@@ -1,0 +1,9 @@
+   Compiling shodh-memory v0.1.0 (C:\Users\Varun Sharma\OneDrive\Documents\Roshera\Vector-DB\vectora\kalki-v2\shodh-memory)
+    Finished `release` profile [optimized] target(s) in 1m 12s
+     Running `target\x86_64-pc-windows-msvc\release\shodh-memory.exe`
+[2m2025-11-20T17:04:51.717303Z[0m [32m INFO[0m [2mshodh_memory[0m[2m:[0m 🧠 Starting Shodh-Memory server...
+[2m2025-11-20T17:04:51.717520Z[0m [32m INFO[0m [2mshodh_memory[0m[2m:[0m 📁 Storage path: ./shodh_memory_data
+[2m2025-11-20T17:04:51.734576Z[0m [32m INFO[0m [2mshodh_memory[0m[2m:[0m 🧹 Running initial audit log rotation...
+[2m2025-11-20T17:04:51.934677Z[0m [32m INFO[0m [2mshodh_memory[0m[2m:[0m ⚡ Rate limiting enabled: 2 req/sec, burst of 10
+[2m2025-11-20T17:04:51.935083Z[0m [32m INFO[0m [2mshodh_memory[0m[2m:[0m 🚀 Server listening on http://127.0.0.1:3030
+error: process didn't exit successfully: `target\x86_64-pc-windows-msvc\release\shodh-memory.exe` (exit code: 0xffffffff)

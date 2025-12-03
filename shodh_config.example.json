@@ -1,0 +1,63 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3030,
+    "cors_enabled": true
+  },
+  "storage": {
+    "base_path": "./shodh_memory_data",
+    "compression": {
+      "enabled": true,
+      "age_days": 7
+    },
+    "retention": {
+      "working_memory_size": 100,
+      "session_memory_size_mb": 100,
+      "importance_threshold": 0.7
+    }
+  },
+  "embeddings": {
+    "provider": "minilm",
+    "model_path": "/path/to/models/minilm-l6/model_quantized.onnx",
+    "tokenizer_path": "/path/to/models/minilm-l6/tokenizer.json",
+    "dimension": 384,
+    "max_length": 256,
+    "use_quantized": true,
+    "fallback_to_simplified": true
+  },
+  "vector_index": {
+    "type": "vamana_hnsw",
+    "max_degree": 24,
+    "search_list_size": 50,
+    "alpha": 1.2,
+    "use_pq_compression": false,
+    "use_mmap": false,
+    "save_on_shutdown": true,
+    "rebuild_on_startup": false
+  },
+  "api": {
+    "default_api_key": "CHANGE-THIS-KEY-IN-PRODUCTION",
+    "rate_limit": {
+      "requests_per_second": 2,
+      "burst_size": 10
+    }
+  },
+  "audit": {
+    "enabled": true,
+    "retention_days": 30,
+    "max_entries_per_user": 10000,
+    "rotation_check_interval": 100
+  },
+  "memory": {
+    "auto_compress": true,
+    "compression_age_days": 7,
+    "importance_threshold": 0.7,
+    "enable_graph_memory": true,
+    "enable_visualization": true
+  },
+  "deployment": {
+    "environment": "production",
+    "target": "robotics",
+    "optimize_for": "low_memory"
+  }
+}

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "shodh-memory"
+version = "0.1.0"
+description = "Local-first AI memory system for robotics, drones, and edge AI - 100% offline capable"
+authors = [{name = "Roshera Team"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Robotics",
+    "Topic :: Software Development :: Libraries",
+]
+keywords = [
+    "memory", "ai", "edge-computing", "robotics", "drones", "rag",
+    "vector-database", "offline", "ros2", "autonomous", "navigation",
+    "gps", "spatial", "mission-tracking", "sensor-data"
+]
+
+[project.urls]
+Homepage = "https://shodh-rag.com"
+Repository = "https://github.com/roshera/shodh-memory"
+Documentation = "https://shodh-rag.com/memory"
+
+[tool.maturin]
+features = ["python"]
+python-source = "python"
+module-name = "shodh_memory.shodh_memory"
+strip = true

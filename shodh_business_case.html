@@ -1,0 +1,1074 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shodh-Memory - Business Case for Investment</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #ff6b35;
+            --secondary: #fe5f39;
+            --destructive: #f73129;
+            --success: #10b981;
+            --slate-50: #f8fafc;
+            --slate-100: #f1f5f9;
+            --slate-200: #e2e8f0;
+            --slate-300: #cbd5e1;
+            --slate-700: #334155;
+            --slate-800: #1e293b;
+            --slate-900: #0f172a;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            line-height: 1.6;
+            color: #ffffff;
+            background: linear-gradient(135deg, var(--slate-900) 0%, #0a0f1e 50%, var(--slate-900) 100%);
+            position: relative;
+            min-height: 100vh;
+        }
+
+        body::before {
+            content: "";
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image:
+                radial-gradient(circle at 20% 50%, rgba(255, 107, 53, 0.08) 0%, transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(254, 95, 57, 0.06) 0%, transparent 50%);
+            z-index: 0;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .header {
+            background: linear-gradient(135deg, rgba(255, 107, 53, 0.15) 0%, rgba(254, 95, 57, 0.1) 100%);
+            border: 1px solid rgba(255, 107, 53, 0.3);
+            color: white;
+            padding: 60px 40px;
+            margin-bottom: 60px;
+            border-radius: 24px;
+            position: relative;
+            overflow: hidden;
+            backdrop-filter: blur(10px);
+        }
+
+        .header::before {
+            content: "";
+            position: absolute;
+            top: -50%;
+            right: -10%;
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, rgba(255, 107, 53, 0.2) 0%, transparent 70%);
+            border-radius: 50%;
+        }
+
+        .header-content {
+            position: relative;
+            z-index: 1;
+        }
+
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+
+        .logo {
+            font-size: 3rem;
+            font-weight: 900;
+            background: linear-gradient(135deg, #ffffff 0%, #e2e8f0 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -0.02em;
+        }
+
+        .tagline {
+            font-size: 1.75rem;
+            font-weight: 300;
+            opacity: 0.95;
+            margin-bottom: 12px;
+            line-height: 1.3;
+        }
+
+        .subtitle {
+            font-size: 1.1rem;
+            opacity: 0.75;
+            font-weight: 400;
+            max-width: 700px;
+        }
+
+        h2 {
+            font-size: 2.25rem;
+            font-weight: 800;
+            margin: 56px 0 28px;
+            color: #ffffff;
+            position: relative;
+            padding-bottom: 16px;
+            letter-spacing: -0.01em;
+        }
+
+        h2::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 80px;
+            height: 5px;
+            background: linear-gradient(90deg, var(--primary), var(--secondary));
+            border-radius: 3px;
+        }
+
+        h3 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin: 32px 0 16px;
+            color: rgba(255, 255, 255, 0.95);
+        }
+
+        p {
+            margin-bottom: 16px;
+            color: rgba(255, 255, 255, 0.8);
+            font-size: 1.05rem;
+            line-height: 1.7;
+        }
+
+        strong {
+            color: rgba(255, 255, 255, 0.95);
+            font-weight: 600;
+        }
+
+        .highlight-box {
+            background: linear-gradient(135deg, rgba(255, 107, 53, 0.12) 0%, rgba(254, 95, 57, 0.08) 100%);
+            border-left: 4px solid var(--primary);
+            border-radius: 12px;
+            padding: 28px;
+            margin: 32px 0;
+            backdrop-filter: blur(10px);
+        }
+
+        .highlight-box h3 {
+            margin-top: 0;
+            color: var(--primary);
+            font-size: 1.4rem;
+        }
+
+        .highlight-box p {
+            color: rgba(255, 255, 255, 0.9);
+        }
+
+        .stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 24px;
+            margin: 40px 0;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 28px 24px;
+            border-radius: 16px;
+            text-align: center;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+        }
+
+        .stat-card:hover {
+            transform: translateY(-6px);
+            box-shadow: 0 16px 32px rgba(255, 107, 53, 0.2);
+            border-color: var(--primary);
+            background: rgba(255, 107, 53, 0.08);
+        }
+
+        .stat-number {
+            font-size: 3rem;
+            font-weight: 900;
+            color: var(--primary);
+            margin-bottom: 8px;
+            letter-spacing: -0.02em;
+        }
+
+        .stat-label {
+            font-size: 0.95rem;
+            color: rgba(255, 255, 255, 0.7);
+            font-weight: 500;
+            line-height: 1.4;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 32px 0;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 16px;
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        thead {
+            background: linear-gradient(135deg, rgba(255, 107, 53, 0.15) 0%, rgba(254, 95, 57, 0.1) 100%);
+            border-bottom: 2px solid rgba(255, 107, 53, 0.3);
+        }
+
+        th, td {
+            padding: 18px 20px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        th {
+            font-weight: 700;
+            font-size: 0.95rem;
+            color: rgba(255, 255, 255, 0.95);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        td {
+            font-size: 0.95rem;
+            color: rgba(255, 255, 255, 0.75);
+        }
+
+        tbody tr:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        .check {
+            color: var(--success);
+            font-weight: 700;
+        }
+
+        .cross {
+            color: var(--destructive);
+            font-weight: 700;
+        }
+
+        pre {
+            background: rgba(0, 0, 0, 0.4);
+            color: #e2e8f0;
+            padding: 28px;
+            border-radius: 12px;
+            overflow-x: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            line-height: 1.7;
+            margin: 28px 0;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .feature-list {
+            list-style: none;
+            padding: 0;
+            margin: 24px 0;
+        }
+
+        .feature-list li {
+            padding: 14px 0;
+            padding-left: 36px;
+            position: relative;
+            color: rgba(255, 255, 255, 0.8);
+            line-height: 1.6;
+        }
+
+        .feature-list li::before {
+            content: "→";
+            position: absolute;
+            left: 0;
+            color: var(--primary);
+            font-weight: bold;
+            font-size: 1.3rem;
+        }
+
+        .use-case-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 24px;
+            margin: 32px 0;
+        }
+
+        .use-case-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 28px 24px;
+            transition: all 0.3s ease;
+        }
+
+        .use-case-card:hover {
+            border-color: var(--primary);
+            background: rgba(255, 107, 53, 0.08);
+            transform: translateY(-4px);
+        }
+
+        .use-case-icon {
+            font-size: 2.5rem;
+            margin-bottom: 16px;
+        }
+
+        .use-case-title {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: rgba(255, 255, 255, 0.95);
+            margin-bottom: 12px;
+        }
+
+        .use-case-desc {
+            font-size: 0.95rem;
+            color: rgba(255, 255, 255, 0.7);
+            line-height: 1.6;
+            margin-bottom: 16px;
+        }
+
+        .use-case-impact {
+            font-size: 0.9rem;
+            color: var(--primary);
+            font-weight: 600;
+        }
+
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            margin: 16px 0;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        .metric-row:hover {
+            background: rgba(255, 107, 53, 0.08);
+            border-color: rgba(255, 107, 53, 0.3);
+        }
+
+        .metric-label {
+            font-weight: 600;
+            color: rgba(255, 255, 255, 0.85);
+            font-size: 1rem;
+        }
+
+        .metric-value {
+            font-weight: 800;
+            font-size: 1.4rem;
+            color: var(--primary);
+            letter-spacing: -0.01em;
+        }
+
+        .timeline {
+            position: relative;
+            padding: 24px 0;
+            margin: 32px 0;
+        }
+
+        .timeline::before {
+            content: "";
+            position: absolute;
+            left: 20px;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: linear-gradient(180deg, var(--primary), var(--secondary));
+        }
+
+        .timeline-item {
+            position: relative;
+            padding-left: 60px;
+            padding-bottom: 32px;
+        }
+
+        .timeline-marker {
+            position: absolute;
+            left: 11px;
+            top: 6px;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: var(--primary);
+            border: 3px solid var(--slate-900);
+            box-shadow: 0 0 0 3px rgba(255, 107, 53, 0.3);
+        }
+
+        .timeline-quarter {
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: var(--primary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .timeline-title {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: rgba(255, 255, 255, 0.95);
+            margin-bottom: 8px;
+        }
+
+        .timeline-desc {
+            font-size: 0.95rem;
+            color: rgba(255, 255, 255, 0.7);
+            line-height: 1.6;
+        }
+
+        .footer {
+            margin-top: 80px;
+            padding: 40px 0;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            text-align: center;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 0.95rem;
+        }
+
+        .footer p {
+            color: rgba(255, 255, 255, 0.6);
+        }
+
+        .footer strong {
+            color: rgba(255, 255, 255, 0.9);
+        }
+
+        .badge {
+            display: inline-block;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            padding: 6px 14px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-left: 12px;
+        }
+
+        .team-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 24px;
+            margin: 32px 0;
+        }
+
+        .team-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            padding: 28px 24px;
+        }
+
+        .team-role {
+            font-size: 0.85rem;
+            color: var(--primary);
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .team-desc {
+            font-size: 0.95rem;
+            color: rgba(255, 255, 255, 0.75);
+            line-height: 1.6;
+        }
+
+        code {
+            background: rgba(255, 107, 53, 0.15);
+            color: var(--primary);
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-content">
+                <div class="logo-section">
+                    <div class="logo">Shodh</div>
+                </div>
+                <div class="tagline">Memory Layer for India's Autonomous Systems</div>
+                <div class="subtitle">Edge-native AI memory infrastructure for robotics, drones, and defense platforms</div>
+            </div>
+        </div>
+
+        <div class="highlight-box">
+            <h3>The Core Problem</h3>
+            <p>Every autonomous system today—warehouse robots, agricultural drones, defense UAVs—operates in a stateless loop. They repeat mistakes, re-scan covered terrain, and ask for the same information daily. <strong>Zero learning. Zero memory.</strong></p>
+            <p>Cloud memory solutions fail at the edge: 200-500ms latency kills real-time decisions, offline zones break connectivity, and data sovereignty concerns block defense adoption.</p>
+            <p><strong>Shodh-Memory</strong> provides on-device persistent memory for autonomous systems. 2-5ms retrieval, 100% offline, learns from every operation.</p>
+        </div>
+
+        <h2>Market Opportunity</h2>
+
+        <div class="stat-grid">
+            <div class="stat-card">
+                <div class="stat-number">$2.2B</div>
+                <div class="stat-label">Vector DB Market (2024)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">21.9%</div>
+                <div class="stat-label">CAGR (2024-2030)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">10K+</div>
+                <div class="stat-label">UAVs Deployed in India</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">$27B</div>
+                <div class="stat-label">India Defense Market</div>
+            </div>
+        </div>
+
+        <h3>Addressable Segments</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Segment</th>
+                    <th>Market Size</th>
+                    <th>Use Case</th>
+                    <th>Entry Path</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Defense UAVs</strong></td>
+                    <td>₹50Cr (5-year)</td>
+                    <td>Multi-drone coordination, border surveillance</td>
+                    <td>iDEX validation</td>
+                </tr>
+                <tr>
+                    <td><strong>Agricultural Drones</strong></td>
+                    <td>₹35Cr (5-year)</td>
+                    <td>Field memory, soil mapping, pest tracking</td>
+                    <td>Ag-tech partnerships</td>
+                </tr>
+                <tr>
+                    <td><strong>Warehouse AGVs</strong></td>
+                    <td>₹60Cr (5-year)</td>
+                    <td>Obstacle learning, route optimization</td>
+                    <td>Enterprise pilots</td>
+                </tr>
+                <tr>
+                    <td><strong>Manufacturing Robots</strong></td>
+                    <td>₹40Cr (5-year)</td>
+                    <td>Anomaly detection, process optimization</td>
+                    <td>Direct sales</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p><strong>Total Addressable Market (India):</strong> ₹185Cr over 5 years</p>
+        <p><strong>Year 1-3 Target (SOM):</strong> ₹18Cr (10% capture rate, defense + commercial)</p>
+
+        <h2>Why Existing Solutions Fail</h2>
+
+        <h3>The Cloud Memory Problem</h3>
+
+        <div class="stat-grid">
+            <div class="stat-card">
+                <div class="stat-number">200-500ms</div>
+                <div class="stat-label">Cloud Latency<br>(vs 2-5ms needed)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">$1,200</div>
+                <div class="stat-label">Monthly Cost<br>(100 robots × 10GB)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">0%</div>
+                <div class="stat-label">Offline Capability<br>(warehouses, farms, borders)</div>
+            </div>
+        </div>
+
+        <ul class="feature-list">
+            <li><strong>Latency kills real-time decisions:</strong> Robots need 2-5ms context retrieval, not 200-500ms cloud round-trips</li>
+            <li><strong>Offline zones are the norm:</strong> Warehouses have dead spots, farms lack connectivity, manufacturing floors ban external networks</li>
+            <li><strong>Data sovereignty blockers:</strong> Defense and enterprise refuse to export operational data to US/EU cloud providers</li>
+            <li><strong>Cost scales unpredictably:</strong> 100 robots × 10GB memory × $0.10/GB/month = $1,200/month just to remember things</li>
+        </ul>
+
+        <h2>The Shodh-Memory Solution</h2>
+
+        <div class="highlight-box">
+            <h3>On-Device Persistent Memory for Edge AI</h3>
+            <p>Shodh-Memory runs directly on autonomous systems—Raspberry Pi, Jetson, edge controllers. Store observations locally, retrieve context in 2-5ms, learn patterns over time. 100% offline, zero cloud dependency.</p>
+        </div>
+
+        <h3>Technical Architecture</h3>
+
+        <pre>from shodh_memory import MemorySystem
+
+# Initialize (fully offline)
+memory = MemorySystem(storage_path="./robot_memory")
+
+# Record observations
+memory.record(
+    content="Obstacle at (10,20)",
+    experience_type="observation",
+    entities=["obstacle_147"]
+)
+
+# Retrieve in 2-5ms
+results = memory.retrieve(
+    query="obstacles nearby",
+    max_results=5
+)</pre>
+
+        <h3>Core Capabilities</h3>
+
+        <div class="metric-row">
+            <span class="metric-label">Retrieval Latency</span>
+            <span class="metric-value">2-5ms</span>
+        </div>
+
+        <div class="metric-row">
+            <span class="metric-label">Storage Backend</span>
+            <span class="metric-value">RocksDB + LZ4</span>
+        </div>
+
+        <div class="metric-row">
+            <span class="metric-label">Vector Search</span>
+            <span class="metric-value">Vamana HNSW</span>
+        </div>
+
+        <div class="metric-row">
+            <span class="metric-label">Embeddings</span>
+            <span class="metric-value">ONNX Runtime</span>
+        </div>
+
+        <div class="metric-row">
+            <span class="metric-label">Deployment</span>
+            <span class="metric-value">100% Offline</span>
+        </div>
+
+        <ul class="feature-list">
+            <li><strong>Semantic Search:</strong> Natural language queries over recorded experiences ("show me all obstacles from morning shift")</li>
+            <li><strong>Temporal Memory:</strong> Time-based retrieval with importance decay and access-based promotion</li>
+            <li><strong>Graph Memory:</strong> Entity relationships and causal chains (obstacle → route change → efficiency gain)</li>
+            <li><strong>Multi-modal:</strong> Support for sensor data, images, telemetry alongside text observations</li>
+            <li><strong>Memory Tiers:</strong> Working memory (active), session memory (shift), long-term (compressed)</li>
+            <li><strong>Python + Rust:</strong> PyO3 bindings for ROS2/drone frameworks, zero IPC overhead</li>
+        </ul>
+
+        <h2>Use Cases & Impact</h2>
+
+        <div class="use-case-grid">
+            <div class="use-case-card">
+                <div class="use-case-icon">🛡️</div>
+                <div class="use-case-title">Defense Surveillance</div>
+                <div class="use-case-desc">Multi-UAV coordination with shared memory. Drones remember patrol patterns, anomalies, and threat signatures across missions.</div>
+                <div class="use-case-impact">Impact: 50% reduction in redundant scans, faster threat detection</div>
+            </div>
+
+            <div class="use-case-card">
+                <div class="use-case-icon">🌾</div>
+                <div class="use-case-title">Agricultural Drones</div>
+                <div class="use-case-desc">Soil condition memory, pest tracking over seasons. Drones learn field patterns instead of re-scanning every flight.</div>
+                <div class="use-case-impact">Impact: 60% fewer redundant scans, seasonal pattern learning</div>
+            </div>
+
+            <div class="use-case-card">
+                <div class="use-case-icon">📦</div>
+                <div class="use-case-title">Warehouse AGVs</div>
+                <div class="use-case-desc">Obstacle learning and route optimization. Robots remember traffic patterns and adapt paths across shifts.</div>
+                <div class="use-case-impact">Impact: 40% better routing, reduced collision incidents</div>
+            </div>
+
+            <div class="use-case-card">
+                <div class="use-case-icon">🏭</div>
+                <div class="use-case-title">Manufacturing</div>
+                <div class="use-case-desc">Anomaly detection with historical context. Robots detect patterns leading to defects before they occur.</div>
+                <div class="use-case-impact">Impact: Early fault detection, quality improvement</div>
+            </div>
+        </div>
+
+        <h2>Competitive Landscape</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Feature</th>
+                    <th>Shodh-Memory</th>
+                    <th>Mem0</th>
+                    <th>ChatGPT Memory</th>
+                    <th>Vector DBs</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Deployment</td>
+                    <td><span class="check">Edge (Pi/Jetson)</span></td>
+                    <td>Cloud only</td>
+                    <td>Cloud only</td>
+                    <td>Cloud or self-hosted</td>
+                </tr>
+                <tr>
+                    <td>Latency</td>
+                    <td><span class="check">2-5ms</span></td>
+                    <td>200-500ms</td>
+                    <td>300-800ms</td>
+                    <td>50-200ms (cloud)</td>
+                </tr>
+                <tr>
+                    <td>Offline Operation</td>
+                    <td><span class="check">100%</span></td>
+                    <td><span class="cross">Requires Internet</span></td>
+                    <td><span class="cross">Requires Internet</span></td>
+                    <td>Only if self-hosted</td>
+                </tr>
+                <tr>
+                    <td>Data Sovereignty</td>
+                    <td><span class="check">Guaranteed</span></td>
+                    <td>US cloud</td>
+                    <td>US cloud (OpenAI)</td>
+                    <td>Depends on hosting</td>
+                </tr>
+                <tr>
+                    <td>Robotics Integration</td>
+                    <td><span class="check">ROS2/Python</span></td>
+                    <td>HTTP API</td>
+                    <td>HTTP API</td>
+                    <td>HTTP API</td>
+                </tr>
+                <tr>
+                    <td>Cost (100 robots)</td>
+                    <td><span class="check">₹0/month</span></td>
+                    <td>₹80K/month</td>
+                    <td>Bundled (no control)</td>
+                    <td>₹60-100K/month</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>Defensible Moats</h3>
+
+        <ul class="feature-list">
+            <li><strong>Technical Moat:</strong> Rust-based edge runtime optimized for constrained hardware (Pi/Jetson). Not trivial to replicate.</li>
+            <li><strong>Latency Moat:</strong> 2-5ms retrieval unlocks real-time autonomous decisions. Cloud solutions can't compete on physics.</li>
+            <li><strong>Sovereignty Moat:</strong> 100% air-gapped operation. Critical for defense and regulated industries in India.</li>
+            <li><strong>Integration Moat:</strong> PyO3 bindings for native Python SDK. Zero IPC overhead with ROS2 and drone frameworks.</li>
+            <li><strong>Cost Moat:</strong> No cloud subscription = 90-95% cheaper at scale. Competitors can't match without abandoning SaaS margins.</li>
+        </ul>
+
+        <h2>Business Model & Economics</h2>
+
+        <h3>Revenue Streams</h3>
+
+        <ul class="feature-list">
+            <li><strong>Defense Contracts (Primary):</strong> iDEX validation → pilot programs → procurement (₹50L-1Cr per contract)</li>
+            <li><strong>Enterprise Licensing:</strong> Per-robot annual licenses for warehouse/manufacturing (₹15K-25K per robot)</li>
+            <li><strong>OEM Partnerships:</strong> Bundle with drone manufacturers (ideaForge, Marut Drones) - white-label or revenue share</li>
+            <li><strong>Professional Services:</strong> Custom integrations, training, support (₹2-5L per engagement)</li>
+        </ul>
+
+        <h3>Pricing Strategy</h3>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Tier</th>
+                    <th>Target</th>
+                    <th>Price</th>
+                    <th>Key Features</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Open Source (Core)</strong></td>
+                    <td>Developers, research</td>
+                    <td>Free</td>
+                    <td>Basic memory, single robot, community support</td>
+                </tr>
+                <tr>
+                    <td><strong>Commercial</strong></td>
+                    <td>Startups, SMEs</td>
+                    <td>₹15K/robot/year</td>
+                    <td>Multi-robot, advanced features, email support</td>
+                </tr>
+                <tr>
+                    <td><strong>Enterprise</strong></td>
+                    <td>Large fleets</td>
+                    <td>₹25K/robot/year</td>
+                    <td>Fleet management, SLA, on-site support</td>
+                </tr>
+                <tr style="background: rgba(255, 107, 53, 0.08);">
+                    <td><strong>Defense/Gov</strong></td>
+                    <td>Military, govt agencies</td>
+                    <td>Custom (₹50L-1Cr)</td>
+                    <td>Air-gapped, custom integrations, security hardening</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h3>Unit Economics (Commercial Tier, ₹15K/robot/year)</h3>
+
+        <div class="metric-row">
+            <span class="metric-label">Customer Acquisition Cost (CAC)</span>
+            <span class="metric-value">₹10,000</span>
+        </div>
+
+        <div class="metric-row">
+            <span class="metric-label">Annual Revenue per Robot (ARPR)</span>
+            <span class="metric-value">₹15,000</span>
+        </div>
+
+        <div class="metric-row">
+            <span class="metric-label">Gross Margin</span>
+            <span class="metric-value">92%</span>
+        </div>
+
+        <div class="metric-row">
+            <span class="metric-label">Lifetime Value (4 years)</span>
+            <span class="metric-value">₹55,200</span>
+        </div>
+
+        <div class="metric-row">
+            <span class="metric-label">LTV:CAC Ratio</span>
+            <span class="metric-value">5.5x</span>
+        </div>
+
+        <p><strong>Note:</strong> Defense contracts (₹50L-1Cr) deliver 10-20x LTV:CAC but have longer sales cycles (6-12 months). Blended model uses defense for validation, commercial for scale.</p>
+
+        <h2>Go-to-Market Strategy</h2>
+
+        <h3>Multi-Channel Approach (Months 1-12)</h3>
+
+        <div class="timeline">
+            <div class="timeline-item">
+                <div class="timeline-marker"></div>
+                <div class="timeline-quarter">Q1 2026</div>
+                <div class="timeline-title">Market Entry</div>
+                <div class="timeline-desc">Open source core launch for developer traction. Parallel outreach: defense (NewSpace, Grene, ideaForge), enterprise (GreyOrange, Addverb), ag-tech (drone manufacturers). Build demo prototypes for each vertical.</div>
+            </div>
+
+            <div class="timeline-item">
+                <div class="timeline-marker"></div>
+                <div class="timeline-quarter">Q2 2026</div>
+                <div class="timeline-title">Pilot Programs</div>
+                <div class="timeline-desc">Run pilots across all channels: defense UAV swarms, warehouse AGV fleets, agricultural drones. Government grant applications (iDEX, other innovation programs). Target 5-8 active pilots.</div>
+            </div>
+
+            <div class="timeline-item">
+                <div class="timeline-marker"></div>
+                <div class="timeline-quarter">Q3 2026</div>
+                <div class="timeline-title">First Contracts</div>
+                <div class="timeline-desc">Convert highest-traction pilots to paid contracts. Could be defense procurement, enterprise licensing, or OEM partnerships depending on market response. Secure case studies.</div>
+            </div>
+
+            <div class="timeline-item">
+                <div class="timeline-marker"></div>
+                <div class="timeline-quarter">Q4 2026</div>
+                <div class="timeline-title">Scale Winners</div>
+                <div class="timeline-desc">Double down on winning channel(s). Expand sales team for validated segment. Build reference customers and case studies for growth.</div>
+            </div>
+        </div>
+
+        <h3>Entry Channels</h3>
+
+        <ul class="feature-list">
+            <li><strong>Defense Direct:</strong> Direct engagement with UAV manufacturers, defense labs (DRDO, BEL). Atmanirbhar Bharat mandate creates natural fit for indigenous solutions.</li>
+            <li><strong>Government Grants:</strong> iDEX and innovation programs provide non-dilutive capital for validation. Optional path, not dependency.</li>
+            <li><strong>Enterprise Partnerships:</strong> OEM bundles with warehouse robotics companies (GreyOrange, Addverb) and agricultural drone platforms.</li>
+            <li><strong>Commercial Licensing:</strong> Direct sales to robotics operators and manufacturers. Per-robot annual licenses with immediate deployment.</li>
+            <li><strong>Open Source Traction:</strong> Developer community adoption drives bottom-up demand in enterprises and startups.</li>
+        </ul>
+
+        <h2>12-Month Roadmap</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Quarter</th>
+                    <th>Key Milestones</th>
+                    <th>Target Metrics</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Q1 2026</strong></td>
+                    <td>Open source launch, demo builds for defense/enterprise/ag-tech, parallel outreach across all channels</td>
+                    <td>5-8 active conversations, developer adoption</td>
+                </tr>
+                <tr>
+                    <td><strong>Q2 2026</strong></td>
+                    <td>Pilot deployments across multiple verticals, grant applications, OEM partnership discussions</td>
+                    <td>3-5 paying pilots, initial revenue</td>
+                </tr>
+                <tr>
+                    <td><strong>Q3 2026</strong></td>
+                    <td>Convert pilots to contracts, identify highest-traction channel, build case studies</td>
+                    <td>First major contracts, clear PMF signal</td>
+                </tr>
+                <tr>
+                    <td><strong>Q4 2026</strong></td>
+                    <td>Scale winning channel, expand team, enterprise/defense partnerships formalized</td>
+                    <td>Growing ARR, validated go-to-market</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <p><strong>Year 1 Target:</strong> Product-market fit validation, multiple revenue streams established, clear path to scale.</p>
+
+        <h2>Team & Execution</h2>
+
+        <h3>Current Team</h3>
+
+        <div class="team-card">
+            <div class="team-role">Founder / Technical Lead</div>
+            <div class="team-desc">Built entire Shodh-Memory system from scratch. Expertise: Rust, distributed systems, vector databases, ONNX Runtime, edge AI. Previously: AI/robotics background (10 years ago), now returning to intersection of AI and autonomous systems.</div>
+        </div>
+
+        <h3>Hiring Roadmap (Post-Funding)</h3>
+
+        <div class="team-grid">
+            <div class="team-card">
+                <div class="team-role">Defense BD Lead (Month 1)</div>
+                <div class="team-desc">Ex-defense services or defense startup experience. Handles iDEX process, DRDO engagements, procurement navigation.</div>
+            </div>
+
+            <div class="team-card">
+                <div class="team-role">Robotics Engineer (Month 2)</div>
+                <div class="team-desc">ROS2 expertise, drone integration. Builds reference implementations for UAV swarms, AGVs.</div>
+            </div>
+
+            <div class="team-card">
+                <div class="team-role">Systems Engineer (Month 4)</div>
+                <div class="team-desc">Rust backend, performance optimization. Scales memory system for large fleets (100+ robots).</div>
+            </div>
+
+            <div class="team-card">
+                <div class="team-role">Customer Success (Month 6)</div>
+                <div class="team-desc">On-site deployment support, integration assistance, training delivery.</div>
+            </div>
+        </div>
+
+        <h2>Funding & Use of Capital</h2>
+
+        <div class="highlight-box">
+            <h3>Seeking Seed Round Investment</h3>
+            <p><strong>Use of Funds:</strong></p>
+            <ul class="feature-list">
+                <li><strong>Team Building (50%):</strong> Defense/enterprise BD lead, 2 engineers (robotics + systems), customer success, product manager. Core competencies: ROS2 integration, edge deployment, enterprise sales.</li>
+                <li><strong>Market Validation (30%):</strong> Demo hardware for multi-vertical pilots (defense UAV swarms, warehouse AGVs, ag-drones), pilot deployments, compliance certifications (ISO 27001, defense standards), conference presence.</li>
+                <li><strong>Commercial GTM (15%):</strong> Enterprise partnerships, developer community building, case study production, technical documentation, reference implementations.</li>
+                <li><strong>Operations (5%):</strong> Legal, security audits, infrastructure, runway buffer.</li>
+            </ul>
+            <p><strong>Target:</strong> 18-24 month runway to product-market fit validation and clear revenue traction across multiple channels.</p>
+        </div>
+
+        <h3>Growth Path</h3>
+
+        <ul class="feature-list">
+            <li><strong>Year 1:</strong> Multi-channel validation. Identify highest-traction segment. Establish reference customers and case studies.</li>
+            <li><strong>Year 2:</strong> Scale winning channel(s). Expand team in validated segment. Build enterprise/defense partnerships. Demonstrate recurring revenue growth.</li>
+            <li><strong>Year 3:</strong> Series A readiness. Established market position in 1-2 verticals. Clear unit economics and growth trajectory.</li>
+        </ul>
+
+        <h2>Why This Wins</h2>
+
+        <div class="highlight-box">
+            <h3>Software-First Entry to Autonomous Systems</h3>
+            <p>The winning playbook for autonomous systems companies: start with critical software infrastructure to validate market demand, then expand from there.</p>
+            <p><strong>Shodh-Memory's path:</strong> Build the memory layer that makes autonomous systems intelligent. Start where the need is clearest. Then scale:</p>
+            <ul class="feature-list">
+                <li><strong>Horizontal scale:</strong> Memory infrastructure for India's 10,000+ deployed autonomous systems (UAVs, AGVs, robots)</li>
+                <li><strong>Vertical integration:</strong> Build or partner on complete autonomous solutions with memory built-in</li>
+                <li><strong>Strategic position:</strong> Critical infrastructure layer that defense primes, robotics platforms, or cloud providers would acquire</li>
+            </ul>
+            <p>The market opportunity is clear: autonomous systems are proliferating across India, but they're stateless. Memory transforms them from remote-controlled executors into systems that learn and improve autonomously.</p>
+            <p><strong>India-specific advantage:</strong> Data sovereignty and Atmanirbhar Bharat mandate create natural moat against US/EU cloud solutions. Shodh-Memory is indigenous, sovereign, and purpose-built for edge autonomy—exactly what India's defense and robotics sectors need.</p>
+        </div>
+
+        <h3>Why Now?</h3>
+
+        <ul class="feature-list">
+            <li><strong>Defense modernization:</strong> India is rapidly deploying UAVs for border surveillance and swarm operations. Memory enables multi-platform coordination that's critical for autonomous defense systems.</li>
+            <li><strong>Atmanirbhar Bharat:</strong> Government mandate for indigenous defense technology creates natural demand for sovereign, India-built solutions. Multiple grant and partnership programs available.</li>
+            <li><strong>Robotics adoption accelerating:</strong> Warehouses and farms deploying autonomous robots at scale (GreyOrange, Addverb, agricultural drones). All facing the same stateless memory problem.</li>
+            <li><strong>Technical maturity:</strong> Rust, ONNX, PyO3 make edge AI deployment production-ready today. The infrastructure exists to build this at scale.</li>
+            <li><strong>Competitive gap:</strong> Mem0 and cloud players focused on chatbots/assistants, not edge robotics. No one is addressing offline, low-latency autonomous memory. Timing window is wide open.</li>
+        </ul>
+
+        <h2>Risks & Mitigation</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Risk</th>
+                    <th>Probability</th>
+                    <th>Mitigation</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Unclear channel priority</td>
+                    <td>Medium</td>
+                    <td>Multi-channel validation in Year 1. Identify highest-traction segment early, then focus resources there.</td>
+                </tr>
+                <tr>
+                    <td>Defense sales cycles too long</td>
+                    <td>Medium</td>
+                    <td>Parallel commercial track (warehouses, ag-drones) for faster cash flow and momentum.</td>
+                </tr>
+                <tr>
+                    <td>Cloud players add edge modes</td>
+                    <td>Low-Medium</td>
+                    <td>Latency physics can't be solved (200ms → 2ms requires local deployment). Cost moat (92% margin) defensible.</td>
+                </tr>
+                <tr>
+                    <td>Robotics adoption slower than expected</td>
+                    <td>Low</td>
+                    <td>Pivot to IoT edge (industrial sensors, smart city infrastructure) if needed. Same tech stack, different vertical.</td>
+                </tr>
+                <tr>
+                    <td>Talent acquisition in Gurugram</td>
+                    <td>Medium</td>
+                    <td>Remote-first for engineering. BD/sales hire locally. Tap IIT Delhi, IIIT Hyderabad, BITS for Rust/systems talent.</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>The Vision</h2>
+
+        <div class="highlight-box">
+            <p style="font-size: 1.15rem; line-height: 1.8; margin-bottom: 0;">
+                In 5 years, every autonomous system in India—from border surveillance UAVs to warehouse robots—will have persistent memory. They'll learn from every operation, share knowledge across fleets, and improve with time.
+            </p>
+            <p style="font-size: 1.15rem; line-height: 1.8; margin: 16px 0 0;">
+                <strong>Shodh-Memory is the operating system for that future.</strong> Indigenous, sovereign, edge-native. Built in India, for India's autonomous systems—and eventually, the world's.
+            </p>
+        </div>
+
+        <div class="footer">
+            <p><strong>Shodh-Memory</strong> — Memory Layer for India's Autonomous Systems</p>
+            <p>Contact: Varun Sharma | 29.varun@gmail.com | +91 98103 00618</p>
+            <p>Location: Gurugram, India | Document: November 2025</p>
+            <p style="margin-top: 16px; font-size: 0.85rem;">Tech Stack: PyO3 • Rust • ONNX Runtime • RocksDB • Vamana HNSW</p>
+        </div>
+    </div>
+</body>
+</html>

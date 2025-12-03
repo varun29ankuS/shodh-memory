@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shodh-Memory - Local Memory System</title>
+    <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <div class="logo">
+                <div class="logo-icon">🧠</div>
+                <div class="logo-text">
+                    <h1>Shodh-Memory</h1>
+                    <p class="subtitle">Local Memory for AI Agents • Offline • Private</p>
+                </div>
+            </div>
+            <div class="header-status">
+                <span id="health-status" class="status-dot"></span>
+                <span id="health-text">Connecting...</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Quick Test Section - THE MOST IMPORTANT PART -->
+        <div class="card">
+            <h2>⚡ Quick Test - See It Work</h2>
+            <p style="color: var(--text-muted); margin-bottom: 1.5rem;">
+                Test the memory system in 3 steps: Store → Search → See Results
+            </p>
+
+            <div class="stats-grid">
+                <!-- Step 1: Store -->
+                <div class="stat-card">
+                    <h3>1️⃣ Store Memory</h3>
+                    <div class="form-group">
+                        <label>User ID</label>
+                        <input type="text" id="quick-user" value="test_robot" placeholder="robot_id">
+                    </div>
+                    <div class="form-group">
+                        <label>Experience</label>
+                        <textarea id="quick-experience" placeholder="E.g., 'Detected obstacle at coordinates (10, 20). Stopped and waited 5 seconds.'"></textarea>
+                    </div>
+                    <button onclick="quickStore()" style="width: 100%;">💾 Store</button>
+                    <div id="store-result" style="margin-top: 1rem; font-size: 0.875rem;"></div>
+                </div>
+
+                <!-- Step 2: Search -->
+                <div class="stat-card">
+                    <h3>2️⃣ Search Memories</h3>
+                    <div class="form-group">
+                        <label>Search Query</label>
+                        <input type="text" id="quick-query" placeholder="E.g., 'obstacles' or 'coordinates'">
+                    </div>
+                    <div class="form-group">
+                        <label>Search Mode</label>
+                        <select id="quick-mode">
+                            <option value="Hybrid">Hybrid (Best)</option>
+                            <option value="SemanticSimilarity">Semantic</option>
+                            <option value="Temporal">Recent</option>
+                        </select>
+                    </div>
+                    <button onclick="quickSearch()" style="width: 100%;">🔍 Search</button>
+                </div>
+
+                <!-- Step 3: Results -->
+                <div class="stat-card">
+                    <h3>3️⃣ Results</h3>
+                    <div id="quick-results" style="max-height: 300px; overflow-y: auto;">
+                        <p style="color: var(--text-muted); font-size: 0.875rem;">
+                            Results will appear here after searching
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Memory Explorer - See REAL stored memories -->
+        <div class="card">
+            <h2>📚 Memory Explorer</h2>
+            <div style="margin-bottom: 1rem;">
+                <button onclick="loadAllUsers()" class="secondary">👥 Load Users</button>
+                <button onclick="loadUserMemories()" class="secondary">🔍 Load Memories</button>
+                <button onclick="clearExplorer()">🗑️ Clear</button>
+            </div>
+
+            <div class="stats-grid">
+                <div id="users-explorer" class="stat-card">
+                    <h3>Active Users</h3>
+                    <div id="users-list" style="max-height: 300px; overflow-y: auto;">
+                        <p style="color: var(--text-muted); font-size: 0.875rem;">
+                            Click "Load Users" to see active users
+                        </p>
+                    </div>
+                </div>
+
+                <div id="memories-explorer" class="stat-card" style="grid-column: span 2;">
+                    <h3>Stored Memories</h3>
+                    <div class="form-group">
+                        <input type="text" id="explorer-user" placeholder="Enter user ID to view their memories">
+                    </div>
+                    <div id="memories-list" style="max-height: 400px; overflow-y: auto;">
+                        <p style="color: var(--text-muted); font-size: 0.875rem;">
+                            Enter a user ID and click "Load Memories" to see their stored experiences
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- API Testing - Like Postman -->
+        <div class="card">
+            <h2>🧪 API Testing</h2>
+
+            <div class="form-group">
+                <label>API URL</label>
+                <input type="text" id="api-url" value="http://127.0.0.1:3030">
+            </div>
+
+            <div class="form-group">
+                <label>API Key</label>
+                <input type="password" id="api-key" value="shodh-dev-key-change-in-production">
+            </div>
+
+            <button onclick="saveConfig()">💾 Save Config</button>
+            <button onclick="testConnection()" class="secondary">🔗 Test Connection</button>
+
+            <div style="margin-top: 2rem;">
+                <h3>Performance Tests</h3>
+                <div class="stats-grid">
+                    <button onclick="testRecordSpeed()">⚡ Record Speed</button>
+                    <button onclick="testSearchSpeed()">⚡ Search Speed</button>
+                    <button onclick="testBulkInsert()">⚡ Bulk Insert</button>
+                </div>
+                <div id="test-results" style="margin-top: 1rem;"></div>
+            </div>
+        </div>
+
+        <!-- API Documentation - Complete Reference -->
+        <div class="card">
+            <h2>📖 API Documentation</h2>
+            <p style="color: var(--text-muted); margin-bottom: 2rem;">
+                Complete API reference with examples. All endpoints require X-API-Key header for authentication.
+            </p>
+
+            <!-- API Categories Navigation -->
+            <div class="api-nav">
+                <button class="api-nav-btn active" onclick="showApiCategory('core')">Core Operations</button>
+                <button class="api-nav-btn" onclick="showApiCategory('users')">User Management</button>
+                <button class="api-nav-btn" onclick="showApiCategory('memory')">Memory CRUD</button>
+                <button class="api-nav-btn" onclick="showApiCategory('search')">Advanced Search</button>
+                <button class="api-nav-btn" onclick="showApiCategory('storage')">Storage & Compression</button>
+                <button class="api-nav-btn" onclick="showApiCategory('forget')">Forgetting Operations</button>
+                <button class="api-nav-btn" onclick="showApiCategory('graph')">Knowledge Graph</button>
+            </div>
+
+            <!-- Core Operations -->
+            <div id="api-core" class="api-category">
+                <h3>Core Operations</h3>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/record</code>
+                    </div>
+                    <p>Record a new experience/memory for a user</p>
+                    <div class="code-example">
+                        <div class="code-tabs">
+                            <button class="code-tab active" onclick="showCodeTab(this, 'curl')">cURL</button>
+                            <button class="code-tab" onclick="showCodeTab(this, 'python')">Python</button>
+                            <button class="code-tab" onclick="showCodeTab(this, 'json')">Response</button>
+                        </div>
+                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/record \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "user_id": "robot_001",
+    "experience": {
+      "content": "Detected obstacle at (10, 20)",
+      "metadata": {"sensor": "lidar"}
+    }
+  }'
+
+# Minimal example - just content required
+curl -X POST http://127.0.0.1:3030/api/record \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "user_id": "robot_001",
+    "experience": {
+      "content": "Detected obstacle at (10, 20)"
+    }
+  }'</code></pre>
+                        <pre class="code-content python" style="display:none;"><code>import requests
+
+# Full example with metadata
+response = requests.post(
+    "http://127.0.0.1:3030/api/record",
+    headers={"X-API-Key": "your-api-key"},
+    json={
+        "user_id": "robot_001",
+        "experience": {
+            "content": "Detected obstacle at (10, 20)",
+            "metadata": {"sensor": "lidar"}
+        }
+    }
+)
+print(response.json())
+
+# Minimal example - just content required
+response = requests.post(
+    "http://127.0.0.1:3030/api/record",
+    headers={"X-API-Key": "your-api-key"},
+    json={
+        "user_id": "robot_001",
+        "experience": {
+            "content": "Detected obstacle at (10, 20)"
+        }
+    }
+)
+print(response.json())</code></pre>
+                        <pre class="code-content json" style="display:none;"><code>{
+  "memory_id": "123e4567-e89b-12d3-a456-426614174000",
+  "success": true
+}</code></pre>
+                    </div>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/retrieve</code>
+                    </div>
+                    <p>Retrieve memories using semantic search</p>
+                    <div class="code-example">
+                        <div class="code-tabs">
+                            <button class="code-tab active" onclick="showCodeTab(this, 'curl')">cURL</button>
+                            <button class="code-tab" onclick="showCodeTab(this, 'python')">Python</button>
+                        </div>
+                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/retrieve \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "user_id": "robot_001",
+    "query_text": "obstacles",
+    "max_results": 10,
+    "importance_threshold": 0.5
+  }'</code></pre>
+                        <pre class="code-content python" style="display:none;"><code>response = requests.post(
+    "http://127.0.0.1:3030/api/retrieve",
+    headers={"X-API-Key": "your-api-key"},
+    json={
+        "user_id": "robot_001",
+        "query_text": "obstacles",
+        "max_results": 10
+    }
+)
+memories = response.json()["memories"]</code></pre>
+                    </div>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method get">GET</span>
+                        <code>/health</code>
+                    </div>
+                    <p>Health check endpoint (no authentication required)</p>
+                    <div class="code-example">
+                        <pre class="code-content curl"><code>curl http://127.0.0.1:3030/health</code></pre>
+                    </div>
+                </div>
+            </div>
+
+            <!-- User Management -->
+            <div id="api-users" class="api-category" style="display:none;">
+                <h3>User Management</h3>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method get">GET</span>
+                        <code>/api/users</code>
+                    </div>
+                    <p>List all active users</p>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method get">GET</span>
+                        <code>/api/users/{user_id}/stats</code>
+                    </div>
+                    <p>Get statistics for a specific user (total memories, compressed count, etc.)</p>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method delete">DELETE</span>
+                        <code>/api/users/{user_id}</code>
+                    </div>
+                    <p>Delete all data for a user (GDPR compliance)</p>
+                </div>
+            </div>
+
+            <!-- Memory CRUD -->
+            <div id="api-memory" class="api-category" style="display:none;">
+                <h3>Memory CRUD Operations</h3>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/memories</code>
+                    </div>
+                    <p>Get all memories for a user</p>
+                    <div class="code-example">
+                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/memories \
+  -H "X-API-Key: your-api-key" \
+  -d '{"user_id": "robot_001", "limit": 100}'</code></pre>
+                    </div>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method get">GET</span>
+                        <code>/api/memory/{memory_id}?user_id={user_id}</code>
+                    </div>
+                    <p>Get a specific memory by ID</p>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method put">PUT</span>
+                        <code>/api/memory/{memory_id}</code>
+                    </div>
+                    <p>Update a memory's content</p>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method delete">DELETE</span>
+                        <code>/api/memory/{memory_id}?user_id={user_id}</code>
+                    </div>
+                    <p>Delete a specific memory</p>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/memories/history</code>
+                    </div>
+                    <p>Get audit trail/history for memories (Enterprise feature)</p>
+                    <div class="code-example">
+                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/memories/history \
+  -H "X-API-Key: your-api-key" \
+  -d '{"user_id": "robot_001", "memory_id": "optional-memory-id"}'</code></pre>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Advanced Search -->
+            <div id="api-search" class="api-category" style="display:none;">
+                <h3>Advanced Search</h3>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/search/multimodal</code>
+                    </div>
+                    <p>Multi-modal search with different retrieval modes</p>
+                    <div class="code-example">
+                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/search/multimodal \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "user_id": "robot_001",
+    "query_text": "navigation errors",
+    "mode": "hybrid",
+    "limit": 10
+  }'
+
+# Available modes:
+# - similarity: Semantic similarity search
+# - temporal: Recent memories first
+# - causal: Causal relationships
+# - associative: Association-based
+# - hybrid: Combined approach (recommended)</code></pre>
+                    </div>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/search/advanced</code>
+                    </div>
+                    <p>Advanced search with entity, date, and importance filters</p>
+                    <div class="code-example">
+                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/search/advanced \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "user_id": "robot_001",
+    "entity_name": "obstacle_detector",
+    "start_date": "2025-01-01T00:00:00Z",
+    "end_date": "2025-12-31T23:59:59Z",
+    "min_importance": 0.5,
+    "max_importance": 1.0
+  }'</code></pre>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Storage & Compression -->
+            <div id="api-storage" class="api-category" style="display:none;">
+                <h3>Storage & Compression</h3>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/storage/stats</code>
+                    </div>
+                    <p>Get storage statistics (total size, compression ratio, etc.)</p>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/memory/compress</code>
+                    </div>
+                    <p>Manually compress a specific memory</p>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/memory/decompress</code>
+                    </div>
+                    <p>Decompress a compressed memory</p>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/storage/uncompressed</code>
+                    </div>
+                    <p>Get uncompressed old memories (for compression review)</p>
+                </div>
+            </div>
+
+            <!-- Forgetting Operations -->
+            <div id="api-forget" class="api-category" style="display:none;">
+                <h3>Forgetting Operations</h3>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/forget/age</code>
+                    </div>
+                    <p>Forget memories older than specified days</p>
+                    <div class="code-example">
+                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/forget/age \
+  -H "X-API-Key: your-api-key" \
+  -d '{"user_id": "robot_001", "days_old": 90}'</code></pre>
+                    </div>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/forget/importance</code>
+                    </div>
+                    <p>Forget memories below importance threshold</p>
+                    <div class="code-example">
+                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/forget/importance \
+  -H "X-API-Key: your-api-key" \
+  -d '{"user_id": "robot_001", "threshold": 0.3}'</code></pre>
+                    </div>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/forget/pattern</code>
+                    </div>
+                    <p>Forget memories matching a text pattern</p>
+                    <div class="code-example">
+                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/forget/pattern \
+  -H "X-API-Key: your-api-key" \
+  -d '{"user_id": "robot_001", "pattern": "test_"}'</code></pre>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Knowledge Graph -->
+            <div id="api-graph" class="api-category" style="display:none;">
+                <h3>Knowledge Graph Operations</h3>
+                <p style="color: var(--text-muted); margin-bottom: 1rem;">
+                    Automatic entity extraction and relationship building from memories
+                </p>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method get">GET</span>
+                        <code>/api/graph/{user_id}/stats</code>
+                    </div>
+                    <p>Get graph statistics (entity count, relationship count, etc.)</p>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/graph/entity/find</code>
+                    </div>
+                    <p>Find an entity by name</p>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/graph/entity/add</code>
+                    </div>
+                    <p>Manually add an entity to the graph</p>
+                    <div class="code-example">
+                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/graph/entity/add \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "user_id": "robot_001",
+    "name": "Assembly Line A",
+    "label": "Location",
+    "attributes": {"zone": "manufacturing"}
+  }'
+
+# Available labels:
+# Person, Organization, Location, Technology,
+# Concept, Event, Date, Product, Skill</code></pre>
+                    </div>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/graph/entities/all</code>
+                    </div>
+                    <p>Get all entities in the graph</p>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/graph/relationship/add</code>
+                    </div>
+                    <p>Add a relationship between entities</p>
+                    <div class="code-example">
+                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/graph/relationship/add \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "user_id": "robot_001",
+    "from_entity_name": "Robot A",
+    "to_entity_name": "Assembly Line A",
+    "relation_type": "WorksAt",
+    "strength": 0.9,
+    "context": "Primary work location"
+  }'
+
+# Relation types:
+# WorksWith, WorksAt, EmployedBy, PartOf, Contains,
+# OwnedBy, LocatedIn, LocatedAt, Uses, CreatedBy,
+# DevelopedBy, Causes, ResultsIn, Learned, Knows,
+# Teaches, RelatedTo, AssociatedWith</code></pre>
+                    </div>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/graph/traverse</code>
+                    </div>
+                    <p>Traverse the graph from an entity</p>
+                    <div class="code-example">
+                        <pre class="code-content curl"><code>curl -X POST http://127.0.0.1:3030/api/graph/traverse \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "user_id": "robot_001",
+    "entity_name": "Robot A",
+    "max_depth": 2
+  }'</code></pre>
+                    </div>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/graph/relationship/invalidate</code>
+                    </div>
+                    <p>Invalidate a relationship (temporal edge invalidation)</p>
+                </div>
+
+                <div class="endpoint">
+                    <div class="endpoint-header">
+                        <span class="method post">POST</span>
+                        <code>/api/graph/episode/get</code>
+                    </div>
+                    <p>Get an episodic memory node by UUID</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Console - See what's happening -->
+        <div class="card">
+            <h2>📟 Console</h2>
+            <div id="console"></div>
+            <button onclick="clearConsole()" style="margin-top: 1rem;">🗑️ Clear Console</button>
+        </div>
+    </div>
+
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>

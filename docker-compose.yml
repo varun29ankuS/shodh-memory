@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  shodh-memory:
+    build: .
+    image: roshera/shodh-memory:latest
+    container_name: shodh-memory
+    ports:
+      - "3030:3030"
+    environment:
+      - RUST_LOG=info
+      - PORT=3030
+      - STORAGE_PATH=/data
+    volumes:
+      - shodh-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3030/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - shodh-network
+
+volumes:
+  shodh-data:
+    driver: local
+
+networks:
+  shodh-network:
+    driver: bridge

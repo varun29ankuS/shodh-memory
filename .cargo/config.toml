@@ -1,0 +1,18 @@
+# Windows MSVC Linker Configuration
+# Fixes C++ runtime library mismatch between ONNX Runtime (/MD) and RocksDB (/MT)
+# Force all dependencies to use dynamic CRT to match ONNX Runtime
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=-crt-static"]
+
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[env]
+# Force CMake to use Visual Studio generator instead of auto-detecting
+# This prevents conflicts when both Ninja and Visual Studio are installed
+CMAKE_GENERATOR = "Visual Studio 17 2022"
+# Force CMake to reconfigure on every build to prevent cache corruption
+CMAKE_BUILD_PARALLEL_LEVEL = "8"
+# Explicitly set the architecture
+CMAKE_GENERATOR_PLATFORM = "x64"

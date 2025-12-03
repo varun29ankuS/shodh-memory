@@ -1,0 +1,131 @@
+[package]
+name = "shodh-memory"
+version = "0.1.0"
+edition = "2021"
+authors = ["shodh-rag"]
+description = "Shodh-Memory - Offline, user-isolated memory layer for AI agents"
+license = "Apache-2.0"
+
+[lib]
+name = "shodh_memory"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]  # cdylib for Python, rlib for Rust
+
+[[bin]]
+name = "shodh-memory-server"
+path = "src/main.rs"
+
+[dependencies]
+# Core
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Async runtime & web server
+tokio = { version = "1.40", features = ["full"] }
+axum = { version = "0.8", features = ["json"] }
+tower = { version = "0.4", features = ["limit", "buffer", "load-shed"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+tower_governor = { version = "0.8", features = ["axum"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Storage
+rocksdb = { version = "0.22", default-features = false, features = ["lz4"] }
+bincode = "1.3"
+lz4 = "1.24"
+
+# Concurrency
+parking_lot = "0.12"
+dashmap = "5.5"
+
+# Utilities
+uuid = { version = "1.4", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+lru = "0.12"
+regex = "1.10"
+dirs = "5.0"  # Platform-specific directory paths
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Observability (P1.1)
+prometheus = "0.13"
+lazy_static = "1.4"
+
+# Distributed Tracing (P1.6) - OPTIONAL (heavy, ~200 packages, not needed for edge)
+tracing-opentelemetry = { version = "0.22", optional = true }
+opentelemetry = { version = "0.21", features = ["trace"], optional = true }
+opentelemetry-otlp = { version = "0.14", features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.21", features = ["trace", "rt-tokio"], optional = true }
+
+# Vector operations (lightweight)
+ordered-float = "4.0"
+
+# Vector database (Vamana HNSW)
+memmap2 = "0.9"
+rand = "0.8"
+
+# ONNX Runtime for embeddings (MiniLM-L6-v2)
+# Using load-dynamic to avoid Windows CRT linking conflicts
+# Note: Set ORT_DYLIB_PATH to the onnxruntime 1.22 DLL location
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["half", "load-dynamic"] }
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+ndarray = "0.15"
+
+# Graph visualization
+petgraph = "0.8"
+
+# Bloom filter
+bloomfilter = "1.0"
+
+# Base64 encoding
+base64 = "0.22"
+
+# Backup & Restore (P2)
+sha2 = "0.10"
+
+# Auto-download for models and ONNX runtime
+ureq = { version = "2.9", features = ["json"] }
+zip = { version = "2.1", default-features = false, features = ["deflate"] }
+flate2 = "1.0"
+tar = "0.4"
+
+# Python bindings (optional)
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"], optional = true }
+numpy = { version = "0.22", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3.8"
+
+[[bench]]
+name = "memory_benchmarks"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true  # Reduce binary size
+panic = "abort"
+
+[features]
+# Default: minimal dependencies for edge devices (Raspberry Pi, drones, robotics)
+default = []
+
+# Python bindings for PyO3
+python = ["pyo3", "numpy"]
+
+# Optional: Distributed tracing for cloud/multi-node deployments (~200 extra packages)
+telemetry = [
+    "tracing-opentelemetry",
+    "opentelemetry",
+    "opentelemetry-otlp",
+    "opentelemetry_sdk"
+]
+
+[workspace]
+# Standalone workspace - not part of parent kalki-v2
