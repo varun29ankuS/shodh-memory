@@ -93,6 +93,11 @@ impl EntityLabel {
 }
 
 /// Relationship edge between entities
+///
+/// Implements Hebbian synaptic plasticity: "Neurons that fire together, wire together"
+/// - Strength increases with co-activation (strengthen method)
+/// - Strength decays over time without use (decay method)
+/// - Long-Term Potentiation (LTP): After threshold activations, becomes permanent
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelationshipEdge {
     /// Unique identifier for this edge
@@ -108,6 +113,7 @@ pub struct RelationshipEdge {
     pub relation_type: RelationType,
 
     /// Confidence/strength of this relationship (0.0 to 1.0)
+    /// Dynamic: increases with co-activation, decays without use
     pub strength: f32,
 
     /// When this relationship was created
@@ -124,6 +130,122 @@ pub struct RelationshipEdge {
 
     /// Additional context about the relationship
     pub context: String,
+
+    // === Hebbian Synaptic Plasticity Fields ===
+
+    /// When this synapse was last activated (used in retrieval/traversal)
+    /// Used to calculate time-based decay
+    #[serde(default = "default_last_activated")]
+    pub last_activated: DateTime<Utc>,
+
+    /// Number of times both entities were co-accessed (Hebbian co-activation)
+    /// Higher count = stronger learned association
+    #[serde(default)]
+    pub activation_count: u32,
+
+    /// Long-Term Potentiation flag: synapse becomes permanent after threshold
+    /// Once potentiated, decay is dramatically reduced (like biological LTP)
+    #[serde(default)]
+    pub potentiated: bool,
+}
+
+fn default_last_activated() -> DateTime<Utc> {
+    Utc::now()
+}
+
+/// Hebbian learning constants
+const LEARNING_RATE: f32 = 0.1;           // η: How much strength increases per co-activation
+const DECAY_HALF_LIFE_DAYS: f64 = 14.0;   // λ: Strength halves every 14 days without use
+const LTP_THRESHOLD: u32 = 10;            // Activations needed for Long-Term Potentiation
+const LTP_DECAY_FACTOR: f32 = 0.1;        // Potentiated synapses decay 10x slower
+const MIN_STRENGTH: f32 = 0.01;           // Floor to prevent complete forgetting
+
+impl RelationshipEdge {
+    /// Strengthen this synapse (Hebbian learning)
+    ///
+    /// Called when both connected entities are accessed together.
+    /// Formula: w_new = w_old + η × (1 - w_old) × co_activation_boost
+    ///
+    /// The (1 - w_old) term ensures asymptotic approach to 1.0,
+    /// preventing unbounded growth while allowing strong associations.
+    pub fn strengthen(&mut self) {
+        self.activation_count += 1;
+        self.last_activated = Utc::now();
+
+        // Hebbian strengthening: diminishing returns as strength approaches 1.0
+        let boost = LEARNING_RATE * (1.0 - self.strength);
+        self.strength = (self.strength + boost).min(1.0);
+
+        // Check for Long-Term Potentiation threshold
+        if !self.potentiated && self.activation_count >= LTP_THRESHOLD {
+            self.potentiated = true;
+            // LTP bonus: immediate strength boost
+            self.strength = (self.strength + 0.2).min(1.0);
+        }
+    }
+
+    /// Apply time-based decay to this synapse
+    ///
+    /// Formula: w(t) = w₀ × e^(-λt) where λ = ln(2) / half_life
+    /// Potentiated synapses decay 10x slower (LTP protection)
+    ///
+    /// Returns true if synapse should be pruned (strength below threshold)
+    pub fn decay(&mut self) -> bool {
+        let now = Utc::now();
+        let elapsed = now.signed_duration_since(self.last_activated);
+        let days_elapsed = elapsed.num_seconds() as f64 / 86400.0;
+
+        if days_elapsed <= 0.0 {
+            return false;
+        }
+
+        // Calculate decay rate (λ = ln(2) / half_life)
+        let lambda = 0.693147 / DECAY_HALF_LIFE_DAYS;
+
+        // Potentiated synapses decay much slower (biological LTP)
+        let effective_lambda = if self.potentiated {
+            lambda * LTP_DECAY_FACTOR as f64
+        } else {
+            lambda
+        };
+
+        // Exponential decay: w(t) = w₀ × e^(-λt)
+        let decay_factor = (-effective_lambda * days_elapsed).exp() as f32;
+        self.strength *= decay_factor;
+
+        // Apply floor to prevent complete forgetting
+        if self.strength < MIN_STRENGTH {
+            self.strength = MIN_STRENGTH;
+        }
+
+        // Return whether this synapse should be pruned
+        // Non-potentiated synapses with minimal strength can be removed
+        !self.potentiated && self.strength <= MIN_STRENGTH
+    }
+
+    /// Get the effective strength considering recency
+    ///
+    /// This is a read-only version that calculates what the strength
+    /// would be after decay, without modifying the edge.
+    pub fn effective_strength(&self) -> f32 {
+        let now = Utc::now();
+        let elapsed = now.signed_duration_since(self.last_activated);
+        let days_elapsed = elapsed.num_seconds() as f64 / 86400.0;
+
+        if days_elapsed <= 0.0 {
+            return self.strength;
+        }
+
+        let lambda = 0.693147 / DECAY_HALF_LIFE_DAYS;
+        let effective_lambda = if self.potentiated {
+            lambda * LTP_DECAY_FACTOR as f64
+        } else {
+            lambda
+        };
+
+        let decay_factor = (-effective_lambda * days_elapsed).exp() as f32;
+        (self.strength * decay_factor).max(MIN_STRENGTH)
+    }
 }
 
 /// Relationship types following Graphiti's semantic model
@@ -423,12 +545,33 @@ impl GraphMemory {
         Ok(edges)
     }
 
-    /// Get relationship by UUID
+    /// Get relationship by UUID (raw, without decay applied)
     pub fn get_relationship(&self, uuid: &Uuid) -> Result<Option<RelationshipEdge>> {
         let key = uuid.as_bytes();
         match self.relationships_db.get(key)? {
             Some(value) => {
                 let edge: RelationshipEdge = bincode::deserialize(&value)?;
+                Ok(Some(edge))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get relationship by UUID with effective strength (lazy decay calculation)
+    ///
+    /// Returns the edge with strength reflecting time-based decay.
+    /// This doesn't persist the decay - just calculates what the strength would be.
+    /// Use this for API responses to show accurate current strength.
+    pub fn get_relationship_with_effective_strength(
+        &self,
+        uuid: &Uuid,
+    ) -> Result<Option<RelationshipEdge>> {
+        let key = uuid.as_bytes();
+        match self.relationships_db.get(key)? {
+            Some(value) => {
+                let mut edge: RelationshipEdge = bincode::deserialize(&value)?;
+                // Apply effective strength calculation (doesn't persist)
+                edge.strength = edge.effective_strength();
                 Ok(Some(edge))
             }
             None => Ok(None),
@@ -499,6 +642,9 @@ impl GraphMemory {
     }
 
     /// Traverse graph starting from an entity (breadth-first)
+    ///
+    /// Implements Hebbian learning: edges traversed during retrieval are strengthened.
+    /// This means frequently accessed pathways become stronger over time.
     pub fn traverse_from_entity(
         &self,
         start_uuid: &Uuid,
@@ -509,6 +655,7 @@ impl GraphMemory {
         let mut current_level = vec![*start_uuid];
         let mut all_entities = Vec::new();
         let mut all_edges = Vec::new();
+        let mut edges_to_strengthen = Vec::new();
 
         visited_entities.insert(*start_uuid);
         if let Some(entity) = self.get_entity(start_uuid)? {
@@ -533,7 +680,13 @@ impl GraphMemory {
                         continue;
                     }
 
-                    all_edges.push(edge.clone());
+                    // Collect edge UUID for Hebbian strengthening
+                    edges_to_strengthen.push(edge.uuid);
+
+                    // Return edge with effective strength (lazy decay calculation)
+                    let mut edge_with_decay = edge.clone();
+                    edge_with_decay.strength = edge_with_decay.effective_strength();
+                    all_edges.push(edge_with_decay);
 
                     // Add connected entity
                     let connected_uuid = if edge.from_entity == entity_uuid {
@@ -559,6 +712,14 @@ impl GraphMemory {
             current_level = next_level;
         }
 
+        // Apply Hebbian strengthening to all traversed edges
+        // "Neurons that fire together, wire together"
+        for edge_uuid in edges_to_strengthen {
+            if let Err(e) = self.strengthen_synapse(&edge_uuid) {
+                tracing::debug!("Failed to strengthen synapse {}: {}", edge_uuid, e);
+            }
+        }
+
         Ok(GraphTraversal {
             entities: all_entities,
             relationships: all_edges,
@@ -576,6 +737,39 @@ impl GraphMemory {
         }
 
         Ok(())
+    }
+
+    /// Strengthen a synapse (Hebbian learning)
+    ///
+    /// Called when an edge is traversed during memory retrieval.
+    /// Implements "neurons that fire together, wire together".
+    pub fn strengthen_synapse(&self, edge_uuid: &Uuid) -> Result<()> {
+        if let Some(mut edge) = self.get_relationship(edge_uuid)? {
+            edge.strengthen();
+
+            let key = edge.uuid.as_bytes();
+            let value = bincode::serialize(&edge)?;
+            self.relationships_db.put(key, value)?;
+        }
+
+        Ok(())
+    }
+
+    /// Apply decay to a synapse
+    ///
+    /// Returns true if the synapse should be pruned (non-potentiated and below threshold)
+    pub fn decay_synapse(&self, edge_uuid: &Uuid) -> Result<bool> {
+        if let Some(mut edge) = self.get_relationship(edge_uuid)? {
+            let should_prune = edge.decay();
+
+            let key = edge.uuid.as_bytes();
+            let value = bincode::serialize(&edge)?;
+            self.relationships_db.put(key, value)?;
+
+            return Ok(should_prune);
+        }
+
+        Ok(false)
     }
 
     /// Get graph statistics
@@ -691,7 +885,35 @@ impl GraphMemory {
             })
             .collect();
 
-        // Create gravitational connections from relationships
+        // Apply gravitational forces FIRST, before creating connections
+        // This ensures connection positions match final star positions
+        for rel in &relationships {
+            if let (Some(from_idx), Some(to_idx)) = (
+                entity_indices.get(&rel.from_entity),
+                entity_indices.get(&rel.to_entity),
+            ) {
+                // Apply small gravitational pull based on connection strength
+                let pull_factor = rel.strength * 0.05;
+
+                let from_pos = stars[*from_idx].position.clone();
+                let to_pos = stars[*to_idx].position.clone();
+
+                let dx = (to_pos.x - from_pos.x) * pull_factor;
+                let dy = (to_pos.y - from_pos.y) * pull_factor;
+                let dz = (to_pos.z - from_pos.z) * pull_factor;
+
+                stars[*from_idx].position.x += dx;
+                stars[*from_idx].position.y += dy;
+                stars[*from_idx].position.z += dz;
+
+                stars[*to_idx].position.x -= dx;
+                stars[*to_idx].position.y -= dy;
+                stars[*to_idx].position.z -= dz;
+            }
+        }
+
+        // Create gravitational connections AFTER star positions are finalized
+        // This ensures from_position/to_position match current star positions
         let connections: Vec<GravitationalConnection> = relationships
             .iter()
             .filter_map(|rel| {
@@ -709,33 +931,6 @@ impl GraphMemory {
                 })
             })
             .collect();
-
-        // Update star positions based on connections (simple force adjustment)
-        // Stars with more connections are pulled toward each other
-        for conn in &connections {
-            if let (Some(from_idx), Some(to_idx)) = (
-                entity_indices.get(&Uuid::parse_str(&conn.from_id).unwrap_or_default()),
-                entity_indices.get(&Uuid::parse_str(&conn.to_id).unwrap_or_default()),
-            ) {
-                // Apply small gravitational pull based on connection strength
-                let pull_factor = conn.strength * 0.05;
-
-                let from_pos = &stars[*from_idx].position;
-                let to_pos = &stars[*to_idx].position;
-
-                let dx = (to_pos.x - from_pos.x) * pull_factor;
-                let dy = (to_pos.y - from_pos.y) * pull_factor;
-                let dz = (to_pos.z - from_pos.z) * pull_factor;
-
-                stars[*from_idx].position.x += dx;
-                stars[*from_idx].position.y += dy;
-                stars[*from_idx].position.z += dz;
-
-                stars[*to_idx].position.x -= dx;
-                stars[*to_idx].position.y -= dy;
-                stars[*to_idx].position.z -= dz;
-            }
-        }
 
         // Calculate universe bounds
         let (min_x, max_x, min_y, max_y, min_z, max_z) = stars.iter().fold(

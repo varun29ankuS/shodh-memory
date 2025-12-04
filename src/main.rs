@@ -723,6 +723,10 @@ impl MultiUserMemoryManager {
                             .unwrap_or_else(|_| uuid::Uuid::new_v4()),
                     ),
                     context: experience.content.clone(),
+                    // Hebbian plasticity fields (new synapses start fresh)
+                    last_activated: chrono::Utc::now(),
+                    activation_count: 1, // First activation
+                    potentiated: false,
                 };
 
                 if let Err(e) = graph_guard.add_relationship(edge) {
@@ -2332,6 +2336,10 @@ async fn add_relationship(
         invalidated_at: None,
         source_episode_id: None,
         context: req.context.unwrap_or_default(),
+        // Hebbian plasticity fields (new synapses start fresh)
+        last_activated: chrono::Utc::now(),
+        activation_count: 1, // First activation
+        potentiated: false,
     };
 
     let edge_uuid = graph_guard

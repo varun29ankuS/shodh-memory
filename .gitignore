@@ -47,3 +47,7 @@ shodh_config.json
 
 # Claude settings
 .claude/
+
+# Internal documentation (keep local only)
+COGNITIVE_ARCHITECTURE.md
+*_ARCHITECTURE.md
