@@ -9,6 +9,7 @@ use rocksdb::{Options, DB};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -368,8 +369,21 @@ pub struct GraphMemory {
     /// RocksDB storage for entity -> episodes index (inverted index for fast lookup)
     entity_episodes_db: Arc<DB>,
 
-    /// In-memory entity name index for fast lookups
+    /// RocksDB storage for entity name -> UUID index (persisted, O(1) startup)
+    entity_name_index_db: Arc<DB>,
+
+    /// In-memory entity name index for fast lookups (loaded from entity_name_index_db)
     entity_name_index: Arc<parking_lot::RwLock<HashMap<String, Uuid>>>,
+
+    // === Atomic counters for O(1) stats (P1 fix) ===
+    /// Entity count - initialized from entity_name_index.len(), updated on add
+    entity_count: Arc<AtomicUsize>,
+
+    /// Relationship count - initialized on startup, updated on add
+    relationship_count: Arc<AtomicUsize>,
+
+    /// Episode count - initialized on startup, updated on add
+    episode_count: Arc<AtomicUsize>,
 }
 
 impl GraphMemory {
@@ -386,10 +400,17 @@ impl GraphMemory {
         let episodes_db = Arc::new(DB::open(&opts, path.join("graph_episodes"))?);
         let entity_edges_db = Arc::new(DB::open(&opts, path.join("graph_entity_edges"))?);
         let entity_episodes_db = Arc::new(DB::open(&opts, path.join("graph_entity_episodes"))?);
+        let entity_name_index_db = Arc::new(DB::open(&opts, path.join("graph_entity_name_index"))?);
 
-        // Rebuild entity name index from persisted data
-        let entity_name_index = Self::rebuild_name_index(&entities_db)?;
-        let index_count = entity_name_index.len();
+        // Load entity name index from persisted DB (O(n) but faster than deserializing entities)
+        // If empty, migrate from entities_db (one-time migration for existing data)
+        let entity_name_index = Self::load_or_migrate_name_index(&entity_name_index_db, &entities_db)?;
+        let entity_count = entity_name_index.len();
+
+        // Count relationships and episodes during startup (one-time cost)
+        // This is O(n) at startup, but get_stats() will be O(1) at runtime
+        let relationship_count = Self::count_db_entries(&relationships_db);
+        let episode_count = Self::count_db_entries(&episodes_db);
 
         let graph = Self {
             entities_db,
@@ -397,28 +418,61 @@ impl GraphMemory {
             episodes_db,
             entity_edges_db,
             entity_episodes_db,
+            entity_name_index_db,
             entity_name_index: Arc::new(parking_lot::RwLock::new(entity_name_index)),
+            entity_count: Arc::new(AtomicUsize::new(entity_count)),
+            relationship_count: Arc::new(AtomicUsize::new(relationship_count)),
+            episode_count: Arc::new(AtomicUsize::new(episode_count)),
         };
 
-        if index_count > 0 {
-            tracing::info!("Rebuilt entity name index with {} entries", index_count);
+        if entity_count > 0 || relationship_count > 0 || episode_count > 0 {
+            tracing::info!(
+                "Loaded graph with {} entities, {} relationships, {} episodes",
+                entity_count, relationship_count, episode_count
+            );
         }
 
         Ok(graph)
     }
 
-    /// Rebuild the entity name->UUID index from persisted database
-    fn rebuild_name_index(entities_db: &DB) -> Result<HashMap<String, Uuid>> {
+    /// Load entity name->UUID index from persisted DB, or migrate from entities_db if empty
+    fn load_or_migrate_name_index(index_db: &DB, entities_db: &DB) -> Result<HashMap<String, Uuid>> {
         let mut index = HashMap::new();
 
-        let iter = entities_db.iterator(rocksdb::IteratorMode::Start);
-        for (_, value) in iter.flatten() {
-            if let Ok(entity) = bincode::deserialize::<EntityNode>(&value) {
-                index.insert(entity.name.clone(), entity.uuid);
+        // Try to load from dedicated index DB first
+        let iter = index_db.iterator(rocksdb::IteratorMode::Start);
+        for (key, value) in iter.flatten() {
+            if let (Ok(name), Ok(uuid_bytes)) = (
+                std::str::from_utf8(&key),
+                <[u8; 16]>::try_from(value.as_ref()),
+            ) {
+                index.insert(name.to_string(), Uuid::from_bytes(uuid_bytes));
+            }
+        }
+
+        // If index DB is empty but entities exist, migrate (one-time operation)
+        if index.is_empty() {
+            let entity_iter = entities_db.iterator(rocksdb::IteratorMode::Start);
+            let mut migrated_count = 0;
+            for (_, value) in entity_iter.flatten() {
+                if let Ok(entity) = bincode::deserialize::<EntityNode>(&value) {
+                    // Store in index DB: name -> UUID bytes
+                    index_db.put(entity.name.as_bytes(), entity.uuid.as_bytes())?;
+                    index.insert(entity.name.clone(), entity.uuid);
+                    migrated_count += 1;
+                }
+            }
+            if migrated_count > 0 {
+                tracing::info!("Migrated {} entities to name index DB", migrated_count);
             }
         }
 
         Ok(index)
+    }
+
+    /// Count entries in a RocksDB database (one-time startup cost)
+    fn count_db_entries(db: &DB) -> usize {
+        db.iterator(rocksdb::IteratorMode::Start).count()
     }
 
     /// Add or update an entity node
@@ -453,6 +507,9 @@ impl GraphMemory {
             entity.last_seen_at = entity.created_at;
             entity.mention_count = 1;
             // Salience stays at base_salience for new entities
+
+            // Increment entity counter for new entities only
+            self.entity_count.fetch_add(1, Ordering::Relaxed);
         }
 
         // Store in database
@@ -460,11 +517,13 @@ impl GraphMemory {
         let value = bincode::serialize(&entity)?;
         self.entities_db.put(key, value)?;
 
-        // Update in-memory index
+        // Update both in-memory index and persisted index DB
         {
             let mut index = self.entity_name_index.write();
             index.insert(entity.name.clone(), entity.uuid);
         }
+        // Persist name->UUID mapping for O(1) startup
+        self.entity_name_index_db.put(entity.name.as_bytes(), entity.uuid.as_bytes())?;
 
         Ok(entity.uuid)
     }
@@ -503,6 +562,9 @@ impl GraphMemory {
         let key = edge.uuid.as_bytes();
         let value = bincode::serialize(&edge)?;
         self.relationships_db.put(key, value)?;
+
+        // Increment relationship counter
+        self.relationship_count.fetch_add(1, Ordering::Relaxed);
 
         // Update entity->edges index for both entities
         self.index_entity_edge(&edge.from_entity, &edge.uuid)?;
@@ -582,6 +644,9 @@ impl GraphMemory {
         let key = episode.uuid.as_bytes();
         let value = bincode::serialize(&episode)?;
         self.episodes_db.put(key, value)?;
+
+        // Increment episode counter
+        self.episode_count.fetch_add(1, Ordering::Relaxed);
 
         // Update inverted index: entity_uuid -> episode_uuid
         for entity_uuid in &episode.entity_refs {
@@ -771,31 +836,12 @@ impl GraphMemory {
         Ok(false)
     }
 
-    /// Get graph statistics
+    /// Get graph statistics - O(1) using atomic counters
     pub fn get_stats(&self) -> Result<GraphStats> {
-        let mut entity_count = 0;
-        let mut relationship_count = 0;
-        let mut episode_count = 0;
-
-        let iter = self.entities_db.iterator(rocksdb::IteratorMode::Start);
-        for _ in iter {
-            entity_count += 1;
-        }
-
-        let iter = self.relationships_db.iterator(rocksdb::IteratorMode::Start);
-        for _ in iter {
-            relationship_count += 1;
-        }
-
-        let iter = self.episodes_db.iterator(rocksdb::IteratorMode::Start);
-        for _ in iter {
-            episode_count += 1;
-        }
-
         Ok(GraphStats {
-            entity_count,
-            relationship_count,
-            episode_count,
+            entity_count: self.entity_count.load(Ordering::Relaxed),
+            relationship_count: self.relationship_count.load(Ordering::Relaxed),
+            episode_count: self.episode_count.load(Ordering::Relaxed),
         })
     }
 

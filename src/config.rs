@@ -28,10 +28,10 @@ pub struct ServerConfig {
     /// Audit log retention days (default: 30)
     pub audit_retention_days: u64,
 
-    /// Rate limit: requests per second (default: 50)
+    /// Rate limit: requests per second (default: 1000 - LLM-friendly)
     pub rate_limit_per_second: u64,
 
-    /// Rate limit: burst size (default: 100)
+    /// Rate limit: burst size (default: 2000 - allows rapid agent bursts)
     pub rate_limit_burst: u32,
 
     /// Maximum concurrent requests (default: 200)
@@ -50,8 +50,8 @@ impl Default for ServerConfig {
             audit_max_entries_per_user: 10_000,
             audit_rotation_check_interval: 100,
             audit_retention_days: 30,
-            rate_limit_per_second: 50,
-            rate_limit_burst: 100,
+            rate_limit_per_second: 1000,
+            rate_limit_burst: 2000,
             max_concurrent_requests: 200,
             is_production: false,
         }

@@ -24,6 +24,8 @@ thiserror = "1.0"
 
 # Async runtime & web server
 tokio = { version = "1.40", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }  # SSE event streaming (sync for BroadcastStream)
+futures = "0.3"  # Stream utilities for SSE
 axum = { version = "0.8", features = ["json"] }
 tower = { version = "0.4", features = ["limit", "buffer", "load-shed"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }
@@ -86,8 +88,9 @@ bloomfilter = "1.0"
 # Base64 encoding
 base64 = "0.22"
 
-# Backup & Restore (P2)
+# Backup & Restore (P2) + Model checksum verification (P1)
 sha2 = "0.10"
+hex = "0.4"
 
 # Auto-download for models and ONNX runtime
 ureq = { version = "2.9", features = ["json"] }

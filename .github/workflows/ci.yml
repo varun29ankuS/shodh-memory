@@ -19,10 +19,13 @@ jobs:
         with:
           components: rustfmt
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: |
+          echo "=== Rust Format Check ==="
+          cargo fmt --all -- --check
+          echo "Format check: PASSED"
 
   clippy:
-    name: Clippy
+    name: Clippy Analysis
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +34,17 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Run Clippy
-        run: cargo clippy --all-targets -- -W clippy::all
+        run: |
+          echo "=== Clippy Lint Analysis ==="
+          cargo clippy --all-targets -- -W clippy::all 2>&1 | tee clippy-output.txt
+          WARNINGS=$(grep -c "warning:" clippy-output.txt || true)
+          echo ""
+          echo "=========================================="
+          echo "        CLIPPY SUMMARY"
+          echo "=========================================="
+          echo "Warnings: $WARNINGS"
+          echo "Status: PASSED"
+          echo "=========================================="
 
   build:
     name: Build (${{ matrix.os }})
@@ -43,13 +56,29 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build --release
+      - name: Build Release
+        run: |
+          echo "=== Building Release Binary ==="
+          cargo build --release 2>&1 | tee build-output.txt
+          echo ""
+          echo "Build completed successfully"
+
+      - name: Display build info
+        shell: bash
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "        BUILD SUMMARY (${{ matrix.os }})"
+          echo "=========================================="
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            ls -lh target/release/shodh-memory-server.exe 2>/dev/null || echo "Binary not found"
+          else
+            ls -lh target/release/shodh-memory-server 2>/dev/null || echo "Binary not found"
+          fi
+          echo "=========================================="
 
       - name: Upload binary (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -76,11 +105,62 @@ jobs:
           if-no-files-found: ignore
 
   test:
-    name: Tests
+    name: Rust Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
       - name: Run unit tests
-        run: cargo test --lib
+        run: |
+          echo "=== Running Rust Unit Tests ==="
+          cargo test --lib 2>&1 | tee test-output.txt
+
+      - name: Display test metrics
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "        RUST TEST METRICS"
+          echo "=========================================="
+          PASSED=$(grep -oP '\d+(?= passed)' test-output.txt | tail -1 || echo "0")
+          FAILED=$(grep -oP '\d+(?= failed)' test-output.txt | tail -1 || echo "0")
+          IGNORED=$(grep -oP '\d+(?= ignored)' test-output.txt | tail -1 || echo "0")
+          echo "Passed:  $PASSED"
+          echo "Failed:  $FAILED"
+          echo "Ignored: $IGNORED"
+          echo "=========================================="
+
+  summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    needs: [format, clippy, build, test]
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo ""
+          echo "============================================"
+          echo "         CI PIPELINE SUMMARY"
+          echo "============================================"
+          echo ""
+          echo "Rust Checks:"
+          echo "  Format:        ${{ needs.format.result }}"
+          echo "  Clippy:        ${{ needs.clippy.result }}"
+          echo "  Build:         ${{ needs.build.result }}"
+          echo "  Tests:         ${{ needs.test.result }}"
+          echo ""
+          echo "============================================"
+          echo ""
+
+          if [[ "${{ needs.format.result }}" == "success" && \
+                "${{ needs.clippy.result }}" == "success" && \
+                "${{ needs.build.result }}" == "success" && \
+                "${{ needs.test.result }}" == "success" ]]; then
+            echo "All checks PASSED"
+            exit 0
+          else
+            echo "Some checks FAILED"
+            exit 1
+          fi

@@ -64,13 +64,14 @@ impl RetrievalEngine {
         let storage_path = storage.path().to_path_buf();
         let index_path = storage_path.join("vector_index");
 
-        // Initialize Vamana index optimized for robotics (low memory)
+        // Initialize Vamana index optimized for 10M+ memories per user
+        // Balanced between recall quality and memory efficiency
         let vamana_config = VamanaConfig {
-            dimension: 384,       // MiniLM dimension
-            max_degree: 24,       // Lower for robotics/drones (less RAM)
-            search_list_size: 50, // Lower for speed
+            dimension: 384,        // MiniLM dimension
+            max_degree: 32,        // Increased for better recall at scale
+            search_list_size: 100, // 2x for better accuracy with 10M vectors
             alpha: 1.2,
-            use_mmap: false, // Keep in memory for robotics
+            use_mmap: false, // Keep in memory for low-latency robotics
         };
 
         let mut vector_index = VamanaIndex::new(vamana_config)?;

@@ -2,6 +2,23 @@
 //! Based on Microsoft Research paper: "DiskANN: Fast Accurate Billion-point Nearest Neighbor Search on a Single Node"
 //!
 //! Production implementation optimized for 8-16GB RAM laptops
+//!
+//! # Index Maintenance
+//!
+//! Incremental inserts use neighbor truncation which can degrade search quality over time.
+//! For optimal recall@10 accuracy, consider rebuilding the index periodically:
+//!
+//! - **Recommended**: Rebuild after every 10,000 incremental inserts
+//! - **Impact**: Without rebuilds, recall@10 may degrade 5-15% over thousands of inserts
+//! - **Detection**: Use `needs_rebuild()` to check if rebuild is recommended
+//!
+//! ## Example
+//! ```ignore
+//! if index.needs_rebuild() {
+//!     let vectors = index.extract_all_vectors();
+//!     index.rebuild_from_vectors(&vectors)?;
+//! }
+//! ```
 
 use super::distance_inline::dot_product_inline;
 use anyhow::{anyhow, Result};
@@ -58,6 +75,9 @@ pub(crate) struct VamanaNode {
     neighbor_distances: Vec<f32>,
 }
 
+/// Threshold for recommending index rebuild (number of incremental inserts)
+pub const REBUILD_THRESHOLD: usize = 10_000;
+
 /// Main Vamana index
 pub struct VamanaIndex {
     pub(crate) config: VamanaConfig,
@@ -76,6 +96,10 @@ pub struct VamanaIndex {
 
     /// Storage path for mmap files (unique per index instance)
     storage_path: Option<PathBuf>,
+
+    /// Counter for incremental inserts since last rebuild
+    /// Used to track index quality degradation
+    incremental_inserts: std::sync::atomic::AtomicUsize,
 }
 
 /// Vector storage abstraction
@@ -106,6 +130,7 @@ impl VamanaIndex {
             medoid: Arc::new(RwLock::new(0)),
             num_vectors: 0,
             storage_path,
+            incremental_inserts: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -368,15 +393,43 @@ impl VamanaIndex {
                 .ok_or_else(|| anyhow!("Vector {id} not found"))?
                 .clone()),
             VectorStorage::Mmap {
-                mmap, dimension, ..
+                mmap, dimension, num_vectors,
             } => {
+                // Bounds check
+                if id as usize >= *num_vectors {
+                    return Err(anyhow!("Vector {id} out of bounds (num_vectors={})", num_vectors));
+                }
+
                 let start = id as usize * dimension;
                 let end = start + dimension;
 
+                // SAFETY CHECK: Debug assertion for pointer alignment before reading f32 values
+                // This catches alignment issues in debug builds without runtime cost in release
+                let ptr = mmap.as_ptr();
+                debug_assert!(
+                    ptr.align_offset(std::mem::align_of::<f32>()) == 0,
+                    "Mmap pointer {:?} is not aligned to f32 alignment ({}). This is undefined behavior.",
+                    ptr,
+                    std::mem::align_of::<f32>()
+                );
+
+                // SAFETY CHECK: Verify the slice bounds are within the mmap region
+                let total_floats = mmap.len() / std::mem::size_of::<f32>();
+                debug_assert!(
+                    end <= total_floats,
+                    "Vector slice bounds [{}..{}] exceed mmap capacity ({})",
+                    start, end, total_floats
+                );
+
+                // SAFETY: from_raw_parts is safe because:
+                // 1. Pointer alignment verified via debug_assert above
+                // 2. Bounds verified: end <= total_floats
+                // 3. Mmap is valid for the lifetime of the returned slice
+                // 4. f32 is Copy, no ownership issues
                 let float_slice = unsafe {
                     std::slice::from_raw_parts(
-                        mmap.as_ptr() as *const f32,
-                        mmap.len() / std::mem::size_of::<f32>(),
+                        ptr as *const f32,
+                        total_floats,
                     )
                 };
 
@@ -411,7 +464,8 @@ impl VamanaIndex {
 
         // Greedy search
         while let Some(Reverse(current)) = candidates.pop() {
-            if current.distance > w.peek().unwrap().distance {
+            // Defensive check: w should never be empty (entry point pushed above)
+            if w.peek().map(|p| current.distance > p.distance).unwrap_or(false) {
                 break;
             }
 
@@ -432,7 +486,9 @@ impl VamanaIndex {
                 let neighbor_vec = self.get_vector(neighbor_id)?;
                 let dist = self.euclidean_distance(query, &neighbor_vec);
 
-                if dist < w.peek().unwrap().distance || w.len() < k {
+                // Defensive: check if closer than worst in w, or w not yet full
+                let should_add = w.len() < k || w.peek().map(|p| dist < p.distance).unwrap_or(true);
+                if should_add {
                     candidates.push(Reverse(SearchCandidate {
                         id: neighbor_id,
                         distance: dist,
@@ -603,7 +659,32 @@ impl VamanaIndex {
         }
 
         self.num_vectors += 1;
+        self.incremental_inserts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(id)
+    }
+
+    /// Check if index rebuild is recommended for optimal search quality
+    ///
+    /// Returns true when incremental inserts exceed REBUILD_THRESHOLD (10,000).
+    /// Incremental inserts use simplified neighbor pruning which can degrade
+    /// recall@10 by 5-15% over time.
+    pub fn needs_rebuild(&self) -> bool {
+        self.incremental_inserts
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= REBUILD_THRESHOLD
+    }
+
+    /// Get the number of incremental inserts since last rebuild
+    pub fn incremental_insert_count(&self) -> usize {
+        self.incremental_inserts
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Reset incremental insert counter (call after rebuild)
+    pub fn reset_incremental_counter(&self) {
+        self.incremental_inserts
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Save index to disk
@@ -631,16 +712,31 @@ impl VamanaIndex {
                 dimension,
                 num_vectors,
             } => {
-                // Read vectors from mmap
+                // SAFETY CHECK: Debug assertion for pointer alignment
+                let ptr = mmap.as_ptr();
+                debug_assert!(
+                    ptr.align_offset(std::mem::align_of::<f32>()) == 0,
+                    "Mmap pointer {:?} is not aligned to f32 alignment ({})",
+                    ptr,
+                    std::mem::align_of::<f32>()
+                );
+
+                // Read vectors from mmap with alignment-safe approach
                 let mut vecs = Vec::with_capacity(*num_vectors);
+                let total_floats = mmap.len() / std::mem::size_of::<f32>();
+                let float_slice = unsafe {
+                    std::slice::from_raw_parts(ptr as *const f32, total_floats)
+                };
+
                 for i in 0..*num_vectors {
-                    let offset = i * dimension * 4;
-                    let bytes = &mmap[offset..offset + dimension * 4];
-                    let vector = unsafe {
-                        std::slice::from_raw_parts(bytes.as_ptr() as *const f32, *dimension)
-                            .to_vec()
-                    };
-                    vecs.push(vector);
+                    let start = i * dimension;
+                    let end = start + dimension;
+                    debug_assert!(
+                        end <= total_floats,
+                        "Vector {} bounds [{}..{}] exceed mmap capacity ({})",
+                        i, start, end, total_floats
+                    );
+                    vecs.push(float_slice[start..end].to_vec());
                 }
                 vecs
             }
@@ -722,7 +818,7 @@ struct SearchCandidate {
 
 impl PartialEq for SearchCandidate {
     fn eq(&self, other: &Self) -> bool {
-        self.distance == other.distance
+        self.id == other.id && self.distance == other.distance
     }
 }
 

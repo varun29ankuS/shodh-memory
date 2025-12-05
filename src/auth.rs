@@ -31,21 +31,24 @@ impl IntoResponse for AuthError {
 
 /// Constant-time string comparison to prevent timing attacks
 ///
-/// Note: This leaks the length of the shorter string, but that's acceptable
-/// for API keys where lengths are not secret. For truly constant-time
-/// comparison regardless of length, consider using a crypto library.
+/// Compares all bytes of both strings to prevent length-based timing leaks.
+/// The comparison time is constant regardless of where differences occur.
 fn constant_time_compare(a: &str, b: &str) -> bool {
-    // XOR all bytes including length difference indicator
-    let mut result = (a.len() ^ b.len()) as u8;
-
-    // Compare byte-by-byte using the shorter length
-    // This prevents out-of-bounds but maintains timing consistency
-    let min_len = std::cmp::min(a.len(), b.len());
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
+    let a_len = a_bytes.len();
+    let b_len = b_bytes.len();
+    let max_len = std::cmp::max(a_len, b_len);
 
-    for i in 0..min_len {
-        result |= a_bytes[i] ^ b_bytes[i];
+    // Track whether lengths match (0 if equal, non-zero otherwise)
+    let mut result = (a_len ^ b_len) as u8;
+
+    // Compare all bytes up to max_len, using 0 for out-of-bounds indices
+    // This ensures constant time regardless of actual lengths
+    for i in 0..max_len {
+        let byte_a = if i < a_len { a_bytes[i] } else { 0 };
+        let byte_b = if i < b_len { b_bytes[i] } else { 0 };
+        result |= byte_a ^ byte_b;
     }
 
     result == 0

@@ -43,8 +43,8 @@ use graph_memory::{
     GraphTraversal, RelationType, RelationshipEdge,
 };
 use memory::{
-    Experience, GraphStats as VisualizationStats, Memory, MemoryConfig, MemoryId, MemoryStats,
-    MemorySystem, Query as MemoryQuery,
+    Experience, ExperienceType, GraphStats as VisualizationStats, Memory, MemoryConfig, MemoryId,
+    MemoryStats, MemorySystem, Query as MemoryQuery,
 };
 use similarity::top_k_similar;
 
@@ -60,6 +60,19 @@ pub struct AuditEvent {
     pub event_type: String, // CREATE, UPDATE, DELETE, RETRIEVE
     pub memory_id: String,
     pub details: String,
+}
+
+/// SSE Memory Event - lightweight event for real-time streaming
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryEvent {
+    pub event_type: String,           // CREATE, RETRIEVE, DELETE, GRAPH_UPDATE
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub user_id: String,
+    pub memory_id: Option<String>,
+    pub content_preview: Option<String>, // First 100 chars
+    pub experience_type: Option<String>,
+    pub importance: Option<f32>,
+    pub count: Option<usize>,         // For retrieve events - number of results
 }
 
 // Note: Audit and memory configuration is now in config.rs and loaded via ServerConfig
@@ -188,6 +201,10 @@ pub struct MultiUserMemoryManager {
 
     /// Server configuration (configurable via environment)
     server_config: ServerConfig,
+
+    /// SSE event broadcaster for real-time dashboard updates
+    /// Broadcast channel allows multiple subscribers (SSE clients) to receive events
+    event_broadcaster: tokio::sync::broadcast::Sender<MemoryEvent>,
 }
 
 impl MultiUserMemoryManager {
@@ -205,6 +222,10 @@ impl MultiUserMemoryManager {
         let cache_size = std::num::NonZeroUsize::new(server_config.max_users_in_memory)
             .unwrap_or_else(|| std::num::NonZeroUsize::new(1000).unwrap());
 
+        // Create broadcast channel for SSE events (capacity 1024 events)
+        // Older events are dropped if subscribers can't keep up
+        let (event_broadcaster, _) = tokio::sync::broadcast::channel(1024);
+
         let manager = Self {
             user_memories: Arc::new(parking_lot::Mutex::new(lru::LruCache::new(cache_size))),
             audit_logs: Arc::new(DashMap::new()),
@@ -216,6 +237,7 @@ impl MultiUserMemoryManager {
             entity_extractor: Arc::new(EntityExtractor::new()),
             user_evictions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             server_config,
+            event_broadcaster,
         };
 
         // Perform initial audit log rotation on startup
@@ -252,9 +274,16 @@ impl MultiUserMemoryManager {
             });
         }
 
-        // Also update in-memory cache for fast access
+        // Also update in-memory cache for fast access (with size cap to prevent unbounded growth)
+        let max_entries = self.server_config.audit_max_entries_per_user;
         if let Some(log) = self.audit_logs.get(user_id) {
-            log.write().push(event);
+            let mut entries = log.write();
+            entries.push(event);
+            // Enforce in-memory size cap: remove oldest entries if over limit
+            if entries.len() > max_entries {
+                let excess = entries.len() - max_entries;
+                entries.drain(0..excess);
+            }
         } else {
             let log = Arc::new(parking_lot::RwLock::new(vec![event]));
             self.audit_logs.insert(user_id.to_string(), log);
@@ -290,6 +319,18 @@ impl MultiUserMemoryManager {
                 }
             });
         }
+    }
+
+    /// Emit SSE event to all connected dashboard clients
+    /// Non-blocking - if no clients are listening, event is dropped silently
+    fn emit_event(&self, event: MemoryEvent) {
+        // broadcast::send returns Err if no receivers, which is fine
+        let _ = self.event_broadcaster.send(event);
+    }
+
+    /// Subscribe to SSE events (returns a receiver)
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<MemoryEvent> {
+        self.event_broadcaster.subscribe()
     }
 
     /// Get audit history for user (reads from persistent storage)
@@ -471,12 +512,7 @@ impl MultiUserMemoryManager {
         }
 
         info!(
-            "✅ Flushed {} audit database and {} user databases",
-            if self.audit_db.flush().is_ok() {
-                "1"
-            } else {
-                "0"
-            },
+            "✅ Flushed 1 audit database and {} user databases",
             flushed
         );
 
@@ -691,8 +727,7 @@ impl MultiUserMemoryManager {
 
         // Create an episodic node for this experience
         let episode = EpisodicNode {
-            uuid: uuid::Uuid::parse_str(&memory_id.0.to_string())
-                .unwrap_or_else(|_| uuid::Uuid::new_v4()),
+            uuid: memory_id.0, // Use memory UUID directly (already a Uuid)
             name: format!("Memory {}", &memory_id.0.to_string()[..8]),
             content: experience.content.clone(),
             valid_at: chrono::Utc::now(),
@@ -718,10 +753,7 @@ impl MultiUserMemoryManager {
                     created_at: chrono::Utc::now(),
                     valid_at: chrono::Utc::now(),
                     invalidated_at: None,
-                    source_episode_id: Some(
-                        uuid::Uuid::parse_str(&memory_id.0.to_string())
-                            .unwrap_or_else(|_| uuid::Uuid::new_v4()),
-                    ),
+                    source_episode_id: Some(memory_id.0), // Use memory UUID directly (already a Uuid)
                     context: experience.content.clone(),
                     // Hebbian plasticity fields (new synapses start fresh)
                     last_activated: chrono::Utc::now(),
@@ -786,6 +818,78 @@ struct HealthResponse {
     users_in_cache: usize,
     user_evictions: usize,
     max_cache_size: usize,
+}
+
+// =============================================================================
+// SIMPLIFIED LLM-FRIENDLY API TYPES
+// Minimal request/response for effortless use by AI agents
+// =============================================================================
+
+/// Simplified remember request - just content, auto-creates Experience
+#[derive(Debug, Deserialize)]
+struct RememberRequest {
+    user_id: String,
+    content: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    experience_type: Option<String>,
+}
+
+/// Simplified remember response
+#[derive(Debug, Serialize)]
+struct RememberResponse {
+    id: String,
+    success: bool,
+}
+
+/// Simplified recall request - just query text
+#[derive(Debug, Deserialize)]
+struct RecallRequest {
+    user_id: String,
+    query: String,
+    #[serde(default = "default_recall_limit")]
+    limit: usize,
+}
+
+fn default_recall_limit() -> usize { 5 }
+
+/// Simplified recall response - returns just text snippets
+#[derive(Debug, Serialize)]
+struct RecallResponse {
+    memories: Vec<RecallMemory>,
+    count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RecallMemory {
+    id: String,
+    content: String,
+    importance: f32,
+    created_at: String,
+}
+
+/// Batch remember request for bulk inserts
+#[derive(Debug, Deserialize)]
+struct BatchRememberRequest {
+    user_id: String,
+    memories: Vec<BatchMemoryItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchMemoryItem {
+    content: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    experience_type: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BatchRememberResponse {
+    ids: Vec<String>,
+    success_count: usize,
+    error_count: usize,
 }
 
 /// Application state
@@ -898,6 +1002,39 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Result<String, Statu
     String::from_utf8(buffer).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+/// SSE endpoint for real-time memory events
+/// Streams CREATE, RETRIEVE, DELETE events to connected dashboard clients
+/// No authentication required - read-only, lightweight event stream
+async fn memory_events_sse(
+    State(state): State<AppState>,
+) -> axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    use axum::response::sse::Event;
+    use futures::StreamExt;
+    use tokio_stream::wrappers::BroadcastStream;
+
+    let receiver = state.subscribe_events();
+    let stream = BroadcastStream::new(receiver);
+
+    let event_stream = stream.filter_map(|result| async move {
+        match result {
+            Ok(event) => {
+                let json = serde_json::to_string(&event).ok()?;
+                Some(Ok(Event::default()
+                    .event(&event.event_type)
+                    .data(json)))
+            }
+            Err(_) => None, // Lagged receiver, skip event
+        }
+    });
+
+    axum::response::Sse::new(event_stream)
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("heartbeat")
+        )
+}
+
 /// Compute cosine similarity between two embedding vectors
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
@@ -971,6 +1108,18 @@ async fn record_experience(
         ),
     );
 
+    // SSE: Emit real-time event for dashboard
+    state.emit_event(MemoryEvent {
+        event_type: "CREATE".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: req.user_id.clone(),
+        memory_id: Some(memory_id.0.to_string()),
+        content_preview: Some(req.experience.content.chars().take(100).collect()),
+        experience_type: Some(format!("{:?}", req.experience.experience_type)),
+        importance: req.experience.reward, // Map reward to importance for display
+        count: None,
+    });
+
     // Record metrics (no user_id to prevent cardinality explosion)
     let duration = store_start.elapsed().as_secs_f64();
     metrics::MEMORY_STORE_DURATION.observe(duration);
@@ -981,6 +1130,190 @@ async fn record_experience(
     Ok(Json(RecordResponse {
         memory_id: memory_id.0.to_string(),
         success: true,
+    }))
+}
+
+// =============================================================================
+// SIMPLIFIED LLM-FRIENDLY API HANDLERS
+// =============================================================================
+
+/// LLM-friendly /api/remember - just pass content, get memory ID back
+/// Example: POST /api/remember { "user_id": "agent-1", "content": "User likes pizza" }
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id))]
+async fn remember(
+    State(state): State<AppState>,
+    Json(req): Json<RememberRequest>,
+) -> Result<Json<RememberResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+    validation::validate_content(&req.content, false).map_validation_err("content")?;
+
+    // Parse experience type from string, default to Context
+    let experience_type = req.experience_type
+        .as_ref()
+        .and_then(|s| match s.to_lowercase().as_str() {
+            "task" => Some(ExperienceType::Task),
+            "learning" => Some(ExperienceType::Learning),
+            "decision" => Some(ExperienceType::Decision),
+            "error" => Some(ExperienceType::Error),
+            "pattern" => Some(ExperienceType::Pattern),
+            "conversation" => Some(ExperienceType::Conversation),
+            "discovery" => Some(ExperienceType::Discovery),
+            _ => None,
+        })
+        .unwrap_or(ExperienceType::Context);
+
+    // Auto-create Experience with sensible defaults
+    let experience = Experience {
+        content: req.content.clone(),
+        experience_type,
+        entities: req.tags.clone(),
+        ..Default::default()
+    };
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let memory_id = {
+        let memory = memory.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut memory_guard = memory.write();
+            memory_guard.record(experience)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+        .map_err(AppError::Internal)?
+    };
+
+    Ok(Json(RememberResponse {
+        id: memory_id.0.to_string(),
+        success: true,
+    }))
+}
+
+/// LLM-friendly /api/recall - just pass query, get relevant memories back
+/// Example: POST /api/recall { "user_id": "agent-1", "query": "What does user like?" }
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id, query = %req.query))]
+async fn recall(
+    State(state): State<AppState>,
+    Json(req): Json<RecallRequest>,
+) -> Result<Json<RecallResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let limit = req.limit;
+    let query_text = req.query.clone();
+
+    let memories = {
+        let memory = memory.clone();
+        tokio::task::spawn_blocking(move || {
+            let memory_guard = memory.read();
+            let query = MemoryQuery {
+                query_text: Some(query_text),
+                max_results: limit,
+                ..Default::default()
+            };
+            memory_guard.retrieve(&query).unwrap_or_default()
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    };
+
+    // Convert Arc<Memory> to owned values for response
+    let recall_memories: Vec<RecallMemory> = memories
+        .into_iter()
+        .map(|m| RecallMemory {
+            id: m.id.0.to_string(),
+            content: m.experience.content.clone(),
+            importance: m.importance(),
+            created_at: m.created_at.to_rfc3339(),
+        })
+        .collect();
+
+    let count = recall_memories.len();
+    Ok(Json(RecallResponse {
+        memories: recall_memories,
+        count,
+    }))
+}
+
+/// Batch /api/batch_remember - store multiple memories at once (efficient for bulk)
+/// Example: POST /api/batch_remember { "user_id": "agent-1", "memories": [{"content": "..."}, ...] }
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id, count = req.memories.len()))]
+async fn batch_remember(
+    State(state): State<AppState>,
+    Json(req): Json<BatchRememberRequest>,
+) -> Result<Json<BatchRememberResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    if req.memories.is_empty() {
+        return Ok(Json(BatchRememberResponse {
+            ids: vec![],
+            success_count: 0,
+            error_count: 0,
+        }));
+    }
+
+    if req.memories.len() > 1000 {
+        return Err(AppError::InvalidInput {
+            field: "memories".to_string(),
+            reason: "Batch size exceeds 1000 limit".to_string(),
+        });
+    }
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let items = req.memories;
+    let (ids, error_count) = {
+        let memory = memory.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut memory_guard = memory.write();
+            let mut ids = Vec::with_capacity(items.len());
+            let mut errors = 0usize;
+
+            for item in items {
+                let experience_type = item.experience_type
+                    .as_ref()
+                    .and_then(|s| match s.to_lowercase().as_str() {
+                        "task" => Some(ExperienceType::Task),
+                        "learning" => Some(ExperienceType::Learning),
+                        "decision" => Some(ExperienceType::Decision),
+                        "error" => Some(ExperienceType::Error),
+                        "pattern" => Some(ExperienceType::Pattern),
+                        "conversation" => Some(ExperienceType::Conversation),
+                        "discovery" => Some(ExperienceType::Discovery),
+                        _ => None,
+                    })
+                    .unwrap_or(ExperienceType::Context);
+
+                let experience = Experience {
+                    content: item.content,
+                    experience_type,
+                    entities: item.tags,
+                    ..Default::default()
+                };
+
+                match memory_guard.record(experience) {
+                    Ok(id) => ids.push(id.0.to_string()),
+                    Err(_) => errors += 1,
+                }
+            }
+            (ids, errors)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    };
+
+    let success_count = ids.len();
+    Ok(Json(BatchRememberResponse {
+        ids,
+        success_count,
+        error_count,
     }))
 }
 
@@ -1143,12 +1476,9 @@ async fn retrieve_memories(
                         // Compute cosine similarity (base score)
                         let semantic_score = cosine_similarity(&query_embedding, &mem_embedding);
 
-                        // Get graph boost (if any)
+                        // Get graph boost (if any) - use UUID directly (memory.id.0 is already Uuid)
                         let graph_boost = memory_graph_boosts
-                            .get(
-                                &uuid::Uuid::parse_str(&memory.id.0.to_string())
-                                    .unwrap_or_default(),
-                            )
+                            .get(&memory.id.0)
                             .copied()
                             .unwrap_or(0.0)
                             .min(1.0); // Cap boost at 100%
@@ -1232,6 +1562,20 @@ async fn retrieve_memories(
     metrics::MEMORY_RETRIEVE_RESULTS
         .with_label_values(&[retrieval_mode])
         .observe(count as f64);
+
+    // SSE: Emit real-time event for dashboard (only if results found)
+    if count > 0 {
+        state.emit_event(MemoryEvent {
+            event_type: "RETRIEVE".to_string(),
+            timestamp: chrono::Utc::now(),
+            user_id: req.user_id.clone(),
+            memory_id: None,
+            content_preview: req.query_text.as_ref().map(|q| q.chars().take(100).collect()),
+            experience_type: None,
+            importance: None,
+            count: Some(count),
+        });
+    }
 
     Ok(Json(RetrieveResponse { memories, count }))
 }
@@ -2585,6 +2929,10 @@ async fn main() -> Result<()> {
         // Core endpoints
         .route("/api/record", post(record_experience))
         .route("/api/retrieve", post(retrieve_memories))
+        // Simplified LLM-friendly endpoints (effortless API)
+        .route("/api/remember", post(remember))
+        .route("/api/recall", post(recall))
+        .route("/api/batch_remember", post(batch_remember))
         // User management
         .route("/api/users", get(list_users))
         .route("/api/users/{user_id}/stats", get(get_user_stats))
@@ -2636,6 +2984,8 @@ async fn main() -> Result<()> {
         .route("/api/visualization/build", post(build_visualization))
         // Apply auth middleware only to protected routes
         .layer(axum::middleware::from_fn(auth::auth_middleware))
+        // Apply rate limiting to API routes only (not health/metrics/static)
+        .layer(governor_layer)
         .with_state(manager.clone());
 
     // P0.8: Concurrency limiting for production resilience
@@ -2647,26 +2997,24 @@ async fn main() -> Result<()> {
         max_concurrent
     );
 
-    // Combine public and protected routes
-    let app = Router::new()
-        // Public routes - no authentication required
-        .route("/", get(|| async { axum::response::Redirect::permanent("/static/index.html") }))
+    // Public routes - NO rate limiting (health checks, metrics, static files)
+    // These must always be accessible for monitoring and Kubernetes probes
+    let public_routes = Router::new()
+        .route("/", get(|| async { axum::response::Redirect::permanent("/static/live.html") }))
         .nest_service("/static", ServeDir::new("static"))
         .route("/health", get(health))
         .route("/health/live", get(health_live))     // P0.9: Kubernetes liveness probe
         .route("/health/ready", get(health_ready))   // P0.9: Kubernetes readiness probe
         .route("/metrics", get(metrics_endpoint))    // P1.1: Prometheus metrics
+        .route("/api/events", get(memory_events_sse)) // SSE: Real-time memory events for dashboard
+        .with_state(manager.clone());
 
-        // Merge protected routes
-        .merge(protected_routes)
-
-        // Apply layers (innermost to outermost):
-        // 1. P1.6: Trace propagation (innermost - sets up trace context first) - OPTIONAL
-        // 2. P1.3: Metrics tracking (tracks ALL requests with trace context)
-        // 3. P0.8: ConcurrencyLimit - Limit max concurrent requests
-        // 4. CORS: Handle cross-origin requests
-        // 5. RateLimit: Per-IP rate limiting (outermost, prevents abuse)
-        ;
+    // Combine public and protected routes
+    // Rate limiting is applied only to protected_routes (API endpoints)
+    // Public routes (health, metrics, static) are NOT rate limited
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(protected_routes);
 
     // Conditionally add trace propagation middleware only when telemetry feature is enabled
     #[cfg(feature = "telemetry")]
@@ -2674,11 +3022,11 @@ async fn main() -> Result<()> {
         crate::tracing_setup::trace_propagation::propagate_trace_context,
     ));
 
+    // Apply global layers (no rate limiting here - it's already on protected_routes)
     let app = app
         .layer(axum::middleware::from_fn(crate::middleware::track_metrics))
         .layer(ConcurrencyLimitLayer::new(max_concurrent))
         .layer(cors)
-        .layer(governor_layer)
         .with_state(manager);
 
     // Start server using port from config

@@ -24,6 +24,11 @@ use tokenizers::Tokenizer;
 
 use super::Embedder;
 
+/// Thread-safe guard for ORT_DYLIB_PATH initialization.
+/// Using OnceLock ensures set_var is called exactly once, before other threads start.
+/// This mitigates the UB risk of concurrent env::set_var calls.
+static ORT_PATH_INIT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+
 /// Lazily initialized ONNX session and tokenizer
 struct LazyModel {
     session: Mutex<Session>,
@@ -173,7 +178,24 @@ impl MiniLMEmbedder {
     /// Ensure ONNX Runtime is available before any ort code runs.
     /// This MUST be called before creating any ONNX sessions.
     /// Sets ORT_DYLIB_PATH if needed from cache or download.
+    ///
+    /// SAFETY: Uses OnceLock to ensure set_var is called at most once,
+    /// mitigating the thread-safety issue with std::env::set_var.
     fn ensure_onnx_runtime_available(offline_mode: bool) -> Result<()> {
+        // Use OnceLock to ensure we only initialize once (thread-safe)
+        let result = ORT_PATH_INIT.get_or_init(|| {
+            Self::init_ort_path_inner(offline_mode)
+        });
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => anyhow::bail!("{}", e),
+        }
+    }
+
+    /// Inner initialization logic - called exactly once via OnceLock.
+    /// SAFETY: set_var is only called once due to OnceLock guard.
+    fn init_ort_path_inner(offline_mode: bool) -> Result<PathBuf, String> {
         // If ORT_DYLIB_PATH is already set to a valid path, we're good
         if let Ok(existing_path) = std::env::var("ORT_DYLIB_PATH") {
             let path = std::path::PathBuf::from(&existing_path);
@@ -182,7 +204,7 @@ impl MiniLMEmbedder {
                     "Using existing ONNX Runtime from ORT_DYLIB_PATH: {:?}",
                     path
                 );
-                return Ok(());
+                return Ok(path);
             }
         }
 
@@ -192,23 +214,26 @@ impl MiniLMEmbedder {
                 "Setting ORT_DYLIB_PATH to cached runtime: {:?}",
                 cached_path
             );
+            // SAFETY: This is called once via OnceLock, before other threads start
             std::env::set_var("ORT_DYLIB_PATH", &cached_path);
-            return Ok(());
+            return Ok(cached_path);
         }
 
         // Need to download ONNX Runtime
         if offline_mode {
-            anyhow::bail!("ONNX Runtime not found and SHODH_OFFLINE=true");
+            return Err("ONNX Runtime not found and SHODH_OFFLINE=true".to_string());
         }
 
         tracing::info!("ONNX Runtime not found. Downloading...");
-        let onnx_path = super::downloader::download_onnx_runtime(None)?;
+        let onnx_path = super::downloader::download_onnx_runtime(None)
+            .map_err(|e| e.to_string())?;
         tracing::info!(
             "Setting ORT_DYLIB_PATH to downloaded runtime: {:?}",
             onnx_path
         );
+        // SAFETY: This is called once via OnceLock, before other threads start
         std::env::set_var("ORT_DYLIB_PATH", &onnx_path);
-        Ok(())
+        Ok(onnx_path)
     }
 
     /// Create new MiniLM embedder with lazy loading (default)
