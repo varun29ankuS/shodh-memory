@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://www.shodh-rag.com/memory"><img src="https://img.shields.io/badge/Website-shodh--rag.com-blue" alt="Website"></a>
   <a href="https://pypi.org/project/shodh-memory/"><img src="https://img.shields.io/pypi/v/shodh-memory.svg" alt="PyPI"></a>
   <a href="https://github.com/varun29ankuS/shodh-memory/actions"><img src="https://github.com/varun29ankuS/shodh-memory/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
@@ -261,7 +262,7 @@ Apache 2.0
 
 ## Links
 
-- [Website](https://shodh-rag.com/memory)
+- [Website](https://www.shodh-rag.com/memory)
 - [PyPI Package](https://pypi.org/project/shodh-memory/)
 - [GitHub](https://github.com/varun29ankuS/shodh-memory)
 - [Issues](https://github.com/varun29ankuS/shodh-memory/issues)
