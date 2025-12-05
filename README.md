@@ -77,7 +77,7 @@ Shodh-Memory uses language structure to decide what to remember:
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Based on [construction grammar](https://direct.mit.edu/coli/article/50/4/1375/123787), [Hebbian learning](https://pmc.ncbi.nlm.nih.gov/articles/PMC10410470/), and [memory consolidation](https://pmc.ncbi.nlm.nih.gov/articles/PMC4183265/) research.
+Based on [construction grammar](https://direct.mit.edu/coli/article/50/4/1375/123787), [Hebbian learning](https://pmc.ncbi.nlm.nih.gov/articles/PMC10410470/), [memory consolidation](https://pmc.ncbi.nlm.nih.gov/articles/PMC4183265/), and [working memory](https://pmc.ncbi.nlm.nih.gov/articles/PMC4207727/) research.
 
 ## Installation
 
