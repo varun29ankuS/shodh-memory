@@ -843,7 +843,9 @@ impl RetrievalEngine {
                         memory.record_access();
 
                         // PERSIST: Write access update to storage
-                        let _ = self.storage.update(&memory);
+                        if let Err(e) = self.storage.update(&memory) {
+                            tracing::warn!("Failed to persist access update for memory {}: {}", id.0, e);
+                        }
                     }
                 }
                 // Mild association strengthening for neutral

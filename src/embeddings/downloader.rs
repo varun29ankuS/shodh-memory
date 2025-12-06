@@ -248,8 +248,10 @@ fn download_file_with_checksum(
 
     if let Some(expected) = expected_checksum {
         if actual_checksum != expected.to_lowercase() {
-            // Delete the corrupted file
-            let _ = fs::remove_file(path);
+            // Delete the corrupted file - log if deletion fails
+            if let Err(e) = fs::remove_file(path) {
+                tracing::error!("Failed to delete corrupted file {:?}: {}", path, e);
+            }
             anyhow::bail!(
                 "Checksum verification failed for {:?}. Expected: {}, Got: {}. File deleted for security.",
                 path,
@@ -365,8 +367,10 @@ pub fn download_onnx_runtime(progress: Option<ProgressCallback>) -> Result<PathB
     // Extract the archive
     extract_onnx_runtime(&archive_path, &onnx_dir)?;
 
-    // Clean up archive
-    let _ = fs::remove_file(&archive_path);
+    // Clean up archive - log if cleanup fails (non-fatal)
+    if let Err(e) = fs::remove_file(&archive_path) {
+        tracing::warn!("Failed to clean up archive {:?}: {}", archive_path, e);
+    }
 
     get_onnx_runtime_path().ok_or_else(|| anyhow::anyhow!("Failed to extract ONNX Runtime"))
 }

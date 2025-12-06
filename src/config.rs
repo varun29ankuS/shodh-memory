@@ -7,6 +7,148 @@ use std::env;
 use std::path::PathBuf;
 use tracing::info;
 
+/// CORS configuration
+#[derive(Debug, Clone)]
+pub struct CorsConfig {
+    /// Allowed origins (empty = allow all)
+    pub allowed_origins: Vec<String>,
+    /// Allowed HTTP methods
+    pub allowed_methods: Vec<String>,
+    /// Allowed headers
+    pub allowed_headers: Vec<String>,
+    /// Whether to allow credentials
+    pub allow_credentials: bool,
+    /// Max age for preflight cache (seconds)
+    pub max_age_seconds: u64,
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            allowed_origins: Vec::new(), // Empty = allow all origins
+            allowed_methods: vec![
+                "GET".to_string(),
+                "POST".to_string(),
+                "PUT".to_string(),
+                "DELETE".to_string(),
+                "OPTIONS".to_string(),
+            ],
+            allowed_headers: vec![
+                "Content-Type".to_string(),
+                "Authorization".to_string(),
+                "X-Request-ID".to_string(),
+            ],
+            allow_credentials: false,
+            max_age_seconds: 86400, // 24 hours
+        }
+    }
+}
+
+impl CorsConfig {
+    /// Load from environment variable SHODH_CORS_ORIGINS
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        if let Ok(origins) = env::var("SHODH_CORS_ORIGINS") {
+            config.allowed_origins = origins
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+
+        if let Ok(methods) = env::var("SHODH_CORS_METHODS") {
+            config.allowed_methods = methods
+                .split(',')
+                .map(|s| s.trim().to_uppercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+
+        if let Ok(headers) = env::var("SHODH_CORS_HEADERS") {
+            config.allowed_headers = headers
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+
+        if let Ok(val) = env::var("SHODH_CORS_CREDENTIALS") {
+            config.allow_credentials = val.to_lowercase() == "true" || val == "1";
+        }
+
+        if let Ok(val) = env::var("SHODH_CORS_MAX_AGE") {
+            if let Ok(n) = val.parse() {
+                config.max_age_seconds = n;
+            }
+        }
+
+        config
+    }
+
+    /// Check if any origin restrictions are configured
+    pub fn is_restricted(&self) -> bool {
+        !self.allowed_origins.is_empty()
+    }
+
+    /// Convert to tower-http CorsLayer
+    pub fn to_layer(&self) -> tower_http::cors::CorsLayer {
+        use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+
+        let mut layer = CorsLayer::new();
+
+        // Configure allowed origins
+        if self.allowed_origins.is_empty() {
+            layer = layer.allow_origin(Any);
+        } else {
+            let origins: Vec<_> = self
+                .allowed_origins
+                .iter()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if origins.is_empty() {
+                layer = layer.allow_origin(Any);
+            } else {
+                layer = layer.allow_origin(AllowOrigin::list(origins));
+            }
+        }
+
+        // Configure allowed methods
+        let methods: Vec<axum::http::Method> = self
+            .allowed_methods
+            .iter()
+            .filter_map(|m| m.parse().ok())
+            .collect();
+        if methods.is_empty() {
+            layer = layer.allow_methods(Any);
+        } else {
+            layer = layer.allow_methods(methods);
+        }
+
+        // Configure allowed headers
+        let headers: Vec<axum::http::HeaderName> = self
+            .allowed_headers
+            .iter()
+            .filter_map(|h| h.parse().ok())
+            .collect();
+        if headers.is_empty() {
+            layer = layer.allow_headers(Any);
+        } else {
+            layer = layer.allow_headers(headers);
+        }
+
+        // Configure credentials
+        if self.allow_credentials {
+            layer = layer.allow_credentials(true);
+        }
+
+        // Configure max age
+        layer = layer.max_age(std::time::Duration::from_secs(self.max_age_seconds));
+
+        layer
+    }
+}
+
 /// Server configuration loaded from environment with defaults
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -39,6 +181,9 @@ pub struct ServerConfig {
 
     /// Whether running in production mode
     pub is_production: bool,
+
+    /// CORS configuration
+    pub cors: CorsConfig,
 }
 
 impl Default for ServerConfig {
@@ -54,6 +199,7 @@ impl Default for ServerConfig {
             rate_limit_burst: 2000,
             max_concurrent_requests: 200,
             is_production: false,
+            cors: CorsConfig::default(),
         }
     }
 }
@@ -124,6 +270,9 @@ impl ServerConfig {
             }
         }
 
+        // CORS configuration
+        config.cors = CorsConfig::from_env();
+
         config
     }
 
@@ -147,6 +296,11 @@ impl ServerConfig {
         );
         info!("   Max concurrent: {}", self.max_concurrent_requests);
         info!("   Audit retention: {} days", self.audit_retention_days);
+        if self.cors.is_restricted() {
+            info!("   CORS origins: {:?}", self.cors.allowed_origins);
+        } else {
+            info!("   CORS: Permissive (all origins allowed)");
+        }
     }
 }
 
@@ -159,13 +313,20 @@ pub fn print_env_help() {
     println!("  SHODH_PORT             - Server port (default: 3030)");
     println!("  SHODH_MEMORY_PATH      - Storage directory (default: ./shodh_memory_data)");
     println!("  SHODH_API_KEYS         - Comma-separated API keys (required in production)");
-    println!("  SHODH_CORS_ORIGINS     - Comma-separated allowed CORS origins");
     println!("  SHODH_MAX_USERS        - Max users in memory LRU (default: 1000)");
-    println!("  SHODH_RATE_LIMIT       - Requests per second (default: 50)");
-    println!("  SHODH_RATE_BURST       - Burst size (default: 100)");
+    println!("  SHODH_RATE_LIMIT       - Requests per second (default: 1000)");
+    println!("  SHODH_RATE_BURST       - Burst size (default: 2000)");
     println!("  SHODH_MAX_CONCURRENT   - Max concurrent requests (default: 200)");
     println!("  SHODH_AUDIT_MAX_ENTRIES    - Max audit entries per user (default: 10000)");
     println!("  SHODH_AUDIT_RETENTION_DAYS - Audit log retention days (default: 30)");
+    println!();
+    println!("CORS Configuration:");
+    println!("  SHODH_CORS_ORIGINS     - Comma-separated allowed origins (default: all)");
+    println!("  SHODH_CORS_METHODS     - Comma-separated allowed methods (default: GET,POST,PUT,DELETE,OPTIONS)");
+    println!("  SHODH_CORS_HEADERS     - Comma-separated allowed headers (default: Content-Type,Authorization,X-Request-ID)");
+    println!("  SHODH_CORS_CREDENTIALS - Allow credentials true/false (default: false)");
+    println!("  SHODH_CORS_MAX_AGE     - Preflight cache seconds (default: 86400)");
+    println!();
     println!("  RUST_LOG               - Log level (e.g., info, debug, trace)");
     println!();
 }
@@ -193,5 +354,34 @@ mod tests {
 
         env::remove_var("SHODH_PORT");
         env::remove_var("SHODH_MAX_USERS");
+    }
+
+    #[test]
+    fn test_cors_default_is_permissive() {
+        let cors = CorsConfig::default();
+        assert!(!cors.is_restricted());
+        assert!(cors.allowed_origins.is_empty());
+        assert!(!cors.allowed_methods.is_empty());
+        assert!(!cors.allowed_headers.is_empty());
+    }
+
+    #[test]
+    fn test_cors_with_origins_is_restricted() {
+        let mut cors = CorsConfig::default();
+        cors.allowed_origins = vec!["https://example.com".to_string()];
+        assert!(cors.is_restricted());
+    }
+
+    #[test]
+    fn test_cors_to_layer_permissive() {
+        let cors = CorsConfig::default();
+        let _layer = cors.to_layer(); // Should not panic
+    }
+
+    #[test]
+    fn test_cors_to_layer_restricted() {
+        let mut cors = CorsConfig::default();
+        cors.allowed_origins = vec!["https://example.com".to_string()];
+        let _layer = cors.to_layer(); // Should not panic
     }
 }

@@ -18,7 +18,6 @@ use std::sync::Arc;
 use tokio::signal;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing::info;
 
@@ -271,7 +270,9 @@ impl MultiUserMemoryManager {
 
             // Spawn blocking DB write on dedicated thread pool
             tokio::task::spawn_blocking(move || {
-                let _ = db.put(&key_bytes, &serialized);
+                if let Err(e) = db.put(&key_bytes, &serialized) {
+                    tracing::error!("Failed to persist audit log: {}", e);
+                }
             });
         }
 
@@ -583,7 +584,9 @@ impl MultiUserMemoryManager {
             Ok(_) => {
                 info!("✅ Rebuilt vector index for user: {}", user_id);
                 // Save the newly built index
-                let _ = memory_guard.save_vector_index(&index_path);
+                if let Err(e) = memory_guard.save_vector_index(&index_path) {
+                    tracing::warn!("Failed to save vector index for user {}: {}", user_id, e);
+                }
                 Ok(())
             }
             Err(e) => {
@@ -2840,8 +2843,6 @@ async fn main() -> Result<()> {
     let server_config = ServerConfig::from_env();
     server_config.log();
 
-    let is_production = server_config.is_production;
-
     // Create memory manager with config
     info!("📁 Storage path: {:?}", server_config.storage_path);
     let manager = Arc::new(MultiUserMemoryManager::new(
@@ -2866,64 +2867,8 @@ async fn main() -> Result<()> {
         server_config.rate_limit_per_second, server_config.rate_limit_burst
     );
 
-    // Configure CORS - secure by default, configurable via environment
-    // In production, SHODH_CORS_ORIGINS should be set to a comma-separated list of allowed origins
-    // Example: SHODH_CORS_ORIGINS=https://app.example.com,https://admin.example.com
-    let cors = if let Ok(origins) = std::env::var("SHODH_CORS_ORIGINS") {
-        let allowed_origins: Vec<_> = origins
-            .split(',')
-            .filter_map(|s| s.trim().parse().ok())
-            .collect();
-
-        if allowed_origins.is_empty() {
-            info!("⚠️  CORS: No valid origins in SHODH_CORS_ORIGINS, using restrictive default");
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::exact("http://localhost:3000".parse().unwrap()))
-                .allow_methods([
-                    axum::http::Method::GET,
-                    axum::http::Method::POST,
-                    axum::http::Method::DELETE,
-                ])
-                .allow_headers([
-                    axum::http::header::CONTENT_TYPE,
-                    axum::http::header::AUTHORIZATION,
-                ])
-        } else {
-            info!("🔒 CORS: Allowing origins: {:?}", allowed_origins);
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::list(allowed_origins))
-                .allow_methods([
-                    axum::http::Method::GET,
-                    axum::http::Method::POST,
-                    axum::http::Method::DELETE,
-                ])
-                .allow_headers([
-                    axum::http::header::CONTENT_TYPE,
-                    axum::http::header::AUTHORIZATION,
-                ])
-        }
-    } else if is_production {
-        // Production without explicit CORS config: very restrictive
-        info!("🔒 CORS: Production mode - allowing only localhost");
-        CorsLayer::new()
-            .allow_origin(AllowOrigin::exact("http://localhost:3000".parse().unwrap()))
-            .allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::DELETE,
-            ])
-            .allow_headers([
-                axum::http::header::CONTENT_TYPE,
-                axum::http::header::AUTHORIZATION,
-            ])
-    } else {
-        // Development mode: allow all (for local testing only)
-        info!("⚠️  CORS: Development mode - allowing all origins (NOT for production!)");
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
-    };
+    // Build CORS layer from configuration
+    let cors = server_config.cors.to_layer();
 
     // Build router with rate limiting
     // Split into public (no auth) and protected (auth required) routes

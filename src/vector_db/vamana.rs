@@ -531,9 +531,13 @@ impl VamanaIndex {
         let mut pruned = Vec::new();
         let node_vec = self.get_vector(node_id)?;
 
-        // Sort candidates by distance
+        // Sort candidates by distance (NaN values sort to end)
         let mut sorted_candidates = candidates.to_vec();
-        sorted_candidates.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+        sorted_candidates.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         for candidate in sorted_candidates {
             if candidate.id == node_id {
