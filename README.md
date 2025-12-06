@@ -18,13 +18,13 @@
 
 ---
 
-Vector databases store and retrieve. That's not memory—that's search.
+We built this because AI agents forget everything between sessions. They make the same mistakes, ask the same questions, lose context constantly.
 
-Memory strengthens what works, forgets what doesn't, and turns experience into knowledge. Shodh-Memory brings this to AI agents: Hebbian learning, activation decay, semantic consolidation—running locally in 8MB.
+Shodh-Memory fixes that. It's a cognitive memory system—Hebbian learning, activation decay, semantic consolidation—packed into a single 8MB binary that runs offline.
 
 **How it works:**
 
-New experiences enter a capacity-limited working memory, overflow into session storage, and consolidate into long-term memory based on importance [1]. When memories are retrieved together successfully, their connections strengthen [2]. After enough co-activations, those connections become permanent. Unused memories fade. The system learns what matters to *you*.
+Experiences flow through three tiers based on Cowan's working memory model [1]. New information enters capacity-limited working memory, overflows into session storage, and consolidates into long-term memory based on importance. When memories are retrieved together successfully, their connections strengthen—classic Hebbian learning [2]. After enough co-activations, those connections become permanent. Unused memories naturally fade. The system learns what matters to *you*.
 
 **What you get:**
 
