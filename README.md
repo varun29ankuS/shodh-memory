@@ -14,17 +14,21 @@
 
 ---
 
-A memory system that actually learns. Not just storage—cognitive processing.
+<p align="center"><i>Memory that learns. Single binary. Runs offline.</i></p>
 
-Most AI memory solutions store vectors and retrieve by similarity. That's a database, not memory. Real memory strengthens connections that lead to good outcomes, lets unused information fade, and consolidates experiences into lasting knowledge.
+---
 
-Shodh-Memory implements these principles in a single 8MB binary that runs entirely offline.
+Vector databases store and retrieve. That's not memory—that's search.
 
-**The architecture:** Three tiers based on Cowan's working memory model [1]. New information enters working memory (limited capacity, fast access), overflows to session memory, and consolidates into long-term storage based on importance. This isn't a metaphor—it's how the data actually flows.
+Memory strengthens what works, forgets what doesn't, and turns experience into knowledge. Shodh-Memory brings this to AI agents: Hebbian learning, activation decay, semantic consolidation—running locally in 8MB.
 
-**The learning:** When memories are retrieved together and the outcome is good, their connection strengthens. Classic Hebbian learning [2]—"neurons that fire together, wire together." After enough co-activations, these connections become permanent (long-term potentiation). Bad outcomes cause decay. Over time, the system learns what matters.
+**How it works:**
 
-**The result:** Memory that adapts to you. Your decisions, your errors, your patterns—searchable, local, private.
+New experiences enter a capacity-limited working memory, overflow into session storage, and consolidate into long-term memory based on importance [1]. When memories are retrieved together successfully, their connections strengthen [2]. After enough co-activations, those connections become permanent. Unused memories fade. The system learns what matters to *you*.
+
+**What you get:**
+
+Your decisions, errors, and patterns—searchable and private. No cloud. No API keys. Your memory, your machine.
 
 ```
 Working Memory ──overflow──▶ Session Memory ──importance──▶ Long-Term Memory

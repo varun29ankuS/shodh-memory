@@ -69,7 +69,8 @@ fn bench_memory_creation(c: &mut Criterion) {
             Memory::new(
                 MemoryId(Uuid::new_v4()),
                 Experience {
-                    content: "Full experience with all fields populated for benchmarking".to_string(),
+                    content: "Full experience with all fields populated for benchmarking"
+                        .to_string(),
                     experience_type: ExperienceType::Decision,
                     entities: vec!["entity1".to_string(), "entity2".to_string()],
                     ..Default::default()
@@ -102,7 +103,11 @@ fn bench_entity_ref_operations(c: &mut Criterion) {
                 )
             },
             |mut memory| {
-                memory.add_entity_ref(Uuid::new_v4(), "entity".to_string(), "mentioned".to_string());
+                memory.add_entity_ref(
+                    Uuid::new_v4(),
+                    "entity".to_string(),
+                    "mentioned".to_string(),
+                );
             },
             BatchSize::SmallInput,
         );
@@ -154,9 +159,7 @@ fn bench_entity_ref_operations(c: &mut Criterion) {
             memory.add_entity_ref(Uuid::new_v4(), format!("e{}", i), "x".to_string());
         }
 
-        b.iter(|| {
-            memory.entity_ids()
-        });
+        b.iter(|| memory.entity_ids());
     });
 
     group.finish();
@@ -305,16 +308,18 @@ fn bench_serialization(c: &mut Criterion) {
         None,
     );
     for i in 0..10 {
-        memory.add_entity_ref(Uuid::new_v4(), format!("entity_{}", i), "mentioned".to_string());
+        memory.add_entity_ref(
+            Uuid::new_v4(),
+            format!("entity_{}", i),
+            "mentioned".to_string(),
+        );
     }
     memory.tier = MemoryTier::Session;
     memory.activation = 0.8;
     memory.last_retrieval_id = Some(Uuid::new_v4());
 
     group.bench_function("bincode_serialize", |b| {
-        b.iter(|| {
-            bincode::serialize(&memory).expect("Failed to serialize")
-        });
+        b.iter(|| bincode::serialize(&memory).expect("Failed to serialize"));
     });
 
     let serialized = bincode::serialize(&memory).expect("Failed to serialize");
@@ -348,14 +353,18 @@ fn bench_hebbian_reinforcement(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let (mut memory, temp) = setup_memory_system();
-                let id = memory.record(Experience {
-                    content: "Test memory".to_string(),
-                    ..Default::default()
-                }).unwrap();
+                let id = memory
+                    .record(Experience {
+                        content: "Test memory".to_string(),
+                        ..Default::default()
+                    })
+                    .unwrap();
                 (memory, temp, vec![id])
             },
             |(mut memory, _temp, ids)| {
-                memory.reinforce_retrieval(&ids, RetrievalOutcome::Helpful).unwrap()
+                memory
+                    .reinforce_retrieval(&ids, RetrievalOutcome::Helpful)
+                    .unwrap()
             },
             BatchSize::SmallInput,
         );
@@ -372,16 +381,20 @@ fn bench_hebbian_reinforcement(c: &mut Criterion) {
                         let (mut memory, temp) = setup_memory_system();
                         let ids: Vec<_> = (0..count)
                             .map(|i| {
-                                memory.record(Experience {
-                                    content: format!("Memory {}", i),
-                                    ..Default::default()
-                                }).unwrap()
+                                memory
+                                    .record(Experience {
+                                        content: format!("Memory {}", i),
+                                        ..Default::default()
+                                    })
+                                    .unwrap()
                             })
                             .collect();
                         (memory, temp, ids)
                     },
                     |(mut memory, _temp, ids)| {
-                        memory.reinforce_retrieval(&ids, RetrievalOutcome::Helpful).unwrap()
+                        memory
+                            .reinforce_retrieval(&ids, RetrievalOutcome::Helpful)
+                            .unwrap()
                     },
                     BatchSize::SmallInput,
                 );
@@ -416,7 +429,9 @@ fn bench_full_feedback_loop(c: &mut Criterion) {
                 // Reinforce
                 let ids: Vec<_> = results.iter().map(|m| m.id.clone()).collect();
                 if !ids.is_empty() {
-                    memory.reinforce_retrieval(&ids, RetrievalOutcome::Helpful).unwrap();
+                    memory
+                        .reinforce_retrieval(&ids, RetrievalOutcome::Helpful)
+                        .unwrap();
                 }
             },
             BatchSize::SmallInput,
@@ -443,9 +458,7 @@ fn bench_importance_operations(c: &mut Criterion) {
             None,
         );
 
-        b.iter(|| {
-            memory.importance()
-        });
+        b.iter(|| memory.importance());
     });
 
     group.bench_function("set_importance", |b| {
@@ -531,9 +544,7 @@ fn bench_access_patterns(c: &mut Criterion) {
             memory.record_access();
         }
 
-        b.iter(|| {
-            memory.access_count()
-        });
+        b.iter(|| memory.access_count());
     });
 
     group.bench_function("mark_retrieved", |b| {

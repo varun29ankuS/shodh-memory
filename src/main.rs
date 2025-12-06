@@ -803,11 +803,7 @@ impl MultiUserMemoryManager {
                 match memory.run_maintenance(decay_factor) {
                     Ok(count) => total_processed += count,
                     Err(e) => {
-                        tracing::warn!(
-                            "Maintenance failed for user {}: {}",
-                            user_id,
-                            e
-                        );
+                        tracing::warn!("Maintenance failed for user {}: {}", user_id, e);
                     }
                 }
             }
@@ -1538,10 +1534,8 @@ async fn consolidate_memories(
                 .collect();
 
             // Create consolidator with custom thresholds
-            let consolidator = crate::memory::SemanticConsolidator::with_thresholds(
-                min_support,
-                min_age_days,
-            );
+            let consolidator =
+                crate::memory::SemanticConsolidator::with_thresholds(min_support, min_age_days);
 
             // Run consolidation
             Ok::<_, anyhow::Error>(consolidator.consolidate(&memories))
@@ -1725,7 +1719,7 @@ async fn retrieve_memories(
                 // Multi-hop activation with exponential decay
                 // =================================================================
                 const DECAY_RATE: f32 = 0.5; // λ: decay rate per hop
-                const MAX_HOPS: usize = 3;   // Maximum traversal depth
+                const MAX_HOPS: usize = 3; // Maximum traversal depth
 
                 if !query_entities.is_empty() {
                     if let Ok(graph) = state_clone.get_user_graph(&user_id) {
@@ -1772,8 +1766,7 @@ async fn retrieve_memories(
 
                             for (entity_uuid, activation) in &current_level {
                                 // Spread to connected entities via edges
-                                if let Ok(edges) =
-                                    graph_guard.get_entity_relationships(entity_uuid)
+                                if let Ok(edges) = graph_guard.get_entity_relationships(entity_uuid)
                                 {
                                     for edge in edges {
                                         let connected_uuid = if edge.from_entity == *entity_uuid {
@@ -1805,7 +1798,8 @@ async fn retrieve_memories(
                                         {
                                             for episode in connected_episodes {
                                                 // Boost = spread_activation × connected_salience
-                                                let boost = spread_activation * connected_salience * 0.5;
+                                                let boost =
+                                                    spread_activation * connected_salience * 0.5;
                                                 *memory_graph_boosts
                                                     .entry(episode.uuid)
                                                     .or_insert(0.0) += boost;
@@ -1813,7 +1807,10 @@ async fn retrieve_memories(
                                         }
 
                                         // Add to next level for further spreading
-                                        next_level.push((connected_uuid, spread_activation * connected_salience));
+                                        next_level.push((
+                                            connected_uuid,
+                                            spread_activation * connected_salience,
+                                        ));
                                     }
                                 }
                             }
@@ -3330,7 +3327,10 @@ async fn main() -> Result<()> {
     // Print startup banner (always visible, regardless of log level)
     eprintln!();
     eprintln!("  ╔═══════════════════════════════════════════════════╗");
-    eprintln!("  ║         🧠 Shodh-Memory Server v{}          ║", env!("CARGO_PKG_VERSION"));
+    eprintln!(
+        "  ║         🧠 Shodh-Memory Server v{}          ║",
+        env!("CARGO_PKG_VERSION")
+    );
     eprintln!("  ║       Cognitive Memory for AI Agents              ║");
     eprintln!("  ╚═══════════════════════════════════════════════════╝");
     eprintln!();
@@ -3343,7 +3343,14 @@ async fn main() -> Result<()> {
 
     // Print configuration (always visible)
     eprintln!("  📋 Configuration:");
-    eprintln!("     Mode:    {}", if server_config.is_production { "PRODUCTION" } else { "Development" });
+    eprintln!(
+        "     Mode:    {}",
+        if server_config.is_production {
+            "PRODUCTION"
+        } else {
+            "Development"
+        }
+    );
     eprintln!("     Port:    {}", server_config.port);
     eprintln!("     Storage: {}", server_config.storage_path.display());
     eprintln!();
@@ -3360,7 +3367,13 @@ async fn main() -> Result<()> {
         let disk_usage = calculate_dir_size(storage_path);
         let user_count = count_user_directories(storage_path);
         eprintln!("  💾 Storage Statistics:");
-        eprintln!("     Location:  {}", storage_path.canonicalize().unwrap_or_else(|_| storage_path.clone()).display());
+        eprintln!(
+            "     Location:  {}",
+            storage_path
+                .canonicalize()
+                .unwrap_or_else(|_| storage_path.clone())
+                .display()
+        );
         eprintln!("     Disk used: {}", format_bytes(disk_usage));
         eprintln!("     Users:     {}", user_count);
         eprintln!();
@@ -3646,12 +3659,7 @@ fn calculate_dir_size(path: &std::path::Path) -> u64 {
 /// Count user directories in storage path
 fn count_user_directories(path: &std::path::Path) -> usize {
     std::fs::read_dir(path)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| e.path().is_dir())
-                .count()
-        })
+        .map(|entries| entries.flatten().filter(|e| e.path().is_dir()).count())
         .unwrap_or(0)
 }
 

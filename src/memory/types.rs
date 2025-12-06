@@ -613,7 +613,6 @@ pub struct Memory {
     // ==========================================================================
     // COGNITIVE EXTENSIONS - Unified memory with graph awareness
     // ==========================================================================
-
     /// Current tier in the memory hierarchy
     /// Memories flow: Working → Session → LongTerm → Archive
     pub tier: MemoryTier,

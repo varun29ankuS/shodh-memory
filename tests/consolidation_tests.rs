@@ -327,18 +327,22 @@ fn test_importance_affects_retention() {
     let (mut system, _temp) = setup_memory_system();
 
     // Record high importance memory
-    let high_id = system.record(Experience {
-        content: "Very important observation".to_string(),
-        experience_type: ExperienceType::Decision, // Decisions get higher importance
-        ..Default::default()
-    }).unwrap();
+    let high_id = system
+        .record(Experience {
+            content: "Very important observation".to_string(),
+            experience_type: ExperienceType::Decision, // Decisions get higher importance
+            ..Default::default()
+        })
+        .unwrap();
 
     // Record low importance memory
-    let low_id = system.record(Experience {
-        content: "Random observation".to_string(),
-        experience_type: ExperienceType::Observation,
-        ..Default::default()
-    }).unwrap();
+    let low_id = system
+        .record(Experience {
+            content: "Random observation".to_string(),
+            experience_type: ExperienceType::Observation,
+            ..Default::default()
+        })
+        .unwrap();
 
     // Both should exist
     assert!(system.get_memory(&high_id).is_ok());
@@ -355,7 +359,9 @@ fn test_working_memory_capacity() {
 
     // Record more memories than working memory capacity
     for i in 0..20 {
-        system.record(create_experience(&format!("Memory {}", i))).unwrap();
+        system
+            .record(create_experience(&format!("Memory {}", i)))
+            .unwrap();
     }
 
     // System should have handled the overflow
@@ -369,7 +375,9 @@ fn test_session_memory_used() {
 
     // Fill up working memory
     for i in 0..15 {
-        system.record(create_experience(&format!("Overflow memory {}", i))).unwrap();
+        system
+            .record(create_experience(&format!("Overflow memory {}", i)))
+            .unwrap();
     }
 
     let stats = system.stats();
@@ -383,7 +391,9 @@ fn test_graph_maintenance_succeeds() {
 
     // Record some memories
     for i in 0..5 {
-        system.record(create_experience(&format!("To consolidate {}", i))).unwrap();
+        system
+            .record(create_experience(&format!("To consolidate {}", i)))
+            .unwrap();
     }
 
     // Graph maintenance should not panic
@@ -493,7 +503,9 @@ fn test_many_memories_graph_maintenance() {
 
     // Create many memories
     for i in 0..50 {
-        system.record(create_experience(&format!("Bulk memory {}", i))).unwrap();
+        system
+            .record(create_experience(&format!("Bulk memory {}", i)))
+            .unwrap();
     }
 
     // Graph maintenance should work
@@ -513,7 +525,9 @@ fn test_multiple_graph_maintenance_calls() {
     let (system, _temp) = setup_memory_system();
 
     for i in 0..10 {
-        system.record(create_experience(&format!("Memory {}", i))).unwrap();
+        system
+            .record(create_experience(&format!("Memory {}", i)))
+            .unwrap();
     }
 
     // Multiple graph maintenance calls should be idempotent
@@ -751,7 +765,9 @@ fn test_stats_report_accurate() {
     let (system, _temp) = setup_memory_system();
 
     for i in 0..10 {
-        system.record(create_experience(&format!("Stats test {}", i))).unwrap();
+        system
+            .record(create_experience(&format!("Stats test {}", i)))
+            .unwrap();
     }
 
     let stats = system.stats();

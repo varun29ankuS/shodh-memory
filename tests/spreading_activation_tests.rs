@@ -307,7 +307,9 @@ fn test_connected_memories_coactivate() {
     let id2 = memory.record(create_experience("Memory B")).unwrap();
 
     // Connect them via reinforcement
-    memory.reinforce_retrieval(&[id1.clone(), id2.clone()], RetrievalOutcome::Helpful).unwrap();
+    memory
+        .reinforce_retrieval(&[id1.clone(), id2.clone()], RetrievalOutcome::Helpful)
+        .unwrap();
 
     // Both should be retrievable when searching for either
     let query = Query {
@@ -330,9 +332,13 @@ fn test_chain_activation_propagates() {
     let id_c = memory.record(create_experience("Chain end C")).unwrap();
 
     // Connect A-B
-    memory.reinforce_retrieval(&[id_a.clone(), id_b.clone()], RetrievalOutcome::Helpful).unwrap();
+    memory
+        .reinforce_retrieval(&[id_a.clone(), id_b.clone()], RetrievalOutcome::Helpful)
+        .unwrap();
     // Connect B-C
-    memory.reinforce_retrieval(&[id_b.clone(), id_c.clone()], RetrievalOutcome::Helpful).unwrap();
+    memory
+        .reinforce_retrieval(&[id_b.clone(), id_c.clone()], RetrievalOutcome::Helpful)
+        .unwrap();
 
     // Query should find all three
     let query = Query {
@@ -370,12 +376,18 @@ fn test_hub_memory_activates_many() {
     let (mut memory, _temp) = setup_memory_system();
 
     // Create hub and spokes
-    let hub = memory.record(create_experience("Central hub memory")).unwrap();
+    let hub = memory
+        .record(create_experience("Central hub memory"))
+        .unwrap();
     let mut spokes = Vec::new();
 
     for i in 0..5 {
-        let spoke = memory.record(create_experience(&format!("Spoke {} connected to hub", i))).unwrap();
-        memory.reinforce_retrieval(&[hub.clone(), spoke.clone()], RetrievalOutcome::Helpful).unwrap();
+        let spoke = memory
+            .record(create_experience(&format!("Spoke {} connected to hub", i)))
+            .unwrap();
+        memory
+            .reinforce_retrieval(&[hub.clone(), spoke.clone()], RetrievalOutcome::Helpful)
+            .unwrap();
         spokes.push(spoke);
     }
 
@@ -753,13 +765,25 @@ fn test_triangle_activation() {
     let (mut memory, _temp) = setup_memory_system();
 
     // Create triangle: A-B, B-C, C-A
-    let id_a = memory.record(create_experience("Triangle vertex A")).unwrap();
-    let id_b = memory.record(create_experience("Triangle vertex B")).unwrap();
-    let id_c = memory.record(create_experience("Triangle vertex C")).unwrap();
+    let id_a = memory
+        .record(create_experience("Triangle vertex A"))
+        .unwrap();
+    let id_b = memory
+        .record(create_experience("Triangle vertex B"))
+        .unwrap();
+    let id_c = memory
+        .record(create_experience("Triangle vertex C"))
+        .unwrap();
 
-    memory.reinforce_retrieval(&[id_a.clone(), id_b.clone()], RetrievalOutcome::Helpful).unwrap();
-    memory.reinforce_retrieval(&[id_b.clone(), id_c.clone()], RetrievalOutcome::Helpful).unwrap();
-    memory.reinforce_retrieval(&[id_c.clone(), id_a.clone()], RetrievalOutcome::Helpful).unwrap();
+    memory
+        .reinforce_retrieval(&[id_a.clone(), id_b.clone()], RetrievalOutcome::Helpful)
+        .unwrap();
+    memory
+        .reinforce_retrieval(&[id_b.clone(), id_c.clone()], RetrievalOutcome::Helpful)
+        .unwrap();
+    memory
+        .reinforce_retrieval(&[id_c.clone(), id_a.clone()], RetrievalOutcome::Helpful)
+        .unwrap();
 
     // Query should find all three
     let query = Query {
@@ -780,8 +804,12 @@ fn test_star_activation() {
     let center = memory.record(create_experience("Star center")).unwrap();
 
     for i in 0..5 {
-        let leaf = memory.record(create_experience(&format!("Star leaf {}", i))).unwrap();
-        memory.reinforce_retrieval(&[center.clone(), leaf], RetrievalOutcome::Helpful).unwrap();
+        let leaf = memory
+            .record(create_experience(&format!("Star leaf {}", i)))
+            .unwrap();
+        memory
+            .reinforce_retrieval(&[center.clone(), leaf], RetrievalOutcome::Helpful)
+            .unwrap();
     }
 
     // Query for center should find it
@@ -804,16 +832,26 @@ fn test_bipartite_activation() {
     let mut group_b = Vec::new();
 
     for i in 0..3 {
-        group_a.push(memory.record(create_experience(&format!("Group A member {}", i))).unwrap());
+        group_a.push(
+            memory
+                .record(create_experience(&format!("Group A member {}", i)))
+                .unwrap(),
+        );
     }
     for i in 0..3 {
-        group_b.push(memory.record(create_experience(&format!("Group B member {}", i))).unwrap());
+        group_b.push(
+            memory
+                .record(create_experience(&format!("Group B member {}", i)))
+                .unwrap(),
+        );
     }
 
     // Connect all A to all B
     for a in &group_a {
         for b in &group_b {
-            memory.reinforce_retrieval(&[a.clone(), b.clone()], RetrievalOutcome::Helpful).unwrap();
+            memory
+                .reinforce_retrieval(&[a.clone(), b.clone()], RetrievalOutcome::Helpful)
+                .unwrap();
         }
     }
 

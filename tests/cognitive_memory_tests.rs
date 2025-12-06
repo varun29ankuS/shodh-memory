@@ -7,9 +7,7 @@
 //! - Retrieval tracking (Hebbian feedback)
 //! - Serialization roundtrips
 
-use shodh_memory::memory::{
-    EntityRef, Experience, ExperienceType, Memory, MemoryId, MemoryTier,
-};
+use shodh_memory::memory::{EntityRef, Experience, ExperienceType, Memory, MemoryId, MemoryTier};
 use shodh_memory::uuid::Uuid;
 
 // =============================================================================
@@ -97,7 +95,11 @@ fn test_add_entity_ref_no_duplicates() {
     memory.add_entity_ref(entity_id, "robot".to_string(), "mentioned".to_string());
     memory.add_entity_ref(entity_id, "robot".to_string(), "subject".to_string());
 
-    assert_eq!(memory.entity_refs.len(), 1, "Should not add duplicate entity");
+    assert_eq!(
+        memory.entity_refs.len(),
+        1,
+        "Should not add duplicate entity"
+    );
 }
 
 #[test]
@@ -247,7 +249,10 @@ fn test_activation_default() {
         None,
     );
 
-    assert!((memory.activation() - 1.0).abs() < f32::EPSILON, "New memory should be fully activated");
+    assert!(
+        (memory.activation() - 1.0).abs() < f32::EPSILON,
+        "New memory should be fully activated"
+    );
 }
 
 #[test]
@@ -281,7 +286,10 @@ fn test_activate_capped_at_one() {
     memory.set_activation(0.9);
     memory.activate(0.5);
 
-    assert!((memory.activation() - 1.0).abs() < f32::EPSILON, "Activation should cap at 1.0");
+    assert!(
+        (memory.activation() - 1.0).abs() < f32::EPSILON,
+        "Activation should cap at 1.0"
+    );
 }
 
 #[test]
@@ -341,7 +349,10 @@ fn test_decay_activation_approaches_zero() {
         memory.decay_activation(0.9);
     }
 
-    assert!(memory.activation() < 0.001, "Should approach zero with enough decay");
+    assert!(
+        memory.activation() < 0.001,
+        "Should approach zero with enough decay"
+    );
 }
 
 #[test]
@@ -421,7 +432,11 @@ fn test_mark_retrieved_multiple() {
     assert_eq!(memory.last_retrieval_id, Some(retrieval1));
 
     memory.mark_retrieved(retrieval2);
-    assert_eq!(memory.last_retrieval_id, Some(retrieval2), "Should update to latest");
+    assert_eq!(
+        memory.last_retrieval_id,
+        Some(retrieval2),
+        "Should update to latest"
+    );
 }
 
 // =============================================================================
@@ -469,10 +484,16 @@ fn test_importance_clamped() {
     );
 
     memory.set_importance(1.5);
-    assert!((memory.importance() - 1.0).abs() < f32::EPSILON, "Should clamp at 1.0");
+    assert!(
+        (memory.importance() - 1.0).abs() < f32::EPSILON,
+        "Should clamp at 1.0"
+    );
 
     memory.set_importance(-0.5);
-    assert!((memory.importance() - 0.0).abs() < f32::EPSILON, "Should clamp at 0.0");
+    assert!(
+        (memory.importance() - 0.0).abs() < f32::EPSILON,
+        "Should clamp at 0.0"
+    );
 }
 
 #[test]
