@@ -34,26 +34,30 @@ Working Memory ──overflow──▶ Session Memory ──importance──▶ 
 ### Architecture
 
 **Storage & Retrieval**
-● Vamana graph index for approximate nearest neighbor search [3]
-● MiniLM-L6 embeddings (384-dim) for semantic similarity
-● RocksDB for durable persistence across restarts
-● User isolation — each agent gets independent memory space
+
+- Vamana graph index for approximate nearest neighbor search [3]
+- MiniLM-L6 embeddings (384-dim) for semantic similarity
+- RocksDB for durable persistence across restarts
+- User isolation — each agent gets independent memory space
 
 **Cognitive Processing**
-● *Activation decay* — exponential decay A(t) = A₀ · e^(-λt) applied each maintenance cycle (λ configurable)
-● *Hebbian strengthening* — co-retrieved memories form graph edges; edge weight w increases as w' = w + α(1 - w) on each co-activation
-● *Long-term potentiation* — edges surviving threshold co-activations (default: 5) become permanent, exempt from decay
-● *Importance scoring* — composite score from memory type, content length, entity density, technical terms, access frequency
+
+- *Activation decay* — exponential decay A(t) = A₀ · e^(-λt) applied each maintenance cycle (λ configurable)
+- *Hebbian strengthening* — co-retrieved memories form graph edges; edge weight w increases as w' = w + α(1 - w) on each co-activation
+- *Long-term potentiation* — edges surviving threshold co-activations (default: 5) become permanent, exempt from decay
+- *Importance scoring* — composite score from memory type, content length, entity density, technical terms, access frequency
 
 **Semantic Consolidation**
-● Episodic memories older than 7 days compress into semantic facts
-● Entity extraction preserves key information during compression
-● Original experiences archived, compressed form used for retrieval
+
+- Episodic memories older than 7 days compress into semantic facts
+- Entity extraction preserves key information during compression
+- Original experiences archived, compressed form used for retrieval
 
 **Context Bootstrapping**
-● `context_summary()` provides categorized session context on startup
-● Returns decisions, learnings, patterns, errors — structured for LLM consumption
-● `brain_state()` exposes full 3-tier visualization data
+
+- `context_summary()` provides categorized session context on startup
+- Returns decisions, learnings, patterns, errors — structured for LLM consumption
+- `brain_state()` exposes full 3-tier visualization data
 
 ### Use cases
 
@@ -92,9 +96,10 @@ Add to your `claude_desktop_config.json`:
 ```
 
 Config file locations:
-● macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-● Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-● Linux: `~/.config/Claude/claude_desktop_config.json`
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- Linux: `~/.config/Claude/claude_desktop_config.json`
 
 **Python:**
 ```
@@ -154,12 +159,12 @@ curl -X POST http://localhost:3030/api/retrieve \
 
 Different types get different importance weights in the scoring model:
 
-● **Decision** (+0.30) — choices, preferences, conclusions
-● **Learning** (+0.25) — new knowledge, facts learned
-● **Error** (+0.25) — mistakes, things to avoid
-● **Discovery**, **Pattern** (+0.20) — findings, recurring behaviors
-● **Task** (+0.15) — work items
-● **Context**, **Observation** (+0.10) — general info
+- **Decision** (+0.30) — choices, preferences, conclusions
+- **Learning** (+0.25) — new knowledge, facts learned
+- **Error** (+0.25) — mistakes, things to avoid
+- **Discovery**, **Pattern** (+0.20) — findings, recurring behaviors
+- **Task** (+0.15) — work items
+- **Context**, **Observation** (+0.10) — general info
 
 Importance also increases with: content length, entity density, technical terms, and access frequency.
 
