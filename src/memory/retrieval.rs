@@ -330,85 +330,11 @@ impl RetrievalEngine {
 
     /// Check if memory matches query filters
     ///
-    /// This is the CANONICAL filter implementation. All retrieval paths MUST use this
-    /// to ensure consistent filtering behavior (mission_id, robot_id, geo, etc.)
+    /// Delegates to Query::matches() which is the SINGLE source of truth for all filter logic.
+    /// This ensures consistent filtering across all memory tiers and retrieval modes.
+    #[inline]
     pub fn matches_filters(&self, memory: &Memory, query: &Query) -> bool {
-        // === Standard Filters ===
-
-        // Importance filter
-        if let Some(threshold) = query.importance_threshold {
-            if memory.importance() < threshold {
-                return false;
-            }
-        }
-
-        // Experience type filter
-        if let Some(types) = &query.experience_types {
-            let matches_type = types.iter().any(|t| {
-                std::mem::discriminant(&memory.experience.experience_type)
-                    == std::mem::discriminant(t)
-            });
-            if !matches_type {
-                return false;
-            }
-        }
-
-        // Time range filter
-        if let Some((start, end)) = &query.time_range {
-            if memory.created_at < *start || memory.created_at > *end {
-                return false;
-            }
-        }
-
-        // === Robotics Filters ===
-
-        // Robot ID filter
-        if let Some(ref robot_id) = query.robot_id {
-            match &memory.experience.robot_id {
-                Some(mem_robot_id) if mem_robot_id == robot_id => {}
-                _ => return false,
-            }
-        }
-
-        // Mission ID filter
-        if let Some(ref mission_id) = query.mission_id {
-            match &memory.experience.mission_id {
-                Some(mem_mission_id) if mem_mission_id == mission_id => {}
-                _ => return false,
-            }
-        }
-
-        // Geo filter (spatial radius)
-        if let Some(ref geo_filter) = query.geo_filter {
-            match memory.experience.geo_location {
-                Some(geo) => {
-                    let lat = geo[0];
-                    let lon = geo[1];
-                    if !geo_filter.contains(lat, lon) {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        }
-
-        // Action type filter
-        if let Some(ref action_type) = query.action_type {
-            match &memory.experience.action_type {
-                Some(mem_action) if mem_action == action_type => {}
-                _ => return false,
-            }
-        }
-
-        // Reward range filter
-        if let Some((min_reward, max_reward)) = query.reward_range {
-            match memory.experience.reward {
-                Some(reward) if reward >= min_reward && reward <= max_reward => {}
-                _ => return false,
-            }
-        }
-
-        true
+        query.matches(memory)
     }
 
     fn temporal_search(&self, query: &Query, limit: usize) -> Result<Vec<SharedMemory>> {
@@ -978,6 +904,8 @@ pub struct ReinforcementStats {
     pub importance_decays: usize,
     /// The outcome that triggered this reinforcement
     pub outcome: RetrievalOutcome,
+    /// How many persistence operations failed (non-zero indicates data loss risk)
+    pub persist_failures: usize,
 }
 
 impl Default for RetrievalOutcome {

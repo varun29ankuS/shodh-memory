@@ -155,6 +155,14 @@ impl CompressionPipeline {
     }
 
     /// Decompress a memory
+    ///
+    /// # Returns
+    /// - `Ok(Memory)` - Decompressed memory with original content restored
+    /// - `Err` - If decompression fails or compression is lossy (semantic)
+    ///
+    /// # Errors
+    /// - Returns error for semantic compression (lossy - original data not recoverable)
+    /// - Returns error if compressed data is missing or corrupted
     pub fn decompress(&self, memory: &Memory) -> Result<Memory> {
         if !memory.compressed {
             return Ok(memory.clone());
@@ -170,11 +178,62 @@ impl CompressionPipeline {
         match strategy {
             "lz4" => self.decompress_lz4(memory),
             "semantic" => {
-                // Semantic compression is lossy, can't fully decompress
-                Ok(memory.clone())
+                // Semantic compression is LOSSY - original content is NOT recoverable
+                // This is intentional: we extracted keywords and summary, discarded original
+                // Callers must handle this error appropriately
+                Err(anyhow!(
+                    "Cannot decompress semantically compressed memory '{}': \
+                     semantic compression is lossy. Original content was replaced with \
+                     summary and keywords. Use memory.experience.content for the summary \
+                     and metadata['keywords'] for extracted keywords.",
+                    memory.id.0
+                ))
             }
-            _ => Ok(memory.clone()),
+            "hybrid" => {
+                // Hybrid = semantic + lz4. The lz4 layer can be decompressed,
+                // but the underlying content is still the semantic summary
+                let lz4_decompressed = self.decompress_lz4(memory)?;
+                // Mark that this is still semantically compressed (lossy)
+                Err(anyhow!(
+                    "Cannot fully decompress hybrid-compressed memory '{}': \
+                     underlying semantic compression is lossy. LZ4 layer decompressed, \
+                     but original content is not recoverable.",
+                    lz4_decompressed.id.0
+                ))
+            }
+            unknown => Err(anyhow!(
+                "Unknown compression strategy '{}' for memory '{}'. \
+                 Cannot decompress.",
+                unknown,
+                memory.id.0
+            )),
         }
+    }
+
+    /// Check if a memory's compression is lossless (can be fully decompressed)
+    pub fn is_lossless(&self, memory: &Memory) -> bool {
+        if !memory.compressed {
+            return true;
+        }
+        let strategy = memory
+            .experience
+            .metadata
+            .get("compression_strategy")
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
+        strategy == "lz4"
+    }
+
+    /// Get the compression strategy used for a memory
+    pub fn get_strategy<'a>(&self, memory: &'a Memory) -> Option<&'a str> {
+        if !memory.compressed {
+            return None;
+        }
+        memory
+            .experience
+            .metadata
+            .get("compression_strategy")
+            .map(|s| s.as_str())
     }
 
     /// Decompress LZ4 compressed memory

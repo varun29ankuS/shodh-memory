@@ -24,6 +24,7 @@ use tracing::info;
 
 mod auth;
 mod config;
+mod constants;
 mod embeddings;
 mod errors;
 mod graph_memory;

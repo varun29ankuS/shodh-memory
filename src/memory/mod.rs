@@ -20,12 +20,17 @@ use anyhow::{Context, Result};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::debug;
 use uuid::Uuid;
+
+use crate::constants::{
+    DEFAULT_COMPRESSION_AGE_DAYS, DEFAULT_IMPORTANCE_THRESHOLD, DEFAULT_MAX_HEAP_PER_USER_MB,
+    DEFAULT_SESSION_MEMORY_SIZE_MB, DEFAULT_WORKING_MEMORY_SIZE, ESTIMATED_BYTES_PER_MEMORY,
+    HEBBIAN_BOOST_HELPFUL, HEBBIAN_DECAY_MISLEADING,
+};
 
 use crate::memory::storage::MemoryStorage;
 pub use crate::memory::types::*;
@@ -71,12 +76,12 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             storage_path: PathBuf::from("./memory_store"),
-            working_memory_size: 100,
-            session_memory_size_mb: 100,
-            max_heap_per_user_mb: 500, // 500MB per user prevents OOM
+            working_memory_size: DEFAULT_WORKING_MEMORY_SIZE,
+            session_memory_size_mb: DEFAULT_SESSION_MEMORY_SIZE_MB,
+            max_heap_per_user_mb: DEFAULT_MAX_HEAP_PER_USER_MB,
             auto_compress: true,
-            compression_age_days: 7,
-            importance_threshold: 0.7,
+            compression_age_days: DEFAULT_COMPRESSION_AGE_DAYS,
+            importance_threshold: DEFAULT_IMPORTANCE_THRESHOLD,
         }
     }
 }
@@ -99,13 +104,15 @@ pub struct MemorySystem {
     /// Embedder for semantic search
     embedder: Arc<crate::embeddings::minilm::MiniLMEmbedder>,
 
-    /// Query embedding cache - hash(query_text) → embedding
+    /// Query embedding cache - SHA256(query_text) → embedding
+    /// Uses SHA256 for stable hashing across restarts (unlike DefaultHasher)
     /// MASSIVE PERF WIN: 80ms → <1ms for cached queries
-    query_cache: Arc<DashMap<u64, Vec<f32>>>,
+    query_cache: Arc<DashMap<[u8; 32], Vec<f32>>>,
 
-    /// Content embedding cache - hash(content) → embedding
+    /// Content embedding cache - SHA256(content) → embedding
+    /// Uses SHA256 for stable hashing across restarts (unlike DefaultHasher)
     /// MASSIVE PERF WIN: 80ms → <1ms for repeated content
-    content_cache: Arc<DashMap<u64, Vec<f32>>>,
+    content_cache: Arc<DashMap<[u8; 32], Vec<f32>>>,
 
     /// Memory statistics
     stats: Arc<RwLock<MemoryStats>>,
@@ -176,15 +183,13 @@ impl MemorySystem {
         // PERFORMANCE: Content embedding cache (80ms → <1μs for repeated content)
         // If experience doesn't have embeddings, check cache or generate
         if experience.embeddings.is_none() {
-            // Hash content for cache lookup
-            let mut hasher = DefaultHasher::new();
-            experience.content.hash(&mut hasher);
-            let content_hash = hasher.finish();
+            // SHA256 hash for stable cache keys (survives restarts, unlike DefaultHasher)
+            let content_hash = Self::sha256_hash(&experience.content);
 
             // Check cache first
             if let Some(cached_embedding) = self.content_cache.get(&content_hash) {
                 experience.embeddings = Some(cached_embedding.clone());
-                tracing::debug!("Content embedding cache HIT for hash {}", content_hash);
+                tracing::debug!("Content embedding cache HIT");
             } else {
                 // Cache miss - generate embedding
                 match self.embedder.encode(&experience.content) {
@@ -338,10 +343,8 @@ impl MemorySystem {
     /// 5. This eliminates deserialization overhead for cached memories
     fn semantic_retrieve(&self, query_text: &str, query: &Query) -> Result<Vec<SharedMemory>> {
         // PERFORMANCE: Query embedding cache (80ms → <1μs for repeated queries)
-        // Hash query text for cache lookup
-        let mut hasher = DefaultHasher::new();
-        query_text.hash(&mut hasher);
-        let query_hash = hasher.finish();
+        // SHA256 hash for stable cache keys (survives restarts, unlike DefaultHasher)
+        let query_hash = Self::sha256_hash(query_text);
 
         // Check cache first
         let query_embedding = if let Some(cached_embedding) = self.query_cache.get(&query_hash) {
@@ -516,6 +519,20 @@ impl MemorySystem {
         }
 
         boost
+    }
+
+    /// Compute SHA256 hash of text for stable cache keys
+    ///
+    /// Unlike std::hash::DefaultHasher, SHA256 produces deterministic hashes
+    /// across process restarts and Rust versions. This is critical for:
+    /// - Embedding cache persistence (future feature)
+    /// - Consistent behavior across restarts
+    /// - Avoiding cache key collisions
+    #[inline]
+    fn sha256_hash(text: &str) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
+        hasher.finalize().into()
     }
 
     /// Forget memories based on criteria
@@ -1050,13 +1067,17 @@ impl MemorySystem {
     }
 
     /// Check resource limits to prevent OOM from single user
+    ///
+    /// Uses ESTIMATED_BYTES_PER_MEMORY constant for size estimation.
+    /// See constants.rs for justification of the estimate.
     pub fn check_resource_limits(&self) -> Result<(), crate::errors::AppError> {
         // Get current memory counts from stats
         let stats = self.stats.read();
         let total_memories = stats.working_memory_count + stats.session_memory_count;
 
-        // Estimate: each memory ~250KB on average (experience + embeddings + metadata)
-        let estimated_size_mb = (total_memories * 250) / 1024;
+        // Estimate size using documented constant (see constants.rs for breakdown)
+        let estimated_size_bytes = total_memories * ESTIMATED_BYTES_PER_MEMORY;
+        let estimated_size_mb = estimated_size_bytes / (1024 * 1024);
 
         if estimated_size_mb > self.config.max_heap_per_user_mb {
             return Err(crate::errors::AppError::ResourceLimit {
@@ -1149,6 +1170,8 @@ impl MemorySystem {
         //    This updates ALL holders of this Arc reference
         // 3. Then persist to storage for durability
         // 4. If not in cache, get from storage, modify, and persist
+        let mut persist_failures: Vec<(MemoryId, String)> = Vec::new();
+
         for id in memory_ids {
             // Try working memory cache first
             let cached_memory = {
@@ -1167,11 +1190,11 @@ impl MemorySystem {
                 memory.record_access();
                 match &outcome {
                     RetrievalOutcome::Helpful => {
-                        memory.boost_importance(0.05);
+                        memory.boost_importance(HEBBIAN_BOOST_HELPFUL);
                         stats.importance_boosts += 1;
                     }
                     RetrievalOutcome::Misleading => {
-                        memory.decay_importance(0.10);
+                        memory.decay_importance(HEBBIAN_DECAY_MISLEADING);
                         stats.importance_decays += 1;
                     }
                     RetrievalOutcome::Neutral => {
@@ -1179,28 +1202,61 @@ impl MemorySystem {
                     }
                 }
                 // PERSIST: Write updated memory to durable storage
-                let _ = self.long_term_memory.update(&memory);
+                // Track failures instead of silently ignoring
+                if let Err(e) = self.long_term_memory.update(&memory) {
+                    persist_failures.push((id.clone(), e.to_string()));
+                    tracing::warn!(
+                        memory_id = %id.0,
+                        error = %e,
+                        "Failed to persist reinforcement update - Hebbian feedback may be lost on restart"
+                    );
+                }
             } else {
                 // CACHE MISS: Get from storage, modify, and persist
-                if let Ok(memory) = self.long_term_memory.get(id) {
-                    memory.record_access();
-                    match &outcome {
-                        RetrievalOutcome::Helpful => {
-                            memory.boost_importance(0.05);
-                            stats.importance_boosts += 1;
+                match self.long_term_memory.get(id) {
+                    Ok(memory) => {
+                        memory.record_access();
+                        match &outcome {
+                            RetrievalOutcome::Helpful => {
+                                memory.boost_importance(HEBBIAN_BOOST_HELPFUL);
+                                stats.importance_boosts += 1;
+                            }
+                            RetrievalOutcome::Misleading => {
+                                memory.decay_importance(HEBBIAN_DECAY_MISLEADING);
+                                stats.importance_decays += 1;
+                            }
+                            RetrievalOutcome::Neutral => {
+                                // Just access recorded
+                            }
                         }
-                        RetrievalOutcome::Misleading => {
-                            memory.decay_importance(0.10);
-                            stats.importance_decays += 1;
-                        }
-                        RetrievalOutcome::Neutral => {
-                            // Just access recorded
+                        // PERSIST: Write to durable storage
+                        if let Err(e) = self.long_term_memory.update(&memory) {
+                            persist_failures.push((id.clone(), e.to_string()));
+                            tracing::warn!(
+                                memory_id = %id.0,
+                                error = %e,
+                                "Failed to persist reinforcement update - Hebbian feedback may be lost on restart"
+                            );
                         }
                     }
-                    // PERSIST: Write to durable storage
-                    let _ = self.long_term_memory.update(&memory);
+                    Err(e) => {
+                        tracing::debug!(
+                            memory_id = %id.0,
+                            error = %e,
+                            "Memory not found during reinforcement - may have been deleted"
+                        );
+                    }
                 }
             }
+        }
+
+        // Report aggregate persistence failures
+        if !persist_failures.is_empty() {
+            stats.persist_failures = persist_failures.len();
+            tracing::error!(
+                failure_count = persist_failures.len(),
+                "Hebbian reinforcement had persistence failures - learning feedback partially lost"
+            );
         }
 
         Ok(stats)

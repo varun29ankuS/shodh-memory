@@ -878,6 +878,238 @@ impl Default for Query {
     }
 }
 
+impl Query {
+    /// Check if a memory matches all query filters
+    ///
+    /// This is the SINGLE source of truth for filtering.
+    /// All memory tiers (working, session, long-term) should use this
+    /// instead of implementing their own filter logic.
+    ///
+    /// # Arguments
+    /// * `memory` - The memory to check
+    ///
+    /// # Returns
+    /// * `true` if memory passes all filters, `false` otherwise
+    pub fn matches(&self, memory: &Memory) -> bool {
+        // Importance threshold
+        if let Some(threshold) = self.importance_threshold {
+            if memory.importance() < threshold {
+                return false;
+            }
+        }
+
+        // Experience type filter
+        if let Some(types) = &self.experience_types {
+            if !types.iter().any(|t| {
+                std::mem::discriminant(&memory.experience.experience_type)
+                    == std::mem::discriminant(t)
+            }) {
+                return false;
+            }
+        }
+
+        // Time range filter
+        if let Some((start, end)) = &self.time_range {
+            if memory.created_at < *start || memory.created_at > *end {
+                return false;
+            }
+        }
+
+        // === Robotics Filters ===
+
+        // Robot ID filter
+        if let Some(robot_id) = &self.robot_id {
+            if memory.experience.robot_id.as_ref() != Some(robot_id) {
+                return false;
+            }
+        }
+
+        // Mission ID filter
+        if let Some(mission_id) = &self.mission_id {
+            if memory.experience.mission_id.as_ref() != Some(mission_id) {
+                return false;
+            }
+        }
+
+        // Geo filter (spatial)
+        // geo_location is [lat, lon, alt] array
+        if let Some(geo_filter) = &self.geo_filter {
+            if let Some(geo) = &memory.experience.geo_location {
+                let lat = geo[0];
+                let lon = geo[1];
+                if !geo_filter.contains(lat, lon) {
+                    return false;
+                }
+            } else {
+                // No geo_location on memory, and we have a geo filter = no match
+                return false;
+            }
+        }
+
+        // Action type filter
+        if let Some(action_type) = &self.action_type {
+            if memory.experience.action_type.as_ref() != Some(action_type) {
+                return false;
+            }
+        }
+
+        // Reward range filter
+        if let Some((min_reward, max_reward)) = &self.reward_range {
+            if let Some(reward) = memory.experience.reward {
+                if reward < *min_reward || reward > *max_reward {
+                    return false;
+                }
+            } else {
+                // No reward on memory = no match
+                return false;
+            }
+        }
+
+        // === Decision & Learning Filters ===
+
+        // Outcome type filter
+        if let Some(outcome_type) = &self.outcome_type {
+            if memory.experience.outcome_type.as_ref() != Some(outcome_type) {
+                return false;
+            }
+        }
+
+        // Failures only filter
+        if self.failures_only {
+            let is_failure = memory
+                .experience
+                .outcome_type
+                .as_ref()
+                .map(|o| o == "failure" || o == "failed" || o == "error")
+                .unwrap_or(false);
+            if !is_failure {
+                return false;
+            }
+        }
+
+        // Anomalies only filter
+        if self.anomalies_only {
+            if !memory.experience.is_anomaly {
+                return false;
+            }
+        }
+
+        // Severity filter
+        if let Some(severity) = &self.severity {
+            if memory.experience.severity.as_ref() != Some(severity) {
+                return false;
+            }
+        }
+
+        // Tags filter (any match)
+        if let Some(query_tags) = &self.tags {
+            let memory_tags = &memory.experience.tags;
+            if memory_tags.is_empty() || !query_tags.iter().any(|qt| memory_tags.contains(qt)) {
+                return false;
+            }
+        }
+
+        // Pattern ID filter
+        if let Some(pattern_id) = &self.pattern_id {
+            if memory.experience.pattern_id.as_ref() != Some(pattern_id) {
+                return false;
+            }
+        }
+
+        // Terrain type filter
+        if let Some(terrain_type) = &self.terrain_type {
+            if memory.experience.terrain_type.as_ref() != Some(terrain_type) {
+                return false;
+            }
+        }
+
+        // Confidence range filter
+        if let Some((min_conf, max_conf)) = &self.confidence_range {
+            if let Some(confidence) = memory.experience.confidence {
+                if confidence < *min_conf || confidence > *max_conf {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Create a builder for Query
+    pub fn builder() -> QueryBuilder {
+        QueryBuilder::default()
+    }
+}
+
+/// Builder for Query to make construction cleaner
+#[derive(Default)]
+pub struct QueryBuilder {
+    query: Query,
+}
+
+impl QueryBuilder {
+    pub fn query_text(mut self, text: impl Into<String>) -> Self {
+        self.query.query_text = Some(text.into());
+        self
+    }
+
+    pub fn importance_threshold(mut self, threshold: f32) -> Self {
+        self.query.importance_threshold = Some(threshold);
+        self
+    }
+
+    pub fn experience_types(mut self, types: Vec<ExperienceType>) -> Self {
+        self.query.experience_types = Some(types);
+        self
+    }
+
+    pub fn time_range(mut self, start: DateTime<Utc>, end: DateTime<Utc>) -> Self {
+        self.query.time_range = Some((start, end));
+        self
+    }
+
+    pub fn max_results(mut self, max: usize) -> Self {
+        self.query.max_results = max;
+        self
+    }
+
+    pub fn robot_id(mut self, id: impl Into<String>) -> Self {
+        self.query.robot_id = Some(id.into());
+        self
+    }
+
+    pub fn mission_id(mut self, id: impl Into<String>) -> Self {
+        self.query.mission_id = Some(id.into());
+        self
+    }
+
+    pub fn failures_only(mut self, only: bool) -> Self {
+        self.query.failures_only = only;
+        self
+    }
+
+    pub fn anomalies_only(mut self, only: bool) -> Self {
+        self.query.anomalies_only = only;
+        self
+    }
+
+    pub fn tags(mut self, tags: Vec<String>) -> Self {
+        self.query.tags = Some(tags);
+        self
+    }
+
+    pub fn retrieval_mode(mut self, mode: RetrievalMode) -> Self {
+        self.query.retrieval_mode = mode;
+        self
+    }
+
+    pub fn build(self) -> Query {
+        self.query
+    }
+}
+
 /// Retrieval modes
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetrievalMode {
@@ -942,32 +1174,13 @@ impl WorkingMemory {
     }
 
     /// Search memories (returns Arc<Memory> for zero-copy)
+    ///
+    /// Uses Query::matches() for filtering - SINGLE source of truth for all filter logic
     pub fn search(&self, query: &Query, limit: usize) -> anyhow::Result<Vec<SharedMemory>> {
         let mut results: Vec<SharedMemory> = self
             .memories
             .values()
-            .filter(|m| {
-                // Apply filters
-                if let Some(threshold) = query.importance_threshold {
-                    if m.importance() < threshold {
-                        return false;
-                    }
-                }
-                if let Some(types) = &query.experience_types {
-                    if !types.iter().any(|t| {
-                        std::mem::discriminant(&m.experience.experience_type)
-                            == std::mem::discriminant(t)
-                    }) {
-                        return false;
-                    }
-                }
-                if let Some((start, end)) = &query.time_range {
-                    if m.created_at < *start || m.created_at > *end {
-                        return false;
-                    }
-                }
-                true
-            })
+            .filter(|m| query.matches(m))
             .cloned() // Arc::clone is cheap (just increments ref count)
             .collect();
 
@@ -1136,18 +1349,13 @@ impl SessionMemory {
     }
 
     /// Search memories (returns Arc<Memory> for zero-copy)
+    ///
+    /// Uses Query::matches() for filtering - SINGLE source of truth for all filter logic
     pub fn search(&self, query: &Query, limit: usize) -> anyhow::Result<Vec<SharedMemory>> {
         let mut results: Vec<SharedMemory> = self
             .memories
             .values()
-            .filter(|m| {
-                if let Some(threshold) = query.importance_threshold {
-                    if m.importance() < threshold {
-                        return false;
-                    }
-                }
-                true
-            })
+            .filter(|m| query.matches(m))
             .cloned() // Arc::clone is cheap
             .collect();
 

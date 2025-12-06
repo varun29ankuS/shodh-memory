@@ -950,6 +950,7 @@ fn test_reinforcement_stats_structure() {
         importance_boosts: 3,
         importance_decays: 2,
         outcome: RetrievalOutcome::Helpful,
+        persist_failures: 0,
     };
 
     assert_eq!(stats.memories_processed, 5);
@@ -957,6 +958,7 @@ fn test_reinforcement_stats_structure() {
     assert_eq!(stats.importance_boosts, 3);
     assert_eq!(stats.importance_decays, 2);
     assert_eq!(stats.outcome, RetrievalOutcome::Helpful);
+    assert_eq!(stats.persist_failures, 0);
 }
 
 // ============================================================================
