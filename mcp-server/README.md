@@ -11,35 +11,24 @@ Persistent AI memory with semantic search. Store observations, decisions, learni
 
 ## Installation
 
-### 1. Start the shodh-memory backend
+Add to your MCP client config:
 
-```bash
-# Download and run the server
-cargo install shodh-memory
-shodh-memory-server
-```
-
-Or with Docker:
-```bash
-docker run -p 3030:3030 shodh/memory
-```
-
-### 2. Configure your MCP client
-
-**For Claude Desktop** (`~/.claude/claude_desktop_config.json`):
+**Claude Desktop / Claude Code** (`claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
     "shodh-memory": {
       "command": "npx",
-      "args": ["@shodh/memory-mcp"],
-      "env": {
-        "SHODH_API_URL": "http://127.0.0.1:3030"
-      }
+      "args": ["-y", "@shodh/memory-mcp"]
     }
   }
 }
 ```
+
+Config file locations:
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- Linux: `~/.config/Claude/claude_desktop_config.json`
 
 **For Cursor/other MCP clients**: Similar configuration with the npx command.
 
@@ -61,24 +50,6 @@ docker run -p 3030:3030 shodh/memory
 "Recall what I know about user's programming preferences"
 "List my recent memories"
 "Show memory stats"
-```
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SHODH_API_URL` | `http://127.0.0.1:3030` | Backend server URL |
-| `SHODH_API_KEY` | (dev key) | API key for authentication |
-| `SHODH_USER_ID` | `default` | User ID for memory isolation |
-
-## Architecture
-
-```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   AI Client     │────▶│   MCP Server    │────▶│ Shodh Backend   │
-│ (Claude, etc.)  │     │  (this package) │     │  (Rust server)  │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
-                              stdio              REST API
 ```
 
 ## License
