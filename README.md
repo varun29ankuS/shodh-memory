@@ -89,6 +89,44 @@ Working Memory ──overflow──▶ Session Memory ──importance──▶ 
 | **Latency** | Sub-millisecond | Network-bound | Database-bound |
 | **Best for** | Local-first, edge, privacy | Cloud scale | Enterprise ETL |
 
+### Performance
+
+Measured with cold TCP connections on Intel i7-1355U (10 cores, 1.7GHz), release build.
+
+**Real-Time API Latencies**
+
+| Endpoint | Operation | Latency | Notes |
+|----------|-----------|---------|-------|
+| `POST /api/remember` | Store memory (new user) | **227-250ms** | Embedding + RocksDB + index |
+| `POST /api/remember` | Store memory (existing user) | **55-60ms** | Embedding + storage |
+| `POST /api/recall` | Semantic search | **34-58ms** | Embedding + vector search |
+| `POST /api/recall/tags` | Tag-based search | **~1ms** | No embedding needed |
+| `GET /api/list` | List memories | **~1ms** | Direct DB read |
+| `DELETE /api/forget` | Delete memory | **~1ms** | Direct DB delete |
+| `GET /health` | Health check | **~1ms** | HTTP baseline |
+
+**Latency Breakdown (Remember Operation)**
+
+| Component | Time |
+|-----------|------|
+| MiniLM-L6-v2 embedding | ~112ms |
+| User lookup/create | ~50-80ms |
+| RocksDB write | ~20-30ms |
+| Vamana index update | ~20-30ms |
+| HTTP overhead | ~1ms |
+
+**Server-Side Metrics (Prometheus)**
+
+```
+Embedding generation: 112ms average (3.24s / 29 calls)
+Distribution:
+  <50ms:  48% of calls
+  <100ms: 52% of calls
+  <250ms: 97% of calls
+```
+
+The embedding model is a 6-layer Transformer (MiniLM-L6-v2), distilled from larger models, running quantized INT8 inference via ONNX Runtime.
+
 ### Installation
 
 **Claude Code / Claude Desktop:**
@@ -193,15 +231,66 @@ Importance also increases with: content length, entity density, technical terms,
 
 **REST endpoints**
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/record` | POST | Store memory |
-| `/api/retrieve` | POST | Semantic search |
-| `/api/memories` | POST | List memories |
-| `/api/memory/{id}` | GET/DELETE | Single memory operations |
-| `/api/users/{id}/stats` | GET | User statistics |
-| `/api/brain/{user_id}` | GET | 3-tier state |
-| `/health` | GET | Health check |
+All protected endpoints require `X-API-Key` header.
+
+| Endpoint | Method | Description | Typical Latency |
+|----------|--------|-------------|-----------------|
+| `/api/remember` | POST | Store a memory | ~30ms |
+| `/api/recall` | POST | Semantic search | ~30ms |
+| `/api/retrieve/tracked` | POST | Search with feedback tracking | ~30ms |
+| `/api/reinforce` | POST | Hebbian reinforcement feedback | ~10ms |
+| `/api/batch_remember` | POST | Store multiple memories | ~130ms/item |
+| `/api/consolidate` | POST | Trigger semantic consolidation | ~250ms |
+| `/api/record` | POST | Store experience (legacy) | ~30ms |
+| `/api/retrieve` | POST | Semantic search (legacy) | ~30ms |
+| `/api/memories` | POST | List all memories | varies |
+| `/api/memory/{id}` | GET/PUT/DELETE | Single memory operations | ~10ms |
+| `/api/users/{id}/stats` | GET | User statistics | ~10ms |
+| `/api/graph/{id}/stats` | GET | Knowledge graph statistics | ~10ms |
+| `/api/brain/{user_id}` | GET | 3-tier state visualization | ~50ms |
+| `/api/search/advanced` | POST | Multi-filter search | ~50ms |
+| `/health` | GET | Health check (no auth) | <1ms |
+| `/health/live` | GET | Kubernetes liveness (no auth) | <1ms |
+| `/health/ready` | GET | Kubernetes readiness (no auth) | <1ms |
+| `/metrics` | GET | Prometheus metrics (no auth) | <1ms |
+
+*Latencies measured on release build, x86_64, with warm embeddings cache.*
+
+**Authentication**
+
+```bash
+# Development mode (SHODH_API_KEYS not set)
+curl -H "X-API-Key: sk-shodh-dev-4f8b2c1d9e3a7f5b6d2c8e4a1b9f7d3c" ...
+
+# Production mode (required)
+export SHODH_API_KEYS="your-secure-key-1,your-secure-key-2"
+export SHODH_ENV=production
+```
+
+**Example: Store and retrieve with Hebbian feedback**
+
+```bash
+# 1. Store a memory
+curl -X POST http://localhost:3030/api/remember \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"user_id": "agent-1", "content": "Docker requires port 8080", "tags": ["docker"]}'
+# Response: {"id": "abc-123", "success": true}
+
+# 2. Retrieve with tracking
+curl -X POST http://localhost:3030/api/retrieve/tracked \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"user_id": "agent-1", "query": "port configuration", "limit": 5}'
+# Response: {"tracking_id": "xyz-789", "memories": [...]}
+
+# 3. Send feedback (strengthens associations)
+curl -X POST http://localhost:3030/api/reinforce \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"user_id": "agent-1", "memory_ids": ["abc-123"], "outcome": "helpful"}'
+# Response: {"memories_processed": 1, "associations_strengthened": 1}
+```
 
 ### Configuration
 
