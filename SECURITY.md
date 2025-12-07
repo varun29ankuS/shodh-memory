@@ -10,7 +10,7 @@
 
 If you discover a security vulnerability in shodh-memory, please report it privately:
 
-1. **Email**: Send details to security@shodh-ai.com
+1. **Email**: Send details to 29.varuns@gmail.com
 2. **GitHub**: Use [Security Advisories](https://github.com/varun29ankuS/shodh-memory/security/advisories/new) to report privately
 
 **What to include:**
