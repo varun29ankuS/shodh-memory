@@ -5,8 +5,8 @@
 <h1 align="center">Shodh-Memory</h1>
 
 <p align="center">
-  <a href="https://github.com/varun29ankuS/shodh-memory/actions"><img src="https://github.com/varun29ankuS/shodh-memory/workflows/CI/badge.svg" alt="CI"></a>
-  <a href="https://registry.modelcontextprotocol.io/servers/io.github.varun29ankuS/shodh-memory"><img src="https://img.shields.io/badge/MCP-Registry-green" alt="MCP Registry"></a>
+  <a href="https://github.com/varun29ankuS/shodh-memory/actions"><img src="https://github.com/varun29ankuS/shodh-memory/workflows/CI/badge.svg" alt="build"></a>
+  <a href="https://registry.modelcontextprotocol.io/v0/servers/io.github.varun29ankuS/shodh-memory"><img src="https://img.shields.io/badge/MCP-Registry-green" alt="MCP Registry"></a>
   <a href="https://crates.io/crates/shodh-memory"><img src="https://img.shields.io/crates/v/shodh-memory.svg" alt="crates.io"></a>
   <a href="https://crates.io/crates/shodh-memory"><img src="https://img.shields.io/crates/d/shodh-memory.svg?label=crates.io%20downloads" alt="crates.io Downloads"></a>
   <a href="https://www.npmjs.com/package/@shodh/memory-mcp"><img src="https://img.shields.io/npm/v/@shodh/memory-mcp.svg?logo=npm" alt="npm"></a>
@@ -349,4 +349,4 @@ Apache 2.0
 
 ---
 
-[MCP Registry](https://registry.modelcontextprotocol.io/servers/io.github.varun29ankuS/shodh-memory) · [PyPI](https://pypi.org/project/shodh-memory/) · [npm](https://www.npmjs.com/package/@shodh/memory-mcp) · [GitHub](https://github.com/varun29ankuS/shodh-memory)
+[MCP Registry](https://registry.modelcontextprotocol.io/v0/servers/io.github.varun29ankuS/shodh-memory) · [PyPI](https://pypi.org/project/shodh-memory/) · [npm](https://www.npmjs.com/package/@shodh/memory-mcp) · [GitHub](https://github.com/varun29ankuS/shodh-memory)
