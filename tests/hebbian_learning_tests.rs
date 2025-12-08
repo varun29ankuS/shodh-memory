@@ -5,11 +5,19 @@
 //! - Reinforcement from task outcomes
 //! - Association strengthening between co-retrieved memories
 //! - Importance boost/decay based on helpfulness
+//! - NER integration for entity extraction
 
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::{
     Experience, ExperienceType, MemoryConfig, MemorySystem, Query, RetrievalOutcome,
 };
 use tempfile::TempDir;
+
+/// Create fallback NER instance for testing
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
 
 /// Create test memory system
 fn setup_memory_system() -> (MemorySystem, TempDir) {
@@ -33,6 +41,18 @@ fn create_experience(content: &str) -> Experience {
     Experience {
         content: content.to_string(),
         experience_type: ExperienceType::Observation,
+        ..Default::default()
+    }
+}
+
+/// Create experience with NER-extracted entities
+fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
+    let entities = ner.extract(content).unwrap_or_default();
+    let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
+    Experience {
+        content: content.to_string(),
+        experience_type: ExperienceType::Observation,
+        entities: entity_names,
         ..Default::default()
     }
 }

@@ -4,6 +4,7 @@
 //! - Outcome Feedback System (Hebbian learning through task outcomes)
 //! - Semantic Consolidation (episodic → semantic fact extraction)
 //! - Anticipatory Prefetch (context-aware cache warming)
+//! - NER integration for entity extraction
 //!
 //! These tests verify that the memory system can learn, adapt, and improve over time.
 
@@ -11,6 +12,7 @@ use chrono::{Duration, Timelike, Utc};
 use tempfile::TempDir;
 use uuid::Uuid;
 
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::{
     compression::{ConsolidationResult, FactType, SemanticConsolidator, SemanticFact},
     retrieval::{
@@ -24,6 +26,28 @@ use shodh_memory::memory::{
     },
     Memory, MemoryConfig, MemoryId, MemorySystem,
 };
+
+/// Create fallback NER instance for testing
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
+/// Create experience with NER-extracted entities
+fn create_experience_with_ner(
+    content: &str,
+    exp_type: ExperienceType,
+    ner: &NeuralNer,
+) -> Experience {
+    let entities = ner.extract(content).unwrap_or_default();
+    let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
+    Experience {
+        experience_type: exp_type,
+        content: content.to_string(),
+        entities: entity_names,
+        ..Default::default()
+    }
+}
 
 // ============================================================================
 // TEST INFRASTRUCTURE

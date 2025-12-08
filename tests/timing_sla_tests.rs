@@ -9,6 +9,7 @@
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::types::{Experience, ExperienceType, GeoFilter, Query};
 use shodh_memory::memory::{MemoryConfig, MemorySystem};
 
@@ -29,6 +30,24 @@ const STATS_MAX_MS: u128 = 50; // 50ms max for stats (debug mode)
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
+
+/// Create fallback NER for testing (rule-based, no ONNX required)
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
+/// Create experience with NER entity extraction
+fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
+    let entities = ner.extract(content).unwrap_or_default();
+    let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
+    Experience {
+        content: content.to_string(),
+        experience_type: ExperienceType::Observation,
+        entities: entity_names,
+        ..Default::default()
+    }
+}
 
 fn create_test_config(temp_dir: &TempDir) -> MemoryConfig {
     MemoryConfig {
@@ -66,6 +85,25 @@ fn create_rich_experience(i: usize) -> Experience {
             "neural_networks".to_string(),
             format!("topic_{}", i % 5),
         ],
+        robot_id: Some(format!("robot_{}", i % 10)),
+        ..Default::default()
+    }
+}
+
+/// Create rich experience with NER entity extraction
+fn create_rich_experience_with_ner(i: usize, ner: &NeuralNer) -> Experience {
+    let content = format!(
+        "CEO Satya Nadella at Microsoft headquarters in Seattle discussed {} \
+         with Sundar Pichai from Google about neural networks and AI transformers. \
+         Dr. Yann LeCun at Meta Research in New York presented gradient descent algorithms.",
+        i
+    );
+    let entities = ner.extract(&content).unwrap_or_default();
+    let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
+    Experience {
+        content,
+        experience_type: ExperienceType::Learning,
+        entities: entity_names,
         robot_id: Some(format!("robot_{}", i % 10)),
         ..Default::default()
     }

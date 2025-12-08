@@ -6,13 +6,33 @@
 //! - Multi-hop traversal
 //! - Activation capping at 1.0
 //! - Concurrent activation updates
+//! - NER integration for entity extraction
 
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::{
     Experience, ExperienceType, Memory, MemoryConfig, MemoryId, MemorySystem, MemoryTier, Query,
     RetrievalOutcome,
 };
 use shodh_memory::uuid::Uuid;
 use tempfile::TempDir;
+
+/// Create fallback NER instance for testing
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
+/// Create experience with NER-extracted entities
+fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
+    let entities = ner.extract(content).unwrap_or_default();
+    let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
+    Experience {
+        content: content.to_string(),
+        experience_type: ExperienceType::Observation,
+        entities: entity_names,
+        ..Default::default()
+    }
+}
 
 /// Create test memory system
 fn setup_memory_system() -> (MemorySystem, TempDir) {

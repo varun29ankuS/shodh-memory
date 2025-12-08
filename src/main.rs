@@ -37,10 +37,12 @@ mod vector_db; // P1.6: Distributed tracing
 
 use config::ServerConfig;
 
+use embeddings::NerEntityType;
+use embeddings::{are_ner_models_downloaded, get_ner_models_dir, NerConfig, NeuralNer};
 use errors::{AppError, ValidationErrorExt};
 use graph_memory::{
-    EntityExtractor, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, GraphStats,
-    GraphTraversal, RelationType, RelationshipEdge,
+    EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, GraphStats, GraphTraversal,
+    RelationType, RelationshipEdge,
 };
 use memory::{
     Experience, ExperienceType, GraphStats as VisualizationStats, Memory, MemoryConfig, MemoryId,
@@ -193,8 +195,8 @@ pub struct MultiUserMemoryManager {
     graph_memories:
         Arc<parking_lot::Mutex<lru::LruCache<String, Arc<parking_lot::RwLock<GraphMemory>>>>>,
 
-    /// Entity extractor for automatic entity extraction
-    entity_extractor: Arc<EntityExtractor>,
+    /// Neural NER for automatic entity extraction (uses TinyBERT ONNX model)
+    neural_ner: Arc<NeuralNer>,
 
     /// User eviction counter for metrics
     user_evictions: Arc<std::sync::atomic::AtomicUsize>,
@@ -226,6 +228,33 @@ impl MultiUserMemoryManager {
         // Older events are dropped if subscribers can't keep up
         let (event_broadcaster, _) = tokio::sync::broadcast::channel(1024);
 
+        // Initialize Neural NER - auto-detects downloaded models
+        let neural_ner = if are_ner_models_downloaded() {
+            let ner_dir = get_ner_models_dir();
+            let config = NerConfig {
+                model_path: ner_dir.join("model.onnx"),
+                tokenizer_path: ner_dir.join("tokenizer.json"),
+                max_length: 128,
+                confidence_threshold: 0.5,
+            };
+            match NeuralNer::new(config) {
+                Ok(ner) => {
+                    info!(
+                        "🧠 Neural NER initialized (TinyBERT model at {:?})",
+                        ner_dir
+                    );
+                    Arc::new(ner)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to initialize neural NER: {}. Using fallback.", e);
+                    Arc::new(NeuralNer::new_fallback(NerConfig::default()))
+                }
+            }
+        } else {
+            info!("📋 NER models not downloaded. Using rule-based fallback.");
+            Arc::new(NeuralNer::new_fallback(NerConfig::default()))
+        };
+
         let manager = Self {
             user_memories: Arc::new(parking_lot::Mutex::new(lru::LruCache::new(cache_size))),
             audit_logs: Arc::new(DashMap::new()),
@@ -234,7 +263,7 @@ impl MultiUserMemoryManager {
             default_config: MemoryConfig::default(),
             audit_log_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             graph_memories: Arc::new(parking_lot::Mutex::new(lru::LruCache::new(cache_size))),
-            entity_extractor: Arc::new(EntityExtractor::new()),
+            neural_ner,
             user_evictions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             server_config,
             event_broadcaster,
@@ -694,32 +723,43 @@ impl MultiUserMemoryManager {
         let graph = self.get_user_graph(user_id)?;
         let graph_guard = graph.write();
 
-        // Extract entities from the experience content with salience information
-        let extracted_entities = self
-            .entity_extractor
-            .extract_with_salience(&experience.content);
+        // Extract entities from the experience content using neural NER
+        let extracted_entities = match self.neural_ner.extract(&experience.content) {
+            Ok(entities) => entities,
+            Err(e) => {
+                tracing::debug!("NER extraction failed: {}. Continuing without entities.", e);
+                Vec::new()
+            }
+        };
 
         let mut entity_uuids = Vec::new();
 
-        // Add entities to the graph with salience scoring
-        for extracted in extracted_entities {
+        // Add entities to the graph - map NerEntityType to EntityLabel
+        for ner_entity in extracted_entities {
+            let label = match ner_entity.entity_type {
+                NerEntityType::Person => EntityLabel::Person,
+                NerEntityType::Organization => EntityLabel::Organization,
+                NerEntityType::Location => EntityLabel::Location,
+                NerEntityType::Misc => EntityLabel::Other("MISC".to_string()),
+            };
+
             let entity = EntityNode {
                 uuid: uuid::Uuid::new_v4(), // Will be replaced if exists
-                name: extracted.name.clone(),
-                labels: vec![extracted.label],
+                name: ner_entity.text.clone(),
+                labels: vec![label],
                 created_at: chrono::Utc::now(),
                 last_seen_at: chrono::Utc::now(),
                 mention_count: 1,
                 summary: String::new(),
                 attributes: HashMap::new(),
                 name_embedding: None,
-                salience: extracted.base_salience,
-                is_proper_noun: extracted.is_proper_noun,
+                salience: ner_entity.confidence, // Use NER confidence as salience
+                is_proper_noun: true,            // Neural NER primarily extracts proper nouns
             };
 
             match graph_guard.add_entity(entity) {
-                Ok(uuid) => entity_uuids.push((extracted.name, uuid)),
-                Err(e) => tracing::debug!("Failed to add entity {}: {}", extracted.name, e),
+                Ok(uuid) => entity_uuids.push((ner_entity.text, uuid)),
+                Err(e) => tracing::debug!("Failed to add entity {}: {}", ner_entity.text, e),
             }
         }
 
@@ -873,7 +913,8 @@ struct RememberRequest {
     content: String,
     #[serde(default)]
     tags: Vec<String>,
-    #[serde(default)]
+    /// Accept both "experience_type" and "memory_type" as field names
+    #[serde(default, alias = "memory_type")]
     experience_type: Option<String>,
 }
 
@@ -1186,6 +1227,32 @@ async fn record_experience(
         .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
+    // Extract entities from content using Neural NER and merge with user-provided entities
+    let extracted_names: Vec<String> = match state.neural_ner.extract(&req.experience.content) {
+        Ok(entities) => entities.into_iter().map(|e| e.text).collect(),
+        Err(e) => {
+            tracing::debug!("NER extraction failed in record_experience: {}", e);
+            Vec::new()
+        }
+    };
+
+    // Merge user entities with NER-extracted entities (deduplicated)
+    let mut merged_entities: Vec<String> = req.experience.entities.clone();
+    for entity_name in extracted_names {
+        if !merged_entities
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(&entity_name))
+        {
+            merged_entities.push(entity_name);
+        }
+    }
+
+    // Create experience with merged entities
+    let experience_with_entities = Experience {
+        entities: merged_entities,
+        ..req.experience.clone()
+    };
+
     // P1.2: Instrument memory store operation
     let store_start = std::time::Instant::now();
 
@@ -1194,7 +1261,7 @@ async fn record_experience(
     // Running these on async threads starves the Tokio runtime under load
     let memory_id = {
         let memory = memory.clone();
-        let experience = req.experience.clone();
+        let experience = experience_with_entities.clone();
 
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
@@ -1206,7 +1273,9 @@ async fn record_experience(
     };
 
     // Extract entities and build knowledge graph (background processing)
-    if let Err(e) = state.process_experience_into_graph(&req.user_id, &req.experience, &memory_id) {
+    if let Err(e) =
+        state.process_experience_into_graph(&req.user_id, &experience_with_entities, &memory_id)
+    {
         tracing::debug!("Graph processing failed for memory {}: {}", memory_id.0, e);
         // Don't fail the request if graph processing fails
     }
@@ -1280,11 +1349,31 @@ async fn remember(
         })
         .unwrap_or(ExperienceType::Context);
 
+    // Extract entities from content using Neural NER and merge with user-provided tags
+    let extracted_names: Vec<String> = match state.neural_ner.extract(&req.content) {
+        Ok(entities) => entities.into_iter().map(|e| e.text).collect(),
+        Err(e) => {
+            tracing::debug!("NER extraction failed in remember_simplified: {}", e);
+            Vec::new()
+        }
+    };
+
+    // Merge user tags with NER-extracted entities (deduplicated)
+    let mut merged_entities: Vec<String> = req.tags.clone();
+    for entity_name in extracted_names {
+        if !merged_entities
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(&entity_name))
+        {
+            merged_entities.push(entity_name);
+        }
+    }
+
     // Auto-create Experience with sensible defaults
     let experience = Experience {
         content: req.content.clone(),
         experience_type,
-        entities: req.tags.clone(),
+        entities: merged_entities,
         ..Default::default()
     };
 
@@ -1294,14 +1383,21 @@ async fn remember(
 
     let memory_id = {
         let memory = memory.clone();
+        let exp_clone = experience.clone();
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
-            memory_guard.record(experience)
+            memory_guard.record(exp_clone)
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
         .map_err(AppError::Internal)?
     };
+
+    // Extract entities and build knowledge graph (same as /api/record)
+    if let Err(e) = state.process_experience_into_graph(&req.user_id, &experience, &memory_id) {
+        tracing::debug!("Graph processing failed for memory {}: {}", memory_id.0, e);
+        // Don't fail the request if graph processing fails
+    }
 
     // Record metrics
     let duration = op_start.elapsed().as_secs_f64();
@@ -1379,6 +1475,221 @@ async fn recall(
         memories: recall_memories,
         count,
     }))
+}
+
+// =============================================================================
+// CONTEXT SUMMARY - Session bootstrap with categorized memories
+// =============================================================================
+
+/// Context summary request
+#[derive(Debug, Deserialize)]
+struct ContextSummaryRequest {
+    user_id: String,
+    #[serde(default = "default_true")]
+    include_decisions: bool,
+    #[serde(default = "default_true")]
+    include_learnings: bool,
+    #[serde(default = "default_true")]
+    include_context: bool,
+    #[serde(default = "default_max_items")]
+    max_items: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_items() -> usize {
+    5
+}
+
+/// Summary item - simplified memory for context
+#[derive(Debug, Serialize)]
+struct SummaryItem {
+    id: String,
+    content: String,
+    importance: f32,
+    created_at: String,
+}
+
+/// Context summary response - categorized memories for session bootstrap
+#[derive(Debug, Serialize)]
+struct ContextSummaryResponse {
+    total_memories: usize,
+    decisions: Vec<SummaryItem>,
+    learnings: Vec<SummaryItem>,
+    context: Vec<SummaryItem>,
+    patterns: Vec<SummaryItem>,
+    errors: Vec<SummaryItem>,
+}
+
+/// GET /api/context_summary - Get categorized context for session bootstrap
+/// Returns decisions, learnings, patterns, errors organized for LLM consumption
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id))]
+async fn context_summary(
+    State(state): State<AppState>,
+    Json(req): Json<ContextSummaryRequest>,
+) -> Result<Json<ContextSummaryResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let all_memories = {
+        let memory = memory.clone();
+        tokio::task::spawn_blocking(move || {
+            let memory_guard = memory.read();
+            memory_guard.get_all_memories()
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+        .map_err(AppError::Internal)?
+    };
+
+    let total_memories = all_memories.len();
+
+    // Categorize memories by type
+    let mut decisions = Vec::new();
+    let mut learnings = Vec::new();
+    let mut context = Vec::new();
+    let mut patterns = Vec::new();
+    let mut errors = Vec::new();
+
+    for m in all_memories {
+        let item = SummaryItem {
+            id: m.id.0.to_string(),
+            content: m.experience.content.chars().take(200).collect(),
+            importance: m.importance(),
+            created_at: m.created_at.to_rfc3339(),
+        };
+
+        match m.experience.experience_type {
+            ExperienceType::Decision => decisions.push(item),
+            ExperienceType::Learning => learnings.push(item),
+            ExperienceType::Context | ExperienceType::Observation => context.push(item),
+            ExperienceType::Pattern => patterns.push(item),
+            ExperienceType::Error => errors.push(item),
+            _ => context.push(item),
+        }
+    }
+
+    // Sort by importance and truncate
+    let sort_and_truncate = |mut items: Vec<SummaryItem>, max: usize| -> Vec<SummaryItem> {
+        items.sort_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        items.truncate(max);
+        items
+    };
+
+    let max = req.max_items;
+    Ok(Json(ContextSummaryResponse {
+        total_memories,
+        decisions: if req.include_decisions {
+            sort_and_truncate(decisions, max)
+        } else {
+            vec![]
+        },
+        learnings: if req.include_learnings {
+            sort_and_truncate(learnings, max)
+        } else {
+            vec![]
+        },
+        context: if req.include_context {
+            sort_and_truncate(context, max)
+        } else {
+            vec![]
+        },
+        patterns: sort_and_truncate(patterns, max),
+        errors: sort_and_truncate(errors, 3.min(max)), // Limit errors to 3
+    }))
+}
+
+// =============================================================================
+// LIST MEMORIES - Simple GET endpoint for listing all memories
+// =============================================================================
+
+/// Query parameters for list endpoint
+#[derive(Debug, Deserialize)]
+struct ListQuery {
+    limit: Option<usize>,
+    #[serde(rename = "type")]
+    memory_type: Option<String>,
+}
+
+/// List response - simplified memory list
+#[derive(Debug, Serialize)]
+struct ListResponse {
+    memories: Vec<ListMemoryItem>,
+    total: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ListMemoryItem {
+    id: String,
+    content: String,
+    memory_type: String,
+    importance: f32,
+    tags: Vec<String>,
+    created_at: String,
+}
+
+/// GET /api/list/{user_id} - List all memories for a user
+/// Query params: ?limit=100&type=Decision
+#[tracing::instrument(skip(state), fields(user_id = %user_id))]
+async fn list_memories(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<ListResponse>, AppError> {
+    validation::validate_user_id(&user_id).map_validation_err("user_id")?;
+
+    let memory = state
+        .get_user_memory(&user_id)
+        .map_err(AppError::Internal)?;
+
+    let all_memories = {
+        let memory = memory.clone();
+        tokio::task::spawn_blocking(move || {
+            let memory_guard = memory.read();
+            memory_guard.get_all_memories()
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+        .map_err(AppError::Internal)?
+    };
+
+    // Filter by type if specified
+    let filtered: Vec<_> = if let Some(ref type_filter) = query.memory_type {
+        let type_lower = type_filter.to_lowercase();
+        all_memories
+            .into_iter()
+            .filter(|m| format!("{:?}", m.experience.experience_type).to_lowercase() == type_lower)
+            .collect()
+    } else {
+        all_memories
+    };
+
+    let total = filtered.len();
+    let limit = query.limit.unwrap_or(100).min(1000);
+
+    let memories: Vec<ListMemoryItem> = filtered
+        .into_iter()
+        .take(limit)
+        .map(|m| ListMemoryItem {
+            id: m.id.0.to_string(),
+            content: m.experience.content.chars().take(500).collect(),
+            memory_type: format!("{:?}", m.experience.experience_type),
+            importance: m.importance(),
+            tags: m.experience.entities.clone(),
+            created_at: m.created_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(ListResponse { memories, total }))
 }
 
 // =============================================================================
@@ -1788,8 +2099,18 @@ async fn retrieve_memories(
                     .encode(query_text)
                     .map_err(AppError::Internal)?;
 
-                // Step 2: Extract entities from query for graph lookup
-                let query_entities = state_clone.entity_extractor.extract(query_text);
+                // Step 2: Extract entities from query for graph lookup using Neural NER
+                let query_entities: Vec<(String, NerEntityType)> =
+                    match state_clone.neural_ner.extract(query_text) {
+                        Ok(entities) => entities
+                            .into_iter()
+                            .map(|e| (e.text, e.entity_type))
+                            .collect(),
+                        Err(e) => {
+                            tracing::debug!("NER extraction failed in hybrid recall: {}", e);
+                            Vec::new()
+                        }
+                    };
 
                 // Step 3: Build entity activation map from graph
                 // This gives us activated memory IDs and their graph scores
@@ -4087,6 +4408,10 @@ async fn main() -> Result<()> {
         .route("/api/visualization/build", post(build_visualization))
         // Brain State Visualization (cognitive memory tiers with activation levels)
         .route("/api/brain/{user_id}", get(get_brain_state))
+        // Context Summary - Session bootstrap with categorized memories
+        .route("/api/context_summary", post(context_summary))
+        // List memories - Simple GET endpoint
+        .route("/api/list/{user_id}", get(list_memories))
         // Apply auth middleware only to protected routes
         .layer(axum::middleware::from_fn(auth::auth_middleware))
         // Apply rate limiting to API routes only (not health/metrics/static)

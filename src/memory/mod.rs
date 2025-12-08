@@ -625,25 +625,40 @@ impl MemorySystem {
     }
 
     /// Get all memories across all tiers for graph-aware retrieval
+    /// Deduplicates by memory ID, preferring working > session > long-term
     pub fn get_all_memories(&self) -> Result<Vec<SharedMemory>> {
+        use std::collections::HashSet;
+        let mut seen_ids: HashSet<MemoryId> = HashSet::new();
         let mut all_memories = Vec::new();
 
-        // Collect from working memory
+        // Collect from working memory (highest priority - most recent/active)
         {
             let working = self.working_memory.read();
-            all_memories.extend(working.all_memories());
+            for mem in working.all_memories() {
+                if seen_ids.insert(mem.id.clone()) {
+                    all_memories.push(mem);
+                }
+            }
         }
 
-        // Collect from session memory
+        // Collect from session memory (medium priority)
         {
             let session = self.session_memory.read();
-            all_memories.extend(session.all_memories());
+            for mem in session.all_memories() {
+                if seen_ids.insert(mem.id.clone()) {
+                    all_memories.push(mem);
+                }
+            }
         }
 
-        // Collect from long-term memory (wrap in Arc)
+        // Collect from long-term memory (lowest priority - wrap in Arc)
         {
             let longterm_mems = self.long_term_memory.get_all()?;
-            all_memories.extend(longterm_mems.into_iter().map(Arc::new));
+            for mem in longterm_mems {
+                if seen_ids.insert(mem.id.clone()) {
+                    all_memories.push(Arc::new(mem));
+                }
+            }
         }
 
         Ok(all_memories)

@@ -4,8 +4,11 @@
 //! - P99 < 100ms for all operations
 //! - P50 < 10ms for retrieval (most critical)
 //! - 5-10x faster than competitors (Cognee, Mem0, ChromaDB)
+//!
+//! Now includes NER integration for entity extraction benchmarks.
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::{Experience, MemoryConfig, MemorySystem, Query};
 use std::fs;
 use tempfile::TempDir;
@@ -28,6 +31,12 @@ fn setup_memory_system() -> (MemorySystem, TempDir) {
     (memory_system, temp_dir)
 }
 
+/// Helper: Create fallback NER instance for testing
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
 /// Helper: Create minimal Experience for benchmarks
 fn create_experience(content: &str) -> Experience {
     Experience {
@@ -36,15 +45,41 @@ fn create_experience(content: &str) -> Experience {
     }
 }
 
-/// Helper: Populate memory system with test data
+/// Helper: Create Experience with NER-extracted entities
+fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
+    let entities = ner.extract(content).unwrap_or_default();
+    let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
+    Experience {
+        content: content.to_string(),
+        entities: entity_names,
+        ..Default::default()
+    }
+}
+
+/// Helper: Populate memory system with test data (with NER entity extraction)
 fn populate_memories(memory_system: &mut MemorySystem, count: usize) {
+    let ner = setup_fallback_ner();
+    for i in 0..count {
+        let content = format!(
+            "Memory entry {i} - Satya Nadella from Microsoft met with Sundar Pichai from Google in Bangalore. \
+             This is a test memory containing various information about task execution, \
+             decision making, and context tracking in the AI agent system."
+        );
+
+        let experience = create_experience_with_ner(&content, &ner);
+        memory_system
+            .record(experience)
+            .expect("Failed to record experience");
+    }
+}
+
+/// Helper: Populate memory system without NER (for comparison)
+fn populate_memories_no_ner(memory_system: &mut MemorySystem, count: usize) {
     for i in 0..count {
         let content = format!(
             "Memory entry {i} - This is a test memory containing various information about task execution, \
-             decision making, and context tracking in the AI agent system. It includes references to \
-             files, commands, and observations that help build a comprehensive understanding."
+             decision making, and context tracking in the AI agent system."
         );
-
         let experience = create_experience(&content);
         memory_system
             .record(experience)
@@ -267,37 +302,95 @@ fn bench_concurrent_operations(c: &mut Criterion) {
 }
 
 // ==============================================================================
-// Benchmark 7: End-to-End Latency (Record + Retrieve)
+// Benchmark 7: NER + Record Combined (Entity Extraction + Storage)
+// ==============================================================================
+
+fn bench_ner_record_combined(c: &mut Criterion) {
+    eprintln!("\n🏷️ NER + RECORD BENCHMARK - Entity Extraction + Storage 🏷️\n");
+
+    let ner = setup_fallback_ner();
+    let (mut memory_system, _temp_dir) = setup_memory_system();
+
+    let mut group = c.benchmark_group("ner_record_combined");
+
+    // Test with entity-rich text
+    let entity_text =
+        "Satya Nadella from Microsoft met with Sundar Pichai from Google in Bangalore. \
+                       They discussed AI partnership with OpenAI in San Francisco.";
+
+    // NER only (baseline)
+    group.bench_function("ner_only", |b| {
+        b.iter(|| {
+            let _ = ner.extract(entity_text);
+        });
+    });
+
+    // NER + Experience creation
+    group.bench_function("ner_experience_creation", |b| {
+        b.iter(|| {
+            let _ = create_experience_with_ner(entity_text, &ner);
+        });
+    });
+
+    // Full NER + Record pipeline
+    group.bench_function("ner_record_full", |b| {
+        b.iter_batched(
+            || create_experience_with_ner(entity_text, &ner),
+            |experience| memory_system.record(experience).expect("Failed to record"),
+            BatchSize::SmallInput,
+        );
+    });
+
+    // Comparison: Record without NER
+    group.bench_function("record_no_ner", |b| {
+        b.iter_batched(
+            || create_experience(entity_text),
+            |experience| memory_system.record(experience).expect("Failed to record"),
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+
+    // Print entity extraction summary
+    eprintln!("\n📊 NER EXTRACTION SUMMARY:");
+    if let Ok(entities) = ner.extract(entity_text) {
+        eprintln!("   Text: {} chars", entity_text.len());
+        eprintln!("   Entities found: {}", entities.len());
+        for e in &entities {
+            eprintln!("     - {} ({:?})", e.text, e.entity_type);
+        }
+    }
+}
+
+// ==============================================================================
+// Benchmark 8: End-to-End Latency (NER + Record + Retrieve)
 // ==============================================================================
 
 fn bench_end_to_end(c: &mut Criterion) {
-    eprintln!("\n🎯 END-TO-END BENCHMARK - Optimized v2.0 🎯\n");
+    eprintln!("\n🎯 END-TO-END BENCHMARK - With NER Integration 🎯\n");
 
-    // CRITICAL FIX: Create and populate MemorySystem ONCE, outside the benchmark
-    eprintln!("   Creating MemorySystem (model will load ONCE)...");
+    let ner = setup_fallback_ner();
     let (mut memory_system, _temp_dir) = setup_memory_system();
     populate_memories(&mut memory_system, 25);
-    eprintln!("   ✅ System ready with 25 pre-populated memories\n");
+    eprintln!("   ✅ System ready with 25 pre-populated memories (with NER entities)\n");
 
-    c.bench_function("end_to_end_record_retrieve", |b| {
+    c.bench_function("end_to_end_ner_record_retrieve", |b| {
         b.iter(|| {
-            // Record a new experience
-            let experience = create_experience(
-                "User completed task X and is now working on task Y with dependencies on module Z",
-            );
+            // NER extraction + Record
+            let content = "User from Infosys completed task X in Bangalore and is now working on task Y with dependencies on Microsoft module Z";
+            let experience = create_experience_with_ner(content, &ner);
             let _memory_id = memory_system.record(experience).expect("Failed to record");
 
-            // Immediately retrieve related memories
+            // Retrieve related memories
             let query = Query {
-                query_text: Some("task dependencies module".to_string()),
+                query_text: Some("task dependencies module Infosys".to_string()),
                 max_results: 5,
                 retrieval_mode: shodh_memory::memory::RetrievalMode::Hybrid,
                 ..Default::default()
             };
 
             let results = memory_system.retrieve(&query).expect("Failed to retrieve");
-
-            // Verify we got results (including the just-recorded memory)
             assert!(!results.is_empty());
         });
     });
@@ -736,9 +829,10 @@ criterion_group!(
         bench_vector_search,
         bench_memory_stats,
         bench_concurrent_operations,
+        bench_ner_record_combined,  // NEW: NER + Record combined benchmarks
         bench_end_to_end,
-        bench_cache_performance,  // NEW: Shows real-world cached performance
-        bench_print_summary  // Print comprehensive summary table at the end
+        bench_cache_performance,
+        bench_print_summary
 );
 
 criterion_main!(benches);

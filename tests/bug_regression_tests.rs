@@ -9,6 +9,7 @@ use chrono::{Duration, Utc};
 use std::time::Instant;
 use tempfile::TempDir;
 
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::types::{
     geohash_decode, geohash_encode, geohash_neighbors, geohash_precision_for_radius, Experience,
     ExperienceType, GeoFilter, Query,
@@ -18,6 +19,24 @@ use shodh_memory::memory::{MemoryConfig, MemorySystem};
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
+
+/// Create fallback NER for testing (rule-based, no ONNX required)
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
+/// Create experience with NER entity extraction
+fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
+    let entities = ner.extract(content).unwrap_or_default();
+    let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
+    Experience {
+        content: content.to_string(),
+        experience_type: ExperienceType::Observation,
+        entities: entity_names,
+        ..Default::default()
+    }
+}
 
 fn create_test_config(temp_dir: &TempDir) -> MemoryConfig {
     MemoryConfig {

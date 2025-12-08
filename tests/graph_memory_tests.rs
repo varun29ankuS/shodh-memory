@@ -6,8 +6,10 @@
 //! - Graph traversal
 //! - Episode creation and queries
 //! - Temporal edge invalidation
+//! - NER integration for entity extraction
 
 use chrono::{DateTime, Duration, Utc};
+use shodh_memory::embeddings::ner::{NerConfig, NerEntityType, NeuralNer};
 use shodh_memory::graph_memory::{
     EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, RelationType,
     RelationshipEdge,
@@ -15,6 +17,43 @@ use shodh_memory::graph_memory::{
 use shodh_memory::uuid::Uuid;
 use std::collections::HashMap;
 use tempfile::TempDir;
+
+/// Create fallback NER instance for testing
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
+/// Convert NER entity type to GraphMemory EntityLabel
+fn ner_type_to_label(ner_type: &NerEntityType) -> EntityLabel {
+    match ner_type {
+        NerEntityType::Person => EntityLabel::Person,
+        NerEntityType::Organization => EntityLabel::Organization,
+        NerEntityType::Location => EntityLabel::Location,
+        NerEntityType::Misc => EntityLabel::Concept,
+    }
+}
+
+/// Create entity from NER extraction
+fn create_entity_from_ner(ner: &NeuralNer, text: &str) -> Vec<EntityNode> {
+    let extracted = ner.extract(text).unwrap_or_default();
+    extracted
+        .iter()
+        .map(|entity| EntityNode {
+            uuid: Uuid::new_v4(),
+            name: entity.text.clone(),
+            labels: vec![ner_type_to_label(&entity.entity_type)],
+            created_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: entity.confidence,
+            is_proper_noun: true,
+        })
+        .collect()
+}
 
 /// Create a test graph memory instance
 fn setup_graph_memory() -> (GraphMemory, TempDir) {

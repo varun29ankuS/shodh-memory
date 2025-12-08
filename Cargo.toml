@@ -141,6 +141,14 @@ harness = false
 name = "cognitive_benchmarks"
 harness = false
 
+[[bench]]
+name = "ner_benchmarks"
+harness = false
+
+[[bench]]
+name = "pipeline_benchmarks"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

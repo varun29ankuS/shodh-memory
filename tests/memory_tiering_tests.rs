@@ -7,12 +7,36 @@
 //! - Promotion/demotion between tiers
 //! - LRU eviction from working memory
 //! - Importance-based promotion to session
+//! - NER integration for entity extraction
 
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::{
     Experience, ExperienceType, MemoryConfig, MemorySystem, Query, RetrievalMode,
 };
 use std::path::PathBuf;
 use tempfile::TempDir;
+
+/// Create fallback NER instance for testing
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
+/// Create experience with NER-extracted entities
+fn create_experience_with_ner(
+    content: &str,
+    exp_type: ExperienceType,
+    ner: &NeuralNer,
+) -> Experience {
+    let entities = ner.extract(content).unwrap_or_default();
+    let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
+    Experience {
+        content: content.to_string(),
+        experience_type: exp_type,
+        entities: entity_names,
+        ..Default::default()
+    }
+}
 
 /// Create a test memory system with configurable parameters
 fn setup_memory_system(working_size: usize, session_mb: usize) -> (MemorySystem, TempDir) {

@@ -22,13 +22,21 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// URLs for model files (hosted on HuggingFace)
+/// URLs for MiniLM model files (hosted on HuggingFace)
 /// Full model is 90MB, quantized is 23MB - we download quantized for edge devices
 const MODEL_ONNX_URL: &str =
     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx";
 const MODEL_QUANTIZED_URL: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model_quint8_avx2.onnx";
 const TOKENIZER_URL: &str =
     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json";
+
+/// URLs for NER model files (TinyBERT-finetuned-NER, ~14.5MB quantized)
+/// Using a lightweight 4-layer TinyBERT model optimized for edge devices
+/// Source: onnx-community/TinyBERT-finetuned-NER-ONNX (fine-tuned on CoNLL2003)
+const NER_MODEL_URL: &str =
+    "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx";
+const NER_TOKENIZER_URL: &str =
+    "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json";
 
 /// SHA-256 checksums for model integrity verification
 /// These should be updated when model versions change
@@ -76,9 +84,14 @@ pub fn get_cache_dir() -> PathBuf {
     PathBuf::from(".shodh-cache")
 }
 
-/// Get the models directory
+/// Get the models directory for embeddings (MiniLM)
 pub fn get_models_dir() -> PathBuf {
     get_cache_dir().join("models").join("minilm-l6")
+}
+
+/// Get the models directory for NER (bert-tiny-ner)
+pub fn get_ner_models_dir() -> PathBuf {
+    get_cache_dir().join("models").join("bert-tiny-ner")
 }
 
 /// Get the ONNX Runtime directory
@@ -86,10 +99,16 @@ pub fn get_onnx_runtime_dir() -> PathBuf {
     get_cache_dir().join("onnxruntime")
 }
 
-/// Check if model files are downloaded
+/// Check if embedding model files are downloaded
 pub fn are_models_downloaded() -> bool {
     let models_dir = get_models_dir();
     models_dir.join("model_quantized.onnx").exists() && models_dir.join("tokenizer.json").exists()
+}
+
+/// Check if NER model files are downloaded
+pub fn are_ner_models_downloaded() -> bool {
+    let models_dir = get_ner_models_dir();
+    models_dir.join("model.onnx").exists() && models_dir.join("tokenizer.json").exists()
 }
 
 /// Check if ONNX Runtime is downloaded
@@ -338,6 +357,46 @@ pub fn download_models_internal(
     Ok(models_dir)
 }
 
+/// Download NER model files (TinyBERT-finetuned-NER, ~14.5MB quantized)
+/// This is opt-in via SHODH_NEURAL_NER=true environment variable
+pub fn download_ner_models(progress: Option<ProgressCallback>) -> Result<PathBuf> {
+    let models_dir = get_ner_models_dir();
+
+    if are_ner_models_downloaded() {
+        tracing::info!("NER models already downloaded at {:?}", models_dir);
+        return Ok(models_dir);
+    }
+
+    tracing::info!(
+        "Downloading TinyBERT-NER model to {:?} (~14.5MB)",
+        models_dir
+    );
+
+    // Download model (~14.5MB quantized)
+    let model_path = models_dir.join("model.onnx");
+    tracing::info!("Downloading NER model_quantized.onnx (~14.5MB)");
+    download_file(
+        NER_MODEL_URL,
+        &model_path,
+        progress.as_ref().map(|p| p.as_ref()),
+    )?;
+
+    // Download tokenizer (~700KB)
+    let tokenizer_path = models_dir.join("tokenizer.json");
+    tracing::info!("Downloading NER tokenizer.json");
+    download_file(
+        NER_TOKENIZER_URL,
+        &tokenizer_path,
+        progress.as_ref().map(|p| p.as_ref()),
+    )?;
+
+    tracing::info!(
+        "TinyBERT-NER model downloaded successfully to {:?}",
+        models_dir
+    );
+    Ok(models_dir)
+}
+
 /// Download ONNX Runtime
 pub fn download_onnx_runtime(progress: Option<ProgressCallback>) -> Result<PathBuf> {
     let onnx_dir = get_onnx_runtime_dir();
@@ -464,16 +523,23 @@ pub fn ensure_downloaded(progress: Option<ProgressCallback>) -> Result<(PathBuf,
 pub fn print_status() {
     let cache_dir = get_cache_dir();
     let models_downloaded = are_models_downloaded();
+    let ner_models_downloaded = are_ner_models_downloaded();
     let onnx_downloaded = is_onnx_runtime_downloaded();
 
     println!("Shodh-Memory Cache Status:");
     println!("  Cache directory: {cache_dir:?}");
-    println!("  Models downloaded: {models_downloaded}");
+    println!("  Embedding models downloaded: {models_downloaded}");
+    println!("  NER models downloaded: {ner_models_downloaded}");
     println!("  ONNX Runtime downloaded: {onnx_downloaded}");
 
     if models_downloaded {
         let models_dir = get_models_dir();
-        println!("  Model path: {models_dir:?}");
+        println!("  Embedding model path: {models_dir:?}");
+    }
+
+    if ner_models_downloaded {
+        let ner_dir = get_ner_models_dir();
+        println!("  NER model path: {ner_dir:?}");
     }
 
     if onnx_downloaded {

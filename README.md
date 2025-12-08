@@ -46,12 +46,14 @@ Working Memory ──overflow──▶ Session Memory ──importance──▶ 
 **Storage & Retrieval**
 
 - Vamana graph index for approximate nearest neighbor search [3]
-- MiniLM-L6 embeddings (384-dim) for semantic similarity
+- MiniLM-L6 embeddings (384-dim, 25MB) for semantic similarity
+- TinyBERT NER (15MB) for named entity extraction (Person, Organization, Location, Misc)
 - RocksDB for durable persistence across restarts
 - User isolation — each agent gets independent memory space
 
 **Cognitive Processing**
 
+- *Named entity recognition* — TinyBERT extracts Person, Organization, Location, Misc entities on every memory store; entities boost importance and enable graph relationships
 - *Activation decay* — exponential decay A(t) = A₀ · e^(-λt) applied each maintenance cycle (λ configurable)
 - *Hebbian strengthening* — co-retrieved memories form graph edges; edge weight w increases as w' = w + α(1 - w) on each co-activation
 - *Long-term potentiation* — edges surviving threshold co-activations (default: 5) become permanent, exempt from decay
@@ -109,7 +111,8 @@ Measured with cold TCP connections on Intel i7-1355U (10 cores, 1.7GHz), release
 
 | Component | Time |
 |-----------|------|
-| MiniLM-L6-v2 embedding | ~112ms |
+| MiniLM-L6-v2 embedding | ~33ms |
+| TinyBERT NER extraction | ~15ms |
 | User lookup/create | ~50-80ms |
 | RocksDB write | ~20-30ms |
 | Vamana index update | ~20-30ms |
@@ -125,7 +128,7 @@ Distribution:
   <250ms: 97% of calls
 ```
 
-The embedding model is a 6-layer Transformer (MiniLM-L6-v2), distilled from larger models, running quantized INT8 inference via ONNX Runtime.
+The system uses two neural models: MiniLM-L6-v2 (25MB, 6-layer Transformer) for semantic embeddings and TinyBERT-NER (15MB) for named entity extraction. Both run quantized INT8 inference via ONNX Runtime.
 
 ### Installation
 

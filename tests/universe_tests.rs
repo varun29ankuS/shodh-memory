@@ -8,12 +8,51 @@
 //! - Bounds calculation
 
 use chrono::Utc;
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::graph_memory::{
     EntityLabel, EntityNode, GraphMemory, RelationType, RelationshipEdge,
 };
 use shodh_memory::uuid::Uuid;
 use std::collections::HashMap;
 use tempfile::TempDir;
+
+/// Create fallback NER for testing (rule-based, no ONNX required)
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
+/// Convert NER entity type to EntityLabel
+fn ner_type_to_label(ner_type: &str) -> EntityLabel {
+    match ner_type {
+        "PER" => EntityLabel::Person,
+        "ORG" => EntityLabel::Organization,
+        "LOC" => EntityLabel::Location,
+        _ => EntityLabel::Concept,
+    }
+}
+
+/// Create entity from NER extraction result
+fn create_entity_from_ner(
+    name: &str,
+    ner_type: &str,
+    is_proper: bool,
+    salience: f32,
+) -> EntityNode {
+    EntityNode {
+        uuid: Uuid::new_v4(),
+        name: name.to_string(),
+        labels: vec![ner_type_to_label(ner_type)],
+        created_at: Utc::now(),
+        last_seen_at: Utc::now(),
+        mention_count: 1,
+        summary: String::new(),
+        attributes: HashMap::new(),
+        name_embedding: None,
+        salience,
+        is_proper_noun: is_proper,
+    }
+}
 
 /// Create a test graph memory instance
 fn setup_graph_memory() -> (GraphMemory, TempDir) {

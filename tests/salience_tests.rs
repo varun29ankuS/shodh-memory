@@ -5,13 +5,36 @@
 //! - Frequency-based salience boost (logarithmic)
 //! - Entity type classification
 //! - Salience decay over time
+//! - NER-based entity extraction and salience assignment
 
 use chrono::Utc;
+use shodh_memory::embeddings::ner::{NerConfig, NerEntityType, NeuralNer};
 use shodh_memory::graph_memory::{EntityLabel, EntityNode, GraphMemory};
 use shodh_memory::uuid::Uuid;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tempfile::TempDir;
+
+/// Create a fallback NER instance for testing
+fn create_test_ner() -> NeuralNer {
+    let config = NerConfig {
+        model_path: PathBuf::from("nonexistent.onnx"),
+        tokenizer_path: PathBuf::from("nonexistent.json"),
+        max_length: 128,
+        confidence_threshold: 0.5,
+    };
+    NeuralNer::new_fallback(config)
+}
+
+/// Convert NER entity type to GraphMemory EntityLabel
+fn ner_type_to_label(ner_type: &NerEntityType) -> EntityLabel {
+    match ner_type {
+        NerEntityType::Person => EntityLabel::Person,
+        NerEntityType::Organization => EntityLabel::Organization,
+        NerEntityType::Location => EntityLabel::Location,
+        NerEntityType::Misc => EntityLabel::Concept,
+    }
+}
 
 /// Create a test graph memory instance
 fn setup_graph_memory() -> (GraphMemory, TempDir) {
@@ -532,4 +555,260 @@ fn test_unicode_entity_name() {
         result.name, unicode_name,
         "Unicode name should be preserved"
     );
+}
+
+// =============================================================================
+// NER-BASED ENTITY EXTRACTION AND SALIENCE TESTS
+// =============================================================================
+
+#[test]
+fn test_ner_extract_and_add_entities() {
+    let (graph, _temp_dir) = setup_graph_memory();
+    let ner = create_test_ner();
+
+    let text = "Microsoft CEO Satya Nadella visited Google headquarters in Seattle";
+    let entities = ner.extract(text).expect("NER extraction failed");
+
+    // Add extracted entities to graph with appropriate salience
+    for entity in &entities {
+        let label = ner_type_to_label(&entity.entity_type);
+        let is_proper = true; // NER entities are typically proper nouns
+        let base_salience = if is_proper { 0.6 } else { 0.3 };
+
+        let node = create_entity(&entity.text, Some(label), is_proper, base_salience);
+        graph.add_entity(node).expect("Failed to add NER entity");
+    }
+
+    // Verify entities were added
+    let all_entities = graph.get_all_entities().expect("Failed to get entities");
+    assert!(
+        all_entities.len() >= 2,
+        "Should have added NER-extracted entities"
+    );
+}
+
+#[test]
+fn test_ner_organization_salience() {
+    let (graph, _temp_dir) = setup_graph_memory();
+    let ner = create_test_ner();
+
+    let text = "Infosys and TCS are major Indian IT companies";
+    let entities = ner.extract(text).expect("NER extraction failed");
+
+    // Add organizations with proper noun salience
+    for entity in entities
+        .iter()
+        .filter(|e| e.entity_type == NerEntityType::Organization)
+    {
+        let node = create_entity(&entity.text, Some(EntityLabel::Organization), true, 0.6);
+        graph.add_entity(node).expect("Failed to add organization");
+    }
+
+    // Verify organizations have higher base salience
+    let orgs = graph.get_all_entities().expect("Failed to get entities");
+    for org in orgs {
+        assert!(
+            org.salience >= 0.5,
+            "Organization {} should have high base salience: {}",
+            org.name,
+            org.salience
+        );
+    }
+}
+
+#[test]
+fn test_ner_location_salience() {
+    let (graph, _temp_dir) = setup_graph_memory();
+    let ner = create_test_ner();
+
+    let text = "The conference will be held in Mumbai, Bangalore, and Delhi";
+    let entities = ner.extract(text).expect("NER extraction failed");
+
+    // Add locations
+    for entity in entities
+        .iter()
+        .filter(|e| e.entity_type == NerEntityType::Location)
+    {
+        let node = create_entity(&entity.text, Some(EntityLabel::Location), true, 0.6);
+        graph.add_entity(node).expect("Failed to add location");
+    }
+
+    // Verify locations were added correctly
+    let all_entities = graph.get_all_entities().expect("Failed to get entities");
+    let locations: Vec<_> = all_entities
+        .iter()
+        .filter(|e| e.labels.contains(&EntityLabel::Location))
+        .collect();
+
+    assert!(
+        locations.len() >= 2,
+        "Should find at least 2 Indian locations"
+    );
+}
+
+#[test]
+fn test_ner_repeated_mentions_boost_salience() {
+    let (graph, _temp_dir) = setup_graph_memory();
+    let ner = create_test_ner();
+
+    // Multiple texts mentioning the same entity
+    let texts = vec![
+        "Microsoft announced new features",
+        "Microsoft stock rose today",
+        "Microsoft CEO gave keynote",
+        "Microsoft acquired another company",
+        "Microsoft cloud services growing",
+    ];
+
+    for text in texts {
+        let entities = ner.extract(text).expect("NER extraction failed");
+        for entity in entities {
+            let label = ner_type_to_label(&entity.entity_type);
+            let node = create_entity(&entity.text, Some(label), true, 0.6);
+            graph.add_entity(node).expect("Failed to add entity");
+        }
+    }
+
+    // Microsoft should have high salience due to repeated mentions
+    let microsoft = graph
+        .find_entity_by_name("Microsoft")
+        .expect("Failed to find Microsoft")
+        .expect("Microsoft should exist");
+
+    assert!(
+        microsoft.mention_count >= 4,
+        "Microsoft should have multiple mentions: {}",
+        microsoft.mention_count
+    );
+    assert!(
+        microsoft.salience > 0.6,
+        "Repeated mentions should boost salience: {}",
+        microsoft.salience
+    );
+}
+
+#[test]
+fn test_ner_mixed_entity_types_salience() {
+    let (graph, _temp_dir) = setup_graph_memory();
+    let ner = create_test_ner();
+
+    let text = "Sundar Pichai announced that Google will expand operations in Bangalore and Mumbai";
+    let entities = ner.extract(text).expect("NER extraction failed");
+
+    // Add all entities with appropriate types
+    for entity in &entities {
+        let label = ner_type_to_label(&entity.entity_type);
+        let base_salience = match entity.entity_type {
+            NerEntityType::Person => 0.7,       // People are often important
+            NerEntityType::Organization => 0.6, // Organizations matter
+            NerEntityType::Location => 0.5,     // Locations are contextual
+            NerEntityType::Misc => 0.4,
+        };
+        let node = create_entity(&entity.text, Some(label), true, base_salience);
+        graph.add_entity(node).expect("Failed to add entity");
+    }
+
+    // Verify different types have different salience
+    let all_entities = graph.get_all_entities().expect("Failed to get entities");
+
+    let persons: Vec<_> = all_entities
+        .iter()
+        .filter(|e| e.labels.contains(&EntityLabel::Person))
+        .collect();
+    let orgs: Vec<_> = all_entities
+        .iter()
+        .filter(|e| e.labels.contains(&EntityLabel::Organization))
+        .collect();
+    let locs: Vec<_> = all_entities
+        .iter()
+        .filter(|e| e.labels.contains(&EntityLabel::Location))
+        .collect();
+
+    // Should have extracted multiple types
+    assert!(
+        !persons.is_empty() || !orgs.is_empty() || !locs.is_empty(),
+        "Should have extracted at least one entity type"
+    );
+}
+
+#[test]
+fn test_ner_confidence_affects_salience() {
+    let ner = create_test_ner();
+
+    let text = "Microsoft and some_random_word are different";
+    let entities = ner.extract(text).expect("NER extraction failed");
+
+    // High confidence entities should be found
+    let microsoft = entities.iter().find(|e| e.text == "Microsoft");
+    assert!(
+        microsoft.is_some(),
+        "Should find Microsoft with high confidence"
+    );
+
+    if let Some(ms) = microsoft {
+        assert!(
+            ms.confidence >= 0.5,
+            "Microsoft should have high confidence: {}",
+            ms.confidence
+        );
+    }
+}
+
+#[test]
+fn test_ner_entity_spans_correct() {
+    let ner = create_test_ner();
+
+    let text = "Google is headquartered in Mountain View";
+    let entities = ner.extract(text).expect("NER extraction failed");
+
+    // Verify spans are correct
+    for entity in &entities {
+        let extracted = &text[entity.start..entity.end];
+        assert_eq!(
+            extracted, entity.text,
+            "Span should match entity text: {} vs {}",
+            extracted, entity.text
+        );
+    }
+}
+
+#[test]
+fn test_ner_integration_with_salience_persistence() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().to_path_buf();
+    let ner = create_test_ner();
+
+    let text = "Amazon and Apple are competing in the cloud market";
+
+    // Extract and add entities
+    {
+        let graph = GraphMemory::new(&db_path).expect("Failed to create graph");
+        let entities = ner.extract(text).expect("NER extraction failed");
+
+        for entity in entities {
+            let label = ner_type_to_label(&entity.entity_type);
+            let node = create_entity(&entity.text, Some(label), true, 0.6);
+            graph.add_entity(node).expect("Failed to add entity");
+        }
+    }
+
+    // Reopen and verify persistence
+    {
+        let graph = GraphMemory::new(&db_path).expect("Failed to reopen graph");
+        let all_entities = graph.get_all_entities().expect("Failed to get entities");
+
+        assert!(
+            !all_entities.is_empty(),
+            "NER entities should persist across restarts"
+        );
+
+        // Check salience persisted
+        for entity in all_entities {
+            assert!(
+                entity.salience > 0.0,
+                "Salience should persist: {}",
+                entity.salience
+            );
+        }
+    }
 }

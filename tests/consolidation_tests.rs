@@ -7,11 +7,30 @@
 //! - Importance-based retention
 //! - Auto-compression triggers
 
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::{
     Experience, ExperienceType, Memory, MemoryConfig, MemoryId, MemorySystem, MemoryTier,
 };
 use shodh_memory::uuid::Uuid;
 use tempfile::TempDir;
+
+/// Create fallback NER for testing (rule-based, no ONNX required)
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
+/// Create experience with NER entity extraction
+fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
+    let entities = ner.extract(content).unwrap_or_default();
+    let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
+    Experience {
+        experience_type: ExperienceType::Observation,
+        content: content.to_string(),
+        entities: entity_names,
+        ..Default::default()
+    }
+}
 
 /// Create test memory system
 fn setup_memory_system() -> (MemorySystem, TempDir) {

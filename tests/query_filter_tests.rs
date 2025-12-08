@@ -1,15 +1,35 @@
 //! Comprehensive tests for Query::matches() filter logic
 //!
 //! Tests the SINGLE source of truth for memory filtering across all tiers.
+//! Includes NER integration for entity extraction.
 
 use chrono::{Duration, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::types::{
     Experience, ExperienceType, GeoFilter, Memory, MemoryId, Query, RetrievalMode,
 };
 use shodh_memory::uuid::Uuid;
+
+/// Create fallback NER instance for testing
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
+/// Create experience with NER-extracted entities
+fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
+    let entities = ner.extract(content).unwrap_or_default();
+    let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
+    Experience {
+        content: content.to_string(),
+        experience_type: ExperienceType::Observation,
+        entities: entity_names,
+        ..Default::default()
+    }
+}
 
 // ============================================================================
 // HELPER FUNCTIONS

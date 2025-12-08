@@ -6,8 +6,10 @@
 //! - Memory tier promotion/demotion
 //! - Entity reference operations
 //! - Activation decay calculations
+//! - NER integration for entity extraction
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::{
     EntityRef, Experience, ExperienceType, Memory, MemoryConfig, MemoryId, MemorySystem,
     MemoryTier, Query, RetrievalOutcome,
@@ -32,12 +34,26 @@ fn setup_memory_system() -> (MemorySystem, TempDir) {
     (memory_system, temp_dir)
 }
 
-/// Populate memory system
+/// Create fallback NER instance for testing
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
+/// Populate memory system with NER-extracted entities
 fn populate_memories(memory: &mut MemorySystem, count: usize) {
+    let ner = setup_fallback_ner();
     for i in 0..count {
+        let content = format!(
+            "Memory entry {} - Satya Nadella from Microsoft discussed with Sundar Pichai from Google in Bangalore",
+            i
+        );
+        let entities = ner.extract(&content).unwrap_or_default();
+        let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
         let exp = Experience {
-            content: format!("Memory entry {} for cognitive benchmarks", i),
+            content,
             experience_type: ExperienceType::Observation,
+            entities: entity_names,
             ..Default::default()
         };
         memory.record(exp).expect("Failed to record");
@@ -244,7 +260,7 @@ fn bench_activation_operations(c: &mut Criterion) {
             None,
             None,
         );
-        memory.activation = 0.5;
+        memory.set_activation(0.5);
 
         b.iter(|| {
             memory.activate(0.1);
@@ -315,7 +331,7 @@ fn bench_serialization(c: &mut Criterion) {
         );
     }
     memory.tier = MemoryTier::Session;
-    memory.activation = 0.8;
+    memory.set_activation(0.8);
     memory.last_retrieval_id = Some(Uuid::new_v4());
 
     group.bench_function("bincode_serialize", |b| {

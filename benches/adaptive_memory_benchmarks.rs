@@ -4,6 +4,7 @@
 //! - Outcome Feedback System (Hebbian reinforcement)
 //! - Semantic Consolidation (episodic → semantic extraction)
 //! - Anticipatory Prefetch (context-aware query generation)
+//! - NER integration for entity extraction
 //!
 //! These benchmarks ensure adaptive operations are fast enough for real-time use.
 
@@ -12,6 +13,7 @@ use tempfile::TempDir;
 
 use uuid::Uuid;
 
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::{
     compression::SemanticConsolidator,
     retrieval::{AnticipatoryPrefetch, PrefetchContext, RetrievalOutcome},
@@ -22,6 +24,12 @@ use shodh_memory::memory::{
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
+
+/// Create fallback NER instance for testing
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
 
 fn setup_memory_system() -> (MemorySystem, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -47,8 +55,34 @@ fn create_experience(content: &str, exp_type: ExperienceType, entities: Vec<&str
     }
 }
 
+/// Create experience with NER-extracted entities
+fn create_experience_with_ner(
+    content: &str,
+    exp_type: ExperienceType,
+    ner: &NeuralNer,
+) -> Experience {
+    let entities = ner.extract(content).unwrap_or_default();
+    let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
+    Experience {
+        experience_type: exp_type,
+        content: content.to_string(),
+        entities: entity_names,
+        ..Default::default()
+    }
+}
+
 fn populate_memories(system: &MemorySystem, count: usize) -> Vec<shodh_memory::memory::MemoryId> {
     let mut ids = Vec::with_capacity(count);
+    let ner = setup_fallback_ner();
+
+    // Rich content with named entities for NER extraction
+    let templates = [
+        "Satya Nadella from Microsoft discussed strategy in Seattle",
+        "Sundar Pichai announced Google's new AI features at Mountain View",
+        "Tim Cook presented Apple's latest products in Cupertino",
+        "Mark Zuckerberg talked about Meta's VR developments in Menlo Park",
+        "Jensen Huang showcased NVIDIA's GPUs at GTC conference",
+    ];
 
     for i in 0..count {
         let exp_type = match i % 5 {
@@ -59,14 +93,9 @@ fn populate_memories(system: &MemorySystem, count: usize) -> Vec<shodh_memory::m
             _ => ExperienceType::Observation,
         };
 
-        let exp = create_experience(
-            &format!(
-                "Benchmark memory {} with content about testing and performance",
-                i
-            ),
-            exp_type,
-            vec!["benchmark", "test", "performance"],
-        );
+        let content = format!("Benchmark {} - {}", i, templates[i % templates.len()]);
+
+        let exp = create_experience_with_ner(&content, exp_type, &ner);
 
         if let Ok(id) = system.record(exp) {
             ids.push(id);
@@ -312,32 +341,37 @@ fn bench_graph_maintenance(c: &mut Criterion) {
 
 fn create_test_memories(count: usize) -> Vec<Memory> {
     let mut memories = Vec::with_capacity(count);
+    let ner = setup_fallback_ner();
+
+    // Rich templates with named entities for NER extraction
+    let templates = [
+        (
+            "Learning: Satya Nadella shared that Microsoft Azure handles {} concurrent users",
+            ExperienceType::Learning,
+        ),
+        (
+            "Decision: Sundar Pichai approved deployment of Google Cloud version {}",
+            ExperienceType::Decision,
+        ),
+        (
+            "Error: Amazon AWS system {} failed with database connection in Seattle",
+            ExperienceType::Error,
+        ),
+        (
+            "Conversation: Tim Cook discussed Apple's dark mode feature with user {}",
+            ExperienceType::Conversation,
+        ),
+        (
+            "Discovery: Jensen Huang found pattern {} in NVIDIA's GPU data",
+            ExperienceType::Discovery,
+        ),
+    ];
 
     for i in 0..count {
-        let exp_type = match i % 5 {
-            0 => ExperienceType::Learning,
-            1 => ExperienceType::Decision,
-            2 => ExperienceType::Error,
-            3 => ExperienceType::Conversation,
-            _ => ExperienceType::Discovery,
-        };
+        let (template, exp_type) = &templates[i % templates.len()];
+        let content = template.replace("{}", &format!("{}", i));
 
-        let content = match exp_type {
-            ExperienceType::Learning => format!(
-                "Learning: the system is able to handle {} concurrent users",
-                i * 100
-            ),
-            ExperienceType::Decision => {
-                format!("To deploy version {}, run the deployment script", i)
-            }
-            ExperienceType::Error => format!("Error {} failed with database connection issue", i),
-            ExperienceType::Conversation => {
-                format!("User prefers dark mode and larger font size {}", i)
-            }
-            _ => format!("Discovered pattern {} in the data", i),
-        };
-
-        let exp = create_experience(&content, exp_type, vec!["test", "benchmark"]);
+        let exp = create_experience_with_ner(&content, exp_type.clone(), &ner);
         memories.push(Memory::new(
             MemoryId(Uuid::new_v4()),
             exp,

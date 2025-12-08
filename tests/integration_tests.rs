@@ -4,6 +4,7 @@
 //! - Robotics and autonomous systems
 //! - Drone fleet management
 //! - Edge AI deployments
+//! - NER integration for entity extraction
 //!
 //! Run with: cargo test --test integration_tests -- --nocapture
 
@@ -11,10 +12,33 @@ use std::collections::HashMap;
 use std::time::Instant;
 use tempfile::TempDir;
 
+use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::{
     memory::types::GeoFilter,
     memory::{Experience, ExperienceType, MemoryConfig, MemorySystem, Query, RetrievalMode},
 };
+
+/// Create fallback NER instance for testing
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
+/// Create experience with NER-extracted entities
+fn create_experience_with_ner(
+    content: &str,
+    exp_type: ExperienceType,
+    ner: &NeuralNer,
+) -> Experience {
+    let entities = ner.extract(content).unwrap_or_default();
+    let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
+    Experience {
+        experience_type: exp_type,
+        content: content.to_string(),
+        entities: entity_names,
+        ..Default::default()
+    }
+}
 
 // ============================================================================
 // TEST REPORTER - Professional output for enterprise demonstration

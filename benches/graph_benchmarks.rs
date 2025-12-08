@@ -5,17 +5,35 @@
 //! - Relationship operations
 //! - Graph traversal
 //! - Universe visualization
+//! - NER integration for entity extraction
 //!
 //! Compare against industry standards (Neo4j, Memgraph, etc.)
 
 use chrono::Utc;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use shodh_memory::embeddings::ner::{NerConfig, NerEntityType, NeuralNer};
 use shodh_memory::graph_memory::{
     EntityLabel, EntityNode, GraphMemory, RelationType, RelationshipEdge,
 };
 use std::collections::HashMap;
 use tempfile::TempDir;
 use uuid::Uuid;
+
+/// Create fallback NER instance for testing
+fn setup_fallback_ner() -> NeuralNer {
+    let config = NerConfig::default();
+    NeuralNer::new_fallback(config)
+}
+
+/// Convert NER entity type to GraphMemory EntityLabel
+fn ner_type_to_label(ner_type: &NerEntityType) -> EntityLabel {
+    match ner_type {
+        NerEntityType::Person => EntityLabel::Person,
+        NerEntityType::Organization => EntityLabel::Organization,
+        NerEntityType::Location => EntityLabel::Location,
+        NerEntityType::Misc => EntityLabel::Concept,
+    }
+}
 
 /// Create a new entity node with the given parameters
 fn create_entity(
@@ -412,6 +430,142 @@ fn bench_traversal_with_hebbian(c: &mut Criterion) {
 }
 
 // =============================================================================
+// NER-Driven Entity Extraction Benchmarks
+// =============================================================================
+
+fn bench_ner_to_graph_entity(c: &mut Criterion) {
+    let mut group = c.benchmark_group("graph_ner_extraction");
+
+    // Test entity extraction from text and graph insertion
+    let test_texts = vec![
+        "Satya Nadella from Microsoft discussed strategy with Sundar Pichai at Google headquarters",
+        "OpenAI's Sam Altman met Elon Musk in San Francisco to discuss artificial intelligence",
+        "Tim Cook announced Apple's new headquarters in Cupertino California",
+    ];
+
+    for (idx, text) in test_texts.iter().enumerate() {
+        group.bench_with_input(BenchmarkId::new("extract_and_add", idx), text, |b, text| {
+            b.iter_batched(
+                || {
+                    let (graph, temp_dir) = setup_graph_memory();
+                    let ner = setup_fallback_ner();
+                    (graph, temp_dir, ner)
+                },
+                |(graph, _temp_dir, ner)| {
+                    // Extract entities using NER
+                    let entities = ner.extract(text).unwrap_or_default();
+
+                    // Add each extracted entity to graph
+                    for entity in entities {
+                        let label = ner_type_to_label(&entity.entity_type);
+                        let node =
+                            create_entity(&entity.text, Some(label), true, entity.confidence);
+                        graph.add_entity(node).expect("Failed to add entity");
+                    }
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_ner_batch_to_graph(c: &mut Criterion) {
+    let mut group = c.benchmark_group("graph_ner_batch");
+
+    // Batch processing: multiple texts
+    for batch_size in [5, 10, 20] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(batch_size),
+            &batch_size,
+            |b, &size| {
+                let texts: Vec<String> = (0..size)
+                    .map(|i| {
+                        format!(
+                            "Person_{} from Organization_{} visited Location_{} to discuss Project_{}",
+                            i, i, i, i
+                        )
+                    })
+                    .collect();
+
+                b.iter_batched(
+                    || {
+                        let (graph, temp_dir) = setup_graph_memory();
+                        let ner = setup_fallback_ner();
+                        (graph, temp_dir, ner, texts.clone())
+                    },
+                    |(graph, _temp_dir, ner, texts)| {
+                        for text in &texts {
+                            let entities = ner.extract(text).unwrap_or_default();
+                            for entity in entities {
+                                let label = ner_type_to_label(&entity.entity_type);
+                                let node = create_entity(
+                                    &entity.text,
+                                    Some(label),
+                                    true,
+                                    entity.confidence,
+                                );
+                                graph.add_entity(node).expect("Failed");
+                            }
+                        }
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_ner_entity_relationships(c: &mut Criterion) {
+    let mut group = c.benchmark_group("graph_ner_relationships");
+    group.sample_size(30);
+
+    // Extract entities and create co-occurrence relationships
+    group.bench_function("cooccurrence_from_text", |b| {
+        let text = "Satya Nadella and Sundar Pichai discussed AI partnerships between Microsoft and Google in Seattle";
+
+        b.iter_batched(
+            || {
+                let (graph, temp_dir) = setup_graph_memory();
+                let ner = setup_fallback_ner();
+                (graph, temp_dir, ner)
+            },
+            |(graph, _temp_dir, ner)| {
+                let entities = ner.extract(text).unwrap_or_default();
+                let mut entity_ids = Vec::new();
+
+                // Add all entities
+                for entity in &entities {
+                    let label = ner_type_to_label(&entity.entity_type);
+                    let node = create_entity(&entity.text, Some(label), true, entity.confidence);
+                    let id = graph.add_entity(node).expect("Failed");
+                    entity_ids.push(id);
+                }
+
+                // Create co-occurrence relationships
+                for i in 0..entity_ids.len() {
+                    for j in (i + 1)..entity_ids.len() {
+                        let edge = create_relationship(
+                            entity_ids[i],
+                            entity_ids[j],
+                            RelationType::RelatedTo,
+                            0.7,
+                        );
+                        graph.add_relationship(edge).expect("Failed");
+                    }
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+// =============================================================================
 // Universe Visualization Benchmarks
 // =============================================================================
 
@@ -507,6 +661,9 @@ criterion_group!(
         bench_synapse_decay,
         bench_effective_strength,
         bench_traversal_with_hebbian,
+        bench_ner_to_graph_entity,
+        bench_ner_batch_to_graph,
+        bench_ner_entity_relationships,
         bench_universe_generation,
         bench_print_graph_summary
 );
