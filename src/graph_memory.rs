@@ -13,6 +13,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::constants::{
+    LTP_DECAY_FACTOR, LTP_DECAY_HALF_LIFE_DAYS, LTP_LEARNING_RATE, LTP_MIN_STRENGTH, LTP_THRESHOLD,
+};
+
 /// Entity node in the knowledge graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityNode {
@@ -153,12 +157,12 @@ fn default_last_activated() -> DateTime<Utc> {
     Utc::now()
 }
 
-/// Hebbian learning constants
-const LEARNING_RATE: f32 = 0.1; // η: How much strength increases per co-activation
-const DECAY_HALF_LIFE_DAYS: f64 = 14.0; // λ: Strength halves every 14 days without use
-const LTP_THRESHOLD: u32 = 10; // Activations needed for Long-Term Potentiation
-const LTP_DECAY_FACTOR: f32 = 0.1; // Potentiated synapses decay 10x slower
-const MIN_STRENGTH: f32 = 0.01; // Floor to prevent complete forgetting
+// Hebbian learning constants now imported from crate::constants:
+// - LTP_LEARNING_RATE (0.1): η for strength increase per co-activation
+// - LTP_DECAY_HALF_LIFE_DAYS (14.0): λ for time-based decay
+// - LTP_THRESHOLD (10): Activations needed for Long-Term Potentiation
+// - LTP_DECAY_FACTOR (0.1): Potentiated synapses decay 10x slower
+// - LTP_MIN_STRENGTH (0.01): Floor to prevent complete forgetting
 
 impl RelationshipEdge {
     /// Strengthen this synapse (Hebbian learning)
@@ -173,7 +177,7 @@ impl RelationshipEdge {
         self.last_activated = Utc::now();
 
         // Hebbian strengthening: diminishing returns as strength approaches 1.0
-        let boost = LEARNING_RATE * (1.0 - self.strength);
+        let boost = LTP_LEARNING_RATE * (1.0 - self.strength);
         self.strength = (self.strength + boost).min(1.0);
 
         // Check for Long-Term Potentiation threshold
@@ -200,7 +204,7 @@ impl RelationshipEdge {
         }
 
         // Calculate decay rate (λ = ln(2) / half_life)
-        let lambda = std::f64::consts::LN_2 / DECAY_HALF_LIFE_DAYS;
+        let lambda = std::f64::consts::LN_2 / LTP_DECAY_HALF_LIFE_DAYS;
 
         // Potentiated synapses decay much slower (biological LTP)
         let effective_lambda = if self.potentiated {
@@ -214,13 +218,13 @@ impl RelationshipEdge {
         self.strength *= decay_factor;
 
         // Apply floor to prevent complete forgetting
-        if self.strength < MIN_STRENGTH {
-            self.strength = MIN_STRENGTH;
+        if self.strength < LTP_MIN_STRENGTH {
+            self.strength = LTP_MIN_STRENGTH;
         }
 
         // Return whether this synapse should be pruned
         // Non-potentiated synapses with minimal strength can be removed
-        !self.potentiated && self.strength <= MIN_STRENGTH
+        !self.potentiated && self.strength <= LTP_MIN_STRENGTH
     }
 
     /// Get the effective strength considering recency
@@ -236,7 +240,7 @@ impl RelationshipEdge {
             return self.strength;
         }
 
-        let lambda = std::f64::consts::LN_2 / DECAY_HALF_LIFE_DAYS;
+        let lambda = std::f64::consts::LN_2 / LTP_DECAY_HALF_LIFE_DAYS;
         let effective_lambda = if self.potentiated {
             lambda * LTP_DECAY_FACTOR as f64
         } else {
@@ -244,7 +248,7 @@ impl RelationshipEdge {
         };
 
         let decay_factor = (-effective_lambda * days_elapsed).exp() as f32;
-        (self.strength * decay_factor).max(MIN_STRENGTH)
+        (self.strength * decay_factor).max(LTP_MIN_STRENGTH)
     }
 }
 
@@ -574,11 +578,21 @@ impl GraphMemory {
         }
     }
 
-    /// Find entity by name
+    /// Find entity by name (case-insensitive)
     pub fn find_entity_by_name(&self, name: &str) -> Result<Option<EntityNode>> {
+        let name_lower = name.to_lowercase();
         let uuid = {
             let index = self.entity_name_index.read();
-            index.get(name).cloned()
+            // First try exact match for performance
+            if let Some(uuid) = index.get(name) {
+                Some(*uuid)
+            } else {
+                // Fall back to case-insensitive search
+                index
+                    .iter()
+                    .find(|(k, _)| k.to_lowercase() == name_lower)
+                    .map(|(_, v)| *v)
+            }
         };
 
         match uuid {

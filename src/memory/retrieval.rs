@@ -18,6 +18,11 @@ use tracing::info;
 
 use super::storage::{MemoryStorage, SearchCriteria};
 use super::types::*;
+use crate::constants::{
+    EDGE_HALF_LIFE_HOURS, EDGE_INITIAL_STRENGTH, EDGE_MIN_STRENGTH,
+    PREFETCH_RECENCY_FULL_BOOST, PREFETCH_RECENCY_FULL_HOURS, PREFETCH_RECENCY_PARTIAL_BOOST,
+    PREFETCH_RECENCY_PARTIAL_HOURS, VECTOR_SEARCH_CANDIDATE_MULTIPLIER,
+};
 use crate::embeddings::{minilm::MiniLMEmbedder, Embedder};
 use crate::vector_db::vamana::{VamanaConfig, VamanaIndex};
 
@@ -247,9 +252,11 @@ impl RetrievalEngine {
         };
 
         // Search vector index
+        // Use VECTOR_SEARCH_CANDIDATE_MULTIPLIER to retrieve extra candidates for filtering
+        // This accounts for ~50% filter rejection rate in typical queries
         let index = self.vector_index.read();
         let results = index
-            .search(&query_embedding, limit * 2) // Get 2x for filtering
+            .search(&query_embedding, limit * VECTOR_SEARCH_CANDIDATE_MULTIPLIER)
             .context("Vector search failed")?;
 
         // Map vector IDs to memory IDs
@@ -305,10 +312,10 @@ impl RetrievalEngine {
             return Ok(Vec::new());
         };
 
-        // Search Vamana index
+        // Search Vamana index with candidate multiplier for filtering headroom
         let index = self.vector_index.read();
         let results = index
-            .search(&query_embedding, limit * 2)
+            .search(&query_embedding, limit * VECTOR_SEARCH_CANDIDATE_MULTIPLIER)
             .context("Vector search failed")?;
 
         // Map vector IDs to memory IDs and fetch memories
@@ -468,11 +475,17 @@ impl RetrievalEngine {
             }
         }
 
+        // Apply Ebbinghaus salience scoring: combines retrieval score with time-based relevance
+        // This ensures older, less-accessed memories naturally fade in ranking
         let mut sorted: Vec<(f32, SharedMemory)> = all_results
             .into_iter()
             .map(|(id, memory)| {
-                let score = scores.get(&id).copied().unwrap_or(0.0);
-                (score, memory)
+                let retrieval_score = scores.get(&id).copied().unwrap_or(0.0);
+                // Salience score factors in recency (Ebbinghaus curve) and access frequency
+                let salience = memory.salience_score_with_access();
+                // Final score: 70% retrieval relevance, 30% salience (time-based decay)
+                let final_score = retrieval_score * 0.7 + salience * 0.3;
+                (final_score, memory)
             })
             .collect();
 
@@ -950,7 +963,7 @@ struct EdgeWeight {
 impl Default for EdgeWeight {
     fn default() -> Self {
         Self {
-            strength: 0.5, // Start at medium strength
+            strength: EDGE_INITIAL_STRENGTH, // From constants.rs (0.5)
             activation_count: 1,
             last_activated: chrono::Utc::now().timestamp_millis(),
         }
@@ -958,11 +971,9 @@ impl Default for EdgeWeight {
 }
 
 impl EdgeWeight {
-    /// Hebbian learning constants
+    /// Hebbian learning constants (local, kept for learning rate and LTP)
     const LEARNING_RATE: f32 = 0.15;
-    const DECAY_HALF_LIFE_HOURS: f64 = 168.0; // 1 week
     const LTP_THRESHOLD: u32 = 5; // Lower threshold for memory associations
-    const MIN_STRENGTH: f32 = 0.05;
 
     /// Strengthen the edge (called when both memories are accessed together)
     fn strengthen(&mut self) {
@@ -990,16 +1001,16 @@ impl EdgeWeight {
 
         // Potentiated edges decay slower
         let effective_half_life = if self.activation_count >= Self::LTP_THRESHOLD {
-            Self::DECAY_HALF_LIFE_HOURS * 5.0 // 5x slower decay
+            EDGE_HALF_LIFE_HOURS * 5.0 // 5x slower decay (from constants.rs)
         } else {
-            Self::DECAY_HALF_LIFE_HOURS
+            EDGE_HALF_LIFE_HOURS // From constants.rs (24.0 hours)
         };
 
         let decay_rate = (0.5_f64).ln() / effective_half_life;
         let decay_factor = (decay_rate * hours_elapsed).exp() as f32;
         self.strength *= decay_factor;
 
-        self.strength < Self::MIN_STRENGTH
+        self.strength < EDGE_MIN_STRENGTH // From constants.rs (0.05)
     }
 }
 
@@ -1094,7 +1105,7 @@ impl MemoryGraph {
                     if !visited.contains(neighbor) {
                         // Apply decay inline (non-mutating check)
                         let effective_strength = weight.strength;
-                        if effective_strength >= EdgeWeight::MIN_STRENGTH {
+                        if effective_strength >= EDGE_MIN_STRENGTH {
                             heap.push((
                                 ordered_float::OrderedFloat(effective_strength),
                                 depth + 1,
@@ -1486,13 +1497,12 @@ impl AnticipatoryPrefetch {
             }
         }
 
-        // Recency boost
+        // Recency boost (using centralized constants)
         let age_hours = (chrono::Utc::now() - memory.created_at).num_hours();
-        if age_hours < 24 {
-            score += 0.1;
-        } else if age_hours < 168 {
-            // 1 week
-            score += 0.05;
+        if age_hours < PREFETCH_RECENCY_FULL_HOURS {
+            score += PREFETCH_RECENCY_FULL_BOOST;
+        } else if age_hours < PREFETCH_RECENCY_PARTIAL_HOURS {
+            score += PREFETCH_RECENCY_PARTIAL_BOOST;
         }
 
         score.min(1.0)

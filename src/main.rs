@@ -36,6 +36,10 @@ mod validation;
 mod vector_db; // P1.6: Distributed tracing
 
 use config::ServerConfig;
+use constants::{
+    DATABASE_FLUSH_TIMEOUT_SECS, GRACEFUL_SHUTDOWN_TIMEOUT_SECS, VECTOR_INDEX_SAVE_TIMEOUT_SECS,
+    VECTOR_SEARCH_CANDIDATE_MULTIPLIER,
+};
 
 use embeddings::NerEntityType;
 use embeddings::{are_ner_models_downloaded, get_ner_models_dir, NerConfig, NeuralNer};
@@ -45,15 +49,11 @@ use graph_memory::{
     RelationType, RelationshipEdge,
 };
 use memory::{
-    Experience, ExperienceType, GraphStats as VisualizationStats, Memory, MemoryConfig, MemoryId,
-    MemoryStats, MemorySystem, Query as MemoryQuery,
+    spreading_activation_retrieve, ActivatedMemory, Experience, ExperienceType,
+    GraphStats as VisualizationStats, Memory, MemoryConfig, MemoryId, MemoryStats, MemorySystem,
+    Query as MemoryQuery, SharedMemory,
 };
 use similarity::top_k_similar;
-
-// P0.11: Shutdown timeouts for production resilience
-const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 30; // Max time to drain requests
-const DATABASE_FLUSH_TIMEOUT_SECS: u64 = 10; // Max time to flush RocksDB
-const VECTOR_INDEX_SAVE_TIMEOUT_SECS: u64 = 10; // Max time to save indices
 
 /// Audit event for history tracking
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1412,32 +1412,45 @@ async fn remember(
     }))
 }
 
-/// LLM-friendly /api/recall - just pass query, get relevant memories back
+/// LLM-friendly /api/recall - hybrid retrieval combining semantic search + graph spreading activation
 /// Example: POST /api/recall { "user_id": "agent-1", "query": "What does user like?" }
+///
+/// Retrieval Strategy:
+/// 1. Semantic search: MiniLM embeddings + Vamana HNSW (50% weight)
+/// 2. Graph spreading activation: Entity-based context retrieval (35% weight)
+/// 3. Linguistic matching: Focal entity boost (15% weight)
+/// Results are deduplicated and ranked by hybrid score.
 #[tracing::instrument(skip(state), fields(user_id = %req.user_id, query = %req.query))]
 async fn recall(
     State(state): State<AppState>,
     Json(req): Json<RecallRequest>,
 ) -> Result<Json<RecallResponse>, AppError> {
-    // P1.2: Instrument recall operation
+    use std::collections::HashMap;
+
     let op_start = std::time::Instant::now();
 
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let memory = state
+    let memory_system = state
         .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let graph_memory = state
+        .get_user_graph(&req.user_id)
         .map_err(AppError::Internal)?;
 
     let limit = req.limit;
     let query_text = req.query.clone();
+    let query_text_clone = query_text.clone();
 
-    let memories = {
-        let memory = memory.clone();
+    // Run semantic retrieval via MemorySystem
+    let semantic_memories: Vec<SharedMemory> = {
+        let memory = memory_system.clone();
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
             let query = MemoryQuery {
                 query_text: Some(query_text),
-                max_results: limit,
+                max_results: limit * VECTOR_SEARCH_CANDIDATE_MULTIPLIER,
                 ..Default::default()
             };
             memory_guard.retrieve(&query).unwrap_or_default()
@@ -1446,10 +1459,96 @@ async fn recall(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
     };
 
-    // Convert Arc<Memory> to owned values for response
-    let recall_memories: Vec<RecallMemory> = memories
+    // Run graph-based spreading activation retrieval
+    let graph_activated: Vec<ActivatedMemory> = {
+        let graph = graph_memory.clone();
+        let memory = memory_system.clone();
+        let query_for_graph = query_text_clone.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let graph_guard = graph.read();
+            let memory_guard = memory.read();
+
+            // Build the episode-to-memory mapping function
+            // EpisodicNode UUID == MemoryId.0 (see process_experience_into_graph)
+            let episode_to_memory = |episode: &EpisodicNode| -> anyhow::Result<Option<SharedMemory>> {
+                let memory_id = MemoryId(episode.uuid);
+                match memory_guard.get_memory(&memory_id) {
+                    Ok(mem) => Ok(Some(Arc::new(mem))),
+                    Err(_) => Ok(None), // Memory may have been deleted
+                }
+            };
+
+            let query = MemoryQuery {
+                query_text: Some(query_for_graph.clone()),
+                max_results: limit * VECTOR_SEARCH_CANDIDATE_MULTIPLIER,
+                ..Default::default()
+            };
+
+            // Run spreading activation
+            match spreading_activation_retrieve(
+                &query_for_graph,
+                &query,
+                &graph_guard,
+                memory_guard.get_embedder(),
+                episode_to_memory,
+            ) {
+                Ok(activated) => activated,
+                Err(e) => {
+                    tracing::debug!("Spreading activation failed: {}. Using semantic only.", e);
+                    Vec::new()
+                }
+            }
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Graph retrieval panicked: {e}")))?
+    };
+
+    // Merge results with hybrid scoring
+    // Scoring weights: semantic 50%, graph 35%, linguistic 15% (from constants)
+    let mut scored_memories: HashMap<uuid::Uuid, (f32, SharedMemory)> = HashMap::new();
+    let semantic_count = semantic_memories.len();
+    let graph_activated_count = graph_activated.len();
+
+    // Add semantic results with their position-based score
+    for (rank, memory) in semantic_memories.iter().enumerate() {
+        let semantic_score = 1.0 / (rank as f32 + 1.0); // Reciprocal rank
+        let hybrid_score = 0.50 * semantic_score; // 50% weight for semantic
+        scored_memories.insert(memory.id.0, (hybrid_score, memory.clone()));
+    }
+
+    // Add/boost graph-activated results
+    for activated in graph_activated {
+        let entry = scored_memories
+            .entry(activated.memory.id.0)
+            .or_insert((0.0, activated.memory.clone()));
+
+        // Add graph activation score (35% weight) + linguistic (15% weight)
+        entry.0 += 0.35 * activated.activation_score + 0.15 * activated.linguistic_score;
+    }
+
+    // Sort by final hybrid score and take top N
+    let mut final_results: Vec<(f32, SharedMemory)> = scored_memories.into_values().collect();
+    final_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    final_results.truncate(limit);
+
+    let graph_contribution = final_results
+        .iter()
+        .filter(|(score, _)| *score > 0.50) // Has graph boost
+        .count();
+
+    tracing::debug!(
+        semantic_count = semantic_count,
+        graph_activated_count = graph_activated_count,
+        final_count = final_results.len(),
+        graph_contribution = graph_contribution,
+        "Hybrid retrieval completed"
+    );
+
+    // Convert to response format
+    let recall_memories: Vec<RecallMemory> = final_results
         .into_iter()
-        .map(|m| RecallMemory {
+        .map(|(_, m)| RecallMemory {
             id: m.id.0.to_string(),
             content: m.experience.content.clone(),
             importance: m.importance(),
@@ -1462,13 +1561,13 @@ async fn recall(
     // Record metrics
     let duration = op_start.elapsed().as_secs_f64();
     metrics::MEMORY_RETRIEVE_DURATION
-        .with_label_values(&["semantic"])
+        .with_label_values(&["hybrid"])
         .observe(duration);
     metrics::MEMORY_RETRIEVE_TOTAL
-        .with_label_values(&["semantic", "success"])
+        .with_label_values(&["hybrid", "success"])
         .inc();
     metrics::MEMORY_RETRIEVE_RESULTS
-        .with_label_values(&["semantic"])
+        .with_label_values(&["hybrid"])
         .observe(count as f64);
 
     Ok(Json(RecallResponse {

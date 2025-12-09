@@ -15,20 +15,14 @@ use anyhow::Result;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::constants::{
+    HYBRID_GRAPH_WEIGHT, HYBRID_LINGUISTIC_WEIGHT, HYBRID_SEMANTIC_WEIGHT,
+    SPREADING_ACTIVATION_THRESHOLD, SPREADING_DECAY_RATE, SPREADING_MAX_HOPS,
+};
 use crate::embeddings::Embedder;
 use crate::graph_memory::{EpisodicNode, GraphMemory};
 use crate::memory::query_parser::{analyze_query, QueryAnalysis};
 use crate::memory::types::{Memory, Query, SharedMemory};
-
-/// Activation decay rate (Anderson & Pirolli 1984)
-/// A(d) = A₀ × e^(-λd) where λ = DECAY_RATE
-const DECAY_RATE: f32 = 0.5;
-
-/// Maximum hops for spreading activation
-const MAX_HOPS: usize = 3;
-
-/// Activation threshold (prune weak activations)
-const ACTIVATION_THRESHOLD: f32 = 0.01;
 
 /// Memory with activation score
 #[derive(Debug, Clone)]
@@ -110,13 +104,13 @@ pub fn spreading_activation_retrieve(
 
     // Step 3: Spread activation through graph (Anderson & Pirolli 1984)
     // Formula: A(d) = A₀ × e^(-λd)
-    for hop in 1..=MAX_HOPS {
-        let decay = (-DECAY_RATE * hop as f32).exp();
+    for hop in 1..=SPREADING_MAX_HOPS {
+        let decay = (-SPREADING_DECAY_RATE * hop as f32).exp();
 
         tracing::debug!(
             "📊 Spreading activation (hop {}/{}), decay factor: {:.3}",
             hop,
-            MAX_HOPS,
+            SPREADING_MAX_HOPS,
             decay
         );
 
@@ -126,7 +120,7 @@ pub fn spreading_activation_retrieve(
 
         for (entity_uuid, source_activation) in current_activated {
             // Only spread from entities with sufficient activation
-            if source_activation < ACTIVATION_THRESHOLD {
+            if source_activation < SPREADING_ACTIVATION_THRESHOLD {
                 continue;
             }
 
@@ -144,7 +138,7 @@ pub fn spreading_activation_retrieve(
         }
 
         // Prune weak activations (ACT-R model)
-        activation_map.retain(|_, activation| *activation > ACTIVATION_THRESHOLD);
+        activation_map.retain(|_, activation| *activation > SPREADING_ACTIVATION_THRESHOLD);
 
         tracing::debug!("  Activated entities: {}", activation_map.len());
     }
@@ -192,11 +186,12 @@ pub fn spreading_activation_retrieve(
             let linguistic_score = calculate_linguistic_match(&memory, &analysis);
 
             // Hybrid scoring (adjusted for semantic-first retrieval)
-            // Semantic: 50%, Graph: 35%, Linguistic: 15%
+            // Weights from constants: Semantic 50%, Graph 35%, Linguistic 15%
             // Semantic similarity is primary for content matching
             // Graph activation helps with context-related memories
-            let final_score =
-                0.35 * graph_activation + 0.50 * semantic_score + 0.15 * linguistic_score;
+            let final_score = HYBRID_GRAPH_WEIGHT * graph_activation
+                + HYBRID_SEMANTIC_WEIGHT * semantic_score
+                + HYBRID_LINGUISTIC_WEIGHT * linguistic_score;
 
             scored_memories.push(ActivatedMemory {
                 memory,
@@ -312,16 +307,20 @@ mod tests {
 
     #[test]
     fn test_activation_decay() {
+        use crate::constants::{
+            SPREADING_ACTIVATION_THRESHOLD, SPREADING_DECAY_RATE, SPREADING_MAX_HOPS,
+        };
+
         // Test decay formula: A(d) = A₀ × e^(-λd)
         let initial_activation = 1.0;
 
-        for hop in 1..=MAX_HOPS {
-            let decay = (-DECAY_RATE * hop as f32).exp();
+        for hop in 1..=SPREADING_MAX_HOPS {
+            let decay = (-SPREADING_DECAY_RATE * hop as f32).exp();
             let activation = initial_activation * decay;
 
             // Activation should decrease with each hop
             assert!(activation < initial_activation);
-            assert!(activation > ACTIVATION_THRESHOLD);
+            assert!(activation > SPREADING_ACTIVATION_THRESHOLD);
         }
     }
 }

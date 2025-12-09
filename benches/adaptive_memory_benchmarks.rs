@@ -11,7 +11,7 @@
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use tempfile::TempDir;
 
-use uuid::Uuid;
+use shodh_memory::uuid::Uuid;
 
 use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::{
@@ -420,7 +420,7 @@ fn bench_consolidate_scaling(c: &mut Criterion) {
 }
 
 fn bench_reinforce_fact(c: &mut Criterion) {
-    use chrono::Utc;
+    use shodh_memory::chrono::Utc;
     use shodh_memory::memory::compression::{FactType, SemanticFact};
 
     c.bench_function("adaptive_reinforce_fact", |b| {
@@ -452,7 +452,7 @@ fn bench_reinforce_fact(c: &mut Criterion) {
 }
 
 fn bench_should_decay_fact(c: &mut Criterion) {
-    use chrono::{Duration, Utc};
+    use shodh_memory::chrono::{Duration, Utc};
     use shodh_memory::memory::compression::{FactType, SemanticFact};
 
     let mut group = c.benchmark_group("adaptive_should_decay_fact");
@@ -476,7 +476,7 @@ fn bench_should_decay_fact(c: &mut Criterion) {
                     fact_type: FactType::Pattern,
                 };
 
-                b.iter(|| consolidator.should_decay_fact(&fact, 30));
+                b.iter(|| consolidator.should_decay_fact(&fact));
             },
         );
     }

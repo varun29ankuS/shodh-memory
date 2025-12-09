@@ -7,9 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::types::*;
-
-/// Maximum decompressed size to prevent DoS via malicious payloads (10MB)
-const MAX_DECOMPRESSED_SIZE: i32 = 10 * 1024 * 1024;
+use crate::constants::{
+    COMPRESSION_ACCESS_THRESHOLD, COMPRESSION_AGE_DAYS, COMPRESSION_IMPORTANCE_HIGH,
+    COMPRESSION_IMPORTANCE_LOW, CONSOLIDATION_MIN_AGE_DAYS, CONSOLIDATION_MIN_SUPPORT,
+    FACT_DECAY_BASE_DAYS, FACT_DECAY_PER_SUPPORT_DAYS, MAX_DECOMPRESSED_SIZE,
+};
 
 /// Compression strategy for memories
 #[derive(Debug, Clone)]
@@ -71,19 +73,20 @@ impl CompressionPipeline {
 
     /// Select compression strategy based on memory characteristics
     fn select_strategy(&self, memory: &Memory) -> CompressionStrategy {
-        // High importance memories get lighter compression
-        if memory.importance() > 0.8 {
+        // High importance memories get lighter compression (lossless LZ4)
+        if memory.importance() > COMPRESSION_IMPORTANCE_HIGH {
             return CompressionStrategy::Lz4;
         }
 
         // Frequently accessed memories stay uncompressed
-        if memory.access_count() > 10 {
+        if memory.access_count() > COMPRESSION_ACCESS_THRESHOLD {
             return CompressionStrategy::None;
         }
 
-        // Old, low-importance memories get aggressive compression
+        // Old, low-importance memories get aggressive compression (lossy semantic)
         let age = chrono::Utc::now() - memory.created_at;
-        if age.num_days() > 30 && memory.importance() < 0.5 {
+        if age.num_days() > COMPRESSION_AGE_DAYS && memory.importance() < COMPRESSION_IMPORTANCE_LOW
+        {
             return CompressionStrategy::Summarization;
         }
 
@@ -441,8 +444,8 @@ impl SemanticConsolidator {
     pub fn new() -> Self {
         Self {
             keyword_extractor: KeywordExtractor::new(),
-            min_support: 2,
-            min_age_days: 7,
+            min_support: CONSOLIDATION_MIN_SUPPORT,
+            min_age_days: CONSOLIDATION_MIN_AGE_DAYS,
         }
     }
 
@@ -737,13 +740,16 @@ impl SemanticConsolidator {
     /// Check if a fact should decay (no reinforcement for too long)
     ///
     /// Returns true if the fact should be removed.
-    pub fn should_decay_fact(&self, fact: &SemanticFact, decay_days: i64) -> bool {
+    /// Uses FACT_DECAY_BASE_DAYS (30) as base, extended by confidence and support count.
+    pub fn should_decay_fact(&self, fact: &SemanticFact) -> bool {
         let now = chrono::Utc::now();
         let days_since_reinforcement = (now - fact.last_reinforced).num_days();
 
         // Facts with high confidence and support decay slower
-        let decay_threshold =
-            decay_days + (fact.confidence * 30.0) as i64 + fact.support_count as i64 * 7;
+        // Base: 30 days, + 7 days per support count, + confidence bonus
+        let decay_threshold = FACT_DECAY_BASE_DAYS
+            + (fact.confidence * 30.0) as i64
+            + fact.support_count as i64 * FACT_DECAY_PER_SUPPORT_DAYS;
 
         days_since_reinforcement > decay_threshold
     }

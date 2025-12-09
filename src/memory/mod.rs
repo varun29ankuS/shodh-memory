@@ -46,6 +46,7 @@ pub use crate::memory::retrieval::{
     PrefetchResult, ReinforcementStats, RetrievalFeedback, RetrievalOutcome, TrackedRetrieval,
 };
 pub use crate::memory::visualization::{GraphStats, MemoryLogger};
+pub use crate::memory::graph_retrieval::{spreading_activation_retrieve, ActivatedMemory};
 
 /// Configuration for the memory system
 #[derive(Debug, Clone, Serialize, Deserialize)]

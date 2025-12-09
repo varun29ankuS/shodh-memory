@@ -126,7 +126,7 @@ pub const COMPRESSION_AGE_DAYS: i64 = 30;
 /// - 10 accesses indicates ongoing utility
 /// - Avoids compressing memories that are still being actively used
 /// - Cost of decompression outweighs storage savings at this usage level
-pub const COMPRESSION_ACCESS_THRESHOLD: usize = 10;
+pub const COMPRESSION_ACCESS_THRESHOLD: u32 = 10;
 
 // =============================================================================
 // RESOURCE LIMITS
@@ -280,3 +280,307 @@ pub const DEFAULT_COMPRESSION_AGE_DAYS: u32 = 7;
 
 /// Default max results for queries
 pub const DEFAULT_MAX_RESULTS: usize = 10;
+
+// =============================================================================
+// SPREADING ACTIVATION CONSTANTS
+// Based on Anderson & Pirolli (1984) "Spread of Activation"
+// =============================================================================
+
+/// Activation decay rate for spreading activation
+///
+/// Formula: A(d) = A₀ × e^(-λd) where λ = SPREADING_DECAY_RATE
+///
+/// Justification:
+/// - 0.5 provides moderate decay - activation halves every ~1.4 hops
+/// - Lower values (0.3) spread further but may activate irrelevant nodes
+/// - Higher values (0.7) focus on immediate neighbors only
+///
+/// Reference: Anderson & Pirolli (1984), ACT-R cognitive architecture
+pub const SPREADING_DECAY_RATE: f32 = 0.5;
+
+/// Maximum hops for spreading activation
+///
+/// Justification:
+/// - 3 hops captures "friend of a friend of a friend" relationships
+/// - Beyond 3 hops, activation typically falls below threshold anyway
+/// - Limits computational cost for large graphs
+pub const SPREADING_MAX_HOPS: usize = 3;
+
+/// Activation threshold for pruning weak activations
+///
+/// Justification:
+/// - 0.01 (1%) prunes noise while preserving meaningful spread
+/// - Matches MIN_STRENGTH for consistency
+/// - Below this, activation contributes negligibly to final score
+pub const SPREADING_ACTIVATION_THRESHOLD: f32 = 0.01;
+
+// =============================================================================
+// LONG-TERM POTENTIATION (LTP) CONSTANTS
+// Based on synaptic plasticity and Hebbian learning theory
+// =============================================================================
+
+/// Learning rate for Hebbian edge strengthening
+///
+/// How much edge strength increases per co-activation.
+///
+/// Justification:
+/// - 0.1 (10%) is moderate - requires ~10 co-activations to saturate
+/// - Matches empirical synaptic LTP rates
+///
+/// Reference: Bi & Poo (1998), Hebbian learning
+pub const LTP_LEARNING_RATE: f32 = 0.1;
+
+/// Half-life in days for synapse decay without use
+///
+/// Justification:
+/// - 14 days matches typical project/task cycles
+/// - Unused associations fade but don't disappear immediately
+/// - LTP edges decay 10x slower (see LTP_DECAY_FACTOR)
+pub const LTP_DECAY_HALF_LIFE_DAYS: f64 = 14.0;
+
+/// Activation count threshold for Long-Term Potentiation
+///
+/// After this many co-activations, the synapse becomes "potentiated"
+/// and decays much slower.
+///
+/// Justification:
+/// - 10 activations indicates consistent pattern, not coincidence
+/// - Matches biological LTP threshold (~10-100 activations)
+pub const LTP_THRESHOLD: u32 = 10;
+
+/// Decay factor for potentiated synapses
+///
+/// Potentiated synapses decay at this fraction of the normal rate.
+///
+/// Justification:
+/// - 0.1 means potentiated edges decay 10x slower
+/// - Important associations persist longer
+pub const LTP_DECAY_FACTOR: f32 = 0.1;
+
+/// Minimum synapse strength floor
+///
+/// Synapses never decay below this value.
+///
+/// Justification:
+/// - 0.01 (1%) allows recovery if pattern re-emerges
+/// - Matches SPREADING_ACTIVATION_THRESHOLD
+pub const LTP_MIN_STRENGTH: f32 = 0.01;
+
+// =============================================================================
+// INFORMATION CONTENT (IC) WEIGHTS
+// Based on linguistic analysis for query parsing
+// Reference: Lioma & Ounis (2006) "Information Content Weighting"
+// =============================================================================
+
+/// Information content weight for nouns
+///
+/// Nouns are the most discriminative in queries.
+///
+/// Justification:
+/// - 2.3 matches empirical IC measurements for English nouns
+/// - Nouns carry the core semantic meaning ("Rust", "database", "memory")
+pub const IC_NOUN: f32 = 2.3;
+
+/// Information content weight for adjectives
+///
+/// Adjectives provide discriminative context.
+///
+/// Justification:
+/// - 1.7 reflects moderate discriminative power
+/// - Adjectives narrow down ("fast database" vs "reliable database")
+pub const IC_ADJECTIVE: f32 = 1.7;
+
+/// Information content weight for verbs
+///
+/// Verbs are less discriminative ("bus stops" in IR terminology).
+///
+/// Justification:
+/// - 1.0 baseline weight
+/// - Common verbs like "is", "has", "uses" add little discriminative value
+pub const IC_VERB: f32 = 1.0;
+
+// =============================================================================
+// SERVER TIMEOUT CONSTANTS
+// =============================================================================
+
+/// Graceful shutdown timeout in seconds
+///
+/// Maximum time to wait for active requests to drain.
+///
+/// Justification:
+/// - 30 seconds allows long-running requests to complete
+/// - Beyond this, force shutdown to avoid hanging
+pub const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+
+/// Database flush timeout in seconds
+///
+/// Maximum time to wait for RocksDB flush on shutdown.
+///
+/// Justification:
+/// - 10 seconds is sufficient for typical write buffers
+/// - Prevents data loss on clean shutdown
+pub const DATABASE_FLUSH_TIMEOUT_SECS: u64 = 10;
+
+/// Vector index save timeout in seconds
+///
+/// Maximum time to wait for HNSW index persistence.
+///
+/// Justification:
+/// - 10 seconds handles typical index sizes
+/// - Large indices may need longer, but startup rebuild is fallback
+pub const VECTOR_INDEX_SAVE_TIMEOUT_SECS: u64 = 10;
+
+// =============================================================================
+// COMPRESSION SAFETY LIMITS
+// =============================================================================
+
+/// Maximum decompressed size in bytes (safety limit)
+///
+/// Prevents zip bomb attacks and memory exhaustion.
+///
+/// Justification:
+/// - 10MB is generous for any single memory entry
+/// - Larger content should be chunked at ingestion time
+pub const MAX_DECOMPRESSED_SIZE: i32 = 10 * 1024 * 1024;
+
+// =============================================================================
+// PREFETCH RECENCY BOOST CONSTANTS
+// For anticipatory prefetch relevance scoring
+// =============================================================================
+
+/// Hours threshold for full recency boost in prefetch
+///
+/// Memories younger than this get the full recency boost.
+///
+/// Justification:
+/// - 24 hours captures "today's context"
+/// - Recent memories are most likely to be relevant
+pub const PREFETCH_RECENCY_FULL_HOURS: i64 = 24;
+
+/// Hours threshold for partial recency boost in prefetch
+///
+/// Memories between FULL and this threshold get partial boost.
+///
+/// Justification:
+/// - 168 hours = 1 week
+/// - Weekly work cycles are common patterns
+pub const PREFETCH_RECENCY_PARTIAL_HOURS: i64 = 168;
+
+/// Recency boost for very recent memories (< 24h)
+pub const PREFETCH_RECENCY_FULL_BOOST: f32 = 0.1;
+
+/// Recency boost for recent memories (24h - 1 week)
+pub const PREFETCH_RECENCY_PARTIAL_BOOST: f32 = 0.05;
+
+// =============================================================================
+// CONSTANTS USAGE DOCUMENTATION
+// =============================================================================
+//
+// This section documents where each constant is used in the codebase.
+// Updated: 2025-12-09
+//
+// ## Hebbian Learning Constants
+// | Constant                  | File                      | Function/Context                    |
+// |---------------------------|---------------------------|-------------------------------------|
+// | HEBBIAN_BOOST_HELPFUL     | memory/types.rs           | Memory::boost_importance()          |
+// | HEBBIAN_DECAY_MISLEADING  | memory/types.rs           | Memory::decay_importance()          |
+// | IMPORTANCE_FLOOR          | memory/types.rs           | Memory::decay_importance() - floor  |
+//
+// ## Memory Graph Edge Constants
+// | Constant                  | File                      | Function/Context                    |
+// |---------------------------|---------------------------|-------------------------------------|
+// | EDGE_INITIAL_STRENGTH     | memory/retrieval.rs       | EdgeWeight::default()               |
+// | EDGE_MIN_STRENGTH         | memory/retrieval.rs       | EdgeWeight::decay(), find_assoc()   |
+// | EDGE_HALF_LIFE_HOURS      | memory/retrieval.rs       | EdgeWeight::decay()                 |
+//
+// ## Compression Constants
+// | Constant                      | File                  | Function/Context                    |
+// |-------------------------------|---------------------- |-------------------------------------|
+// | COMPRESSION_IMPORTANCE_HIGH   | memory/compression.rs | should_compress() - LZ4 threshold   |
+// | COMPRESSION_IMPORTANCE_LOW    | memory/compression.rs | should_compress() - semantic thresh |
+// | COMPRESSION_AGE_DAYS          | memory/compression.rs | should_compress() - age check       |
+// | COMPRESSION_ACCESS_THRESHOLD  | memory/compression.rs | should_compress() - access count    |
+// | MAX_DECOMPRESSED_SIZE         | memory/compression.rs | decompress() - safety limit         |
+//
+// ## Vector Search Constants
+// | Constant                          | File                | Function/Context                  |
+// |-----------------------------------|---------------------|-----------------------------------|
+// | VECTOR_SEARCH_CANDIDATE_MULTIPLIER| memory/retrieval.rs | search_ids(), similarity_search() |
+// |                                   | main.rs             | hybrid recall query building      |
+// | ESTIMATED_BYTES_PER_MEMORY        | (unused)            | Resource estimation               |
+//
+// ## Salience/Recency Scoring Constants (Ebbinghaus Forgetting Curve)
+// | Constant                  | File                | Function/Context                      |
+// |---------------------------|---------------------|---------------------------------------|
+// | SALIENCE_RECENCY_WEIGHT   | memory/types.rs     | Memory::salience_score()              |
+// | RECENCY_FULL_DAYS         | memory/types.rs     | Memory::salience_score() - 7 day tier |
+// | RECENCY_HIGH_DAYS         | memory/types.rs     | Memory::salience_score() - 30 day     |
+// | RECENCY_MEDIUM_DAYS       | memory/types.rs     | Memory::salience_score() - 90 day     |
+// | RECENCY_HIGH_WEIGHT       | memory/types.rs     | Memory::salience_score() - 0.7        |
+// | RECENCY_MEDIUM_WEIGHT     | memory/types.rs     | Memory::salience_score() - 0.4        |
+// | RECENCY_LOW_WEIGHT        | memory/types.rs     | Memory::salience_score() - 0.1        |
+//
+// ## Hybrid Retrieval Weights
+// | Constant                  | File                      | Function/Context                  |
+// |---------------------------|---------------------------|-----------------------------------|
+// | HYBRID_SEMANTIC_WEIGHT    | memory/graph_retrieval.rs | spreading_activation_retrieve()   |
+// | HYBRID_GRAPH_WEIGHT       | memory/graph_retrieval.rs | spreading_activation_retrieve()   |
+// | HYBRID_LINGUISTIC_WEIGHT  | memory/graph_retrieval.rs | spreading_activation_retrieve()   |
+//
+// ## Semantic Consolidation Constants
+// | Constant                      | File                  | Function/Context                  |
+// |-------------------------------|---------------------- |-----------------------------------|
+// | CONSOLIDATION_MIN_SUPPORT     | memory/compression.rs | consolidate_semantic_facts()      |
+// | CONSOLIDATION_MIN_AGE_DAYS    | memory/compression.rs | consolidate_semantic_facts()      |
+// | FACT_DECAY_BASE_DAYS          | memory/compression.rs | fact decay calculation            |
+// | FACT_DECAY_PER_SUPPORT_DAYS   | memory/compression.rs | fact decay per support            |
+//
+// ## Default Configuration Constants
+// | Constant                      | File                | Function/Context                    |
+// |-------------------------------|---------------------|-------------------------------------|
+// | DEFAULT_WORKING_MEMORY_SIZE   | memory/types.rs     | MemoryConfig::default()             |
+// | DEFAULT_SESSION_MEMORY_SIZE_MB| memory/types.rs     | MemoryConfig::default()             |
+// | DEFAULT_MAX_HEAP_PER_USER_MB  | memory/types.rs     | MemoryConfig::default()             |
+// | DEFAULT_IMPORTANCE_THRESHOLD  | memory/types.rs     | MemoryConfig::default()             |
+// | DEFAULT_COMPRESSION_AGE_DAYS  | memory/types.rs     | MemoryConfig::default()             |
+// | DEFAULT_MAX_RESULTS           | memory/types.rs     | Query::default()                    |
+//
+// ## Spreading Activation Constants (Anderson & Pirolli 1984)
+// | Constant                      | File                      | Function/Context                |
+// |-------------------------------|---------------------------|---------------------------------|
+// | SPREADING_DECAY_RATE          | memory/graph_retrieval.rs | spreading_activation_retrieve() |
+// | SPREADING_MAX_HOPS            | memory/graph_retrieval.rs | spreading_activation_retrieve() |
+// | SPREADING_ACTIVATION_THRESHOLD| memory/graph_retrieval.rs | spreading_activation_retrieve() |
+//
+// ## Long-Term Potentiation (LTP) Constants
+// | Constant                  | File              | Function/Context                      |
+// |---------------------------|-------------------|---------------------------------------|
+// | LTP_LEARNING_RATE         | graph_memory.rs   | Synapse::activate()                   |
+// | LTP_DECAY_HALF_LIFE_DAYS  | graph_memory.rs   | Synapse::decay()                      |
+// | LTP_THRESHOLD             | graph_memory.rs   | Synapse::is_potentiated()             |
+// | LTP_DECAY_FACTOR          | graph_memory.rs   | Synapse::decay() - potentiated rate   |
+// | LTP_MIN_STRENGTH          | graph_memory.rs   | Synapse::decay() - minimum floor      |
+//
+// ## Information Content (IC) Weights (Lioma & Ounis 2006)
+// | Constant      | File                    | Function/Context                        |
+// |---------------|-------------------------|-----------------------------------------|
+// | IC_NOUN       | memory/query_parser.rs  | analyze_query() - noun IC weight        |
+// | IC_ADJECTIVE  | memory/query_parser.rs  | analyze_query() - adjective IC weight   |
+// | IC_VERB       | memory/query_parser.rs  | analyze_query() - verb IC weight        |
+//
+// ## Server Timeout Constants
+// | Constant                      | File      | Function/Context                        |
+// |-------------------------------|-----------|-----------------------------------------|
+// | GRACEFUL_SHUTDOWN_TIMEOUT_SECS| main.rs   | graceful_shutdown() - request drain     |
+// | DATABASE_FLUSH_TIMEOUT_SECS   | main.rs   | graceful_shutdown() - RocksDB flush     |
+// | VECTOR_INDEX_SAVE_TIMEOUT_SECS| main.rs   | graceful_shutdown() - HNSW persist      |
+//
+// ## Prefetch Recency Constants
+// | Constant                      | File                | Function/Context                    |
+// |-------------------------------|---------------------|-------------------------------------|
+// | PREFETCH_RECENCY_FULL_HOURS   | memory/retrieval.rs | AnticipatoryPrefetch::relevance()   |
+// | PREFETCH_RECENCY_PARTIAL_HOURS| memory/retrieval.rs | AnticipatoryPrefetch::relevance()   |
+// | PREFETCH_RECENCY_FULL_BOOST   | memory/retrieval.rs | AnticipatoryPrefetch::relevance()   |
+// | PREFETCH_RECENCY_PARTIAL_BOOST| memory/retrieval.rs | AnticipatoryPrefetch::relevance()   |
+//
+// =============================================================================

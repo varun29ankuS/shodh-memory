@@ -6,6 +6,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::constants::{
+    DEFAULT_MAX_RESULTS, IMPORTANCE_FLOOR, RECENCY_FULL_DAYS, RECENCY_HIGH_DAYS, RECENCY_HIGH_WEIGHT,
+    RECENCY_LOW_WEIGHT, RECENCY_MEDIUM_DAYS, RECENCY_MEDIUM_WEIGHT, SALIENCE_RECENCY_WEIGHT,
+};
+
 /// Unique identifier for memories
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)] // Serialize as plain UUID string, not array
@@ -832,19 +837,89 @@ impl Memory {
 
     /// Decay importance by a factor (for misleading memories)
     ///
-    /// Uses multiplicative decay clamped to [0.05, 1.0]:
+    /// Uses multiplicative decay clamped to [IMPORTANCE_FLOOR, 1.0]:
     /// - decay of 0.10 = -10% (memory was misleading)
-    /// - Never drops below 0.05 to allow recovery
+    /// - Never drops below IMPORTANCE_FLOOR (0.05) to allow recovery
+    ///
+    /// The floor prevents complete forgetting, mimicking the "savings effect"
+    /// in human memory - relearning is faster than initial learning.
     ///
     /// Example: memory with importance 0.6 - decay 0.10 -> 0.54
     pub fn decay_importance(&self, decay: f32) {
         let mut meta = self.metadata.lock();
-        meta.importance = (meta.importance * (1.0 - decay)).max(0.05);
+        meta.importance = (meta.importance * (1.0 - decay)).max(IMPORTANCE_FLOOR);
     }
 
     /// Get all metadata snapshot (for debugging/stats)
     pub fn metadata_snapshot(&self) -> MemoryMetadata {
         self.metadata.lock().clone()
+    }
+
+    // =========================================================================
+    // SALIENCE SCORING - Ebbinghaus Forgetting Curve Implementation
+    // =========================================================================
+
+    /// Calculate salience score based on Ebbinghaus forgetting curve
+    ///
+    /// This implements a time-based relevance decay that mimics human memory:
+    /// - Memories < 7 days: Full relevance (1.0)
+    /// - Memories 8-30 days: High relevance (0.7)
+    /// - Memories 31-90 days: Medium relevance (0.4)
+    /// - Memories 90+ days: Low relevance (0.1)
+    ///
+    /// The score is weighted by SALIENCE_RECENCY_WEIGHT (default 1.0) and combined
+    /// with importance to produce a final salience score.
+    ///
+    /// Reference: Ebbinghaus (1885) "Memory: A Contribution to Experimental Psychology"
+    ///
+    /// # Returns
+    /// A salience score between 0.0 and 1.0, where higher = more salient
+    pub fn salience_score(&self) -> f32 {
+        let age_days = (Utc::now() - self.created_at).num_days();
+
+        // Calculate recency factor based on Ebbinghaus forgetting curve
+        let recency_factor = if age_days <= RECENCY_FULL_DAYS {
+            1.0 // Full relevance for recent memories
+        } else if age_days <= RECENCY_HIGH_DAYS {
+            RECENCY_HIGH_WEIGHT // High relevance (0.7)
+        } else if age_days <= RECENCY_MEDIUM_DAYS {
+            RECENCY_MEDIUM_WEIGHT // Medium relevance (0.4)
+        } else {
+            RECENCY_LOW_WEIGHT // Low relevance (0.1)
+        };
+
+        // Combine recency with importance for final salience
+        // Formula: salience = (recency_weight * recency_factor + importance) / 2
+        // This balances time-based decay with inherent memory importance
+        let importance = self.importance();
+        let weighted_recency = SALIENCE_RECENCY_WEIGHT * recency_factor;
+
+        // Weighted average: recency contributes 60%, importance contributes 40%
+        // This prioritizes recent memories but preserves important old ones
+        (weighted_recency * 0.6 + importance * 0.4).clamp(0.0, 1.0)
+    }
+
+    /// Calculate salience score with access-based boost
+    ///
+    /// Similar to `salience_score()` but also factors in access frequency.
+    /// Frequently accessed memories resist forgetting (spacing effect).
+    ///
+    /// # Returns
+    /// A salience score between 0.0 and 1.0
+    pub fn salience_score_with_access(&self) -> f32 {
+        let base_salience = self.salience_score();
+        let access_count = self.access_count();
+
+        // Access boost: logarithmic growth to prevent runaway scores
+        // Each access adds a diminishing boost (log2 scale)
+        // 1 access: +0, 2: +0.05, 4: +0.1, 8: +0.15, 16: +0.2
+        let access_boost = if access_count > 0 {
+            ((access_count as f32).log2() * 0.05).min(0.3)
+        } else {
+            0.0
+        };
+
+        (base_salience + access_boost).clamp(0.0, 1.0)
     }
 }
 
@@ -1254,7 +1329,7 @@ impl Default for Query {
             pattern_id: None,
             terrain_type: None,
             confidence_range: None,
-            max_results: 10,
+            max_results: DEFAULT_MAX_RESULTS,
             retrieval_mode: RetrievalMode::Hybrid,
         }
     }
@@ -1969,7 +2044,7 @@ mod tests {
         assert!(query.geo_filter.is_none());
         assert!(query.action_type.is_none());
         assert!(query.reward_range.is_none());
-        assert_eq!(query.max_results, 10);
+        assert_eq!(query.max_results, DEFAULT_MAX_RESULTS);
     }
 
     #[test]

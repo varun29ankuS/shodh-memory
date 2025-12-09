@@ -577,7 +577,7 @@ fn test_should_decay_fact_old_unreinforced() {
         fact_type: FactType::Pattern,
     };
 
-    assert!(consolidator.should_decay_fact(&old_fact, 30));
+    assert!(consolidator.should_decay_fact(&old_fact));
 }
 
 #[test]
@@ -596,7 +596,7 @@ fn test_should_not_decay_high_confidence_fact() {
         fact_type: FactType::Definition,
     };
 
-    assert!(!consolidator.should_decay_fact(&strong_fact, 30));
+    assert!(!consolidator.should_decay_fact(&strong_fact));
 }
 
 #[test]

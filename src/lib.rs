@@ -29,7 +29,8 @@ pub mod tracing_setup;
 pub mod validation;
 pub mod vector_db;
 
-// Re-export uuid to ensure tests use the same version
+// Re-export uuid and chrono to ensure tests/benchmarks use the same version
+pub use chrono;
 pub use uuid;
 
 #[cfg(feature = "python")]

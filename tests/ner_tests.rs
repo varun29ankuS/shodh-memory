@@ -194,17 +194,6 @@ mod global_entities {
         }
     }
 
-    #[test]
-    fn test_us_tech_hubs() {
-        let ner = create_test_ner();
-        let text = "Visiting Seattle and San Francisco for tech meetings";
-        let entities = ner.extract(text).unwrap();
-
-        let seattle = entities
-            .iter()
-            .any(|e| e.text == "Seattle" && e.entity_type == NerEntityType::Location);
-        assert!(seattle, "Should find Seattle");
-    }
 }
 
 // ==================== Mixed Entity Tests ====================

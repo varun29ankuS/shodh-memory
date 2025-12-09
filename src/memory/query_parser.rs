@@ -7,10 +7,7 @@
 //! Extracts focal entities (nouns), discriminative modifiers (adjectives),
 //! and relational context (verbs) from natural language queries.
 
-/// Information Content (IC) weights based on Lioma & Ounis (2006)
-const IC_NOUN: f32 = 2.3;
-const IC_ADJECTIVE: f32 = 1.7;
-const IC_VERB: f32 = 1.0;
+use crate::constants::{IC_ADJECTIVE, IC_NOUN, IC_VERB};
 
 /// Focal entity extracted from query (noun)
 #[derive(Debug, Clone)]
