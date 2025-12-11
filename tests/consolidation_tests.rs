@@ -834,3 +834,428 @@ fn test_concurrent_tier_reads() {
         h.join().unwrap();
     }
 }
+
+// =============================================================================
+// CONSOLIDATION INTROSPECTION TESTS (SHO-28)
+// =============================================================================
+
+use chrono::{Duration, TimeZone, Utc};
+use shodh_memory::memory::{ConsolidationEvent, Query};
+
+/// Helper to get a "beginning of time" DateTime for all-time queries
+fn epoch() -> chrono::DateTime<chrono::Utc> {
+    Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap()
+}
+
+#[test]
+fn test_consolidation_report_empty_system() {
+    let (system, _temp) = setup_memory_system();
+
+    // Empty system should produce valid report with zero counts
+    let report = system.get_consolidation_report(epoch(), None);
+
+    assert!(report.strengthened_memories.is_empty());
+    assert!(report.decayed_memories.is_empty());
+    assert!(report.formed_associations.is_empty());
+    assert!(report.pruned_associations.is_empty());
+    assert_eq!(report.statistics.maintenance_cycles, 0);
+}
+
+#[test]
+fn test_consolidation_report_after_retrieval() {
+    let (system, _temp) = setup_memory_system();
+
+    // Record some memories
+    let _id1 = system
+        .record(create_experience("Paris is the capital of France"))
+        .unwrap();
+    let _id2 = system
+        .record(create_experience("The Eiffel Tower is in Paris"))
+        .unwrap();
+
+    // Retrieve memories multiple times to trigger strengthening
+    // (importance boosts after 5+ accesses)
+    for _ in 0..7 {
+        let query = Query {
+            query_text: Some("Paris".to_string()),
+            ..Default::default()
+        };
+        let _ = system.retrieve(&query);
+    }
+
+    // Get report (epoch = all time)
+    let report = system.get_consolidation_report(epoch(), None);
+
+    // Should have strengthening events recorded
+    // Note: strengthening only occurs when importance actually changes
+    // which happens after 5+ accesses
+    assert!(
+        !report.strengthened_memories.is_empty() || !report.formed_associations.is_empty(),
+        "Expected at least one strengthening or association event"
+    );
+}
+
+#[test]
+fn test_consolidation_report_after_maintenance() {
+    let (system, _temp) = setup_memory_system();
+
+    // Record memories
+    for i in 0..10 {
+        system
+            .record(create_experience(&format!("Test memory {}", i)))
+            .unwrap();
+    }
+
+    // Run maintenance to potentially trigger decay events (0.95 = standard decay factor)
+    system.run_maintenance(0.95).unwrap();
+
+    // Get report
+    let report = system.get_consolidation_report(epoch(), None);
+
+    // Maintenance should have been recorded
+    assert!(
+        report.statistics.maintenance_cycles >= 1,
+        "Expected at least 1 maintenance cycle"
+    );
+}
+
+#[test]
+fn test_consolidation_report_hebbian_learning() {
+    let (system, _temp) = setup_memory_system();
+
+    // Record memories with related content
+    let _id1 = system
+        .record(create_experience("Rust is a systems programming language"))
+        .unwrap();
+    let _id2 = system
+        .record(create_experience("Rust has ownership and borrowing"))
+        .unwrap();
+    let _id3 = system
+        .record(create_experience("Rust prevents memory leaks"))
+        .unwrap();
+
+    // Retrieve related memories together multiple times
+    // This should trigger Hebbian co-activation (fire together, wire together)
+    for _ in 0..3 {
+        let query = Query {
+            query_text: Some("Rust programming".to_string()),
+            max_results: 3,
+            ..Default::default()
+        };
+        let _ = system.retrieve(&query);
+    }
+
+    // Get report
+    let report = system.get_consolidation_report(epoch(), None);
+
+    // Should have edge formation events from Hebbian learning
+    // Note: edges form when 2+ memories are retrieved together
+    assert!(
+        !report.formed_associations.is_empty() || !report.strengthened_associations.is_empty(),
+        "Expected Hebbian edge formation/strengthening events"
+    );
+}
+
+#[test]
+fn test_consolidation_report_time_filtering() {
+    let (system, _temp) = setup_memory_system();
+
+    // Record and retrieve memories
+    let _id1 = system
+        .record(create_experience("Time-filtered test memory"))
+        .unwrap();
+
+    for _ in 0..7 {
+        let query = Query {
+            query_text: Some("Time-filtered".to_string()),
+            ..Default::default()
+        };
+        let _ = system.retrieve(&query);
+    }
+
+    // Get reports for different time periods
+    let all_time = system.get_consolidation_report(epoch(), None);
+    let one_hour_ago = Utc::now() - Duration::hours(1);
+    let last_hour = system.get_consolidation_report(one_hour_ago, None);
+
+    // All events should be within the last hour for this test, so they should be equal
+    // (Since we just created them, last_hour should have same events as all_time)
+    let all_time_count = all_time.strengthened_memories.len()
+        + all_time.formed_associations.len()
+        + all_time.statistics.maintenance_cycles;
+    let last_hour_count = last_hour.strengthened_memories.len()
+        + last_hour.formed_associations.len()
+        + last_hour.statistics.maintenance_cycles;
+
+    assert!(
+        all_time_count >= last_hour_count,
+        "AllTime ({}) should have >= events than LastHour ({})",
+        all_time_count,
+        last_hour_count
+    );
+}
+
+#[test]
+fn test_consolidation_event_buffer_clear() {
+    let (system, _temp) = setup_memory_system();
+
+    // Generate some events
+    system.record(create_experience("Buffer clear test")).unwrap();
+    let query = Query {
+        query_text: Some("Buffer".to_string()),
+        ..Default::default()
+    };
+    for _ in 0..7 {
+        let _ = system.retrieve(&query);
+    }
+
+    // Count events before clear
+    let events_before = system.get_all_consolidation_events().len();
+
+    // Clear the buffer
+    system.clear_consolidation_events();
+
+    // Count events after clear
+    let events_after = system.get_all_consolidation_events().len();
+
+    // Second count should be zero or fewer
+    assert!(
+        events_after < events_before,
+        "Events should be cleared: before={}, after={}",
+        events_before,
+        events_after
+    );
+    assert_eq!(events_after, 0, "Events should be completely cleared");
+}
+
+#[test]
+fn test_consolidation_report_stats_consistency() {
+    let (system, _temp) = setup_memory_system();
+
+    // Record and interact with memories
+    for i in 0..5 {
+        system
+            .record(create_experience(&format!("Stats consistency test {}", i)))
+            .unwrap();
+    }
+
+    // Multiple retrieval rounds
+    for _ in 0..3 {
+        let query = Query {
+            query_text: Some("Stats consistency".to_string()),
+            max_results: 5,
+            ..Default::default()
+        };
+        let _ = system.retrieve(&query);
+    }
+
+    // Run maintenance with standard decay factor
+    system.run_maintenance(0.95).unwrap();
+
+    // Get report
+    let report = system.get_consolidation_report(epoch(), None);
+
+    // Verify stats are internally consistent
+    // statistics counters should match the vector lengths
+    assert_eq!(
+        report.statistics.memories_strengthened,
+        report.strengthened_memories.len(),
+        "memories_strengthened stat should match vector length"
+    );
+    assert_eq!(
+        report.statistics.memories_decayed,
+        report.decayed_memories.len(),
+        "memories_decayed stat should match vector length"
+    );
+    assert_eq!(
+        report.statistics.edges_formed,
+        report.formed_associations.len(),
+        "edges_formed stat should match vector length"
+    );
+    assert_eq!(
+        report.statistics.edges_strengthened,
+        report.strengthened_associations.len(),
+        "edges_strengthened stat should match vector length"
+    );
+}
+
+#[test]
+fn test_memory_strengthening_records_before_after() {
+    let (system, _temp) = setup_memory_system();
+
+    // Record a memory with moderate initial importance
+    let _id = system
+        .record(Experience {
+            content: "Strengthening before/after test".to_string(),
+            experience_type: ExperienceType::Observation,
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Access the memory many times to trigger importance boost
+    for _ in 0..10 {
+        let query = Query {
+            query_text: Some("before/after test".to_string()),
+            ..Default::default()
+        };
+        let _ = system.retrieve(&query);
+    }
+
+    // Get report
+    let report = system.get_consolidation_report(epoch(), None);
+
+    // Verify strengthening events have valid before/after values
+    for change in &report.strengthened_memories {
+        assert!(
+            change.activation_after >= change.activation_before,
+            "activation_after ({}) should be >= activation_before ({})",
+            change.activation_after,
+            change.activation_before
+        );
+    }
+}
+
+#[test]
+fn test_edge_events_have_strength_values() {
+    let (system, _temp) = setup_memory_system();
+
+    // Record related memories
+    let _id1 = system
+        .record(create_experience("Edge test: topic A related"))
+        .unwrap();
+    let _id2 = system
+        .record(create_experience("Edge test: topic A connected"))
+        .unwrap();
+
+    // Retrieve together to form edges
+    for _ in 0..5 {
+        let query = Query {
+            query_text: Some("Edge test: topic A".to_string()),
+            max_results: 2,
+            ..Default::default()
+        };
+        let _ = system.retrieve(&query);
+    }
+
+    // Get report
+    let report = system.get_consolidation_report(epoch(), None);
+
+    // Verify edge events have valid strength values
+    for assoc in &report.formed_associations {
+        // strength_after contains the initial_strength for newly formed associations
+        assert!(
+            assoc.strength_after > 0.0 && assoc.strength_after <= 1.0,
+            "strength_after (initial) should be in (0, 1]"
+        );
+    }
+
+    for assoc in &report.strengthened_associations {
+        // strength_before is Option<f32>, so we check if it exists
+        if let Some(before) = assoc.strength_before {
+            assert!(
+                assoc.strength_after >= before,
+                "strength_after ({}) should be >= strength_before ({}) for strengthening",
+                assoc.strength_after,
+                before
+            );
+        }
+    }
+}
+
+#[test]
+fn test_consolidation_events_list() {
+    let (system, _temp) = setup_memory_system();
+
+    // Record and retrieve a memory
+    system
+        .record(create_experience("Test consolidation events list"))
+        .unwrap();
+
+    for _ in 0..7 {
+        let query = Query {
+            query_text: Some("consolidation events".to_string()),
+            ..Default::default()
+        };
+        let _ = system.retrieve(&query);
+    }
+
+    // Get all events directly
+    let events = system.get_all_consolidation_events();
+
+    // Should have some events recorded
+    assert!(
+        !events.is_empty(),
+        "Expected some consolidation events to be recorded"
+    );
+
+    // Verify each event has a valid timestamp
+    for event in &events {
+        let timestamp = event.timestamp();
+        let now = Utc::now();
+        // Event should have been created within the last minute
+        assert!(
+            timestamp <= now,
+            "Event timestamp should not be in the future"
+        );
+    }
+}
+
+#[test]
+fn test_consolidation_events_since_filter() {
+    let (system, _temp) = setup_memory_system();
+
+    // Record a memory and generate some events
+    system
+        .record(create_experience("Test events since filter"))
+        .unwrap();
+
+    let start_time = Utc::now();
+
+    for _ in 0..5 {
+        let query = Query {
+            query_text: Some("events since".to_string()),
+            ..Default::default()
+        };
+        let _ = system.retrieve(&query);
+    }
+
+    // Get events since the start time
+    let recent_events = system.get_consolidation_events_since(start_time);
+
+    // All returned events should be >= start_time
+    for event in &recent_events {
+        assert!(
+            event.timestamp() >= start_time,
+            "Event timestamp should be >= filter time"
+        );
+    }
+}
+
+#[test]
+fn test_consolidation_event_count() {
+    let (system, _temp) = setup_memory_system();
+
+    // Initially should have zero events
+    let initial_count = system.consolidation_event_count();
+    assert_eq!(initial_count, 0, "Initial event count should be zero");
+
+    // Record a memory and do some retrievals
+    system
+        .record(create_experience("Test event count"))
+        .unwrap();
+
+    for _ in 0..7 {
+        let query = Query {
+            query_text: Some("event count".to_string()),
+            ..Default::default()
+        };
+        let _ = system.retrieve(&query);
+    }
+
+    // Should have more events now
+    let final_count = system.consolidation_event_count();
+    assert!(
+        final_count > initial_count,
+        "Event count should increase after operations"
+    );
+}

@@ -31,6 +31,7 @@ mod memory;
 mod metrics; // P1.1: Observability
 mod middleware; // P1.3: HTTP request tracking
 mod similarity;
+mod streaming; // SHO-25: Streaming memory ingestion
 mod tracing_setup;
 mod validation;
 mod vector_db; // P1.6: Distributed tracing
@@ -49,9 +50,8 @@ use graph_memory::{
     RelationType, RelationshipEdge,
 };
 use memory::{
-    spreading_activation_retrieve, ActivatedMemory, Experience, ExperienceType,
-    GraphStats as VisualizationStats, Memory, MemoryConfig, MemoryId, MemoryStats, MemorySystem,
-    Query as MemoryQuery, SharedMemory,
+    ActivatedMemory, Experience, ExperienceType, GraphStats as VisualizationStats, Memory,
+    MemoryConfig, MemoryId, MemoryStats, MemorySystem, Query as MemoryQuery, SharedMemory,
 };
 use similarity::top_k_similar;
 
@@ -207,6 +207,10 @@ pub struct MultiUserMemoryManager {
     /// SSE event broadcaster for real-time dashboard updates
     /// Broadcast channel allows multiple subscribers (SSE clients) to receive events
     event_broadcaster: tokio::sync::broadcast::Sender<MemoryEvent>,
+
+    /// Streaming memory extractor for implicit learning
+    /// Handles WebSocket connections for continuous memory formation
+    streaming_extractor: Arc<streaming::StreamingMemoryExtractor>,
 }
 
 impl MultiUserMemoryManager {
@@ -255,6 +259,11 @@ impl MultiUserMemoryManager {
             Arc::new(NeuralNer::new_fallback(NerConfig::default()))
         };
 
+        // Initialize streaming memory extractor
+        let streaming_extractor = Arc::new(streaming::StreamingMemoryExtractor::new(
+            neural_ner.clone(),
+        ));
+
         let manager = Self {
             user_memories: Arc::new(parking_lot::Mutex::new(lru::LruCache::new(cache_size))),
             audit_logs: Arc::new(DashMap::new()),
@@ -267,6 +276,7 @@ impl MultiUserMemoryManager {
             user_evictions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             server_config,
             event_broadcaster,
+            streaming_extractor,
         };
 
         // Perform initial audit log rotation on startup
@@ -932,10 +942,20 @@ struct RecallRequest {
     query: String,
     #[serde(default = "default_recall_limit")]
     limit: usize,
+    /// Retrieval mode: "semantic", "associative", or "hybrid" (default)
+    /// - semantic: Pure vector similarity search
+    /// - associative: Graph traversal with density-dependent weights (SHO-26)
+    /// - hybrid: Combined semantic + graph with fixed weights (legacy)
+    #[serde(default = "default_recall_mode")]
+    mode: String,
 }
 
 fn default_recall_limit() -> usize {
     5
+}
+
+fn default_recall_mode() -> String {
+    "hybrid".to_string()
 }
 
 /// Simplified recall response - returns just text snippets
@@ -943,6 +963,9 @@ fn default_recall_limit() -> usize {
 struct RecallResponse {
     memories: Vec<RecallMemory>,
     count: usize,
+    /// Retrieval statistics (SHO-26) - optional for observability
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retrieval_stats: Option<memory::types::RetrievalStats>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1190,6 +1213,196 @@ async fn memory_events_sse(
     )
 }
 
+/// WebSocket endpoint for streaming memory ingestion
+/// Enables implicit learning from continuous data streams
+///
+/// # Protocol
+/// 1. Client connects to WS /api/stream
+/// 2. Client sends handshake: { user_id, mode, extraction_config }
+/// 3. Client streams messages: { type: "content"|"event"|"sensor", ... }
+/// 4. Server responds with extraction results: { memories_created, entities_detected, ... }
+///
+/// # Modes
+/// - conversation: Agent dialogue (high semantic content)
+/// - sensor: IoT/robotics data (needs aggregation)
+/// - event: Discrete system events
+async fn streaming_memory_ws(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl axum::response::IntoResponse {
+    ws.on_upgrade(|socket| handle_streaming_socket(socket, state))
+}
+
+/// Handle WebSocket connection for streaming memory ingestion
+async fn handle_streaming_socket(
+    socket: axum::extract::ws::WebSocket,
+    state: AppState,
+) {
+    use axum::extract::ws::Message;
+    use futures::{SinkExt, StreamExt};
+
+    let (mut sender, mut receiver) = socket.split();
+    let mut session_id: Option<String> = None;
+
+    // Wait for handshake message
+    while let Some(msg) = receiver.next().await {
+        let msg = match msg {
+            Ok(Message::Text(text)) => text,
+            Ok(Message::Close(_)) => {
+                tracing::debug!("WebSocket closed before handshake");
+                return;
+            }
+            Ok(_) => continue, // Skip binary/ping/pong
+            Err(e) => {
+                tracing::warn!("WebSocket error before handshake: {}", e);
+                return;
+            }
+        };
+
+        // Parse handshake
+        let handshake: streaming::StreamHandshake = match serde_json::from_str(&msg) {
+            Ok(h) => h,
+            Err(e) => {
+                let error = streaming::ExtractionResult::Error {
+                    code: "INVALID_HANDSHAKE".to_string(),
+                    message: format!("Failed to parse handshake: {}", e),
+                    fatal: true,
+                    timestamp: chrono::Utc::now(),
+                };
+                let _ = sender
+                    .send(Message::Text(serde_json::to_string(&error).unwrap().into()))
+                    .await;
+                return;
+            }
+        };
+
+        // Validate user_id
+        if let Err(e) = validation::validate_user_id(&handshake.user_id) {
+            let error = streaming::ExtractionResult::Error {
+                code: "INVALID_USER_ID".to_string(),
+                message: format!("Invalid user_id: {}", e),
+                fatal: true,
+                timestamp: chrono::Utc::now(),
+            };
+            let _ = sender
+                .send(Message::Text(serde_json::to_string(&error).unwrap().into()))
+                .await;
+            return;
+        }
+
+        // Create session
+        let id = state.streaming_extractor.create_session(handshake.clone()).await;
+        session_id = Some(id.clone());
+
+        // Send acknowledgement
+        let ack = streaming::ExtractionResult::Ack {
+            message_type: "handshake".to_string(),
+            timestamp: chrono::Utc::now(),
+        };
+        if sender
+            .send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        tracing::info!(
+            "Streaming session {} created for user {} in {:?} mode",
+            id,
+            handshake.user_id,
+            handshake.mode
+        );
+        break;
+    }
+
+    let session_id = match session_id {
+        Some(id) => id,
+        None => return,
+    };
+
+    // Get user memory system for storing extracted memories
+    // Note: This is done once per connection, not per message
+    let user_memory = {
+        // Extract user_id from session
+        let stats = state.streaming_extractor.get_session_stats(&session_id).await;
+        match stats {
+            Some(s) => match state.get_user_memory(&s.user_id) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::error!("Failed to get user memory: {}", e);
+                    return;
+                }
+            },
+            None => return,
+        }
+    };
+
+    // Process messages
+    while let Some(msg) = receiver.next().await {
+        let text = match msg {
+            Ok(Message::Text(text)) => text,
+            Ok(Message::Close(_)) => {
+                // Client requested close
+                let _ = state.streaming_extractor.close_session(&session_id).await;
+                return;
+            }
+            Ok(Message::Ping(data)) => {
+                let _ = sender.send(Message::Pong(data)).await;
+                continue;
+            }
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::warn!("WebSocket error: {}", e);
+                break;
+            }
+        };
+
+        // Parse message
+        let stream_msg: streaming::StreamMessage = match serde_json::from_str(&text) {
+            Ok(m) => m,
+            Err(e) => {
+                let error = streaming::ExtractionResult::Error {
+                    code: "INVALID_MESSAGE".to_string(),
+                    message: format!("Failed to parse message: {}", e),
+                    fatal: false,
+                    timestamp: chrono::Utc::now(),
+                };
+                let _ = sender
+                    .send(Message::Text(serde_json::to_string(&error).unwrap().into()))
+                    .await;
+                continue;
+            }
+        };
+
+        // Process message
+        let result = state
+            .streaming_extractor
+            .process_message(&session_id, stream_msg, user_memory.clone())
+            .await;
+
+        // Send result
+        let response = serde_json::to_string(&result).unwrap();
+        if sender.send(Message::Text(response.into())).await.is_err() {
+            break;
+        }
+
+        // Check if session was closed
+        if matches!(result, streaming::ExtractionResult::Closed { .. }) {
+            break;
+        }
+    }
+
+    // Cleanup session on disconnect
+    if let Some(total) = state.streaming_extractor.close_session(&session_id).await {
+        tracing::info!(
+            "Streaming session {} closed. Total memories created: {}",
+            session_id,
+            total
+        );
+    }
+}
+
 /// Compute cosine similarity between two embedding vectors
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
@@ -1415,12 +1628,16 @@ async fn remember(
 /// LLM-friendly /api/recall - hybrid retrieval combining semantic search + graph spreading activation
 /// Example: POST /api/recall { "user_id": "agent-1", "query": "What does user like?" }
 ///
-/// Retrieval Strategy:
-/// 1. Semantic search: MiniLM embeddings + Vamana HNSW (50% weight)
-/// 2. Graph spreading activation: Entity-based context retrieval (35% weight)
-/// 3. Linguistic matching: Focal entity boost (15% weight)
-/// Results are deduplicated and ranked by hybrid score.
-#[tracing::instrument(skip(state), fields(user_id = %req.user_id, query = %req.query))]
+/// Retrieval Strategy (SHO-26 Enhanced):
+/// - "semantic": Pure vector similarity search (MiniLM embeddings + Vamana HNSW)
+/// - "associative": Graph traversal with density-dependent weights
+/// - "hybrid": Combined semantic + graph with fixed weights (legacy default)
+///
+/// Associative mode (SHO-26) features:
+/// - Density-dependent hybrid weights: Graph trust scales with learned associations
+/// - Importance-weighted decay: Important memories decay slower during spreading activation
+/// - RetrievalStats returned for observability
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id, query = %req.query, mode = %req.mode))]
 async fn recall(
     State(state): State<AppState>,
     Json(req): Json<RecallRequest>,
@@ -1442,10 +1659,66 @@ async fn recall(
     let limit = req.limit;
     let query_text = req.query.clone();
     let query_text_clone = query_text.clone();
+    let mode = req.mode.to_lowercase();
+
+    // For "semantic" mode, skip graph entirely
+    if mode == "semantic" {
+        let semantic_memories: Vec<SharedMemory> = {
+            let memory = memory_system.clone();
+            let query_text = query_text.clone();
+            tokio::task::spawn_blocking(move || {
+                let memory_guard = memory.read();
+                let query = MemoryQuery {
+                    query_text: Some(query_text),
+                    max_results: limit,
+                    ..Default::default()
+                };
+                memory_guard.retrieve(&query).unwrap_or_default()
+            })
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+        };
+
+        let recall_memories: Vec<RecallMemory> = semantic_memories
+            .into_iter()
+            .map(|m| RecallMemory {
+                id: m.id.0.to_string(),
+                content: m.experience.content.clone(),
+                importance: m.importance(),
+                created_at: m.created_at.to_rfc3339(),
+            })
+            .collect();
+
+        let count = recall_memories.len();
+        let duration = op_start.elapsed().as_secs_f64();
+        metrics::MEMORY_RETRIEVE_DURATION
+            .with_label_values(&["semantic"])
+            .observe(duration);
+        metrics::MEMORY_RETRIEVE_TOTAL
+            .with_label_values(&["semantic", "success"])
+            .inc();
+        metrics::MEMORY_RETRIEVE_RESULTS
+            .with_label_values(&["semantic"])
+            .observe(count as f64);
+
+        let stats = memory::types::RetrievalStats {
+            mode: "semantic".to_string(),
+            semantic_candidates: count,
+            retrieval_time_us: op_start.elapsed().as_micros() as u64,
+            ..Default::default()
+        };
+
+        return Ok(Json(RecallResponse {
+            memories: recall_memories,
+            count,
+            retrieval_stats: Some(stats),
+        }));
+    }
 
     // Run semantic retrieval via MemorySystem
     let semantic_memories: Vec<SharedMemory> = {
         let memory = memory_system.clone();
+        let query_text = query_text.clone();
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
             let query = MemoryQuery {
@@ -1460,14 +1733,30 @@ async fn recall(
     };
 
     // Run graph-based spreading activation retrieval
-    let graph_activated: Vec<ActivatedMemory> = {
+    // For "associative" mode, calculate graph density and use density-dependent weights
+    let (graph_activated, retrieval_stats): (Vec<ActivatedMemory>, Option<memory::types::RetrievalStats>) = {
         let graph = graph_memory.clone();
         let memory = memory_system.clone();
         let query_for_graph = query_text_clone.clone();
+        let use_density_weights = mode == "associative";
 
         tokio::task::spawn_blocking(move || {
             let graph_guard = graph.read();
             let memory_guard = memory.read();
+
+            // Calculate graph density for associative mode
+            let graph_density = if use_density_weights {
+                match graph_guard.get_stats() {
+                    Ok(stats) => {
+                        let memory_count = stats.episode_count.max(1) as f32;
+                        let edge_count = stats.relationship_count as f32;
+                        Some(edge_count / memory_count)
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
 
             // Build the episode-to-memory mapping function
             // EpisodicNode UUID == MemoryId.0 (see process_experience_into_graph)
@@ -1486,18 +1775,19 @@ async fn recall(
                 ..Default::default()
             };
 
-            // Run spreading activation
-            match spreading_activation_retrieve(
+            // Run spreading activation with optional density-dependent weights (SHO-26)
+            match memory::graph_retrieval::spreading_activation_retrieve_with_stats(
                 &query_for_graph,
                 &query,
                 &graph_guard,
                 memory_guard.get_embedder(),
+                graph_density,
                 episode_to_memory,
             ) {
-                Ok(activated) => activated,
+                Ok((activated, stats)) => (activated, Some(stats)),
                 Err(e) => {
                     tracing::debug!("Spreading activation failed: {}. Using semantic only.", e);
-                    Vec::new()
+                    (Vec::new(), None)
                 }
             }
         })
@@ -1506,15 +1796,21 @@ async fn recall(
     };
 
     // Merge results with hybrid scoring
-    // Scoring weights: semantic 50%, graph 35%, linguistic 15% (from constants)
     let mut scored_memories: HashMap<uuid::Uuid, (f32, SharedMemory)> = HashMap::new();
     let semantic_count = semantic_memories.len();
     let graph_activated_count = graph_activated.len();
 
+    // Get weights from retrieval stats (density-dependent for associative, fixed for hybrid)
+    let (semantic_weight, graph_weight, linguistic_weight) = if let Some(ref stats) = retrieval_stats {
+        (stats.semantic_weight, stats.graph_weight, stats.linguistic_weight)
+    } else {
+        (0.50, 0.35, 0.15) // Legacy fixed weights
+    };
+
     // Add semantic results with their position-based score
     for (rank, memory) in semantic_memories.iter().enumerate() {
         let semantic_score = 1.0 / (rank as f32 + 1.0); // Reciprocal rank
-        let hybrid_score = 0.50 * semantic_score; // 50% weight for semantic
+        let hybrid_score = semantic_weight * semantic_score;
         scored_memories.insert(memory.id.0, (hybrid_score, memory.clone()));
     }
 
@@ -1524,8 +1820,8 @@ async fn recall(
             .entry(activated.memory.id.0)
             .or_insert((0.0, activated.memory.clone()));
 
-        // Add graph activation score (35% weight) + linguistic (15% weight)
-        entry.0 += 0.35 * activated.activation_score + 0.15 * activated.linguistic_score;
+        // Add graph activation score + linguistic score with density-dependent weights
+        entry.0 += graph_weight * activated.activation_score + linguistic_weight * activated.linguistic_score;
     }
 
     // Sort by final hybrid score and take top N
@@ -1535,15 +1831,17 @@ async fn recall(
 
     let graph_contribution = final_results
         .iter()
-        .filter(|(score, _)| *score > 0.50) // Has graph boost
+        .filter(|(score, _)| *score > semantic_weight) // Has graph boost
         .count();
 
     tracing::debug!(
+        mode = %mode,
         semantic_count = semantic_count,
         graph_activated_count = graph_activated_count,
         final_count = final_results.len(),
         graph_contribution = graph_contribution,
-        "Hybrid retrieval completed"
+        graph_weight = graph_weight,
+        "Retrieval completed"
     );
 
     // Convert to response format
@@ -1559,21 +1857,29 @@ async fn recall(
 
     let count = recall_memories.len();
 
+    // Update retrieval stats with final counts
+    let final_stats = retrieval_stats.map(|mut stats| {
+        stats.semantic_candidates = semantic_count;
+        stats.retrieval_time_us = op_start.elapsed().as_micros() as u64;
+        stats
+    });
+
     // Record metrics
     let duration = op_start.elapsed().as_secs_f64();
     metrics::MEMORY_RETRIEVE_DURATION
-        .with_label_values(&["hybrid"])
+        .with_label_values(&[&mode])
         .observe(duration);
     metrics::MEMORY_RETRIEVE_TOTAL
-        .with_label_values(&["hybrid", "success"])
+        .with_label_values(&[&mode, "success"])
         .inc();
     metrics::MEMORY_RETRIEVE_RESULTS
-        .with_label_values(&["hybrid"])
+        .with_label_values(&[&mode])
         .observe(count as f64);
 
     Ok(Json(RecallResponse {
         memories: recall_memories,
         count,
+        retrieval_stats: final_stats,
     }))
 }
 
@@ -1621,6 +1927,120 @@ struct ContextSummaryResponse {
     context: Vec<SummaryItem>,
     patterns: Vec<SummaryItem>,
     errors: Vec<SummaryItem>,
+}
+
+// =========================================================================
+// CONSOLIDATION INTROSPECTION API
+// =========================================================================
+
+/// Request for consolidation report - what the memory system is learning
+#[derive(Debug, Deserialize)]
+struct ConsolidationReportRequest {
+    user_id: String,
+    /// Start of the time period (ISO 8601 format, optional - defaults to 1 hour ago)
+    #[serde(default)]
+    since: Option<String>,
+    /// End of the time period (ISO 8601 format, optional - defaults to now)
+    #[serde(default)]
+    until: Option<String>,
+}
+
+/// POST /api/consolidation/report - Get consolidation introspection report
+/// Shows what the memory system has been learning (strengthened/decayed memories, associations, facts)
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id))]
+async fn get_consolidation_report(
+    State(state): State<AppState>,
+    Json(req): Json<ConsolidationReportRequest>,
+) -> Result<Json<memory::ConsolidationReport>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    // Parse time range (default: last hour)
+    let now = chrono::Utc::now();
+    let since = if let Some(since_str) = &req.since {
+        chrono::DateTime::parse_from_rfc3339(since_str)
+            .map_err(|e| AppError::InvalidInput {
+                field: "since".to_string(),
+                reason: format!("Invalid timestamp: {}", e),
+            })?
+            .with_timezone(&chrono::Utc)
+    } else {
+        now - chrono::Duration::hours(1)
+    };
+
+    let until = if let Some(until_str) = &req.until {
+        Some(
+            chrono::DateTime::parse_from_rfc3339(until_str)
+                .map_err(|e| AppError::InvalidInput {
+                    field: "until".to_string(),
+                    reason: format!("Invalid timestamp: {}", e),
+                })?
+                .with_timezone(&chrono::Utc),
+        )
+    } else {
+        None
+    };
+
+    let report = {
+        let memory = memory.clone();
+        tokio::task::spawn_blocking(move || {
+            let memory_guard = memory.read();
+            memory_guard.get_consolidation_report(since, until)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    };
+
+    Ok(Json(report))
+}
+
+/// GET /api/consolidation/events - Get raw consolidation events since a timestamp
+#[derive(Debug, Deserialize)]
+struct ConsolidationEventsRequest {
+    user_id: String,
+    /// Start timestamp (ISO 8601 format, optional - defaults to 1 hour ago)
+    #[serde(default)]
+    since: Option<String>,
+}
+
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id))]
+async fn get_consolidation_events(
+    State(state): State<AppState>,
+    Json(req): Json<ConsolidationEventsRequest>,
+) -> Result<Json<Vec<memory::ConsolidationEvent>>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    // Parse time range (default: last hour)
+    let now = chrono::Utc::now();
+    let since = if let Some(since_str) = &req.since {
+        chrono::DateTime::parse_from_rfc3339(since_str)
+            .map_err(|e| AppError::InvalidInput {
+                field: "since".to_string(),
+                reason: format!("Invalid timestamp: {}", e),
+            })?
+            .with_timezone(&chrono::Utc)
+    } else {
+        now - chrono::Duration::hours(1)
+    };
+
+    let events = {
+        let memory = memory.clone();
+        tokio::task::spawn_blocking(move || {
+            let memory_guard = memory.read();
+            memory_guard.get_consolidation_events_since(since)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    };
+
+    Ok(Json(events))
 }
 
 /// GET /api/context_summary - Get categorized context for session bootstrap
@@ -4510,6 +4930,9 @@ async fn main() -> Result<()> {
         .route("/api/brain/{user_id}", get(get_brain_state))
         // Context Summary - Session bootstrap with categorized memories
         .route("/api/context_summary", post(context_summary))
+        // Consolidation Introspection - What the memory system is learning
+        .route("/api/consolidation/report", post(get_consolidation_report))
+        .route("/api/consolidation/events", post(get_consolidation_events))
         // List memories - Simple GET endpoint
         .route("/api/list/{user_id}", get(list_memories))
         // Apply auth middleware only to protected routes
@@ -4540,6 +4963,7 @@ async fn main() -> Result<()> {
         .route("/health/ready", get(health_ready)) // P0.9: Kubernetes readiness probe
         .route("/metrics", get(metrics_endpoint)) // P1.1: Prometheus metrics
         .route("/api/events", get(memory_events_sse)) // SSE: Real-time memory events for dashboard
+        .route("/api/stream", get(streaming_memory_ws)) // WS: Streaming memory ingestion (SHO-25)
         .with_state(manager.clone());
 
     // Combine public and protected routes
@@ -4575,6 +4999,7 @@ async fn main() -> Result<()> {
     eprintln!("     HTTP:      http://{}", addr);
     eprintln!("     Health:    http://{}/health", addr);
     eprintln!("     Dashboard: http://{}/static/live.html", addr);
+    eprintln!("     Stream:    ws://{}/api/stream", addr);
     eprintln!();
     eprintln!("  Press Ctrl+C to stop");
     eprintln!();

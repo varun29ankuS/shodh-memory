@@ -221,6 +221,125 @@ pub const HYBRID_GRAPH_WEIGHT: f32 = 0.35;
 pub const HYBRID_LINGUISTIC_WEIGHT: f32 = 0.15;
 
 // =============================================================================
+// DENSITY-DEPENDENT RETRIEVAL WEIGHTS (SHO-26)
+// Based on GraphRAG Survey (arXiv 2408.08921) - hybrid KG-Vector improves 13.1%
+// Graph weight scales with density: sparse graphs get less trust, dense graphs more
+// =============================================================================
+
+/// Minimum graph weight for sparse graphs (few associations)
+///
+/// Justification:
+/// - 0.1 (10%) for graphs with < 0.5 edges per memory
+/// - Sparse graphs have low-confidence associations
+/// - Semantic similarity dominates when graph is underdeveloped
+pub const DENSITY_GRAPH_WEIGHT_MIN: f32 = 0.1;
+
+/// Maximum graph weight for dense graphs (rich associations)
+///
+/// Justification:
+/// - 0.5 (50%) for graphs with > 2.0 edges per memory
+/// - Dense graphs have high-confidence Hebbian associations
+/// - Graph traversal becomes primary retrieval signal
+///
+/// Reference: GraphRAG Survey (arXiv 2408.08921)
+pub const DENSITY_GRAPH_WEIGHT_MAX: f32 = 0.5;
+
+/// Linguistic weight for density-dependent retrieval
+///
+/// Justification:
+/// - 0.15 (15%) fixed - exact term matching always useful
+/// - Semantic weight = 1.0 - graph_weight - linguistic_weight
+pub const DENSITY_LINGUISTIC_WEIGHT: f32 = 0.15;
+
+/// Density threshold for minimum graph weight
+///
+/// Below this edges-per-memory ratio, use DENSITY_GRAPH_WEIGHT_MIN
+pub const DENSITY_THRESHOLD_MIN: f32 = 0.5;
+
+/// Density threshold for maximum graph weight
+///
+/// Above this edges-per-memory ratio, use DENSITY_GRAPH_WEIGHT_MAX
+pub const DENSITY_THRESHOLD_MAX: f32 = 2.0;
+
+// =============================================================================
+// IMPORTANCE-WEIGHTED DECAY (SHO-26)
+// Based on spreadr R package (Siew, 2019) and ACT-R cognitive architecture
+// Important memories spread activation slower (preserve signal)
+// Weak memories spread faster but decay quickly (exploratory)
+// =============================================================================
+
+/// Minimum decay rate for high-importance memories
+///
+/// Justification:
+/// - 0.1 decay preserves ~90% activation per hop for important nodes
+/// - High-importance memories (decisions, learnings) maintain strong signal
+/// - Matches ACT-R base-level activation for frequently accessed chunks
+///
+/// Reference: spreadr R package (Siew, 2019), decay range 0.1-0.3
+pub const IMPORTANCE_DECAY_MIN: f32 = 0.1;
+
+/// Maximum decay rate for low-importance memories
+///
+/// Justification:
+/// - 0.4 decay for transient observations/context
+/// - Low-importance memories spread wider but contribute less
+/// - Prevents noise from dominating associative retrieval
+pub const IMPORTANCE_DECAY_MAX: f32 = 0.4;
+
+/// Type-based importance: Decision memories
+///
+/// Justification:
+/// - 0.30 weight - highest importance
+/// - Decisions represent explicit choices and preferences
+/// - Critical for agent memory consistency
+pub const IMPORTANCE_TYPE_DECISION: f32 = 0.30;
+
+/// Type-based importance: Learning memories
+pub const IMPORTANCE_TYPE_LEARNING: f32 = 0.25;
+
+/// Type-based importance: Error memories
+pub const IMPORTANCE_TYPE_ERROR: f32 = 0.25;
+
+/// Type-based importance: Discovery/Pattern memories
+pub const IMPORTANCE_TYPE_DISCOVERY: f32 = 0.20;
+
+/// Type-based importance: Task memories
+pub const IMPORTANCE_TYPE_TASK: f32 = 0.15;
+
+/// Type-based importance: Context/Observation memories
+pub const IMPORTANCE_TYPE_OBSERVATION: f32 = 0.10;
+
+/// Entity presence boost for importance calculation
+///
+/// Justification:
+/// - 0.04 per entity (max ~0.12 for 3 entities)
+/// - Named entities indicate factual, retrievable content
+pub const IMPORTANCE_ENTITY_BOOST: f32 = 0.04;
+
+/// Max entities for importance boost calculation
+pub const IMPORTANCE_ENTITY_MAX: usize = 3;
+
+/// Graph connectivity boost for importance
+///
+/// Justification:
+/// - 0.03 per connected memory (max ~0.15 for 5 connections)
+/// - Well-connected memories are central to knowledge graph
+pub const IMPORTANCE_CONNECTIVITY_BOOST: f32 = 0.03;
+
+/// Max connections for importance boost calculation
+pub const IMPORTANCE_CONNECTIVITY_MAX: usize = 5;
+
+/// Recency boost for importance (within threshold)
+///
+/// Justification:
+/// - 0.20 boost for memories within IMPORTANCE_RECENCY_DAYS
+/// - Recent memories more likely to be contextually relevant
+pub const IMPORTANCE_RECENCY_BOOST: f32 = 0.20;
+
+/// Days threshold for recency importance boost
+pub const IMPORTANCE_RECENCY_DAYS: f64 = 7.0;
+
+// =============================================================================
 // SEMANTIC CONSOLIDATION THRESHOLDS
 // =============================================================================
 

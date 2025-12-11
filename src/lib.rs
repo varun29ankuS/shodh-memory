@@ -25,6 +25,7 @@ pub mod memory;
 pub mod metrics;
 pub mod middleware;
 pub mod similarity;
+pub mod streaming;
 pub mod tracing_setup;
 pub mod validation;
 pub mod vector_db;

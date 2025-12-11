@@ -45,7 +45,7 @@ thiserror = "1.0"
 tokio = { version = "1.40", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }  # SSE event streaming (sync for BroadcastStream)
 futures = "0.3"  # Stream utilities for SSE
-axum = { version = "0.8", features = ["json"] }
+axum = { version = "0.8", features = ["json", "ws"] }
 tower = { version = "0.4", features = ["limit", "buffer", "load-shed"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 tower_governor = { version = "0.8", features = ["axum"] }
@@ -147,6 +147,10 @@ harness = false
 
 [[bench]]
 name = "pipeline_benchmarks"
+harness = false
+
+[[bench]]
+name = "associative_retrieval_benchmarks"
 harness = false
 
 [profile.release]

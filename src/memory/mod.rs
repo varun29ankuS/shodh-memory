@@ -8,6 +8,7 @@
 
 pub mod compression;
 pub mod context;
+pub mod introspection;
 pub mod retrieval;
 pub mod storage;
 pub mod types;
@@ -47,6 +48,11 @@ pub use crate::memory::retrieval::{
     PrefetchResult, ReinforcementStats, RetrievalFeedback, RetrievalOutcome, TrackedRetrieval,
 };
 pub use crate::memory::visualization::{GraphStats, MemoryLogger};
+pub use crate::memory::introspection::{
+    AssociationChange, ConsolidationEvent, ConsolidationEventBuffer, ConsolidationReport,
+    ConsolidationStats, EdgeFormationReason, FactChange, MemoryChange, PruningReason,
+    ReportPeriod, StrengtheningReason,
+};
 
 /// Configuration for the memory system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +126,10 @@ pub struct MemorySystem {
 
     /// Visualization logger
     logger: Arc<RwLock<MemoryLogger>>,
+
+    /// Consolidation event buffer for introspection
+    /// Tracks what the memory system is learning (strengthening, decay, edges, facts)
+    consolidation_events: Arc<RwLock<ConsolidationEventBuffer>>,
 }
 
 impl MemorySystem {
@@ -135,8 +145,16 @@ impl MemorySystem {
                 .context("Failed to initialize embedder")?,
         );
 
-        // Pass shared embedder to retrieval engine (no duplicate model load)
-        let retriever = RetrievalEngine::new(storage.clone(), embedder.clone())?;
+        // Create consolidation event buffer first so we can share it with retriever
+        let consolidation_events = Arc::new(RwLock::new(ConsolidationEventBuffer::new()));
+
+        // Pass shared embedder and event buffer to retrieval engine (no duplicate model load)
+        // Event buffer allows retriever to record Hebbian edge events for introspection
+        let retriever = RetrievalEngine::with_event_buffer(
+            storage.clone(),
+            embedder.clone(),
+            Some(consolidation_events.clone()),
+        )?;
 
         // Disable visualization logging for production performance
         let logger = Arc::new(RwLock::new(MemoryLogger::new(false)));
@@ -167,6 +185,7 @@ impl MemorySystem {
             content_cache: Arc::new(DashMap::new()),
             stats: Arc::new(RwLock::new(initial_stats)),
             logger,
+            consolidation_events, // Use the shared buffer created earlier
         })
     }
 
@@ -324,11 +343,16 @@ impl MemorySystem {
             .read()
             .log_retrieved("", memories.len(), &sources);
 
-        // Update access counts asynchronously
+        // Update access counts with instrumentation for consolidation events
         for memory in &memories {
-            if let Err(e) = self.update_access_count(&memory.id) {
-                tracing::warn!(memory_id = %memory.id.0, error = %e, "Failed to update access count");
-            }
+            self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+        }
+
+        // Hebbian learning: co-activation strengthens associations between memories
+        // When memories are retrieved together, they form/strengthen edges in the memory graph
+        if memories.len() >= 2 {
+            let memory_ids: Vec<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
+            self.retriever.record_coactivation(&memory_ids);
         }
 
         Ok(memories)
@@ -492,11 +516,16 @@ impl MemorySystem {
             .read()
             .log_retrieved(query_text, memories.len(), &sources);
 
-        // Update access counts asynchronously
+        // Update access counts with instrumentation for consolidation events
         for memory in &memories {
-            if let Err(e) = self.update_access_count(&memory.id) {
-                tracing::warn!(memory_id = %memory.id.0, error = %e, "Failed to update access count");
-            }
+            self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+        }
+
+        // Hebbian learning: co-activation strengthens associations between memories
+        // When memories are retrieved together, they form/strengthen edges in the memory graph
+        if memories.len() >= 2 {
+            let memory_ids: Vec<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
+            self.retriever.record_coactivation(&memory_ids);
         }
 
         Ok(memories)
@@ -1034,6 +1063,41 @@ impl MemorySystem {
             .map_err(|e| anyhow::anyhow!("Failed to update long-term memory access: {e}"))
     }
 
+    /// Update access count with instrumentation for consolidation events
+    ///
+    /// Records MemoryStrengthened events when memories are accessed during retrieval,
+    /// capturing activation changes for introspection.
+    fn update_access_count_instrumented(&self, memory: &SharedMemory, reason: StrengtheningReason) {
+        // Capture activation before update
+        let activation_before = memory.importance();
+
+        // Perform the actual access update
+        memory.update_access();
+
+        // Capture activation after update
+        let activation_after = memory.importance();
+
+        // Only record event if activation actually changed
+        if (activation_after - activation_before).abs() > f32::EPSILON {
+            let content_preview = if memory.experience.content.len() > 50 {
+                format!("{}...", &memory.experience.content[..50])
+            } else {
+                memory.experience.content.clone()
+            };
+
+            let event = ConsolidationEvent::MemoryStrengthened {
+                memory_id: memory.id.0.to_string(),
+                content_preview,
+                activation_before,
+                activation_after,
+                reason,
+                timestamp: chrono::Utc::now(),
+            };
+
+            self.consolidation_events.write().push(event);
+        }
+    }
+
     /// Forget memories matching a pattern
     ///
     /// Uses validated regex compilation with ReDoS protection
@@ -1523,41 +1587,164 @@ impl MemorySystem {
     /// 3. Run graph maintenance (prune weak edges)
     ///
     /// Returns the number of memories processed for activation decay.
+    /// Also records consolidation events for introspection.
     pub fn run_maintenance(&self, decay_factor: f32) -> Result<usize> {
+        let start_time = std::time::Instant::now();
+        let now = chrono::Utc::now();
+
         // 1. Consolidation: promote memories between tiers
         self.consolidate_if_needed()?;
 
         // 2. Decay activation on all in-memory memories (working + session)
         let mut decayed_count = 0;
+        let mut at_risk_count = 0;
+        const AT_RISK_THRESHOLD: f32 = 0.2; // Memories below this are at risk of being forgotten
 
-        // Decay working memory activations
+        // Decay working memory activations with event tracking
         {
             let working = self.working_memory.read();
             for memory in working.all_memories() {
+                let activation_before = memory.activation();
                 memory.decay_activation(decay_factor);
+                let activation_after = memory.activation();
                 decayed_count += 1;
+
+                // Only record event if there was actual decay
+                if activation_before != activation_after {
+                    let at_risk = activation_after < AT_RISK_THRESHOLD;
+                    if at_risk {
+                        at_risk_count += 1;
+                    }
+
+                    // Record decay event
+                    self.record_consolidation_event(ConsolidationEvent::MemoryDecayed {
+                        memory_id: memory.id.0.to_string(),
+                        content_preview: memory.experience.content.chars().take(50).collect(),
+                        activation_before,
+                        activation_after,
+                        at_risk,
+                        timestamp: now,
+                    });
+                }
             }
         }
 
-        // Decay session memory activations
+        // Decay session memory activations with event tracking
         {
             let session = self.session_memory.read();
             for memory in session.all_memories() {
+                let activation_before = memory.activation();
                 memory.decay_activation(decay_factor);
+                let activation_after = memory.activation();
                 decayed_count += 1;
+
+                // Only record event if there was actual decay
+                if activation_before != activation_after {
+                    let at_risk = activation_after < AT_RISK_THRESHOLD;
+                    if at_risk {
+                        at_risk_count += 1;
+                    }
+
+                    // Record decay event
+                    self.record_consolidation_event(ConsolidationEvent::MemoryDecayed {
+                        memory_id: memory.id.0.to_string(),
+                        content_preview: memory.experience.content.chars().take(50).collect(),
+                        activation_before,
+                        activation_after,
+                        at_risk,
+                        timestamp: now,
+                    });
+                }
             }
         }
 
         // 3. Graph maintenance: prune weak edges
+        // Note: Graph maintenance doesn't currently report pruned edges,
+        // but the retriever could be modified to return pruning stats
         self.graph_maintenance();
 
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+
+        // Record maintenance cycle completion event
+        self.record_consolidation_event(ConsolidationEvent::MaintenanceCycleCompleted {
+            memories_processed: decayed_count,
+            memories_decayed: decayed_count, // All memories get decay applied
+            edges_pruned: 0, // Graph maintenance doesn't report this yet
+            duration_ms,
+            timestamp: now,
+        });
+
         tracing::debug!(
-            "Maintenance complete: {} memories decayed (factor={})",
+            "Maintenance complete: {} memories decayed (factor={}), {} at risk, took {}ms",
             decayed_count,
-            decay_factor
+            decay_factor,
+            at_risk_count,
+            duration_ms
         );
 
         Ok(decayed_count)
+    }
+
+    // =========================================================================
+    // CONSOLIDATION INTROSPECTION API
+    // =========================================================================
+
+    /// Get a consolidation report for a time period
+    ///
+    /// Shows what the memory system has been learning:
+    /// - Which memories strengthened or decayed
+    /// - What associations formed or were pruned
+    /// - What facts were extracted or reinforced
+    ///
+    /// # Arguments
+    /// * `since` - Start of the time period
+    /// * `until` - End of the time period (default: now)
+    pub fn get_consolidation_report(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+        until: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> ConsolidationReport {
+        let until = until.unwrap_or_else(chrono::Utc::now);
+        let events = self.consolidation_events.read();
+        events.generate_report(since, until)
+    }
+
+    /// Get all consolidation events since a timestamp
+    ///
+    /// Returns raw events for detailed analysis
+    pub fn get_consolidation_events_since(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<ConsolidationEvent> {
+        let events = self.consolidation_events.read();
+        events.events_since(since)
+    }
+
+    /// Get all consolidation events in the buffer
+    pub fn get_all_consolidation_events(&self) -> Vec<ConsolidationEvent> {
+        let events = self.consolidation_events.read();
+        events.all_events()
+    }
+
+    /// Record a consolidation event
+    ///
+    /// Used internally by the memory system to log learning events.
+    /// Also available for external callers that want to track custom events.
+    pub fn record_consolidation_event(&self, event: ConsolidationEvent) {
+        let mut events = self.consolidation_events.write();
+        events.push(event);
+    }
+
+    /// Clear all consolidation events
+    pub fn clear_consolidation_events(&self) {
+        let mut events = self.consolidation_events.write();
+        events.clear();
+    }
+
+    /// Get the number of consolidation events in the buffer
+    pub fn consolidation_event_count(&self) -> usize {
+        let events = self.consolidation_events.read();
+        events.len()
     }
 }
 

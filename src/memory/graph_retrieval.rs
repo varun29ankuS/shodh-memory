@@ -3,26 +3,35 @@
 //! Based on:
 //! - Anderson & Pirolli (1984): "Spread of Activation"
 //! - Xiong et al. (2017): "Explicit Semantic Ranking via Knowledge Graph Embedding"
+//! - GraphRAG Survey (arXiv 2408.08921): Hybrid KG-Vector improves 13.1%
+//! - spreadr R package (Siew, 2019): Importance-weighted decay
 //!
 //! Implements spreading activation algorithm for memory retrieval:
 //! 1. Extract entities from query (using linguistic analysis)
 //! 2. Activate entities in knowledge graph
-//! 3. Spread activation through graph relationships
+//! 3. Spread activation through graph relationships (importance-weighted decay)
 //! 4. Retrieve episodic memories connected to activated entities
-//! 5. Score using hybrid method (graph + semantic + linguistic)
+//! 5. Score using hybrid method (density-dependent graph + semantic + linguistic)
+//!
+//! SHO-26 Enhancements:
+//! - Density-dependent hybrid weights: Graph trust scales with learned associations
+//! - Importance-weighted decay: Important memories decay slower, preserve signal
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::time::Instant;
 use uuid::Uuid;
 
 use crate::constants::{
-    HYBRID_GRAPH_WEIGHT, HYBRID_LINGUISTIC_WEIGHT, HYBRID_SEMANTIC_WEIGHT,
-    SPREADING_ACTIVATION_THRESHOLD, SPREADING_DECAY_RATE, SPREADING_MAX_HOPS,
+    DENSITY_GRAPH_WEIGHT_MAX, DENSITY_GRAPH_WEIGHT_MIN, DENSITY_LINGUISTIC_WEIGHT,
+    DENSITY_THRESHOLD_MAX, DENSITY_THRESHOLD_MIN, HYBRID_GRAPH_WEIGHT, HYBRID_LINGUISTIC_WEIGHT,
+    HYBRID_SEMANTIC_WEIGHT, IMPORTANCE_DECAY_MAX, IMPORTANCE_DECAY_MIN,
+    SPREADING_ACTIVATION_THRESHOLD, SPREADING_MAX_HOPS,
 };
 use crate::embeddings::Embedder;
 use crate::graph_memory::{EpisodicNode, GraphMemory};
 use crate::memory::query_parser::{analyze_query, QueryAnalysis};
-use crate::memory::types::{Memory, Query, SharedMemory};
+use crate::memory::types::{Memory, Query, RetrievalStats, SharedMemory};
 
 /// Memory with activation score
 #[derive(Debug, Clone)]
@@ -37,10 +46,55 @@ pub struct ActivatedMemory {
     pub final_score: f32,
 }
 
-/// Spreading activation retrieval
+/// Calculate density-dependent graph weight (SHO-26)
+///
+/// Graph weight scales linearly with density from MIN to MAX:
+/// - density < 0.5: weight = 0.1 (sparse graph, don't trust associations)
+/// - density > 2.0: weight = 0.5 (dense graph, trust learned associations)
+/// - in between: linear interpolation
+///
+/// Formula: weight = MIN + (density - THRESHOLD_MIN) / (THRESHOLD_MAX - THRESHOLD_MIN) * (MAX - MIN)
+///
+/// Reference: GraphRAG Survey (arXiv 2408.08921)
+pub fn calculate_density_weights(graph_density: f32) -> (f32, f32, f32) {
+    let graph_weight = if graph_density <= DENSITY_THRESHOLD_MIN {
+        DENSITY_GRAPH_WEIGHT_MIN
+    } else if graph_density >= DENSITY_THRESHOLD_MAX {
+        DENSITY_GRAPH_WEIGHT_MAX
+    } else {
+        // Linear interpolation between MIN and MAX
+        let ratio =
+            (graph_density - DENSITY_THRESHOLD_MIN) / (DENSITY_THRESHOLD_MAX - DENSITY_THRESHOLD_MIN);
+        DENSITY_GRAPH_WEIGHT_MIN + ratio * (DENSITY_GRAPH_WEIGHT_MAX - DENSITY_GRAPH_WEIGHT_MIN)
+    };
+
+    let linguistic_weight = DENSITY_LINGUISTIC_WEIGHT;
+    let semantic_weight = 1.0 - graph_weight - linguistic_weight;
+
+    (semantic_weight, graph_weight, linguistic_weight)
+}
+
+/// Calculate importance-weighted decay for spreading activation (SHO-26)
+///
+/// Important memories (decisions, learnings) decay slower to preserve signal.
+/// Weak memories (observations, context) decay faster for exploration.
+///
+/// Formula: decay = DECAY_MIN + (1.0 - importance) * (DECAY_MAX - DECAY_MIN)
+/// - importance = 1.0: decay = 0.1 (high-value, preserve)
+/// - importance = 0.0: decay = 0.4 (low-value, explore)
+///
+/// Reference: spreadr R package (Siew, 2019)
+pub fn calculate_importance_weighted_decay(importance: f32) -> f32 {
+    let clamped_importance = importance.clamp(0.0, 1.0);
+    IMPORTANCE_DECAY_MIN + (1.0 - clamped_importance) * (IMPORTANCE_DECAY_MAX - IMPORTANCE_DECAY_MIN)
+}
+
+/// Spreading activation retrieval (legacy - uses fixed weights)
 ///
 /// This is the core algorithm implementing Anderson & Pirolli (1984)
 /// spreading activation model adapted for episodic memory retrieval.
+///
+/// For SHO-26 density-dependent weights, use `spreading_activation_retrieve_with_stats`
 pub fn spreading_activation_retrieve(
     query_text: &str,
     query: &Query,
@@ -48,6 +102,65 @@ pub fn spreading_activation_retrieve(
     embedder: &dyn Embedder,
     episode_to_memory_fn: impl Fn(&EpisodicNode) -> Result<Option<SharedMemory>>,
 ) -> Result<Vec<ActivatedMemory>> {
+    // Delegate to enhanced version with default density (uses legacy weights)
+    let (memories, _stats) = spreading_activation_retrieve_with_stats(
+        query_text,
+        query,
+        graph,
+        embedder,
+        None, // No density = use legacy fixed weights
+        episode_to_memory_fn,
+    )?;
+    Ok(memories)
+}
+
+/// Spreading activation retrieval with density-dependent weights (SHO-26)
+///
+/// Enhanced version that:
+/// - Uses density-dependent hybrid weights (graph trust scales with associations)
+/// - Applies importance-weighted decay (important memories decay slower)
+/// - Returns RetrievalStats for observability
+///
+/// # Arguments
+/// - `query_text`: The search query
+/// - `query`: Query parameters including max_results
+/// - `graph`: The knowledge graph for spreading activation
+/// - `embedder`: Embedding model for semantic scoring
+/// - `graph_density`: Optional density (edges/memories). If None, uses fixed weights.
+/// - `episode_to_memory_fn`: Function to convert episodes to memories
+///
+/// # Returns
+/// (Vec<ActivatedMemory>, RetrievalStats)
+pub fn spreading_activation_retrieve_with_stats(
+    query_text: &str,
+    query: &Query,
+    graph: &GraphMemory,
+    embedder: &dyn Embedder,
+    graph_density: Option<f32>,
+    episode_to_memory_fn: impl Fn(&EpisodicNode) -> Result<Option<SharedMemory>>,
+) -> Result<(Vec<ActivatedMemory>, RetrievalStats)> {
+    let start_time = Instant::now();
+    let mut stats = RetrievalStats::default();
+
+    // Determine weights based on density
+    let (semantic_weight, graph_weight, linguistic_weight) = if let Some(density) = graph_density {
+        stats.mode = "associative".to_string();
+        stats.graph_density = density;
+        calculate_density_weights(density)
+    } else {
+        stats.mode = "hybrid".to_string();
+        stats.graph_density = 0.0;
+        (
+            HYBRID_SEMANTIC_WEIGHT,
+            HYBRID_GRAPH_WEIGHT,
+            HYBRID_LINGUISTIC_WEIGHT,
+        )
+    };
+
+    stats.semantic_weight = semantic_weight;
+    stats.graph_weight = graph_weight;
+    stats.linguistic_weight = linguistic_weight;
+
     // Step 1: Linguistic query analysis (Lioma & Ounis 2006)
     let analysis = analyze_query(query_text);
 
@@ -76,6 +189,12 @@ pub fn spreading_activation_retrieve(
             .map(|r| &r.text)
             .collect::<Vec<_>>()
     );
+    tracing::info!(
+        "  Weights: semantic={:.2}, graph={:.2}, linguistic={:.2}",
+        semantic_weight,
+        graph_weight,
+        linguistic_weight
+    );
 
     // Step 2: Initialize activation map from focal entities (nouns)
     let mut activation_map: HashMap<Uuid, f32> = HashMap::new();
@@ -85,6 +204,7 @@ pub fn spreading_activation_retrieve(
         if let Some(entity_node) = graph.find_entity_by_name(&entity.text)? {
             // Initial activation = IC weight (2.3 for nouns)
             activation_map.insert(entity_node.uuid, entity.ic_weight);
+            stats.entities_activated += 1;
 
             tracing::debug!(
                 "  ✓ Activated entity '{}' (UUID: {}, IC: {})",
@@ -99,19 +219,21 @@ pub fn spreading_activation_retrieve(
 
     if activation_map.is_empty() {
         tracing::warn!("No entities found in graph, falling back to semantic search");
-        return Ok(Vec::new()); // Caller should fall back to semantic search
+        stats.retrieval_time_us = start_time.elapsed().as_micros() as u64;
+        return Ok((Vec::new(), stats)); // Caller should fall back to semantic search
     }
 
     // Step 3: Spread activation through graph (Anderson & Pirolli 1984)
-    // Formula: A(d) = A₀ × e^(-λd)
+    // With importance-weighted decay (SHO-26)
+    let graph_start = Instant::now();
+
     for hop in 1..=SPREADING_MAX_HOPS {
-        let decay = (-SPREADING_DECAY_RATE * hop as f32).exp();
+        stats.graph_hops = hop;
 
         tracing::debug!(
-            "📊 Spreading activation (hop {}/{}), decay factor: {:.3}",
+            "📊 Spreading activation (hop {}/{})",
             hop,
-            SPREADING_MAX_HOPS,
-            decay
+            SPREADING_MAX_HOPS
         );
 
         // Clone to avoid borrow issues
@@ -130,10 +252,25 @@ pub fn spreading_activation_retrieve(
             for edge in edges {
                 // Spread activation to connected entity
                 let target_uuid = edge.to_entity;
+
+                // SHO-26: Importance-weighted decay
+                // Use edge strength as proxy for importance (stronger edges = more important)
+                let importance = edge.strength;
+                let decay_rate = calculate_importance_weighted_decay(importance);
+                let decay = (-decay_rate * hop as f32).exp();
+
                 let spread_amount = source_activation * decay * edge.strength;
 
                 // Accumulate activation
-                *activation_map.entry(target_uuid).or_insert(0.0) += spread_amount;
+                let new_activation = activation_map.entry(target_uuid).or_insert(0.0);
+                *new_activation += spread_amount;
+
+                // Track newly activated entities
+                if *new_activation >= SPREADING_ACTIVATION_THRESHOLD
+                    && *new_activation - spread_amount < SPREADING_ACTIVATION_THRESHOLD
+                {
+                    stats.entities_activated += 1;
+                }
             }
         }
 
@@ -143,6 +280,7 @@ pub fn spreading_activation_retrieve(
         tracing::debug!("  Activated entities: {}", activation_map.len());
     }
 
+    stats.graph_time_us = graph_start.elapsed().as_micros() as u64;
     tracing::info!("📊 Final activated entities: {}", activation_map.len());
 
     // Step 4: Retrieve episodic memories connected to activated entities
@@ -161,8 +299,9 @@ pub fn spreading_activation_retrieve(
         }
     }
 
+    stats.graph_candidates = activated_memories.len();
     tracing::info!(
-        "📊 Retrieved {} episodic memories",
+        "📊 Retrieved {} episodic memories via graph",
         activated_memories.len()
     );
 
@@ -170,7 +309,9 @@ pub fn spreading_activation_retrieve(
     let mut scored_memories = Vec::new();
 
     // Generate query embedding once (for semantic scoring)
+    let embedding_start = Instant::now();
     let query_embedding = embedder.encode(query_text)?;
+    stats.embedding_time_us = embedding_start.elapsed().as_micros() as u64;
 
     for (_episode_uuid, (graph_activation, episode)) in activated_memories {
         // Convert episode to memory
@@ -185,13 +326,10 @@ pub fn spreading_activation_retrieve(
             // Calculate linguistic match score
             let linguistic_score = calculate_linguistic_match(&memory, &analysis);
 
-            // Hybrid scoring (adjusted for semantic-first retrieval)
-            // Weights from constants: Semantic 50%, Graph 35%, Linguistic 15%
-            // Semantic similarity is primary for content matching
-            // Graph activation helps with context-related memories
-            let final_score = HYBRID_GRAPH_WEIGHT * graph_activation
-                + HYBRID_SEMANTIC_WEIGHT * semantic_score
-                + HYBRID_LINGUISTIC_WEIGHT * linguistic_score;
+            // SHO-26: Density-dependent hybrid scoring
+            let final_score = graph_weight * graph_activation
+                + semantic_weight * semantic_score
+                + linguistic_weight * linguistic_score;
 
             scored_memories.push(ActivatedMemory {
                 memory,
@@ -213,6 +351,8 @@ pub fn spreading_activation_retrieve(
     // Step 7: Apply limit
     scored_memories.truncate(query.max_results);
 
+    stats.retrieval_time_us = start_time.elapsed().as_micros() as u64;
+
     tracing::info!(
         "🎯 Returning {} memories (top scores: {:?})",
         scored_memories.len(),
@@ -223,7 +363,7 @@ pub fn spreading_activation_retrieve(
             .collect::<Vec<_>>()
     );
 
-    Ok(scored_memories)
+    Ok((scored_memories, stats))
 }
 
 /// Calculate cosine similarity between two embeddings
@@ -306,21 +446,69 @@ mod tests {
     }
 
     #[test]
-    fn test_activation_decay() {
-        use crate::constants::{
-            SPREADING_ACTIVATION_THRESHOLD, SPREADING_DECAY_RATE, SPREADING_MAX_HOPS,
-        };
+    fn test_density_weights_sparse() {
+        // Sparse graph: density < 0.5 -> min graph weight
+        let (semantic, graph, linguistic) = calculate_density_weights(0.3);
+        assert!((graph - DENSITY_GRAPH_WEIGHT_MIN).abs() < 0.001);
+        assert!((linguistic - DENSITY_LINGUISTIC_WEIGHT).abs() < 0.001);
+        assert!((semantic + graph + linguistic - 1.0).abs() < 0.001);
+    }
 
-        // Test decay formula: A(d) = A₀ × e^(-λd)
+    #[test]
+    fn test_density_weights_dense() {
+        // Dense graph: density > 2.0 -> max graph weight
+        let (semantic, graph, linguistic) = calculate_density_weights(2.5);
+        assert!((graph - DENSITY_GRAPH_WEIGHT_MAX).abs() < 0.001);
+        assert!((linguistic - DENSITY_LINGUISTIC_WEIGHT).abs() < 0.001);
+        assert!((semantic + graph + linguistic - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_density_weights_interpolation() {
+        // Medium density: should interpolate
+        let (semantic, graph, linguistic) = calculate_density_weights(1.25);
+        assert!(graph > DENSITY_GRAPH_WEIGHT_MIN);
+        assert!(graph < DENSITY_GRAPH_WEIGHT_MAX);
+        assert!((linguistic - DENSITY_LINGUISTIC_WEIGHT).abs() < 0.001);
+        assert!((semantic + graph + linguistic - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_importance_weighted_decay_high() {
+        // High importance -> low decay (preserve signal)
+        let decay = calculate_importance_weighted_decay(1.0);
+        assert!((decay - IMPORTANCE_DECAY_MIN).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_importance_weighted_decay_low() {
+        // Low importance -> high decay (explore)
+        let decay = calculate_importance_weighted_decay(0.0);
+        assert!((decay - IMPORTANCE_DECAY_MAX).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_importance_weighted_decay_mid() {
+        // Medium importance -> intermediate decay
+        let decay = calculate_importance_weighted_decay(0.5);
+        let expected = IMPORTANCE_DECAY_MIN + 0.5 * (IMPORTANCE_DECAY_MAX - IMPORTANCE_DECAY_MIN);
+        assert!((decay - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_activation_decay() {
+        // Test that importance-weighted decay varies correctly
         let initial_activation = 1.0;
 
-        for hop in 1..=SPREADING_MAX_HOPS {
-            let decay = (-SPREADING_DECAY_RATE * hop as f32).exp();
-            let activation = initial_activation * decay;
+        // High importance = slow decay
+        let high_importance_decay = calculate_importance_weighted_decay(0.9);
+        let high_importance_final = initial_activation * (-high_importance_decay).exp();
 
-            // Activation should decrease with each hop
-            assert!(activation < initial_activation);
-            assert!(activation > SPREADING_ACTIVATION_THRESHOLD);
-        }
+        // Low importance = fast decay
+        let low_importance_decay = calculate_importance_weighted_decay(0.1);
+        let low_importance_final = initial_activation * (-low_importance_decay).exp();
+
+        // High importance should retain more activation
+        assert!(high_importance_final > low_importance_final);
     }
 }

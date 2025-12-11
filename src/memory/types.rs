@@ -1972,6 +1972,49 @@ pub struct MemoryStats {
     pub average_importance: f32,
 }
 
+/// Retrieval statistics for SHO-26 associative retrieval (debugging/observability)
+///
+/// Returned with recall responses to expose the hybrid scoring internals.
+/// Helps users understand why certain memories were retrieved and tune parameters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RetrievalStats {
+    /// Mode used for this retrieval (semantic, associative, hybrid)
+    pub mode: String,
+
+    /// Number of memories retrieved via semantic similarity
+    pub semantic_candidates: usize,
+
+    /// Number of memories retrieved via graph traversal
+    pub graph_candidates: usize,
+
+    /// Graph density (edges per memory) - determines graph weight
+    pub graph_density: f32,
+
+    /// Actual graph weight used (density-dependent: 0.1 to 0.5)
+    pub graph_weight: f32,
+
+    /// Actual semantic weight used (1.0 - graph_weight - linguistic_weight)
+    pub semantic_weight: f32,
+
+    /// Linguistic weight used (fixed at 0.15)
+    pub linguistic_weight: f32,
+
+    /// Number of graph hops performed in spreading activation
+    pub graph_hops: usize,
+
+    /// Number of unique entities activated during graph traversal
+    pub entities_activated: usize,
+
+    /// Total time spent on retrieval (microseconds)
+    pub retrieval_time_us: u64,
+
+    /// Time spent on embedding generation (microseconds)
+    pub embedding_time_us: u64,
+
+    /// Time spent on graph traversal (microseconds)
+    pub graph_time_us: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

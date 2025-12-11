@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
 
+use super::introspection::{
+    ConsolidationEvent, ConsolidationEventBuffer, EdgeFormationReason, PruningReason,
+};
 use super::storage::{MemoryStorage, SearchCriteria};
 use super::types::*;
 use crate::constants::{
@@ -35,6 +38,9 @@ pub struct RetrievalEngine {
     graph: RwLock<MemoryGraph>, // Interior mutability for graph updates
     /// Storage path for persisting vector index and ID mapping
     storage_path: PathBuf,
+    /// Shared consolidation event buffer for introspection
+    /// Records edge formation, strengthening, and pruning events
+    consolidation_events: Option<Arc<RwLock<ConsolidationEventBuffer>>>,
 }
 
 /// Bidirectional mapping between memory IDs and vector IDs
@@ -71,6 +77,21 @@ impl RetrievalEngine {
     ///
     /// Automatically loads persisted vector index and ID mapping if they exist.
     pub fn new(storage: Arc<MemoryStorage>, embedder: Arc<MiniLMEmbedder>) -> Result<Self> {
+        Self::with_event_buffer(storage, embedder, None)
+    }
+
+    /// Create retrieval engine with event buffer for consolidation introspection
+    ///
+    /// The event buffer is used to record Hebbian learning events:
+    /// - Edge formation (new associations)
+    /// - Edge strengthening (co-activation)
+    /// - Edge potentiation (LTP)
+    /// - Edge pruning (decay below threshold)
+    pub fn with_event_buffer(
+        storage: Arc<MemoryStorage>,
+        embedder: Arc<MiniLMEmbedder>,
+        consolidation_events: Option<Arc<RwLock<ConsolidationEventBuffer>>>,
+    ) -> Result<Self> {
         // Get storage path from MemoryStorage for persistence
         let storage_path = storage.path().to_path_buf();
         let index_path = storage_path.join("vector_index");
@@ -125,7 +146,20 @@ impl RetrievalEngine {
             id_mapping: Arc::new(RwLock::new(id_mapping)),
             graph: RwLock::new(MemoryGraph::new()),
             storage_path,
+            consolidation_events,
         })
+    }
+
+    /// Set the consolidation event buffer (for late binding after construction)
+    pub fn set_consolidation_events(&mut self, events: Arc<RwLock<ConsolidationEventBuffer>>) {
+        self.consolidation_events = Some(events);
+    }
+
+    /// Record a consolidation event (helper method)
+    fn record_event(&self, event: ConsolidationEvent) {
+        if let Some(ref buffer) = self.consolidation_events {
+            buffer.write().push(event);
+        }
     }
 
     /// Load ID mapping from file
@@ -656,17 +690,72 @@ impl RetrievalEngine {
     ///
     /// Call this when multiple memories are accessed together in a retrieval result.
     /// Strengthens the associations between them.
+    /// Records consolidation events for introspection.
     pub fn record_coactivation(&self, memory_ids: &[MemoryId]) {
         if memory_ids.len() >= 2 {
-            self.graph.write().record_coactivation(memory_ids);
+            let results = self.graph.write().record_coactivation(memory_ids);
+            let now = chrono::Utc::now();
+
+            // Record consolidation events for each edge update
+            for result in results {
+                let res = &result.forward_result;
+                if res.is_new {
+                    // New edge formed
+                    self.record_event(ConsolidationEvent::EdgeFormed {
+                        from_memory_id: result.from_id.0.to_string(),
+                        to_memory_id: result.to_id.0.to_string(),
+                        initial_strength: res.strength_after,
+                        reason: EdgeFormationReason::CoRetrieval,
+                        timestamp: now,
+                    });
+                } else {
+                    // Existing edge strengthened
+                    self.record_event(ConsolidationEvent::EdgeStrengthened {
+                        from_memory_id: result.from_id.0.to_string(),
+                        to_memory_id: result.to_id.0.to_string(),
+                        strength_before: res.strength_before,
+                        strength_after: res.strength_after,
+                        co_activations: res.activation_count,
+                        timestamp: now,
+                    });
+                }
+
+                // Record LTP event if triggered
+                if res.ltp_triggered {
+                    self.record_event(ConsolidationEvent::EdgePotentiated {
+                        from_memory_id: result.from_id.0.to_string(),
+                        to_memory_id: result.to_id.0.to_string(),
+                        final_strength: res.strength_after,
+                        total_co_activations: res.activation_count,
+                        timestamp: now,
+                    });
+                }
+            }
         }
     }
 
     /// Perform graph maintenance (decay old edges, prune weak ones)
     ///
     /// Call this periodically (e.g., every hour or on user logout)
-    pub fn graph_maintenance(&self) {
-        self.graph.write().maintenance();
+    /// Records consolidation events for edge pruning.
+    /// Returns the number of edges pruned.
+    pub fn graph_maintenance(&self) -> usize {
+        let prune_results = self.graph.write().maintenance();
+        let now = chrono::Utc::now();
+        let pruned_count = prune_results.len();
+
+        // Record pruning events
+        for result in prune_results {
+            self.record_event(ConsolidationEvent::EdgePruned {
+                from_memory_id: result.from_id.0.to_string(),
+                to_memory_id: result.to_id.0.to_string(),
+                final_strength: result.final_strength,
+                reason: PruningReason::DecayedBelowThreshold,
+                timestamp: now,
+            });
+        }
+
+        pruned_count
     }
 
     /// Get memory graph statistics
@@ -960,11 +1049,26 @@ struct EdgeWeight {
     last_activated: i64,
 }
 
+/// Result of strengthening an edge (for introspection)
+#[derive(Debug)]
+pub(crate) struct StrengthenResult {
+    /// Was this a new edge?
+    pub is_new: bool,
+    /// Strength before this operation
+    pub strength_before: f32,
+    /// Strength after this operation
+    pub strength_after: f32,
+    /// Total co-activations
+    pub activation_count: u32,
+    /// Did this trigger long-term potentiation?
+    pub ltp_triggered: bool,
+}
+
 impl Default for EdgeWeight {
     fn default() -> Self {
         Self {
             strength: EDGE_INITIAL_STRENGTH, // From constants.rs (0.5)
-            activation_count: 1,
+            activation_count: 0, // Start at 0, strengthen() will increment to 1
             last_activated: chrono::Utc::now().timestamp_millis(),
         }
     }
@@ -976,7 +1080,11 @@ impl EdgeWeight {
     const LTP_THRESHOLD: u32 = 5; // Lower threshold for memory associations
 
     /// Strengthen the edge (called when both memories are accessed together)
-    fn strengthen(&mut self) {
+    /// Returns info about what happened for introspection
+    fn strengthen(&mut self) -> StrengthenResult {
+        let strength_before = self.strength;
+        let was_new = self.activation_count == 0;
+
         self.activation_count += 1;
         self.last_activated = chrono::Utc::now().timestamp_millis();
 
@@ -985,8 +1093,17 @@ impl EdgeWeight {
         self.strength = (self.strength + boost).min(1.0);
 
         // Long-term potentiation bonus
-        if self.activation_count == Self::LTP_THRESHOLD {
+        let ltp_triggered = self.activation_count == Self::LTP_THRESHOLD;
+        if ltp_triggered {
             self.strength = (self.strength + 0.15).min(1.0);
+        }
+
+        StrengthenResult {
+            is_new: was_new,
+            strength_before,
+            strength_after: self.strength,
+            activation_count: self.activation_count,
+            ltp_triggered,
         }
     }
 
@@ -1014,6 +1131,22 @@ impl EdgeWeight {
     }
 }
 
+/// Result of an edge update (for introspection)
+#[derive(Debug)]
+pub(crate) struct EdgeUpdateResult {
+    pub from_id: MemoryId,
+    pub to_id: MemoryId,
+    pub forward_result: StrengthenResult,
+}
+
+/// Result of a pruning operation (for introspection)
+#[derive(Debug)]
+pub(crate) struct PruneResult {
+    pub from_id: MemoryId,
+    pub to_id: MemoryId,
+    pub final_strength: f32,
+}
+
 impl MemoryGraph {
     fn new() -> Self {
         Self {
@@ -1022,22 +1155,30 @@ impl MemoryGraph {
     }
 
     /// Add edge between memories (bidirectional) with initial weight
-    pub(crate) fn add_edge(&mut self, from: &MemoryId, to: &MemoryId) {
+    /// Returns the result of the forward edge update for introspection
+    pub(crate) fn add_edge(&mut self, from: &MemoryId, to: &MemoryId) -> EdgeUpdateResult {
         // Forward edge
-        self.adjacency
+        let forward_result = self
+            .adjacency
             .entry(from.clone())
             .or_default()
             .entry(to.clone())
             .or_default()
             .strengthen();
 
-        // Backward edge
+        // Backward edge (we don't need to return this, symmetric)
         self.adjacency
             .entry(to.clone())
             .or_default()
             .entry(from.clone())
             .or_default()
             .strengthen();
+
+        EdgeUpdateResult {
+            from_id: from.clone(),
+            to_id: to.clone(),
+            forward_result,
+        }
     }
 
     /// Add a memory to the graph (creates edges based on related_memories)
@@ -1058,7 +1199,8 @@ impl MemoryGraph {
     /// Note: For large retrievals, we limit to top N memories to avoid O(n²) explosion.
     /// This is a deliberate tradeoff: we still get good association learning while
     /// keeping worst-case complexity bounded to O(MAX_COACTIVATION_SIZE²).
-    pub(crate) fn record_coactivation(&mut self, memories: &[MemoryId]) {
+    /// Returns the edge update results for introspection.
+    pub(crate) fn record_coactivation(&mut self, memories: &[MemoryId]) -> Vec<EdgeUpdateResult> {
         const MAX_COACTIVATION_SIZE: usize = 20;
 
         // Limit to top N memories to bound worst-case O(n²) to O(400)
@@ -1068,12 +1210,17 @@ impl MemoryGraph {
             memories
         };
 
+        let mut results = Vec::new();
+
         // Strengthen edges between all pairs of co-accessed memories
         for i in 0..memories_to_process.len() {
             for j in (i + 1)..memories_to_process.len() {
-                self.add_edge(&memories_to_process[i], &memories_to_process[j]);
+                let result = self.add_edge(&memories_to_process[i], &memories_to_process[j]);
+                results.push(result);
             }
         }
+
+        results
     }
 
     /// Find associated memories using weighted graph traversal
@@ -1121,23 +1268,36 @@ impl MemoryGraph {
     }
 
     /// Periodic maintenance: decay edges and prune weak ones
-    fn maintenance(&mut self) {
-        let mut to_remove: Vec<(MemoryId, MemoryId)> = Vec::new();
+    /// Returns list of pruned edges for introspection
+    fn maintenance(&mut self) -> Vec<PruneResult> {
+        let mut to_remove: Vec<(MemoryId, MemoryId, f32)> = Vec::new();
 
         for (from_id, neighbors) in &mut self.adjacency {
             for (to_id, weight) in neighbors.iter_mut() {
+                let strength_before = weight.strength;
                 if weight.decay() {
-                    to_remove.push((from_id.clone(), to_id.clone()));
+                    to_remove.push((from_id.clone(), to_id.clone(), strength_before));
                 }
             }
         }
 
-        // Remove pruned edges
-        for (from_id, to_id) in to_remove {
+        // Remove pruned edges and collect results
+        let mut prune_results = Vec::new();
+        for (from_id, to_id, final_strength) in to_remove {
             if let Some(neighbors) = self.adjacency.get_mut(&from_id) {
                 neighbors.remove(&to_id);
             }
+            // Only record one direction (edges are bidirectional)
+            if from_id.0 < to_id.0 {
+                prune_results.push(PruneResult {
+                    from_id,
+                    to_id,
+                    final_strength,
+                });
+            }
         }
+
+        prune_results
     }
 
     /// Get graph statistics
