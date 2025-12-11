@@ -153,6 +153,10 @@ harness = false
 name = "associative_retrieval_benchmarks"
 harness = false
 
+[[bench]]
+name = "streaming_benchmarks"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true
