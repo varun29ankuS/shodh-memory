@@ -140,6 +140,7 @@ jobs:
   benchmark:
     name: Benchmarks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -148,7 +149,8 @@ jobs:
       - name: Run benchmarks
         run: |
           cargo bench --no-run 2>&1 || true
-          cargo bench 2>&1 | tee bench-output.txt || true
+          # Run only relevance benchmarks (latency verification) to keep CI fast
+          cargo bench --bench relevance_benchmarks -- latency_30ms_target 2>&1 | tee bench-output.txt || true
 
       - name: Parse and display benchmark results
         if: always()
