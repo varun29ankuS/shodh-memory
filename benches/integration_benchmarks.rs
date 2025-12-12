@@ -16,8 +16,8 @@ use shodh_memory::integrations::github::{
     GitHubWebhook,
 };
 use shodh_memory::integrations::linear::{
-    LinearCycle, LinearIssueData, LinearLabel, LinearProject, LinearState, LinearTeam,
-    LinearUser, LinearWebhook,
+    LinearCycle, LinearIssueData, LinearLabel, LinearProject, LinearState, LinearTeam, LinearUser,
+    LinearWebhook,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -289,7 +289,8 @@ fn create_linear_webhook_payload() -> String {
             "updatedAt": "2025-01-10T12:00:00Z"
         },
         "url": "https://linear.app/shodh/issue/SHO-42"
-    }).to_string()
+    })
+    .to_string()
 }
 
 fn create_github_webhook_payload() -> String {
@@ -318,7 +319,8 @@ fn create_github_webhook_payload() -> String {
             "owner": {"id": 1, "login": "varun29ankuS"}
         },
         "sender": {"id": 1, "login": "varun29ankuS"}
-    }).to_string()
+    })
+    .to_string()
 }
 
 // =============================================================================
@@ -367,9 +369,7 @@ fn bench_linear_signature_verification(c: &mut Criterion) {
     let mut group = c.benchmark_group("linear_integration");
 
     group.bench_function("signature_verification", |b| {
-        b.iter(|| {
-            webhook.verify_signature(black_box(payload.as_bytes()), black_box(&signature))
-        })
+        b.iter(|| webhook.verify_signature(black_box(payload.as_bytes()), black_box(&signature)))
     });
 
     group.finish();
@@ -389,9 +389,7 @@ fn bench_github_signature_verification(c: &mut Criterion) {
     let mut group = c.benchmark_group("github_integration");
 
     group.bench_function("signature_verification", |b| {
-        b.iter(|| {
-            webhook.verify_signature(black_box(payload.as_bytes()), black_box(&signature))
-        })
+        b.iter(|| webhook.verify_signature(black_box(payload.as_bytes()), black_box(&signature)))
     });
 
     group.finish();
@@ -479,7 +477,9 @@ fn bench_full_linear_pipeline(c: &mut Criterion) {
             assert!(valid);
 
             // 2. Parse payload
-            let parsed = webhook.parse_payload(black_box(payload.as_bytes())).unwrap();
+            let parsed = webhook
+                .parse_payload(black_box(payload.as_bytes()))
+                .unwrap();
 
             // 3. Transform content
             let content = LinearWebhook::issue_to_content(&parsed.data);
@@ -519,7 +519,9 @@ fn bench_full_github_pipeline(c: &mut Criterion) {
             assert!(valid);
 
             // 2. Parse payload
-            let parsed = webhook.parse_payload(black_box(payload.as_bytes())).unwrap();
+            let parsed = webhook
+                .parse_payload(black_box(payload.as_bytes()))
+                .unwrap();
 
             // 3. Transform content (issue)
             let content = if let Some(issue) = &parsed.issue {

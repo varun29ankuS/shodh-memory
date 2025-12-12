@@ -125,7 +125,8 @@ mod linear_tests {
     fn test_linear_signature_verification_invalid() {
         let secret = "webhook-signing-secret";
         let body = r#"{"action":"create","type":"Issue","data":{"id":"123"}}"#;
-        let wrong_signature = "sha256=0000000000000000000000000000000000000000000000000000000000000000";
+        let wrong_signature =
+            "sha256=0000000000000000000000000000000000000000000000000000000000000000";
 
         let webhook = LinearWebhook::new(Some(secret.to_string()));
         let result = webhook.verify_signature(body.as_bytes(), wrong_signature);
