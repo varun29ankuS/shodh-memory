@@ -109,6 +109,7 @@ impl RetrievalEngine {
             search_list_size: 100, // 2x for better accuracy with 10M vectors
             alpha: 1.2,
             use_mmap: false, // Keep in memory for low-latency robotics
+            ..Default::default()
         };
 
         let mut vector_index = VamanaIndex::new(vamana_config)?;
@@ -809,7 +810,7 @@ impl RetrievalEngine {
     ///
     /// Returns a write guard to the memory graph for recording coactivations
     /// and adding edges. The guard is automatically released when dropped.
-    pub fn graph_mut(&self) -> parking_lot::RwLockWriteGuard<'_, MemoryGraph> {
+    pub(crate) fn graph_mut(&self) -> parking_lot::RwLockWriteGuard<'_, MemoryGraph> {
         self.graph.write()
     }
 

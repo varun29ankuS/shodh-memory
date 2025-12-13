@@ -1210,6 +1210,86 @@ async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<serde_
     )
 }
 
+/// Vector index health endpoint - provides Vamana index statistics per user
+///
+/// Returns index health metrics including total vectors, incremental inserts since
+/// last build, and whether a rebuild is recommended for optimal recall.
+async fn health_index(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let user_id = match params.get("user_id") {
+        Some(id) => id.clone(),
+        None => {
+            // Return aggregate stats across all cached users
+            let users: Vec<(String, memory::retrieval::IndexHealth)> = {
+                let cache = state.user_memories.lock();
+                cache
+                    .iter()
+                    .map(|(user_id, memory)| {
+                        let guard = memory.read();
+                        (user_id.clone(), guard.index_health())
+                    })
+                    .collect()
+            };
+
+            let total_vectors: usize = users.iter().map(|(_, h)| h.total_vectors).sum();
+            let total_incremental: usize = users.iter().map(|(_, h)| h.incremental_inserts).sum();
+            let needs_rebuild: Vec<&str> = users
+                .iter()
+                .filter(|(_, h)| h.needs_rebuild)
+                .map(|(id, _)| id.as_str())
+                .collect();
+
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "users_checked": users.len(),
+                    "total_vectors": total_vectors,
+                    "total_incremental_inserts": total_incremental,
+                    "users_needing_rebuild": needs_rebuild,
+                    "rebuild_threshold": crate::vector_db::vamana::REBUILD_THRESHOLD,
+                    "timestamp": chrono::Utc::now().to_rfc3339()
+                })),
+            );
+        }
+    };
+
+    // Get health for specific user
+    match state.get_user_memory(&user_id) {
+        Ok(memory) => {
+            let guard = memory.read();
+            let health = guard.index_health();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "user_id": user_id,
+                    "total_vectors": health.total_vectors,
+                    "incremental_inserts": health.incremental_inserts,
+                    "needs_rebuild": health.needs_rebuild,
+                    "rebuild_threshold": health.rebuild_threshold,
+                    "degradation_percent": if health.rebuild_threshold > 0 {
+                        (health.incremental_inserts as f64 / health.rebuild_threshold as f64 * 100.0).min(100.0)
+                    } else {
+                        0.0
+                    },
+                    "timestamp": chrono::Utc::now().to_rfc3339()
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": e.to_string(),
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            })),
+        ),
+    }
+}
+
 /// Prometheus metrics endpoint for observability
 /// Returns metrics in Prometheus text format for scraping
 async fn metrics_endpoint(State(state): State<AppState>) -> Result<String, StatusCode> {
@@ -6408,6 +6488,7 @@ async fn main() -> Result<()> {
         .route("/health", get(health))
         .route("/health/live", get(health_live)) // P0.9: Kubernetes liveness probe
         .route("/health/ready", get(health_ready)) // P0.9: Kubernetes readiness probe
+        .route("/health/index", get(health_index)) // Vector index health metrics
         .route("/metrics", get(metrics_endpoint)) // P1.1: Prometheus metrics
         .route("/api/events", get(memory_events_sse)) // SSE: Real-time memory events for dashboard
         .route("/api/stream", get(streaming_memory_ws)) // WS: Streaming memory ingestion (SHO-25)

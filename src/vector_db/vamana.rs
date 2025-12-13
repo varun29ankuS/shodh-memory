@@ -20,7 +20,10 @@
 //! }
 //! ```
 
-use super::distance_inline::dot_product_inline;
+use super::distance_inline::{
+    cosine_similarity_inline, dot_product_inline, euclidean_squared_inline,
+    normalized_distance_inline,
+};
 use anyhow::{anyhow, Result};
 use memmap2::MmapMut;
 use parking_lot::RwLock;
@@ -29,7 +32,27 @@ use std::collections::{BinaryHeap, HashSet};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
+
+/// Distance metric for vector similarity
+///
+/// All metrics are SIMD-optimized (AVX2 on x86-64, NEON on ARM64).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DistanceMetric {
+    /// For L2-normalized vectors (default). Fastest option.
+    /// Uses -dot_product which gives correct distance ordering.
+    /// MiniLM and most sentence transformers output normalized vectors.
+    #[default]
+    NormalizedDotProduct,
+
+    /// Euclidean distance squared. Works for any vectors.
+    /// Slightly slower than dot product but doesn't require normalization.
+    Euclidean,
+
+    /// Cosine similarity (1 - cos_sim). Works for any vectors.
+    /// Computes norms on-the-fly, slowest but most flexible.
+    Cosine,
+}
 
 /// Vamana configuration
 #[derive(Debug, Clone)]
@@ -48,16 +71,21 @@ pub struct VamanaConfig {
 
     /// Use memory mapping for large datasets
     pub use_mmap: bool,
+
+    /// Distance metric for similarity calculation
+    /// Default: NormalizedDotProduct (assumes L2-normalized vectors)
+    pub distance_metric: DistanceMetric,
 }
 
 impl Default for VamanaConfig {
     fn default() -> Self {
         Self {
-            max_degree: 32,       // R=32 for billion-scale
-            search_list_size: 75, // L=75 during construction
-            alpha: 1.2,           // Standard α for pruning
-            dimension: 384,       // MiniLM dimension
-            use_mmap: true,       // Disk-based for large datasets
+            max_degree: 32,                              // R=32 for billion-scale
+            search_list_size: 75,                        // L=75 during construction
+            alpha: 1.2,                                  // Standard α for pruning
+            dimension: 384,                              // MiniLM dimension
+            use_mmap: true,                              // Disk-based for large datasets
+            distance_metric: DistanceMetric::default(), // NormalizedDotProduct for MiniLM
         }
     }
 }
@@ -70,9 +98,6 @@ pub(crate) struct VamanaNode {
 
     /// Neighbor IDs sorted by distance
     neighbors: Vec<u32>,
-
-    /// Optional: distances to neighbors (for faster search)
-    neighbor_distances: Vec<f32>,
 }
 
 /// Threshold for recommending index rebuild (number of incremental inserts)
@@ -100,6 +125,9 @@ pub struct VamanaIndex {
     /// Counter for incremental inserts since last rebuild
     /// Used to track index quality degradation
     incremental_inserts: std::sync::atomic::AtomicUsize,
+
+    /// Flag to prevent concurrent rebuilds
+    rebuilding: std::sync::atomic::AtomicBool,
 }
 
 /// Vector storage abstraction
@@ -131,6 +159,7 @@ impl VamanaIndex {
             num_vectors: 0,
             storage_path,
             incremental_inserts: std::sync::atomic::AtomicUsize::new(0),
+            rebuilding: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -247,7 +276,6 @@ impl VamanaIndex {
             graph.push(VamanaNode {
                 id: i as u32,
                 neighbors,
-                neighbor_distances: Vec::new(),
             });
         }
 
@@ -372,7 +400,7 @@ impl VamanaIndex {
 
         for i in 0..n {
             let vec = self.get_vector(i as u32)?;
-            let dist = self.euclidean_distance(&vec, &centroid);
+            let dist = self.distance(&vec, &centroid);
             if dist < best_dist {
                 best_dist = dist;
                 best_id = i as u32;
@@ -483,7 +511,7 @@ impl VamanaIndex {
 
         // Start from entry point
         let entry_vec = self.get_vector(entry)?;
-        let entry_dist = self.euclidean_distance(query, &entry_vec);
+        let entry_dist = self.distance(query, &entry_vec);
 
         candidates.push(Reverse(SearchCandidate {
             id: entry,
@@ -522,7 +550,7 @@ impl VamanaIndex {
                 visited.insert(neighbor_id);
 
                 let neighbor_vec = self.get_vector(neighbor_id)?;
-                let dist = self.euclidean_distance(query, &neighbor_vec);
+                let dist = self.distance(query, &neighbor_vec);
 
                 // Defensive: check if closer than worst in w, or w not yet full
                 let should_add = w.len() < k || w.peek().map(|p| dist < p.distance).unwrap_or(true);
@@ -578,13 +606,13 @@ impl VamanaIndex {
 
             // Check α-RNG condition
             let candidate_vec = self.get_vector(candidate.id)?;
-            let dist_nc = self.euclidean_distance(&node_vec, &candidate_vec);
+            let dist_nc = self.distance(&node_vec, &candidate_vec);
 
             let mut should_add = true;
             for &existing_id in &pruned {
                 let existing_vec = self.get_vector(existing_id)?;
-                let dist_ne = self.euclidean_distance(&node_vec, &existing_vec);
-                let dist_ce = self.euclidean_distance(&candidate_vec, &existing_vec);
+                let dist_ne = self.distance(&node_vec, &existing_vec);
+                let dist_ce = self.distance(&candidate_vec, &existing_vec);
 
                 // α-RNG pruning condition
                 if self.config.alpha * dist_ce <= dist_nc && dist_ce <= dist_ne {
@@ -604,11 +632,19 @@ impl VamanaIndex {
         Ok(pruned)
     }
 
-    /// Inline SIMD distance calculation (zero overhead)
-    fn euclidean_distance(&self, a: &[f32], b: &[f32]) -> f32 {
-        // Use inline SIMD with zero overhead
-        // For normalized vectors, -dot product gives distance ordering
-        -dot_product_inline(a, b)
+    /// Compute distance between two vectors using configured metric
+    ///
+    /// All metrics are SIMD-optimized:
+    /// - NormalizedDotProduct: -dot(a,b) - fastest, requires normalized vectors
+    /// - Euclidean: ||a-b||^2 - works for any vectors
+    /// - Cosine: 1 - cos_sim(a,b) - works for any vectors, computes norms
+    #[inline(always)]
+    fn distance(&self, a: &[f32], b: &[f32]) -> f32 {
+        match self.config.distance_metric {
+            DistanceMetric::NormalizedDotProduct => normalized_distance_inline(a, b),
+            DistanceMetric::Euclidean => euclidean_squared_inline(a, b),
+            DistanceMetric::Cosine => 1.0 - cosine_similarity_inline(a, b),
+        }
     }
 
     /// Search for k nearest neighbors
@@ -653,7 +689,6 @@ impl VamanaIndex {
             graph.push(VamanaNode {
                 id,
                 neighbors: Vec::new(),
-                neighbor_distances: Vec::new(),
             });
             *self.medoid.write() = 0;
             self.num_vectors += 1;
@@ -680,7 +715,6 @@ impl VamanaIndex {
         graph.push(VamanaNode {
             id,
             neighbors: neighbors.clone(),
-            neighbor_distances: Vec::new(),
         });
 
         // BUG-004 FIX: Distance-aware neighbor pruning for incremental inserts
@@ -827,22 +861,51 @@ impl VamanaIndex {
     /// Perform automatic rebuild if threshold exceeded
     ///
     /// Thread-safe method that checks if rebuild is needed and performs it atomically.
-    /// Returns true if rebuild was performed, false if not needed.
+    /// Returns true if rebuild was performed, false if not needed or already in progress.
     ///
-    /// This is safe to call from multiple threads - only one rebuild will occur.
+    /// Uses compare-and-swap to ensure only one rebuild occurs even with concurrent calls.
     pub fn auto_rebuild_if_needed(&mut self) -> Result<bool> {
         if !self.needs_rebuild() {
             return Ok(false);
         }
 
-        // Extract vectors before rebuild
-        let vectors = self.extract_all_vectors();
-        if vectors.is_empty() {
+        // Atomic compare-and-swap: try to set rebuilding from false to true
+        // If another thread is already rebuilding, this returns Err and we skip
+        if self
+            .rebuilding
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            // Another thread is already rebuilding
             return Ok(false);
         }
 
-        self.rebuild_from_vectors(vectors)?;
-        Ok(true)
+        // We acquired the rebuild lock - perform rebuild
+        let result = (|| {
+            let vectors = self.extract_all_vectors();
+            if vectors.is_empty() {
+                return Ok(false);
+            }
+            self.rebuild_from_vectors(vectors)?;
+            Ok(true)
+        })();
+
+        // Always release the lock, even on error
+        self.rebuilding
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        result
+    }
+
+    /// Check if a rebuild is currently in progress
+    pub fn is_rebuilding(&self) -> bool {
+        self.rebuilding
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Save index to disk
@@ -958,8 +1021,12 @@ impl VamanaIndex {
                 *vecs = data.vectors;
             }
             VectorStorage::Mmap { .. } => {
-                // For mmap, we'd need to reload the mmap file
-                // For now, convert to memory storage
+                // Cannot restore mmap from serialized data - converting to in-memory storage
+                warn!(
+                    "Loading index into mmap-configured instance: converting {} vectors to in-memory storage. \
+                     This may increase memory usage. To use mmap, rebuild the index with build().",
+                    data.num_vectors
+                );
                 *self.vectors.write() = VectorStorage::Memory(data.vectors);
             }
         }
@@ -1010,6 +1077,7 @@ mod tests {
             search_list_size: 10,
             alpha: 1.2,
             use_mmap: false,
+            ..Default::default()
         })
         .unwrap();
 

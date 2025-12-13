@@ -1130,8 +1130,9 @@ impl MemorySystem {
                 .map(|m| m.id.clone())
                 .collect();
             for id in &ids_to_remove {
-                working.remove(id);
-                count += 1;
+                if working.remove(id).is_ok() {
+                    count += 1;
+                }
             }
         }
 
@@ -1145,8 +1146,9 @@ impl MemorySystem {
                 .map(|m| m.id.clone())
                 .collect();
             for id in &ids_to_remove {
-                session.remove(id);
-                count += 1;
+                if session.remove(id).is_ok() {
+                    count += 1;
+                }
             }
         }
 
@@ -1180,8 +1182,9 @@ impl MemorySystem {
                 .map(|m| m.id.clone())
                 .collect();
             for id in &ids_to_remove {
-                working.remove(id);
-                count += 1;
+                if working.remove(id).is_ok() {
+                    count += 1;
+                }
             }
         }
 
@@ -1195,8 +1198,9 @@ impl MemorySystem {
                 .map(|m| m.id.clone())
                 .collect();
             for id in &ids_to_remove {
-                session.remove(id);
-                count += 1;
+                if session.remove(id).is_ok() {
+                    count += 1;
+                }
             }
         }
 
@@ -1226,8 +1230,9 @@ impl MemorySystem {
                 .map(|m| m.id.clone())
                 .collect();
             for id in &ids_to_remove {
-                working.remove(id);
-                count += 1;
+                if working.remove(id).is_ok() {
+                    count += 1;
+                }
             }
         }
 
@@ -1241,8 +1246,9 @@ impl MemorySystem {
                 .map(|m| m.id.clone())
                 .collect();
             for id in &ids_to_remove {
-                session.remove(id);
-                count += 1;
+                if session.remove(id).is_ok() {
+                    count += 1;
+                }
             }
         }
 
@@ -1489,6 +1495,22 @@ impl MemorySystem {
     /// Load vector index from disk (startup restoration)
     pub fn load_vector_index(&self, path: &Path) -> Result<()> {
         self.retriever.load_index(path)
+    }
+
+    /// Get vector index health information
+    ///
+    /// Returns metrics about the Vamana index including total vectors,
+    /// incremental inserts since last build, and whether rebuild is recommended.
+    pub fn index_health(&self) -> retrieval::IndexHealth {
+        self.retriever.index_health()
+    }
+
+    /// Auto-rebuild vector index if degradation threshold is exceeded
+    ///
+    /// Returns `Ok(true)` if rebuild was performed, `Ok(false)` if not needed.
+    /// Thread-safe: concurrent calls are no-ops while rebuild is in progress.
+    pub fn auto_rebuild_index_if_needed(&self) -> Result<bool> {
+        self.retriever.auto_rebuild_index_if_needed()
     }
 
     /// Check resource limits to prevent OOM from single user
