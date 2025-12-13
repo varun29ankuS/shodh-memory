@@ -994,6 +994,7 @@ pub struct SessionStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embeddings::NerEntityType;
 
     #[test]
     fn test_extraction_config_defaults() {

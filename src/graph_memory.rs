@@ -420,10 +420,8 @@ impl GraphMemory {
             Self::load_or_migrate_name_index(&entity_name_index_db, &entities_db)?;
 
         // Load/migrate lowercase index for O(1) case-insensitive lookup
-        let entity_lowercase_index = Self::load_or_migrate_lowercase_index(
-            &entity_lowercase_index_db,
-            &entity_name_index,
-        )?;
+        let entity_lowercase_index =
+            Self::load_or_migrate_lowercase_index(&entity_lowercase_index_db, &entity_name_index)?;
 
         let entity_count = entity_name_index.len();
 
@@ -2369,7 +2367,10 @@ mod tests {
             edge.strengthen();
         }
 
-        assert!(edge.potentiated, "Should be potentiated after 10 activations");
+        assert!(
+            edge.potentiated,
+            "Should be potentiated after 10 activations"
+        );
         assert!(
             edge.strength > 0.7,
             "Potentiated edge should have bonus strength"
@@ -2472,8 +2473,7 @@ mod tests {
 
     #[test]
     fn test_salience_calculation() {
-        let person_salience =
-            EntityExtractor::calculate_base_salience(&EntityLabel::Person, false);
+        let person_salience = EntityExtractor::calculate_base_salience(&EntityLabel::Person, false);
         let person_proper_salience =
             EntityExtractor::calculate_base_salience(&EntityLabel::Person, true);
 

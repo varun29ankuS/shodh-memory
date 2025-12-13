@@ -80,11 +80,11 @@ pub struct VamanaConfig {
 impl Default for VamanaConfig {
     fn default() -> Self {
         Self {
-            max_degree: 32,                              // R=32 for billion-scale
-            search_list_size: 75,                        // L=75 during construction
-            alpha: 1.2,                                  // Standard α for pruning
-            dimension: 384,                              // MiniLM dimension
-            use_mmap: true,                              // Disk-based for large datasets
+            max_degree: 32,                             // R=32 for billion-scale
+            search_list_size: 75,                       // L=75 during construction
+            alpha: 1.2,                                 // Standard α for pruning
+            dimension: 384,                             // MiniLM dimension
+            use_mmap: true,                             // Disk-based for large datasets
             distance_metric: DistanceMetric::default(), // NormalizedDotProduct for MiniLM
         }
     }
@@ -904,8 +904,7 @@ impl VamanaIndex {
 
     /// Check if a rebuild is currently in progress
     pub fn is_rebuilding(&self) -> bool {
-        self.rebuilding
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.rebuilding.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Save index to disk

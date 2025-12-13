@@ -1126,7 +1126,7 @@ impl MemorySystem {
             let ids_to_remove: Vec<MemoryId> = working
                 .all_memories()
                 .iter()
-                .filter(|m| m.experience.entities.iter().any(|e| tags.contains(e)))
+                .filter(|m| m.experience.tags.iter().any(|t| tags.contains(t)))
                 .map(|m| m.id.clone())
                 .collect();
             for id in &ids_to_remove {
@@ -1142,7 +1142,7 @@ impl MemorySystem {
             let ids_to_remove: Vec<MemoryId> = session
                 .all_memories()
                 .iter()
-                .filter(|m| m.experience.entities.iter().any(|e| tags.contains(e)))
+                .filter(|m| m.experience.tags.iter().any(|t| tags.contains(t)))
                 .map(|m| m.id.clone())
                 .collect();
             for id in &ids_to_remove {
@@ -1155,7 +1155,7 @@ impl MemorySystem {
         // Remove from long-term memory (hard delete for tag-based)
         let all_lt = self.long_term_memory.get_all()?;
         for memory in all_lt {
-            if memory.experience.entities.iter().any(|e| tags.contains(e)) {
+            if memory.experience.tags.iter().any(|t| tags.contains(t)) {
                 self.long_term_memory.delete(&memory.id)?;
                 count += 1;
             }
