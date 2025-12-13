@@ -3579,13 +3579,13 @@ async fn list_memories(
 // HEBBIAN FEEDBACK HANDLERS - Closes the learning loop
 // =============================================================================
 
-/// Tracked retrieval - returns tracking info for later feedback
-/// POST /api/retrieve/tracked
+/// Tracked recall - returns tracking info for later Hebbian feedback
+/// POST /api/recall/tracked
 ///
 /// Use this when you want to provide feedback later on whether memories were helpful.
-/// Returns memory_ids that can be passed to /api/reinforce.
+/// Returns memory_ids that can be passed to /api/reinforce for Hebbian strengthening.
 #[tracing::instrument(skip(state), fields(user_id = %req.user_id, query = %req.query))]
-async fn retrieve_tracked(
+async fn recall_tracked(
     State(state): State<AppState>,
     Json(req): Json<TrackedRetrieveRequest>,
 ) -> Result<Json<TrackedRetrieveResponse>, AppError> {
@@ -6368,7 +6368,7 @@ async fn main() -> Result<()> {
         .route("/webhook/github", post(github_webhook))
         .route("/api/sync/github", post(github_sync))
         // Hebbian Feedback Loop - Wire up learning from task outcomes
-        .route("/api/retrieve/tracked", post(retrieve_tracked))
+        .route("/api/recall/tracked", post(recall_tracked))
         .route("/api/reinforce", post(reinforce_feedback))
         // Semantic Consolidation - Extract durable facts from episodic memories
         .route("/api/consolidate", post(consolidate_memories))

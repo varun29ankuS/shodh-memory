@@ -251,7 +251,7 @@ All protected endpoints require `X-API-Key` header.
 | `/api/forget/tags` | POST | Delete memories by tags | 5ms |
 | `/api/forget/date` | POST | Delete memories in date range | 5ms |
 | **Hebbian Learning** ||||
-| `/api/retrieve/tracked` | POST | Search with feedback tracking | 45ms |
+| `/api/recall/tracked` | POST | Search with Hebbian feedback tracking | 45ms |
 | `/api/reinforce` | POST | Hebbian reinforcement feedback | 10ms |
 | **Batch & Consolidation** ||||
 | `/api/batch_remember` | POST | Store multiple memories | 55ms/item |
