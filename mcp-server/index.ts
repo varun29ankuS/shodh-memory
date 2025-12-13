@@ -36,7 +36,7 @@ const STREAM_MIN_CONTENT_LENGTH = 50; // minimum content length to stream
 
 // Proactive surfacing settings
 // When enabled, relevant memories are automatically surfaced with tool responses
-const PROACTIVE_SURFACING = process.env.SHODH_PROACTIVE === "true"; // disabled by default (adds ~90ms latency)
+const PROACTIVE_SURFACING = process.env.SHODH_PROACTIVE !== "false"; // enabled by default
 const PROACTIVE_MIN_CONTEXT_LENGTH = 30; // minimum context length to trigger surfacing
 
 // =============================================================================
@@ -595,7 +595,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "proactive_context",
-        description: "Surface relevant memories based on current conversation context AND automatically store the context for future recall. Use this proactively during conversations to: (1) retrieve memories relevant to the current discussion, and (2) build persistent memory of the conversation. The system analyzes entities, semantic similarity, and recency to find contextually appropriate memories. Auto-ingest is enabled by default - set auto_ingest=false to disable. IMPORTANT: Call this tool at the START of conversations and whenever the topic changes significantly to surface relevant past context.",
+        description: "REQUIRED: Call this tool with EVERY user message to surface relevant memories and build conversation history. Pass the user's message as context. This enables: (1) retrieving memories relevant to what the user is asking, (2) building persistent memory of the conversation for future sessions. The system analyzes entities, semantic similarity, and recency to find contextually appropriate memories. Auto-ingest stores the context automatically. USAGE: Always call this FIRST when you receive a user message, passing their message as the context parameter.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1577,7 +1577,7 @@ async function main() {
   console.error(`Connecting to: ${API_URL}`);
   console.error(`User ID: ${USER_ID}`);
   console.error(`Streaming: ${STREAM_ENABLED ? "enabled" : "disabled"}`);
-  console.error(`Proactive surfacing: ${PROACTIVE_SURFACING ? "enabled (SHODH_PROACTIVE=true)" : "disabled (set SHODH_PROACTIVE=true to enable)"}`);
+  console.error(`Proactive surfacing: ${PROACTIVE_SURFACING ? "enabled" : "disabled (SHODH_PROACTIVE=false)"}`);
 }
 
 main().catch(console.error);
