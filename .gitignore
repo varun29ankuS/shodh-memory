@@ -44,6 +44,8 @@ Thumbs.db
 
 # Config (keep example, ignore actual)
 shodh_config.json
+.env
+!.env.example
 
 # Claude settings
 .claude/

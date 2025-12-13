@@ -6224,6 +6224,9 @@ async fn build_visualization(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file if present (silently ignore if not found)
+    let _ = dotenvy::dotenv();
+
     // P1.6: Initialize distributed tracing with OpenTelemetry (optional)
     #[cfg(feature = "telemetry")]
     {

@@ -399,15 +399,19 @@ pub struct LinearSyncResponse {
 /// Simple Linear GraphQL API client for bulk sync
 pub struct LinearClient {
     api_key: String,
+    api_url: String,
     client: reqwest::Client,
 }
 
 impl LinearClient {
-    const API_URL: &'static str = "https://api.linear.app/graphql";
+    const DEFAULT_API_URL: &'static str = "https://api.linear.app/graphql";
 
     pub fn new(api_key: String) -> Self {
+        let api_url =
+            std::env::var("LINEAR_API_URL").unwrap_or_else(|_| Self::DEFAULT_API_URL.to_string());
         Self {
             api_key,
+            api_url,
             client: reqwest::Client::new(),
         }
     }
@@ -505,7 +509,7 @@ impl LinearClient {
 
         let response = self
             .client
-            .post(Self::API_URL)
+            .post(&self.api_url)
             .header("Authorization", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&serde_json::json!({ "query": query }))

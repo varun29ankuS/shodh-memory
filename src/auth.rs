@@ -70,9 +70,19 @@ pub fn validate_api_key(provided_key: &str) -> Result<(), AuthError> {
                 return Err(AuthError::NotConfigured);
             }
 
-            // Development mode: warn but allow default key
-            tracing::warn!("SHODH_API_KEYS not set - using development key (not for production!)");
-            "sk-shodh-dev-4f8b2c1d9e3a7f5b6d2c8e4a1b9f7d3c".to_string()
+            // Development mode: require SHODH_DEV_API_KEY to be explicitly set
+            match env::var("SHODH_DEV_API_KEY") {
+                Ok(key) if !key.trim().is_empty() => {
+                    tracing::warn!("Using SHODH_DEV_API_KEY for development (not for production!)");
+                    key
+                }
+                _ => {
+                    tracing::error!(
+                        "SHODH_API_KEYS not set. Set SHODH_API_KEYS for production or SHODH_DEV_API_KEY for development."
+                    );
+                    return Err(AuthError::NotConfigured);
+                }
+            }
         }
     };
 

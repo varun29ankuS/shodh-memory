@@ -3,7 +3,7 @@ name = "shodh-memory"
 version = "0.1.5"
 edition = "2021"
 authors = ["Shodh Team <29.varuns@gmail.com>"]
-description = "Cognitive memory system for AI agents - Hebbian learning, activation decay, semantic consolidation in a single binary"
+description = "Persistent memory for AI agents and edge devices - 3-tier memory, Hebbian learning, knowledge graph. Single binary, runs offline."
 license = "Apache-2.0"
 repository = "https://github.com/varun29ankuS/shodh-memory"
 homepage = "https://github.com/varun29ankuS/shodh-memory"
@@ -40,6 +40,7 @@ path = "src/main.rs"
 # Core
 anyhow = "1.0"
 thiserror = "1.0"
+dotenvy = "0.15"  # Load .env files
 
 # Async runtime & web server
 tokio = { version = "1.40", features = ["full"] }

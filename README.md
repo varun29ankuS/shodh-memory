@@ -18,13 +18,18 @@
 
 ---
 
-<p align="center"><i>Memory that learns. Single binary. Runs offline.</i></p>
+<p align="center"><i>Persistent memory for AI agents. Single binary. Local-first. Runs offline.</i></p>
+
+---
+
+> **For AI Agents** — Claude, GPT, LangChain, AutoGPT, robotic systems, or your custom agents.
+> Give them memory that persists across sessions, learns from experience, and runs entirely on your hardware.
 
 ---
 
 We built this because AI agents forget everything between sessions. They make the same mistakes, ask the same questions, lose context constantly.
 
-Shodh-Memory fixes that. It's a cognitive memory system—Hebbian learning, activation decay, semantic consolidation—packed into a single 8MB binary that runs offline.
+Shodh-Memory fixes that. It's a cognitive memory system—Hebbian learning, activation decay, semantic consolidation—packed into a single ~15MB binary that runs offline. Deploy on cloud, edge devices, or air-gapped systems.
 
 **How it works:**
 
@@ -253,22 +258,42 @@ All protected endpoints require `X-API-Key` header.
 **Authentication**
 
 ```bash
-# Development mode (SHODH_API_KEYS not set)
-curl -H "X-API-Key: sk-shodh-dev-4f8b2c1d9e3a7f5b6d2c8e4a1b9f7d3c" ...
+# Development: Set your own dev key
+export SHODH_DEV_API_KEY="my-dev-key"
+curl -H "X-API-Key: my-dev-key" ...
 
-# Production mode (required)
+# Production: Set API keys and environment
 export SHODH_API_KEYS="your-secure-key-1,your-secure-key-2"
 export SHODH_ENV=production
+curl -H "X-API-Key: your-secure-key-1" ...
 ```
 
 ### Configuration
 
-```
+All settings via environment variables. Create a `.env` file or export directly.
+
+```bash
+# Server
 SHODH_PORT=3030                    # Default: 3030
 SHODH_MEMORY_PATH=./data           # Default: ./shodh_memory_data
-SHODH_API_KEYS=key1,key2           # Required in production
-SHODH_MAINTENANCE_INTERVAL=300     # Decay cycle (seconds)
-SHODH_ACTIVATION_DECAY=0.95        # Decay factor per cycle
+SHODH_ENV=production               # Set for production mode
+
+# Authentication
+SHODH_API_KEYS=key1,key2           # Required in production (comma-separated)
+SHODH_DEV_API_KEY=my-dev-key       # For development (if SHODH_API_KEYS not set)
+
+# Cognitive Parameters
+SHODH_MAINTENANCE_INTERVAL=300     # Decay cycle in seconds (default: 300)
+SHODH_ACTIVATION_DECAY=0.95        # Decay factor per cycle (default: 0.95)
+
+# Integrations (optional)
+LINEAR_API_URL=https://api.linear.app/graphql
+LINEAR_WEBHOOK_SECRET=your-secret
+GITHUB_API_URL=https://api.github.com
+GITHUB_WEBHOOK_SECRET=your-secret
+
+# Logging
+RUST_LOG=info                      # Options: error, warn, info, debug, trace
 ```
 
 ### Platform support

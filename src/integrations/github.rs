@@ -614,15 +614,19 @@ pub struct GitHubSyncResponse {
 /// Simple GitHub REST API client for bulk sync
 pub struct GitHubClient {
     token: String,
+    api_url: String,
     client: reqwest::Client,
 }
 
 impl GitHubClient {
-    const API_URL: &'static str = "https://api.github.com";
+    const DEFAULT_API_URL: &'static str = "https://api.github.com";
 
     pub fn new(token: String) -> Self {
+        let api_url =
+            std::env::var("GITHUB_API_URL").unwrap_or_else(|_| Self::DEFAULT_API_URL.to_string());
         Self {
             token,
+            api_url,
             client: reqwest::Client::new(),
         }
     }
@@ -638,11 +642,7 @@ impl GitHubClient {
         let per_page = limit.unwrap_or(100).min(100);
         let url = format!(
             "{}/repos/{}/{}/issues?state={}&per_page={}&sort=updated&direction=desc",
-            Self::API_URL,
-            owner,
-            repo,
-            state,
-            per_page
+            self.api_url, owner, repo, state, per_page
         );
 
         let response = self
@@ -684,11 +684,7 @@ impl GitHubClient {
         let per_page = limit.unwrap_or(100).min(100);
         let url = format!(
             "{}/repos/{}/{}/pulls?state={}&per_page={}&sort=updated&direction=desc",
-            Self::API_URL,
-            owner,
-            repo,
-            state,
-            per_page
+            self.api_url, owner, repo, state, per_page
         );
 
         let response = self
@@ -727,10 +723,7 @@ impl GitHubClient {
         let per_page = limit.unwrap_or(100).min(100);
         let mut url = format!(
             "{}/repos/{}/{}/commits?per_page={}",
-            Self::API_URL,
-            owner,
-            repo,
-            per_page
+            self.api_url, owner, repo, per_page
         );
 
         if let Some(branch) = branch {
@@ -764,7 +757,7 @@ impl GitHubClient {
 
     /// Get repository info
     pub async fn get_repository(&self, owner: &str, repo: &str) -> Result<GitHubRepository> {
-        let url = format!("{}/repos/{}/{}", Self::API_URL, owner, repo);
+        let url = format!("{}/repos/{}/{}", self.api_url, owner, repo);
 
         let response = self
             .client
