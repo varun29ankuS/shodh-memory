@@ -34,6 +34,11 @@ const REQUEST_TIMEOUT_MS = 10000;
 const STREAM_ENABLED = process.env.SHODH_STREAM !== "false"; // enabled by default
 const STREAM_MIN_CONTENT_LENGTH = 50; // minimum content length to stream
 
+// Proactive surfacing settings
+// When enabled, relevant memories are automatically surfaced with tool responses
+const PROACTIVE_SURFACING = process.env.SHODH_PROACTIVE === "true"; // disabled by default (adds ~90ms latency)
+const PROACTIVE_MIN_CONTEXT_LENGTH = 30; // minimum context length to trigger surfacing
+
 // =============================================================================
 // STREAMING MEMORY INGESTION - Continuous background memory capture
 // =============================================================================
@@ -205,6 +210,65 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// =============================================================================
+// PROACTIVE MEMORY SURFACING - Auto-surface relevant memories with responses
+// =============================================================================
+
+interface SurfacedMemory {
+  content: string;
+  memory_type: string;
+  relevance_score: number;
+}
+
+// Surface relevant memories based on context (non-blocking, returns null on failure)
+async function surfaceRelevant(context: string, maxResults: number = 3): Promise<SurfacedMemory[] | null> {
+  if (!PROACTIVE_SURFACING || context.length < PROACTIVE_MIN_CONTEXT_LENGTH) {
+    return null;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s timeout for surfacing
+
+    const response = await fetch(`${API_URL}/api/relevant`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": API_KEY,
+      },
+      body: JSON.stringify({
+        user_id: USER_ID,
+        context: context.slice(0, 2000),
+        config: {
+          semantic_threshold: 0.65,
+          max_results: maxResults,
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) return null;
+
+    const result = await response.json() as { memories?: SurfacedMemory[] };
+    return result.memories || null;
+  } catch {
+    return null;
+  }
+}
+
+// Format surfaced memories for inclusion in tool response
+function formatSurfacedMemories(memories: SurfacedMemory[]): string {
+  if (!memories || memories.length === 0) return "";
+
+  const formatted = memories
+    .map((m, i) => `  ${i + 1}. [${(m.relevance_score * 100).toFixed(0)}%] ${m.content.slice(0, 80)}...`)
+    .join("\n");
+
+  return `\n\n[Relevant memories surfaced]\n${formatted}`;
+}
+
 // Stream tool interactions automatically (non-blocking)
 function streamToolCall(toolName: string, args: Record<string, unknown>, resultText: string): void {
   // Skip ingesting memory management tools to avoid noise
@@ -291,7 +355,7 @@ async function isServerAvailable(): Promise<boolean> {
 const server = new Server(
   {
     name: "shodh-memory",
-    version: "0.1.6",
+    version: "0.1.5",
   },
   {
     capabilities: {
@@ -531,7 +595,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "proactive_context",
-        description: "Surface relevant memories based on current conversation context AND automatically store the context for future recall. Use this proactively during conversations to: (1) retrieve memories relevant to the current discussion, and (2) build persistent memory of the conversation. The system analyzes entities, semantic similarity, and recency to find contextually appropriate memories. Auto-ingest is enabled by default - set auto_ingest=false to disable.",
+        description: "Surface relevant memories based on current conversation context AND automatically store the context for future recall. Use this proactively during conversations to: (1) retrieve memories relevant to the current discussion, and (2) build persistent memory of the conversation. The system analyzes entities, semantic similarity, and recency to find contextually appropriate memories. Auto-ingest is enabled by default - set auto_ingest=false to disable. IMPORTANT: Call this tool at the START of conversations and whenever the topic changes significantly to surface relevant past context.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1398,6 +1462,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const resultText = result.content.map(c => c.text).join('\n');
     streamToolCall(name, args as Record<string, unknown>, resultText);
 
+    // Proactive surfacing: append relevant memories to non-memory tool responses
+    if (PROACTIVE_SURFACING && !["remember", "recall", "forget", "list_memories", "proactive_context", "context_summary", "memory_stats"].includes(name)) {
+      // Extract context from tool args
+      const contextParts: string[] = [];
+      if (args && typeof args === "object") {
+        for (const [key, value] of Object.entries(args)) {
+          if (typeof value === "string" && value.length > 10) {
+            contextParts.push(value);
+          }
+        }
+      }
+      const context = contextParts.join(" ").slice(0, 1000);
+
+      if (context.length >= PROACTIVE_MIN_CONTEXT_LENGTH) {
+        const surfaced = await surfaceRelevant(context, 3);
+        if (surfaced && surfaced.length > 0) {
+          const surfacedText = formatSurfacedMemories(surfaced);
+          // Append surfaced memories to result
+          result.content[result.content.length - 1].text += surfacedText;
+        }
+      }
+    }
+
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1486,9 +1573,11 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Shodh-Memory MCP server v0.1.6 running");
+  console.error("Shodh-Memory MCP server v0.1.5 running");
   console.error(`Connecting to: ${API_URL}`);
   console.error(`User ID: ${USER_ID}`);
+  console.error(`Streaming: ${STREAM_ENABLED ? "enabled" : "disabled"}`);
+  console.error(`Proactive surfacing: ${PROACTIVE_SURFACING ? "enabled (SHODH_PROACTIVE=true)" : "disabled (set SHODH_PROACTIVE=true to enable)"}`);
 }
 
 main().catch(console.error);
