@@ -14,20 +14,34 @@ permissions:
   contents: read
 
 jobs:
-  build-wheels:
-    name: Build ABI3 wheels (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+  build-linux-wheels:
+    name: Build Linux wheels (manylinux)
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
 
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Build wheels with maturin
+        run: |
+          source $HOME/.cargo/env
+          pip3.11 install maturin
+          maturin build --release --out dist --features python --manylinux 2_28
+        shell: bash
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux
+          path: dist/*.whl
+
+  build-macos-wheels:
+    name: Build macOS wheels
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -37,19 +51,44 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - name: Install maturin
         run: pip install maturin
 
       - name: Build ABI3 wheels (Python 3.8+)
-        run: maturin build --release --target ${{ matrix.target }} --out dist --features python
-        shell: bash
+        run: maturin build --release --target aarch64-apple-darwin --out dist --features python
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-macos
+          path: dist/*.whl
+
+  build-windows-wheels:
+    name: Build Windows wheels
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build ABI3 wheels (Python 3.8+)
+        run: maturin build --release --target x86_64-pc-windows-msvc --out dist --features python
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows
           path: dist/*.whl
 
   build-sdist:
@@ -76,7 +115,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [build-wheels, build-sdist]
+    needs: [build-linux-wheels, build-macos-wheels, build-windows-wheels, build-sdist]
     runs-on: ubuntu-latest
     if: github.event_name == 'release' || github.event.inputs.publish == 'true'
     environment:
