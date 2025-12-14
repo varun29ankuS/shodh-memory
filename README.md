@@ -171,11 +171,18 @@ memory = Memory(storage_path="./my_data")
 memory.remember("User prefers dark mode", memory_type="Decision")
 memory.remember("JWT tokens expire after 24h", memory_type="Learning")
 
-# Search
+# Search - returns list of dicts
 results = memory.recall("user preferences", limit=5)
+for r in results:
+    print(f"{r['content']} ({r['experience_type']})")
 
-# Get memory statistics
+# Get memory statistics - returns dict
 stats = memory.get_stats()
+print(f"Total: {stats['total_memories']}")
+
+# Context summary for LLM bootstrap - returns dict
+summary = memory.context_summary()
+print(summary["decisions"])  # list of decision dicts
 ```
 
 **REST API**
