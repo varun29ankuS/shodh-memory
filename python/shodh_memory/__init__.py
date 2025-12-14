@@ -60,5 +60,8 @@ __all__ = [
 # Show GitHub prompt once per session
 import sys as _sys
 if not getattr(_sys, '_shodh_star_shown', False):
-    print("\u2b50 Love shodh-memory? Star us: https://github.com/varun29ankuS/shodh-memory")
+    try:
+        print("\u2b50 Love shodh-memory? Star us: https://github.com/varun29ankuS/shodh-memory")
+    except UnicodeEncodeError:
+        print("* Love shodh-memory? Star us: https://github.com/varun29ankuS/shodh-memory")
     _sys._shodh_star_shown = True
