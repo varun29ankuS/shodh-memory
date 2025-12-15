@@ -663,3 +663,278 @@ fn test_geo_filter_retrieval() {
         results.len()
     );
 }
+
+// ============================================================================
+// SHO-48: FORGET ENDPOINT VECTOR INDEX DELETION
+// Original: forget() returned success but memories remained in vector index
+// Fix: Added soft-delete to VamanaIndex, remove_memory() to RetrievalEngine
+// ============================================================================
+
+#[test]
+fn test_sho48_forget_removes_from_semantic_search() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config = create_test_config(&temp_dir);
+    let system = MemorySystem::new(config).expect("Failed to create memory system");
+
+    // Record a unique memory
+    let exp = Experience {
+        content: "SHO48 test memory with unique quantum entanglement photonic crystal content"
+            .to_string(),
+        experience_type: ExperienceType::Discovery,
+        entities: vec!["quantum".to_string(), "photonic".to_string()],
+        ..Default::default()
+    };
+    let memory_id = system.record(exp).expect("Failed to record memory");
+
+    // Verify it's findable via semantic search
+    let query = Query {
+        query_text: Some("quantum entanglement photonic crystal".to_string()),
+        max_results: 10,
+        ..Default::default()
+    };
+    let results_before = system.retrieve(&query).expect("Failed to retrieve");
+    assert!(
+        !results_before.is_empty(),
+        "Memory should be findable before forget"
+    );
+
+    // Forget the memory
+    let forget_result = system
+        .forget(shodh_memory::memory::ForgetCriteria::ById(memory_id.clone()))
+        .expect("Failed to forget");
+    assert_eq!(forget_result, 1, "Should have forgotten 1 memory");
+
+    // Verify it's NO LONGER findable via semantic search
+    let results_after = system.retrieve(&query).expect("Failed to retrieve");
+    let found_deleted = results_after.iter().any(|m| m.id == memory_id);
+    assert!(
+        !found_deleted,
+        "SHO-48 REGRESSION: Forgotten memory still found in semantic search! \
+         Vector index not cleaned on delete."
+    );
+}
+
+#[test]
+fn test_sho48_forget_updates_stats() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config = create_test_config(&temp_dir);
+    let system = MemorySystem::new(config).expect("Failed to create memory system");
+
+    // Record a memory
+    let exp = create_experience("Stats tracking test memory for SHO-48");
+    let memory_id = system.record(exp).expect("Failed to record memory");
+
+    let stats_before = system.stats();
+
+    // Forget the memory
+    system
+        .forget(shodh_memory::memory::ForgetCriteria::ById(memory_id))
+        .expect("Failed to forget");
+
+    let stats_after = system.stats();
+
+    // Stats should be decremented
+    assert!(
+        stats_after.total_memories < stats_before.total_memories,
+        "SHO-48 REGRESSION: total_memories not decremented after forget"
+    );
+}
+
+// ============================================================================
+// SHO-49: LIST_MEMORIES DUPLICATE ENTRIES
+// Original: Same memory appeared multiple times in list (from different tiers)
+// Fix: Added HashSet deduplication in retrieve()
+// ============================================================================
+
+#[test]
+fn test_sho49_no_duplicates_in_retrieve() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config = MemoryConfig {
+        storage_path: temp_dir.path().to_path_buf(),
+        working_memory_size: 100,
+        session_memory_size_mb: 50,
+        max_heap_per_user_mb: 500,
+        auto_compress: false,
+        compression_age_days: 30,
+        importance_threshold: 0.0, // Low threshold so memories go to session too
+    };
+    let system = MemorySystem::new(config).expect("Failed to create memory system");
+
+    // Record memories with high importance (will be in both working and session)
+    let mut recorded_ids = std::collections::HashSet::new();
+    for i in 0..10 {
+        let exp = Experience {
+            content: format!("Important memory {} for deduplication test", i),
+            experience_type: ExperienceType::Decision, // High importance type
+            entities: vec!["dedup_test".to_string()],
+            ..Default::default()
+        };
+        let id = system.record(exp).expect("Failed to record");
+        recorded_ids.insert(id);
+    }
+
+    // Retrieve without semantic query (uses tier-based retrieval)
+    let query = Query {
+        max_results: 100,
+        ..Default::default()
+    };
+    let results = system.retrieve(&query).expect("Failed to retrieve");
+
+    // Check for duplicates
+    let mut seen_ids = std::collections::HashSet::new();
+    for memory in &results {
+        let is_new = seen_ids.insert(memory.id.clone());
+        assert!(
+            is_new,
+            "SHO-49 REGRESSION: Duplicate memory ID {:?} in results! \
+             Deduplication not working across tiers.",
+            memory.id
+        );
+    }
+}
+
+#[test]
+fn test_sho49_retrieve_count_matches_unique() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config = create_test_config(&temp_dir);
+    let system = MemorySystem::new(config).expect("Failed to create memory system");
+
+    // Record 5 unique memories
+    for i in 0..5 {
+        let exp = create_experience(&format!("Unique memory {} for count test", i));
+        system.record(exp).expect("Failed to record");
+    }
+
+    // Retrieve all
+    let query = Query {
+        max_results: 100,
+        ..Default::default()
+    };
+    let results = system.retrieve(&query).expect("Failed to retrieve");
+
+    // Count unique IDs
+    let unique_count = results
+        .iter()
+        .map(|m| &m.id)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
+    assert_eq!(
+        results.len(),
+        unique_count,
+        "SHO-49 REGRESSION: Result count ({}) != unique count ({}). Duplicates present!",
+        results.len(),
+        unique_count
+    );
+}
+
+// ============================================================================
+// SHO-50: MEMORY_STATS INCONSISTENT COUNTS
+// Original: working_memory_count and session_memory_count always 0
+// Fix: Update tier counts on add/delete operations
+// ============================================================================
+
+#[test]
+fn test_sho50_stats_updated_on_add() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config = create_test_config(&temp_dir);
+    let system = MemorySystem::new(config).expect("Failed to create memory system");
+
+    let stats_before = system.stats();
+
+    // Record a memory
+    let exp = create_experience("Stats test memory for SHO-50");
+    system.record(exp).expect("Failed to record");
+
+    let stats_after = system.stats();
+
+    // total_memories should increase
+    assert_eq!(
+        stats_after.total_memories,
+        stats_before.total_memories + 1,
+        "SHO-50 REGRESSION: total_memories not incremented on add"
+    );
+
+    // working_memory_count should increase (memory always goes to working first)
+    assert!(
+        stats_after.working_memory_count > stats_before.working_memory_count,
+        "SHO-50 REGRESSION: working_memory_count not incremented on add"
+    );
+
+    // long_term_memory_count should increase (we store to long-term first)
+    assert!(
+        stats_after.long_term_memory_count > stats_before.long_term_memory_count,
+        "SHO-50 REGRESSION: long_term_memory_count not incremented on add"
+    );
+
+    // vector_index_count should increase
+    assert!(
+        stats_after.vector_index_count > stats_before.vector_index_count,
+        "SHO-50 REGRESSION: vector_index_count not incremented on add"
+    );
+}
+
+#[test]
+fn test_sho50_stats_updated_on_forget() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config = create_test_config(&temp_dir);
+    let system = MemorySystem::new(config).expect("Failed to create memory system");
+
+    // Record a memory
+    let exp = create_experience("Memory to forget for SHO-50 stats test");
+    let memory_id = system.record(exp).expect("Failed to record");
+
+    let stats_before = system.stats();
+
+    // Forget the memory
+    system
+        .forget(shodh_memory::memory::ForgetCriteria::ById(memory_id))
+        .expect("Failed to forget");
+
+    let stats_after = system.stats();
+
+    // All counts should decrease
+    assert!(
+        stats_after.total_memories < stats_before.total_memories,
+        "SHO-50 REGRESSION: total_memories not decremented on forget"
+    );
+
+    assert!(
+        stats_after.long_term_memory_count < stats_before.long_term_memory_count,
+        "SHO-50 REGRESSION: long_term_memory_count not decremented on forget"
+    );
+}
+
+#[test]
+fn test_sho50_high_importance_updates_session_count() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config = MemoryConfig {
+        storage_path: temp_dir.path().to_path_buf(),
+        working_memory_size: 100,
+        session_memory_size_mb: 50,
+        max_heap_per_user_mb: 500,
+        auto_compress: false,
+        compression_age_days: 30,
+        importance_threshold: 0.0, // Very low threshold - everything goes to session
+    };
+    let system = MemorySystem::new(config).expect("Failed to create memory system");
+
+    let stats_before = system.stats();
+
+    // Record a high-importance memory (should go to session)
+    let exp = Experience {
+        content: "Critical decision about system architecture".to_string(),
+        experience_type: ExperienceType::Decision, // High importance type
+        entities: vec!["architecture".to_string()],
+        ..Default::default()
+    };
+    system.record(exp).expect("Failed to record");
+
+    let stats_after = system.stats();
+
+    // session_memory_count should increase for high-importance memory
+    assert!(
+        stats_after.session_memory_count > stats_before.session_memory_count,
+        "SHO-50 REGRESSION: session_memory_count not incremented for high-importance memory"
+    );
+}

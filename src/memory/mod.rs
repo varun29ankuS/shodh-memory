@@ -22,6 +22,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::debug;
@@ -252,24 +253,41 @@ impl MemorySystem {
 
         // CRITICAL: Index memory immediately for semantic search (don't wait for long-term promotion)
         // This ensures new memories are searchable right away, not only after consolidation
-        if let Err(e) = self.retriever.index_memory(&memory) {
+        let indexed = if let Err(e) = self.retriever.index_memory(&memory) {
             tracing::warn!("Failed to index memory {} in vector DB: {}", memory.id.0, e);
             // Don't fail the record operation if indexing fails - memory is still stored
-        }
+            false
+        } else {
+            true
+        };
 
         // Add to knowledge graph for associative/causal retrieval
         self.retriever.add_to_graph(&memory);
 
         // If important enough, prepare for session storage
-        if importance > self.config.importance_threshold {
+        let added_to_session = if importance > self.config.importance_threshold {
             self.session_memory
                 .write()
                 .add_shared(Arc::clone(&memory))?;
             self.logger.write().log_created(&memory, "session");
-        }
+            true
+        } else {
+            false
+        };
 
-        // Update stats
-        self.stats.write().total_memories += 1;
+        // Update stats - track all tier counts accurately
+        {
+            let mut stats = self.stats.write();
+            stats.total_memories += 1;
+            stats.long_term_memory_count += 1; // Always stored to long-term first
+            stats.working_memory_count += 1;
+            if added_to_session {
+                stats.session_memory_count += 1;
+            }
+            if indexed {
+                stats.vector_index_count += 1;
+            }
+        }
 
         // Trigger background consolidation if needed
         self.consolidate_if_needed()?;
@@ -291,16 +309,21 @@ impl MemorySystem {
 
         // Non-semantic search: filter-based retrieval
         let mut memories = Vec::new();
+        let mut seen_ids: HashSet<MemoryId> = HashSet::new();
         let mut sources = Vec::new();
 
-        // Collect from all tiers
+        // Collect from all tiers with deduplication (priority: working > session > long_term)
         {
             let working = self.working_memory.read();
             let working_results = working.search(query, query.max_results)?;
             if !working_results.is_empty() {
                 sources.push("working");
             }
-            memories.extend(working_results);
+            for memory in working_results {
+                if seen_ids.insert(memory.id.clone()) {
+                    memories.push(memory);
+                }
+            }
         }
 
         {
@@ -309,7 +332,11 @@ impl MemorySystem {
             if !session_results.is_empty() {
                 sources.push("session");
             }
-            memories.extend(session_results);
+            for memory in session_results {
+                if seen_ids.insert(memory.id.clone()) {
+                    memories.push(memory);
+                }
+            }
         }
 
         {
@@ -317,7 +344,11 @@ impl MemorySystem {
             if !long_term_results.is_empty() {
                 sources.push("longterm");
             }
-            memories.extend(long_term_results);
+            for memory in long_term_results {
+                if seen_ids.insert(memory.id.clone()) {
+                    memories.push(memory);
+                }
+            }
         }
 
         // Rank by importance * temporal relevance
@@ -569,6 +600,57 @@ impl MemorySystem {
     /// Thread-safe: uses interior mutability for all internal state
     pub fn forget(&self, criteria: ForgetCriteria) -> Result<usize> {
         let forgotten_count = match criteria {
+            ForgetCriteria::ById(memory_id) => {
+                // Delete a single memory by ID from all tiers, tracking which tiers had it
+                let mut deleted_from_any = false;
+                let mut was_in_working = false;
+                let mut was_in_session = false;
+                let mut was_in_longterm = false;
+
+                // Remove from working memory
+                if self.working_memory.write().remove(&memory_id).is_ok() {
+                    deleted_from_any = true;
+                    was_in_working = true;
+                }
+
+                // Remove from session memory
+                if self.session_memory.write().remove(&memory_id).is_ok() {
+                    deleted_from_any = true;
+                    was_in_session = true;
+                }
+
+                // Remove from long-term storage
+                if self.long_term_memory.delete(&memory_id).is_ok() {
+                    deleted_from_any = true;
+                    was_in_longterm = true;
+                }
+
+                // Remove from vector index (soft delete) - CRITICAL for semantic search
+                // This marks the vector as deleted so it won't appear in search results
+                let was_indexed = self.retriever.remove_memory(&memory_id);
+
+                // Update stats - decrement each tier count that had this memory
+                if deleted_from_any {
+                    let mut stats = self.stats.write();
+                    stats.total_memories = stats.total_memories.saturating_sub(1);
+                    if was_in_working {
+                        stats.working_memory_count = stats.working_memory_count.saturating_sub(1);
+                    }
+                    if was_in_session {
+                        stats.session_memory_count = stats.session_memory_count.saturating_sub(1);
+                    }
+                    if was_in_longterm {
+                        stats.long_term_memory_count =
+                            stats.long_term_memory_count.saturating_sub(1);
+                    }
+                    if was_indexed {
+                        stats.vector_index_count = stats.vector_index_count.saturating_sub(1);
+                    }
+                    1
+                } else {
+                    0
+                }
+            }
             ForgetCriteria::OlderThan(days) => {
                 let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
 

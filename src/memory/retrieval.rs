@@ -67,6 +67,20 @@ impl IdMapping {
         self.vector_to_memory.get(&vector_id)
     }
 
+    fn get_vector_id(&self, memory_id: &MemoryId) -> Option<u32> {
+        self.memory_to_vector.get(memory_id).copied()
+    }
+
+    /// Remove a memory from the mapping, returns the vector_id if it existed
+    fn remove(&mut self, memory_id: &MemoryId) -> Option<u32> {
+        if let Some(vector_id) = self.memory_to_vector.remove(memory_id) {
+            self.vector_to_memory.remove(&vector_id);
+            Some(vector_id)
+        } else {
+            None
+        }
+    }
+
     fn len(&self) -> usize {
         self.memory_to_vector.len()
     }
@@ -271,6 +285,36 @@ impl RetrievalEngine {
 
         // Add with new embedding
         self.index_memory(memory)
+    }
+
+    /// Remove a memory from the vector index (soft delete)
+    ///
+    /// This removes the memory from the ID mapping and marks the vector as deleted
+    /// in the Vamana index. The vector is excluded from search results immediately.
+    /// Physical deletion occurs on next index rebuild.
+    ///
+    /// Returns true if the memory was found and removed, false if not indexed.
+    pub fn remove_memory(&self, memory_id: &MemoryId) -> bool {
+        // Remove from ID mapping and get the vector ID
+        let vector_id = self.id_mapping.write().remove(memory_id);
+
+        if let Some(vid) = vector_id {
+            // Mark vector as deleted in Vamana (soft delete)
+            self.vector_index.read().mark_deleted(vid);
+
+            // Also remove from memory graph if present
+            self.graph.write().remove_memory(memory_id);
+
+            tracing::debug!(
+                "Removed memory {:?} from vector index (vector_id={})",
+                memory_id,
+                vid
+            );
+            true
+        } else {
+            tracing::debug!("Memory {:?} not found in vector index", memory_id);
+            false
+        }
     }
 
     /// Extract searchable text from memory
@@ -1234,6 +1278,17 @@ impl MemoryGraph {
         // Add edges to causal chain
         for causal_id in &memory.experience.causal_chain {
             self.add_edge(&memory.id, causal_id);
+        }
+    }
+
+    /// Remove a memory from the graph (removes all edges to/from this memory)
+    pub(crate) fn remove_memory(&mut self, memory_id: &MemoryId) {
+        // Remove outgoing edges from this memory
+        self.adjacency.remove(memory_id);
+
+        // Remove incoming edges to this memory from all other nodes
+        for (_, edges) in self.adjacency.iter_mut() {
+            edges.remove(memory_id);
         }
     }
 

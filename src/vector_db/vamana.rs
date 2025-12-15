@@ -128,6 +128,11 @@ pub struct VamanaIndex {
 
     /// Flag to prevent concurrent rebuilds
     rebuilding: std::sync::atomic::AtomicBool,
+
+    /// Soft-deleted vector IDs (filtered from search results)
+    /// These vectors remain in the graph but are excluded from results.
+    /// Physically removed on next rebuild.
+    deleted_ids: Arc<RwLock<HashSet<u32>>>,
 }
 
 /// Vector storage abstraction
@@ -160,6 +165,7 @@ impl VamanaIndex {
             storage_path,
             incremental_inserts: std::sync::atomic::AtomicUsize::new(0),
             rebuilding: std::sync::atomic::AtomicBool::new(false),
+            deleted_ids: Arc::new(RwLock::new(HashSet::new())),
         })
     }
 
@@ -647,7 +653,7 @@ impl VamanaIndex {
         }
     }
 
-    /// Search for k nearest neighbors
+    /// Search for k nearest neighbors (excludes soft-deleted vectors)
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(u32, f32)>> {
         // Check if index is empty
         if self.num_vectors == 0 {
@@ -662,9 +668,54 @@ impl VamanaIndex {
         }
 
         let entry = *self.medoid.read();
-        let candidates = self.greedy_search(query, k, entry)?;
+        let deleted = self.deleted_ids.read();
+        let deleted_count = deleted.len();
 
-        Ok(candidates.into_iter().map(|c| (c.id, c.distance)).collect())
+        // Request extra candidates to account for deleted vectors
+        let search_k = if deleted_count > 0 {
+            k + deleted_count.min(k * 2)
+        } else {
+            k
+        };
+
+        let candidates = self.greedy_search(query, search_k, entry)?;
+
+        // Filter out deleted vectors and take k results
+        let results: Vec<(u32, f32)> = candidates
+            .into_iter()
+            .filter(|c| !deleted.contains(&c.id))
+            .take(k)
+            .map(|c| (c.id, c.distance))
+            .collect();
+
+        Ok(results)
+    }
+
+    /// Mark a vector as deleted (soft delete)
+    /// The vector remains in the graph but is excluded from search results.
+    /// It will be physically removed on the next rebuild.
+    pub fn mark_deleted(&self, vector_id: u32) -> bool {
+        if (vector_id as usize) < self.num_vectors {
+            self.deleted_ids.write().insert(vector_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if a vector is marked as deleted
+    pub fn is_deleted(&self, vector_id: u32) -> bool {
+        self.deleted_ids.read().contains(&vector_id)
+    }
+
+    /// Get the number of soft-deleted vectors
+    pub fn deleted_count(&self) -> usize {
+        self.deleted_ids.read().len()
+    }
+
+    /// Clear all deleted markers (use after rebuild)
+    pub fn clear_deleted(&self) {
+        self.deleted_ids.write().clear();
     }
 
     /// Add a single vector (incremental indexing) - OPTIMIZED
