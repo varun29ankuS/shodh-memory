@@ -173,9 +173,8 @@ impl MultiUserMemoryManagerRotationHelper {
 /// Multi-user memory manager
 pub struct MultiUserMemoryManager {
     /// Per-user memory systems with LRU eviction (prevents unbounded growth)
-    /// Wrapped in Mutex because LruCache needs exclusive access even for reads (to update LRU order)
-    user_memories:
-        Arc<parking_lot::Mutex<lru::LruCache<String, Arc<parking_lot::RwLock<MemorySystem>>>>>,
+    /// Uses moka concurrent cache for lock-free reads (no mutex contention)
+    user_memories: moka::sync::Cache<String, Arc<parking_lot::RwLock<MemorySystem>>>,
 
     /// Per-user audit logs (enterprise feature - in-memory cache)
     audit_logs: Arc<DashMap<String, Arc<parking_lot::RwLock<Vec<AuditEvent>>>>>,
@@ -193,8 +192,8 @@ pub struct MultiUserMemoryManager {
     audit_log_counter: Arc<std::sync::atomic::AtomicUsize>,
 
     /// Per-user graph memory systems (knowledge graphs) - also needs LRU eviction
-    graph_memories:
-        Arc<parking_lot::Mutex<lru::LruCache<String, Arc<parking_lot::RwLock<GraphMemory>>>>>,
+    /// Uses moka concurrent cache for lock-free reads
+    graph_memories: moka::sync::Cache<String, Arc<parking_lot::RwLock<GraphMemory>>>,
 
     /// Neural NER for automatic entity extraction (uses TinyBERT ONNX model)
     neural_ner: Arc<NeuralNer>,
@@ -224,10 +223,6 @@ impl MultiUserMemoryManager {
         opts.create_if_missing(true);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
         let audit_db = Arc::new(rocksdb::DB::open(&opts, audit_path)?);
-
-        // Use NonZeroUsize for LRU cache size (guaranteed non-zero from config)
-        let cache_size = std::num::NonZeroUsize::new(server_config.max_users_in_memory)
-            .unwrap_or_else(|| std::num::NonZeroUsize::new(1000).unwrap());
 
         // Create broadcast channel for SSE events (capacity 1024 events)
         // Older events are dropped if subscribers can't keep up
@@ -264,16 +259,46 @@ impl MultiUserMemoryManager {
         let streaming_extractor =
             Arc::new(streaming::StreamingMemoryExtractor::new(neural_ner.clone()));
 
+        // Eviction counter for metrics (shared with cache eviction listener)
+        let user_evictions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let evictions_clone = user_evictions.clone();
+        let max_cache = server_config.max_users_in_memory;
+
+        // Build moka cache with eviction listener for logging
+        let user_memories = moka::sync::Cache::builder()
+            .max_capacity(server_config.max_users_in_memory as u64)
+            .eviction_listener(move |key: Arc<String>, _value, cause| {
+                if cause == moka::notification::RemovalCause::Size {
+                    evictions_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    info!(
+                        "📤 Evicted user '{}' from memory cache (LRU, cache_size={})",
+                        key, max_cache
+                    );
+                }
+            })
+            .build();
+
+        // Build moka cache for graph memories
+        let graph_memories = moka::sync::Cache::builder()
+            .max_capacity(server_config.max_users_in_memory as u64)
+            .eviction_listener(move |key: Arc<String>, _value, _cause| {
+                info!(
+                    "📤 Evicted graph for user '{}' from memory cache (LRU)",
+                    key
+                );
+            })
+            .build();
+
         let manager = Self {
-            user_memories: Arc::new(parking_lot::Mutex::new(lru::LruCache::new(cache_size))),
+            user_memories,
             audit_logs: Arc::new(DashMap::new()),
             audit_db,
             base_path,
             default_config: MemoryConfig::default(),
             audit_log_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            graph_memories: Arc::new(parking_lot::Mutex::new(lru::LruCache::new(cache_size))),
+            graph_memories,
             neural_ner,
-            user_evictions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            user_evictions,
             server_config,
             event_broadcaster,
             streaming_extractor,
@@ -428,12 +453,9 @@ impl MultiUserMemoryManager {
 
     /// Get or create memory system for a user
     pub fn get_user_memory(&self, user_id: &str) -> Result<Arc<parking_lot::RwLock<MemorySystem>>> {
-        // Try to get from LRU cache (updates LRU order)
-        {
-            let mut cache = self.user_memories.lock();
-            if let Some(memory) = cache.get(user_id) {
-                return Ok(memory.clone());
-            }
+        // Try to get from cache (lock-free read, updates LRU order internally)
+        if let Some(memory) = self.user_memories.get(user_id) {
+            return Ok(memory);
         }
 
         // Create new memory system for this user
@@ -446,30 +468,9 @@ impl MultiUserMemoryManager {
         let memory_system = MemorySystem::new(config)?;
         let memory_arc = Arc::new(parking_lot::RwLock::new(memory_system));
 
-        // Insert into LRU cache (may evict least recently used user)
-        {
-            let mut cache = self.user_memories.lock();
-
-            // Check if insertion will cause eviction
-            if cache.len() >= self.server_config.max_users_in_memory {
-                if let Some((evicted_user_id, _evicted_memory)) =
-                    cache.push(user_id.to_string(), memory_arc.clone())
-                {
-                    // LRU eviction occurred - log it
-                    self.user_evictions
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    info!(
-                        "📤 Evicted user '{}' from memory cache (LRU, cache_size={})",
-                        evicted_user_id, self.server_config.max_users_in_memory
-                    );
-
-                    // Note: Evicted memory system will be flushed when Arc refcount drops to 0
-                    // and MemorySystem's Drop implementation runs
-                }
-            } else {
-                cache.put(user_id.to_string(), memory_arc.clone());
-            }
-        }
+        // Insert into cache (moka handles LRU eviction automatically via eviction_listener)
+        self.user_memories
+            .insert(user_id.to_string(), memory_arc.clone());
 
         info!("🧠 Created memory system for user: {}", user_id);
 
@@ -488,8 +489,8 @@ impl MultiUserMemoryManager {
 
     /// Delete user data (GDPR compliance)
     pub fn forget_user(&self, user_id: &str) -> Result<()> {
-        // Remove from memory cache
-        self.user_memories.lock().pop(user_id);
+        // Remove from memory cache (lock-free)
+        self.user_memories.invalidate(user_id);
 
         // Delete storage directory
         let user_path = self.base_path.join(user_id);
@@ -511,9 +512,8 @@ impl MultiUserMemoryManager {
     /// List all users currently in memory cache
     pub fn list_users(&self) -> Vec<String> {
         self.user_memories
-            .lock()
             .iter()
-            .map(|(key, _)| key.clone())
+            .map(|(key, _)| key.to_string())
             .collect()
     }
 
@@ -526,15 +526,12 @@ impl MultiUserMemoryManager {
             .flush()
             .map_err(|e| anyhow::anyhow!("Failed to flush audit database: {e}"))?;
 
-        // Flush all user memory databases
-        // Collect entries first, then release lock before flushing (avoid holding lock during I/O)
-        let user_entries: Vec<(String, Arc<parking_lot::RwLock<MemorySystem>>)> = {
-            self.user_memories
-                .lock()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        };
+        // Flush all user memory databases (lock-free iteration)
+        let user_entries: Vec<(String, Arc<parking_lot::RwLock<MemorySystem>>)> = self
+            .user_memories
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
 
         let mut flushed = 0;
         for (user_id, memory_system) in user_entries {
@@ -561,14 +558,12 @@ impl MultiUserMemoryManager {
     pub fn save_all_vector_indices(&self) -> Result<()> {
         info!("🔍 Saving vector indices to disk...");
 
-        // Collect entries first, then release lock before saving (avoid holding lock during I/O)
-        let user_entries: Vec<(String, Arc<parking_lot::RwLock<MemorySystem>>)> = {
-            self.user_memories
-                .lock()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        };
+        // Collect entries (lock-free iteration)
+        let user_entries: Vec<(String, Arc<parking_lot::RwLock<MemorySystem>>)> = self
+            .user_memories
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
 
         let mut saved = 0;
         for (user_id, memory_system) in user_entries {
@@ -690,12 +685,9 @@ impl MultiUserMemoryManager {
 
     /// Get or create graph memory for a user
     pub fn get_user_graph(&self, user_id: &str) -> Result<Arc<parking_lot::RwLock<GraphMemory>>> {
-        // Try to get from LRU cache (updates LRU order)
-        {
-            let mut cache = self.graph_memories.lock();
-            if let Some(graph) = cache.get(user_id) {
-                return Ok(graph.clone());
-            }
+        // Try to get from cache (lock-free read, updates LRU order internally)
+        if let Some(graph) = self.graph_memories.get(user_id) {
+            return Ok(graph);
         }
 
         // Create new graph memory for this user
@@ -703,25 +695,9 @@ impl MultiUserMemoryManager {
         let graph_memory = GraphMemory::new(&graph_path)?;
         let graph_arc = Arc::new(parking_lot::RwLock::new(graph_memory));
 
-        // Insert into LRU cache (may evict least recently used graph)
-        {
-            let mut cache = self.graph_memories.lock();
-
-            // Check if insertion will cause eviction
-            if cache.len() >= self.server_config.max_users_in_memory {
-                if let Some((evicted_user_id, _evicted_graph)) =
-                    cache.push(user_id.to_string(), graph_arc.clone())
-                {
-                    // LRU eviction occurred - log it
-                    info!(
-                        "📤 Evicted graph for user '{}' from memory cache (LRU, cache_size={})",
-                        evicted_user_id, self.server_config.max_users_in_memory
-                    );
-                }
-            } else {
-                cache.put(user_id.to_string(), graph_arc.clone());
-            }
-        }
+        // Insert into cache (moka handles LRU eviction automatically via eviction_listener)
+        self.graph_memories
+            .insert(user_id.to_string(), graph_arc.clone());
 
         info!("📊 Created graph memory for user: {}", user_id);
 
@@ -843,11 +819,12 @@ impl MultiUserMemoryManager {
         let decay_factor = self.server_config.activation_decay_factor;
         let mut total_processed = 0;
 
-        // Get list of cached user IDs (hold lock briefly)
-        let user_ids: Vec<String> = {
-            let cache = self.user_memories.lock();
-            cache.iter().map(|(id, _)| id.clone()).collect()
-        };
+        // Get list of cached user IDs (lock-free iteration)
+        let user_ids: Vec<String> = self
+            .user_memories
+            .iter()
+            .map(|(id, _)| id.to_string())
+            .collect();
 
         let user_count = user_ids.len();
 
@@ -1162,7 +1139,7 @@ type AppState = Arc<MultiUserMemoryManager>;
 
 /// Health check endpoint (basic compatibility)
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
-    let users_in_cache = state.user_memories.lock().len();
+    let users_in_cache = state.user_memories.entry_count() as usize;
     let user_evictions = state
         .user_evictions
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -1194,8 +1171,8 @@ async fn health_live() -> (StatusCode, Json<serde_json::Value>) {
 /// Returns 200 OK if service is ready, 503 if not ready
 /// Kubernetes uses this to route traffic only to ready pods
 async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    // Check if critical resources are accessible
-    let users_in_cache = state.user_memories.lock().len();
+    // Check if critical resources are accessible (lock-free)
+    let users_in_cache = state.user_memories.entry_count() as usize;
 
     // Service is ready if we can access the user cache without panicking
     // This verifies the lock is not poisoned and the service is operational
@@ -1221,17 +1198,15 @@ async fn health_index(
     let user_id = match params.get("user_id") {
         Some(id) => id.clone(),
         None => {
-            // Return aggregate stats across all cached users
-            let users: Vec<(String, memory::retrieval::IndexHealth)> = {
-                let cache = state.user_memories.lock();
-                cache
-                    .iter()
-                    .map(|(user_id, memory)| {
-                        let guard = memory.read();
-                        (user_id.clone(), guard.index_health())
-                    })
-                    .collect()
-            };
+            // Return aggregate stats across all cached users (lock-free iteration)
+            let users: Vec<(String, memory::retrieval::IndexHealth)> = state
+                .user_memories
+                .iter()
+                .map(|(user_id, memory)| {
+                    let guard = memory.read();
+                    (user_id.to_string(), guard.index_health())
+                })
+                .collect();
 
             let total_vectors: usize = users.iter().map(|(_, h)| h.total_vectors).sum();
             let total_incremental: usize = users.iter().map(|(_, h)| h.incremental_inserts).sum();
@@ -1295,8 +1270,8 @@ async fn health_index(
 async fn metrics_endpoint(State(state): State<AppState>) -> Result<String, StatusCode> {
     use prometheus::Encoder;
 
-    // Update memory usage gauges before serving metrics
-    let users_in_cache = state.user_memories.lock().len();
+    // Update memory usage gauges before serving metrics (lock-free)
+    let users_in_cache = state.user_memories.entry_count();
     metrics::ACTIVE_USERS.set(users_in_cache as i64);
 
     // Aggregate metrics across all users (no per-user labels to avoid cardinality explosion)
@@ -1304,10 +1279,13 @@ async fn metrics_endpoint(State(state): State<AppState>) -> Result<String, Statu
         (0i64, 0i64, 0i64, 0i64);
     let mut total_vectors = 0i64;
 
-    let user_entries: Vec<_> = {
-        let cache = state.user_memories.lock();
-        cache.iter().take(100).map(|(_, v)| v.clone()).collect()
-    };
+    // Lock-free iteration, take up to 100 entries
+    let user_entries: Vec<_> = state
+        .user_memories
+        .iter()
+        .take(100)
+        .map(|(_, v)| v.clone())
+        .collect();
 
     for memory_sys in user_entries {
         if let Some(guard) = memory_sys.try_read() {

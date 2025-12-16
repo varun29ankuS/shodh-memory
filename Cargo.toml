@@ -63,6 +63,7 @@ lz4 = "1.24"
 # Concurrency
 parking_lot = "0.12"
 dashmap = "5.5"
+moka = { version = "0.12", features = ["sync"] }  # Lock-free concurrent cache with LRU eviction
 
 # Utilities
 uuid = { version = "1.4", features = ["v4", "serde"] }
