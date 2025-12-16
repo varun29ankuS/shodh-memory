@@ -6142,6 +6142,9 @@ async fn main() -> Result<()> {
         .route("/api/consolidation/events", post(get_consolidation_events))
         // List memories - Simple GET endpoint
         .route("/api/list/{user_id}", get(list_memories))
+        // Streaming endpoints (moved from public to require auth - SHO-56)
+        .route("/api/events", get(memory_events_sse)) // SSE: Real-time memory events for dashboard
+        .route("/api/stream", get(streaming_memory_ws)) // WS: Streaming memory ingestion (SHO-25)
         // Apply auth middleware only to protected routes
         .layer(axum::middleware::from_fn(auth::auth_middleware))
         // Apply rate limiting to API routes only (not health/metrics/static)
@@ -6157,7 +6160,7 @@ async fn main() -> Result<()> {
         max_concurrent
     );
 
-    // Public routes - NO rate limiting (health checks, metrics, static files)
+    // Public routes - NO rate limiting, NO auth (health checks, metrics, static files)
     // These must always be accessible for monitoring and Kubernetes probes
     let public_routes = Router::new()
         .route(
@@ -6170,13 +6173,11 @@ async fn main() -> Result<()> {
         .route("/health/ready", get(health_ready)) // P0.9: Kubernetes readiness probe
         .route("/health/index", get(health_index)) // Vector index health metrics
         .route("/metrics", get(metrics_endpoint)) // P1.1: Prometheus metrics
-        .route("/api/events", get(memory_events_sse)) // SSE: Real-time memory events for dashboard
-        .route("/api/stream", get(streaming_memory_ws)) // WS: Streaming memory ingestion (SHO-25)
         .with_state(manager.clone());
 
     // Combine public and protected routes
-    // Rate limiting is applied only to protected_routes (API endpoints)
-    // Public routes (health, metrics, static) are NOT rate limited
+    // - public_routes: health, metrics, static - NO auth, NO rate limiting
+    // - protected_routes: API endpoints including streaming - API key auth, rate limited
     let app = Router::new().merge(public_routes).merge(protected_routes);
 
     // Conditionally add trace propagation middleware only when telemetry feature is enabled

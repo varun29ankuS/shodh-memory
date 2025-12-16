@@ -106,8 +106,15 @@ pub fn validate_api_key(provided_key: &str) -> Result<(), AuthError> {
 
 /// Authentication middleware
 pub async fn auth_middleware(request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+
     // Skip auth for health endpoint
-    if request.uri().path() == "/health" {
+    if path == "/health" {
+        return next.run(request).await;
+    }
+
+    // Skip API key auth for webhook endpoints (they use HMAC signature verification)
+    if path.starts_with("/webhook/") {
         return next.run(request).await;
     }
 
