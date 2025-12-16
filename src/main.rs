@@ -3937,14 +3937,26 @@ async fn get_user_stats(
     Ok(Json(stats))
 }
 
+/// Response for user deletion
+#[derive(Debug, Serialize)]
+struct DeleteUserResponse {
+    success: bool,
+    user_id: String,
+    message: String,
+}
+
 /// Delete user data (GDPR)
 async fn delete_user(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
-) -> Result<StatusCode, AppError> {
+) -> Result<Json<DeleteUserResponse>, AppError> {
     state.forget_user(&user_id).map_err(AppError::Internal)?;
 
-    Ok(StatusCode::OK)
+    Ok(Json(DeleteUserResponse {
+        success: true,
+        user_id,
+        message: "User data deleted successfully".to_string(),
+    }))
 }
 
 /// List all users
@@ -4006,11 +4018,19 @@ struct UpdateMemoryRequest {
     embeddings: Option<Vec<f32>>,
 }
 
+/// Response for memory update operations
+#[derive(Debug, Serialize)]
+struct UpdateMemoryResponse {
+    success: bool,
+    id: String,
+    message: String,
+}
+
 async fn update_memory(
     State(state): State<AppState>,
     Path(memory_id): Path<String>,
     Json(req): Json<UpdateMemoryRequest>,
-) -> Result<StatusCode, AppError> {
+) -> Result<Json<UpdateMemoryResponse>, AppError> {
     // Enterprise input validation
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
@@ -4073,7 +4093,19 @@ async fn update_memory(
         &format!("Updated memory content: {content_preview}"),
     );
 
-    Ok(StatusCode::OK)
+    Ok(Json(UpdateMemoryResponse {
+        success: true,
+        id: memory_id,
+        message: "Memory updated successfully".to_string(),
+    }))
+}
+
+/// Response for memory delete operations
+#[derive(Debug, Serialize)]
+struct DeleteMemoryResponse {
+    success: bool,
+    id: String,
+    message: String,
 }
 
 /// Delete specific memory
@@ -4081,7 +4113,7 @@ async fn delete_memory(
     State(state): State<AppState>,
     Path(memory_id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
-) -> Result<StatusCode, AppError> {
+) -> Result<Json<DeleteMemoryResponse>, AppError> {
     let user_id = params
         .get("user_id")
         .ok_or_else(|| AppError::InvalidInput {
@@ -4109,8 +4141,11 @@ async fn delete_memory(
     // Enterprise audit logging
     state.log_event(user_id, "DELETE", &memory_id, "Memory deleted");
 
-    // Return 200 OK instead of 204 NO_CONTENT so Python client can verify success
-    Ok(StatusCode::OK)
+    Ok(Json(DeleteMemoryResponse {
+        success: true,
+        id: memory_id,
+        message: "Memory deleted successfully".to_string(),
+    }))
 }
 
 /// Get all memories for a user with optional filters
