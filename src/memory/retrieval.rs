@@ -753,34 +753,83 @@ impl RetrievalEngine {
         Ok(memories)
     }
 
-    /// Build vector index from existing memories (one-time initialization)
+    /// Build vector index from existing memories (resumable on failure)
+    ///
+    /// Uses incremental indexing so partial progress is preserved:
+    /// - Skips memories already in the index
+    /// - On failure, next rebuild/repair continues from where it left off
+    /// - Logs progress every 1000 memories for monitoring
     pub fn rebuild_index(&self) -> Result<()> {
         // Get all memories from storage
         let end = chrono::Utc::now();
         let start = chrono::DateTime::from_timestamp(0, 0).unwrap();
         let memories = self.storage.search(SearchCriteria::ByDate { start, end })?;
+        let total = memories.len();
 
-        // Batch add to Vamana
-        let mut vectors = Vec::new();
-        let mut memory_ids = Vec::new();
-
-        for memory in &memories {
-            let text = Self::extract_searchable_text(memory);
-            let embedding = self.embedder.encode(&text)?;
-            vectors.push(embedding);
-            memory_ids.push(memory.id.clone());
+        if total == 0 {
+            tracing::info!("No memories to index");
+            return Ok(());
         }
 
-        // Build index
-        let mut index = self.vector_index.write();
-        index.build(vectors)?;
+        tracing::info!("Starting resumable index rebuild: {} memories", total);
 
-        // Clear and rebuild ID mapping
-        let mut id_mapping = self.id_mapping.write();
-        id_mapping.clear();
-        for (vector_id, memory_id) in memory_ids.into_iter().enumerate() {
-            id_mapping.insert(memory_id, vector_id as u32);
+        // Get already-indexed memory IDs to skip
+        let indexed_ids = self.get_indexed_memory_ids();
+        let already_indexed = indexed_ids.len();
+
+        let mut indexed = 0;
+        let mut skipped = 0;
+        let mut failed = 0;
+        let start_time = std::time::Instant::now();
+
+        for (i, memory) in memories.iter().enumerate() {
+            // Skip already indexed memories (makes rebuild resumable)
+            if indexed_ids.contains(&memory.id) {
+                skipped += 1;
+                continue;
+            }
+
+            // Index this memory
+            match self.index_memory(memory) {
+                Ok(_) => indexed += 1,
+                Err(e) => {
+                    failed += 1;
+                    tracing::warn!(
+                        "Failed to index memory {} during rebuild: {}",
+                        memory.id.0,
+                        e
+                    );
+                }
+            }
+
+            // Log progress every 1000 memories
+            if (i + 1) % 1000 == 0 || i + 1 == total {
+                let elapsed = start_time.elapsed().as_secs();
+                let rate = if elapsed > 0 {
+                    (indexed + skipped) as f64 / elapsed as f64
+                } else {
+                    0.0
+                };
+                tracing::info!(
+                    "Rebuild progress: {}/{} ({:.1}%), {} indexed, {} skipped, {} failed, {:.0}/sec",
+                    i + 1,
+                    total,
+                    (i + 1) as f64 / total as f64 * 100.0,
+                    indexed,
+                    skipped,
+                    failed,
+                    rate
+                );
+            }
         }
+
+        tracing::info!(
+            "Index rebuild complete: {} indexed, {} already present, {} failed (total: {})",
+            indexed,
+            already_indexed + skipped,
+            failed,
+            self.len()
+        );
 
         Ok(())
     }

@@ -1761,6 +1761,68 @@ impl MemorySystem {
         self.retriever.auto_rebuild_index_if_needed()
     }
 
+    /// Auto-repair index integrity and compact if needed
+    ///
+    /// Called during maintenance to ensure storage↔index consistency:
+    /// 1. Checks index health (fast O(1) operation)
+    /// 2. If needs compaction (>30% deleted), triggers auto-rebuild
+    /// 3. If orphaned memories detected, repairs them
+    ///
+    /// This provides eventual consistency between storage and index.
+    fn auto_repair_and_compact(&self) {
+        // Check index health first (fast operation)
+        let health = self.index_health();
+
+        // Auto-compact if deletion ratio exceeds threshold
+        if health.needs_compaction {
+            tracing::info!(
+                "Index compaction triggered: {:.1}% deleted ({} of {} vectors)",
+                health.deletion_ratio * 100.0,
+                health.deleted_count,
+                health.total_vectors
+            );
+            if let Err(e) = self.auto_rebuild_index_if_needed() {
+                tracing::warn!("Index compaction failed: {}", e);
+            }
+        }
+
+        // Check for orphaned memories (stored but not indexed)
+        // Only do full scan if we suspect issues (cheap heuristic: counts differ)
+        let storage_count = self
+            .long_term_memory
+            .get_stats()
+            .map(|s| s.total_count)
+            .unwrap_or(0);
+        let index_count = health.total_vectors.saturating_sub(health.deleted_count);
+
+        if storage_count > index_count {
+            // Potential orphans detected - run repair
+            let orphan_estimate = storage_count - index_count;
+            if orphan_estimate > 0 {
+                tracing::info!(
+                    "Potential orphaned memories detected: ~{} (storage={}, indexed={})",
+                    orphan_estimate,
+                    storage_count,
+                    index_count
+                );
+                match self.repair_vector_index() {
+                    Ok((_, _, repaired, failed)) => {
+                        if repaired > 0 || failed > 0 {
+                            tracing::info!(
+                                "Index repair complete: {} repaired, {} failed",
+                                repaired,
+                                failed
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Index repair failed: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
     /// Check resource limits to prevent OOM from single user
     ///
     /// Uses ESTIMATED_BYTES_PER_MEMORY constant for size estimation.
@@ -2260,6 +2322,10 @@ impl MemorySystem {
         // Note: Graph maintenance doesn't currently report pruned edges,
         // but the retriever could be modified to return pruning stats
         self.graph_maintenance();
+
+        // 4. Auto-repair index integrity and compact if needed
+        // This ensures storage↔index sync and prevents memory leaks from soft-deleted vectors
+        self.auto_repair_and_compact();
 
         let duration_ms = start_time.elapsed().as_millis() as u64;
 
