@@ -124,6 +124,77 @@ impl GraphData {
                 .unwrap_or(self.nodes.len() - 1);
         }
     }
+
+    /// Apply Fruchterman-Reingold force-directed layout
+    /// Makes connected nodes cluster together, unconnected nodes spread out
+    pub fn apply_force_layout(&mut self, iterations: usize) {
+        if self.nodes.len() < 2 {
+            return;
+        }
+
+        let n = self.nodes.len() as f32;
+        let area = 1.0_f32;
+        let k = (area / n).sqrt() * 0.5; // Optimal distance between nodes
+
+        for iteration in 0..iterations {
+            // Temperature decreases over iterations (simulated annealing)
+            let temp = 0.1 * (1.0 - iteration as f32 / iterations as f32).max(0.01);
+
+            // Calculate displacements
+            let mut dx_vec: Vec<f32> = vec![0.0; self.nodes.len()];
+            let mut dy_vec: Vec<f32> = vec![0.0; self.nodes.len()];
+
+            // Repulsive forces between all pairs
+            for i in 0..self.nodes.len() {
+                for j in (i + 1)..self.nodes.len() {
+                    let dx = self.nodes[i].x - self.nodes[j].x;
+                    let dy = self.nodes[i].y - self.nodes[j].y;
+                    let dist = (dx * dx + dy * dy).sqrt().max(0.001);
+
+                    // Repulsive force: k^2 / d
+                    let repulsion = (k * k) / dist;
+                    let fx = (dx / dist) * repulsion;
+                    let fy = (dy / dist) * repulsion;
+
+                    dx_vec[i] += fx;
+                    dy_vec[i] += fy;
+                    dx_vec[j] -= fx;
+                    dy_vec[j] -= fy;
+                }
+            }
+
+            // Attractive forces along edges
+            for edge in &self.edges {
+                let i_opt = self.nodes.iter().position(|n| n.id == edge.from_id);
+                let j_opt = self.nodes.iter().position(|n| n.id == edge.to_id);
+
+                if let (Some(i), Some(j)) = (i_opt, j_opt) {
+                    let dx = self.nodes[i].x - self.nodes[j].x;
+                    let dy = self.nodes[i].y - self.nodes[j].y;
+                    let dist = (dx * dx + dy * dy).sqrt().max(0.001);
+
+                    // Attractive force: d^2 / k, scaled by edge weight
+                    let attraction = (dist * dist) / k * edge.weight;
+                    let fx = (dx / dist) * attraction;
+                    let fy = (dy / dist) * attraction;
+
+                    dx_vec[i] -= fx;
+                    dy_vec[i] -= fy;
+                    dx_vec[j] += fx;
+                    dy_vec[j] += fy;
+                }
+            }
+
+            // Apply displacements with temperature limiting
+            for (i, node) in self.nodes.iter_mut().enumerate() {
+                let disp_len = (dx_vec[i] * dx_vec[i] + dy_vec[i] * dy_vec[i]).sqrt().max(0.001);
+                let scale = temp.min(disp_len) / disp_len;
+
+                node.x = (node.x + dx_vec[i] * scale).clamp(0.05, 0.95);
+                node.y = (node.y + dy_vec[i] * scale).clamp(0.05, 0.95);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

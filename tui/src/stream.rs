@@ -291,6 +291,9 @@ impl MemoryStream {
                 state.graph_stats.density =
                     (state.graph_data.edges.len() as f64 / max_edges) as f32;
             }
+
+            // Apply force-directed layout to position nodes based on connections
+            state.graph_data.apply_force_layout(50);
         }
     }
 
