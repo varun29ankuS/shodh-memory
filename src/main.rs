@@ -465,8 +465,9 @@ impl MultiUserMemoryManager {
             ..self.default_config.clone()
         };
 
-        let memory_system = MemorySystem::new(config)
-            .with_context(|| format!("Failed to initialize memory system for user '{}'", user_id))?;
+        let memory_system = MemorySystem::new(config).with_context(|| {
+            format!("Failed to initialize memory system for user '{}'", user_id)
+        })?;
         let memory_arc = Arc::new(parking_lot::RwLock::new(memory_system));
 
         // Insert into cache (moka handles LRU eviction automatically via eviction_listener)

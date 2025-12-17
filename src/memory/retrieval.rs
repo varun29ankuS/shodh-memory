@@ -151,8 +151,8 @@ impl RetrievalEngine {
             ..Default::default()
         };
 
-        let mut vector_index = VamanaIndex::new(vamana_config)
-            .context("Failed to initialize Vamana vector index")?;
+        let mut vector_index =
+            VamanaIndex::new(vamana_config).context("Failed to initialize Vamana vector index")?;
         let mut id_mapping = IdMapping::new();
 
         // Try to load persisted index and ID mapping

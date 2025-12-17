@@ -196,7 +196,8 @@ impl VamanaIndex {
         }
 
         let n = vectors.len();
-        self.num_vectors.store(n, std::sync::atomic::Ordering::Release);
+        self.num_vectors
+            .store(n, std::sync::atomic::Ordering::Release);
 
         info!("Building Vamana index with {} vectors", n);
 
@@ -644,14 +645,16 @@ impl VamanaIndex {
 
     /// Robust prune using α-RNG strategy
     ///
-    /// Optimized to use zero-copy slice access for vector data during build.
+    /// Optimized with:
+    /// - Zero-copy slice access for vector data
+    /// - Cached dist_ne (node to existing) to avoid O(n²) distance recomputation
+    /// - Pre-loaded candidate vectors to minimize storage lookups
     fn robust_prune(&self, node_id: u32, candidates: &[SearchCandidate]) -> Result<Vec<u32>> {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
 
         let storage = self.vectors.read(); // Hold lock for entire prune operation
-        let mut pruned = Vec::new();
         let node_slice = Self::get_slice_from_storage(&storage, node_id)?;
 
         // Sort candidates by distance (NaN values sort to end)
@@ -662,20 +665,35 @@ impl VamanaIndex {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        for candidate in sorted_candidates {
-            if candidate.id == node_id {
-                continue;
-            }
+        // Pre-load all candidate vectors to avoid repeated storage lookups
+        // This trades memory for CPU - worth it for the O(n²) inner loop
+        let candidate_vectors: Vec<_> = sorted_candidates
+            .iter()
+            .filter_map(|c| {
+                if c.id == node_id {
+                    None
+                } else {
+                    Self::get_slice_from_storage(&storage, c.id)
+                        .ok()
+                        .map(|slice| (c.id, slice.to_vec(), c.distance))
+                }
+            })
+            .collect();
 
-            // Check α-RNG condition (zero-copy slice access)
-            let candidate_slice = Self::get_slice_from_storage(&storage, candidate.id)?;
-            let dist_nc = self.distance(node_slice, candidate_slice);
+        let mut pruned_ids = Vec::with_capacity(self.config.max_degree);
+        // Cache dist_ne (distance from node to each pruned neighbor)
+        // When we add candidate C to pruned, dist_nc becomes the dist_ne for C
+        let mut pruned_dist_ne: Vec<f32> = Vec::with_capacity(self.config.max_degree);
+        // Cache existing vectors for O(1) access in inner loop
+        let mut pruned_vectors: Vec<&[f32]> = Vec::with_capacity(self.config.max_degree);
+
+        for (candidate_id, candidate_vec, _candidate_dist) in &candidate_vectors {
+            let dist_nc = self.distance(node_slice, candidate_vec);
 
             let mut should_add = true;
-            for &existing_id in &pruned {
-                let existing_slice = Self::get_slice_from_storage(&storage, existing_id)?;
-                let dist_ne = self.distance(node_slice, existing_slice);
-                let dist_ce = self.distance(candidate_slice, existing_slice);
+            for i in 0..pruned_ids.len() {
+                let dist_ne = pruned_dist_ne[i]; // Cached - no recomputation!
+                let dist_ce = self.distance(candidate_vec, pruned_vectors[i]);
 
                 // α-RNG pruning condition
                 if self.config.alpha * dist_ce <= dist_nc && dist_ce <= dist_ne {
@@ -685,14 +703,18 @@ impl VamanaIndex {
             }
 
             if should_add {
-                pruned.push(candidate.id);
-                if pruned.len() >= self.config.max_degree {
+                pruned_ids.push(*candidate_id);
+                // dist_nc is the distance from node to this candidate
+                // It becomes dist_ne when this candidate is used as "existing" in future iterations
+                pruned_dist_ne.push(dist_nc);
+                pruned_vectors.push(candidate_vec);
+                if pruned_ids.len() >= self.config.max_degree {
                     break;
                 }
             }
         }
 
-        Ok(pruned)
+        Ok(pruned_ids)
     }
 
     /// Compute distance between two vectors using configured metric
@@ -815,7 +837,8 @@ impl VamanaIndex {
                 neighbors: Vec::new(),
             });
             *self.medoid.write() = 0;
-            self.num_vectors.fetch_add(1, std::sync::atomic::Ordering::Release);
+            self.num_vectors
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
             return Ok(id);
         }
 
@@ -887,7 +910,8 @@ impl VamanaIndex {
         }
         drop(vectors);
 
-        self.num_vectors.fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.num_vectors
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         self.incremental_inserts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(id)
@@ -1017,7 +1041,8 @@ impl VamanaIndex {
         // Clear current state
         self.graph.write().clear();
         *self.vectors.write() = VectorStorage::Memory(Vec::new());
-        self.num_vectors.store(0, std::sync::atomic::Ordering::Release);
+        self.num_vectors
+            .store(0, std::sync::atomic::Ordering::Release);
 
         // Full rebuild with robust_prune
         self.build(vectors)?;
@@ -1128,7 +1153,9 @@ impl VamanaIndex {
 
             // Update num_vectors atomically (after releasing locks)
             self.num_vectors.store(
-                new_index.num_vectors.load(std::sync::atomic::Ordering::Acquire),
+                new_index
+                    .num_vectors
+                    .load(std::sync::atomic::Ordering::Acquire),
                 std::sync::atomic::Ordering::Release,
             );
 
@@ -1262,7 +1289,8 @@ impl VamanaIndex {
         // Update internal state
         *self.graph.write() = data.graph;
         *self.medoid.write() = data.medoid;
-        self.num_vectors.store(data.num_vectors, std::sync::atomic::Ordering::Release);
+        self.num_vectors
+            .store(data.num_vectors, std::sync::atomic::Ordering::Release);
 
         // Update vector storage
         match &mut *self.vectors.write() {
