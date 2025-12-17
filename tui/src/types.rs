@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
+use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use ratatui::style::Color;
 use std::time::Instant;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -100,7 +100,8 @@ impl GraphData {
 
     pub fn edges_from_selected(&self) -> Vec<(&GraphEdge, Option<&GraphNode>)> {
         if let Some(node) = self.selected() {
-            self.edges.iter()
+            self.edges
+                .iter()
                 .filter(|e| e.from_id == node.id)
                 .map(|e| (e, self.nodes.iter().find(|n| n.id == e.to_id)))
                 .collect()
@@ -117,7 +118,10 @@ impl GraphData {
 
     pub fn select_prev(&mut self) {
         if !self.nodes.is_empty() {
-            self.selected_node = self.selected_node.checked_sub(1).unwrap_or(self.nodes.len() - 1);
+            self.selected_node = self
+                .selected_node
+                .checked_sub(1)
+                .unwrap_or(self.nodes.len() - 1);
         }
     }
 }
@@ -269,8 +273,14 @@ impl TypeStats {
     }
 
     pub fn total(&self) -> u32 {
-        self.context + self.learning + self.decision + self.error
-            + self.pattern + self.discovery + self.task + self.conversation
+        self.context
+            + self.learning
+            + self.decision
+            + self.error
+            + self.pattern
+            + self.discovery
+            + self.task
+            + self.conversation
     }
 
     pub fn as_vec(&self) -> Vec<(&'static str, u32, Color)> {
@@ -308,6 +318,7 @@ pub struct AppState {
     pub max_events: usize,
     pub session_start: Instant,
     pub current_user: String,
+    pub selected_event: Option<usize>,
 }
 
 impl AppState {
@@ -333,7 +344,42 @@ impl AppState {
             max_events: 100,
             session_start: Instant::now(),
             current_user: String::new(),
+            selected_event: None,
         }
+    }
+
+    pub fn select_event_prev(&mut self) {
+        if self.events.is_empty() {
+            return;
+        }
+        match self.selected_event {
+            None => self.selected_event = Some(0),
+            Some(i) => {
+                let new_idx = i.saturating_sub(1);
+                self.selected_event = Some(new_idx);
+                if new_idx < self.scroll_offset {
+                    self.scroll_offset = new_idx;
+                }
+            }
+        }
+    }
+
+    pub fn select_event_next(&mut self) {
+        if self.events.is_empty() {
+            return;
+        }
+        let max = self.events.len().saturating_sub(1);
+        match self.selected_event {
+            None => self.selected_event = Some(0),
+            Some(i) => {
+                let new_idx = (i + 1).min(max);
+                self.selected_event = Some(new_idx);
+            }
+        }
+    }
+
+    pub fn clear_event_selection(&mut self) {
+        self.selected_event = None;
     }
 
     pub fn set_view(&mut self, mode: ViewMode) {
@@ -365,14 +411,21 @@ impl AppState {
                 self.total_memories += 1;
                 self.tier_stats.working += 1;
                 self.graph_stats.nodes += 1;
-                if let Some(ref t) = event.memory_type { self.type_stats.increment(t); }
+                if let Some(ref t) = event.memory_type {
+                    self.type_stats.increment(t);
+                }
                 if let Some(ref entities) = event.entities {
                     self.total_entities += entities.len() as u64;
-                    for e in entities { self.add_entity(e.clone()); }
+                    for e in entities {
+                        self.add_entity(e.clone());
+                    }
                 }
                 if let Some(ref id) = event.memory_id {
                     let content = event.content_preview.clone().unwrap_or_default();
-                    let mem_type = event.memory_type.clone().unwrap_or_else(|| "Unknown".to_string());
+                    let mem_type = event
+                        .memory_type
+                        .clone()
+                        .unwrap_or_else(|| "Unknown".to_string());
                     self.add_graph_node(id.clone(), content, mem_type);
                 }
             }
@@ -389,7 +442,9 @@ impl AppState {
                 if let Some(latency) = event.latency_ms {
                     let total = self.retrieval_stats.total();
                     if total > 0 {
-                        self.retrieval_stats.avg_latency_ms = (self.retrieval_stats.avg_latency_ms * (total - 1) as f32 + latency) / total as f32;
+                        self.retrieval_stats.avg_latency_ms =
+                            (self.retrieval_stats.avg_latency_ms * (total - 1) as f32 + latency)
+                                / total as f32;
                     }
                 }
             }
@@ -401,7 +456,9 @@ impl AppState {
             "GRAPH_UPDATE" => {
                 self.total_edges += 1;
                 self.graph_stats.edges += 1;
-                if let (Some(from), Some(to), Some(weight)) = (&event.from_id, &event.to_id, event.edge_weight) {
+                if let (Some(from), Some(to), Some(weight)) =
+                    (&event.from_id, &event.to_id, event.edge_weight)
+                {
                     self.add_graph_edge(from.clone(), to.clone(), weight);
                 }
                 self.update_graph_stats();
@@ -417,11 +474,18 @@ impl AppState {
             _ => {}
         }
         self.events.push_front(DisplayEvent::new(event));
-        while self.events.len() > self.max_events { self.events.pop_back(); }
+        while self.events.len() > self.max_events {
+            self.events.pop_back();
+        }
     }
 
     fn add_entity(&mut self, entity: String) {
-        if let Some(pos) = self.entity_stats.top_entities.iter().position(|(e, _)| e == &entity) {
+        if let Some(pos) = self
+            .entity_stats
+            .top_entities
+            .iter()
+            .position(|(e, _)| e == &entity)
+        {
             self.entity_stats.top_entities[pos].1 += 1;
         } else {
             self.entity_stats.top_entities.push((entity, 1));
@@ -432,36 +496,70 @@ impl AppState {
     }
 
     fn add_graph_node(&mut self, id: String, content: String, memory_type: String) {
-        let short_id = if id.len() > 8 { id[..8].to_string() } else { id.clone() };
+        let short_id = if id.len() > 8 {
+            id[..8].to_string()
+        } else {
+            id.clone()
+        };
         let n = self.graph_data.nodes.len() as f32;
         let x = (n * 0.618).sin() * 0.35 + 0.5;
         let y = (n * 0.618).cos() * 0.35 + 0.5;
         self.graph_data.nodes.push(GraphNode {
-            id, short_id,
-            content: if content.len() > 40 { format!("{}...", &content[..37]) } else { content },
-            memory_type, connections: 0, x, y,
+            id,
+            short_id,
+            content: if content.len() > 40 {
+                format!("{}...", &content[..37])
+            } else {
+                content
+            },
+            memory_type,
+            connections: 0,
+            x,
+            y,
         });
     }
 
     fn add_graph_edge(&mut self, from_id: String, to_id: String, weight: f32) {
-        self.graph_data.edges.push(GraphEdge { from_id: from_id.clone(), to_id: to_id.clone(), weight });
+        self.graph_data.edges.push(GraphEdge {
+            from_id: from_id.clone(),
+            to_id: to_id.clone(),
+            weight,
+        });
         for node in &mut self.graph_data.nodes {
-            if node.id == from_id || node.id == to_id { node.connections += 1; }
+            if node.id == from_id || node.id == to_id {
+                node.connections += 1;
+            }
         }
-        self.graph_data.nodes.sort_by(|a, b| b.connections.cmp(&a.connections));
+        self.graph_data
+            .nodes
+            .sort_by(|a, b| b.connections.cmp(&a.connections));
     }
 
     fn update_graph_stats(&mut self) {
         let n = self.graph_stats.nodes as f32;
-        if n > 1.0 { self.graph_stats.density = self.graph_stats.edges as f32 / (n * (n - 1.0) / 2.0); }
-        let (s, m, w) = self.graph_data.edges.iter().fold((0, 0, 0), |(s, m, w), e| {
-            if e.weight >= 0.7 { (s + 1, m, w) } else if e.weight >= 0.4 { (s, m + 1, w) } else { (s, m, w + 1) }
-        });
+        if n > 1.0 {
+            self.graph_stats.density = self.graph_stats.edges as f32 / (n * (n - 1.0) / 2.0);
+        }
+        let (s, m, w) = self
+            .graph_data
+            .edges
+            .iter()
+            .fold((0, 0, 0), |(s, m, w), e| {
+                if e.weight >= 0.7 {
+                    (s + 1, m, w)
+                } else if e.weight >= 0.4 {
+                    (s, m + 1, w)
+                } else {
+                    (s, m, w + 1)
+                }
+            });
         self.graph_stats.strong_edges = s;
         self.graph_stats.medium_edges = m;
         self.graph_stats.weak_edges = w;
         if !self.graph_data.edges.is_empty() {
-            self.graph_stats.avg_weight = self.graph_data.edges.iter().map(|e| e.weight).sum::<f32>() / self.graph_data.edges.len() as f32;
+            self.graph_stats.avg_weight =
+                self.graph_data.edges.iter().map(|e| e.weight).sum::<f32>()
+                    / self.graph_data.edges.len() as f32;
         }
     }
 
@@ -477,7 +575,9 @@ impl AppState {
             ViewMode::GraphList | ViewMode::GraphMap => self.graph_data.select_next(),
             _ => {
                 let max = self.events.len().saturating_sub(1);
-                if self.scroll_offset < max { self.scroll_offset += 1; }
+                if self.scroll_offset < max {
+                    self.scroll_offset += 1;
+                }
             }
         }
     }
@@ -487,7 +587,9 @@ impl AppState {
         for event in &mut self.events {
             if let AnimationState::SlideIn(ref mut p) = event.animation {
                 *p += 0.15;
-                if *p >= 1.0 { event.animation = AnimationState::Visible; }
+                if *p >= 1.0 {
+                    event.animation = AnimationState::Visible;
+                }
             }
         }
     }
