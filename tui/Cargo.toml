@@ -1,0 +1,43 @@
+[package]
+name = "shodh-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal UI for Shodh Memory - real-time visualization"
+authors = ["Shodh"]
+license = "MIT"
+
+[[bin]]
+name = "shodh-tui"
+path = "src/main.rs"
+
+[dependencies]
+# TUI framework
+ratatui = "0.28"
+crossterm = "0.28"
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+futures-util = "0.3"
+
+# HTTP client for SSE
+reqwest = { version = "0.12", features = ["stream", "json"] }
+reqwest-eventsource = "0.6"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+
+# Keep out of parent workspace
+[workspace]

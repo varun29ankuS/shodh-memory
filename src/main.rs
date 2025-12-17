@@ -516,12 +516,44 @@ impl MultiUserMemoryManager {
         Ok(memory_guard.stats())
     }
 
-    /// List all users currently in memory cache
+    /// List all users (scans data directory for user folders)
     pub fn list_users(&self) -> Vec<String> {
-        self.user_memories
-            .iter()
-            .map(|(key, _)| key.to_string())
-            .collect()
+        let mut users = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&self.base_path) {
+            for entry in entries.flatten() {
+                if let Ok(file_type) = entry.file_type() {
+                    if file_type.is_dir() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            if name != "audit_logs" {
+                                users.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        users.sort();
+        users
+    }
+
+    /// Get audit logs for a user (from persistent storage)
+    pub fn get_audit_logs(&self, user_id: &str, limit: usize) -> Vec<AuditEvent> {
+        let mut events: Vec<AuditEvent> = Vec::new();
+        let prefix = format!("{user_id}:");
+        let iter = self.audit_db.prefix_iterator(prefix.as_bytes());
+        for (key, value) in iter.flatten() {
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                if !key_str.starts_with(&prefix) {
+                    break;
+                }
+                if let Ok(event) = bincode::deserialize::<AuditEvent>(&value) {
+                    events.push(event);
+                }
+            }
+        }
+        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.truncate(limit);
+        events
     }
 
     /// Flush all RocksDB databases to ensure data persistence (critical for graceful shutdown)
@@ -1713,6 +1745,18 @@ async fn record_experience(
         .with_label_values(&["success"])
         .inc();
 
+    // Broadcast CREATE event for real-time dashboard
+    state.emit_event(MemoryEvent {
+        event_type: "CREATE".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: req.user_id.clone(),
+        memory_id: Some(memory_id.0.to_string()),
+        content_preview: Some(req.experience.content.chars().take(100).collect()),
+        memory_type: Some(format!("{:?}", req.experience.experience_type)),
+        importance: None,
+        count: None,
+    });
+
     Ok(Json(RecordResponse {
         id: memory_id.0.to_string(),
         success: true,
@@ -1772,6 +1816,9 @@ async fn remember(
         }
     }
 
+    // Save experience type string before it's moved
+    let experience_type_str = format!("{:?}", experience_type);
+
     // Auto-create Experience with sensible defaults
     // Note: tags field is for explicit user tags, entities field includes tags + NER-extracted
     let experience = Experience {
@@ -1811,6 +1858,18 @@ async fn remember(
     metrics::MEMORY_STORE_TOTAL
         .with_label_values(&["success"])
         .inc();
+
+    // Broadcast CREATE event for real-time dashboard
+    state.emit_event(MemoryEvent {
+        event_type: "CREATE".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: req.user_id.clone(),
+        memory_id: Some(memory_id.0.to_string()),
+        content_preview: Some(req.content.chars().take(100).collect()),
+        memory_type: Some(experience_type_str),
+        importance: None,
+        count: None,
+    });
 
     Ok(Json(RememberResponse {
         id: memory_id.0.to_string(),
@@ -1960,6 +2019,18 @@ async fn upsert_memory(
             "upsert_create"
         }])
         .inc();
+
+    // Broadcast CREATE/UPDATE event for real-time dashboard
+    state.emit_event(MemoryEvent {
+        event_type: if was_update { "UPDATE".to_string() } else { "CREATE".to_string() },
+        timestamp: chrono::Utc::now(),
+        user_id: req.user_id.clone(),
+        memory_id: Some(memory_id.0.to_string()),
+        content_preview: Some(req.content.chars().take(100).collect()),
+        memory_type: req.memory_type.clone(),
+        importance: None,
+        count: None,
+    });
 
     Ok(Json(UpsertResponse {
         id: memory_id.0.to_string(),
@@ -2807,6 +2878,18 @@ async fn recall(
             ..Default::default()
         };
 
+        // Broadcast RETRIEVE event for real-time dashboard
+        state.emit_event(MemoryEvent {
+            event_type: "RETRIEVE".to_string(),
+            timestamp: chrono::Utc::now(),
+            user_id: req.user_id.clone(),
+            memory_id: None,
+            content_preview: Some(req.query.chars().take(50).collect()),
+            memory_type: Some("semantic".to_string()),
+            importance: None,
+            count: Some(count),
+        });
+
         return Ok(Json(RecallResponse {
             memories: recall_memories,
             count,
@@ -2988,6 +3071,18 @@ async fn recall(
     metrics::MEMORY_RETRIEVE_RESULTS
         .with_label_values(&[&mode])
         .observe(count as f64);
+
+    // Broadcast RETRIEVE event for real-time dashboard
+    state.emit_event(MemoryEvent {
+        event_type: "RETRIEVE".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: req.user_id.clone(),
+        memory_id: None,
+        content_preview: Some(req.query.chars().take(50).collect()),
+        memory_type: Some(mode.clone()),
+        importance: None,
+        count: Some(count),
+    });
 
     Ok(Json(RecallResponse {
         memories: recall_memories,
@@ -3280,6 +3375,18 @@ async fn surface_relevant(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
         .map_err(AppError::Internal)?
     };
+
+    // Broadcast RETRIEVE event for real-time dashboard
+    state.emit_event(MemoryEvent {
+        event_type: "RETRIEVE".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: req.user_id.clone(),
+        memory_id: None,
+        content_preview: Some(req.context.chars().take(50).collect()),
+        memory_type: Some("proactive".to_string()),
+        importance: None,
+        count: Some(response.memories.len()),
+    });
 
     Ok(Json(response))
 }
@@ -4258,6 +4365,18 @@ async fn delete_memory(
 
     // Enterprise audit logging
     state.log_event(user_id, "DELETE", &memory_id, "Memory deleted");
+
+    // Broadcast DELETE event for real-time dashboard
+    state.emit_event(MemoryEvent {
+        event_type: "DELETE".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: user_id.to_string(),
+        memory_id: Some(memory_id.clone()),
+        content_preview: None,
+        memory_type: None,
+        importance: None,
+        count: None,
+    });
 
     Ok(Json(DeleteMemoryResponse {
         success: true,
@@ -5374,6 +5493,18 @@ async fn forget_by_tags(
         req.user_id, req.tags, deleted_count
     );
 
+    // Broadcast DELETE event for real-time dashboard
+    state.emit_event(MemoryEvent {
+        event_type: "DELETE".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: req.user_id.clone(),
+        memory_id: None,
+        content_preview: Some(format!("tags: {:?}", req.tags)),
+        memory_type: None,
+        importance: None,
+        count: Some(deleted_count),
+    });
+
     Ok(Json(serde_json::json!({
         "success": true,
         "deleted_count": deleted_count,
@@ -5421,6 +5552,18 @@ async fn forget_by_date(
         "📅 Forget by date: user={}, start={}, end={}, deleted={}",
         req.user_id, req.start, req.end, deleted_count
     );
+
+    // Broadcast DELETE event for real-time dashboard
+    state.emit_event(MemoryEvent {
+        event_type: "DELETE".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: req.user_id.clone(),
+        memory_id: None,
+        content_preview: Some(format!("date range: {} to {}", req.start, req.end)),
+        memory_type: None,
+        importance: None,
+        count: Some(deleted_count),
+    });
 
     Ok(Json(serde_json::json!({
         "success": true,
