@@ -451,9 +451,10 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
         let is_selected = state.selected_event == Some(global_idx);
         let color = event.event.event_color();
         let icon = event.event.event_icon();
-        let prefix = if is_selected { ">" } else { " " };
+        let prefix = if is_selected { "▶" } else { " " };
+        // Blue-tinted background for better contrast
         let bg = if is_selected {
-            Color::DarkGray
+            Color::Rgb(25, 40, 60)
         } else {
             Color::Reset
         };
@@ -486,13 +487,19 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
                     .fg(if is_selected {
                         Color::White
                     } else {
-                        Color::DarkGray
+                        Color::Gray
                     })
                     .bg(bg),
             ),
             Span::styled(
                 format!(" {}", event.time_ago()),
-                Style::default().fg(Color::DarkGray).bg(bg),
+                Style::default()
+                    .fg(if is_selected {
+                        Color::White
+                    } else {
+                        Color::DarkGray
+                    })
+                    .bg(bg),
             ),
         ]);
         f.render_widget(
@@ -784,12 +791,13 @@ fn render_river_event_selectable(
     let color = event.event.event_color();
     let icon = event.event.event_icon();
     let sep = "-".repeat(area.width.saturating_sub(27) as usize);
+    // Blue-tinted background for better contrast
     let bg = if is_selected {
-        Color::DarkGray
+        Color::Rgb(25, 40, 60)
     } else {
         Color::Reset
     };
-    let prefix = if is_selected { "> " } else { "  " };
+    let prefix = if is_selected { "▶ " } else { "  " };
 
     let mut lines = vec![Line::from(vec![
         Span::styled(
@@ -1049,7 +1057,7 @@ fn render_graph_list(f: &mut Frame, area: Rect, state: &AppState) {
                     Style::default().fg(if is_selected {
                         Color::White
                     } else {
-                        Color::DarkGray
+                        Color::Gray
                     }),
                 ),
             ]));
