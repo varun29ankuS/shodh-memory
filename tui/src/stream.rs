@@ -226,15 +226,19 @@ impl MemoryStream {
         if let Ok(universe) = self.fetch_universe(user_id).await {
             let mut state = self.state.lock().await;
 
-            // Only use universe data if it has entities
-            // Otherwise keep memory nodes (but they won't have edges)
-            if !universe.stars.is_empty() {
+            // Filter out short/meaningless entity names
+            let valid_stars: Vec<_> = universe
+                .stars
+                .iter()
+                .filter(|s| s.name.len() >= 3 && !s.name.chars().all(|c| c.is_lowercase()))
+                .collect();
+
+            // Only use universe data if it has valid entities
+            if !valid_stars.is_empty() {
                 state.graph_data.nodes.clear();
                 state.graph_data.edges.clear();
             }
-
-            // Add entity nodes from stars
-            for (i, star) in universe.stars.iter().enumerate() {
+            for (i, star) in valid_stars.iter().enumerate() {
                 let short_id = if star.id.len() > 8 {
                     star.id[..8].to_string()
                 } else {
