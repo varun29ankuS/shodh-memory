@@ -414,7 +414,7 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
     }
 
     let detail_height = if state.selected_event.is_some() {
-        6u16
+        12u16 // Expanded view for full content
     } else {
         0u16
     };
@@ -606,86 +606,98 @@ fn render_event_card(f: &mut Frame, area: Rect, event: &DisplayEvent, _index: us
 
 fn render_event_detail(f: &mut Frame, area: Rect, event: &DisplayEvent) {
     let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
         .title(Span::styled(
-            " Details ",
+            " ▼ MEMORY DETAILS ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        ));
+        ))
+        .title(
+            block::Title::from(Span::styled(
+                " Backspace to close ",
+                Style::default().fg(Color::DarkGray),
+            ))
+            .alignment(Alignment::Right),
+        );
     let inner = block.inner(area);
     f.render_widget(block, area);
+
     let color = event.event.event_color();
     let mut lines = Vec::new();
-    if let Some(content) = &event.event.content_preview {
-        lines.push(Line::from(vec![
-            Span::styled("Content: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                truncate(content, inner.width.saturating_sub(10) as usize),
-                Style::default().fg(Color::White),
-            ),
-        ]));
-    }
-    let mut meta = Vec::new();
-    meta.push(Span::styled(
+
+    // Header line with type and metadata
+    let mut header = vec![Span::styled(
         format!("{} ", event.event.event_type),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
-    ));
+    )];
     if let Some(t) = &event.event.memory_type {
-        meta.push(Span::styled(
-            format!("type:{} ", t),
-            Style::default().fg(Color::Cyan),
-        ));
-    }
-    if let Some(m) = &event.event.retrieval_mode {
-        meta.push(Span::styled(
-            format!("mode:{} ", m),
-            Style::default().fg(Color::Magenta),
+        header.push(Span::styled(
+            format!("[{}] ", t),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     if let Some(l) = event.event.latency_ms {
-        meta.push(Span::styled(
+        header.push(Span::styled(
             format!("{:.0}ms ", l),
             Style::default().fg(Color::Yellow),
         ));
     }
-    if let Some(c) = event.event.count {
-        meta.push(Span::styled(
-            format!("x{} ", c),
-            Style::default().fg(Color::Yellow),
-        ));
+    lines.push(Line::from(header));
+
+    // Full content - word wrapped across multiple lines
+    if let Some(content) = &event.event.content_preview {
+        lines.push(Line::from(""));
+        // Split content into lines that fit the width
+        let max_width = inner.width.saturating_sub(2) as usize;
+        let mut remaining = content.as_str();
+        let mut content_lines = 0;
+        while !remaining.is_empty() && content_lines < 6 {
+            let take = remaining.chars().take(max_width).collect::<String>();
+            let actual_len = take.len();
+            lines.push(Line::from(Span::styled(
+                take,
+                Style::default().fg(Color::White),
+            )));
+            remaining = &remaining[actual_len.min(remaining.len())..];
+            content_lines += 1;
+        }
+        if !remaining.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "...(more)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
     }
-    lines.push(Line::from(meta));
+
+    // ID and timestamp
+    lines.push(Line::from(""));
     let mut id_line = Vec::new();
     if let Some(id) = &event.event.memory_id {
-        id_line.push(Span::styled(
-            format!("id:{} ", id),
-            Style::default().fg(Color::DarkGray),
-        ));
+        id_line.push(Span::styled("ID: ", Style::default().fg(Color::DarkGray)));
+        id_line.push(Span::styled(id.clone(), Style::default().fg(Color::Cyan)));
+        id_line.push(Span::raw("  "));
     }
     id_line.push(Span::styled(
-        format!("@ {}", event.event.timestamp.format("%H:%M:%S")),
+        format!("@ {}", event.event.timestamp.format("%Y-%m-%d %H:%M:%S")),
         Style::default().fg(Color::DarkGray),
     ));
     lines.push(Line::from(id_line));
+
+    // Entities
     if let Some(entities) = &event.event.entities {
         if !entities.is_empty() {
-            let es = entities
-                .iter()
-                .take(8)
-                .map(|e| e.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let es = entities.join(", ");
             lines.push(Line::from(vec![
-                Span::styled("entities: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    truncate(&es, inner.width.saturating_sub(12) as usize),
-                    Style::default().fg(Color::Green),
-                ),
+                Span::styled("Tags: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(es, Style::default().fg(Color::Green)),
             ]));
         }
     }
+
     f.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -722,7 +734,7 @@ fn render_activity_logs(f: &mut Frame, area: Rect, state: &AppState) {
     }
 
     let detail_height = if state.selected_event.is_some() {
-        6u16
+        12u16 // Expanded view for full content
     } else {
         0u16
     };
