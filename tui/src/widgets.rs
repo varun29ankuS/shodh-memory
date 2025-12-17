@@ -449,9 +449,18 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
         }
 
         let is_selected = state.selected_event == Some(global_idx);
+        let is_newest = global_idx == 0;
         let color = event.event.event_color();
         let icon = event.event.event_icon();
-        let prefix = if is_selected { "▶" } else { " " };
+        // Green circle for newest, arrow for selected, space otherwise
+        let prefix = if is_newest {
+            "●"
+        } else if is_selected {
+            "▶"
+        } else {
+            " "
+        };
+        let prefix_color = if is_newest { Color::Green } else { Color::Cyan };
         // Blue-tinted background for better contrast
         let bg = if is_selected {
             Color::Rgb(25, 40, 60)
@@ -469,7 +478,7 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
             Span::styled(
                 prefix,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(prefix_color)
                     .add_modifier(Modifier::BOLD)
                     .bg(bg),
             ),
@@ -751,7 +760,8 @@ fn render_activity_logs(f: &mut Frame, area: Rect, state: &AppState) {
         };
         if event_area.y + event_area.height <= inner.y + list_height {
             let is_selected = state.selected_event == Some(global_idx);
-            render_river_event_selectable(f, event_area, event, is_selected);
+            let is_newest = global_idx == 0;
+            render_river_event_selectable(f, event_area, event, is_selected, is_newest);
         }
         y_offset += event_height;
     }
@@ -787,6 +797,7 @@ fn render_river_event_selectable(
     area: Rect,
     event: &DisplayEvent,
     is_selected: bool,
+    is_newest: bool,
 ) {
     let color = event.event.event_color();
     let icon = event.event.event_icon();
@@ -797,13 +808,20 @@ fn render_river_event_selectable(
     } else {
         Color::Reset
     };
-    let prefix = if is_selected { "▶ " } else { "  " };
+    // Green circle for newest, arrow for selected
+    let (prefix, prefix_color) = if is_newest {
+        ("● ", Color::Green)
+    } else if is_selected {
+        ("▶ ", Color::Cyan)
+    } else {
+        ("  ", Color::Cyan)
+    };
 
     let mut lines = vec![Line::from(vec![
         Span::styled(
             prefix,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(prefix_color)
                 .add_modifier(Modifier::BOLD)
                 .bg(bg),
         ),
