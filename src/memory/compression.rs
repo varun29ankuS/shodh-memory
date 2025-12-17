@@ -10,7 +10,8 @@ use super::types::*;
 use crate::constants::{
     COMPRESSION_ACCESS_THRESHOLD, COMPRESSION_AGE_DAYS, COMPRESSION_IMPORTANCE_HIGH,
     COMPRESSION_IMPORTANCE_LOW, CONSOLIDATION_MIN_AGE_DAYS, CONSOLIDATION_MIN_SUPPORT,
-    FACT_DECAY_BASE_DAYS, FACT_DECAY_PER_SUPPORT_DAYS, MAX_DECOMPRESSED_SIZE,
+    FACT_DECAY_BASE_DAYS, FACT_DECAY_PER_SUPPORT_DAYS, MAX_COMPRESSION_RATIO,
+    MAX_DECOMPRESSED_SIZE,
 };
 
 /// Compression strategy for memories
@@ -244,8 +245,45 @@ impl CompressionPipeline {
         if let Some(compressed_b64) = memory.experience.metadata.get("compressed_data") {
             let compressed = general_purpose::STANDARD.decode(compressed_b64)?;
 
+            // Zip bomb protection: Check compression ratio before decompressing
+            // A small payload claiming to decompress to MAX_DECOMPRESSED_SIZE is suspicious
+            let compressed_size = compressed.len();
+            let max_expected_decompressed = compressed_size.saturating_mul(MAX_COMPRESSION_RATIO);
+
+            if max_expected_decompressed > MAX_DECOMPRESSED_SIZE as usize {
+                // The compressed size is so small that even at MAX_COMPRESSION_RATIO
+                // it would exceed our limit - this is suspicious
+                return Err(anyhow!(
+                    "Suspicious compression ratio: compressed size {} bytes with max ratio {} \
+                     would allow {} bytes decompressed, which exceeds limit of {} bytes. \
+                     This may indicate a zip bomb attack.",
+                    compressed_size,
+                    MAX_COMPRESSION_RATIO,
+                    max_expected_decompressed,
+                    MAX_DECOMPRESSED_SIZE
+                ));
+            }
+
             // Limit decompression size to prevent DoS attacks
             let decompressed = lz4::block::decompress(&compressed, Some(MAX_DECOMPRESSED_SIZE))?;
+
+            // Post-decompression ratio check for additional safety
+            let actual_ratio = if compressed_size > 0 {
+                decompressed.len() / compressed_size
+            } else {
+                0
+            };
+            if actual_ratio > MAX_COMPRESSION_RATIO {
+                return Err(anyhow!(
+                    "Decompression ratio {} exceeds maximum allowed ratio of {}. \
+                     Compressed: {} bytes, Decompressed: {} bytes. \
+                     This may indicate a zip bomb attack.",
+                    actual_ratio,
+                    MAX_COMPRESSION_RATIO,
+                    compressed_size,
+                    decompressed.len()
+                ));
+            }
 
             let experience: Experience = bincode::deserialize(&decompressed)?;
 

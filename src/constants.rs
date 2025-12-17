@@ -564,6 +564,19 @@ pub const VECTOR_INDEX_SAVE_TIMEOUT_SECS: u64 = 10;
 /// - Larger content should be chunked at ingestion time
 pub const MAX_DECOMPRESSED_SIZE: i32 = 10 * 1024 * 1024;
 
+/// Maximum allowed compression ratio (decompressed / compressed)
+///
+/// Prevents zip bomb attacks where small payloads decompress to huge sizes.
+/// Normal LZ4 compression ratios are typically 2:1 to 5:1 for text.
+/// Ratios above 100:1 are suspicious and indicate potential attack.
+///
+/// Justification:
+/// - LZ4 typical ratio for text: 2-5x
+/// - LZ4 maximum theoretical ratio: ~255x (all zeros)
+/// - 100:1 is generous for legitimate data while catching attacks
+/// - Combined with MAX_DECOMPRESSED_SIZE for defense in depth
+pub const MAX_COMPRESSION_RATIO: usize = 100;
+
 // =============================================================================
 // PREFETCH RECENCY BOOST CONSTANTS
 // For anticipatory prefetch relevance scoring

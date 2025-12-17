@@ -2,7 +2,7 @@
 //!
 //! Standalone memory server with REST API for Python clients
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -465,14 +465,15 @@ impl MultiUserMemoryManager {
             ..self.default_config.clone()
         };
 
-        let memory_system = MemorySystem::new(config)?;
+        let memory_system = MemorySystem::new(config)
+            .with_context(|| format!("Failed to initialize memory system for user '{}'", user_id))?;
         let memory_arc = Arc::new(parking_lot::RwLock::new(memory_system));
 
         // Insert into cache (moka handles LRU eviction automatically via eviction_listener)
         self.user_memories
             .insert(user_id.to_string(), memory_arc.clone());
 
-        info!("🧠 Created memory system for user: {}", user_id);
+        info!("Created memory system for user: {}", user_id);
 
         // Initialize vector index (load from disk or rebuild)
         if let Err(e) = self.init_user_vector_index(user_id) {

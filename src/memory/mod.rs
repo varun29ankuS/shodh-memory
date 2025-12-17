@@ -141,14 +141,18 @@ pub struct MemorySystem {
 impl MemorySystem {
     /// Create a new memory system
     pub fn new(config: MemoryConfig) -> Result<Self> {
-        let storage = Arc::new(MemoryStorage::new(&config.storage_path)?);
+        let storage_path = config.storage_path.clone();
+        let storage = Arc::new(
+            MemoryStorage::new(&storage_path)
+                .with_context(|| format!("Failed to open storage at {:?}", storage_path))?,
+        );
 
         // CRITICAL: Initialize embedder ONCE and share between MemorySystem and RetrievalEngine
         // This prevents loading the ONNX model multiple times (50-200ms overhead per load)
         let embedding_config = crate::embeddings::minilm::EmbeddingConfig::default();
         let embedder = Arc::new(
             crate::embeddings::minilm::MiniLMEmbedder::new(embedding_config)
-                .context("Failed to initialize embedder")?,
+                .context("Failed to initialize MiniLM embedder (ONNX model)")?,
         );
 
         // Create consolidation event buffer first so we can share it with retriever
@@ -160,7 +164,8 @@ impl MemorySystem {
             storage.clone(),
             embedder.clone(),
             Some(consolidation_events.clone()),
-        )?;
+        )
+        .context("Failed to initialize retrieval engine")?;
 
         // Disable visualization logging for production performance
         let logger = Arc::new(RwLock::new(MemoryLogger::new(false)));
