@@ -5,7 +5,7 @@ use crossterm::{
         MouseEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle},
 };
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -21,10 +21,27 @@ mod stream;
 mod types;
 mod widgets;
 
-use logo::ELEPHANT;
+use logo::{ELEPHANT, ELEPHANT_FRAMES, SHODH_GRADIENT, SHODH_TEXT};
 use stream::MemoryStream;
 use types::{AppState, SearchMode, ViewMode};
 use widgets::{render_footer, render_header, render_main};
+
+/// Set the terminal window title
+fn set_terminal_title(title: &str) {
+    let _ = execute!(io::stdout(), SetTitle(title));
+}
+
+/// Generate dynamic title based on current view
+fn generate_title(state: &AppState) -> String {
+    let view_name = match state.view_mode {
+        ViewMode::Dashboard => "Dashboard",
+        ViewMode::ActivityLogs => "Activity",
+        ViewMode::GraphList => "Graph",
+        ViewMode::GraphMap => "Map",
+    };
+
+    format!("🦣 Shodh - {}", view_name)
+}
 
 struct UserSelector {
     users: Vec<String>,
@@ -61,42 +78,88 @@ async fn fetch_users(base_url: &str, api_key: &str) -> Result<Vec<String>, Strin
     let client = reqwest::Client::new();
     let url = format!("{}/api/users", base_url);
     match client.get(&url).header("X-API-Key", api_key).send().await {
-        Ok(resp) => resp
-            .json::<Vec<String>>()
-            .await
-            .map_err(|e| format!("Parse: {}", e)),
-        Err(e) => Err(format!("Connection: {}", e)),
+        Ok(resp) => {
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(format!("Server error {}: {}", status.as_u16(), body.chars().take(100).collect::<String>()));
+            }
+            resp.json::<Vec<String>>()
+                .await
+                .map_err(|e| format!("Parse error: {}", e))
+        }
+        Err(e) => Err(format!("Connection failed: {}", e)),
     }
 }
 
 fn render_user_selector(f: &mut Frame, selector: &UserSelector) {
     let area = f.area();
+
+    // Dark background
     f.render_widget(
-        Block::default().style(Style::default().bg(Color::Black)),
+        Block::default().style(Style::default().bg(Color::Rgb(15, 15, 20))),
         area,
     );
+
+    // Center everything with generous margins
+    let outer = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(15),
+            Constraint::Percentage(70),
+            Constraint::Percentage(15),
+        ])
+        .split(area);
+
+    let center = outer[1];
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),
-            Constraint::Length(3),
-            Constraint::Min(10),
-            Constraint::Length(3),
+            Constraint::Length(2),  // Top padding
+            Constraint::Length(6),  // SHODH text logo
+            Constraint::Length(1),  // Spacing
+            Constraint::Length(6),  // Elephant logo
+            Constraint::Length(1),  // Spacing
+            Constraint::Length(2),  // Tagline
+            Constraint::Length(2),  // Spacing
+            Constraint::Length(1),  // "Select Profile" header
+            Constraint::Length(1),  // Spacing
+            Constraint::Min(6),     // User list
+            Constraint::Length(1),  // Spacing
+            Constraint::Length(3),  // Footer
         ])
-        .margin(2)
-        .split(area);
+        .split(center);
 
+    // SHODH text logo with gradient
+    let shodh_lines: Vec<Line> = SHODH_TEXT
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let (r, g, b) = SHODH_GRADIENT[i % SHODH_GRADIENT.len()];
+            Line::from(Span::styled(
+                *l,
+                Style::default().fg(Color::Rgb(r, g, b)),
+            ))
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(shodh_lines).alignment(Alignment::Center),
+        chunks[1],
+    );
+
+    // Elephant logo with orange gradient
     let logo_lines: Vec<Line> = ELEPHANT
         .iter()
         .enumerate()
         .map(|(i, l)| {
             let g = [
-                (255, 180, 50),
-                (255, 160, 40),
-                (255, 140, 30),
-                (255, 120, 20),
-                (255, 100, 10),
-                (255, 80, 0),
+                (255, 140, 50),
+                (255, 120, 40),
+                (255, 100, 30),
+                (255, 85, 20),
+                (255, 70, 10),
+                (200, 55, 5),
             ];
             Line::from(Span::styled(
                 *l,
@@ -106,47 +169,65 @@ fn render_user_selector(f: &mut Frame, selector: &UserSelector) {
         .collect();
     f.render_widget(
         Paragraph::new(logo_lines).alignment(Alignment::Center),
-        chunks[0],
+        chunks[3],
     );
 
+    // Tagline
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Cognitive Memory for ", Style::default().fg(Color::DarkGray)),
+            Span::styled("AI Agents", Style::default().fg(Color::Rgb(255, 140, 50)).add_modifier(Modifier::BOLD)),
+        ]))
+        .alignment(Alignment::Center),
+        chunks[5],
+    );
+
+    // Select Profile header
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "SELECT USER",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            "─── Select Profile ───",
+            Style::default().fg(Color::Rgb(100, 100, 120)),
         )))
         .alignment(Alignment::Center),
-        chunks[1],
+        chunks[7],
     );
 
-    let block = Block::default()
+    // User list
+    let list_area = chunks[9];
+    let list_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(Span::styled(" Users ", Style::default().fg(Color::Cyan)));
+        .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
+        .border_type(ratatui::widgets::BorderType::Rounded);
+
+    let inner = list_block.inner(list_area);
+    f.render_widget(list_block, list_area);
+
     if selector.loading {
         f.render_widget(
-            Paragraph::new("Loading...")
-                .fg(Color::Yellow)
-                .alignment(Alignment::Center)
-                .block(block),
-            chunks[2],
+            Paragraph::new(Line::from(vec![
+                Span::styled("◐ ", Style::default().fg(Color::Rgb(255, 140, 50))),
+                Span::styled("Connecting...", Style::default().fg(Color::DarkGray)),
+            ]))
+            .alignment(Alignment::Center),
+            inner,
         );
     } else if let Some(ref e) = selector.error {
         f.render_widget(
-            Paragraph::new(e.as_str())
-                .fg(Color::Red)
-                .alignment(Alignment::Center)
-                .block(block),
-            chunks[2],
+            Paragraph::new(Line::from(vec![
+                Span::styled("✗ ", Style::default().fg(Color::Red)),
+                Span::styled(e.as_str(), Style::default().fg(Color::Red)),
+            ]))
+            .alignment(Alignment::Center),
+            inner,
         );
     } else if selector.users.is_empty() {
         f.render_widget(
-            Paragraph::new("No users found.")
-                .fg(Color::DarkGray)
-                .alignment(Alignment::Center)
-                .block(block),
-            chunks[2],
+            Paragraph::new(Line::from(Span::styled(
+                "No profiles found",
+                Style::default().fg(Color::DarkGray),
+            )))
+            .alignment(Alignment::Center),
+            inner,
         );
     } else {
         let items: Vec<ListItem> = selector
@@ -154,60 +235,252 @@ fn render_user_selector(f: &mut Frame, selector: &UserSelector) {
             .iter()
             .enumerate()
             .map(|(i, u)| {
-                let s = i == selector.selected;
-                let st = if s {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
+                let is_selected = i == selector.selected;
+                if is_selected {
+                    ListItem::new(Line::from(vec![
+                        Span::styled("  ▶ ", Style::default().fg(Color::Rgb(255, 140, 50))),
+                        Span::styled("🦣 ", Style::default()),
+                        Span::styled(
+                            u,
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]))
                 } else {
-                    Style::default().fg(Color::White)
-                };
-                ListItem::new(Line::from(vec![
-                    Span::styled(if s { "> " } else { "  " }, st),
-                    Span::styled(u, st),
-                ]))
+                    ListItem::new(Line::from(vec![
+                        Span::raw("    "),
+                        Span::styled("   ", Style::default()),
+                        Span::styled(u, Style::default().fg(Color::Rgb(120, 120, 140))),
+                    ]))
+                }
             })
             .collect();
-        f.render_widget(List::new(items).block(block), chunks[2]);
+        f.render_widget(List::new(items), inner);
     }
+
+    // Footer with keybindings
+    let footer_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::Rgb(50, 50, 60)));
+    let footer_inner = footer_block.inner(chunks[11]);
+    f.render_widget(footer_block, chunks[11]);
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                " j/k ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("select ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                " Enter ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("confirm ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                " q ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("quit", Style::default().fg(Color::DarkGray)),
+            Span::styled(" ↑↓ ", Style::default().fg(Color::Rgb(255, 140, 50)).add_modifier(Modifier::BOLD)),
+            Span::styled("navigate  ", Style::default().fg(Color::Rgb(80, 80, 100))),
+            Span::styled(" Enter ", Style::default().fg(Color::Rgb(255, 140, 50)).add_modifier(Modifier::BOLD)),
+            Span::styled("select  ", Style::default().fg(Color::Rgb(80, 80, 100))),
+            Span::styled(" q ", Style::default().fg(Color::Rgb(255, 140, 50)).add_modifier(Modifier::BOLD)),
+            Span::styled("quit", Style::default().fg(Color::Rgb(80, 80, 100))),
         ]))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        ),
-        chunks[3],
+        .alignment(Alignment::Center),
+        footer_inner,
     );
 }
 
-async fn run_user_selector(base_url: &str, api_key: &str) -> Result<Option<String>> {
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+fn render_splash(f: &mut Frame, progress: f32, tick: u64) {
+    let area = f.area();
+
+    // Dark background
+    f.render_widget(
+        Block::default().style(Style::default().bg(Color::Rgb(15, 15, 20))),
+        area,
+    );
+
+    // Center everything
+    let outer = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(20),
+            Constraint::Percentage(60),
+            Constraint::Percentage(20),
+        ])
+        .split(area);
+
+    let center = outer[1];
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(20),
+            Constraint::Length(6),  // SHODH text
+            Constraint::Length(1),
+            Constraint::Length(6),  // Elephant
+            Constraint::Length(2),
+            Constraint::Length(1),  // Tagline
+            Constraint::Length(3),
+            Constraint::Length(1),  // Loading bar
+            Constraint::Length(3),
+            Constraint::Length(1),  // Made in India
+            Constraint::Percentage(15),
+        ])
+        .split(center);
+
+    // SHODH text with animated gradient
+    let shodh_lines: Vec<Line> = SHODH_TEXT
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            // Animate brightness based on tick
+            let phase = ((tick as f32 * 0.1) + i as f32 * 0.5).sin() * 0.3 + 0.7;
+            let (r, g, b) = SHODH_GRADIENT[i % SHODH_GRADIENT.len()];
+            let r = (r as f32 * phase) as u8;
+            let g = (g as f32 * phase) as u8;
+            let b = (b as f32 * phase) as u8;
+            Line::from(Span::styled(*l, Style::default().fg(Color::Rgb(r, g, b))))
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(shodh_lines).alignment(Alignment::Center),
+        chunks[1],
+    );
+
+    // Animated elephant logo with trunk waving
+    let frame_idx = (tick as usize / 8) % ELEPHANT_FRAMES.len(); // Change frame every 8 ticks
+    let current_frame = ELEPHANT_FRAMES[frame_idx];
+
+    let logo_lines: Vec<Line> = current_frame
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let phase = ((tick as f32 * 0.15) + i as f32 * 0.3).sin() * 0.2 + 0.8;
+            let base = [
+                (255, 140, 50),
+                (255, 120, 40),
+                (255, 100, 30),
+                (255, 85, 20),
+                (255, 70, 10),
+                (200, 55, 5),
+            ];
+            let (r, g, b) = base[i % 6];
+            let r = (r as f32 * phase) as u8;
+            let g = (g as f32 * phase) as u8;
+            let b = (b as f32 * phase) as u8;
+            Line::from(Span::styled(*l, Style::default().fg(Color::Rgb(r, g, b))))
+        })
+        .collect();
+    f.render_widget(
+        Paragraph::new(logo_lines).alignment(Alignment::Center),
+        chunks[3],
+    );
+
+    // Tagline
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Cognitive Memory for ", Style::default().fg(Color::Rgb(100, 100, 110))),
+            Span::styled("AI Agents", Style::default().fg(Color::Rgb(255, 140, 50)).add_modifier(Modifier::BOLD)),
+        ]))
+        .alignment(Alignment::Center),
+        chunks[5],
+    );
+
+    // Progress bar - full width with gradient colors
+    let bar_width = chunks[7].width.saturating_sub(12) as usize;
+    let filled = (bar_width as f32 * progress) as usize;
+    let empty = bar_width.saturating_sub(filled);
+
+    let pct = (progress * 100.0) as u32;
+
+    // Build progress bar with gradient (dark red -> orange -> yellow)
+    let mut progress_spans = vec![
+        Span::styled(format!(" {:>3}% ", pct), Style::default().fg(Color::Rgb(255, 200, 100)).add_modifier(Modifier::BOLD)),
+    ];
+
+    // Gradient colors for filled portion
+    for i in 0..filled {
+        let t = if bar_width > 0 { i as f32 / bar_width as f32 } else { 0.0 };
+        // Gradient: dark red (180,50,20) -> orange (255,140,50) -> yellow (255,220,100)
+        let (r, g, b) = if t < 0.5 {
+            let t2 = t * 2.0;
+            (
+                (180.0 + 75.0 * t2) as u8,
+                (50.0 + 90.0 * t2) as u8,
+                (20.0 + 30.0 * t2) as u8,
+            )
+        } else {
+            let t2 = (t - 0.5) * 2.0;
+            (
+                255,
+                (140.0 + 80.0 * t2) as u8,
+                (50.0 + 50.0 * t2) as u8,
+            )
+        };
+        progress_spans.push(Span::styled("█", Style::default().fg(Color::Rgb(r, g, b))));
+    }
+
+    if filled < bar_width {
+        progress_spans.push(Span::styled("▓", Style::default().fg(Color::Rgb(120, 60, 20))));
+        progress_spans.push(Span::styled("░".repeat(empty.saturating_sub(1)), Style::default().fg(Color::Rgb(40, 40, 50))));
+    }
+
+    f.render_widget(
+        Paragraph::new(Line::from(progress_spans)).alignment(Alignment::Center),
+        chunks[7],
+    );
+
+    // Made in India with proper horizontal tricolor flag
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Made in ", Style::default().fg(Color::Rgb(80, 80, 90))),
+            Span::styled("I", Style::default().fg(Color::Rgb(255, 153, 51)).add_modifier(Modifier::BOLD)), // Saffron
+            Span::styled("n", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),             // White
+            Span::styled("d", Style::default().fg(Color::Rgb(19, 136, 8)).add_modifier(Modifier::BOLD)),  // Green
+            Span::styled("i", Style::default().fg(Color::Rgb(255, 153, 51)).add_modifier(Modifier::BOLD)), // Saffron
+            Span::styled("a", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),             // White
+        ]))
+        .alignment(Alignment::Center),
+        chunks[9],
+    );
+}
+
+async fn run_splash(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    execute!(io::stdout(), SetTitle("🦣 Shodh - Loading..."))?;
+
+    let start = Instant::now();
+    let duration = Duration::from_secs(5);
+    let mut tick: u64 = 0;
+
+    // Clear and draw first frame immediately
+    terminal.clear()?;
+
+    loop {
+        // Check if duration elapsed
+        if start.elapsed() >= duration {
+            break;
+        }
+
+        let progress = start.elapsed().as_secs_f32() / duration.as_secs_f32();
+        terminal.draw(|f| render_splash(f, progress, tick))?;
+        tick += 1;
+
+        // Check for early exit with keyboard only (ignore mouse events)
+        if event::poll(Duration::from_millis(50))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    // Only exit on key press, not release
+                    if key.kind == KeyEventKind::Press {
+                        break;
+                    }
+                }
+                Event::Mouse(_) => {
+                    // Ignore mouse events - don't exit
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_user_selector(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Option<String>> {
+    execute!(io::stdout(), SetTitle("🦣 Shodh - Select Profile"))?;
     let mut selector = UserSelector::new();
     match fetch_users(base_url, api_key).await {
         Ok(u) => {
@@ -239,13 +512,6 @@ async fn run_user_selector(base_url: &str, api_key: &str) -> Result<Option<Strin
             }
         }
     };
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
     Ok(result)
 }
 
@@ -258,10 +524,31 @@ async fn main() -> Result<()> {
     let api_key = std::env::var("SHODH_API_KEY")
         .unwrap_or_else(|_| "sk-shodh-dev-local-testing-key".to_string());
 
-    let user = match run_user_selector(&base_url, &api_key).await? {
+    // Initialize terminal for splash and user selector
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+
+    // Show splash screen
+    run_splash(&mut terminal).await?;
+
+    // Run user selector
+    let user = match run_user_selector(&mut terminal, &base_url, &api_key).await? {
         Some(u) => u,
-        None => return Ok(()),
+        None => {
+            // Clean up terminal before exit
+            disable_raw_mode()?;
+            execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+            terminal.show_cursor()?;
+            return Ok(());
+        }
     };
+
+    // Clean up terminal - run_tui will create its own session
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    terminal.show_cursor()?;
+    drop(terminal);
 
     let state = Arc::new(Mutex::new(AppState::new()));
     {
@@ -289,7 +576,6 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let tick_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
-
     // Clone state for search API calls
     let search_state = Arc::clone(&state);
     let base_url = std::env::var("SHODH_SERVER_URL")
@@ -299,10 +585,25 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
     let api_key = std::env::var("SHODH_API_KEY")
         .unwrap_or_else(|_| "sk-shodh-dev-local-testing-key".to_string());
 
+    // Set initial title
+    let mut last_title = {
+        let g = state.lock().await;
+        let title = generate_title(&g);
+        set_terminal_title(&title);
+        title
+    };
+
     loop {
         {
             let g = state.lock().await;
             terminal.draw(|f| ui(f, &g))?;
+
+            // Update title if changed
+            let new_title = generate_title(&g);
+            if new_title != last_title {
+                set_terminal_title(&new_title);
+                last_title = new_title;
+            }
         }
         if crossterm::event::poll(tick_rate.saturating_sub(last_tick.elapsed()))? {
             match event::read()? {
@@ -422,6 +723,13 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                         KeyCode::Char('a') => g.set_view(ViewMode::ActivityLogs),
                         KeyCode::Char('g') => g.set_view(ViewMode::GraphList),
                         KeyCode::Char('m') => g.set_view(ViewMode::GraphMap),
+                        KeyCode::Char('t') => g.toggle_theme(),
+                        KeyCode::Char('o') => {
+                            // Toggle auto-rotate in graph map view
+                            if matches!(g.view_mode, ViewMode::GraphMap) {
+                                g.toggle_graph_auto_rotate();
+                            }
+                        }
                         KeyCode::Char('+') | KeyCode::Char('=') => {
                             g.zoom_in();
                         }
@@ -439,11 +747,6 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                 g.rotate_graph_right();
                             }
                         }
-                        KeyCode::Char('t') => {
-                            if matches!(g.view_mode, ViewMode::GraphMap) {
-                                g.toggle_graph_auto_rotate();
-                            }
-                        }
                         KeyCode::Char('w') => {
                             if matches!(g.view_mode, ViewMode::GraphMap) {
                                 g.tilt_graph(-0.1);
@@ -452,6 +755,77 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                         KeyCode::Char('s') => {
                             if matches!(g.view_mode, ViewMode::GraphMap) {
                                 g.tilt_graph(0.1);
+                            }
+                        }
+                        KeyCode::Char('r') => {
+                            // Rebuild graph in graph views (lowercase r = rebuild)
+                            if matches!(g.view_mode, ViewMode::GraphList | ViewMode::GraphMap) {
+                                let user_id = g.current_user.clone();
+                                g.set_error("Rebuilding graph...".to_string());
+                                drop(g);
+
+                                // Trigger graph rebuild
+                                let rebuild_result =
+                                    rebuild_graph(&base_url, &api_key, &user_id).await;
+
+                                let mut g = search_state.lock().await;
+                                match rebuild_result {
+                                    Ok(msg) => {
+                                        g.set_error(msg.clone());
+                                        drop(g);
+
+                                        // Fetch fresh graph data
+                                        let graph_result =
+                                            fetch_graph_data(&base_url, &api_key, &user_id).await;
+
+                                        let mut g = search_state.lock().await;
+                                        match graph_result {
+                                            Ok((nodes, edges, stats)) => {
+                                                g.graph_data.nodes = nodes;
+                                                g.graph_data.edges = edges;
+                                                g.graph_stats = stats;
+                                                g.graph_data.selected_node = 0;
+                                            }
+                                            Err(e) => {
+                                                g.set_error(format!("Fetch failed: {}", e));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        g.set_error(format!("Rebuild failed: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Char('R') => {
+                            // Refresh graph data without rebuilding (uppercase R)
+                            if matches!(g.view_mode, ViewMode::GraphList | ViewMode::GraphMap) {
+                                let user_id = g.current_user.clone();
+                                g.set_error("Refreshing graph...".to_string());
+                                drop(g);
+
+                                // Fetch fresh graph data
+                                let graph_result =
+                                    fetch_graph_data(&base_url, &api_key, &user_id).await;
+
+                                let mut g = search_state.lock().await;
+                                match graph_result {
+                                    Ok((nodes, edges, stats)) => {
+                                        let msg = format!(
+                                            "Loaded {} entities, {} edges",
+                                            nodes.len(),
+                                            edges.len()
+                                        );
+                                        g.graph_data.nodes = nodes;
+                                        g.graph_data.edges = edges;
+                                        g.graph_stats = stats;
+                                        g.graph_data.selected_node = 0;
+                                        g.set_error(msg);
+                                    }
+                                    Err(e) => {
+                                        g.set_error(format!("Refresh failed: {}", e));
+                                    }
+                                }
                             }
                         }
                         KeyCode::Tab => g.cycle_view(),
@@ -739,6 +1113,180 @@ fn parse_memory_list_response(data: serde_json::Value) -> Result<Vec<types::Sear
     Ok(results)
 }
 
+async fn rebuild_graph(base_url: &str, api_key: &str, user_id: &str) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/graph/{}/rebuild", base_url, user_id);
+
+    let resp = client
+        .post(&url)
+        .header("X-API-Key", api_key)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = resp.status();
+    let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+
+    if status.is_success() {
+        let entities = data
+            .get("entities_created")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let relationships = data
+            .get("relationships_created")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        Ok(format!(
+            "Graph rebuilt: {} entities, {} relationships",
+            entities, relationships
+        ))
+    } else {
+        let error = data
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error");
+        Err(error.to_string())
+    }
+}
+
+async fn fetch_graph_data(
+    base_url: &str,
+    api_key: &str,
+    user_id: &str,
+) -> Result<(Vec<types::GraphNode>, Vec<types::GraphEdge>, types::GraphStats), String> {
+    let client = reqwest::Client::new();
+
+    // Fetch universe data (entities + connections)
+    let url = format!("{}/api/graph/{}/universe", base_url, user_id);
+    let resp = client
+        .get(&url)
+        .header("X-API-Key", api_key)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut stats = types::GraphStats::default();
+
+    // Parse stars (entities)
+    if let Some(stars) = data.get("stars").and_then(|s| s.as_array()) {
+        for (i, star) in stars.iter().enumerate() {
+            let id = star
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = star
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let entity_type = star
+                .get("entity_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mention_count = star
+                .get("mention_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+
+            // Filter out short/meaningless names
+            if name.len() >= 3 && !name.chars().all(|c| c.is_lowercase()) {
+                let short_id = if id.len() > 8 {
+                    id[..8].to_string()
+                } else {
+                    id.clone()
+                };
+
+                // Position from server or generate
+                let pos = star.get("position");
+                let x = pos
+                    .and_then(|p| p.get("x"))
+                    .and_then(|v| v.as_f64())
+                    .map(|v| (v as f32 / 200.0 + 0.5).clamp(0.1, 0.9))
+                    .unwrap_or_else(|| {
+                        let n = i as f32;
+                        (n * 0.618).sin() * 0.35 + 0.5
+                    });
+                let y = pos
+                    .and_then(|p| p.get("y"))
+                    .and_then(|v| v.as_f64())
+                    .map(|v| (v as f32 / 200.0 + 0.5).clamp(0.1, 0.9))
+                    .unwrap_or_else(|| {
+                        let n = i as f32;
+                        (n * 0.618).cos() * 0.35 + 0.5
+                    });
+                let z = pos
+                    .and_then(|p| p.get("z"))
+                    .and_then(|v| v.as_f64())
+                    .map(|v| (v as f32 / 200.0 + 0.5).clamp(0.1, 0.9))
+                    .unwrap_or_else(|| {
+                        let n = i as f32;
+                        ((n * 0.3).sin() * 0.2 + 0.5).clamp(0.1, 0.9)
+                    });
+
+                nodes.push(types::GraphNode {
+                    id,
+                    short_id,
+                    content: name,
+                    memory_type: entity_type,
+                    connections: mention_count,
+                    x,
+                    y,
+                    z,
+                });
+            }
+        }
+    }
+
+    stats.nodes = nodes.len() as u32;
+
+    // Parse connections (edges)
+    if let Some(connections) = data.get("connections").and_then(|c| c.as_array()) {
+        for conn in connections {
+            let from_id = conn
+                .get("from_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let to_id = conn
+                .get("to_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let strength = conn
+                .get("strength")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.5) as f32;
+
+            // Only add edge if both nodes exist
+            if nodes.iter().any(|n| n.id == from_id) && nodes.iter().any(|n| n.id == to_id) {
+                edges.push(types::GraphEdge {
+                    from_id,
+                    to_id,
+                    weight: strength,
+                });
+            }
+        }
+    }
+
+    stats.edges = edges.len() as u32;
+    if !edges.is_empty() {
+        stats.avg_weight = edges.iter().map(|e| e.weight).sum::<f32>() / edges.len() as f32;
+    }
+    let n = nodes.len() as f64;
+    if n > 1.0 {
+        let max_edges = n * (n - 1.0) / 2.0;
+        stats.density = (edges.len() as f64 / max_edges) as f32;
+    }
+
+    Ok((nodes, edges, stats))
+}
+
 fn parse_recall_response(data: serde_json::Value) -> Result<Vec<types::SearchResult>, String> {
     let memories = data
         .get("memories")
@@ -800,6 +1348,12 @@ fn parse_recall_response(data: serde_json::Value) -> Result<Vec<types::SearchRes
 }
 
 fn ui(f: &mut Frame, state: &AppState) {
+    // Clear background with theme color
+    f.render_widget(
+        Block::default().style(Style::default().bg(state.theme.bg())),
+        f.area(),
+    );
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

@@ -118,8 +118,8 @@ impl Animation {
     pub fn entrance(index: usize) -> Self {
         Self::new(
             AnimationType::Entrance {
-                delay_ms: (index as u64) * 50, // Stagger by 50ms per item
-                duration_ms: 300,
+                delay_ms: (index as u64) * 30, // Quick stagger
+                duration_ms: 400, // Snappy 400ms animation
             },
             Easing::EaseOut,
         )
@@ -310,7 +310,7 @@ impl ViewTransition {
             from_view: from,
             to_view: to,
             started_at: Instant::now(),
-            duration_ms: 200,
+            duration_ms: 250, // Quick snappy transition
         }
     }
 
@@ -398,6 +398,67 @@ pub enum ViewMode {
     ActivityLogs,
     GraphList,
     GraphMap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl Theme {
+    pub fn toggle(&self) -> Self {
+        match self {
+            Theme::Dark => Theme::Light,
+            Theme::Light => Theme::Dark,
+        }
+    }
+
+    /// Background color
+    pub fn bg(&self) -> Color {
+        match self {
+            Theme::Dark => Color::Rgb(15, 15, 20),
+            Theme::Light => Color::Rgb(250, 248, 245),
+        }
+    }
+
+    /// Primary text color
+    pub fn fg(&self) -> Color {
+        match self {
+            Theme::Dark => Color::White,
+            Theme::Light => Color::Rgb(30, 30, 35),
+        }
+    }
+
+    /// Secondary/dimmed text
+    pub fn fg_dim(&self) -> Color {
+        match self {
+            Theme::Dark => Color::DarkGray,
+            Theme::Light => Color::Rgb(120, 115, 110),
+        }
+    }
+
+    /// Border color
+    pub fn border(&self) -> Color {
+        match self {
+            Theme::Dark => Color::Rgb(60, 60, 80),
+            Theme::Light => Color::Rgb(200, 195, 190),
+        }
+    }
+
+    /// Accent color (orange)
+    pub fn accent(&self) -> Color {
+        Color::Rgb(255, 140, 50)
+    }
+
+    /// Selection highlight background
+    pub fn selection_bg(&self) -> Color {
+        match self {
+            Theme::Dark => Color::Rgb(40, 40, 55),
+            Theme::Light => Color::Rgb(255, 240, 220),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -604,6 +665,43 @@ impl GraphData {
         }
     }
 
+    /// Get sorted indices by connection count (descending)
+    pub fn sorted_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..self.nodes.len()).collect();
+        indices.sort_by(|&a, &b| self.nodes[b].connections.cmp(&self.nodes[a].connections));
+        indices
+    }
+
+    /// Select next node in sorted order (by connections)
+    pub fn select_next_sorted(&mut self) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let sorted = self.sorted_indices();
+        let current_pos = sorted
+            .iter()
+            .position(|&idx| idx == self.selected_node)
+            .unwrap_or(0);
+        let next_pos = (current_pos + 1) % sorted.len();
+        self.selected_node = sorted[next_pos];
+    }
+
+    /// Select previous node in sorted order (by connections)
+    pub fn select_prev_sorted(&mut self) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let sorted = self.sorted_indices();
+        let current_pos = sorted
+            .iter()
+            .position(|&idx| idx == self.selected_node)
+            .unwrap_or(0);
+        let prev_pos = current_pos
+            .checked_sub(1)
+            .unwrap_or(sorted.len().saturating_sub(1));
+        self.selected_node = sorted[prev_pos];
+    }
+
     /// Apply Fruchterman-Reingold force-directed layout
     /// Makes connected nodes cluster together, unconnected nodes spread out
     pub fn apply_force_layout(&mut self, iterations: usize) {
@@ -760,7 +858,8 @@ impl DisplayEvent {
     }
 
     pub fn is_animating(&self) -> bool {
-        !self.animation.is_complete()
+        // Use time-based check - flash for first 1 second
+        self.received_at.elapsed().as_millis() < 1000
     }
 
     /// Get visual opacity based on animation state
@@ -773,15 +872,15 @@ impl DisplayEvent {
         self.animation.offset_x()
     }
 
-    /// Check if this is a "new" event (within last 3 seconds)
+    /// Check if this is a "new" event (within last 2 seconds)
     pub fn is_new(&self) -> bool {
-        self.received_at.elapsed().as_secs() < 3
+        self.received_at.elapsed().as_secs() < 2
     }
 
     /// Get glow intensity for new events
     pub fn glow(&self) -> f32 {
         if self.is_new() {
-            let elapsed = self.received_at.elapsed().as_millis() as f32 / 3000.0;
+            let elapsed = self.received_at.elapsed().as_millis() as f32 / 2000.0;
             1.0 - elapsed.clamp(0.0, 1.0)
         } else {
             0.0
@@ -792,7 +891,9 @@ impl DisplayEvent {
         let now = chrono::Utc::now();
         let elapsed = (now - self.event.timestamp).num_seconds();
         if elapsed < 0 {
-            self.event.timestamp.format("%H:%M").to_string()
+            // Convert to local time for display
+            let local_time = self.event.timestamp.with_timezone(&chrono::Local);
+            local_time.format("%H:%M").to_string()
         } else if elapsed < 60 {
             format!("{}s", elapsed)
         } else if elapsed < 3600 {
@@ -800,7 +901,9 @@ impl DisplayEvent {
         } else if elapsed < 86400 {
             format!("{}h", elapsed / 3600)
         } else {
-            self.event.timestamp.format("%m/%d %H:%M").to_string()
+            // Convert to local time for display
+            let local_time = self.event.timestamp.with_timezone(&chrono::Local);
+            local_time.format("%m/%d %H:%M").to_string()
         }
     }
 }
@@ -860,6 +963,7 @@ impl TypeStats {
 pub struct AppState {
     pub events: VecDeque<DisplayEvent>,
     pub view_mode: ViewMode,
+    pub theme: Theme,
     pub type_stats: TypeStats,
     pub tier_stats: TierStats,
     pub graph_stats: GraphStats,
@@ -917,6 +1021,14 @@ pub struct AppState {
     pub last_tick: Instant,
     /// Connection animation (pulse when first connected)
     pub connection_animation: Option<Animation>,
+    /// Graph display: max nodes to show (0 = all)
+    pub graph_max_nodes: usize,
+    /// Graph display: minimum edge weight to show (0.0-1.0)
+    pub graph_min_edge_weight: f32,
+    /// Graph display: show only connected nodes (hide isolated)
+    pub graph_hide_isolated: bool,
+    /// Graph display: focus mode (show only selected + neighbors)
+    pub graph_focus_mode: bool,
 }
 
 impl AppState {
@@ -924,6 +1036,7 @@ impl AppState {
         Self {
             events: VecDeque::new(),
             view_mode: ViewMode::Dashboard,
+            theme: Theme::default(),
             type_stats: TypeStats::default(),
             tier_stats: TierStats::default(),
             graph_stats: GraphStats::default(),
@@ -939,7 +1052,7 @@ impl AppState {
             connected: false,
             scroll_offset: 0,
             animation_tick: 0,
-            max_events: 100,
+            max_events: 500,
             session_start: Instant::now(),
             current_user: String::new(),
             selected_event: None,
@@ -962,6 +1075,10 @@ impl AppState {
             view_transition: None,
             last_tick: Instant::now(),
             connection_animation: None,
+            graph_max_nodes: 50,
+            graph_min_edge_weight: 0.3,
+            graph_hide_isolated: true,
+            graph_focus_mode: false,
         }
     }
 
@@ -972,7 +1089,7 @@ impl AppState {
             self.connection_animation = Some(Animation::new(
                 AnimationType::Flash {
                     color: Color::Green,
-                    duration_ms: 500,
+                    duration_ms: 1000, // Longer flash for visibility
                 },
                 Easing::EaseOut,
             ));
@@ -992,7 +1109,7 @@ impl AppState {
 
     /// Rotate graph left (counter-clockwise)
     pub fn rotate_graph_left(&mut self) {
-        self.graph_rotation -= 0.15;
+        self.graph_rotation -= 0.3; // ~17 degrees per press
         if self.graph_rotation < 0.0 {
             self.graph_rotation += std::f32::consts::PI * 2.0;
         }
@@ -1000,7 +1117,7 @@ impl AppState {
 
     /// Rotate graph right (clockwise)
     pub fn rotate_graph_right(&mut self) {
-        self.graph_rotation += 0.15;
+        self.graph_rotation += 0.3; // ~17 degrees per press
         if self.graph_rotation > std::f32::consts::PI * 2.0 {
             self.graph_rotation -= std::f32::consts::PI * 2.0;
         }
@@ -1049,6 +1166,10 @@ impl AppState {
         if self.zoom_level > 0 {
             self.zoom_level -= 1;
         }
+    }
+
+    pub fn toggle_theme(&mut self) {
+        self.theme = self.theme.toggle();
     }
 
     pub fn zoom_label(&self) -> &'static str {
@@ -1228,13 +1349,12 @@ impl AppState {
             }
             "GRAPH_UPDATE" => {
                 self.total_edges += 1;
-                self.graph_stats.edges += 1;
                 if let (Some(from), Some(to), Some(weight)) =
                     (&event.from_id, &event.to_id, event.edge_weight)
                 {
                     self.add_graph_edge(from.clone(), to.clone(), weight);
+                    self.update_graph_stats();
                 }
-                self.update_graph_stats();
             }
             "STRENGTHEN" => self.consolidation_stats.strengthened += 1,
             "DECAY" => self.consolidation_stats.decayed += 1,
@@ -1315,10 +1435,16 @@ impl AppState {
     }
 
     fn update_graph_stats(&mut self) {
+        // Recalculate all stats from actual data to prevent drift
+        self.graph_stats.nodes = self.graph_data.nodes.len() as u32;
+        self.graph_stats.edges = self.graph_data.edges.len() as u32;
+
         let n = self.graph_stats.nodes as f32;
         if n > 1.0 {
             self.graph_stats.density = self.graph_stats.edges as f32 / (n * (n - 1.0) / 2.0);
         }
+
+        // Use consistent thresholds: >= 0.7 strong, >= 0.4 medium, < 0.4 weak
         let (s, m, w) = self
             .graph_data
             .edges
@@ -1335,6 +1461,7 @@ impl AppState {
         self.graph_stats.strong_edges = s;
         self.graph_stats.medium_edges = m;
         self.graph_stats.weak_edges = w;
+
         if !self.graph_data.edges.is_empty() {
             self.graph_stats.avg_weight =
                 self.graph_data.edges.iter().map(|e| e.weight).sum::<f32>()
@@ -1344,7 +1471,8 @@ impl AppState {
 
     pub fn scroll_up(&mut self) {
         match self.view_mode {
-            ViewMode::GraphList | ViewMode::GraphMap => self.graph_data.select_prev(),
+            ViewMode::GraphList => self.graph_data.select_prev(),
+            ViewMode::GraphMap => self.graph_data.select_prev_sorted(),
             _ => {
                 let new_offset = self.scroll_offset.saturating_sub(1);
                 self.scroll_offset = new_offset;
@@ -1355,7 +1483,8 @@ impl AppState {
 
     pub fn scroll_down(&mut self) {
         match self.view_mode {
-            ViewMode::GraphList | ViewMode::GraphMap => self.graph_data.select_next(),
+            ViewMode::GraphList => self.graph_data.select_next(),
+            ViewMode::GraphMap => self.graph_data.select_next_sorted(),
             _ => {
                 let max = self.events.len().saturating_sub(1);
                 if self.scroll_offset < max {

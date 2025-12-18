@@ -257,11 +257,51 @@ pub fn render_main(f: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
+    // Render the view first, then overlay transition effect on top
     match state.view_mode {
         ViewMode::Dashboard => render_dashboard(f, area, state),
         ViewMode::ActivityLogs => render_activity_logs(f, area, state),
         ViewMode::GraphList => render_graph_list(f, area, state),
         ViewMode::GraphMap => render_graph_map(f, area, state),
+    }
+
+    // View transition overlay - renders on top of content
+    if state.is_transitioning() {
+        render_view_transition(f, area, state);
+    }
+}
+
+/// Render view transition overlay effect
+fn render_view_transition(f: &mut Frame, area: Rect, state: &AppState) {
+    if let Some(ref transition) = state.view_transition {
+        let progress = transition.progress();
+
+        // Simple border flash during transition - works on both themes
+        // Use orange/accent color which is visible on both dark and light backgrounds
+        let accent = state.theme.accent();
+
+        if progress < 0.5 {
+            // First half: orange border flash out
+            let fade_intensity = progress * 2.0; // 0 to 1 during first half
+            let border_intensity = ((1.0 - fade_intensity) * 200.0 + 55.0) as u8;
+            let border_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Rgb(255, border_intensity, 0)));
+            f.render_widget(border_block, area);
+        } else {
+            // Second half: accent border fades in
+            let fade_intensity = (progress - 0.5) * 2.0; // 0 to 1 during second half
+
+            if fade_intensity < 0.95 {
+                // Border that fades to theme accent
+                let intensity = (fade_intensity * 255.0) as u8;
+                let border_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Rgb(255, 140 + (intensity / 4), 50)));
+                f.render_widget(border_block, area);
+            }
+        }
+        let _ = accent; // Suppress unused warning
     }
 }
 
@@ -374,7 +414,7 @@ fn render_search_results(f: &mut Frame, area: Rect, state: &AppState) {
         };
         if result_area.y + result_area.height <= inner.y + inner.height {
             let is_selected = idx == state.search_selected;
-            render_search_result_item(f, result_area, result, is_selected, state.zoom_level);
+            render_search_result_item(f, result_area, state, result, is_selected, state.zoom_level);
         }
         y_offset += lines_per_result;
     }
@@ -398,14 +438,15 @@ fn render_search_results(f: &mut Frame, area: Rect, state: &AppState) {
 fn render_search_result_item(
     f: &mut Frame,
     area: Rect,
+    state: &AppState,
     result: &SearchResult,
     is_selected: bool,
     zoom_level: u8,
 ) {
     let bg = if is_selected {
-        Color::Rgb(25, 50, 40)
+        state.theme.selection_bg()
     } else {
-        Color::Reset
+        state.theme.bg()
     };
     let content_width = area.width.saturating_sub(4) as usize;
 
@@ -432,7 +473,8 @@ fn render_search_result_item(
         } else if elapsed < 86400 {
             format!("{}h", elapsed / 3600)
         } else {
-            result.created_at.format("%m/%d").to_string()
+            let local_time = result.created_at.with_timezone(&chrono::Local);
+            local_time.format("%m/%d").to_string()
         }
     };
 
@@ -475,19 +517,20 @@ fn render_search_result_item(
     };
     let content_preview = truncate(&result.content, content_len);
 
+    // Content color: use theme-aware colors for readability on both dark and light backgrounds
+    let content_fg = if is_selected {
+        state.theme.fg()
+    } else {
+        state.theme.fg_dim()
+    };
+
     if zoom_level == 0 {
         // Compact: single line content
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default().bg(bg)),
             Span::styled(
                 content_preview,
-                Style::default()
-                    .fg(if is_selected {
-                        Color::White
-                    } else {
-                        Color::Gray
-                    })
-                    .bg(bg),
+                Style::default().fg(content_fg).bg(bg),
             ),
         ]));
     } else {
@@ -503,13 +546,7 @@ fn render_search_result_item(
                 Span::styled("  ", Style::default().bg(bg)),
                 Span::styled(
                     take,
-                    Style::default()
-                        .fg(if is_selected {
-                            Color::White
-                        } else {
-                            Color::Gray
-                        })
-                        .bg(bg),
+                    Style::default().fg(content_fg).bg(bg),
                 ),
             ]));
             remaining = &remaining[actual_len.min(remaining.len())..];
@@ -567,7 +604,8 @@ fn render_search_detail(f: &mut Frame, area: Rect, state: &AppState) {
     let content_width = inner.width.saturating_sub(4) as usize;
 
     // Format timestamp
-    let time_str = result.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+    let local_time = result.created_at.with_timezone(&chrono::Local);
+    let time_str = local_time.format("%Y-%m-%d %H:%M:%S").to_string();
 
     let mut lines = vec![
         // Header with type and ID
@@ -622,7 +660,7 @@ fn render_search_detail(f: &mut Frame, area: Rect, state: &AppState) {
         let line_content = &remaining[..take_len];
         lines.push(Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled(line_content, Style::default().fg(Color::White)),
+            Span::styled(line_content, Style::default().fg(state.theme.fg())),
         ]));
         remaining = &remaining[take_len..];
     }
@@ -918,12 +956,21 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
 
         let is_selected = state.selected_event == Some(global_idx);
         let is_newest = global_idx == 0;
-        let color = event.event.event_color();
+
+        // Yellow highlight for new events - fades over 30 seconds
+        // Skip historical events (loaded on startup) - only highlight live SSE events
+        let flash_age = event.received_at.elapsed().as_millis() as f32;
+        let is_history = event.event.event_type == "HISTORY";
+        let is_fresh = !is_history && flash_age < 30000.0;
+
+        let color = if is_fresh { Color::Yellow } else { event.event.event_color() };
         let icon = event.event.event_icon();
 
-        // Timeline node: green for newest, cyan for selected, dim for others
-        let node = if is_newest { "●" } else { "○" };
-        let node_color = if is_newest {
+        // Timeline node: YELLOW for fresh, green for newest, cyan for selected
+        let node = if is_newest { "★" } else { "○" };
+        let node_color = if is_fresh {
+            Color::Yellow
+        } else if is_newest {
             Color::Green
         } else if is_selected {
             Color::Cyan
@@ -932,9 +979,9 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
         };
 
         let bg = if is_selected {
-            Color::Rgb(25, 40, 60)
+            state.theme.selection_bg()
         } else {
-            Color::Reset
+            state.theme.bg()
         };
 
         // Line 1: Timeline node + event type + time
@@ -961,24 +1008,26 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
             ),
         ]);
 
-        // Line 2: Content (full width)
+        // Line 2: Content (full width) - YELLOW for fresh events
         let preview = event
             .event
             .content_preview
             .as_ref()
             .map(|s| truncate(s, content_width))
             .unwrap_or_default();
+        // Use theme-aware colors for content readability on both dark and light backgrounds
+        let content_color = if is_fresh {
+            Color::Yellow
+        } else if is_selected {
+            state.theme.fg()
+        } else {
+            state.theme.fg_dim()
+        };
         let line2 = Line::from(vec![
-            Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+            Span::styled("│ ", Style::default().fg(if is_fresh { Color::Yellow } else { Color::DarkGray })),
             Span::styled(
                 preview,
-                Style::default()
-                    .fg(if is_selected {
-                        Color::White
-                    } else {
-                        Color::Gray
-                    })
-                    .bg(bg),
+                Style::default().fg(content_color).bg(bg),
             ),
         ]);
 
@@ -1030,7 +1079,7 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
                 width: inner.width,
                 height: detail_height,
             };
-            render_event_detail(f, detail_area, event);
+            render_event_detail(f, detail_area, event, state);
         }
     }
 
@@ -1080,7 +1129,7 @@ fn render_event_card(f: &mut Frame, area: Rect, event: &DisplayEvent, _index: us
     if let Some(preview) = &event.event.content_preview {
         lines.push(Line::from(Span::styled(
             truncate(preview, inner.width as usize - 2),
-            Style::default().fg(Color::White),
+            Style::default().fg(Color::Rgb(220, 220, 220)), // Light gray readable on both dark/light
         )));
     }
     let mut info_spans = Vec::new();
@@ -1104,7 +1153,7 @@ fn render_event_card(f: &mut Frame, area: Rect, event: &DisplayEvent, _index: us
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_event_detail(f: &mut Frame, area: Rect, event: &DisplayEvent) {
+fn render_event_detail(f: &mut Frame, area: Rect, event: &DisplayEvent, state: &AppState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
@@ -1160,7 +1209,7 @@ fn render_event_detail(f: &mut Frame, area: Rect, event: &DisplayEvent) {
             let actual_len = take.len();
             lines.push(Line::from(Span::styled(
                 take,
-                Style::default().fg(Color::White),
+                Style::default().fg(state.theme.fg()),
             )));
             remaining = &remaining[actual_len.min(remaining.len())..];
             content_lines += 1;
@@ -1181,8 +1230,9 @@ fn render_event_detail(f: &mut Frame, area: Rect, event: &DisplayEvent) {
         id_line.push(Span::styled(id.clone(), Style::default().fg(Color::Cyan)));
         id_line.push(Span::raw("  "));
     }
+    let local_time = event.event.timestamp.with_timezone(&chrono::Local);
     id_line.push(Span::styled(
-        format!("@ {}", event.event.timestamp.format("%Y-%m-%d %H:%M:%S")),
+        format!("@ {}", local_time.format("%Y-%m-%d %H:%M:%S")),
         Style::default().fg(Color::DarkGray),
     ));
     lines.push(Line::from(id_line));
@@ -1273,7 +1323,7 @@ fn render_activity_logs(f: &mut Frame, area: Rect, state: &AppState) {
         if event_area.y + event_area.height <= inner.y + list_height {
             let is_selected = state.selected_event == Some(global_idx);
             let is_newest = global_idx == 0;
-            render_river_event_selectable(f, event_area, event, is_selected, is_newest);
+            render_river_event_selectable(f, event_area, state, event, is_selected, is_newest);
         }
         y_offset += event_height;
     }
@@ -1286,7 +1336,7 @@ fn render_activity_logs(f: &mut Frame, area: Rect, state: &AppState) {
                 width: inner.width,
                 height: detail_height,
             };
-            render_event_detail(f, detail_area, event);
+            render_event_detail(f, detail_area, event, state);
         }
     }
 
@@ -1307,9 +1357,10 @@ fn render_activity_logs(f: &mut Frame, area: Rect, state: &AppState) {
 fn render_river_event_selectable(
     f: &mut Frame,
     area: Rect,
+    state: &AppState,
     event: &DisplayEvent,
     is_selected: bool,
-    is_newest: bool,
+    _is_newest: bool,
 ) {
     let color = event.event.event_color();
     let icon = event.event.event_icon();
@@ -1320,50 +1371,59 @@ fn render_river_event_selectable(
     let glow = event.glow();
     let is_animating = event.is_animating();
 
-    // Background with animation support
+    // Skip yellow highlight for historical events (loaded on startup)
+    let is_history = event.event.event_type == "HISTORY";
+
+    // Yellow highlight for NEW events only - fades over 30 seconds
+    let flash_age = event.received_at.elapsed().as_millis() as f32;
+    let flash_intensity = if !is_history && flash_age < 30000.0 {
+        1.0 - (flash_age / 30000.0) // 1.0 at start, fades to 0.0 over 30 seconds
+    } else {
+        0.0
+    };
+
     let bg = if is_selected {
-        Color::Rgb(25, 40, 60)
-    } else if glow > 0.3 {
-        // Subtle green glow for new events
+        state.theme.selection_bg()
+    } else if glow > 0.05 {
+        // Bright green glow that fades over 2 seconds
         Color::Rgb(
-            (10.0 + glow * 20.0) as u8,
-            (20.0 + glow * 40.0) as u8,
-            (15.0 + glow * 25.0) as u8,
+            (20.0 + glow * 60.0) as u8,
+            (50.0 + glow * 150.0) as u8,
+            (30.0 + glow * 80.0) as u8,
         )
     } else {
-        Color::Reset
+        state.theme.bg()
     };
 
-    // Apply opacity to colors for fade-in effect
-    let text_color = if is_animating {
-        apply_opacity(Color::White, opacity)
-    } else if is_selected {
-        Color::White
+    // Text colors - Yellow for live new events, not historical ones
+    // Use theme-aware colors for readability on both dark and light backgrounds
+    let is_fresh = !is_history && flash_intensity > 0.05;
+    let text_color = if is_selected {
+        state.theme.fg()
+    } else if is_fresh {
+        Color::Yellow
     } else {
-        Color::Gray
+        state.theme.fg_dim()
     };
 
-    let event_color = if is_animating && !is_newest {
-        apply_opacity(color, opacity)
-    } else if is_newest && glow > 0.0 {
-        glow_color(color, glow * 0.5)
+    let event_color = if is_fresh {
+        Color::Yellow
     } else {
         color
     };
 
-    // Prefix: green pulse for newest, arrow for selected
-    let (prefix, prefix_color) = if is_newest {
-        let pulse_char = if glow > 0.5 { "◉ " } else { "● " };
-        (pulse_char, glow_color(Color::Green, glow * 0.3))
+    // Prefix: bright indicator for fresh live events only
+    let (prefix, prefix_color) = if is_fresh {
+        ("★ ", Color::Yellow) // Yellow star for fresh live events
     } else if is_selected {
         ("▶ ", Color::Cyan)
     } else {
         ("  ", Color::DarkGray)
     };
 
-    // Border characters with depth effect for new events
-    let border_color = if is_animating {
-        apply_opacity(Color::DarkGray, opacity)
+    // Border - yellow for fresh live events only
+    let border_color = if is_fresh {
+        Color::Yellow
     } else if glow > 0.0 {
         lerp_color(Color::DarkGray, Color::Green, glow * 0.5)
     } else {
@@ -1561,6 +1621,8 @@ fn render_graph_list(f: &mut Frame, area: Rect, state: &AppState) {
         .split(area);
 
     // LEFT: Node list
+    let node_count = state.graph_data.nodes.len();
+    let selected_idx = state.graph_data.selected_node;
     let left_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
@@ -1572,7 +1634,11 @@ fn render_graph_list(f: &mut Frame, area: Rect, state: &AppState) {
         ))
         .title(
             block::Title::from(Span::styled(
-                format!(" {} ", state.graph_stats.nodes),
+                format!(
+                    " [{}/{}] ",
+                    if node_count > 0 { selected_idx + 1 } else { 0 },
+                    node_count
+                ),
                 Style::default().fg(Color::Yellow),
             ))
             .alignment(Alignment::Right),
@@ -1589,9 +1655,26 @@ fn render_graph_list(f: &mut Frame, area: Rect, state: &AppState) {
             left_inner,
         );
     } else {
+        let lines_per_node = 2_usize;
+        let max_visible_nodes = (left_inner.height as usize) / lines_per_node;
+
+        // Calculate scroll offset to keep selected node in view
+        let scroll_offset = if selected_idx >= max_visible_nodes {
+            selected_idx - max_visible_nodes + 1
+        } else {
+            0
+        };
+
         let mut lines = Vec::new();
-        for (i, node) in state.graph_data.nodes.iter().enumerate() {
-            let is_selected = i == state.graph_data.selected_node;
+        for (i, node) in state
+            .graph_data
+            .nodes
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(max_visible_nodes)
+        {
+            let is_selected = i == selected_idx;
             let prefix = if is_selected { "> " } else { "  " };
             let style = if is_selected {
                 Style::default()
@@ -1627,19 +1710,34 @@ fn render_graph_list(f: &mut Frame, area: Rect, state: &AppState) {
                     Style::default().fg(Color::Green),
                 ),
             ]));
+            // Use theme-aware colors for node content readability on both dark and light backgrounds
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(
                     truncate(&node.content, left_inner.width.saturating_sub(4) as usize),
                     Style::default().fg(if is_selected {
-                        Color::White
+                        state.theme.fg()
                     } else {
-                        Color::Gray
+                        state.theme.fg_dim()
                     }),
                 ),
             ]));
         }
         f.render_widget(Paragraph::new(lines), left_inner);
+
+        // Show scrollbar if there are more nodes than can display
+        if node_count > max_visible_nodes {
+            let scrollbar = Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight);
+            let mut scrollbar_state = ScrollbarState::new(node_count).position(selected_idx);
+            f.render_stateful_widget(
+                scrollbar,
+                chunks[0].inner(Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut scrollbar_state,
+            );
+        }
     }
 
     // RIGHT: Edges from selected node
@@ -1679,7 +1777,7 @@ fn render_graph_list(f: &mut Frame, area: Rect, state: &AppState) {
             ]),
             Line::from(Span::styled(
                 format!(" {}", selected.content),
-                Style::default().fg(Color::White),
+                Style::default().fg(state.theme.fg()),
             )),
             Line::from(""),
             Line::from(Span::styled(
@@ -1711,7 +1809,7 @@ fn render_graph_list(f: &mut Frame, area: Rect, state: &AppState) {
                         format!("   --{:.2}-->", edge.weight),
                         Style::default().fg(weight_color),
                     ),
-                    Span::styled(target_info, Style::default().fg(Color::White)),
+                    Span::styled(target_info, Style::default().fg(state.theme.fg())),
                 ]));
             }
         }
@@ -1740,251 +1838,461 @@ fn render_graph_list(f: &mut Frame, area: Rect, state: &AppState) {
 }
 
 fn render_graph_map(f: &mut Frame, area: Rect, state: &AppState) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Length(6)])
+    // Three-column layout: Top Entities | Selected Focus | Type Summary
+    let main_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(28),  // Left: Top entities
+            Constraint::Min(40),     // Center: Focus view
+            Constraint::Length(24),  // Right: Type summary
+        ])
         .split(area);
 
-    // TOP: 3D Graph visualization with rotation
-    let auto_rotate_indicator = if state.graph_auto_rotate { "⟳" } else { "" };
-    let map_block = Block::default()
+    render_graph_top_entities(f, main_chunks[0], state);
+    render_graph_focus_view(f, main_chunks[1], state);
+    render_graph_type_summary(f, main_chunks[2], state);
+}
+
+/// Left panel: Top entities sorted by connections
+fn render_graph_top_entities(f: &mut Frame, area: Rect, state: &AppState) {
+    let node_count = state.graph_data.nodes.len();
+    let selected_idx = state.graph_data.selected_node;
+
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(Span::styled(
-            format!(" GRAPH MAP {} ", auto_rotate_indicator),
+            " TOP ENTITIES ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ))
         .title(
             block::Title::from(Span::styled(
-                format!(
-                    " {}n {}e r/R=rotate ",
-                    state.graph_data.nodes.len(),
-                    state.graph_data.edges.len(),
-                ),
+                format!(" [{}/{}] ", selected_idx + 1, node_count),
                 Style::default().fg(Color::Yellow),
             ))
             .alignment(Alignment::Right),
         );
-    let map_inner = map_block.inner(chunks[0]);
-    f.render_widget(map_block, chunks[0]);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
     if state.graph_data.nodes.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "  No nodes to display",
-                Style::default().fg(Color::DarkGray),
-            )),
-            map_inner,
+            Paragraph::new(Span::styled("  No entities", Style::default().fg(Color::DarkGray))),
+            inner,
         );
-    } else {
-        // Create grid for rendering
-        let width = map_inner.width as usize;
-        let height = map_inner.height as usize;
-        let mut grid: Vec<Vec<(char, Color, f32)>> = vec![vec![(' ', Color::DarkGray, 999.0); width]; height];
-
-        // Project all nodes to 2D with depth
-        let mut projected_nodes: Vec<(usize, f32, f32, f32)> = state
-            .graph_data
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, node)| {
-                let (sx, sy, depth) = node.project_3d(state.graph_rotation, state.graph_tilt);
-                (i, sx, sy, depth)
-            })
-            .collect();
-
-        // Sort by depth (far to near) for proper z-ordering
-        projected_nodes.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Draw edges first (at average depth of connected nodes)
-        for edge in &state.graph_data.edges {
-            let from_proj = state.graph_data.nodes.iter().enumerate()
-                .find(|(_, n)| n.id == edge.from_id)
-                .map(|(_, n)| n.project_3d(state.graph_rotation, state.graph_tilt));
-            let to_proj = state.graph_data.nodes.iter().enumerate()
-                .find(|(_, n)| n.id == edge.to_id)
-                .map(|(_, n)| n.project_3d(state.graph_rotation, state.graph_tilt));
-
-            if let (Some((fx, fy, fd)), Some((tx, ty, td))) = (from_proj, to_proj) {
-                let avg_depth = (fd + td) / 2.0;
-                let brightness = 0.3 + (1.0 - ((avg_depth + 1.0) / 2.0).clamp(0.0, 1.0)) * 0.4;
-
-                let x1 = ((fx * (width - 2) as f32) as i32 + 1).clamp(0, width as i32 - 1);
-                let y1 = ((fy * (height - 1) as f32) as i32).clamp(0, height as i32 - 1);
-                let x2 = ((tx * (width - 2) as f32) as i32 + 1).clamp(0, width as i32 - 1);
-                let y2 = ((ty * (height - 1) as f32) as i32).clamp(0, height as i32 - 1);
-
-                let base_color = if edge.weight >= 0.7 {
-                    Color::Green
-                } else if edge.weight >= 0.4 {
-                    Color::Yellow
-                } else {
-                    Color::DarkGray
-                };
-                let edge_color = apply_opacity(base_color, brightness);
-
-                // Bresenham's line
-                let dx = (x2 - x1).abs();
-                let dy = -(y2 - y1).abs();
-                let sx = if x1 < x2 { 1 } else { -1 };
-                let sy = if y1 < y2 { 1 } else { -1 };
-                let mut err = dx + dy;
-                let mut x = x1;
-                let mut y = y1;
-
-                loop {
-                    if x >= 0 && y >= 0 && (y as usize) < height && (x as usize) < width {
-                        let ux = x as usize;
-                        let uy = y as usize;
-                        if grid[uy][ux].0 == ' ' || grid[uy][ux].2 > avg_depth {
-                            let ch = if dx > dy.abs() * 2 {
-                                '─'
-                            } else if dy.abs() > dx * 2 {
-                                '│'
-                            } else if (sx > 0) == (sy > 0) {
-                                '╲'
-                            } else {
-                                '╱'
-                            };
-                            grid[uy][ux] = (ch, edge_color, avg_depth);
-                        }
-                    }
-                    if x == x2 && y == y2 {
-                        break;
-                    }
-                    let e2 = 2 * err;
-                    if e2 >= dy {
-                        err += dy;
-                        x += sx;
-                    }
-                    if e2 <= dx {
-                        err += dx;
-                        y += sy;
-                    }
-                }
-            }
-        }
-
-        // Draw nodes (depth-sorted, near nodes overwrite far nodes)
-        for (i, sx, sy, depth) in projected_nodes {
-            let node = &state.graph_data.nodes[i];
-            let x = ((sx * (width - 2) as f32) as usize + 1).min(width - 1);
-            let y = ((sy * (height - 1) as f32) as usize).min(height - 1);
-            let is_selected = i == state.graph_data.selected_node;
-
-            // Depth-based symbol size (closer = larger symbol)
-            let brightness = node.depth_brightness(depth);
-            let symbol = if is_selected {
-                '◉'
-            } else if depth < -0.3 {
-                '●' // Large/close
-            } else if depth > 0.3 {
-                '•' // Small/far
-            } else {
-                '○' // Medium
-            };
-
-            let base_color = match node.memory_type.to_lowercase().as_str() {
-                "learning" => Color::Green,
-                "context" => Color::Cyan,
-                "decision" => Color::Yellow,
-                "error" => Color::Red,
-                "task" => Color::Blue,
-                "discovery" => Color::Magenta,
-                "pattern" => Color::LightCyan,
-                _ => Color::White,
-            };
-
-            let color = if is_selected {
-                Color::Yellow
-            } else {
-                apply_opacity(base_color, brightness)
-            };
-
-            if y < height && x < width {
-                // Only overwrite if this node is closer (smaller depth)
-                if grid[y][x].2 > depth || is_selected {
-                    grid[y][x] = (symbol, color, depth);
-                }
-            }
-        }
-
-        // Render grid
-        let lines: Vec<Line> = grid
-            .iter()
-            .map(|row| {
-                Line::from(
-                    row.iter()
-                        .map(|(c, color, _)| Span::styled(c.to_string(), Style::default().fg(*color)))
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect();
-        f.render_widget(Paragraph::new(lines), map_inner);
+        return;
     }
 
-    // BOTTOM: Selected node info + controls
-    let info_block = Block::default()
+    // Sort nodes by connections (descending)
+    let mut sorted_indices: Vec<usize> = (0..state.graph_data.nodes.len()).collect();
+    sorted_indices.sort_by(|&a, &b| {
+        state.graph_data.nodes[b]
+            .connections
+            .cmp(&state.graph_data.nodes[a].connections)
+    });
+
+    let max_display = inner.height as usize;
+
+    // Find where selected node is in the sorted list
+    let selected_sort_position = sorted_indices
+        .iter()
+        .position(|&idx| idx == state.graph_data.selected_node)
+        .unwrap_or(0);
+
+    // Calculate scroll offset to keep selected in view
+    let scroll_offset = if selected_sort_position >= max_display {
+        selected_sort_position - max_display + 1
+    } else {
+        0
+    };
+
+    let mut lines = Vec::new();
+
+    for (visible_idx, &node_idx) in sorted_indices
+        .iter()
+        .skip(scroll_offset)
+        .take(max_display)
+        .enumerate()
+    {
+        let node = &state.graph_data.nodes[node_idx];
+        let is_selected = node_idx == state.graph_data.selected_node;
+        let rank = scroll_offset + visible_idx;
+
+        // Rank medal for top 3
+        let rank_str = match rank {
+            0 => "🥇",
+            1 => "🥈",
+            2 => "🥉",
+            _ => "  ",
+        };
+
+        let prefix = if is_selected { "▶" } else { " " };
+        let name = truncate(&node.content, 15);
+
+        let style = if is_selected {
+            Style::default()
+                .fg(state.theme.accent())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(state.theme.fg())
+        };
+
+        let conn_color = if node.connections >= 10 {
+            Color::Green
+        } else if node.connections >= 5 {
+            Color::Yellow
+        } else {
+            state.theme.fg_dim()
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(if is_selected { state.theme.accent() } else { state.theme.fg_dim() })),
+            Span::raw(rank_str),
+            Span::styled(name, style),
+            Span::styled(
+                format!(" {:>2}", node.connections),
+                Style::default().fg(conn_color).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
+
+    // Show scrollbar if there are more nodes than can display
+    if node_count > max_display {
+        let scrollbar = Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight);
+        let mut scrollbar_state =
+            ScrollbarState::new(node_count).position(selected_sort_position);
+        f.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut scrollbar_state,
+        );
+    }
+}
+
+/// Center panel: Selected entity with radial connections
+fn render_graph_focus_view(f: &mut Frame, area: Rect, state: &AppState) {
+    let selected_name = state
+        .graph_data
+        .selected()
+        .map(|n| truncate(&n.content, 20))
+        .unwrap_or_else(|| "None".to_string());
+
+    let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(Color::Cyan))
         .title(Span::styled(
-            " Selected ",
+            format!(" {} ", selected_name),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ))
         .title(
             block::Title::from(Span::styled(
-                " h/l=rotate t=auto w/s=tilt ",
+                " j/k=select Enter=expand ",
                 Style::default().fg(Color::DarkGray),
             ))
             .alignment(Alignment::Right),
         );
-    let info_inner = info_block.inner(chunks[1]);
-    f.render_widget(info_block, chunks[1]);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    if let Some(node) = state.graph_data.selected() {
-        let (_, _, depth) = node.project_3d(state.graph_rotation, state.graph_tilt);
-        let lines = vec![
-            Line::from(vec![
-                Span::styled(
-                    &node.short_id,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" | {} | {} connections", node.memory_type, node.connections),
-                    Style::default().fg(Color::Cyan),
-                ),
-            ]),
-            Line::from(Span::styled(
-                &node.content,
-                Style::default().fg(Color::White),
+    let Some(selected) = state.graph_data.selected() else {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  Select an entity from the list",
+                Style::default().fg(Color::DarkGray),
             )),
-            Line::from(vec![
-                Span::styled("3D: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("({:.2}, {:.2}, {:.2})", node.x, node.y, node.z),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::styled(" rot:", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{:.1}°", state.graph_rotation.to_degrees() % 360.0),
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::styled(" depth:", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{:.2}", depth),
-                    Style::default().fg(Color::Magenta),
-                ),
-            ]),
-        ];
-        f.render_widget(Paragraph::new(lines), info_inner);
+            inner,
+        );
+        return;
+    };
+
+    // Get connected nodes
+    let mut connected: Vec<(&str, &str, f32, bool)> = Vec::new(); // (id, name, weight, is_outgoing)
+
+    for edge in &state.graph_data.edges {
+        if edge.from_id == selected.id {
+            if let Some(target) = state.graph_data.nodes.iter().find(|n| n.id == edge.to_id) {
+                connected.push((&target.id, &target.content, edge.weight, true));
+            }
+        } else if edge.to_id == selected.id {
+            if let Some(source) = state.graph_data.nodes.iter().find(|n| n.id == edge.from_id) {
+                connected.push((&source.id, &source.content, edge.weight, false));
+            }
+        }
     }
+
+    // Sort by weight descending
+    connected.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    let width = inner.width as usize;
+    let height = inner.height as usize;
+
+    if height < 3 {
+        return;
+    }
+
+    // Render as a star/radial pattern with selected in center
+    let center_x = width / 2;
+    let center_y = height / 2;
+
+    let mut lines: Vec<Line> = vec![Line::from(""); height];
+
+    // Build the visualization as a character grid
+    let mut grid: Vec<Vec<(char, Color)>> = vec![vec![(' ', Color::DarkGray); width]; height];
+
+    // Draw center node (selected entity)
+    let center_label = truncate(&selected.content, 16);
+    let label_start = center_x.saturating_sub(center_label.len() / 2);
+    for (i, ch) in center_label.chars().enumerate() {
+        if label_start + i < width {
+            grid[center_y][label_start + i] = (ch, Color::Yellow);
+        }
+    }
+
+    // Draw box around center
+    if center_y > 0 && center_y + 1 < height {
+        let box_left = label_start.saturating_sub(1);
+        let box_right = (label_start + center_label.len()).min(width - 1);
+        // Top border
+        if center_y > 0 {
+            grid[center_y - 1][box_left] = ('╭', Color::Yellow);
+            for x in (box_left + 1)..box_right {
+                grid[center_y - 1][x] = ('─', Color::Yellow);
+            }
+            if box_right < width {
+                grid[center_y - 1][box_right] = ('╮', Color::Yellow);
+            }
+        }
+        // Bottom border
+        if center_y + 1 < height {
+            grid[center_y + 1][box_left] = ('╰', Color::Yellow);
+            for x in (box_left + 1)..box_right {
+                grid[center_y + 1][x] = ('─', Color::Yellow);
+            }
+            if box_right < width {
+                grid[center_y + 1][box_right] = ('╯', Color::Yellow);
+            }
+        }
+        // Side borders
+        grid[center_y][box_left] = ('│', Color::Yellow);
+        if box_right < width {
+            grid[center_y][box_right] = ('│', Color::Yellow);
+        }
+    }
+
+    // Position connected nodes around the center
+    let max_connections = 8.min(connected.len());
+    let radius_x = (width as f32 * 0.35) as usize;
+    let radius_y = (height as f32 * 0.35) as usize;
+
+    for (i, (_, name, weight, is_outgoing)) in connected.iter().take(max_connections).enumerate() {
+        let angle = (i as f32 / max_connections as f32) * std::f32::consts::PI * 2.0 - std::f32::consts::PI / 2.0;
+        let target_x = (center_x as f32 + angle.cos() * radius_x as f32) as usize;
+        let target_y = (center_y as f32 + angle.sin() * radius_y as f32) as usize;
+
+        // Draw connection line
+        let edge_color = if *weight >= 0.7 {
+            Color::Green
+        } else if *weight >= 0.4 {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
+
+        let arrow = if *is_outgoing { '→' } else { '←' };
+
+        // Simple line from center to target
+        let dx = target_x as i32 - center_x as i32;
+        let dy = target_y as i32 - center_y as i32;
+        let steps = dx.abs().max(dy.abs()) as usize;
+
+        if steps > 2 {
+            for step in 2..(steps - 1) {
+                let t = step as f32 / steps as f32;
+                let x = (center_x as f32 + dx as f32 * t) as usize;
+                let y = (center_y as f32 + dy as f32 * t) as usize;
+                if y < height && x < width && grid[y][x].0 == ' ' {
+                    let ch = if dx.abs() > dy.abs() * 2 {
+                        '─'
+                    } else if dy.abs() > dx.abs() * 2 {
+                        '│'
+                    } else {
+                        '·'
+                    };
+                    grid[y][x] = (ch, edge_color);
+                }
+            }
+        }
+
+        // Draw arrow near target
+        if target_y < height && target_x < width {
+            grid[target_y][target_x] = (arrow, edge_color);
+        }
+
+        // Draw target label
+        let label = truncate(name, 10);
+        let label_x = if target_x > center_x {
+            (target_x + 1).min(width.saturating_sub(label.len()))
+        } else {
+            target_x.saturating_sub(label.len() + 1)
+        };
+
+        // Use theme-aware color for connected node labels
+        let label_color = state.theme.fg();
+        for (j, ch) in label.chars().enumerate() {
+            if label_x + j < width && target_y < height {
+                grid[target_y][label_x + j] = (ch, label_color);
+            }
+        }
+    }
+
+    // Show "... and N more" if truncated
+    if connected.len() > max_connections {
+        let more_text = format!("... +{} more", connected.len() - max_connections);
+        if height > 1 {
+            for (i, ch) in more_text.chars().enumerate() {
+                if i < width {
+                    grid[height - 1][i] = (ch, Color::DarkGray);
+                }
+            }
+        }
+    }
+
+    // Convert grid to lines
+    for (y, row) in grid.iter().enumerate() {
+        lines[y] = Line::from(
+            row.iter()
+                .map(|(ch, color)| Span::styled(ch.to_string(), Style::default().fg(*color)))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Right panel: Entity type breakdown and stats
+fn render_graph_type_summary(f: &mut Frame, area: Rect, state: &AppState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(
+            " TYPES ",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title(
+            block::Title::from(Span::styled(
+                format!(" {}e ", state.graph_data.edges.len()),
+                Style::default().fg(Color::Yellow),
+            ))
+            .alignment(Alignment::Right),
+        );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Count entities by type
+    let mut type_counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    for node in &state.graph_data.nodes {
+        let type_name = if node.memory_type.is_empty() {
+            "Unknown"
+        } else {
+            &node.memory_type
+        };
+        *type_counts.entry(type_name).or_insert(0) += 1;
+    }
+
+    // Sort by count
+    let mut type_vec: Vec<_> = type_counts.into_iter().collect();
+    type_vec.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let mut lines = Vec::new();
+
+    // Type breakdown
+    lines.push(Line::from(Span::styled(
+        " By Type:",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let total = state.graph_data.nodes.len() as f32;
+    for (type_name, count) in type_vec.iter().take(6) {
+        let pct = (*count as f32 / total * 100.0) as u32;
+        let bar_width = ((pct as f32 / 100.0) * 8.0) as usize;
+        let bar = "█".repeat(bar_width) + &"░".repeat(8 - bar_width);
+
+        let type_color = match *type_name {
+            "Person" => Color::Cyan,
+            "Organization" => Color::Blue,
+            "Location" => Color::Green,
+            "Technology" => Color::Magenta,
+            "Issue" => Color::Yellow,
+            _ => state.theme.fg(),
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {:8}", truncate(type_name, 8)),
+                Style::default().fg(type_color),
+            ),
+            Span::styled(bar, Style::default().fg(type_color)),
+            Span::styled(format!(" {}", count), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+
+    // Edge stats
+    lines.push(Line::from(Span::styled(
+        " Connections:",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let strong = state.graph_stats.strong_edges;
+    let medium = state.graph_stats.medium_edges;
+    let weak = state.graph_stats.weak_edges;
+
+    lines.push(Line::from(vec![
+        Span::styled(" Strong ", Style::default().fg(Color::Green)),
+        Span::styled(format!("{}", strong), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" Medium ", Style::default().fg(Color::Yellow)),
+        Span::styled(format!("{}", medium), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(" Weak   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", weak), Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+    ]));
+
+    lines.push(Line::from(""));
+
+    // Density
+    lines.push(Line::from(vec![
+        Span::styled(" Density: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{:.1}%", state.graph_stats.density * 100.0),
+            Style::default().fg(Color::Cyan),
+        ),
+    ]));
+
+    // Avg weight
+    lines.push(Line::from(vec![
+        Span::styled(" Avg wt:  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{:.2}", state.graph_stats.avg_weight),
+            Style::default().fg(Color::Cyan),
+        ),
+    ]));
+
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
@@ -2111,8 +2419,10 @@ pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    // Normal footer
-    let keys = vec![
+    // Normal footer - context-sensitive based on view
+    let is_graph_view = matches!(state.view_mode, ViewMode::GraphList | ViewMode::GraphMap);
+
+    let mut keys = vec![
         Span::styled(
             " / ",
             Style::default()
@@ -2162,13 +2472,55 @@ pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("↑↓ ", Style::default().fg(Color::DarkGray)),
+    ];
+
+    // Add graph-specific controls
+    if is_graph_view {
+        keys.extend([
+            Span::styled(
+                "r ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("rebuild ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "R ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("refresh ", Style::default().fg(Color::DarkGray)),
+        ]);
+    } else {
+        keys.extend([
+            Span::styled(
+                "+/- ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("zoom ", Style::default().fg(Color::DarkGray)),
+        ]);
+    }
+
+    // Theme toggle
+    let theme_label = match state.theme {
+        crate::types::Theme::Dark => "◐",
+        crate::types::Theme::Light => "◑",
+    };
+    keys.extend([
         Span::styled(
-            "+/- ",
+            "t ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("zoom ", Style::default().fg(Color::DarkGray)),
+        Span::styled(theme_label, Style::default().fg(state.theme.accent())),
+        Span::raw(" "),
+    ]);
+
+    keys.extend([
         Span::raw(" "),
         Span::styled(
             format!("[{}]", view_name),
@@ -2179,11 +2531,11 @@ pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
         Span::raw(" "),
         Span::styled(
             format!("[{}]", state.zoom_label()),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(state.theme.fg_dim()),
         ),
-    ];
+    ]);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(state.theme.border()));
     f.render_widget(Paragraph::new(Line::from(keys)).block(block), area);
 }

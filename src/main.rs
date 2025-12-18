@@ -787,6 +787,13 @@ impl MultiUserMemoryManager {
     }
 
     /// Process an experience and extract entities/relationships into the graph
+    ///
+    /// SHO-102: Improved graph building with:
+    /// - Neural NER entities
+    /// - Tags as Technology/Concept entities
+    /// - All-caps terms (API, TUI, NER, etc.)
+    /// - Issue IDs (SHO-XX pattern)
+    /// - Semantic similarity edges between memories
     fn process_experience_into_graph(
         &self,
         user_id: &str,
@@ -813,7 +820,7 @@ impl MultiUserMemoryManager {
             "the", "and", "for", "that", "this", "with", "from", "have", "been",
             "are", "was", "were", "will", "would", "could", "should", "may", "might",
         ].iter().cloned().collect();
-        
+
         let filtered_entities: Vec<_> = extracted_entities
             .into_iter()
             .filter(|e| {
@@ -866,6 +873,92 @@ impl MultiUserMemoryManager {
             match graph_guard.add_entity(entity) {
                 Ok(uuid) => entity_uuids.push((ner_entity.text, uuid)),
                 Err(e) => tracing::debug!("Failed to add entity {}: {}", ner_entity.text, e),
+            }
+        }
+
+        // SHO-102: Add tags as entities (Technology/Concept type)
+        for tag in &experience.tags {
+            let tag_name = tag.trim();
+            if tag_name.len() >= 2 && !stop_words.contains(tag_name.to_lowercase().as_str()) {
+                let entity = EntityNode {
+                    uuid: uuid::Uuid::new_v4(),
+                    name: tag_name.to_string(),
+                    labels: vec![EntityLabel::Technology],
+                    created_at: chrono::Utc::now(),
+                    last_seen_at: chrono::Utc::now(),
+                    mention_count: 1,
+                    summary: String::new(),
+                    attributes: HashMap::new(),
+                    name_embedding: None,
+                    salience: 0.6, // Tags are user-provided, so medium-high salience
+                    is_proper_noun: false,
+                };
+
+                match graph_guard.add_entity(entity) {
+                    Ok(uuid) => entity_uuids.push((tag_name.to_string(), uuid)),
+                    Err(e) => tracing::debug!("Failed to add tag entity {}: {}", tag_name, e),
+                }
+            }
+        }
+
+        // SHO-102: Extract all-caps terms (API, TUI, NER, REST, etc.) - min 2 chars
+        let allcaps_regex = regex::Regex::new(r"\b[A-Z]{2,}[A-Z0-9]*\b").unwrap();
+        for cap in allcaps_regex.find_iter(&experience.content) {
+            let term = cap.as_str();
+            // Skip if already extracted or is a stop word
+            if entity_uuids.iter().any(|(name, _)| name.eq_ignore_ascii_case(term)) {
+                continue;
+            }
+            if stop_words.contains(term.to_lowercase().as_str()) {
+                continue;
+            }
+
+            let entity = EntityNode {
+                uuid: uuid::Uuid::new_v4(),
+                name: term.to_string(),
+                labels: vec![EntityLabel::Technology],
+                created_at: chrono::Utc::now(),
+                last_seen_at: chrono::Utc::now(),
+                mention_count: 1,
+                summary: String::new(),
+                attributes: HashMap::new(),
+                name_embedding: None,
+                salience: 0.5, // All-caps terms are likely technical terms
+                is_proper_noun: true,
+            };
+
+            match graph_guard.add_entity(entity) {
+                Ok(uuid) => entity_uuids.push((term.to_string(), uuid)),
+                Err(e) => tracing::debug!("Failed to add allcaps entity {}: {}", term, e),
+            }
+        }
+
+        // SHO-102: Extract issue IDs (SHO-XX, JIRA-123, etc.)
+        let issue_regex = regex::Regex::new(r"\b([A-Z]{2,10}-\d+)\b").unwrap();
+        for issue in issue_regex.find_iter(&experience.content) {
+            let issue_id = issue.as_str();
+            // Skip if already extracted
+            if entity_uuids.iter().any(|(name, _)| name == issue_id) {
+                continue;
+            }
+
+            let entity = EntityNode {
+                uuid: uuid::Uuid::new_v4(),
+                name: issue_id.to_string(),
+                labels: vec![EntityLabel::Other("Issue".to_string())],
+                created_at: chrono::Utc::now(),
+                last_seen_at: chrono::Utc::now(),
+                mention_count: 1,
+                summary: String::new(),
+                attributes: HashMap::new(),
+                name_embedding: None,
+                salience: 0.7, // Issue IDs are specific references
+                is_proper_noun: true,
+            };
+
+            match graph_guard.add_entity(entity) {
+                Ok(uuid) => entity_uuids.push((issue_id.to_string(), uuid)),
+                Err(e) => tracing::debug!("Failed to add issue entity {}: {}", issue_id, e),
             }
         }
 
@@ -3085,14 +3178,24 @@ async fn recall(
     }
 
     // Add/boost graph-activated results
+    // Find max activation for normalization (activation can be unbounded due to accumulation)
+    let max_activation = graph_activated
+        .iter()
+        .map(|a| a.activation_score)
+        .fold(1.0_f32, |max, score| max.max(score)); // Min 1.0 to avoid division issues
+
     for activated in graph_activated {
         let entry = scored_memories
             .entry(activated.memory.id.0)
             .or_insert((0.0, activated.memory.clone()));
 
+        // Normalize activation score to 0-1 range, then apply weights
+        let normalized_activation = (activated.activation_score / max_activation).min(1.0);
+        let normalized_linguistic = activated.linguistic_score.min(1.0);
+
         // Add graph activation score + linguistic score with density-dependent weights
-        entry.0 += graph_weight * activated.activation_score
-            + linguistic_weight * activated.linguistic_score;
+        entry.0 += graph_weight * normalized_activation
+            + linguistic_weight * normalized_linguistic;
     }
 
     // Sort by final hybrid score and take top N

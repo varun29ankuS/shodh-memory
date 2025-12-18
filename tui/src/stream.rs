@@ -141,9 +141,9 @@ impl MemoryStream {
         }
         if let Ok(list) = self.fetch_memory_list(user_id).await {
             let mut state = self.state.lock().await;
-            // Reverse so newest ends up at front (position 0) after push_front
+            // Sort by created_at ascending (oldest first), so newest ends up at front after push_front
             let mut memories = list.memories;
-            memories.reverse();
+            memories.sort_by(|a, b| a.created_at.cmp(&b.created_at));
             for mem in memories {
                 state.type_stats.increment(&mem.memory_type);
                 for tag in &mem.tags {
