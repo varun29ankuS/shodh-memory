@@ -121,15 +121,32 @@ pub fn render_header(f: &mut Frame, area: Rect, state: &AppState) {
         ])
         .split(inner);
 
-    // Elephant logo with gradient
+    // Elephant logo with breathing animation when connected
     let logo_lines: Vec<Line> = ELEPHANT
         .iter()
         .enumerate()
         .map(|(i, l)| {
             let (r, g, b) = if state.connected {
-                ELEPHANT_GRADIENT[i % ELEPHANT_GRADIENT.len()]
+                let (base_r, base_g, base_b) = ELEPHANT_GRADIENT[i % ELEPHANT_GRADIENT.len()];
+
+                // Breathing effect: subtle brightness oscillation
+                let breath_phase = (state.animation_tick as f32 * 0.05 + i as f32 * 0.1).sin();
+                let breath_intensity = 0.85 + breath_phase * 0.15; // 0.7 to 1.0
+
+                // Activity boost: brighter when events are happening
+                let activity_boost = state.heartbeat_intensity() * 0.2;
+                let intensity = (breath_intensity + activity_boost).min(1.2);
+
+                (
+                    (base_r as f32 * intensity).min(255.0) as u8,
+                    (base_g as f32 * intensity).min(255.0) as u8,
+                    (base_b as f32 * intensity).min(255.0) as u8,
+                )
             } else {
-                (80, 80, 80)
+                // Disconnected: dim gray with slow pulse
+                let pulse = (state.animation_tick as f32 * 0.03).sin() * 0.2 + 0.5;
+                let gray = (60.0 + pulse * 40.0) as u8;
+                (gray, gray, gray)
             };
             Line::from(Span::styled(*l, Style::default().fg(Color::Rgb(r, g, b))))
         })
@@ -189,13 +206,14 @@ pub fn render_header(f: &mut Frame, area: Rect, state: &AppState) {
     ]);
     f.render_widget(Paragraph::new(stats_line), title_chunks[1]);
 
-    // Right side: version, status, session
+    // Right side: version, status with heartbeat, sparkline, session
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
-            Constraint::Length(2),
-            Constraint::Min(0),
+            Constraint::Length(1), // Version
+            Constraint::Length(2), // Status with heartbeat
+            Constraint::Length(2), // Sparkline
+            Constraint::Min(0),    // Session
         ])
         .split(chunks[2]);
 
@@ -208,19 +226,47 @@ pub fn render_header(f: &mut Frame, area: Rect, state: &AppState) {
         right_chunks[0],
     );
 
+    // Pulsing LIVE indicator with heartbeat effect
     let status = if state.connected {
-        Line::from(Span::styled(
-            "● LIVE",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ))
+        let heartbeat = state.heartbeat_intensity();
+        let pulse_phase = (state.animation_tick as f32 * 0.15).sin() * 0.5 + 0.5;
+
+        // Combine heartbeat (event-triggered) with ambient pulse
+        let intensity = if heartbeat > 0.1 {
+            heartbeat // Use heartbeat when events are happening
+        } else {
+            pulse_phase * 0.3 + 0.7 // Subtle ambient pulse when idle
+        };
+
+        // Color intensity based on activity
+        let green_val = (100.0 + intensity * 155.0) as u8;
+        let dot_color = Color::Rgb(0, green_val, 0);
+
+        // Choose dot character based on heartbeat
+        let dot = if heartbeat > 0.5 { "◉" } else if heartbeat > 0.1 { "●" } else { "○" };
+
+        Line::from(vec![
+            Span::styled(
+                format!("{} ", dot),
+                Style::default()
+                    .fg(dot_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "LIVE",
+                Style::default()
+                    .fg(Color::Rgb(0, green_val, 0))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
     } else {
+        // Pulsing reconnect indicator
+        let pulse = (state.animation_tick as f32 * 0.1).sin() * 0.5 + 0.5;
+        let yellow_val = (150.0 + pulse * 105.0) as u8;
         Line::from(Span::styled(
             "○ ...",
             Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::SLOW_BLINK),
+                .fg(Color::Rgb(yellow_val, yellow_val, 0)),
         ))
     };
     f.render_widget(
@@ -228,14 +274,48 @@ pub fn render_header(f: &mut Frame, area: Rect, state: &AppState) {
         right_chunks[1],
     );
 
+    // Activity sparkline - visual heartbeat of the system
+    let sparkline_data = state.get_sparkline_data();
+    if !sparkline_data.is_empty() {
+        let sparkline_str = render_sparkline(&sparkline_data);
+        let sparkline_line = Line::from(vec![
+            Span::styled(sparkline_str, Style::default().fg(Color::Rgb(100, 140, 180))),
+        ]);
+        f.render_widget(
+            Paragraph::new(sparkline_line).alignment(Alignment::Right),
+            right_chunks[2],
+        );
+    }
+
     let session = Line::from(Span::styled(
         state.session_duration(),
         Style::default().fg(Color::White),
     ));
     f.render_widget(
         Paragraph::new(session).alignment(Alignment::Right),
-        right_chunks[2],
+        right_chunks[3],
     );
+}
+
+/// Render a mini sparkline using Unicode block characters
+fn render_sparkline(data: &[u8]) -> String {
+    if data.is_empty() {
+        return String::new();
+    }
+
+    // Find max for scaling
+    let max_val = *data.iter().max().unwrap_or(&1) as f32;
+    let max_val = max_val.max(1.0); // Avoid division by zero
+
+    // Unicode bar characters for 8 levels
+    const BARS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+    data.iter()
+        .map(|&v| {
+            let normalized = (v as f32 / max_val * 8.0) as usize;
+            BARS[normalized.min(8)]
+        })
+        .collect()
 }
 
 pub fn render_main(f: &mut Frame, area: Rect, state: &AppState) {
@@ -1101,35 +1181,71 @@ fn render_event_card(f: &mut Frame, area: Rect, event: &DisplayEvent, _index: us
     let color = event.event.event_color();
     let icon = event.event.event_icon();
     let label = &event.event.event_type;
-    let is_new = event.received_at.elapsed().as_secs() < 3;
-    let border_color = if is_new { color } else { Color::DarkGray };
-    let title_style = if is_new && tick % 10 < 5 {
+
+    // Calculate glow intensity for smooth fade effect
+    let glow = event.glow(); // 0.0 to 1.0, fades over 2 seconds
+    let is_new = glow > 0.0;
+
+    // Dynamic border color with glow effect
+    let border_color = if is_new {
+        // Glow from bright event color to dim
+        let (r, g, b) = color_to_rgb(color);
+        let intensity = 0.4 + glow * 0.6; // 0.4 to 1.0
+        Color::Rgb(
+            (r as f32 * intensity) as u8,
+            (g as f32 * intensity) as u8,
+            (b as f32 * intensity) as u8,
+        )
+    } else {
+        Color::Rgb(60, 60, 70)
+    };
+
+    // Title style with subtle pulse for very new events
+    let title_style = if glow > 0.5 {
+        // Very new: pulsing brightness
+        let pulse = (tick as f32 * 0.3).sin() * 0.2 + 0.8;
+        let (r, g, b) = color_to_rgb(color);
         Style::default()
-            .fg(color)
-            .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK)
+            .fg(Color::Rgb(
+                (r as f32 * pulse).min(255.0) as u8,
+                (g as f32 * pulse).min(255.0) as u8,
+                (b as f32 * pulse).min(255.0) as u8,
+            ))
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(color).add_modifier(Modifier::BOLD)
     };
 
+    // New event indicator - brief flash marker
+    let new_indicator = if glow > 0.7 { "★ " } else if glow > 0.3 { "● " } else { "" };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .title(Span::styled(format!(" {} {} ", icon, label), title_style))
+        .title(Span::styled(format!(" {}{} {} ", new_indicator, icon, label), title_style))
         .title(
             block::Title::from(Span::styled(
                 format!(" {} ", event.time_ago()),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(if is_new { Color::White } else { Color::DarkGray }),
             ))
             .alignment(Alignment::Right),
         );
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // Content with glow effect on text
+    let content_color = if is_new {
+        let base = 180.0 + glow * 75.0; // 180 to 255
+        Color::Rgb(base as u8, base as u8, base as u8)
+    } else {
+        Color::Rgb(180, 180, 180)
+    };
+
     let mut lines: Vec<Line> = Vec::new();
     if let Some(preview) = &event.event.content_preview {
         lines.push(Line::from(Span::styled(
             truncate(preview, inner.width as usize - 2),
-            Style::default().fg(Color::Rgb(220, 220, 220)), // Light gray readable on both dark/light
+            Style::default().fg(content_color),
         )));
     }
     let mut info_spans = Vec::new();

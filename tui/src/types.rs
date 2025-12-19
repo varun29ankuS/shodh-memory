@@ -1029,6 +1029,14 @@ pub struct AppState {
     pub graph_hide_isolated: bool,
     /// Graph display: focus mode (show only selected + neighbors)
     pub graph_focus_mode: bool,
+    /// Activity sparkline - event counts per second for last 20 seconds
+    pub activity_sparkline: VecDeque<u8>,
+    /// Last second for activity tracking
+    pub activity_last_second: u64,
+    /// Events in current second
+    pub activity_current_count: u8,
+    /// Last event timestamp for "last activity" display
+    pub last_event_time: Option<Instant>,
 }
 
 impl AppState {
@@ -1079,6 +1087,10 @@ impl AppState {
             graph_min_edge_weight: 0.3,
             graph_hide_isolated: true,
             graph_focus_mode: false,
+            activity_sparkline: VecDeque::with_capacity(20),
+            activity_last_second: 0,
+            activity_current_count: 0,
+            last_event_time: None,
         }
     }
 
@@ -1374,6 +1386,44 @@ impl AppState {
         while self.events.len() > self.max_events {
             self.events.pop_back();
         }
+
+        // Track activity for sparkline
+        self.last_event_time = Some(Instant::now());
+        self.activity_current_count = self.activity_current_count.saturating_add(1);
+    }
+
+    /// Update activity sparkline - call this every tick
+    pub fn update_activity_sparkline(&mut self) {
+        let current_second = self.session_start.elapsed().as_secs();
+        if current_second > self.activity_last_second {
+            // New second - push the count and reset
+            self.activity_sparkline.push_back(self.activity_current_count);
+            while self.activity_sparkline.len() > 20 {
+                self.activity_sparkline.pop_front();
+            }
+            self.activity_current_count = 0;
+            self.activity_last_second = current_second;
+        }
+    }
+
+    /// Get sparkline data for rendering
+    pub fn get_sparkline_data(&self) -> Vec<u8> {
+        let mut data: Vec<u8> = self.activity_sparkline.iter().copied().collect();
+        // Add current partial second
+        data.push(self.activity_current_count);
+        data
+    }
+
+    /// Get time since last event for "heartbeat" display
+    pub fn heartbeat_intensity(&self) -> f32 {
+        match self.last_event_time {
+            Some(t) => {
+                let elapsed = t.elapsed().as_secs_f32();
+                // Decays from 1.0 to 0.0 over 3 seconds
+                (1.0 - elapsed / 3.0).max(0.0)
+            }
+            None => 0.0,
+        }
     }
 
     fn add_entity(&mut self, entity: String) {
@@ -1542,6 +1592,9 @@ impl AppState {
                 self.graph_rotation -= std::f32::consts::PI * 2.0;
             }
         }
+
+        // Update activity sparkline
+        self.update_activity_sparkline();
     }
 
     /// Get effective scroll offset (from smooth scroll)
