@@ -70,3 +70,4 @@ python/shodh_memory/models/minilm-l6/*.onnx
 python/shodh_memory/models/minilm-l6/*.json
 python/shodh_memory/models/bert-tiny-ner/*.onnx
 python/shodh_memory/models/bert-tiny-ner/*.json
+experiments/
