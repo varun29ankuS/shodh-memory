@@ -115,7 +115,6 @@ pub enum ConsolidationEvent {
 
     // SHO-105: Memory Replay Events
     // Based on Rasch & Born (2013) - sleep consolidation through replay
-
     /// Memory was replayed during consolidation cycle
     MemoryReplayed {
         memory_id: String,
@@ -138,7 +137,6 @@ pub enum ConsolidationEvent {
 
     // SHO-106: Memory Interference Events
     // Based on Anderson & Neely (1996) - retrieval competition
-
     /// Interference detected between memories
     InterferenceDetected {
         new_memory_id: String,

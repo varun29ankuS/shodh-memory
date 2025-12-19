@@ -1130,7 +1130,6 @@ struct RememberRequest {
     // =========================================================================
     // SHO-104: RICHER CONTEXT ENCODING - Optional context fields
     // =========================================================================
-
     /// Emotional valence: -1.0 (negative) to 1.0 (positive), 0.0 = neutral
     /// E.g., bug found: -0.3, feature shipped: 0.7
     #[serde(default)]

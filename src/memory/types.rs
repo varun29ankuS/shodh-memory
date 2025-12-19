@@ -85,7 +85,6 @@ pub struct RichContext {
     // =========================================================================
     // SHO-104: RICHER CONTEXT ENCODING
     // =========================================================================
-
     /// Emotional context - affective state during memory formation (SHO-104)
     /// Captures valence, arousal, and dominant emotion for emotional memory enhancement
     #[serde(default)]

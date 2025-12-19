@@ -326,18 +326,21 @@ impl MemorySystem {
                         .collect();
 
                     if !similar_memories.is_empty() {
-                        let interference_result = self.interference_detector.write().check_interference(
-                            &memory.id.0.to_string(),
-                            importance,
-                            memory.created_at,
-                            &similar_memories,
-                        );
+                        let interference_result =
+                            self.interference_detector.write().check_interference(
+                                &memory.id.0.to_string(),
+                                importance,
+                                memory.created_at,
+                                &similar_memories,
+                            );
 
                         // Apply retroactive interference (weaken old memories)
-                        for (old_id, _similarity, decay_amount) in &interference_result.retroactive_targets
+                        for (old_id, _similarity, decay_amount) in
+                            &interference_result.retroactive_targets
                         {
-                            if let Ok(old_memory) =
-                                self.long_term_memory.get(&MemoryId(uuid::Uuid::parse_str(old_id).unwrap_or_default()))
+                            if let Ok(old_memory) = self
+                                .long_term_memory
+                                .get(&MemoryId(uuid::Uuid::parse_str(old_id).unwrap_or_default()))
                             {
                                 old_memory.decay_importance(*decay_amount);
                                 let _ = self.long_term_memory.update(&old_memory);
@@ -2570,9 +2573,11 @@ impl MemorySystem {
                             uuid::Uuid::parse_str(from_str),
                             uuid::Uuid::parse_str(to_str),
                         ) {
-                            self.retriever
-                                .graph_write()
-                                .strengthen_edge(&MemoryId(from_id), &MemoryId(to_id), *boost);
+                            self.retriever.graph_write().strengthen_edge(
+                                &MemoryId(from_id),
+                                &MemoryId(to_id),
+                                *boost,
+                            );
                         }
                     }
 

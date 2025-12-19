@@ -5,7 +5,9 @@ use crossterm::{
         MouseEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+    },
 };
 use ratatui::prelude::*;
 use ratatui::widgets::*;
@@ -82,7 +84,11 @@ async fn fetch_users(base_url: &str, api_key: &str) -> Result<Vec<String>, Strin
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
-                return Err(format!("Server error {}: {}", status.as_u16(), body.chars().take(100).collect::<String>()));
+                return Err(format!(
+                    "Server error {}: {}",
+                    status.as_u16(),
+                    body.chars().take(100).collect::<String>()
+                ));
             }
             resp.json::<Vec<String>>()
                 .await
@@ -116,18 +122,18 @@ fn render_user_selector(f: &mut Frame, selector: &UserSelector) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),  // Top padding
-            Constraint::Length(6),  // SHODH text logo
-            Constraint::Length(1),  // Spacing
-            Constraint::Length(6),  // Elephant logo
-            Constraint::Length(1),  // Spacing
-            Constraint::Length(2),  // Tagline
-            Constraint::Length(2),  // Spacing
-            Constraint::Length(1),  // "Select Profile" header
-            Constraint::Length(1),  // Spacing
-            Constraint::Min(6),     // User list
-            Constraint::Length(1),  // Spacing
-            Constraint::Length(3),  // Footer
+            Constraint::Length(2), // Top padding
+            Constraint::Length(6), // SHODH text logo
+            Constraint::Length(1), // Spacing
+            Constraint::Length(6), // Elephant logo
+            Constraint::Length(1), // Spacing
+            Constraint::Length(2), // Tagline
+            Constraint::Length(2), // Spacing
+            Constraint::Length(1), // "Select Profile" header
+            Constraint::Length(1), // Spacing
+            Constraint::Min(6),    // User list
+            Constraint::Length(1), // Spacing
+            Constraint::Length(3), // Footer
         ])
         .split(center);
 
@@ -137,10 +143,7 @@ fn render_user_selector(f: &mut Frame, selector: &UserSelector) {
         .enumerate()
         .map(|(i, l)| {
             let (r, g, b) = SHODH_GRADIENT[i % SHODH_GRADIENT.len()];
-            Line::from(Span::styled(
-                *l,
-                Style::default().fg(Color::Rgb(r, g, b)),
-            ))
+            Line::from(Span::styled(*l, Style::default().fg(Color::Rgb(r, g, b))))
         })
         .collect();
     f.render_widget(
@@ -175,8 +178,16 @@ fn render_user_selector(f: &mut Frame, selector: &UserSelector) {
     // Tagline
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("Cognitive Memory for ", Style::default().fg(Color::DarkGray)),
-            Span::styled("AI Agents", Style::default().fg(Color::Rgb(255, 140, 50)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Cognitive Memory for ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "AI Agents",
+                Style::default()
+                    .fg(Color::Rgb(255, 140, 50))
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]))
         .alignment(Alignment::Center),
         chunks[5],
@@ -268,11 +279,26 @@ fn render_user_selector(f: &mut Frame, selector: &UserSelector) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" ↑↓ ", Style::default().fg(Color::Rgb(255, 140, 50)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ↑↓ ",
+                Style::default()
+                    .fg(Color::Rgb(255, 140, 50))
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("navigate  ", Style::default().fg(Color::Rgb(80, 80, 100))),
-            Span::styled(" Enter ", Style::default().fg(Color::Rgb(255, 140, 50)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Enter ",
+                Style::default()
+                    .fg(Color::Rgb(255, 140, 50))
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("select  ", Style::default().fg(Color::Rgb(80, 80, 100))),
-            Span::styled(" q ", Style::default().fg(Color::Rgb(255, 140, 50)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " q ",
+                Style::default()
+                    .fg(Color::Rgb(255, 140, 50))
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("quit", Style::default().fg(Color::Rgb(80, 80, 100))),
         ]))
         .alignment(Alignment::Center),
@@ -305,15 +331,15 @@ fn render_splash(f: &mut Frame, progress: f32, tick: u64) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(20),
-            Constraint::Length(6),  // SHODH text
+            Constraint::Length(6), // SHODH text
             Constraint::Length(1),
-            Constraint::Length(6),  // Elephant
+            Constraint::Length(6), // Elephant
             Constraint::Length(2),
-            Constraint::Length(1),  // Tagline
+            Constraint::Length(1), // Tagline
             Constraint::Length(3),
-            Constraint::Length(1),  // Loading bar
+            Constraint::Length(1), // Loading bar
             Constraint::Length(3),
-            Constraint::Length(1),  // Made in India
+            Constraint::Length(1), // Made in India
             Constraint::Percentage(15),
         ])
         .split(center);
@@ -369,8 +395,16 @@ fn render_splash(f: &mut Frame, progress: f32, tick: u64) {
     // Tagline
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("Cognitive Memory for ", Style::default().fg(Color::Rgb(100, 100, 110))),
-            Span::styled("AI Agents", Style::default().fg(Color::Rgb(255, 140, 50)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Cognitive Memory for ",
+                Style::default().fg(Color::Rgb(100, 100, 110)),
+            ),
+            Span::styled(
+                "AI Agents",
+                Style::default()
+                    .fg(Color::Rgb(255, 140, 50))
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]))
         .alignment(Alignment::Center),
         chunks[5],
@@ -384,13 +418,20 @@ fn render_splash(f: &mut Frame, progress: f32, tick: u64) {
     let pct = (progress * 100.0) as u32;
 
     // Build progress bar with gradient (dark red -> orange -> yellow)
-    let mut progress_spans = vec![
-        Span::styled(format!(" {:>3}% ", pct), Style::default().fg(Color::Rgb(255, 200, 100)).add_modifier(Modifier::BOLD)),
-    ];
+    let mut progress_spans = vec![Span::styled(
+        format!(" {:>3}% ", pct),
+        Style::default()
+            .fg(Color::Rgb(255, 200, 100))
+            .add_modifier(Modifier::BOLD),
+    )];
 
     // Gradient colors for filled portion
     for i in 0..filled {
-        let t = if bar_width > 0 { i as f32 / bar_width as f32 } else { 0.0 };
+        let t = if bar_width > 0 {
+            i as f32 / bar_width as f32
+        } else {
+            0.0
+        };
         // Gradient: dark red (180,50,20) -> orange (255,140,50) -> yellow (255,220,100)
         let (r, g, b) = if t < 0.5 {
             let t2 = t * 2.0;
@@ -401,18 +442,20 @@ fn render_splash(f: &mut Frame, progress: f32, tick: u64) {
             )
         } else {
             let t2 = (t - 0.5) * 2.0;
-            (
-                255,
-                (140.0 + 80.0 * t2) as u8,
-                (50.0 + 50.0 * t2) as u8,
-            )
+            (255, (140.0 + 80.0 * t2) as u8, (50.0 + 50.0 * t2) as u8)
         };
         progress_spans.push(Span::styled("█", Style::default().fg(Color::Rgb(r, g, b))));
     }
 
     if filled < bar_width {
-        progress_spans.push(Span::styled("▓", Style::default().fg(Color::Rgb(120, 60, 20))));
-        progress_spans.push(Span::styled("░".repeat(empty.saturating_sub(1)), Style::default().fg(Color::Rgb(40, 40, 50))));
+        progress_spans.push(Span::styled(
+            "▓",
+            Style::default().fg(Color::Rgb(120, 60, 20)),
+        ));
+        progress_spans.push(Span::styled(
+            "░".repeat(empty.saturating_sub(1)),
+            Style::default().fg(Color::Rgb(40, 40, 50)),
+        ));
     }
 
     f.render_widget(
@@ -424,11 +467,36 @@ fn render_splash(f: &mut Frame, progress: f32, tick: u64) {
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Made in ", Style::default().fg(Color::Rgb(80, 80, 90))),
-            Span::styled("I", Style::default().fg(Color::Rgb(255, 153, 51)).add_modifier(Modifier::BOLD)), // Saffron
-            Span::styled("n", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),             // White
-            Span::styled("d", Style::default().fg(Color::Rgb(19, 136, 8)).add_modifier(Modifier::BOLD)),  // Green
-            Span::styled("i", Style::default().fg(Color::Rgb(255, 153, 51)).add_modifier(Modifier::BOLD)), // Saffron
-            Span::styled("a", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),             // White
+            Span::styled(
+                "I",
+                Style::default()
+                    .fg(Color::Rgb(255, 153, 51))
+                    .add_modifier(Modifier::BOLD),
+            ), // Saffron
+            Span::styled(
+                "n",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ), // White
+            Span::styled(
+                "d",
+                Style::default()
+                    .fg(Color::Rgb(19, 136, 8))
+                    .add_modifier(Modifier::BOLD),
+            ), // Green
+            Span::styled(
+                "i",
+                Style::default()
+                    .fg(Color::Rgb(255, 153, 51))
+                    .add_modifier(Modifier::BOLD),
+            ), // Saffron
+            Span::styled(
+                "a",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ), // White
         ]))
         .alignment(Alignment::Center),
         chunks[9],
@@ -538,7 +606,11 @@ async fn main() -> Result<()> {
         None => {
             // Clean up terminal before exit
             disable_raw_mode()?;
-            execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+            execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture
+            )?;
             terminal.show_cursor()?;
             return Ok(());
         }
@@ -546,7 +618,11 @@ async fn main() -> Result<()> {
 
     // Clean up terminal - run_tui will create its own session
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     drop(terminal);
 
@@ -1046,10 +1122,7 @@ fn parse_date_query(
 
     // Try YYYY-MM-DD format
     if let Ok(date) = chrono::NaiveDate::parse_from_str(&query, "%Y-%m-%d") {
-        let start = date
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc();
+        let start = date.and_hms_opt(0, 0, 0).unwrap().and_utc();
         return Ok((start, now));
     }
 
@@ -1153,7 +1226,14 @@ async fn fetch_graph_data(
     base_url: &str,
     api_key: &str,
     user_id: &str,
-) -> Result<(Vec<types::GraphNode>, Vec<types::GraphEdge>, types::GraphStats), String> {
+) -> Result<
+    (
+        Vec<types::GraphNode>,
+        Vec<types::GraphEdge>,
+        types::GraphStats,
+    ),
+    String,
+> {
     let client = reqwest::Client::new();
 
     // Fetch universe data (entities + connections)
@@ -1258,10 +1338,7 @@ async fn fetch_graph_data(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let strength = conn
-                .get("strength")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.5) as f32;
+            let strength = conn.get("strength").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
 
             // Only add edge if both nodes exist
             if nodes.iter().any(|n| n.id == from_id) && nodes.iter().any(|n| n.id == to_id) {

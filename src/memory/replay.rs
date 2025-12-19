@@ -19,8 +19,8 @@ use crate::constants::{
     INTERFERENCE_PROACTIVE_THRESHOLD, INTERFERENCE_RETROACTIVE_DECAY,
     INTERFERENCE_SEVERE_THRESHOLD, INTERFERENCE_SIMILARITY_THRESHOLD,
     INTERFERENCE_VULNERABILITY_HOURS, REPLAY_AROUSAL_THRESHOLD, REPLAY_BATCH_SIZE,
-    REPLAY_EDGE_BOOST, REPLAY_IMPORTANCE_THRESHOLD, REPLAY_MAX_AGE_DAYS,
-    REPLAY_MIN_CONNECTIONS, REPLAY_STRENGTH_BOOST,
+    REPLAY_EDGE_BOOST, REPLAY_IMPORTANCE_THRESHOLD, REPLAY_MAX_AGE_DAYS, REPLAY_MIN_CONNECTIONS,
+    REPLAY_STRENGTH_BOOST,
 };
 use crate::memory::introspection::{ConsolidationEvent, InterferenceType};
 use chrono::{DateTime, Duration, Utc};
@@ -74,7 +74,7 @@ impl ReplayManager {
     pub fn new() -> Self {
         Self {
             last_replay: Utc::now() - Duration::hours(24), // Allow immediate first replay
-            replay_interval_hours: 1, // Replay every hour during active use
+            replay_interval_hours: 1,                      // Replay every hour during active use
             total_replays: 0,
         }
     }
@@ -99,45 +99,47 @@ impl ReplayManager {
         let now = Utc::now();
         let mut candidates: Vec<ReplayCandidate> = memories
             .iter()
-            .filter_map(|(id, importance, arousal, created_at, connections, preview)| {
-                let age = now - *created_at;
-                let age_days = age.num_hours() as f64 / 24.0;
+            .filter_map(
+                |(id, importance, arousal, created_at, connections, preview)| {
+                    let age = now - *created_at;
+                    let age_days = age.num_hours() as f64 / 24.0;
 
-                // Check eligibility
-                if age_days > REPLAY_MAX_AGE_DAYS as f64 {
-                    return None;
-                }
-                if *importance < REPLAY_IMPORTANCE_THRESHOLD {
-                    return None;
-                }
-                if connections.len() < REPLAY_MIN_CONNECTIONS {
-                    return None;
-                }
+                    // Check eligibility
+                    if age_days > REPLAY_MAX_AGE_DAYS as f64 {
+                        return None;
+                    }
+                    if *importance < REPLAY_IMPORTANCE_THRESHOLD {
+                        return None;
+                    }
+                    if connections.len() < REPLAY_MIN_CONNECTIONS {
+                        return None;
+                    }
 
-                // Calculate priority score
-                // Priority = importance × recency_factor × (1 + arousal_boost) × connectivity_factor
-                let recency_factor = 1.0 - (age_days / REPLAY_MAX_AGE_DAYS as f64) as f32;
-                let arousal_boost = if *arousal > REPLAY_AROUSAL_THRESHOLD {
-                    (*arousal - REPLAY_AROUSAL_THRESHOLD) * 0.5
-                } else {
-                    0.0
-                };
-                let connectivity_factor =
-                    1.0 + (connections.len() as f32 / 10.0).min(0.5); // Max 50% boost
+                    // Calculate priority score
+                    // Priority = importance × recency_factor × (1 + arousal_boost) × connectivity_factor
+                    let recency_factor = 1.0 - (age_days / REPLAY_MAX_AGE_DAYS as f64) as f32;
+                    let arousal_boost = if *arousal > REPLAY_AROUSAL_THRESHOLD {
+                        (*arousal - REPLAY_AROUSAL_THRESHOLD) * 0.5
+                    } else {
+                        0.0
+                    };
+                    let connectivity_factor = 1.0 + (connections.len() as f32 / 10.0).min(0.5); // Max 50% boost
 
-                let priority = importance * recency_factor * (1.0 + arousal_boost) * connectivity_factor;
+                    let priority =
+                        importance * recency_factor * (1.0 + arousal_boost) * connectivity_factor;
 
-                Some(ReplayCandidate {
-                    memory_id: id.clone(),
-                    content_preview: preview.clone(),
-                    importance: *importance,
-                    arousal: *arousal,
-                    age_days,
-                    connection_count: connections.len(),
-                    priority_score: priority,
-                    connected_memory_ids: connections.clone(),
-                })
-            })
+                    Some(ReplayCandidate {
+                        memory_id: id.clone(),
+                        content_preview: preview.clone(),
+                        importance: *importance,
+                        arousal: *arousal,
+                        age_days,
+                        connection_count: connections.len(),
+                        priority_score: priority,
+                        connected_memory_ids: connections.clone(),
+                    })
+                },
+            )
             .collect();
 
         // Sort by priority (highest first)
@@ -158,7 +160,11 @@ impl ReplayManager {
     pub fn execute_replay(
         &mut self,
         candidates: &[ReplayCandidate],
-    ) -> (Vec<(String, f32)>, Vec<(String, String, f32)>, Vec<ConsolidationEvent>) {
+    ) -> (
+        Vec<(String, f32)>,
+        Vec<(String, String, f32)>,
+        Vec<ConsolidationEvent>,
+    ) {
         // (memory_id, boost), (from_id, to_id, boost), events
         let mut memory_boosts: Vec<(String, f32)> = Vec::new();
         let mut edge_boosts: Vec<(String, String, f32)> = Vec::new();
@@ -320,21 +326,24 @@ impl InterferenceDetector {
             // Retroactive interference: new memory weakens old
             if is_vulnerable || *old_importance < new_memory_importance {
                 // Stronger interference for more similar memories
-                let interference_strength =
-                    (*similarity - INTERFERENCE_SIMILARITY_THRESHOLD)
-                        / (1.0 - INTERFERENCE_SIMILARITY_THRESHOLD);
+                let interference_strength = (*similarity - INTERFERENCE_SIMILARITY_THRESHOLD)
+                    / (1.0 - INTERFERENCE_SIMILARITY_THRESHOLD);
 
                 let decay = INTERFERENCE_RETROACTIVE_DECAY * interference_strength;
-                result.retroactive_targets.push((old_id.clone(), *similarity, decay));
+                result
+                    .retroactive_targets
+                    .push((old_id.clone(), *similarity, decay));
 
                 // Record event
-                result.events.push(ConsolidationEvent::InterferenceDetected {
-                    new_memory_id: new_memory_id.to_string(),
-                    old_memory_id: old_id.clone(),
-                    similarity: *similarity,
-                    interference_type: InterferenceType::Retroactive,
-                    timestamp: now,
-                });
+                result
+                    .events
+                    .push(ConsolidationEvent::InterferenceDetected {
+                        new_memory_id: new_memory_id.to_string(),
+                        old_memory_id: old_id.clone(),
+                        similarity: *similarity,
+                        interference_type: InterferenceType::Retroactive,
+                        timestamp: now,
+                    });
 
                 result.events.push(ConsolidationEvent::MemoryWeakened {
                     memory_id: old_id.clone(),
@@ -358,9 +367,8 @@ impl InterferenceDetector {
 
             // Proactive interference: strong old memory suppresses new
             if *old_importance > INTERFERENCE_PROACTIVE_THRESHOLD {
-                let interference_strength =
-                    (*similarity - INTERFERENCE_SIMILARITY_THRESHOLD)
-                        / (1.0 - INTERFERENCE_SIMILARITY_THRESHOLD);
+                let interference_strength = (*similarity - INTERFERENCE_SIMILARITY_THRESHOLD)
+                    / (1.0 - INTERFERENCE_SIMILARITY_THRESHOLD);
 
                 let decay = INTERFERENCE_PROACTIVE_DECAY
                     * interference_strength
@@ -368,13 +376,15 @@ impl InterferenceDetector {
 
                 result.proactive_decay += decay;
 
-                result.events.push(ConsolidationEvent::InterferenceDetected {
-                    new_memory_id: new_memory_id.to_string(),
-                    old_memory_id: old_id.clone(),
-                    similarity: *similarity,
-                    interference_type: InterferenceType::Proactive,
-                    timestamp: now,
-                });
+                result
+                    .events
+                    .push(ConsolidationEvent::InterferenceDetected {
+                        new_memory_id: new_memory_id.to_string(),
+                        old_memory_id: old_id.clone(),
+                        similarity: *similarity,
+                        interference_type: InterferenceType::Proactive,
+                        timestamp: now,
+                    });
 
                 self.record_interference(
                     new_memory_id,
@@ -449,7 +459,10 @@ impl InterferenceDetector {
         let event = if !suppressed.is_empty() {
             Some(ConsolidationEvent::RetrievalCompetition {
                 query_preview: query_preview.to_string(),
-                winner_memory_id: winners.first().map(|(id, _)| id.clone()).unwrap_or_default(),
+                winner_memory_id: winners
+                    .first()
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_default(),
                 suppressed_memory_ids: suppressed.clone(),
                 competition_factor: INTERFERENCE_COMPETITION_FACTOR,
                 timestamp: Utc::now(),
@@ -528,9 +541,9 @@ mod tests {
         let memories = vec![
             (
                 "mem-1".to_string(),
-                0.8, // High importance
-                0.7, // High arousal
-                now - Duration::hours(12), // Recent
+                0.8,                                            // High importance
+                0.7,                                            // High arousal
+                now - Duration::hours(12),                      // Recent
                 vec!["mem-2".to_string(), "mem-3".to_string()], // Connected
                 "Important memory".to_string(),
             ),
@@ -598,15 +611,13 @@ mod tests {
         let now = Utc::now();
 
         // Test retroactive interference
-        let similar_memories = vec![
-            (
-                "old-mem".to_string(),
-                0.90, // High similarity
-                0.5,  // Moderate importance
-                now - Duration::hours(12), // Recent, vulnerable
-                "Old memory content".to_string(),
-            ),
-        ];
+        let similar_memories = vec![(
+            "old-mem".to_string(),
+            0.90,                      // High similarity
+            0.5,                       // Moderate importance
+            now - Duration::hours(12), // Recent, vulnerable
+            "Old memory content".to_string(),
+        )];
 
         let result = detector.check_interference(
             "new-mem",
@@ -626,15 +637,13 @@ mod tests {
         let now = Utc::now();
 
         // Very similar memory (near duplicate)
-        let similar_memories = vec![
-            (
-                "existing-mem".to_string(),
-                0.98, // Very high similarity - duplicate
-                0.5,
-                now - Duration::hours(1),
-                "Existing content".to_string(),
-            ),
-        ];
+        let similar_memories = vec![(
+            "existing-mem".to_string(),
+            0.98, // Very high similarity - duplicate
+            0.5,
+            now - Duration::hours(1),
+            "Existing content".to_string(),
+        )];
 
         let result = detector.check_interference("new-mem", 0.6, now, &similar_memories);
 

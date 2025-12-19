@@ -243,14 +243,18 @@ pub fn render_header(f: &mut Frame, area: Rect, state: &AppState) {
         let dot_color = Color::Rgb(0, green_val, 0);
 
         // Choose dot character based on heartbeat
-        let dot = if heartbeat > 0.5 { "◉" } else if heartbeat > 0.1 { "●" } else { "○" };
+        let dot = if heartbeat > 0.5 {
+            "◉"
+        } else if heartbeat > 0.1 {
+            "●"
+        } else {
+            "○"
+        };
 
         Line::from(vec![
             Span::styled(
                 format!("{} ", dot),
-                Style::default()
-                    .fg(dot_color)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(dot_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "LIVE",
@@ -265,8 +269,7 @@ pub fn render_header(f: &mut Frame, area: Rect, state: &AppState) {
         let yellow_val = (150.0 + pulse * 105.0) as u8;
         Line::from(Span::styled(
             "○ ...",
-            Style::default()
-                .fg(Color::Rgb(yellow_val, yellow_val, 0)),
+            Style::default().fg(Color::Rgb(yellow_val, yellow_val, 0)),
         ))
     };
     f.render_widget(
@@ -288,7 +291,9 @@ pub fn render_header(f: &mut Frame, area: Rect, state: &AppState) {
         Span::styled(format!("{} ", arrow), Style::default().fg(counter_color)),
         Span::styled(
             format!("{}", events_per_min),
-            Style::default().fg(counter_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(counter_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" events/min", Style::default().fg(Color::DarkGray)),
     ]);
@@ -618,10 +623,7 @@ fn render_search_result_item(
         // Compact: single line content
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default().bg(bg)),
-            Span::styled(
-                content_preview,
-                Style::default().fg(content_fg).bg(bg),
-            ),
+            Span::styled(content_preview, Style::default().fg(content_fg).bg(bg)),
         ]));
     } else {
         // Normal/Expanded: word-wrap content
@@ -634,10 +636,7 @@ fn render_search_result_item(
             let actual_len = take.len();
             lines.push(Line::from(vec![
                 Span::styled("  ", Style::default().bg(bg)),
-                Span::styled(
-                    take,
-                    Style::default().fg(content_fg).bg(bg),
-                ),
+                Span::styled(take, Style::default().fg(content_fg).bg(bg)),
             ]));
             remaining = &remaining[actual_len.min(remaining.len())..];
             line_count += 1;
@@ -755,10 +754,7 @@ fn render_search_detail(f: &mut Frame, area: Rect, state: &AppState) {
         remaining = &remaining[take_len..];
     }
 
-    f.render_widget(
-        Paragraph::new(lines).scroll((0, 0)),
-        inner,
-    );
+    f.render_widget(Paragraph::new(lines).scroll((0, 0)), inner);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1143,16 +1139,17 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
             state.theme.fg_dim()
         };
         let connector_color = if is_glowing {
-            Color::Rgb((255.0 * glow) as u8, (200.0 * glow) as u8, (50.0 * glow) as u8)
+            Color::Rgb(
+                (255.0 * glow) as u8,
+                (200.0 * glow) as u8,
+                (50.0 * glow) as u8,
+            )
         } else {
             Color::DarkGray
         };
         let line2 = Line::from(vec![
             Span::styled("│ ", Style::default().fg(connector_color)),
-            Span::styled(
-                preview,
-                Style::default().fg(content_color).bg(bg),
-            ),
+            Span::styled(preview, Style::default().fg(content_color).bg(bg)),
         ]);
 
         // Line 3: Metadata + spacing
@@ -1261,16 +1258,29 @@ fn render_event_card(f: &mut Frame, area: Rect, event: &DisplayEvent, _index: us
     };
 
     // New event indicator - brief flash marker
-    let new_indicator = if glow > 0.7 { "★ " } else if glow > 0.3 { "● " } else { "" };
+    let new_indicator = if glow > 0.7 {
+        "★ "
+    } else if glow > 0.3 {
+        "● "
+    } else {
+        ""
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .title(Span::styled(format!(" {}{} {} ", new_indicator, icon, label), title_style))
+        .title(Span::styled(
+            format!(" {}{} {} ", new_indicator, icon, label),
+            title_style,
+        ))
         .title(
             block::Title::from(Span::styled(
                 format!(" {} ", event.time_ago()),
-                Style::default().fg(if is_new { Color::White } else { Color::DarkGray }),
+                Style::default().fg(if is_new {
+                    Color::White
+                } else {
+                    Color::DarkGray
+                }),
             ))
             .alignment(Alignment::Right),
         );
@@ -1566,11 +1576,7 @@ fn render_river_event_selectable(
         state.theme.fg_dim()
     };
 
-    let event_color = if is_fresh {
-        Color::Yellow
-    } else {
-        color
-    };
+    let event_color = if is_fresh { Color::Yellow } else { color };
 
     // Prefix: bright indicator for fresh live events only
     let (prefix, prefix_color) = if is_fresh {
@@ -1649,13 +1655,25 @@ fn render_river_event_selectable(
     if let Some(m) = &event.event.retrieval_mode {
         meta.push(Span::styled(
             format!("mode:{} ", m),
-            Style::default().fg(if is_animating { apply_opacity(Color::Magenta, opacity) } else { Color::Magenta }).bg(bg),
+            Style::default()
+                .fg(if is_animating {
+                    apply_opacity(Color::Magenta, opacity)
+                } else {
+                    Color::Magenta
+                })
+                .bg(bg),
         ));
     }
     if let Some(l) = event.event.latency_ms {
         meta.push(Span::styled(
             format!("{:.0}ms ", l),
-            Style::default().fg(if is_animating { apply_opacity(Color::Yellow, opacity) } else { Color::Yellow }).bg(bg),
+            Style::default()
+                .fg(if is_animating {
+                    apply_opacity(Color::Yellow, opacity)
+                } else {
+                    Color::Yellow
+                })
+                .bg(bg),
         ));
     }
     if let Some(id) = &event.event.memory_id {
@@ -2002,9 +2020,9 @@ fn render_graph_map(f: &mut Frame, area: Rect, state: &AppState) {
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(28),  // Left: Top entities
-            Constraint::Min(40),     // Center: Focus view
-            Constraint::Length(24),  // Right: Type summary
+            Constraint::Length(28), // Left: Top entities
+            Constraint::Min(40),    // Center: Focus view
+            Constraint::Length(24), // Right: Type summary
         ])
         .split(area);
 
@@ -2039,7 +2057,10 @@ fn render_graph_top_entities(f: &mut Frame, area: Rect, state: &AppState) {
 
     if state.graph_data.nodes.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled("  No entities", Style::default().fg(Color::DarkGray))),
+            Paragraph::new(Span::styled(
+                "  No entities",
+                Style::default().fg(Color::DarkGray),
+            )),
             inner,
         );
         return;
@@ -2108,7 +2129,14 @@ fn render_graph_top_entities(f: &mut Frame, area: Rect, state: &AppState) {
         };
 
         lines.push(Line::from(vec![
-            Span::styled(prefix, Style::default().fg(if is_selected { state.theme.accent() } else { state.theme.fg_dim() })),
+            Span::styled(
+                prefix,
+                Style::default().fg(if is_selected {
+                    state.theme.accent()
+                } else {
+                    state.theme.fg_dim()
+                }),
+            ),
             Span::raw(rank_str),
             Span::styled(name, style),
             Span::styled(
@@ -2123,8 +2151,7 @@ fn render_graph_top_entities(f: &mut Frame, area: Rect, state: &AppState) {
     // Show scrollbar if there are more nodes than can display
     if node_count > max_display {
         let scrollbar = Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight);
-        let mut scrollbar_state =
-            ScrollbarState::new(node_count).position(selected_sort_position);
+        let mut scrollbar_state = ScrollbarState::new(node_count).position(selected_sort_position);
         f.render_stateful_widget(
             scrollbar,
             area.inner(Margin {
@@ -2254,7 +2281,8 @@ fn render_graph_focus_view(f: &mut Frame, area: Rect, state: &AppState) {
     let radius_y = (height as f32 * 0.35) as usize;
 
     for (i, (_, name, weight, is_outgoing)) in connected.iter().take(max_connections).enumerate() {
-        let angle = (i as f32 / max_connections as f32) * std::f32::consts::PI * 2.0 - std::f32::consts::PI / 2.0;
+        let angle = (i as f32 / max_connections as f32) * std::f32::consts::PI * 2.0
+            - std::f32::consts::PI / 2.0;
         let target_x = (center_x as f32 + angle.cos() * radius_x as f32) as usize;
         let target_y = (center_y as f32 + angle.sin() * radius_y as f32) as usize;
 
@@ -2421,15 +2449,30 @@ fn render_graph_type_summary(f: &mut Frame, area: Rect, state: &AppState) {
 
     lines.push(Line::from(vec![
         Span::styled(" Strong ", Style::default().fg(Color::Green)),
-        Span::styled(format!("{}", strong), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{}", strong),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
     ]));
     lines.push(Line::from(vec![
         Span::styled(" Medium ", Style::default().fg(Color::Yellow)),
-        Span::styled(format!("{}", medium), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{}", medium),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
     ]));
     lines.push(Line::from(vec![
         Span::styled(" Weak   ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{}", weak), Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{}", weak),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
     ]));
 
     lines.push(Line::from(""));

@@ -72,17 +72,33 @@ pub enum AnimationType {
     /// Fade from opaque to transparent
     FadeOut { duration_ms: u64 },
     /// Slide in from a direction with fade
-    SlideIn { direction: SlideDirection, distance: f32, duration_ms: u64 },
+    SlideIn {
+        direction: SlideDirection,
+        distance: f32,
+        duration_ms: u64,
+    },
     /// Slide out to a direction with fade
-    SlideOut { direction: SlideDirection, distance: f32, duration_ms: u64 },
+    SlideOut {
+        direction: SlideDirection,
+        distance: f32,
+        duration_ms: u64,
+    },
     /// Scale from small to full size
     ScaleIn { from: f32, duration_ms: u64 },
     /// Pulsing glow effect (continuous)
-    Pulse { min_intensity: f32, max_intensity: f32, period_ms: u64 },
+    Pulse {
+        min_intensity: f32,
+        max_intensity: f32,
+        period_ms: u64,
+    },
     /// Attention-grabbing highlight flash
     Flash { color: Color, duration_ms: u64 },
     /// Color transition
-    ColorTransition { from: Color, to: Color, duration_ms: u64 },
+    ColorTransition {
+        from: Color,
+        to: Color,
+        duration_ms: u64,
+    },
     /// Combined slide + fade + scale for new items
     Entrance { delay_ms: u64, duration_ms: u64 },
 }
@@ -119,7 +135,7 @@ impl Animation {
         Self::new(
             AnimationType::Entrance {
                 delay_ms: (index as u64) * 30, // Quick stagger
-                duration_ms: 400, // Snappy 400ms animation
+                duration_ms: 400,              // Snappy 400ms animation
             },
             Easing::EaseOut,
         )
@@ -137,10 +153,7 @@ impl Animation {
     }
 
     pub fn fade_in() -> Self {
-        Self::new(
-            AnimationType::FadeIn { duration_ms: 200 },
-            Easing::EaseOut,
-        )
+        Self::new(AnimationType::FadeIn { duration_ms: 200 }, Easing::EaseOut)
     }
 
     pub fn pulse() -> Self {
@@ -166,7 +179,10 @@ impl Animation {
             AnimationType::ScaleIn { duration_ms, .. } => (0, *duration_ms),
             AnimationType::Flash { duration_ms, .. } => (0, *duration_ms),
             AnimationType::ColorTransition { duration_ms, .. } => (0, *duration_ms),
-            AnimationType::Entrance { delay_ms, duration_ms } => (*delay_ms, *duration_ms),
+            AnimationType::Entrance {
+                delay_ms,
+                duration_ms,
+            } => (*delay_ms, *duration_ms),
             AnimationType::Pulse { period_ms, .. } => (0, *period_ms),
         };
 
@@ -204,9 +220,11 @@ impl Animation {
             AnimationType::SlideOut { .. } => 1.0 - p,
             AnimationType::ScaleIn { .. } => p,
             AnimationType::Entrance { .. } => p,
-            AnimationType::Pulse { min_intensity, max_intensity, .. } => {
-                min_intensity + (max_intensity - min_intensity) * p
-            }
+            AnimationType::Pulse {
+                min_intensity,
+                max_intensity,
+                ..
+            } => min_intensity + (max_intensity - min_intensity) * p,
             _ => 1.0,
         }
     }
@@ -215,7 +233,11 @@ impl Animation {
     pub fn offset_x(&self) -> i16 {
         let p = self.easing.apply(self.progress());
         match &self.animation_type {
-            AnimationType::SlideIn { direction, distance, .. } => {
+            AnimationType::SlideIn {
+                direction,
+                distance,
+                ..
+            } => {
                 let remaining = 1.0 - p;
                 match direction {
                     SlideDirection::Left => -(distance * remaining) as i16,
@@ -223,13 +245,15 @@ impl Animation {
                     _ => 0,
                 }
             }
-            AnimationType::SlideOut { direction, distance, .. } => {
-                match direction {
-                    SlideDirection::Left => -(distance * p) as i16,
-                    SlideDirection::Right => (distance * p) as i16,
-                    _ => 0,
-                }
-            }
+            AnimationType::SlideOut {
+                direction,
+                distance,
+                ..
+            } => match direction {
+                SlideDirection::Left => -(distance * p) as i16,
+                SlideDirection::Right => (distance * p) as i16,
+                _ => 0,
+            },
             AnimationType::Entrance { .. } => {
                 let remaining = 1.0 - p;
                 (15.0 * remaining) as i16 // Slide from right
@@ -242,7 +266,11 @@ impl Animation {
     pub fn offset_y(&self) -> i16 {
         let p = self.easing.apply(self.progress());
         match &self.animation_type {
-            AnimationType::SlideIn { direction, distance, .. } => {
+            AnimationType::SlideIn {
+                direction,
+                distance,
+                ..
+            } => {
                 let remaining = 1.0 - p;
                 match direction {
                     SlideDirection::Top => -(distance * remaining) as i16,
@@ -250,13 +278,15 @@ impl Animation {
                     _ => 0,
                 }
             }
-            AnimationType::SlideOut { direction, distance, .. } => {
-                match direction {
-                    SlideDirection::Top => -(distance * p) as i16,
-                    SlideDirection::Bottom => (distance * p) as i16,
-                    _ => 0,
-                }
-            }
+            AnimationType::SlideOut {
+                direction,
+                distance,
+                ..
+            } => match direction {
+                SlideDirection::Top => -(distance * p) as i16,
+                SlideDirection::Bottom => (distance * p) as i16,
+                _ => 0,
+            },
             AnimationType::Entrance { .. } => {
                 let remaining = 1.0 - p;
                 (3.0 * remaining) as i16 // Slight vertical offset
@@ -286,7 +316,11 @@ impl Animation {
                     (1.0 - p) * 2.0
                 }
             }
-            AnimationType::Pulse { min_intensity, max_intensity, .. } => {
+            AnimationType::Pulse {
+                min_intensity,
+                max_intensity,
+                ..
+            } => {
                 let p = self.progress();
                 min_intensity + (max_intensity - min_intensity) * p
             }
@@ -1295,12 +1329,18 @@ impl AppState {
 
     /// Check if view is transitioning
     pub fn is_transitioning(&self) -> bool {
-        self.view_transition.as_ref().map(|t| !t.is_complete()).unwrap_or(false)
+        self.view_transition
+            .as_ref()
+            .map(|t| !t.is_complete())
+            .unwrap_or(false)
     }
 
     /// Get view transition progress (for rendering)
     pub fn transition_progress(&self) -> f32 {
-        self.view_transition.as_ref().map(|t| t.progress()).unwrap_or(1.0)
+        self.view_transition
+            .as_ref()
+            .map(|t| t.progress())
+            .unwrap_or(1.0)
     }
 
     pub fn session_duration(&self) -> String {
@@ -1397,7 +1437,8 @@ impl AppState {
         let current_second = self.session_start.elapsed().as_secs();
         if current_second > self.activity_last_second {
             // New second - push the count and reset
-            self.activity_sparkline.push_back(self.activity_current_count);
+            self.activity_sparkline
+                .push_back(self.activity_current_count);
             while self.activity_sparkline.len() > 20 {
                 self.activity_sparkline.pop_front();
             }
