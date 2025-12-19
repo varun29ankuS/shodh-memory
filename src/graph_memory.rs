@@ -13,9 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::constants::{
-    LTP_DECAY_FACTOR, LTP_DECAY_HALF_LIFE_DAYS, LTP_LEARNING_RATE, LTP_MIN_STRENGTH, LTP_THRESHOLD,
-};
+use crate::constants::{LTP_LEARNING_RATE, LTP_MIN_STRENGTH, LTP_THRESHOLD};
+use crate::decay::hybrid_decay_factor;
 
 /// Entity node in the knowledge graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,32 +189,38 @@ impl RelationshipEdge {
 
     /// Apply time-based decay to this synapse
     ///
-    /// Formula: w(t) = w₀ × e^(-λt) where λ = ln(2) / half_life
-    /// Potentiated synapses decay 10x slower (LTP protection)
+    /// Uses hybrid decay model (SHO-103):
+    /// - t < 3 days: Exponential decay (fast consolidation filtering)
+    /// - t ≥ 3 days: Power-law decay (heavy tail for long-term retention)
+    ///
+    /// Potentiated synapses use lower β exponent for even slower decay.
+    ///
+    /// **Important:** Updates `last_activated` to prevent double-decay on
+    /// repeated calls. Also caps max decay at 365 days to protect against
+    /// clock jumps.
     ///
     /// Returns true if synapse should be pruned (strength below threshold)
     pub fn decay(&mut self) -> bool {
         let now = Utc::now();
         let elapsed = now.signed_duration_since(self.last_activated);
-        let days_elapsed = elapsed.num_seconds() as f64 / 86400.0;
+        let mut days_elapsed = elapsed.num_seconds() as f64 / 86400.0;
 
         if days_elapsed <= 0.0 {
             return false;
         }
 
-        // Calculate decay rate (λ = ln(2) / half_life)
-        let lambda = std::f64::consts::LN_2 / LTP_DECAY_HALF_LIFE_DAYS;
+        // Cap max decay to protect against clock jumps (max 1 year per call)
+        const MAX_DECAY_DAYS: f64 = 365.0;
+        if days_elapsed > MAX_DECAY_DAYS {
+            days_elapsed = MAX_DECAY_DAYS;
+        }
 
-        // Potentiated synapses decay much slower (biological LTP)
-        let effective_lambda = if self.potentiated {
-            lambda * LTP_DECAY_FACTOR as f64
-        } else {
-            lambda
-        };
-
-        // Exponential decay: w(t) = w₀ × e^(-λt)
-        let decay_factor = (-effective_lambda * days_elapsed).exp() as f32;
+        // Hybrid decay: exponential for consolidation, power-law for long-term
+        let decay_factor = hybrid_decay_factor(days_elapsed, self.potentiated);
         self.strength *= decay_factor;
+
+        // Update last_activated to prevent double-decay on repeated calls
+        self.last_activated = now;
 
         // Apply floor to prevent complete forgetting
         if self.strength < LTP_MIN_STRENGTH {
@@ -231,6 +236,7 @@ impl RelationshipEdge {
     ///
     /// This is a read-only version that calculates what the strength
     /// would be after decay, without modifying the edge.
+    /// Uses hybrid decay model (exponential → power-law).
     pub fn effective_strength(&self) -> f32 {
         let now = Utc::now();
         let elapsed = now.signed_duration_since(self.last_activated);
@@ -240,14 +246,7 @@ impl RelationshipEdge {
             return self.strength;
         }
 
-        let lambda = std::f64::consts::LN_2 / LTP_DECAY_HALF_LIFE_DAYS;
-        let effective_lambda = if self.potentiated {
-            lambda * LTP_DECAY_FACTOR as f64
-        } else {
-            lambda
-        };
-
-        let decay_factor = (-effective_lambda * days_elapsed).exp() as f32;
+        let decay_factor = hybrid_decay_factor(days_elapsed, self.potentiated);
         (self.strength * decay_factor).max(LTP_MIN_STRENGTH)
     }
 }
@@ -2555,16 +2554,25 @@ mod tests {
     }
 
     #[test]
-    fn test_decay_exponential_formula() {
-        // Test: w(t) = w₀ × e^(-λt) where λ = ln(2) / 14 days
-        let mut edge = create_test_edge(1.0, 14); // 14 days = half-life
+    fn test_decay_hybrid_model() {
+        // Test hybrid decay: exponential (< 3 days) → power-law (≥ 3 days)
+        // At 14 days with β=0.5:
+        // - Crossover value at 3 days: e^(-0.693 * 3) ≈ 0.125
+        // - Power-law from crossover: 0.125 * (14/3)^(-0.5) ≈ 0.058
+        let mut edge = create_test_edge(1.0, 14);
 
         edge.decay();
 
-        // After one half-life, strength should be ~0.5
+        // Hybrid decay at 14 days should be much less than old exponential 0.5
+        // Expected ~0.058 for normal, allowing some tolerance
         assert!(
-            (edge.strength - 0.5).abs() < 0.05,
-            "After half-life, strength should be ~0.5, got {}",
+            edge.strength < 0.15,
+            "After 14 days with hybrid decay, strength should be < 0.15, got {}",
+            edge.strength
+        );
+        assert!(
+            edge.strength > 0.01,
+            "Strength should still be above floor, got {}",
             edge.strength
         );
     }

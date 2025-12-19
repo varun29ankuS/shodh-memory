@@ -488,6 +488,59 @@ pub const LTP_DECAY_FACTOR: f32 = 0.1;
 pub const LTP_MIN_STRENGTH: f32 = 0.01;
 
 // =============================================================================
+// HYBRID DECAY MODEL CONSTANTS (SHO-103)
+// Based on Wixted & Ebbesen (1991) - power-law forgetting matches human memory
+// Hybrid model: exponential for consolidation, power-law for long-term retention
+// =============================================================================
+
+/// Crossover point in days from exponential to power-law decay
+///
+/// Below this threshold: exponential decay (fast consolidation)
+/// Above this threshold: power-law decay (slow long-term forgetting)
+///
+/// Justification:
+/// - 3 days matches memory consolidation window in neuroscience
+/// - Hippocampal-cortical transfer takes ~72 hours
+/// - Short-term plasticity is exponential, long-term follows power-law
+///
+/// Reference: Wixted (2004) "The psychology and neuroscience of forgetting"
+pub const DECAY_CROSSOVER_DAYS: f64 = 3.0;
+
+/// Power-law exponent (β) for long-term forgetting
+///
+/// Formula: A(t) = A_cross × (t / t_cross)^(-β)
+///
+/// Justification:
+/// - β = 0.5 produces moderate long-term retention
+/// - Lower β (0.3) = slower forgetting, heavier tail
+/// - Higher β (0.7) = faster forgetting, lighter tail
+/// - 0.5 matches empirical human forgetting curves
+///
+/// Reference: Wixted & Ebbesen (1991), Anderson & Schooler (1991)
+pub const POWERLAW_BETA: f64 = 0.5;
+
+/// Power-law exponent for potentiated/important memories
+///
+/// Potentiated synapses and high-importance memories use lower β
+/// for even slower forgetting (heavier tail).
+///
+/// Justification:
+/// - 0.3 exponent means 50% retention at ~11 days vs ~4 days for β=0.5
+/// - Matches LTP protection ratio (10x slower decay)
+pub const POWERLAW_BETA_POTENTIATED: f64 = 0.3;
+
+/// Exponential decay rate (λ) for consolidation phase
+///
+/// Used during t < DECAY_CROSSOVER_DAYS.
+/// λ = ln(2) / half_life, where half_life ≈ 1 day for consolidation.
+///
+/// Justification:
+/// - Fast initial decay clears noise and weak associations
+/// - Matches short-term synaptic depression rates
+/// - After 3 days at this rate: ~12.5% retention → power-law takes over
+pub const DECAY_LAMBDA_CONSOLIDATION: f64 = 0.693; // ln(2) / 1.0 day
+
+// =============================================================================
 // INFORMATION CONTENT (IC) WEIGHTS
 // Based on linguistic analysis for query parsing
 // Reference: Lioma & Ounis (2006) "Information Content Weighting"

@@ -18,6 +18,7 @@
 pub mod auth;
 pub mod backup;
 pub mod constants;
+pub mod decay;
 pub mod embeddings;
 pub mod errors;
 pub mod graph_memory;

@@ -22,10 +22,11 @@ use super::introspection::{
 use super::storage::{MemoryStorage, SearchCriteria};
 use super::types::*;
 use crate::constants::{
-    EDGE_HALF_LIFE_HOURS, EDGE_INITIAL_STRENGTH, EDGE_MIN_STRENGTH, PREFETCH_RECENCY_FULL_BOOST,
+    EDGE_INITIAL_STRENGTH, EDGE_MIN_STRENGTH, PREFETCH_RECENCY_FULL_BOOST,
     PREFETCH_RECENCY_FULL_HOURS, PREFETCH_RECENCY_PARTIAL_BOOST, PREFETCH_RECENCY_PARTIAL_HOURS,
     VECTOR_SEARCH_CANDIDATE_MULTIPLIER,
 };
+use crate::decay::hybrid_decay_factor;
 use crate::embeddings::{minilm::MiniLMEmbedder, Embedder};
 use crate::vector_db::vamana::{VamanaConfig, VamanaIndex};
 
@@ -1309,27 +1310,39 @@ impl EdgeWeight {
         }
     }
 
-    /// Apply time-based decay, returns true if edge should be pruned
+    /// Apply time-based decay using hybrid model (SHO-103)
+    ///
+    /// Uses exponential decay for consolidation (< 3 days), then
+    /// power-law for long-term retention. Potentiated edges use
+    /// lower β exponent for even slower forgetting.
+    ///
+    /// **Important:** Updates `last_activated` to prevent double-decay on
+    /// repeated calls. Also caps max decay at 365 days to protect against
+    /// clock jumps.
     fn decay(&mut self) -> bool {
         let now = chrono::Utc::now().timestamp_millis();
         let hours_elapsed = (now - self.last_activated) as f64 / 3_600_000.0;
+        let mut days_elapsed = hours_elapsed / 24.0;
 
-        if hours_elapsed <= 0.0 {
+        if days_elapsed <= 0.0 {
             return false;
         }
 
-        // Potentiated edges decay slower
-        let effective_half_life = if self.activation_count >= Self::LTP_THRESHOLD {
-            EDGE_HALF_LIFE_HOURS * 5.0 // 5x slower decay (from constants.rs)
-        } else {
-            EDGE_HALF_LIFE_HOURS // From constants.rs (24.0 hours)
-        };
+        // Cap max decay to protect against clock jumps (max 1 year per call)
+        const MAX_DECAY_DAYS: f64 = 365.0;
+        if days_elapsed > MAX_DECAY_DAYS {
+            days_elapsed = MAX_DECAY_DAYS;
+        }
 
-        let decay_rate = (0.5_f64).ln() / effective_half_life;
-        let decay_factor = (decay_rate * hours_elapsed).exp() as f32;
+        // Potentiated = LTP threshold reached
+        let potentiated = self.activation_count >= Self::LTP_THRESHOLD;
+        let decay_factor = hybrid_decay_factor(days_elapsed, potentiated);
         self.strength *= decay_factor;
 
-        self.strength < EDGE_MIN_STRENGTH // From constants.rs (0.05)
+        // Update last_activated to prevent double-decay on repeated calls
+        self.last_activated = now;
+
+        self.strength < EDGE_MIN_STRENGTH
     }
 }
 
