@@ -115,8 +115,7 @@ impl EmbeddingConfig {
                     Some(PathBuf::from("../models/minilm-l6")),
                     // Auto-download cache location
                     Some(super::downloader::get_models_dir()),
-                    dirs::data_dir()
-                        .map(|p| p.join("shodh-memory/models/minilm-l6")),
+                    dirs::data_dir().map(|p| p.join("shodh-memory/models/minilm-l6")),
                 ];
 
                 candidates

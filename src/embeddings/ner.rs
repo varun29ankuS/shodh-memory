@@ -36,7 +36,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tokenizers::Tokenizer;
 
-
 /// BIO tag labels from TinyBERT-finetuned-NER-ONNX
 /// Index mapping: O=0, B-MISC=1, I-MISC=2, B-ORG=3, I-ORG=4, B-LOC=5, I-LOC=6, B-PER=7, I-PER=8
 /// Note: This ordering differs from bert-base-NER (dslim) which uses MISC, PER, ORG, LOC
@@ -360,14 +359,17 @@ impl NeuralNer {
             .context("Failed to create token_type_ids tensor")?;
 
         // Run inference
-        let outputs = session.run(ort::inputs![
-            "input_ids" => &input_ids_value,
-            "attention_mask" => &attention_mask_value,
-            "token_type_ids" => &token_type_ids_value,
-        ]).context("NER inference failed")?;
+        let outputs = session
+            .run(ort::inputs![
+                "input_ids" => &input_ids_value,
+                "attention_mask" => &attention_mask_value,
+                "token_type_ids" => &token_type_ids_value,
+            ])
+            .context("NER inference failed")?;
 
         // Extract logits - shape: [1, seq_len, num_labels]
-        let output_tensor = outputs[0].try_extract_tensor::<f32>()
+        let output_tensor = outputs[0]
+            .try_extract_tensor::<f32>()
             .context("Failed to extract NER output tensor")?;
         let (_shape, logits) = output_tensor;
 
