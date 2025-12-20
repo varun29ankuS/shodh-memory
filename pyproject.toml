@@ -44,11 +44,11 @@ python-source = "python"
 module-name = "shodh_memory.shodh_memory"
 strip = true
 include = [
-    { path = "shodh_memory/lib/*.dll", format = "wheel" },
-    { path = "shodh_memory/lib/*.so", format = "wheel" },
-    { path = "shodh_memory/lib/*.dylib", format = "wheel" },
-    { path = "shodh_memory/models/minilm-l6/*.onnx", format = "wheel" },
-    { path = "shodh_memory/models/minilm-l6/*.json", format = "wheel" },
-    { path = "shodh_memory/models/bert-tiny-ner/*.onnx", format = "wheel" },
-    { path = "shodh_memory/models/bert-tiny-ner/*.json", format = "wheel" },
+    { path = "bundled/lib/*.dll", format = "wheel" },
+    { path = "bundled/lib/*.so", format = "wheel" },
+    { path = "bundled/lib/*.dylib", format = "wheel" },
+    { path = "bundled/models/minilm-l6/*.onnx", format = "wheel" },
+    { path = "bundled/models/minilm-l6/*.json", format = "wheel" },
+    { path = "bundled/models/bert-tiny-ner/*.onnx", format = "wheel" },
+    { path = "bundled/models/bert-tiny-ner/*.json", format = "wheel" },
 ]
