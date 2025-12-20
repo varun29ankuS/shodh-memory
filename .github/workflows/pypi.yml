@@ -40,8 +40,8 @@ jobs:
       - name: Build wheels with maturin
         run: |
           source $HOME/.cargo/env
-          pip3.11 install maturin
-          maturin build --release --out dist --features python --manylinux 2_28
+          /opt/python/cp311-cp311/bin/pip install maturin
+          /opt/python/cp311-cp311/bin/maturin build --release --out dist --features python --manylinux 2_28
         shell: bash
 
       - name: Upload wheels
@@ -116,6 +116,8 @@ jobs:
         run: pip install maturin
 
       - name: Build ABI3 wheels (Python 3.8+)
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "10.13"
         run: maturin build --release --target x86_64-apple-darwin --out dist --features python
 
       - name: Upload wheels
