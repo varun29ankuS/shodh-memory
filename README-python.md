@@ -77,7 +77,7 @@ memory.remember(
     content="...",           # Required: the memory content
     memory_type="Learning",  # Optional: Decision, Learning, Error, etc.
     tags=["tag1", "tag2"],   # Optional: for filtering
-    importance=0.8           # Optional: override auto-calculated importance
+    metadata={"key": "val"}  # Optional: custom metadata dict
 )
 
 # Semantic search
@@ -85,6 +85,16 @@ results = memory.recall(
     query="...",             # Required: search query
     limit=10,                # Optional: max results (default: 10)
     mode="hybrid"            # Optional: semantic, associative, hybrid
+)
+
+# Search by tags (no embedding needed, fast)
+results = memory.recall_by_tags(tags=["preferences", "ui"], limit=20)
+
+# Search by date range
+results = memory.recall_by_date(
+    start="2025-12-01T00:00:00Z",
+    end="2025-12-20T23:59:59Z",
+    limit=20
 )
 
 # List all memories
@@ -95,7 +105,25 @@ mem = memory.get_memory("uuid-here")
 
 # Get statistics
 stats = memory.get_stats()
-print(f"Total: {stats['total_memories']}, Graph edges: {stats['graph_edges']}")
+print(f"Total: {stats['total_memories']}")
+```
+
+### Proactive Context (for Agent Loops)
+
+```python
+# Surface relevant memories for current context
+# Use in every agent loop to maintain context awareness
+result = memory.proactive_context(
+    context="User asking about authentication",  # Current conversation/task
+    semantic_threshold=0.65,                      # Min similarity (0.0-1.0)
+    max_results=5,                                # Max memories to return
+    auto_ingest=True,                             # Store context as Conversation memory
+    recency_weight=0.2                            # Boost recent memories
+)
+
+# Returns surfaced memories with relevance scores
+for mem in result["memories"]:
+    print(f"{mem['content'][:50]} (score: {mem['relevance_score']:.2f})")
 ```
 
 ### Forget Operations
@@ -116,8 +144,8 @@ memory.forget_by_pattern(r"test.*")
 # Delete by tags
 memory.forget_by_tags(["temporary", "draft"])
 
-# Delete by date range
-memory.forget_by_date(start="2024-01-01", end="2024-06-30")
+# Delete by date range (ISO 8601 format)
+memory.forget_by_date(start="2025-11-01T00:00:00Z", end="2025-11-30T23:59:59Z")
 
 # GDPR: Delete everything
 memory.forget_all()
@@ -128,18 +156,41 @@ memory.forget_all()
 ```python
 # Context summary for LLM bootstrap
 summary = memory.context_summary(max_items=5)
-# Returns: {"decisions": [...], "learnings": [...], "context": [...]}
+# Returns: {"decisions": [...], "learnings": [...], "context": [...], "patterns": [...]}
 
 # 3-tier memory visualization
 state = memory.brain_state(longterm_limit=100)
-# Returns: {"working": [...], "session": [...], "longterm": [...]}
+# Returns: {"working_memory": [...], "session_memory": [...], "longterm_memory": [...], "stats": {...}}
 
 # Memory learning activity report
-report = memory.consolidation_report(since="2024-01-01")
-# Returns: strengthening events, decay events, edge formations
+report = memory.consolidation_report(since="2025-12-19T00:00:00Z")
+# Returns: strengthening events, decay events, edge formations, pruned associations
+
+# Raw consolidation events
+events = memory.consolidation_events(since="2025-12-19T00:00:00Z")
+
+# Knowledge graph statistics
+graph = memory.graph_stats()
+print(f"Nodes: {graph['node_count']}, Edges: {graph['edge_count']}")
 
 # Flush to disk
 memory.flush()
+```
+
+### Index Health & Maintenance
+
+```python
+# Verify vector index integrity
+report = memory.verify_index()
+print(f"Healthy: {report['is_healthy']}, Orphaned: {report['orphaned_count']}")
+
+# Repair orphaned memories (re-index missing entries)
+result = memory.repair_index()
+print(f"Repaired: {result['repaired']}, Failed: {result['failed']}")
+
+# Get detailed index health metrics
+health = memory.index_health()
+print(f"Vectors: {health['total_vectors']}, Needs rebuild: {health['needs_rebuild']}")
 ```
 
 ## LLM Framework Integration

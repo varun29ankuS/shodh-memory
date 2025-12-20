@@ -5,7 +5,7 @@
 <h1 align="center">Shodh-Memory MCP Server</h1>
 
 <p align="center">
-  <strong>v0.1.6</strong> | Persistent cognitive memory for AI agents
+  <strong>v0.1.61</strong> | Persistent cognitive memory for AI agents
 </p>
 
 <p align="center">
@@ -70,7 +70,7 @@ Config file locations:
 | `SHODH_STREAM` | Enable/disable streaming ingestion | `true` |
 | `SHODH_PROACTIVE` | Enable/disable proactive memory surfacing | `true` |
 
-## MCP Tools
+## MCP Tools (15 total)
 
 | Tool | Description |
 |------|-------------|
@@ -80,12 +80,15 @@ Config file locations:
 | `context_summary` | Get categorized context for session bootstrap |
 | `list_memories` | List all stored memories |
 | `forget` | Delete a specific memory by ID |
+| `forget_by_tags` | Delete memories matching any of the specified tags |
+| `forget_by_date` | Delete memories within a date range |
 | `memory_stats` | Get statistics about stored memories |
 | `recall_by_tags` | Find memories by tag |
 | `recall_by_date` | Find memories within a date range |
 | `verify_index` | Check vector index health |
 | `repair_index` | Repair orphaned memories |
 | `consolidation_report` | View memory consolidation activity |
+| `streaming_status` | Check WebSocket streaming connection status |
 
 ## REST API (for Developers)
 

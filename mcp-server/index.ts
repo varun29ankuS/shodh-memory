@@ -382,7 +382,7 @@ async function isServerAvailable(): Promise<boolean> {
 const server = new Server(
   {
     name: "shodh-memory",
-    version: "0.1.51",
+    version: "0.1.61",
   },
   {
     capabilities: {

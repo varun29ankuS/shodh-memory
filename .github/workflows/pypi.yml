@@ -26,15 +26,15 @@ jobs:
 
       - name: Download models and ONNX Runtime
         run: |
-          mkdir -p shodh_memory/models/minilm-l6 shodh_memory/models/bert-tiny-ner shodh_memory/lib
-          curl -L -o shodh_memory/models/minilm-l6/model_quantized.onnx "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model_quint8_avx2.onnx"
-          curl -L -o shodh_memory/models/minilm-l6/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
-          curl -L -o shodh_memory/models/bert-tiny-ner/model.onnx "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx"
-          curl -L -o shodh_memory/models/bert-tiny-ner/tokenizer.json "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json"
+          mkdir -p python/shodh_memory/models/minilm-l6 python/shodh_memory/models/bert-tiny-ner python/shodh_memory/lib
+          curl -L -o python/shodh_memory/models/minilm-l6/model_quantized.onnx "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model_quint8_avx2.onnx"
+          curl -L -o python/shodh_memory/models/minilm-l6/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
+          curl -L -o python/shodh_memory/models/bert-tiny-ner/model.onnx "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx"
+          curl -L -o python/shodh_memory/models/bert-tiny-ner/tokenizer.json "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json"
           curl -L -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz"
           tar -xzf onnxruntime.tgz
-          cp onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so.1.22.0 shodh_memory/lib/libonnxruntime.so
-          ls -la shodh_memory/models/minilm-l6/ shodh_memory/models/bert-tiny-ner/ shodh_memory/lib/
+          cp onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so.1.22.0 python/shodh_memory/lib/libonnxruntime.so
+          ls -la python/shodh_memory/models/minilm-l6/ python/shodh_memory/models/bert-tiny-ner/ python/shodh_memory/lib/
         shell: bash
 
       - name: Build wheels with maturin

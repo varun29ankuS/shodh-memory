@@ -1720,6 +1720,272 @@ impl PyMemorySystem {
         })
     }
 
+    // === Proactive Context API (Matching npm MCP) ===
+
+    /// Surface relevant memories based on current context
+    ///
+    /// This is for proactive memory surfacing - finding memories relevant to
+    /// the current conversation or task without explicit query.
+    ///
+    /// Matches REST /api/relevant and npm MCP proactive_context tool.
+    ///
+    /// Args:
+    ///     context: Current conversation context or user message
+    ///     semantic_threshold: Minimum similarity score (0.0-1.0, default: 0.65)
+    ///     max_results: Maximum memories to return (default: 5)
+    ///     memory_types: Filter to specific types (empty = all)
+    ///     auto_ingest: Store context as Conversation memory (default: true)
+    ///     recency_weight: Weight for recency boost (0.0-1.0, default: 0.2)
+    #[pyo3(signature = (
+        context,
+        semantic_threshold=0.65,
+        max_results=5,
+        memory_types=None,
+        auto_ingest=true,
+        recency_weight=0.2
+    ))]
+    fn proactive_context(
+        &mut self,
+        context: String,
+        semantic_threshold: f32,
+        max_results: usize,
+        memory_types: Option<Vec<String>>,
+        auto_ingest: bool,
+        recency_weight: f32,
+    ) -> PyResult<HashMap<String, PyObject>> {
+        let start = std::time::Instant::now();
+
+        // Auto-ingest: Store context as a Conversation memory
+        let ingested_id = if auto_ingest && context.len() > 50 {
+            let experience = Experience {
+                experience_type: ExperienceType::Conversation,
+                content: context.clone(),
+                tags: vec!["proactive-context".to_string()],
+                ..Default::default()
+            };
+            match self.inner.remember(experience, None) {
+                Ok(id) => Some(id.0.to_string()),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        // Semantic search for relevant memories
+        let query = Query {
+            query_text: Some(context.clone()),
+            query_embedding: None,
+            time_range: None,
+            experience_types: memory_types.map(|types| {
+                types
+                    .iter()
+                    .filter_map(|t| match t.to_lowercase().as_str() {
+                        "decision" => Some(ExperienceType::Decision),
+                        "learning" => Some(ExperienceType::Learning),
+                        "error" => Some(ExperienceType::Error),
+                        "context" | "observation" => Some(ExperienceType::Context),
+                        "pattern" => Some(ExperienceType::Pattern),
+                        "conversation" => Some(ExperienceType::Conversation),
+                        "task" => Some(ExperienceType::Task),
+                        "discovery" => Some(ExperienceType::Discovery),
+                        _ => None,
+                    })
+                    .collect()
+            }),
+            importance_threshold: None,
+            robot_id: self.robot_id.clone(),
+            mission_id: None,
+            geo_filter: None,
+            action_type: None,
+            reward_range: None,
+            outcome_type: None,
+            failures_only: false,
+            anomalies_only: false,
+            severity: None,
+            tags: None,
+            pattern_id: None,
+            terrain_type: None,
+            confidence_range: None,
+            max_results: max_results * 2, // Get more for filtering
+            retrieval_mode: RetrievalMode::Hybrid,
+            offset: 0,
+        };
+
+        let memories = self
+            .inner
+            .recall(&query)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to recall memories: {}", e)))?;
+
+        // Apply semantic threshold and recency weighting
+        let now = Utc::now();
+        let recency_half_life_hours = 24.0f32;
+
+        let mut scored_memories: Vec<(std::sync::Arc<Memory>, f32, String)> = memories
+            .into_iter()
+            .filter_map(|m| {
+                // Get semantic score from the memory's score if available
+                let base_score = m.importance();
+
+                // Apply recency boost
+                let age_hours = (now - m.created_at).num_hours() as f32;
+                let recency_factor = (-age_hours / recency_half_life_hours).exp();
+                let recency_boost = 1.0 + (recency_weight * recency_factor);
+
+                let final_score = base_score * recency_boost;
+
+                if final_score >= semantic_threshold * 0.5 {
+                    let reason = if recency_factor > 0.5 {
+                        "recent_and_relevant".to_string()
+                    } else {
+                        "semantic_similarity".to_string()
+                    };
+                    Some((m, final_score.min(1.0), reason))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by score and take top results
+        scored_memories.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored_memories.truncate(max_results);
+
+        let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        Python::with_gil(|py| {
+            let mut result = HashMap::new();
+
+            // Surfaced memories
+            let memories_list: Vec<HashMap<String, PyObject>> = scored_memories
+                .into_iter()
+                .map(|(m, score, reason)| {
+                    let mut mem = HashMap::new();
+                    mem.insert("id".to_string(), m.id.0.to_string().into_py(py));
+                    mem.insert("content".to_string(), m.experience.content.clone().into_py(py));
+                    mem.insert(
+                        "memory_type".to_string(),
+                        format!("{:?}", m.experience.experience_type).into_py(py),
+                    );
+                    mem.insert("importance".to_string(), m.importance().into_py(py));
+                    mem.insert("relevance_score".to_string(), score.into_py(py));
+                    mem.insert("relevance_reason".to_string(), reason.into_py(py));
+                    mem.insert("created_at".to_string(), m.created_at.to_rfc3339().into_py(py));
+                    mem.insert("tags".to_string(), m.experience.tags.clone().into_py(py));
+                    mem
+                })
+                .collect();
+
+            let count = memories_list.len();
+            result.insert("memories".to_string(), memories_list.into_py(py));
+            result.insert("count".to_string(), count.into_py(py));
+            result.insert("latency_ms".to_string(), latency_ms.into_py(py));
+            result.insert(
+                "ingested_id".to_string(),
+                ingested_id.map(|id| id.into_py(py)).unwrap_or_else(|| py.None()),
+            );
+            result.insert(
+                "config".to_string(),
+                {
+                    let mut cfg = HashMap::new();
+                    cfg.insert("semantic_threshold".to_string(), semantic_threshold.into_py(py));
+                    cfg.insert("max_results".to_string(), max_results.into_py(py));
+                    cfg.insert("recency_weight".to_string(), recency_weight.into_py(py));
+                    cfg.insert("auto_ingest".to_string(), auto_ingest.into_py(py));
+                    cfg
+                }
+                .into_py(py),
+            );
+
+            Ok(result)
+        })
+    }
+
+    // === Index Health API (Matching npm MCP) ===
+
+    /// Verify vector index integrity
+    ///
+    /// Diagnoses orphaned memories that are stored but not searchable.
+    /// Matches REST /api/index/verify and npm MCP verify_index tool.
+    ///
+    /// Returns:
+    ///     dict with: total_storage, total_indexed, orphaned_count, is_healthy
+    fn verify_index(&self) -> PyResult<HashMap<String, PyObject>> {
+        let report = self
+            .inner
+            .verify_index_integrity()
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to verify index: {}", e)))?;
+
+        Python::with_gil(|py| {
+            let mut result = HashMap::new();
+            result.insert("total_storage".to_string(), report.total_storage.into_py(py));
+            result.insert("total_indexed".to_string(), report.total_indexed.into_py(py));
+            result.insert("orphaned_count".to_string(), report.orphaned_count.into_py(py));
+            result.insert("is_healthy".to_string(), report.is_healthy.into_py(py));
+            result.insert(
+                "orphaned_ids".to_string(),
+                report
+                    .orphaned_ids
+                    .iter()
+                    .map(|id| id.0.to_string())
+                    .collect::<Vec<_>>()
+                    .into_py(py),
+            );
+            Ok(result)
+        })
+    }
+
+    /// Repair vector index by re-indexing orphaned memories
+    ///
+    /// Use when verify_index shows unhealthy status.
+    /// Matches REST /api/index/repair and npm MCP repair_index tool.
+    ///
+    /// Returns:
+    ///     dict with: total_storage, total_indexed, repaired, failed, is_healthy
+    fn repair_index(&self) -> PyResult<HashMap<String, PyObject>> {
+        let (total_storage, total_indexed, repaired, failed) = self
+            .inner
+            .repair_vector_index()
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to repair index: {}", e)))?;
+
+        Python::with_gil(|py| {
+            let mut result = HashMap::new();
+            result.insert("total_storage".to_string(), total_storage.into_py(py));
+            result.insert("total_indexed".to_string(), total_indexed.into_py(py));
+            result.insert("repaired".to_string(), repaired.into_py(py));
+            result.insert("failed".to_string(), failed.into_py(py));
+            result.insert("is_healthy".to_string(), (failed == 0).into_py(py));
+            result.insert("success".to_string(), true.into_py(py));
+            Ok(result)
+        })
+    }
+
+    /// Get vector index health metrics
+    ///
+    /// Returns information about the Vamana index including total vectors,
+    /// incremental inserts since last build, and whether rebuild is recommended.
+    fn index_health(&self) -> PyResult<HashMap<String, PyObject>> {
+        let health = self.inner.index_health();
+
+        Python::with_gil(|py| {
+            let mut result = HashMap::new();
+            result.insert("total_vectors".to_string(), health.total_vectors.into_py(py));
+            result.insert("deleted_count".to_string(), health.deleted_count.into_py(py));
+            result.insert("deletion_ratio".to_string(), health.deletion_ratio.into_py(py));
+            result.insert("needs_compaction".to_string(), health.needs_compaction.into_py(py));
+            result.insert(
+                "incremental_inserts".to_string(),
+                health.incremental_inserts.into_py(py),
+            );
+            result.insert("needs_rebuild".to_string(), health.needs_rebuild.into_py(py));
+            result.insert(
+                "rebuild_threshold".to_string(),
+                health.rebuild_threshold.into_py(py),
+            );
+            result.insert("healthy".to_string(), (!health.needs_rebuild && !health.needs_compaction).into_py(py));
+            Ok(result)
+        })
+    }
+
     fn __repr__(&self) -> String {
         let stats = self.inner.stats();
         format!(
