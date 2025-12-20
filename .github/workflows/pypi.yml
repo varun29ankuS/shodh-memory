@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          yum install -y openssl-devel perl-IPC-Cmd clang-devel llvm-devel
+          yum install -y openssl-devel perl-IPC-Cmd clang-devel llvm-devel zip unzip
 
       - name: Install Rust
         run: |
