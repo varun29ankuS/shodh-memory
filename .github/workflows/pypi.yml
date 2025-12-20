@@ -184,7 +184,7 @@ jobs:
 
   build-macos-x64-wheels:
     name: Build macOS x64 wheels
-    runs-on: macos-13
+    runs-on: macos-latest  # ARM runner, cross-compile to x64
     steps:
       - uses: actions/checkout@v4
 
