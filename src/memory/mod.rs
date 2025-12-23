@@ -952,6 +952,11 @@ impl MemorySystem {
         self.embedder.as_ref()
     }
 
+    /// Compute embedding for arbitrary text (for external use like prospective memory)
+    pub fn compute_embedding(&self, text: &str) -> Result<Vec<f32>> {
+        self.embedder.encode(text)
+    }
+
     /// Get all memories across all tiers for graph-aware retrieval
     /// Deduplicates by memory ID, preferring working > session > long-term
     pub fn get_all_memories(&self) -> Result<Vec<SharedMemory>> {

@@ -17,6 +17,23 @@ use std::sync::Arc;
 
 use super::types::{ProspectiveTask, ProspectiveTaskId, ProspectiveTaskStatus, ProspectiveTrigger};
 
+/// Compute cosine similarity between two embedding vectors
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+
+    dot / (norm_a * norm_b)
+}
+
 /// Storage and query engine for prospective memory (reminders)
 pub struct ProspectiveStore {
     /// Main task storage: key = {user_id}:{task_id}
@@ -57,7 +74,9 @@ impl ProspectiveStore {
     /// Store a new prospective task
     pub fn store(&self, task: &ProspectiveTask) -> Result<()> {
         let key = format!("{}:{}", task.user_id, task.id);
-        let value = bincode::serialize(task).context("Failed to serialize prospective task")?;
+        // Use JSON instead of bincode - handles tagged enums properly and is human-readable
+        let value =
+            serde_json::to_vec(task).context("Failed to serialize prospective task to JSON")?;
 
         self.db
             .put(key.as_bytes(), &value)
@@ -124,8 +143,8 @@ impl ProspectiveStore {
 
         match self.db.get(key.as_bytes())? {
             Some(value) => {
-                let task: ProspectiveTask = bincode::deserialize(&value)
-                    .context("Failed to deserialize prospective task")?;
+                let task: ProspectiveTask = serde_json::from_slice(&value)
+                    .context("Failed to deserialize prospective task from JSON")?;
                 Ok(Some(task))
             }
             None => Ok(None),
@@ -294,12 +313,14 @@ impl ProspectiveStore {
         Ok(due_tasks)
     }
 
-    /// Check for context-triggered reminders based on text content
+    /// Check for context-triggered reminders based on text content (keyword match only)
     ///
     /// Returns tasks where:
     /// - Trigger is OnContext
     /// - Any keyword matches the context text
     /// - Status is Pending
+    ///
+    /// For semantic matching, use `check_context_triggers_semantic` instead.
     pub fn check_context_triggers(
         &self,
         user_id: &str,
@@ -331,6 +352,84 @@ impl ProspectiveStore {
 
         // Sort by priority
         matches.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+        Ok(matches)
+    }
+
+    /// Check for context-triggered reminders using both keyword AND semantic matching
+    ///
+    /// Returns tasks that either:
+    /// - Have keyword matches in the context (score = 1.0), OR
+    /// - Have semantic similarity above their threshold
+    ///
+    /// # Arguments
+    /// * `user_id` - User to check reminders for
+    /// * `context` - Current context text (for keyword matching)
+    /// * `context_embedding` - Precomputed embedding of the context
+    /// * `embed_fn` - Closure to compute embedding for task content
+    ///
+    /// # Returns
+    /// Vector of (task, score) tuples sorted by score (highest first)
+    pub fn check_context_triggers_semantic<F>(
+        &self,
+        user_id: &str,
+        context: &str,
+        context_embedding: &[f32],
+        embed_fn: F,
+    ) -> Result<Vec<(ProspectiveTask, f32)>>
+    where
+        F: Fn(&str) -> Option<Vec<f32>>,
+    {
+        let context_lower = context.to_lowercase();
+        let mut matches: Vec<(ProspectiveTask, f32)> = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+
+        // Get all pending context-based tasks for user
+        let pending_tasks = self.list_for_user(user_id, Some(ProspectiveTaskStatus::Pending))?;
+
+        for task in pending_tasks {
+            if seen_ids.contains(&task.id.0) {
+                continue;
+            }
+
+            if let ProspectiveTrigger::OnContext {
+                ref keywords,
+                threshold,
+            } = task.trigger
+            {
+                // 1. Check keyword matches first (fast path)
+                let keyword_match = keywords
+                    .iter()
+                    .any(|kw| context_lower.contains(&kw.to_lowercase()));
+
+                if keyword_match {
+                    seen_ids.insert(task.id.0);
+                    matches.push((task, 1.0)); // Perfect score for keyword match
+                    continue;
+                }
+
+                // 2. Try semantic matching
+                if let Some(task_embedding) = embed_fn(&task.content) {
+                    let similarity = cosine_similarity(context_embedding, &task_embedding);
+                    if similarity >= threshold {
+                        seen_ids.insert(task.id.0);
+                        matches.push((task, similarity));
+                    }
+                }
+            }
+        }
+
+        // Sort by score (highest first), then by priority
+        matches.sort_by(|a, b| {
+            let score_cmp = b
+                .1
+                .partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if score_cmp != std::cmp::Ordering::Equal {
+                return score_cmp;
+            }
+            b.0.priority.cmp(&a.0.priority)
+        });
 
         Ok(matches)
     }

@@ -3676,6 +3676,274 @@ async fn context_summary(
 }
 
 // =============================================================================
+// PROACTIVE CONTEXT (SHO-116) - Combined recall + reminders for MCP
+// =============================================================================
+
+/// Request for proactive context - returns relevant memories + triggered reminders
+#[derive(Debug, Deserialize)]
+struct ProactiveContextRequest {
+    user_id: String,
+    context: String,
+    #[serde(default = "default_proactive_max_results")]
+    max_results: usize,
+    /// Minimum semantic similarity threshold (0.0-1.0)
+    #[serde(default = "default_semantic_threshold")]
+    semantic_threshold: f32,
+    /// Weight for entity matching in relevance scoring
+    #[serde(default = "default_entity_weight")]
+    entity_match_weight: f32,
+    /// Weight for recency boost
+    #[serde(default = "default_recency_weight")]
+    recency_weight: f32,
+    /// Filter to specific memory types
+    #[serde(default)]
+    memory_types: Vec<String>,
+    /// Whether to auto-ingest the context as a Conversation memory
+    #[serde(default = "default_true")]
+    auto_ingest: bool,
+}
+
+fn default_proactive_max_results() -> usize {
+    5
+}
+fn default_semantic_threshold() -> f32 {
+    0.65
+}
+fn default_entity_weight() -> f32 {
+    0.4
+}
+fn default_recency_weight() -> f32 {
+    0.2
+}
+
+/// Surfaced memory in proactive context response
+#[derive(Debug, Serialize)]
+struct ProactiveSurfacedMemory {
+    id: String,
+    content: String,
+    memory_type: String,
+    score: f32,
+    created_at: String,
+    tags: Vec<String>,
+}
+
+/// Response for proactive context
+#[derive(Debug, Serialize)]
+struct ProactiveContextResponse {
+    /// Relevant memories based on context
+    memories: Vec<ProactiveSurfacedMemory>,
+    /// Due time-based reminders
+    due_reminders: Vec<ReminderItem>,
+    /// Context-triggered reminders (keyword match)
+    context_reminders: Vec<ReminderItem>,
+    /// Total counts
+    memory_count: usize,
+    reminder_count: usize,
+    /// ID of auto-ingested memory (if auto_ingest=true)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ingested_memory_id: Option<String>,
+}
+
+/// POST /api/proactive_context - Combined recall + reminders for AI agents
+///
+/// Returns relevant memories based on semantic similarity and entity matching,
+/// plus any due or context-triggered reminders. Optionally stores the context
+/// as a Conversation memory for future recall.
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id))]
+async fn proactive_context(
+    State(state): State<AppState>,
+    Json(req): Json<ProactiveContextRequest>,
+) -> Result<Json<ProactiveContextResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory_system = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let graph_memory = state
+        .get_user_graph(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    // 1. Semantic recall
+    let context_clone = req.context.clone();
+    let max_results = req.max_results;
+    let memories: Vec<ProactiveSurfacedMemory> = {
+        let memory = memory_system.clone();
+        tokio::task::spawn_blocking(move || {
+            let memory_guard = memory.read();
+            let query = MemoryQuery {
+                query_text: Some(context_clone),
+                max_results,
+                ..Default::default()
+            };
+            let results = memory_guard.recall(&query).unwrap_or_default();
+            results
+                .into_iter()
+                .enumerate()
+                .map(|(rank, m)| {
+                    let total = max_results.max(1);
+                    let rank_score = 1.0 - (rank as f32 / total as f32);
+                    let salience = m.salience_score_with_access();
+                    let score = rank_score * 0.7 + salience * 0.3;
+                    ProactiveSurfacedMemory {
+                        id: m.id.0.to_string(),
+                        content: m.experience.content.clone(),
+                        memory_type: format!("{:?}", m.experience.experience_type),
+                        score,
+                        created_at: m.created_at.to_rfc3339(),
+                        tags: m.experience.entities.clone(),
+                    }
+                })
+                .collect()
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    };
+
+    // 2. Check due reminders
+    let user_id = req.user_id.clone();
+    let due_reminders: Vec<ReminderItem> = {
+        let prospective = state.prospective_store.clone();
+        tokio::task::spawn_blocking(move || {
+            prospective
+                .get_due_tasks(&user_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|t| {
+                    let overdue = t.overdue_seconds();
+                    let trigger_type = match &t.trigger {
+                        ProspectiveTrigger::AtTime { .. } => "time".to_string(),
+                        ProspectiveTrigger::AfterDuration { .. } => "duration".to_string(),
+                        ProspectiveTrigger::OnContext { .. } => "context".to_string(),
+                    };
+                    ReminderItem {
+                        id: t.id.0.to_string(),
+                        content: t.content,
+                        trigger_type,
+                        status: format!("{:?}", t.status).to_lowercase(),
+                        due_at: t.trigger.due_at(),
+                        created_at: t.created_at,
+                        triggered_at: t.triggered_at,
+                        dismissed_at: t.dismissed_at,
+                        priority: t.priority,
+                        tags: t.tags,
+                        overdue_seconds: overdue,
+                    }
+                })
+                .collect()
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    };
+
+    // 3. Check context-triggered reminders (keyword + semantic matching)
+    // First, compute context embedding for semantic matching
+    let context_for_triggers = req.context.clone();
+    let memory_for_embedding = memory_system.clone();
+    let context_embedding: Vec<f32> = tokio::task::spawn_blocking(move || {
+        let memory_guard = memory_for_embedding.read();
+        memory_guard
+            .compute_embedding(&context_for_triggers)
+            .unwrap_or_else(|_| vec![0.0; 384])
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Embedding task panicked: {e}")))?;
+
+    // Now check context triggers with semantic matching
+    let user_id = req.user_id.clone();
+    let context_for_triggers = req.context.clone();
+    let memory_for_task_embed = memory_system.clone();
+    let context_reminders: Vec<ReminderItem> = {
+        let prospective = state.prospective_store.clone();
+        tokio::task::spawn_blocking(move || {
+            let embed_fn = |text: &str| -> Option<Vec<f32>> {
+                let memory_guard = memory_for_task_embed.read();
+                memory_guard.compute_embedding(text).ok()
+            };
+
+            prospective
+                .check_context_triggers_semantic(
+                    &user_id,
+                    &context_for_triggers,
+                    &context_embedding,
+                    embed_fn,
+                )
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(t, score)| {
+                    let overdue = t.overdue_seconds();
+                    ReminderItem {
+                        id: t.id.0.to_string(),
+                        content: t.content,
+                        trigger_type: format!("context (score: {:.2})", score),
+                        status: format!("{:?}", t.status).to_lowercase(),
+                        due_at: t.trigger.due_at(),
+                        created_at: t.created_at,
+                        triggered_at: t.triggered_at,
+                        dismissed_at: t.dismissed_at,
+                        priority: t.priority,
+                        tags: t.tags,
+                        overdue_seconds: overdue,
+                    }
+                })
+                .collect()
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    };
+
+    // 4. Auto-ingest context as Conversation memory (optional)
+    let ingested_memory_id = if req.auto_ingest && !req.context.trim().is_empty() {
+        let context = req.context.clone();
+        let memory = memory_system.clone();
+
+        let memory_id = tokio::task::spawn_blocking(move || {
+            let memory_guard = memory.read();
+
+            let experience = Experience {
+                content: context,
+                experience_type: ExperienceType::Conversation,
+                entities: vec![],
+                tags: vec![],
+                ..Default::default()
+            };
+
+            memory_guard.remember(experience, None).ok()
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?;
+
+        memory_id.map(|id| id.0.to_string())
+    } else {
+        None
+    };
+
+    let memory_count = memories.len();
+    let reminder_count = due_reminders.len() + context_reminders.len();
+
+    // Emit event for dashboard
+    state.emit_event(MemoryEvent {
+        event_type: "PROACTIVE_CONTEXT".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: req.user_id.clone(),
+        memory_id: ingested_memory_id.clone(),
+        content_preview: Some(req.context.chars().take(50).collect()),
+        memory_type: Some("proactive".to_string()),
+        importance: None,
+        count: Some(memory_count + reminder_count),
+    });
+
+    Ok(Json(ProactiveContextResponse {
+        memories,
+        due_reminders,
+        context_reminders,
+        memory_count,
+        reminder_count,
+        ingested_memory_id,
+    }))
+}
+
+// =============================================================================
 // PROACTIVE MEMORY SURFACING (SHO-29) - Push-based relevance surfacing
 // =============================================================================
 
@@ -7115,14 +7383,52 @@ async fn check_context_reminders(
         }));
     }
 
-    let mut matched_tasks = state
-        .prospective_store
-        .check_context_triggers(&req.user_id, &req.context)
+    // Get memory system for embeddings
+    let memory_system = state
+        .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
+    // Compute context embedding for semantic matching
+    let context_for_embed = req.context.clone();
+    let memory_for_embedding = memory_system.clone();
+    let context_embedding: Vec<f32> = tokio::task::spawn_blocking(move || {
+        let memory_guard = memory_for_embedding.read();
+        memory_guard
+            .compute_embedding(&context_for_embed)
+            .unwrap_or_else(|_| vec![0.0; 384])
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Embedding task panicked: {e}")))?;
+
+    // Check context triggers with semantic matching
+    let user_id = req.user_id.clone();
+    let context_for_triggers = req.context.clone();
+    let memory_for_task_embed = memory_system.clone();
+    let prospective = state.prospective_store.clone();
+    let mark_triggered = req.mark_triggered;
+
+    let matched_tasks: Vec<(crate::memory::types::ProspectiveTask, f32)> =
+        tokio::task::spawn_blocking(move || {
+            let embed_fn = |text: &str| -> Option<Vec<f32>> {
+                let memory_guard = memory_for_task_embed.read();
+                memory_guard.compute_embedding(text).ok()
+            };
+
+            prospective
+                .check_context_triggers_semantic(
+                    &user_id,
+                    &context_for_triggers,
+                    &context_embedding,
+                    embed_fn,
+                )
+                .unwrap_or_default()
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?;
+
     // Mark as triggered if requested
-    if req.mark_triggered {
-        for task in &mut matched_tasks {
+    if mark_triggered {
+        for (task, _) in &matched_tasks {
             let _ = state
                 .prospective_store
                 .mark_triggered(&req.user_id, &task.id);
@@ -7131,18 +7437,18 @@ async fn check_context_reminders(
 
     let reminders: Vec<ReminderItem> = matched_tasks
         .into_iter()
-        .map(|t| ReminderItem {
+        .map(|(t, score)| ReminderItem {
             id: t.id.to_string(),
             content: t.content,
-            trigger_type: "context".to_string(),
-            status: if req.mark_triggered {
+            trigger_type: format!("context (score: {:.2})", score),
+            status: if mark_triggered {
                 "triggered".to_string()
             } else {
                 format!("{:?}", t.status).to_lowercase()
             },
             due_at: None,
             created_at: t.created_at,
-            triggered_at: if req.mark_triggered {
+            triggered_at: if mark_triggered {
                 Some(chrono::Utc::now())
             } else {
                 t.triggered_at
@@ -7496,6 +7802,8 @@ async fn main() -> Result<()> {
         .route("/api/brain/{user_id}", get(get_brain_state))
         // Context Summary - Session bootstrap with categorized memories
         .route("/api/context_summary", post(context_summary))
+        // Proactive Context (SHO-116) - Combined recall + reminders for MCP
+        .route("/api/proactive_context", post(proactive_context))
         // Proactive Memory Surfacing (SHO-29) - Push-based relevance
         .route("/api/relevant", post(surface_relevant))
         // Context Monitor WebSocket (SHO-29) - Streaming context surfacing
