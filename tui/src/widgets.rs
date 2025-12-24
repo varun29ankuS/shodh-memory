@@ -795,14 +795,27 @@ fn render_search_detail(f: &mut Frame, area: Rect, state: &AppState) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub fn render_dashboard(f: &mut Frame, area: Rect, state: &AppState) {
+    // Vertical split: ribbon at top, spacer, content below
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),   // Status ribbon
+            Constraint::Length(2),   // Spacer for breathing room
+            Constraint::Min(5),      // Main content
+        ])
+        .split(area);
+
+    render_status_ribbon(f, rows[0], state);
+    // rows[1] is empty spacer
+
     // 40/60 split: Todos+Stats on left, Activity on right
-    let chunks = Layout::default()
+    let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(40),  // Todos + Stats
             Constraint::Percentage(60),  // Activity
         ])
-        .split(area);
+        .split(rows[2]);
 
     // Left panel: split vertically for todos (top) and stats (bottom)
     let left_chunks = Layout::default()
@@ -811,30 +824,137 @@ pub fn render_dashboard(f: &mut Frame, area: Rect, state: &AppState) {
             Constraint::Min(10),      // Todos (expandable)
             Constraint::Length(8),    // Stats summary (compact)
         ])
-        .split(chunks[0]);
+        .split(columns[0]);
 
     render_todos_panel(f, left_chunks[0], state);
     render_compact_stats(f, left_chunks[1], state);
-    render_activity_feed(f, chunks[1], state);
+    render_activity_feed(f, columns[1], state);
 }
 
 // ============================================================================
 // PROJECTS VIEW - Full-width layout with proper spacing
 // ============================================================================
 
-/// Main Projects view - two-column layout
+/// Main Projects view - full-width ribbon + two-column layout
 fn render_projects_view(f: &mut Frame, area: Rect, state: &AppState) {
-    // 50/50 split
+    // Vertical split: ribbon at top, spacer, columns below
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),   // Status ribbon
+            Constraint::Length(2),   // Spacer for breathing room
+            Constraint::Min(5),      // Main content
+        ])
+        .split(area);
+
+    render_status_ribbon(f, rows[0], state);
+    // rows[1] is empty spacer
+
+    // 50/50 columns for main content
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(50),
             Constraint::Percentage(50),
         ])
-        .split(area);
+        .split(rows[2]);
 
     render_projects_sidebar(f, columns[0], state);
     render_todos_panel_right(f, columns[1], state);
+}
+
+/// Full-width status ribbon showing current work context
+fn render_status_ribbon(f: &mut Frame, area: Rect, state: &AppState) {
+    let width = area.width as usize;
+    let ribbon_bg = Color::Rgb(50, 45, 40);
+
+    let in_progress = state.in_progress_todos();
+    let mut spans: Vec<Span> = Vec::new();
+
+    // Current task info
+    if let Some(current) = in_progress.first() {
+        let duration = format_duration_since(&current.created_at);
+
+        // Project name
+        let project_name = if let Some(ref pid) = current.project_id {
+            state.projects.iter()
+                .find(|p| &p.id == pid)
+                .map(|p| p.name.as_str())
+                .unwrap_or("—")
+        } else {
+            "Inbox"
+        };
+
+        // Priority indicator
+        let (pri_icon, pri_color) = match current.priority {
+            TuiPriority::Urgent => ("▲▲▲", MAROON),
+            TuiPriority::High => ("▲▲", SAFFRON),
+            TuiPriority::Medium => ("▲", TEXT_DISABLED),
+            TuiPriority::Low => ("", TEXT_DISABLED),
+        };
+
+        spans.push(Span::styled(" ◐ ", Style::default().fg(SAFFRON).bg(ribbon_bg)));
+        spans.push(Span::styled(
+            truncate(project_name, 15),
+            Style::default().fg(TEXT_SECONDARY).bg(ribbon_bg)
+        ));
+        spans.push(Span::styled(" › ", Style::default().fg(TEXT_DISABLED).bg(ribbon_bg)));
+        spans.push(Span::styled(
+            truncate(&current.content, 30),
+            Style::default().fg(TEXT_PRIMARY).bg(ribbon_bg)
+        ));
+        if !pri_icon.is_empty() {
+            spans.push(Span::styled(
+                format!("  {} ", pri_icon),
+                Style::default().fg(pri_color).bg(ribbon_bg)
+            ));
+        }
+        spans.push(Span::styled(
+            format!("  ⏱ {}", duration),
+            Style::default().fg(TEXT_DISABLED).bg(ribbon_bg)
+        ));
+
+        // Next up (if there's another todo)
+        let todos: Vec<_> = state.todos.iter()
+            .filter(|t| t.status == TuiTodoStatus::Todo)
+            .collect();
+        if let Some(next) = todos.first() {
+            spans.push(Span::styled("   │   ", Style::default().fg(TEXT_DISABLED).bg(ribbon_bg)));
+            spans.push(Span::styled("next: ", Style::default().fg(TEXT_DISABLED).bg(ribbon_bg)));
+            spans.push(Span::styled(
+                truncate(&next.content, 20),
+                Style::default().fg(TEXT_SECONDARY).bg(ribbon_bg)
+            ));
+        }
+    } else {
+        // Idle state
+        spans.push(Span::styled(" ○ ", Style::default().fg(TEXT_DISABLED).bg(ribbon_bg)));
+        spans.push(Span::styled("idle", Style::default().fg(TEXT_DISABLED).bg(ribbon_bg)));
+
+        // Show next todo if any
+        let todos: Vec<_> = state.todos.iter()
+            .filter(|t| t.status == TuiTodoStatus::Todo)
+            .collect();
+        if let Some(next) = todos.first() {
+            spans.push(Span::styled("   │   ", Style::default().fg(TEXT_DISABLED).bg(ribbon_bg)));
+            spans.push(Span::styled("next: ", Style::default().fg(TEXT_DISABLED).bg(ribbon_bg)));
+            spans.push(Span::styled(
+                truncate(&next.content, 25),
+                Style::default().fg(TEXT_SECONDARY).bg(ribbon_bg)
+            ));
+        }
+    }
+
+    // Pad to full width
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    if used < width {
+        spans.push(Span::styled(
+            " ".repeat(width.saturating_sub(used)),
+            Style::default().bg(ribbon_bg)
+        ));
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Left sidebar - projects list with flat navigation (projects + todos)
@@ -842,15 +962,12 @@ fn render_projects_sidebar(f: &mut Frame, area: Rect, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),   // NOW indicator
             Constraint::Min(5),      // Projects list
             Constraint::Length(1),   // Footer
         ])
         .split(area);
 
-    render_now_indicator(f, chunks[0], state);
-
-    let inner = chunks[1];
+    let inner = chunks[0];
     let width = inner.width as usize;
     let mut lines: Vec<Line> = Vec::new();
     let is_left_focused = state.focus_panel == FocusPanel::Left;
@@ -971,54 +1088,22 @@ fn render_projects_sidebar(f: &mut Frame, area: Rect, state: &AppState) {
             Span::styled(" return", Style::default().fg(Color::Rgb(50, 50, 50))),
         ])
     };
-    f.render_widget(Paragraph::new(footer), chunks[2]);
+    f.render_widget(Paragraph::new(footer), chunks[1]);
 }
 
-/// NOW indicator - status with spacing
-fn render_now_indicator(f: &mut Frame, area: Rect, state: &AppState) {
-    let in_progress = state.in_progress_todos();
-    let (overdue, due_today, _blocked) = state.attention_counts();
-    let width = area.width as usize;
+/// Format duration since a timestamp
+fn format_duration_since(created_at: &chrono::DateTime<chrono::Utc>) -> String {
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(*created_at);
 
-    let mut lines: Vec<Line> = Vec::new();
+    let hours = duration.num_hours();
+    let mins = duration.num_minutes() % 60;
 
-    // Line 1: NOW badge + current task
-    if let Some(current) = in_progress.first() {
-        let duration = format_duration_since(&current.created_at);
-        let task_width = width.saturating_sub(18);
-        lines.push(Line::from(vec![
-            Span::styled(" NOW ", Style::default().fg(Color::Rgb(40, 30, 20)).bg(SAFFRON)),
-            Span::styled("  ", Style::default()),
-            Span::styled(truncate(&current.content, task_width), Style::default().fg(TEXT_PRIMARY)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("       ⏱ ", Style::default().fg(TEXT_DISABLED)),
-            Span::styled(duration, Style::default().fg(SAFFRON)),
-        ]));
+    if hours > 0 {
+        format!("{}h {:02}m", hours, mins)
     } else {
-        lines.push(Line::from(vec![
-            Span::styled(" NOW ", Style::default().fg(Color::Rgb(100, 100, 100)).bg(Color::Rgb(50, 50, 50))),
-            Span::styled("  ─ idle ─", Style::default().fg(TEXT_DISABLED)),
-        ]));
-        lines.push(Line::from(""));
+        format!("{}m", mins)
     }
-
-    // Line 3: alerts if any
-    if overdue > 0 || due_today > 0 {
-        let mut alerts: Vec<Span> = vec![Span::styled(" ", Style::default())];
-        if overdue > 0 {
-            alerts.push(Span::styled(format!("⚠ {} overdue", overdue), Style::default().fg(MAROON)));
-            alerts.push(Span::styled("   ", Style::default()));
-        }
-        if due_today > 0 {
-            alerts.push(Span::styled(format!("{} due today", due_today), Style::default().fg(TURMERIC)));
-        }
-        lines.push(Line::from(alerts));
-    } else {
-        lines.push(Line::from(""));
-    }
-
-    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// Right panel - todos for selected project
@@ -1268,21 +1353,6 @@ fn render_sidebar_todo(todo: &TuiTodo, width: usize, is_selected: bool, is_panel
         Span::styled(format!("{} ", icon), Style::default().fg(color).bg(bg)),
         Span::styled(truncate(&todo.content, content_width), Style::default().fg(TEXT_SECONDARY).bg(bg)),
     ])
-}
-
-/// Format duration since a timestamp
-fn format_duration_since(created_at: &chrono::DateTime<chrono::Utc>) -> String {
-    let now = chrono::Utc::now();
-    let duration = now.signed_duration_since(*created_at);
-
-    let hours = duration.num_hours();
-    let mins = duration.num_minutes() % 60;
-
-    if hours > 0 {
-        format!("{}h {:02}m", hours, mins)
-    } else {
-        format!("{}m", mins)
-    }
 }
 
 /// Compact stats panel for dashboard
