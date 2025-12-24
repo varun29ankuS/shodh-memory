@@ -40,19 +40,15 @@ impl TodoStore {
         opts.set_max_write_buffer_number(2);
         opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
 
-        let todo_db = Arc::new(
-            DB::open(&opts, todos_path.join("items"))
-                .context("Failed to open todos DB")?,
-        );
+        let todo_db =
+            Arc::new(DB::open(&opts, todos_path.join("items")).context("Failed to open todos DB")?);
 
         let project_db = Arc::new(
-            DB::open(&opts, todos_path.join("projects"))
-                .context("Failed to open projects DB")?,
+            DB::open(&opts, todos_path.join("projects")).context("Failed to open projects DB")?,
         );
 
         let index_db = Arc::new(
-            DB::open(&opts, todos_path.join("index"))
-                .context("Failed to open todos index DB")?,
+            DB::open(&opts, todos_path.join("index")).context("Failed to open todos index DB")?,
         );
 
         tracing::info!("Todo store initialized");
@@ -103,7 +99,12 @@ impl TodoStore {
         batch.put(status_key.as_bytes(), b"1");
 
         // Index by priority
-        let priority_key = format!("priority:{}:{}:{}", todo.priority.value(), todo.user_id, id_str);
+        let priority_key = format!(
+            "priority:{}:{}:{}",
+            todo.priority.value(),
+            todo.user_id,
+            id_str
+        );
         batch.put(priority_key.as_bytes(), b"1");
 
         // Index by project
@@ -148,7 +149,12 @@ impl TodoStore {
         let status_key = format!("status:{:?}:{}:{}", todo.status, todo.user_id, id_str);
         batch.delete(status_key.as_bytes());
 
-        let priority_key = format!("priority:{}:{}:{}", todo.priority.value(), todo.user_id, id_str);
+        let priority_key = format!(
+            "priority:{}:{}:{}",
+            todo.priority.value(),
+            todo.user_id,
+            id_str
+        );
         batch.delete(priority_key.as_bytes());
 
         if let Some(ref project_id) = todo.project_id {
@@ -245,7 +251,11 @@ impl TodoStore {
     }
 
     /// Complete a todo (marks as Done, handles recurrence)
-    pub fn complete_todo(&self, user_id: &str, todo_id: &TodoId) -> Result<Option<(Todo, Option<Todo>)>> {
+    pub fn complete_todo(
+        &self,
+        user_id: &str,
+        todo_id: &TodoId,
+    ) -> Result<Option<(Todo, Option<Todo>)>> {
         if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
             // Remove old indices
             self.remove_todo_indices(&todo)?;
@@ -514,7 +524,9 @@ impl TodoStore {
     pub fn list_projects(&self, user_id: &str) -> Result<Vec<Project>> {
         let mut projects = Vec::new();
 
-        let iter = self.project_db.prefix_iterator(format!("{}:", user_id).as_bytes());
+        let iter = self
+            .project_db
+            .prefix_iterator(format!("{}:", user_id).as_bytes());
 
         for item in iter {
             let (key, value) = item?;
@@ -733,7 +745,9 @@ mod tests {
         let project = Project::new("test_user".to_string(), "Test Project".to_string());
         store.store_project(&project).unwrap();
 
-        let found = store.find_project_by_name("test_user", "test project").unwrap();
+        let found = store
+            .find_project_by_name("test_user", "test project")
+            .unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().name, "Test Project");
     }

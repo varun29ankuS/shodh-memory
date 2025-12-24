@@ -2930,7 +2930,9 @@ impl Todo {
     /// Check if todo is overdue
     pub fn is_overdue(&self) -> bool {
         if let Some(due) = &self.due_date {
-            Utc::now() > *due && self.status != TodoStatus::Done && self.status != TodoStatus::Cancelled
+            Utc::now() > *due
+                && self.status != TodoStatus::Done
+                && self.status != TodoStatus::Cancelled
         } else {
             false
         }
@@ -2940,7 +2942,8 @@ impl Todo {
     pub fn overdue_seconds(&self) -> Option<i64> {
         if let Some(due) = &self.due_date {
             let now = Utc::now();
-            if now > *due && self.status != TodoStatus::Done && self.status != TodoStatus::Cancelled {
+            if now > *due && self.status != TodoStatus::Done && self.status != TodoStatus::Cancelled
+            {
                 return Some((now - *due).num_seconds());
             }
         }

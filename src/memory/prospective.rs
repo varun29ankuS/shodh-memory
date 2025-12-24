@@ -421,10 +421,7 @@ impl ProspectiveStore {
 
         // Sort by score (highest first), then by priority
         matches.sort_by(|a, b| {
-            let score_cmp = b
-                .1
-                .partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal);
+            let score_cmp = b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
             if score_cmp != std::cmp::Ordering::Equal {
                 return score_cmp;
             }

@@ -58,8 +58,8 @@ use memory::{
     prospective::ProspectiveStore, todo_formatter, ActivatedMemory, Experience, ExperienceType,
     GraphStats as VisualizationStats, Memory, MemoryConfig, MemoryId, MemoryStats, MemorySystem,
     Project, ProjectId, ProjectStats, ProspectiveTask, ProspectiveTaskId, ProspectiveTaskStatus,
-    ProspectiveTrigger, Query as MemoryQuery, SharedMemory, Todo, TodoId, TodoPriority,
-    TodoStatus, TodoStore, UserTodoStats,
+    ProspectiveTrigger, Query as MemoryQuery, SharedMemory, Todo, TodoId, TodoPriority, TodoStatus,
+    TodoStore, UserTodoStats,
 };
 
 /// Audit event for history tracking

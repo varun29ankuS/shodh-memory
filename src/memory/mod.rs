@@ -58,7 +58,6 @@ pub use crate::memory::introspection::{
     MemoryChange, PruningReason, ReplayEvent, ReportPeriod, StrengtheningReason,
 };
 pub use crate::memory::prospective::ProspectiveStore;
-pub use crate::memory::todos::{ProjectStats, TodoStore, UserTodoStats};
 pub use crate::memory::replay::{
     InterferenceCheckResult, InterferenceDetector, InterferenceRecord, ReplayCandidate,
     ReplayCycleResult, ReplayManager,
@@ -68,6 +67,7 @@ pub use crate::memory::retrieval::{
     AnticipatoryPrefetch, IndexHealth, MemoryGraphStats, PrefetchContext, PrefetchReason,
     PrefetchResult, ReinforcementStats, RetrievalFeedback, RetrievalOutcome, TrackedRetrieval,
 };
+pub use crate::memory::todos::{ProjectStats, TodoStore, UserTodoStats};
 pub use crate::memory::visualization::{GraphStats, MemoryLogger};
 
 /// Configuration for the memory system

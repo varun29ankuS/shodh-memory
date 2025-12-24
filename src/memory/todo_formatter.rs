@@ -333,10 +333,7 @@ pub fn format_user_stats(stats: &UserTodoStats) -> String {
     output.push_str(&"─".repeat(LINE_WIDTH));
     output.push('\n');
 
-    output.push_str(&format!(
-        "\n  ◐ In Progress    {:>4}\n",
-        stats.in_progress
-    ));
+    output.push_str(&format!("\n  ◐ In Progress    {:>4}\n", stats.in_progress));
     output.push_str(&format!("  ○ Todo           {:>4}\n", stats.todo));
     output.push_str(&format!("  ⊘ Blocked        {:>4}\n", stats.blocked));
     output.push_str(&format!("  ◌ Backlog        {:>4}\n", stats.backlog));
