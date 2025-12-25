@@ -3634,7 +3634,7 @@ pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
             Span::styled("refresh ", Style::default().fg(Color::DarkGray)),
         ]);
     } else if matches!(state.view_mode, ViewMode::Dashboard | ViewMode::Projects) {
-        // Todo controls for Dashboard/Projects
+        // Todo controls for Dashboard/Projects - show full priority labels
         keys.extend([
             Span::styled(
                 "x ",
@@ -3643,13 +3643,8 @@ pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("done ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "!@#$ ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("pri ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Spc ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("status ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 "[] ",
                 Style::default()
@@ -3657,6 +3652,34 @@ pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("move ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "! ",
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("urg ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "@ ",
+                Style::default()
+                    .fg(Color::Rgb(255, 165, 0))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("hi ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "# ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("med ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "$ ",
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("low ", Style::default().fg(Color::DarkGray)),
         ]);
     } else {
         keys.extend([
