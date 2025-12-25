@@ -1906,6 +1906,36 @@ fn render_todos_panel(f: &mut Frame, area: Rect, state: &AppState) {
                 format!("    +{} more", backlog.len() - show_count),
                 Style::default().fg(TEXT_DISABLED),
             )));
+            used_lines += 1;
+        }
+    }
+
+    // Done section (show recent completions)
+    let done: Vec<_> = state.todos.iter()
+        .filter(|t| t.status == TuiTodoStatus::Done)
+        .collect();
+    if !done.is_empty() && used_lines < available_lines {
+        lines.push(Line::from(Span::styled(
+            format!(" ● Done ({})", done.len()),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        )));
+        used_lines += 1;
+        let show_count = (available_lines - used_lines).min(done.len()).min(3);
+        for todo in done.iter().take(show_count) {
+            let is_selected = state.selected_todo == flat_idx && is_focused;
+            lines.push(render_dashboard_todo_line(todo, width, is_selected, is_focused));
+            used_lines += 1;
+            if is_selected && used_lines < available_lines {
+                lines.push(render_action_bar(todo));
+                used_lines += 1;
+            }
+            flat_idx += 1;
+        }
+        if done.len() > show_count {
+            lines.push(Line::from(Span::styled(
+                format!("    +{} more", done.len() - show_count),
+                Style::default().fg(TEXT_DISABLED),
+            )));
         }
     }
 
