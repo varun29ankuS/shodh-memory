@@ -9,7 +9,7 @@
 use chrono::{DateTime, Datelike, Utc};
 
 use super::todos::{ProjectStats, UserTodoStats};
-use super::types::{Project, Todo, TodoStatus};
+use super::types::{Project, ProjectStatus, Todo, TodoStatus};
 
 /// Width of formatted output
 const LINE_WIDTH: usize = 70;
@@ -94,7 +94,31 @@ fn format_section_header(label: &str) -> String {
     format!("{} {}", label, "─".repeat(dashes))
 }
 
+/// Format a subtask line with indentation
+pub fn format_subtask_line(todo: &Todo, project_name: Option<&str>) -> String {
+    let status = todo.status.icon();
+    let priority = format!("{:3}", todo.priority.indicator());
+    let short_id = todo.id.short();
+
+    // Indented by 4 extra spaces for subtasks
+    let mut line = format!("      {} {} {}  {}", status, priority, short_id, todo.content);
+
+    if let Some(proj) = project_name {
+        let content_width = line.chars().count();
+        if content_width < LINE_WIDTH - proj.len() - 2 {
+            let padding = LINE_WIDTH - content_width - proj.len() - 2;
+            line.push_str(&" ".repeat(padding));
+        } else {
+            line.push_str("  ");
+        }
+        line.push_str(proj);
+    }
+
+    line
+}
+
 /// Format list of todos grouped by status (Linear-style main view)
+/// Subtasks are shown indented under their parent todos
 pub fn format_todo_list(todos: &[Todo], projects: &[Project]) -> String {
     if todos.is_empty() {
         return "No todos found.".to_string();
@@ -106,6 +130,10 @@ pub fn format_todo_list(todos: &[Todo], projects: &[Project]) -> String {
         width = LINE_WIDTH - 14
     );
 
+    // Separate parent todos and subtasks
+    let parent_todos: Vec<_> = todos.iter().filter(|t| t.parent_id.is_none()).collect();
+    let subtasks: Vec<_> = todos.iter().filter(|t| t.parent_id.is_some()).collect();
+
     // Group by status in workflow order
     let status_order = [
         (TodoStatus::InProgress, "In Progress ◐"),
@@ -115,7 +143,10 @@ pub fn format_todo_list(todos: &[Todo], projects: &[Project]) -> String {
     ];
 
     for (status, label) in status_order {
-        let items: Vec<_> = todos.iter().filter(|t| t.status == status).collect();
+        let items: Vec<_> = parent_todos
+            .iter()
+            .filter(|t| t.status == status)
+            .collect();
 
         if !items.is_empty() {
             output.push_str(&format_section_header(label));
@@ -130,6 +161,23 @@ pub fn format_todo_list(todos: &[Todo], projects: &[Project]) -> String {
 
                 output.push_str(&format_todo_line(todo, project_name, true));
                 output.push('\n');
+
+                // Find and render subtasks of this todo
+                let todo_subtasks: Vec<_> = subtasks
+                    .iter()
+                    .filter(|st| st.parent_id.as_ref() == Some(&todo.id))
+                    .collect();
+
+                for subtask in todo_subtasks {
+                    let subtask_project = subtask
+                        .project_id
+                        .as_ref()
+                        .and_then(|pid| projects.iter().find(|p| p.id == *pid))
+                        .map(|p| p.name.as_str());
+
+                    output.push_str(&format_subtask_line(subtask, subtask_project));
+                    output.push('\n');
+                }
             }
             output.push('\n');
         }
@@ -323,6 +371,32 @@ pub fn format_project_created(project: &Project) -> String {
     )
 }
 
+/// Format project update output
+pub fn format_project_updated(project: &Project) -> String {
+    let status_str = match project.status {
+        ProjectStatus::Active => "Active",
+        ProjectStatus::OnHold => "On Hold",
+        ProjectStatus::Completed => "Completed",
+        ProjectStatus::Archived => "Archived",
+    };
+    format!(
+        "✓ Updated project '{}' (Status: {})",
+        project.name, status_str
+    )
+}
+
+/// Format project delete output
+pub fn format_project_deleted(project: &Project, todos_deleted: usize) -> String {
+    if todos_deleted > 0 {
+        format!(
+            "✓ Deleted project '{}' and {} todos",
+            project.name, todos_deleted
+        )
+    } else {
+        format!("✓ Deleted project '{}'", project.name)
+    }
+}
+
 /// Format user todo stats
 pub fn format_user_stats(stats: &UserTodoStats) -> String {
     let mut output = format!(
@@ -362,10 +436,44 @@ pub fn parse_due_date(input: &str) -> Option<DateTime<Utc>> {
             .unwrap_or(dt)
     };
 
+    // Handle "next <day>" patterns
+    if input_lower.starts_with("next ") {
+        let day = input_lower.strip_prefix("next ").unwrap_or("");
+        return match day {
+            "monday" | "mon" => Some(next_weekday(now + Duration::days(7), 1)),
+            "tuesday" | "tue" => Some(next_weekday(now + Duration::days(7), 2)),
+            "wednesday" | "wed" => Some(next_weekday(now + Duration::days(7), 3)),
+            "thursday" | "thu" => Some(next_weekday(now + Duration::days(7), 4)),
+            "friday" | "fri" => Some(next_weekday(now + Duration::days(7), 5)),
+            "saturday" | "sat" => Some(next_weekday(now + Duration::days(7), 6)),
+            "sunday" | "sun" => Some(next_weekday(now + Duration::days(7), 0)),
+            "week" => Some(end_of_day(now + Duration::weeks(1))),
+            "month" => Some(end_of_day(now + Duration::days(30))),
+            _ => None,
+        };
+    }
+
+    // Handle "in X days/weeks" patterns
+    if input_lower.starts_with("in ") {
+        let rest = input_lower.strip_prefix("in ").unwrap_or("");
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        if parts.len() == 2 {
+            if let Ok(num) = parts[0].parse::<i64>() {
+                return match parts[1] {
+                    "day" | "days" => Some(end_of_day(now + Duration::days(num))),
+                    "week" | "weeks" => Some(end_of_day(now + Duration::weeks(num))),
+                    "month" | "months" => Some(end_of_day(now + Duration::days(num * 30))),
+                    _ => None,
+                };
+            }
+        }
+    }
+
     match input_lower.as_str() {
         "today" => Some(end_of_day(now)),
         "tomorrow" => Some(end_of_day(now + Duration::days(1))),
         "next week" => Some(end_of_day(now + Duration::weeks(1))),
+        "next month" => Some(end_of_day(now + Duration::days(30))),
         "monday" | "mon" => Some(next_weekday(now, 1)),
         "tuesday" | "tue" => Some(next_weekday(now, 2)),
         "wednesday" | "wed" => Some(next_weekday(now, 3)),
@@ -373,6 +481,13 @@ pub fn parse_due_date(input: &str) -> Option<DateTime<Utc>> {
         "friday" | "fri" => Some(next_weekday(now, 5)),
         "saturday" | "sat" => Some(next_weekday(now, 6)),
         "sunday" | "sun" => Some(next_weekday(now, 0)),
+        "eod" | "end of day" => Some(end_of_day(now)),
+        "eow" | "end of week" => Some(next_weekday(now, 5)), // Friday
+        "eom" | "end of month" => {
+            let next_month = now.with_day(1).unwrap() + Duration::days(32);
+            let first_of_next = next_month.with_day(1).unwrap();
+            Some(end_of_day(first_of_next - Duration::days(1)))
+        }
         _ => {
             // Try parsing as ISO date
             chrono::DateTime::parse_from_rfc3339(input)

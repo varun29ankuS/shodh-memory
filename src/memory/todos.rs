@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use super::types::{Project, ProjectId, Todo, TodoId, TodoStatus};
+use super::types::{Project, ProjectId, ProjectStatus, Todo, TodoId, TodoStatus};
 
 /// Storage and query engine for todos and projects
 pub struct TodoStore {
@@ -631,6 +631,69 @@ impl TodoStore {
         stats.total = todos.len();
 
         Ok(stats)
+    }
+
+    /// Update a project's properties
+    pub fn update_project(
+        &self,
+        user_id: &str,
+        project_id: &ProjectId,
+        name: Option<String>,
+        description: Option<Option<String>>,
+        status: Option<ProjectStatus>,
+        color: Option<Option<String>>,
+    ) -> Result<Option<Project>> {
+        if let Some(mut project) = self.get_project(user_id, project_id)? {
+            let old_name = project.name.clone();
+            let mut changed = false;
+
+            if let Some(new_name) = name {
+                if !new_name.trim().is_empty() && new_name != project.name {
+                    project.name = new_name;
+                    changed = true;
+                }
+            }
+
+            if let Some(new_description) = description {
+                project.description = new_description;
+                changed = true;
+            }
+
+            if let Some(new_status) = status {
+                if new_status != project.status {
+                    project.status = new_status.clone();
+                    changed = true;
+
+                    // Set completed_at when archiving or completing
+                    if new_status == ProjectStatus::Completed || new_status == ProjectStatus::Archived
+                    {
+                        project.completed_at = Some(Utc::now());
+                    } else {
+                        project.completed_at = None;
+                    }
+                }
+            }
+
+            if let Some(new_color) = color {
+                project.color = new_color;
+                changed = true;
+            }
+
+            if changed {
+                // Update name index if name changed
+                if project.name != old_name {
+                    let old_name_key =
+                        format!("project_name:{}:{}", old_name.to_lowercase(), user_id);
+                    self.index_db.delete(old_name_key.as_bytes())?;
+                }
+
+                self.store_project(&project)?;
+            }
+
+            Ok(Some(project))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Delete a project (and optionally its todos)

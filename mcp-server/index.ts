@@ -837,7 +837,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // =================================================================
       {
         name: "add_todo",
-        description: "Add a task to your todo list. Supports GTD workflow with projects, contexts (@computer, @phone), priorities, and due dates.",
+        description: "Add a task to your todo list. Supports GTD workflow with projects, contexts (@computer, @phone), priorities, due dates, and subtasks (via parent_id).",
         inputSchema: {
           type: "object",
           properties: {
@@ -1012,6 +1012,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "reorder_todo",
+        description: "Move a todo up or down within its status group. Use to prioritize tasks manually.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            todo_id: {
+              type: "string",
+              description: "Todo ID or short prefix",
+            },
+            direction: {
+              type: "string",
+              enum: ["up", "down"],
+              description: "Direction to move the todo",
+            },
+          },
+          required: ["todo_id", "direction"],
+        },
+      },
+      {
         name: "add_project",
         description: "Create a new project to group todos.",
         inputSchema: {
@@ -1038,11 +1057,59 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "archive_project",
+        description:
+          "Archive a project. Archived projects are hidden by default but can be restored.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            project: {
+              type: "string",
+              description: "Project name or ID to archive",
+            },
+          },
+          required: ["project"],
+        },
+      },
+      {
+        name: "delete_project",
+        description:
+          "Permanently delete a project. Use delete_todos=true to also delete all todos in the project.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            project: {
+              type: "string",
+              description: "Project name or ID to delete",
+            },
+            delete_todos: {
+              type: "boolean",
+              description: "Also delete all todos in this project (default: false)",
+            },
+          },
+          required: ["project"],
+        },
+      },
+      {
         name: "todo_stats",
         description: "Get statistics about your todos - counts by status, overdue items, etc.",
         inputSchema: {
           type: "object",
           properties: {},
+        },
+      },
+      {
+        name: "list_subtasks",
+        description: "List subtasks of a parent todo. Use add_todo with parent_id to create subtasks.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            parent_id: {
+              type: "string",
+              description: "Parent todo ID or short prefix",
+            },
+          },
+          required: ["parent_id"],
         },
       },
     ],
@@ -2460,6 +2527,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "reorder_todo": {
+        const { todo_id, direction } = args as { todo_id: string; direction: string };
+
+        interface ReorderTodoResponse {
+          success: boolean;
+          todo: unknown;
+          formatted: string;
+        }
+
+        const result = await apiCall<ReorderTodoResponse>(`/api/todos/${todo_id}/reorder`, "POST", {
+          user_id: USER_ID,
+          direction,
+        });
+
+        return {
+          content: [{ type: "text", text: result.formatted }],
+        };
+      }
+
       case "add_project": {
         const { name, description } = args as { name: string; description?: string };
 
@@ -2496,6 +2582,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "archive_project": {
+        const { project } = args as { project: string };
+
+        interface ProjectResponse {
+          success: boolean;
+          project: { id: string; name: string };
+          formatted: string;
+        }
+
+        const result = await apiCall<ProjectResponse>(`/api/projects/${encodeURIComponent(project)}/update`, "POST", {
+          user_id: USER_ID,
+          status: "Archived",
+        });
+
+        return {
+          content: [{ type: "text", text: result.formatted }],
+        };
+      }
+
+      case "delete_project": {
+        const { project, delete_todos } = args as { project: string; delete_todos?: boolean };
+
+        interface ProjectResponse {
+          success: boolean;
+          project: { id: string; name: string };
+          formatted: string;
+        }
+
+        const result = await apiCall<ProjectResponse>(`/api/projects/${encodeURIComponent(project)}`, "DELETE", {
+          user_id: USER_ID,
+          delete_todos: delete_todos ?? false,
+        });
+
+        return {
+          content: [{ type: "text", text: result.formatted }],
+        };
+      }
+
       case "todo_stats": {
         interface TodoStatsResponse {
           stats: unknown;
@@ -2511,6 +2635,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "list_subtasks": {
+        const { parent_id } = args as { parent_id: string };
+
+        interface ListSubtasksResponse {
+          success: boolean;
+          todos: unknown[];
+          formatted: string;
+        }
+
+        const result = await apiCall<ListSubtasksResponse>(
+          `/api/todos/${parent_id}/subtasks?user_id=${USER_ID}`,
+          "GET"
+        );
+
+        return {
+          content: [{ type: "text", text: result.formatted }],
+        };
+      }
 
       default:
         throw new Error(`Unknown tool: ${name}`);
