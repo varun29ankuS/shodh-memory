@@ -1436,6 +1436,27 @@ pub struct AppState {
     pub current_operation: Option<CurrentOperation>,
     /// Last memory being used/referenced (for ribbon display)
     pub last_used_memory: Option<LastUsedMemory>,
+    /// Claude Code context sessions (multiple windows supported)
+    pub context_sessions: Vec<ContextSession>,
+}
+
+/// Claude Code context session status
+#[derive(Debug, Clone, Default)]
+pub struct ContextSession {
+    /// Session ID (unique per Claude window)
+    pub session_id: String,
+    /// Tokens used
+    pub tokens_used: u64,
+    /// Token budget (context window size)
+    pub tokens_budget: u64,
+    /// Usage percentage
+    pub percent_used: u8,
+    /// Current directory/task
+    pub current_task: Option<String>,
+    /// Model name
+    pub model: Option<String>,
+    /// Last update time
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl AppState {
@@ -1503,6 +1524,7 @@ impl AppState {
             selected_connection: 0,
             current_operation: None,
             last_used_memory: None,
+            context_sessions: Vec::new(),
         }
     }
 

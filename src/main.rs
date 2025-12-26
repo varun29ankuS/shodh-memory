@@ -85,6 +85,29 @@ pub struct MemoryEvent {
     pub count: Option<usize>, // For retrieve events - number of results
 }
 
+/// Context status from Claude Code (MCP server reports this via status line)
+/// Streamed to TUI via separate SSE channel for real-time context window display
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ContextStatus {
+    /// Session identifier (from Claude Code session_id)
+    pub session_id: Option<String>,
+    /// Tokens used in current session
+    pub tokens_used: u64,
+    /// Token budget (context window size)
+    pub tokens_budget: u64,
+    /// Usage percentage (0-100)
+    pub percent_used: u8,
+    /// Current working directory (approximates current task)
+    pub current_task: Option<String>,
+    /// Model name being used
+    pub model: Option<String>,
+    /// Last update timestamp
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// All active Claude Code sessions (keyed by session_id)
+pub type ContextSessions = DashMap<String, ContextStatus>;
+
 // Note: Audit and memory configuration is now in config.rs and loaded via ServerConfig
 
 /// Helper struct for audit log rotation (allows spawn_blocking with minimal clone)
@@ -228,6 +251,13 @@ pub struct MultiUserMemoryManager {
     /// GTD-style todo store (Linear-inspired)
     /// Handles todos, projects, and task management
     todo_store: Arc<TodoStore>,
+
+    /// Context status from Claude Code sessions (keyed by session_id)
+    /// Multiple Claude windows can run simultaneously, each with own context
+    context_sessions: Arc<ContextSessions>,
+    
+    /// SSE broadcaster for context status updates (separate from memory events)
+    context_broadcaster: tokio::sync::broadcast::Sender<ContextStatus>,
 }
 
 impl MultiUserMemoryManager {
@@ -370,6 +400,11 @@ impl MultiUserMemoryManager {
             streaming_extractor,
             prospective_store,
             todo_store,
+            context_sessions: Arc::new(DashMap::new()),
+            context_broadcaster: {
+                let (tx, _) = tokio::sync::broadcast::channel(16);
+                tx
+            },
         };
 
         // Perform initial audit log rotation on startup
@@ -1516,6 +1551,92 @@ async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<serde_
             "users_in_cache": users_in_cache,
             "timestamp": chrono::Utc::now().to_rfc3339()
         })),
+    )
+}
+
+/// Update context status from Claude Code status line script
+/// Called by a custom status line script to report token usage and current task
+#[derive(Debug, Deserialize)]
+struct ContextStatusRequest {
+    /// Session ID from Claude Code (unique per window)
+    pub session_id: String,
+    /// Tokens used in current context window
+    pub tokens_used: u64,
+    /// Context window size (budget)
+    pub tokens_budget: u64,
+    /// Current working directory
+    pub current_dir: Option<String>,
+    /// Model display name
+    pub model: Option<String>,
+}
+
+async fn update_context_status(
+    State(state): State<AppState>,
+    Json(req): Json<ContextStatusRequest>,
+) -> Json<serde_json::Value> {
+    let percent_used = if req.tokens_budget > 0 {
+        ((req.tokens_used as f64 / req.tokens_budget as f64) * 100.0) as u8
+    } else {
+        0
+    };
+
+    let status = ContextStatus {
+        session_id: Some(req.session_id.clone()),
+        tokens_used: req.tokens_used,
+        tokens_budget: req.tokens_budget,
+        percent_used,
+        current_task: req.current_dir,
+        model: req.model,
+        updated_at: chrono::Utc::now(),
+    };
+
+    // Store by session_id (allows multiple Claude windows)
+    state.context_sessions.insert(req.session_id, status.clone());
+
+    // Broadcast for TUI SSE subscribers
+    let _ = state.context_broadcaster.send(status);
+
+    Json(serde_json::json!({
+        "success": true,
+        "percent_used": percent_used
+    }))
+}
+
+/// Get all active context sessions
+async fn get_context_status(State(state): State<AppState>) -> Json<Vec<ContextStatus>> {
+    let sessions: Vec<ContextStatus> = state.context_sessions
+        .iter()
+        .map(|r| r.value().clone())
+        .collect();
+    Json(sessions)
+}
+
+/// SSE endpoint for context status updates (no auth - local status line script)
+async fn context_status_sse(
+    State(state): State<AppState>,
+) -> axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    use tokio_stream::wrappers::BroadcastStream;
+    use futures::StreamExt;
+
+    let receiver = state.context_broadcaster.subscribe();
+    let stream = BroadcastStream::new(receiver);
+
+    let event_stream = stream.filter_map(|result| async move {
+        match result {
+            Ok(status) => {
+                let data = serde_json::to_string(&status).ok()?;
+                Some(Ok(axum::response::sse::Event::default()
+                    .event("context")
+                    .data(data)))
+            }
+            Err(_) => None,
+        }
+    });
+
+    axum::response::Sse::new(event_stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
     )
 }
 
@@ -9008,6 +9129,10 @@ async fn main() -> Result<()> {
         .nest_service("/static", ServeDir::new("static"))
         .route("/health", get(health))
         .route("/health/live", get(health_live)) // P0.9: Kubernetes liveness probe
+        // Context status from Claude Code status line (no auth - local script)
+        .route("/api/context_status", post(update_context_status))
+        .route("/api/context_status", get(get_context_status))
+        .route("/api/context_status/stream", get(context_status_sse))
         .route("/health/ready", get(health_ready)) // P0.9: Kubernetes readiness probe
         .route("/health/index", get(health_index)) // Vector index health metrics
         .route("/metrics", get(metrics_endpoint)) // P1.1: Prometheus metrics

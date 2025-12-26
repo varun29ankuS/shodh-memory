@@ -142,6 +142,25 @@ struct TodoStatsApi {
     overdue: u32,
 }
 
+/// Context session from Claude Code (via status line)
+#[derive(Debug, Deserialize, Default)]
+struct ContextSessionApi {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    tokens_used: u64,
+    #[serde(default)]
+    tokens_budget: u64,
+    #[serde(default)]
+    percent_used: u8,
+    #[serde(default)]
+    current_task: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
 pub struct MemoryStream {
     url: String,
     base_url: String,
@@ -477,6 +496,38 @@ impl MemoryStream {
                 state.set_error(format!("Failed to load todos: {}", e));
             }
         }
+        // Fetch Claude Code context sessions (no auth required)
+        if let Ok(sessions) = self.fetch_context_sessions().await {
+            let mut state = self.state.lock().await;
+            state.context_sessions = sessions;
+        }
+    }
+
+    /// Fetch context sessions from Claude Code status line updates
+    async fn fetch_context_sessions(&self) -> Result<Vec<crate::types::ContextSession>, Box<dyn std::error::Error + Send + Sync>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/context_status", self.base_url))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Ok(Vec::new()); // Silently return empty if endpoint not available
+        }
+
+        let sessions: Vec<ContextSessionApi> = resp.json().await.unwrap_or_default();
+        Ok(sessions
+            .into_iter()
+            .map(|s| crate::types::ContextSession {
+                session_id: s.session_id.unwrap_or_default(),
+                tokens_used: s.tokens_used,
+                tokens_budget: s.tokens_budget,
+                percent_used: s.percent_used,
+                current_task: s.current_task,
+                model: s.model,
+                updated_at: s.updated_at.and_then(|d| d.parse().ok()),
+            })
+            .collect())
     }
 
     async fn fetch_todos(

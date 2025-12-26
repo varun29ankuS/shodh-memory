@@ -250,13 +250,14 @@ pub fn render_header(f: &mut Frame, area: Rect, state: &AppState) {
     ]);
     f.render_widget(Paragraph::new(stats_line), title_chunks[1]);
 
-    // Right side: version, status with heartbeat, sparkline, session
+    // Right side: version, status with heartbeat, sparkline, context, session
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // Version
             Constraint::Length(2), // Status with heartbeat
-            Constraint::Length(2), // Sparkline
+            Constraint::Length(2), // Sparkline/activity
+            Constraint::Length(1), // Context window status
             Constraint::Min(0),    // Session
         ])
         .split(chunks[2]);
@@ -346,13 +347,46 @@ pub fn render_header(f: &mut Frame, area: Rect, state: &AppState) {
         right_chunks[2],
     );
 
+    // Context window status from Claude Code
+    let context_line = if let Some(session) = state.context_sessions.first() {
+        let percent = session.percent_used;
+        let color = if percent < 50 {
+            Color::Rgb(100, 200, 100) // Green
+        } else if percent < 80 {
+            Color::Rgb(220, 180, 80) // Yellow
+        } else {
+            Color::Rgb(220, 100, 100) // Red
+        };
+        let tokens_k = session.tokens_used / 1000;
+        let budget_k = session.tokens_budget / 1000;
+        let model = session.model.as_deref().unwrap_or("Claude");
+        Line::from(vec![
+            Span::styled("⬡ ", Style::default().fg(color)),
+            Span::styled(
+                format!("{}%", percent),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {}k/{}k ", tokens_k, budget_k),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(model, Style::default().fg(Color::Rgb(150, 180, 220))),
+        ])
+    } else {
+        Line::from(Span::styled("⬡ --", Style::default().fg(Color::DarkGray)))
+    };
+    f.render_widget(
+        Paragraph::new(context_line).alignment(Alignment::Right),
+        right_chunks[3],
+    );
+
     let session = Line::from(Span::styled(
         state.session_duration(),
         Style::default().fg(Color::White),
     ));
     f.render_widget(
         Paragraph::new(session).alignment(Alignment::Right),
-        right_chunks[3],
+        right_chunks[4],
     );
 }
 
