@@ -497,6 +497,9 @@ impl MemorySystem {
             self.retriever.record_coactivation(&memory_ids);
         }
 
+        // Increment retrieval counter
+        self.stats.write().total_retrievals += 1;
+
         Ok(memories)
     }
 
@@ -544,6 +547,7 @@ impl MemorySystem {
         let criteria = storage::SearchCriteria::ByTags(tags.to_vec());
         let mut memories = self.advanced_search(criteria)?;
         memories.truncate(limit);
+        self.stats.write().total_retrievals += 1;
         Ok(memories)
     }
 
@@ -559,6 +563,7 @@ impl MemorySystem {
         let criteria = storage::SearchCriteria::ByDate { start, end };
         let mut memories = self.advanced_search(criteria)?;
         memories.truncate(limit);
+        self.stats.write().total_retrievals += 1;
         Ok(memories)
     }
 
@@ -2082,7 +2087,9 @@ impl MemorySystem {
     /// memory_system.reinforce_recall(&tracked.memory_ids(), RetrievalOutcome::Helpful)?;
     /// ```
     pub fn recall_tracked(&self, query: &Query) -> Result<TrackedRetrieval> {
-        self.retriever.search_tracked(query, query.max_results)
+        let result = self.retriever.search_tracked(query, query.max_results)?;
+        self.stats.write().total_retrievals += 1;
+        Ok(result)
     }
 
     /// Reinforce memories based on task outcome (core feedback loop)
