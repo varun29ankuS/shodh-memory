@@ -3991,7 +3991,18 @@ async fn proactive_context(
                 let mut helpful_ids: Vec<crate::memory::types::MemoryId> = Vec::new();
                 let mut misleading_ids: Vec<crate::memory::types::MemoryId> = Vec::new();
 
+                // Extract entities from context for fingerprinting
+                let context_entities: Vec<String> =
+                    crate::memory::feedback::extract_entities_simple(&pending.context)
+                        .into_iter()
+                        .collect();
+                let context_embedding = pending.context_embedding.clone();
+
                 for (memory_id, signal) in signals {
+                    // Determine if this memory was helpful or misleading
+                    let is_helpful = signal.value > 0.3;
+                    let is_misleading = signal.value < -0.3;
+
                     // Get or create momentum for this memory
                     let momentum = store.get_or_create_momentum(
                         memory_id.clone(),
@@ -4005,11 +4016,21 @@ async fn proactive_context(
                         momentum.ema
                     };
 
+                    // Add context fingerprint for pattern learning
+                    if is_helpful || is_misleading {
+                        let fingerprint = crate::memory::feedback::ContextFingerprint::new(
+                            context_entities.clone(),
+                            &context_embedding,
+                            is_helpful,
+                        );
+                        momentum.add_context(fingerprint);
+                    }
+
                     // Determine outcome based on signal and EMA change
-                    if signal.value > 0.3 || new_ema > old_ema + 0.05 {
+                    if is_helpful || new_ema > old_ema + 0.05 {
                         reinforced.push(memory_id.0.to_string());
                         helpful_ids.push(memory_id.clone());
-                    } else if signal.value < -0.3 || new_ema < old_ema - 0.05 {
+                    } else if is_misleading || new_ema < old_ema - 0.05 {
                         weakened.push(memory_id.0.to_string());
                         misleading_ids.push(memory_id.clone());
                     }
