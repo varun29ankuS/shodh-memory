@@ -95,6 +95,26 @@ pub enum ConsolidationEvent {
         timestamp: DateTime<Utc>,
     },
 
+    /// Fact confidence decayed due to lack of reinforcement
+    FactDecayed {
+        fact_id: String,
+        fact_content: String,
+        confidence_before: f32,
+        confidence_after: f32,
+        days_since_reinforcement: i64,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Fact was deleted (confidence fell below threshold)
+    FactDeleted {
+        fact_id: String,
+        fact_content: String,
+        final_confidence: f32,
+        support_count: usize,
+        reason: String,
+        timestamp: DateTime<Utc>,
+    },
+
     /// Memory was promoted to a higher tier
     MemoryPromoted {
         memory_id: String,
@@ -249,6 +269,12 @@ pub struct ConsolidationReport {
     /// Facts that were reinforced
     pub reinforced_facts: Vec<FactChange>,
 
+    /// Facts that decayed due to lack of reinforcement
+    pub decayed_facts: Vec<FactChange>,
+
+    /// Facts that were deleted (confidence too low)
+    pub deleted_facts: Vec<FactChange>,
+
     // SHO-105: Replay events
     /// Memories that were replayed for consolidation
     pub replayed_memories: Vec<ReplayEvent>,
@@ -341,6 +367,8 @@ pub struct ConsolidationStats {
     pub edges_pruned: usize,
     pub facts_extracted: usize,
     pub facts_reinforced: usize,
+    pub facts_decayed: usize,
+    pub facts_deleted: usize,
     pub maintenance_cycles: usize,
     pub total_maintenance_duration_ms: u64,
     // SHO-105: Replay statistics
@@ -440,6 +468,8 @@ impl ConsolidationEventBuffer {
             pruned_associations: Vec::new(),
             extracted_facts: Vec::new(),
             reinforced_facts: Vec::new(),
+            decayed_facts: Vec::new(),
+            deleted_facts: Vec::new(),
             // SHO-105: Replay events
             replayed_memories: Vec::new(),
             // SHO-106: Interference events
@@ -608,6 +638,44 @@ impl ConsolidationEventBuffer {
                     report.statistics.facts_reinforced += 1;
                 }
 
+                ConsolidationEvent::FactDecayed {
+                    fact_id,
+                    fact_content,
+                    confidence_after,
+                    days_since_reinforcement,
+                    timestamp,
+                    ..
+                } => {
+                    report.decayed_facts.push(FactChange {
+                        fact_id: fact_id.clone(),
+                        fact_content: fact_content.clone(),
+                        confidence: *confidence_after,
+                        support_count: *days_since_reinforcement as usize,
+                        fact_type: "decayed".to_string(),
+                        timestamp: *timestamp,
+                    });
+                    report.statistics.facts_decayed += 1;
+                }
+
+                ConsolidationEvent::FactDeleted {
+                    fact_id,
+                    fact_content,
+                    final_confidence,
+                    support_count,
+                    reason,
+                    timestamp,
+                } => {
+                    report.deleted_facts.push(FactChange {
+                        fact_id: fact_id.clone(),
+                        fact_content: fact_content.clone(),
+                        confidence: *final_confidence,
+                        support_count: *support_count,
+                        fact_type: reason.clone(),
+                        timestamp: *timestamp,
+                    });
+                    report.statistics.facts_deleted += 1;
+                }
+
                 ConsolidationEvent::MemoryPromoted { .. } => {
                     // Track promotions if needed
                 }
@@ -714,6 +782,8 @@ impl ConsolidationEvent {
             ConsolidationEvent::EdgePruned { timestamp, .. } => *timestamp,
             ConsolidationEvent::FactExtracted { timestamp, .. } => *timestamp,
             ConsolidationEvent::FactReinforced { timestamp, .. } => *timestamp,
+            ConsolidationEvent::FactDecayed { timestamp, .. } => *timestamp,
+            ConsolidationEvent::FactDeleted { timestamp, .. } => *timestamp,
             ConsolidationEvent::MemoryPromoted { timestamp, .. } => *timestamp,
             ConsolidationEvent::MaintenanceCycleCompleted { timestamp, .. } => *timestamp,
             // SHO-105: Replay events
@@ -742,6 +812,8 @@ impl Default for ConsolidationReport {
             pruned_associations: Vec::new(),
             extracted_facts: Vec::new(),
             reinforced_facts: Vec::new(),
+            decayed_facts: Vec::new(),
+            deleted_facts: Vec::new(),
             // SHO-105: Replay events
             replayed_memories: Vec::new(),
             // SHO-106: Interference events

@@ -1055,6 +1055,14 @@ impl MemoryStorage {
 
         Ok(())
     }
+
+    /// Get a reference to the underlying RocksDB instance
+    ///
+    /// Used by SemanticFactStore to share the same database for fact storage.
+    /// Facts use a different key prefix ("facts:") to avoid collisions.
+    pub fn db(&self) -> Arc<DB> {
+        self.db.clone()
+    }
 }
 
 /// Search criteria for memory retrieval

@@ -19,6 +19,7 @@ pub mod todos;
 pub mod types;
 pub mod visualization;
 // pub mod vector_storage;  // Disabled - requires crate::rag::vamana from parent project
+pub mod facts;
 pub mod feedback;
 pub mod graph_retrieval;
 pub mod injection;
@@ -76,6 +77,7 @@ pub use crate::memory::retrieval::{
 };
 pub use crate::memory::todos::{ProjectStats, TodoStore, UserTodoStats};
 pub use crate::memory::visualization::{GraphStats, MemoryLogger};
+pub use crate::memory::facts::{FactQueryResponse, FactStats, SemanticFactStore};
 
 /// Configuration for the memory system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +163,11 @@ pub struct MemorySystem {
     /// Interference detector (SHO-106)
     /// Detects and handles memory interference (retroactive/proactive)
     interference_detector: Arc<RwLock<replay::InterferenceDetector>>,
+
+    /// Semantic fact store (SHO-f0e7)
+    /// Stores distilled knowledge extracted from episodic memories
+    /// Separate from episodic storage: facts persist, episodes flow
+    fact_store: Arc<facts::SemanticFactStore>,
 }
 
 impl MemorySystem {
@@ -207,6 +214,10 @@ impl MemorySystem {
             }
         };
 
+        // SHO-f0e7: Create semantic fact store using the same DB as long-term memory
+        // Facts use "facts:" prefix to avoid key collisions with episodic memories
+        let fact_store = Arc::new(facts::SemanticFactStore::new(storage.db()));
+
         Ok(Self {
             config: config.clone(),
             working_memory: Arc::new(RwLock::new(WorkingMemory::new(config.working_memory_size))),
@@ -226,6 +237,8 @@ impl MemorySystem {
             replay_manager: Arc::new(RwLock::new(replay::ReplayManager::new())),
             // SHO-106: Interference detector
             interference_detector: Arc::new(RwLock::new(replay::InterferenceDetector::new())),
+            // SHO-f0e7: Semantic fact store
+            fact_store,
         })
     }
 
@@ -2740,6 +2753,260 @@ impl MemorySystem {
     pub fn consolidation_event_count(&self) -> usize {
         let events = self.consolidation_events.read();
         events.len()
+    }
+
+    // =========================================================================
+    // SEMANTIC FACT OPERATIONS (SHO-f0e7)
+    // Distilled knowledge extracted from episodic memories
+    // =========================================================================
+
+    /// Distill semantic facts from episodic memories
+    ///
+    /// Runs the consolidation process to extract durable knowledge:
+    /// 1. Find patterns appearing in multiple memories
+    /// 2. Create or reinforce semantic facts
+    /// 3. Store facts in the fact store
+    ///
+    /// # Arguments
+    /// * `user_id` - User whose memories to consolidate
+    /// * `min_support` - Minimum memories needed to form a fact (default: 3)
+    /// * `min_age_days` - Minimum age of memories to consider (default: 7)
+    ///
+    /// # Returns
+    /// ConsolidationResult with stats and newly extracted facts
+    pub fn distill_facts(
+        &self,
+        user_id: &str,
+        min_support: usize,
+        min_age_days: i64,
+    ) -> Result<ConsolidationResult> {
+        // Get all memories for consolidation
+        let all_memories = self.get_all_memories()?;
+
+        // Convert SharedMemory to Memory for consolidator
+        let memories: Vec<Memory> = all_memories
+            .into_iter()
+            .map(|arc_mem| (*arc_mem).clone())
+            .collect();
+
+        // Create consolidator with custom thresholds
+        let consolidator = compression::SemanticConsolidator::with_thresholds(min_support, min_age_days);
+
+        // Run consolidation
+        let result = consolidator.consolidate(&memories);
+
+        // Store extracted facts
+        if !result.new_facts.is_empty() {
+            let stored = self.fact_store.store_batch(user_id, &result.new_facts)?;
+            tracing::info!(
+                user_id = %user_id,
+                facts_extracted = result.facts_extracted,
+                facts_stored = stored,
+                "Semantic distillation complete"
+            );
+
+            // Record consolidation event for each fact
+            for fact in &result.new_facts {
+                self.record_consolidation_event(ConsolidationEvent::FactExtracted {
+                    fact_id: fact.id.clone(),
+                    fact_content: fact.fact.clone(),
+                    confidence: fact.confidence,
+                    fact_type: format!("{:?}", fact.fact_type),
+                    source_memory_count: fact.source_memories.len(),
+                    timestamp: chrono::Utc::now(),
+                });
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Get semantic facts for a user
+    ///
+    /// # Arguments
+    /// * `user_id` - User whose facts to retrieve
+    /// * `limit` - Maximum number of facts to return
+    pub fn get_facts(&self, user_id: &str, limit: usize) -> Result<Vec<SemanticFact>> {
+        self.fact_store.list(user_id, limit)
+    }
+
+    /// Get facts related to a specific entity
+    ///
+    /// # Arguments
+    /// * `user_id` - User whose facts to search
+    /// * `entity` - Entity to search for (e.g., "authentication", "JWT")
+    /// * `limit` - Maximum number of facts to return
+    pub fn get_facts_by_entity(
+        &self,
+        user_id: &str,
+        entity: &str,
+        limit: usize,
+    ) -> Result<Vec<SemanticFact>> {
+        self.fact_store.find_by_entity(user_id, entity, limit)
+    }
+
+    /// Get facts of a specific type
+    ///
+    /// # Arguments
+    /// * `user_id` - User whose facts to search
+    /// * `fact_type` - Type of fact (Preference, Procedure, Definition, etc.)
+    /// * `limit` - Maximum number of facts to return
+    pub fn get_facts_by_type(
+        &self,
+        user_id: &str,
+        fact_type: FactType,
+        limit: usize,
+    ) -> Result<Vec<SemanticFact>> {
+        self.fact_store.find_by_type(user_id, fact_type, limit)
+    }
+
+    /// Search facts by keyword
+    ///
+    /// # Arguments
+    /// * `user_id` - User whose facts to search
+    /// * `query` - Search query
+    /// * `limit` - Maximum number of facts to return
+    pub fn search_facts(&self, user_id: &str, query: &str, limit: usize) -> Result<Vec<SemanticFact>> {
+        self.fact_store.search(user_id, query, limit)
+    }
+
+    /// Get statistics about stored facts
+    pub fn get_fact_stats(&self, user_id: &str) -> Result<facts::FactStats> {
+        self.fact_store.stats(user_id)
+    }
+
+    /// Reinforce a fact with new supporting evidence
+    ///
+    /// Called when a new memory supports an existing fact.
+    /// Increments support_count and boosts confidence.
+    pub fn reinforce_fact(&self, user_id: &str, fact_id: &str, memory_id: &MemoryId) -> Result<bool> {
+        if let Some(mut fact) = self.fact_store.get(user_id, fact_id)? {
+            // Track confidence before change for event
+            let confidence_before = fact.confidence;
+
+            // Increment support
+            fact.support_count += 1;
+            fact.last_reinforced = chrono::Utc::now();
+
+            // Boost confidence with diminishing returns
+            let boost = 0.1 * (1.0 - fact.confidence);
+            fact.confidence = (fact.confidence + boost).min(1.0);
+
+            // Add source if not already present
+            if !fact.source_memories.contains(memory_id) {
+                fact.source_memories.push(memory_id.clone());
+            }
+
+            // Update in store
+            self.fact_store.update(user_id, &fact)?;
+
+            // Record reinforcement event
+            self.record_consolidation_event(ConsolidationEvent::FactReinforced {
+                fact_id: fact.id.clone(),
+                fact_content: fact.fact.clone(),
+                confidence_before,
+                confidence_after: fact.confidence,
+                new_support_count: fact.support_count,
+                timestamp: chrono::Utc::now(),
+            });
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Delete a fact (soft delete or hard delete)
+    pub fn delete_fact(&self, user_id: &str, fact_id: &str) -> Result<bool> {
+        self.fact_store.delete(user_id, fact_id)
+    }
+
+    /// Get the fact store for direct access
+    pub fn fact_store(&self) -> &Arc<facts::SemanticFactStore> {
+        &self.fact_store
+    }
+
+    /// Decay facts for all users during maintenance
+    ///
+    /// Facts decay based on lack of reinforcement. The decay rate is modulated by support_count:
+    /// - Higher support = slower decay (fact is well-established)
+    /// - Lower support = faster decay (fact is tentative)
+    ///
+    /// Returns (facts_decayed, facts_deleted)
+    fn decay_facts_for_all_users(&self) -> Result<(usize, usize)> {
+        const DECAY_THRESHOLD_DAYS: i64 = 30;  // Start decay after 30 days without reinforcement
+        const DELETE_CONFIDENCE: f32 = 0.1;    // Delete facts below this confidence
+        const BASE_DECAY_RATE: f32 = 0.05;     // 5% decay per maintenance cycle
+
+        let now = chrono::Utc::now();
+        let mut total_decayed = 0;
+        let mut total_deleted = 0;
+
+        // Get all users from fact store
+        let user_ids = self.fact_store.list_users(100)?;
+
+        for user_id in &user_ids {
+            // Get all facts for this user
+            let facts = self.fact_store.list(user_id, 10000)?;
+
+            for mut fact in facts {
+                let days_since_reinforcement = (now - fact.last_reinforced).num_days();
+
+                // Only decay facts that haven't been reinforced recently
+                if days_since_reinforcement < DECAY_THRESHOLD_DAYS {
+                    continue;
+                }
+
+                let confidence_before = fact.confidence;
+
+                // Decay rate is reduced by support_count (log scale to prevent infinite protection)
+                // Formula: effective_decay = base_decay / (1 + ln(support_count))
+                let support_protection = 1.0 + (fact.support_count as f32).ln().max(0.0);
+                let effective_decay = BASE_DECAY_RATE / support_protection;
+
+                // Apply decay
+                fact.confidence = (fact.confidence - effective_decay).max(0.0);
+
+                // Delete if below threshold
+                if fact.confidence < DELETE_CONFIDENCE {
+                    // Record deletion event
+                    self.record_consolidation_event(ConsolidationEvent::FactDeleted {
+                        fact_id: fact.id.clone(),
+                        fact_content: fact.fact.clone(),
+                        final_confidence: fact.confidence,
+                        support_count: fact.support_count,
+                        reason: format!("confidence_below_{}", DELETE_CONFIDENCE),
+                        timestamp: now,
+                    });
+
+                    self.fact_store.delete(user_id, &fact.id)?;
+                    total_deleted += 1;
+                } else if fact.confidence < confidence_before {
+                    // Record decay event (only if actually decayed)
+                    self.record_consolidation_event(ConsolidationEvent::FactDecayed {
+                        fact_id: fact.id.clone(),
+                        fact_content: fact.fact.clone(),
+                        confidence_before,
+                        confidence_after: fact.confidence,
+                        days_since_reinforcement,
+                        timestamp: now,
+                    });
+
+                    self.fact_store.update(user_id, &fact)?;
+                    total_decayed += 1;
+                }
+            }
+        }
+
+        if total_decayed > 0 || total_deleted > 0 {
+            tracing::info!(
+                facts_decayed = total_decayed,
+                facts_deleted = total_deleted,
+                "Fact maintenance complete"
+            );
+        }
+
+        Ok((total_decayed, total_deleted))
     }
 }
 

@@ -456,6 +456,8 @@ pub struct ConsolidationResult {
     pub facts_reinforced: usize,
     /// IDs of newly created facts
     pub new_fact_ids: Vec<String>,
+    /// Newly extracted semantic facts (ready for storage)
+    pub new_facts: Vec<SemanticFact>,
 }
 
 /// Semantic consolidation engine
@@ -560,6 +562,7 @@ impl SemanticConsolidator {
                 };
 
                 result.new_fact_ids.push(fact.id.clone());
+                result.new_facts.push(fact);
                 result.facts_extracted += 1;
             }
         }

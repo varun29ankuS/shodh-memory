@@ -3780,6 +3780,153 @@ async fn get_consolidation_events(
     Ok(Json(events))
 }
 
+
+// ============================================================================
+// SEMANTIC FACTS API (SHO-f0e7)
+// Facts are durable knowledge distilled from episodic memories
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct FactsListRequest {
+    user_id: String,
+    #[serde(default = "facts_default_limit")]
+    limit: usize,
+}
+
+fn facts_default_limit() -> usize {
+    50
+}
+
+#[derive(Debug, Deserialize)]
+struct FactsSearchRequest {
+    user_id: String,
+    query: String,
+    #[serde(default = "facts_default_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct FactsByEntityRequest {
+    user_id: String,
+    entity: String,
+    #[serde(default = "facts_default_limit")]
+    limit: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct FactsResponse {
+    facts: Vec<memory::SemanticFact>,
+    total: usize,
+}
+
+/// POST /api/facts/list - List semantic facts for a user
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id))]
+async fn list_facts(
+    State(state): State<AppState>,
+    Json(req): Json<FactsListRequest>,
+) -> Result<Json<FactsResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let user_id = req.user_id.clone();
+    let limit = req.limit;
+
+    let facts = tokio::task::spawn_blocking(move || {
+        let memory_guard = memory.read();
+        memory_guard.get_facts(&user_id, limit)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    let total = facts.len();
+    Ok(Json(FactsResponse { facts, total }))
+}
+
+/// POST /api/facts/search - Search facts by keyword
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id, query = %req.query))]
+async fn search_facts(
+    State(state): State<AppState>,
+    Json(req): Json<FactsSearchRequest>,
+) -> Result<Json<FactsResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let user_id = req.user_id.clone();
+    let query = req.query.clone();
+    let limit = req.limit;
+
+    let facts = tokio::task::spawn_blocking(move || {
+        let memory_guard = memory.read();
+        memory_guard.search_facts(&user_id, &query, limit)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    let total = facts.len();
+    Ok(Json(FactsResponse { facts, total }))
+}
+
+/// POST /api/facts/by-entity - Get facts related to an entity
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id, entity = %req.entity))]
+async fn facts_by_entity(
+    State(state): State<AppState>,
+    Json(req): Json<FactsByEntityRequest>,
+) -> Result<Json<FactsResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let user_id = req.user_id.clone();
+    let entity = req.entity.clone();
+    let limit = req.limit;
+
+    let facts = tokio::task::spawn_blocking(move || {
+        let memory_guard = memory.read();
+        memory_guard.get_facts_by_entity(&user_id, &entity, limit)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    let total = facts.len();
+    Ok(Json(FactsResponse { facts, total }))
+}
+
+/// POST /api/facts/stats - Get statistics about stored facts
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id))]
+async fn get_facts_stats(
+    State(state): State<AppState>,
+    Json(req): Json<FactsListRequest>,
+) -> Result<Json<memory::FactStats>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let user_id = req.user_id.clone();
+
+    let stats = tokio::task::spawn_blocking(move || {
+        let memory_guard = memory.read();
+        memory_guard.get_fact_stats(&user_id)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    Ok(Json(stats))
+}
+
 /// GET /api/context_summary - Get categorized context for session bootstrap
 /// Returns decisions, learnings, patterns, errors organized for LLM consumption
 #[tracing::instrument(skip(state), fields(user_id = %req.user_id))]
@@ -9403,6 +9550,11 @@ async fn main() -> Result<()> {
         // Consolidation Introspection - What the memory system is learning
         .route("/api/consolidation/report", post(get_consolidation_report))
         .route("/api/consolidation/events", post(get_consolidation_events))
+        // Semantic Facts API (SHO-f0e7) - Durable knowledge from episodic memories
+        .route("/api/facts/list", post(list_facts))
+        .route("/api/facts/search", post(search_facts))
+        .route("/api/facts/by-entity", post(facts_by_entity))
+        .route("/api/facts/stats", post(get_facts_stats))
         // List memories - Simple GET endpoint
         .route("/api/list/{user_id}", get(list_memories))
         // Streaming endpoints (moved from public to require auth - SHO-56)
