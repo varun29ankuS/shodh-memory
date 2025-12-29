@@ -220,6 +220,7 @@ impl MemorySystem {
                 total_memories: storage_stats.total_count,
                 long_term_memory_count: storage_stats.total_count,
                 vector_index_count: vector_count,
+                total_retrievals: storage_stats.total_retrievals,
                 ..Default::default()
             }
         };
@@ -533,8 +534,10 @@ impl MemorySystem {
             self.retriever.record_coactivation(&memory_ids);
         }
 
-        // Increment retrieval counter
-        self.stats.write().total_retrievals += 1;
+        // Increment and persist retrieval counter
+        if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+            self.stats.write().total_retrievals = count;
+        }
 
         Ok(memories)
     }
@@ -583,7 +586,9 @@ impl MemorySystem {
         let criteria = storage::SearchCriteria::ByTags(tags.to_vec());
         let mut memories = self.advanced_search(criteria)?;
         memories.truncate(limit);
-        self.stats.write().total_retrievals += 1;
+        if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+            self.stats.write().total_retrievals = count;
+        }
         Ok(memories)
     }
 
@@ -599,7 +604,9 @@ impl MemorySystem {
         let criteria = storage::SearchCriteria::ByDate { start, end };
         let mut memories = self.advanced_search(criteria)?;
         memories.truncate(limit);
-        self.stats.write().total_retrievals += 1;
+        if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+            self.stats.write().total_retrievals = count;
+        }
         Ok(memories)
     }
 
@@ -2124,7 +2131,9 @@ impl MemorySystem {
     /// ```
     pub fn recall_tracked(&self, query: &Query) -> Result<TrackedRetrieval> {
         let result = self.retriever.search_tracked(query, query.max_results)?;
-        self.stats.write().total_retrievals += 1;
+        if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+            self.stats.write().total_retrievals = count;
+        }
         Ok(result)
     }
 

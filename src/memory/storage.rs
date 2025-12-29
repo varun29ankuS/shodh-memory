@@ -998,7 +998,34 @@ impl MemoryStorage {
             stats.average_importance = stats.importance_sum / stats.total_count as f32;
         }
 
+        // Load persisted retrieval counter
+        stats.total_retrievals = self.get_retrieval_count().unwrap_or(0);
+
         Ok(stats)
+    }
+
+    /// Get the persisted retrieval counter
+    pub fn get_retrieval_count(&self) -> Result<usize> {
+        const RETRIEVAL_KEY: &[u8] = b"stats:total_retrievals";
+        match self.db.get(RETRIEVAL_KEY)? {
+            Some(data) => {
+                if data.len() >= 8 {
+                    Ok(usize::from_le_bytes(data[..8].try_into().unwrap_or([0; 8])))
+                } else {
+                    Ok(0)
+                }
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Increment and persist the retrieval counter, returns new value
+    pub fn increment_retrieval_count(&self) -> Result<usize> {
+        const RETRIEVAL_KEY: &[u8] = b"stats:total_retrievals";
+        let current = self.get_retrieval_count().unwrap_or(0);
+        let new_count = current + 1;
+        self.db.put(RETRIEVAL_KEY, new_count.to_le_bytes())?;
+        Ok(new_count)
     }
 
     /// Remove corrupted memories that fail to deserialize
@@ -1113,4 +1140,7 @@ pub struct StorageStats {
     pub total_size_bytes: usize,
     pub average_importance: f32,
     pub importance_sum: f32,
+    /// Total number of recall/retrieval operations (persisted)
+    #[serde(default)]
+    pub total_retrievals: usize,
 }
