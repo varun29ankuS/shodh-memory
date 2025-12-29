@@ -440,6 +440,7 @@ pub enum FocusPanel {
     #[default]
     Left,
     Right,
+    Detail,  // Detail panel at bottom (notes/activity)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -1242,6 +1243,39 @@ impl TuiPriority {
     }
 }
 
+/// Type of todo comment
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiTodoCommentType {
+    #[default]
+    Comment,
+    Activity,
+    Progress,
+    Resolution,
+}
+
+impl TuiTodoCommentType {
+    pub fn icon(&self) -> &'static str {
+        match self {
+            TuiTodoCommentType::Comment => "▹",
+            TuiTodoCommentType::Progress => "▸",
+            TuiTodoCommentType::Resolution => "✓",
+            TuiTodoCommentType::Activity => "▸",
+        }
+    }
+}
+
+/// A comment/activity on a todo
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiTodoComment {
+    pub id: String,
+    pub author: String,
+    pub content: String,
+    #[serde(default)]
+    pub comment_type: TuiTodoCommentType,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiTodo {
     pub id: String,
@@ -1257,6 +1291,18 @@ pub struct TuiTodo {
     /// Parent todo ID (for subtasks)
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Sequence number within project (for display as BOLT-1, MEM-2, etc.)
+    #[serde(default)]
+    pub seq_num: u32,
+    /// Project prefix (cached from project, e.g., "BOLT", "MEM")
+    #[serde(default)]
+    pub project_prefix: Option<String>,
+    /// Comments and activity history
+    #[serde(default)]
+    pub comments: Vec<TuiTodoComment>,
+    /// Additional notes
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 impl TuiTodo {
@@ -1266,7 +1312,13 @@ impl TuiTodo {
     }
 
     pub fn short_id(&self) -> String {
-        format!("SHO-{}", &self.id[..4.min(self.id.len())])
+        if self.seq_num > 0 {
+            let prefix = self.project_prefix.as_deref().unwrap_or("SHO");
+            format!("{}-{}", prefix, self.seq_num)
+        } else {
+            // Fallback to old style for legacy todos
+            format!("SHO-{}", &self.id[..4.min(self.id.len())])
+        }
     }
 
     pub fn is_overdue(&self) -> bool {
@@ -1309,6 +1361,9 @@ pub struct TuiProject {
     pub completed_count: usize,
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Project prefix for todo IDs (e.g., "BOLT", "MEM")
+    #[serde(default)]
+    pub prefix: Option<String>,
 }
 
 impl TuiProject {
@@ -1448,6 +1503,16 @@ pub struct AppState {
     pub lineage_trace: Option<LineageTrace>,
     /// Lineage horizontal scroll offset
     pub lineage_scroll: usize,
+    /// Notes scroll offset (for detail panel)
+    pub notes_scroll: usize,
+    /// Whether notes section is focused (for keyboard navigation)
+    pub notes_focused: bool,
+    /// Activity scroll offset (for detail panel)
+    pub activity_scroll: usize,
+    /// Whether activity section is focused (for keyboard navigation)
+    pub activity_focused: bool,
+    /// Which detail column is focused (0 = notes/details, 1 = activity)
+    pub detail_focus_column: u8,
 }
 
 /// Claude Code context session status
@@ -1538,6 +1603,11 @@ impl AppState {
             context_sessions: Vec::new(),
             lineage_trace: None,
             lineage_scroll: 0,
+            notes_scroll: 0,
+            notes_focused: false,
+            activity_scroll: 0,
+            activity_focused: false,
+            detail_focus_column: 0,
         }
     }
 
@@ -2082,6 +2152,7 @@ impl AppState {
                         // Navigate connections
                         self.selected_connection = self.selected_connection.saturating_sub(1);
                     }
+                    FocusPanel::Detail => {} // Not used in GraphMap
                 }
             }
             _ => {
@@ -2104,6 +2175,7 @@ impl AppState {
                             self.selected_connection += 1;
                         }
                     }
+                    FocusPanel::Detail => {} // Not used in GraphMap
                 }
             }
             _ => {
@@ -2133,6 +2205,7 @@ impl AppState {
         self.graph_map_focus = match self.graph_map_focus {
             FocusPanel::Left => FocusPanel::Right,
             FocusPanel::Right => FocusPanel::Left,
+            FocusPanel::Detail => FocusPanel::Left, // Not used in GraphMap
         };
         // Reset connection selection when switching to connections
         if self.graph_map_focus == FocusPanel::Right {
@@ -2265,20 +2338,74 @@ impl AppState {
             .collect()
     }
 
-    /// Toggle focus between left and right panel in Projects view
+    /// Toggle focus between panels (Left -> Right -> Detail -> Left)
     pub fn toggle_focus_panel(&mut self) {
         self.focus_panel = match self.focus_panel {
             FocusPanel::Left => FocusPanel::Right,
-            FocusPanel::Right => FocusPanel::Left,
+            FocusPanel::Right => {
+                // Only go to Detail panel in Dashboard mode where it exists
+                if matches!(self.view_mode, ViewMode::Dashboard) {
+                    FocusPanel::Detail
+                } else {
+                    FocusPanel::Left
+                }
+            }
+            FocusPanel::Detail => FocusPanel::Left,
         };
         // Reset right panel selection when switching to it
         if self.focus_panel == FocusPanel::Right {
             self.todos_selected = 0;
         }
+        // Reset detail panel state when entering it
+        if self.focus_panel == FocusPanel::Detail {
+            self.notes_scroll = 0;
+            self.activity_scroll = 0;
+            self.detail_focus_column = 0;
+        }
+    }
+
+    /// Toggle focus between Notes (0) and Activity (1) in detail panel
+    pub fn toggle_detail_column(&mut self) {
+        if self.focus_panel == FocusPanel::Detail {
+            self.detail_focus_column = if self.detail_focus_column == 0 { 1 } else { 0 };
+            // Reset scroll when switching columns
+            if self.detail_focus_column == 0 {
+                self.notes_scroll = 0;
+            } else {
+                self.activity_scroll = 0;
+            }
+        }
+    }
+
+    /// Scroll up in the detail panel (notes or activity)
+    pub fn detail_scroll_up(&mut self) {
+        if self.focus_panel == FocusPanel::Detail {
+            if self.detail_focus_column == 0 {
+                self.notes_scroll = self.notes_scroll.saturating_sub(1);
+            } else {
+                self.activity_scroll = self.activity_scroll.saturating_sub(1);
+            }
+        }
+    }
+
+    /// Scroll down in the detail panel (notes or activity)
+    pub fn detail_scroll_down(&mut self, max_notes_lines: usize, max_activity_items: usize) {
+        if self.focus_panel == FocusPanel::Detail {
+            if self.detail_focus_column == 0 {
+                if self.notes_scroll < max_notes_lines.saturating_sub(1) {
+                    self.notes_scroll += 1;
+                }
+            } else {
+                if self.activity_scroll < max_activity_items.saturating_sub(1) {
+                    self.activity_scroll += 1;
+                }
+            }
+        }
     }
 
     /// Get todos visible in the right panel (for current project selection)
-    /// Uses visual order (same as sidebar) and includes sub-project todos for parent projects
+    /// Returns todos in the SAME order as rendered in right panel:
+    /// In Progress → Todo → Blocked → Done, with subtasks after each parent
     pub fn visible_todos_right_panel(&self) -> Vec<&TuiTodo> {
         // Build visual order list (same order as sidebar: root projects, then sub-projects under each)
         let mut visual_order: Vec<&TuiProject> = Vec::new();
@@ -2291,20 +2418,65 @@ impl AppState {
             }
         }
 
-        if self.projects_selected < visual_order.len() {
+        let all_todos: Vec<&TuiTodo> = if self.projects_selected < visual_order.len() {
             let project = visual_order[self.projects_selected];
-            let mut all_todos = self.todos_for_project(&project.id);
-            
+            let mut todos = self.todos_for_project(&project.id);
+
             // If this is a parent project, also include todos from sub-projects
             if project.parent_id.is_none() {
                 for subproject in sub_projects.iter().filter(|sp| sp.parent_id.as_ref() == Some(&project.id)) {
-                    all_todos.extend(self.todos_for_project(&subproject.id));
+                    todos.extend(self.todos_for_project(&subproject.id));
                 }
             }
-            all_todos
+            todos
         } else {
             self.standalone_todos()
+        };
+
+        // Now order by status groups with subtasks after parents (same as render order)
+        let mut result: Vec<&TuiTodo> = Vec::new();
+
+        // In Progress (non-subtasks first, then their subtasks)
+        for todo in all_todos.iter().filter(|t| t.status == TuiTodoStatus::InProgress && t.parent_id.is_none()) {
+            result.push(todo);
+            for subtask in all_todos.iter().filter(|t| t.parent_id.as_ref() == Some(&todo.id)) {
+                result.push(subtask);
+            }
         }
+
+        // Todo (non-subtasks first, then their subtasks)
+        for todo in all_todos.iter().filter(|t| t.status == TuiTodoStatus::Todo && t.parent_id.is_none()) {
+            result.push(todo);
+            for subtask in all_todos.iter().filter(|t| t.parent_id.as_ref() == Some(&todo.id)) {
+                result.push(subtask);
+            }
+        }
+
+        // Blocked (non-subtasks first, then their subtasks)
+        for todo in all_todos.iter().filter(|t| t.status == TuiTodoStatus::Blocked && t.parent_id.is_none()) {
+            result.push(todo);
+            for subtask in all_todos.iter().filter(|t| t.parent_id.as_ref() == Some(&todo.id)) {
+                result.push(subtask);
+            }
+        }
+
+        // Done (non-subtasks first, then their subtasks)
+        for todo in all_todos.iter().filter(|t| t.status == TuiTodoStatus::Done && t.parent_id.is_none()) {
+            result.push(todo);
+            for subtask in all_todos.iter().filter(|t| t.parent_id.as_ref() == Some(&todo.id)) {
+                result.push(subtask);
+            }
+        }
+
+        // Backlog (non-subtasks first, then their subtasks)
+        for todo in all_todos.iter().filter(|t| t.status == TuiTodoStatus::Backlog && t.parent_id.is_none()) {
+            result.push(todo);
+            for subtask in all_todos.iter().filter(|t| t.parent_id.as_ref() == Some(&todo.id)) {
+                result.push(subtask);
+            }
+        }
+
+        result
     }
 
     /// Get count of todos visible in the right panel

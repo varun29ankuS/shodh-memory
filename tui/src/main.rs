@@ -892,7 +892,15 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                     match key.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Esc => {
-                            if g.selected_event.is_some() {
+                            // Exit detail panel focus first, then clear event selection, then quit
+                            if g.focus_panel == FocusPanel::Detail {
+                                // In Projects, go back to Right panel (todos); in Dashboard, go to Left
+                                if matches!(g.view_mode, ViewMode::Projects) {
+                                    g.focus_panel = FocusPanel::Right;
+                                } else {
+                                    g.focus_panel = FocusPanel::Left;
+                                }
+                            } else if g.selected_event.is_some() {
                                 g.clear_event_selection();
                             } else {
                                 break;
@@ -1274,12 +1282,22 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                 }
                             }
                         }
-                        KeyCode::Tab => g.cycle_view(),
+                        KeyCode::Tab => {
+                            // In Detail panel, Tab toggles between columns
+                            if matches!(g.view_mode, ViewMode::Dashboard | ViewMode::Projects) && g.focus_panel == FocusPanel::Detail {
+                                g.toggle_detail_column();
+                            } else if matches!(g.view_mode, ViewMode::GraphMap) {
+                                g.toggle_graph_map_focus();
+                            } else {
+                                g.cycle_view();
+                            }
+                        }
                         KeyCode::Up | KeyCode::Char('k') => match g.view_mode {
                             ViewMode::Dashboard => {
                                 match g.focus_panel {
                                     FocusPanel::Left => g.dashboard_todo_up(),
                                     FocusPanel::Right => g.select_event_prev(),
+                                    FocusPanel::Detail => g.detail_scroll_up(),
                                 }
                             }
                             ViewMode::ActivityLogs => g.select_event_prev(),
@@ -1291,6 +1309,7 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                         }
                                     }
                                     FocusPanel::Right => g.right_panel_up(),
+                                    FocusPanel::Detail => g.detail_scroll_up(),
                                 }
                             }
                             _ => g.scroll_up(),
@@ -1300,6 +1319,17 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                 match g.focus_panel {
                                     FocusPanel::Left => g.dashboard_todo_down(),
                                     FocusPanel::Right => g.select_event_next(),
+                                    FocusPanel::Detail => {
+                                        // Calculate max scroll based on selected todo
+                                        let (max_notes, max_activity) = if let Some(todo) = g.get_selected_dashboard_todo() {
+                                            let notes_lines = todo.notes.as_ref().map(|n| n.len() / 40 + 1).unwrap_or(0);
+                                            let activity_count = todo.comments.len();
+                                            (notes_lines, activity_count)
+                                        } else {
+                                            (0, 0)
+                                        };
+                                        g.detail_scroll_down(max_notes, max_activity);
+                                    }
                                 }
                             }
                             ViewMode::ActivityLogs => g.select_event_next(),
@@ -1312,39 +1342,99 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                         }
                                     }
                                     FocusPanel::Right => g.right_panel_down(),
+                                    FocusPanel::Detail => {
+                                        // Calculate max scroll based on selected todo
+                                        let (max_notes, max_activity) = if let Some(todo) = g.get_selected_dashboard_todo() {
+                                            let notes_lines = todo.notes.as_ref().map(|n| n.len() / 40 + 1).unwrap_or(0);
+                                            let activity_count = todo.comments.len();
+                                            (notes_lines, activity_count)
+                                        } else {
+                                            (0, 0)
+                                        };
+                                        g.detail_scroll_down(max_notes, max_activity);
+                                    }
                                 }
                             }
                             _ => g.scroll_down(),
                         },
                         KeyCode::Left => {
-                            if matches!(g.view_mode, ViewMode::Dashboard | ViewMode::Projects) && g.focus_panel == FocusPanel::Right {
-                                g.focus_panel = FocusPanel::Left;
+                            if matches!(g.view_mode, ViewMode::Dashboard | ViewMode::Projects) {
+                                match g.focus_panel {
+                                    FocusPanel::Right => g.focus_panel = FocusPanel::Left,
+                                    FocusPanel::Detail => {
+                                        // In Detail, left/right toggle columns
+                                        if g.detail_focus_column == 1 {
+                                            g.detail_focus_column = 0;
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             } else if matches!(g.view_mode, ViewMode::GraphMap) {
                                 // Switch focus to entities panel
                                 g.graph_map_focus = FocusPanel::Left;
                             }
                         }
                         KeyCode::Right => {
-                            if matches!(g.view_mode, ViewMode::Dashboard) && g.focus_panel == FocusPanel::Left {
-                                g.focus_panel = FocusPanel::Right;
-                                if g.selected_event.is_none() && !g.events.is_empty() {
-                                    g.selected_event = Some(0);
+                            if matches!(g.view_mode, ViewMode::Dashboard) {
+                                match g.focus_panel {
+                                    FocusPanel::Left => {
+                                        g.focus_panel = FocusPanel::Right;
+                                        if g.selected_event.is_none() && !g.events.is_empty() {
+                                            g.selected_event = Some(0);
+                                        }
+                                    }
+                                    FocusPanel::Detail => {
+                                        // In Detail, left/right toggle columns
+                                        if g.detail_focus_column == 0 {
+                                            g.detail_focus_column = 1;
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                            } else if matches!(g.view_mode, ViewMode::Projects) && g.focus_panel == FocusPanel::Left {
-                                g.focus_panel = FocusPanel::Right;
-                                g.todos_selected = 0;
+                            } else if matches!(g.view_mode, ViewMode::Projects) {
+                                match g.focus_panel {
+                                    FocusPanel::Left => {
+                                        g.focus_panel = FocusPanel::Right;
+                                        g.todos_selected = 0;
+                                    }
+                                    FocusPanel::Detail => {
+                                        // In Detail, left/right toggle columns
+                                        if g.detail_focus_column == 0 {
+                                            g.detail_focus_column = 1;
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             } else if matches!(g.view_mode, ViewMode::GraphMap) {
                                 // Switch focus to connections panel
                                 g.graph_map_focus = FocusPanel::Right;
                                 g.selected_connection = 0;
                             }
                         }
-                        KeyCode::Tab => {
-                            if matches!(g.view_mode, ViewMode::GraphMap) {
-                                g.toggle_graph_map_focus();
-                            }
-                        }
                         KeyCode::Enter => match g.view_mode {
+                            ViewMode::Dashboard => {
+                                match g.focus_panel {
+                                    FocusPanel::Left => {
+                                        // Enter on a todo focuses the detail panel
+                                        if g.get_selected_dashboard_todo().is_some() {
+                                            g.focus_panel = FocusPanel::Detail;
+                                            g.notes_scroll = 0;
+                                            g.activity_scroll = 0;
+                                            g.detail_focus_column = 0;
+                                        }
+                                    }
+                                    FocusPanel::Right => {
+                                        // Select event for detail view
+                                        if g.selected_event.is_none() && !g.events.is_empty() {
+                                            g.selected_event = Some(0);
+                                        }
+                                    }
+                                    FocusPanel::Detail => {
+                                        // Exit detail panel
+                                        g.focus_panel = FocusPanel::Left;
+                                    }
+                                }
+                            }
                             ViewMode::Projects => {
                                 match g.focus_panel {
                                     FocusPanel::Left => {
@@ -1352,10 +1442,19 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                         if let Some(project_id) = g.selected_project_id() {
                                             g.toggle_project_expansion(&project_id);
                                         }
-                                        // If a todo is selected, could open detail in future
                                     }
                                     FocusPanel::Right => {
-                                        // Future: toggle todo status or view detail
+                                        // Enter on a todo focuses the detail panel
+                                        if g.get_selected_dashboard_todo().is_some() {
+                                            g.focus_panel = FocusPanel::Detail;
+                                            g.notes_scroll = 0;
+                                            g.activity_scroll = 0;
+                                            g.detail_focus_column = 0;
+                                        }
+                                    }
+                                    FocusPanel::Detail => {
+                                        // Exit detail panel
+                                        g.focus_panel = FocusPanel::Right;
                                     }
                                 }
                             }
@@ -1369,9 +1468,14 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                         KeyCode::PageUp => {
                             for _ in 0..5 {
                                 match g.view_mode {
-                                    ViewMode::Dashboard | ViewMode::ActivityLogs => {
-                                        g.select_event_prev()
+                                    ViewMode::Dashboard => {
+                                        if g.focus_panel == FocusPanel::Detail {
+                                            g.detail_scroll_up();
+                                        } else {
+                                            g.select_event_prev()
+                                        }
                                     }
+                                    ViewMode::ActivityLogs => g.select_event_prev(),
                                     ViewMode::Projects => {
                                         match g.focus_panel {
                                             FocusPanel::Left => {
@@ -1380,6 +1484,7 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                                 }
                                             }
                                             FocusPanel::Right => g.right_panel_up(),
+                                            FocusPanel::Detail => {}
                                         }
                                     }
                                     _ => g.scroll_up(),
@@ -1389,9 +1494,21 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                         KeyCode::PageDown => {
                             for _ in 0..5 {
                                 match g.view_mode {
-                                    ViewMode::Dashboard | ViewMode::ActivityLogs => {
-                                        g.select_event_next()
+                                    ViewMode::Dashboard => {
+                                        if g.focus_panel == FocusPanel::Detail {
+                                            let (max_notes, max_activity) = if let Some(todo) = g.get_selected_dashboard_todo() {
+                                                let notes_lines = todo.notes.as_ref().map(|n| n.len() / 40 + 1).unwrap_or(0);
+                                                let activity_count = todo.comments.len();
+                                                (notes_lines, activity_count)
+                                            } else {
+                                                (0, 0)
+                                            };
+                                            g.detail_scroll_down(max_notes, max_activity);
+                                        } else {
+                                            g.select_event_next()
+                                        }
                                     }
+                                    ViewMode::ActivityLogs => g.select_event_next(),
                                     ViewMode::Projects => {
                                         match g.focus_panel {
                                             FocusPanel::Left => {
@@ -1401,6 +1518,7 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                                 }
                                             }
                                             FocusPanel::Right => g.right_panel_down(),
+                                            FocusPanel::Detail => {}
                                         }
                                     }
                                     _ => g.scroll_down(),
@@ -1424,6 +1542,7 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                         FocusPanel::Right => {
                                             g.todos_selected = 0;
                                         }
+                                        FocusPanel::Detail => {}
                                     }
                                 }
                                 _ => {}

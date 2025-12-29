@@ -1,7 +1,8 @@
 use crate::logo::{ELEPHANT, ELEPHANT_GRADIENT, SHODH_GRADIENT, SHODH_TEXT};
 use crate::types::{
     AppState, DisplayEvent, FocusPanel, LineageEdge, LineageNode, LineageTrace, SearchMode,
-    SearchResult, TuiPriority, TuiProject, TuiTodo, TuiTodoStatus, ViewMode, VERSION,
+    SearchResult, TuiPriority, TuiProject, TuiTodo, TuiTodoComment, TuiTodoCommentType,
+    TuiTodoStatus, ViewMode, VERSION,
 };
 use ratatui::{prelude::*, widgets::*};
 
@@ -861,6 +862,15 @@ fn render_search_detail(f: &mut Frame, area: Rect, state: &AppState) {
 pub fn render_dashboard(f: &mut Frame, area: Rect, state: &AppState) {
     let content_area = with_ribbon_layout(f, area, state);
 
+    // Split into main content (top) + detail panel (bottom)
+    let main_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(8),       // Main content takes most space
+            Constraint::Length(12),   // Detail panel (fixed 12 lines)
+        ])
+        .split(content_area);
+
     // 50/50 split: Todos on left, Activity on right
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -868,25 +878,201 @@ pub fn render_dashboard(f: &mut Frame, area: Rect, state: &AppState) {
             Constraint::Percentage(50),  // Todos (full height)
             Constraint::Percentage(50),  // Activity
         ])
-        .split(content_area);
+        .split(main_split[0]);
 
     render_todos_panel(f, columns[0], state);
     render_activity_feed(f, columns[1], state);
+
+    // Detail panel at bottom (full width, single column)
+    render_dashboard_detail_panel(f, main_split[1], state);
+}
+
+/// Render dashboard detail panel (single column, full width)
+fn render_dashboard_detail_panel(f: &mut Frame, area: Rect, state: &AppState) {
+    // Top border
+    let border = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(BORDER_SUBTLE));
+    f.render_widget(border, area);
+
+    // Adjust area for content (after border)
+    let content_area = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
+
+    let selected_todo = state.get_selected_dashboard_todo();
+    let is_focused = state.focus_panel == FocusPanel::Detail;
+
+    match selected_todo {
+        Some(todo) => {
+            let mut lines: Vec<Line> = Vec::new();
+            let width = content_area.width as usize;
+
+            // Header: ID + Title + focus indicator
+            let short_id = todo.short_id();
+            let focus_indicator = if is_focused { "▶ " } else { "  " };
+            let focus_style = if is_focused { Style::default().fg(SAFFRON) } else { Style::default() };
+
+            lines.push(Line::from(vec![
+                Span::styled(focus_indicator, focus_style),
+                Span::styled(short_id, Style::default().fg(DEEP_BLUE).add_modifier(Modifier::BOLD)),
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    truncate(&todo.content, width.saturating_sub(20)),
+                    Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {} {:?}", todo.status.icon(), todo.status),
+                    Style::default().fg(todo.status.color()),
+                ),
+                Span::styled(
+                    if is_focused { "  (↑↓ scroll, ←→ section, Esc exit)" } else { "  (Enter to focus)" },
+                    Style::default().fg(TEXT_DISABLED),
+                ),
+            ]));
+
+            lines.push(Line::from(""));
+
+            // Split remaining space: Notes (left half) | Activity (right half)
+            let half_width = width / 2;
+            let notes_scroll = state.notes_scroll;
+            let activity_scroll = state.activity_scroll;
+            let notes_focused = is_focused && state.detail_focus_column == 0;
+            let activity_focused = is_focused && state.detail_focus_column == 1;
+
+            // Build notes lines
+            let mut note_lines: Vec<String> = Vec::new();
+            if let Some(ref notes) = todo.notes {
+                let line_width = half_width.saturating_sub(4);
+                let mut chars = notes.chars().peekable();
+                while chars.peek().is_some() {
+                    let line_text: String = chars.by_ref().take(line_width).collect();
+                    if line_text.is_empty() { break; }
+                    note_lines.push(line_text);
+                }
+            }
+
+            // Build activity lines
+            let activity_items: Vec<_> = todo.comments.iter().rev().collect();
+
+            // Render side by side (up to available_lines rows)
+            let available_lines = (content_area.height as usize).saturating_sub(3);
+
+            // Headers
+            let notes_header = if notes_focused { "▶ NOTES" } else { "  NOTES" };
+            let activity_header = if activity_focused { "▶ ACTIVITY" } else { "  ACTIVITY" };
+            let notes_header_style = if notes_focused { Style::default().fg(SAFFRON) } else { Style::default().fg(TEXT_DISABLED) };
+            let activity_header_style = if activity_focused { Style::default().fg(SAFFRON) } else { Style::default().fg(TEXT_DISABLED) };
+
+            let scroll_info_notes = if note_lines.len() > available_lines {
+                format!(" [{}/{}]", notes_scroll + 1, note_lines.len())
+            } else { String::new() };
+            let scroll_info_activity = if activity_items.len() > available_lines {
+                format!(" [{}/{}]", activity_scroll + 1, activity_items.len())
+            } else { String::new() };
+
+            // Calculate left column content length
+            let left_header_content = format!("{}{}", notes_header, scroll_info_notes);
+            let left_header_len = left_header_content.chars().count();
+            let left_pad = half_width.saturating_sub(left_header_len);
+
+            lines.push(Line::from(vec![
+                Span::styled(notes_header, notes_header_style),
+                Span::styled(&scroll_info_notes, Style::default().fg(TEXT_DISABLED)),
+                Span::styled(" ".repeat(left_pad), Style::default()),
+                Span::styled("│", Style::default().fg(SAFFRON)),
+                Span::styled(activity_header, activity_header_style),
+                Span::styled(&scroll_info_activity, Style::default().fg(TEXT_DISABLED)),
+            ]));
+
+            // Content rows
+            for i in 0..available_lines {
+                let mut spans: Vec<Span> = Vec::new();
+
+                // Notes column - fixed width (half_width chars total)
+                let note_idx = notes_scroll + i;
+                let mut left_content = String::new();
+                if note_idx < note_lines.len() {
+                    let is_cursor = notes_focused && i == 0;
+                    let cursor = if is_cursor { "▸" } else { " " };
+                    let style = if is_cursor {
+                        Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::ITALIC)
+                    } else {
+                        Style::default().fg(TEXT_SECONDARY).add_modifier(Modifier::ITALIC)
+                    };
+                    let note_text = truncate(&note_lines[note_idx], half_width.saturating_sub(4));
+                    left_content = format!(" {} {}", cursor, note_text);
+                    spans.push(Span::styled(format!(" {}", cursor), Style::default().fg(SAFFRON)));
+                    spans.push(Span::styled(note_text.clone(), style));
+                }
+                // Pad to exact half_width
+                let left_len = left_content.chars().count();
+                if left_len < half_width {
+                    spans.push(Span::raw(" ".repeat(half_width - left_len)));
+                }
+
+                // Separator (single char)
+                spans.push(Span::styled("│", Style::default().fg(SAFFRON)));
+
+                // Activity column
+                let activity_idx = activity_scroll + i;
+                if activity_idx < activity_items.len() {
+                    let comment = activity_items[activity_idx];
+                    let is_cursor = activity_focused && i == 0;
+                    let cursor = if is_cursor { "▸" } else { " " };
+                    let icon = comment.comment_type.icon();
+                    let style = if is_cursor {
+                        Style::default().fg(TEXT_PRIMARY)
+                    } else {
+                        Style::default().fg(TEXT_SECONDARY)
+                    };
+                    let time_ago = format_duration_since(&comment.created_at);
+                    let content_width = half_width.saturating_sub(time_ago.len() + 6);
+                    let content_text = truncate(&comment.content, content_width);
+
+                    spans.push(Span::styled(cursor, Style::default().fg(SAFFRON)));
+                    spans.push(Span::styled(format!("{} ", icon), style));
+                    spans.push(Span::styled(content_text, style));
+                    spans.push(Span::styled(format!(" {}", time_ago), Style::default().fg(TEXT_DISABLED)));
+                }
+
+                lines.push(Line::from(spans));
+            }
+
+            let content = Paragraph::new(lines);
+            f.render_widget(content, content_area);
+        }
+        None => {
+            // No todo selected - show placeholder
+            let placeholder = Paragraph::new(Line::from(vec![
+                Span::styled("  ◇ ", Style::default().fg(TEXT_DISABLED)),
+                Span::styled(
+                    "Select a todo to view details",
+                    Style::default().fg(TEXT_DISABLED),
+                ),
+            ]));
+            f.render_widget(placeholder, content_area);
+        }
+    }
 }
 
 // ============================================================================
 // PROJECTS VIEW - Full-width layout with proper spacing
 // ============================================================================
 
-/// Main Projects view - full-width ribbon + two-column layout + bottom lineage
+/// Main Projects view - full-width ribbon + two-column layout + detail panel + lineage
 fn render_projects_view(f: &mut Frame, area: Rect, state: &AppState) {
     let content_area = with_ribbon_layout(f, area, state);
 
-    // Split into main content (top) + lineage chain (bottom)
+    // Split into main content (top) + detail panel + lineage chain (bottom)
     let main_split = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(10),      // Main content takes most space
+            Constraint::Length(15),   // Todo detail panel (fixed 15 lines for notes + activity)
             Constraint::Length(5),    // Lineage chain (fixed 5 lines)
         ])
         .split(content_area);
@@ -903,8 +1089,11 @@ fn render_projects_view(f: &mut Frame, area: Rect, state: &AppState) {
     render_projects_sidebar(f, columns[0], state);
     render_todos_panel_right(f, columns[1], state);
 
+    // Render todo detail panel above lineage
+    render_todo_detail_panel(f, main_split[1], state);
+
     // Render lineage chain at bottom
-    render_lineage_chain(f, main_split[1], state);
+    render_lineage_chain(f, main_split[2], state);
 }
 
 /// Full-width status ribbon showing current work context
@@ -1544,13 +1733,17 @@ fn render_todo_row(todo: &TuiTodo, width: usize) -> Line<'static> {
         TuiPriority::Low => ("   ", TEXT_DISABLED),
     };
 
-    let content_width = width.saturating_sub(15);
+    // Short ID (BOLT-1, MEM-2, etc.)
+    let short_id = format!("{:<9}", todo.short_id());
+
+    let content_width = width.saturating_sub(24); // 15 + 9 for short_id
     let content = truncate(&todo.content, content_width);
 
     let mut spans = vec![
         Span::styled("   ", Style::default()),
         Span::styled(format!("{} ", icon), Style::default().fg(color)),
         Span::styled(priority.0, Style::default().fg(priority.1)),
+        Span::styled(short_id, Style::default().fg(TEXT_SECONDARY)),
         Span::styled(content, Style::default().fg(if todo.status == TuiTodoStatus::Done { TEXT_DISABLED } else { TEXT_PRIMARY })),
     ];
 
@@ -1666,6 +1859,367 @@ fn spacer_line() -> Line<'static> {
 }
 
 // ============================================================================
+// TODO DETAIL PANEL
+// ============================================================================
+
+/// Render todo detail panel with 2-column layout (Linear-inspired)
+/// Left: Details | Right: Activity
+fn render_todo_detail_panel(f: &mut Frame, area: Rect, state: &AppState) {
+    // Top border
+    let border = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(BORDER_SUBTLE));
+    f.render_widget(border, area);
+
+    // Adjust area for content (after border)
+    let content_area = Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: area.height.saturating_sub(1),
+    };
+
+    let selected_todo = state.get_selected_dashboard_todo();
+
+    match selected_todo {
+        Some(todo) => {
+            // Split into 2 columns: Details (50%) | Separator (1) | Activity (50%)
+            let columns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(50),
+                    Constraint::Length(1),  // Vertical separator
+                    Constraint::Percentage(50),
+                ])
+                .split(content_area);
+
+            // === LEFT COLUMN: Details ===
+            render_detail_left_column(f, columns[0], &todo, state);
+
+            // === VERTICAL SEPARATOR ===
+            let separator_lines: Vec<Line> = (0..content_area.height)
+                .map(|_| Line::from(Span::styled("│", Style::default().fg(BORDER_SUBTLE))))
+                .collect();
+            let separator = Paragraph::new(separator_lines);
+            f.render_widget(separator, columns[1]);
+
+            // === RIGHT COLUMN: Activity ===
+            render_detail_right_column(f, columns[2], &todo, state);
+        }
+        None => {
+            // No todo selected - show placeholder
+            let placeholder = Paragraph::new(Line::from(vec![
+                Span::styled("  ◇ ", Style::default().fg(TEXT_DISABLED)),
+                Span::styled(
+                    "Select a todo to view details",
+                    Style::default().fg(TEXT_DISABLED),
+                ),
+            ]));
+            f.render_widget(placeholder, content_area);
+        }
+    }
+}
+
+/// Render left column of detail panel (metadata + scrollable notes)
+fn render_detail_left_column(f: &mut Frame, area: Rect, todo: &TuiTodo, state: &AppState) {
+    let mut lines: Vec<Line> = Vec::new();
+    let is_focused = state.detail_focus_column == 0;
+    let line_width = (area.width as usize).saturating_sub(3);
+
+    // Header: ID + Title
+    let short_id = todo.short_id();
+    let content_max = (area.width as usize).saturating_sub(short_id.len() + 5);
+    let content_truncated: String = todo.content.chars().take(content_max).collect();
+
+    lines.push(Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(
+            short_id,
+            Style::default().fg(DEEP_BLUE).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            content_truncated,
+            Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Empty line for spacing
+    lines.push(Line::from(""));
+
+    // Metadata rows with labels
+    let label_width = 10;
+
+    // Status row
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {:label_width$}", "Status"),
+            Style::default().fg(TEXT_DISABLED),
+        ),
+        Span::styled(
+            format!("{} ", todo.status.icon()),
+            Style::default().fg(todo.status.color()),
+        ),
+        Span::styled(
+            format!("{:?}", todo.status),
+            Style::default().fg(TEXT_SECONDARY),
+        ),
+    ]));
+
+    // Priority row
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {:label_width$}", "Priority"),
+            Style::default().fg(TEXT_DISABLED),
+        ),
+        Span::styled(
+            todo.priority.indicator(),
+            Style::default().fg(todo.priority.color()),
+        ),
+    ]));
+
+    // Project row
+    let project_display = todo.project_name.as_deref().unwrap_or("—");
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {:label_width$}", "Project"),
+            Style::default().fg(TEXT_DISABLED),
+        ),
+        Span::styled(project_display, Style::default().fg(SAFFRON)),
+    ]));
+
+    // Due date row
+    let due_display = todo.due_label().unwrap_or_else(|| "—".to_string());
+    let due_color = if todo.is_overdue() { MAROON } else { TEXT_SECONDARY };
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {:label_width$}", "Due"),
+            Style::default().fg(TEXT_DISABLED),
+        ),
+        Span::styled(due_display, Style::default().fg(due_color)),
+    ]));
+
+    // Contexts row (if any)
+    if !todo.contexts.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {:label_width$}", "Contexts"),
+                Style::default().fg(TEXT_DISABLED),
+            ),
+            Span::styled(
+                todo.contexts.join(" "),
+                Style::default().fg(DEEP_BLUE),
+            ),
+        ]));
+    }
+
+    // Blocked row (if blocked)
+    if let Some(ref blocked) = todo.blocked_on {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {:label_width$}", "Blocked"),
+                Style::default().fg(TEXT_DISABLED),
+            ),
+            Span::styled(
+                format!("⊘ {}", blocked),
+                Style::default().fg(MAROON),
+            ),
+        ]));
+    }
+
+    // Calculate available space for notes
+    let metadata_lines = lines.len();
+    let available_for_notes = (area.height as usize).saturating_sub(metadata_lines + 2);
+
+    // Notes section (scrollable)
+    if let Some(ref notes) = todo.notes {
+        lines.push(Line::from(""));
+
+        // Notes header with focus indicator
+        let focus_indicator = if is_focused { "▶" } else { " " };
+        let header_style = if is_focused {
+            Style::default().fg(SAFFRON)
+        } else {
+            Style::default().fg(TEXT_DISABLED)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(focus_indicator, header_style),
+            Span::styled("─── ", Style::default().fg(BORDER_SUBTLE)),
+            Span::styled("Notes", header_style),
+            Span::styled(
+                if is_focused { " (↑↓ scroll)" } else { "" },
+                Style::default().fg(TEXT_DISABLED),
+            ),
+        ]));
+
+        // Split notes into lines for scrolling
+        let mut note_lines: Vec<String> = Vec::new();
+        let mut chars = notes.chars().peekable();
+
+        while chars.peek().is_some() {
+            let line_text: String = chars.by_ref().take(line_width).collect();
+            if line_text.is_empty() { break; }
+            note_lines.push(line_text);
+        }
+
+        let total_note_lines = note_lines.len();
+        let scroll = state.notes_scroll.min(total_note_lines.saturating_sub(1));
+        let visible_notes = available_for_notes.saturating_sub(1); // -1 for scroll indicator
+
+        // Show scroll position if needed
+        if total_note_lines > visible_notes {
+            let scroll_info = format!(" [{}/{}]", scroll + 1, total_note_lines);
+            if let Some(last) = lines.last_mut() {
+                last.spans.push(Span::styled(scroll_info, Style::default().fg(TEXT_DISABLED)));
+            }
+        }
+
+        // Render visible note lines
+        for (i, line_text) in note_lines.iter().enumerate().skip(scroll).take(visible_notes) {
+            let is_cursor_line = is_focused && i == scroll;
+            let line_style = if is_cursor_line {
+                Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::ITALIC)
+            } else {
+                Style::default().fg(TEXT_SECONDARY).add_modifier(Modifier::ITALIC)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(if is_cursor_line { "▸" } else { " " }, Style::default().fg(SAFFRON)),
+                Span::styled(line_text.clone(), line_style),
+            ]));
+        }
+
+        // Show more indicator
+        if scroll + visible_notes < total_note_lines {
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(
+                    format!("  ↓ {} more lines", total_note_lines - scroll - visible_notes),
+                    Style::default().fg(TEXT_DISABLED),
+                ),
+            ]));
+        }
+    }
+
+    let content = Paragraph::new(lines);
+    f.render_widget(content, area);
+}
+
+/// Render right column of detail panel (scrollable activity feed)
+fn render_detail_right_column(f: &mut Frame, area: Rect, todo: &TuiTodo, state: &AppState) {
+    let mut lines: Vec<Line> = Vec::new();
+    let is_focused = state.detail_focus_column == 1;
+
+    // Header: ACTIVITY with focus indicator
+    let focus_indicator = if is_focused { "▶" } else { " " };
+    let header_style = if is_focused {
+        Style::default().fg(SAFFRON)
+    } else {
+        Style::default().fg(TEXT_DISABLED)
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled(focus_indicator, header_style),
+        Span::styled("ACTIVITY", header_style),
+        Span::styled(
+            format!(" ({})", todo.comments.len()),
+            Style::default().fg(TEXT_DISABLED),
+        ),
+        Span::styled(
+            if is_focused { " ↑↓ scroll" } else { "" },
+            Style::default().fg(TEXT_DISABLED),
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled("◉", Style::default().fg(LIVE_GREEN)),
+    ]));
+
+    lines.push(Line::from(""));
+
+    if !todo.comments.is_empty() {
+        let total_comments = todo.comments.len();
+        let scroll = state.activity_scroll.min(total_comments.saturating_sub(1));
+
+        // Calculate lines per comment (2 lines each: content + timestamp)
+        let lines_per_comment = 2;
+        let available_lines = (area.height as usize).saturating_sub(4);
+        let comments_visible = available_lines / lines_per_comment;
+
+        // Show scroll position if needed
+        if total_comments > comments_visible {
+            let scroll_info = format!(" [{}/{}]", scroll + 1, total_comments);
+            if let Some(last) = lines.last_mut() {
+                last.spans.push(Span::styled(scroll_info, Style::default().fg(TEXT_DISABLED)));
+            }
+        }
+
+        // Show comments from scroll position (most recent first)
+        let recent_comments: Vec<_> = todo.comments.iter().rev().collect();
+
+        for (i, comment) in recent_comments.iter().enumerate().skip(scroll).take(comments_visible) {
+            let icon = comment.comment_type.icon();
+            let time_ago = format_duration_since(&comment.created_at);
+            let content_max = (area.width as usize).saturating_sub(6);
+            let content_preview: String = comment.content.chars().take(content_max).collect();
+
+            let is_cursor = is_focused && i == scroll;
+            let cursor_indicator = if is_cursor { "▸" } else { " " };
+            let text_style = if is_cursor {
+                Style::default().fg(TEXT_PRIMARY)
+            } else {
+                Style::default().fg(TEXT_SECONDARY)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(cursor_indicator, Style::default().fg(SAFFRON)),
+                Span::styled(
+                    format!("{} ", icon),
+                    text_style,
+                ),
+                Span::styled(content_preview, text_style),
+            ]));
+
+            // Time on separate line
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("   {}", time_ago),
+                    Style::default().fg(TEXT_DISABLED),
+                ),
+            ]));
+        }
+
+        // Show more indicator
+        if scroll + comments_visible < total_comments {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  ↓ {} more", total_comments - scroll - comments_visible),
+                    Style::default().fg(TEXT_DISABLED),
+                ),
+            ]));
+        }
+
+        // Footer: sync status
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} entries synced to memory", todo.comments.len()),
+                Style::default().fg(TEXT_DISABLED).add_modifier(Modifier::DIM),
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(
+                " No activity yet",
+                Style::default().fg(TEXT_DISABLED),
+            ),
+        ]));
+    }
+
+    let content = Paragraph::new(lines);
+    f.render_widget(content, area);
+}
+
+// ============================================================================
 // LINEAGE CHAIN VISUALIZATION
 // ============================================================================
 
@@ -1673,27 +2227,27 @@ fn spacer_line() -> Line<'static> {
 fn render_lineage_chain(f: &mut Frame, area: Rect, state: &AppState) {
     let width = area.width as usize;
 
-    // Border line separating from main content
+    // Border line separating from main content (orange tint)
     let border_line = "─".repeat(width);
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // Header with border
+    // Header with border (orange/saffron tint for visibility)
     lines.push(Line::from(Span::styled(
         border_line,
-        Style::default().fg(Color::Rgb(40, 40, 40)),
+        Style::default().fg(Color::Rgb(120, 80, 40)),
     )));
 
     if let Some(ref trace) = state.lineage_trace {
         if trace.edges.is_empty() {
-            // No lineage - show placeholder
+            // No lineage - show placeholder (orange tint)
             lines.push(Line::from(Span::styled(
                 " ◇ No causal chain detected",
-                Style::default().fg(TEXT_DISABLED),
+                Style::default().fg(SAFFRON),
             )));
             lines.push(Line::from(Span::styled(
                 "   Select a todo or memory to see its lineage",
-                Style::default().fg(Color::Rgb(60, 60, 60)),
+                Style::default().fg(Color::Rgb(150, 100, 60)),
             )));
         } else {
             // Build horizontal chain visualization
@@ -1707,11 +2261,11 @@ fn render_lineage_chain(f: &mut Frame, area: Rect, state: &AppState) {
                 _ => "──▸ Lineage chain",
             };
             lines.push(Line::from(vec![
-                Span::styled(" ⑂ LINEAGE ", Style::default().fg(Color::Black).bg(Color::Rgb(100, 180, 255)).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" {} ", direction_label), Style::default().fg(Color::Rgb(200, 200, 200))),
+                Span::styled(" ⑂ LINEAGE ", Style::default().fg(Color::Black).bg(SAFFRON).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {} ", direction_label), Style::default().fg(SAFFRON)),
                 Span::styled(
                     format!("(depth: {}, {} edges)", trace.depth, trace.edges.len()),
-                    Style::default().fg(Color::Rgb(140, 140, 140)),
+                    Style::default().fg(Color::Rgb(180, 140, 100)),
                 ),
             ]));
 
@@ -1825,11 +2379,12 @@ fn render_lineage_chain(f: &mut Frame, area: Rect, state: &AppState) {
 
 /// Render a todo row with selection highlighting
 fn render_todo_row_with_selection(todo: &TuiTodo, width: usize, is_selected: bool, is_panel_focused: bool) -> Line<'static> {
-    // Fixed column widths for uniform layout (same as dashboard)
-    // | sel(3) | status(2) | pri(3) | content(flex) | project(14) | due(10) |
+    // Fixed column widths for uniform layout
+    // | sel(3) | status(2) | pri(3) | id(9) | content(flex) | project(14) | due(10) |
+    const ID_COL_WIDTH: usize = 9;
     const PROJECT_COL_WIDTH: usize = 14;
     const DUE_COL_WIDTH: usize = 10;
-    const FIXED_LEFT: usize = 8; // sel(3) + status(2) + pri(3)
+    const FIXED_LEFT: usize = 8 + ID_COL_WIDTH; // sel(3) + status(2) + pri(3) + id(9)
 
     let (icon, color) = match todo.status {
         TuiTodoStatus::Backlog => ("◌", TEXT_DISABLED),
@@ -1852,6 +2407,10 @@ fn render_todo_row_with_selection(todo: &TuiTodo, width: usize, is_selected: boo
     let sel_color = if is_selected && is_panel_focused { SAFFRON } else if is_selected { TEXT_DISABLED } else { Color::Reset };
     let bg = if is_selected { SELECTION_BG } else { Color::Reset };
     let text_color = if todo.status == TuiTodoStatus::Done { TEXT_DISABLED } else { TEXT_PRIMARY };
+
+    // Short ID column (BOLT-1, MEM-2, etc.)
+    let short_id = todo.short_id();
+    let id_col = format!("{:<width$}", short_id, width = ID_COL_WIDTH);
 
     // Calculate content width (flexible column)
     let content_width = width.saturating_sub(FIXED_LEFT + PROJECT_COL_WIDTH + DUE_COL_WIDTH + 1);
@@ -1891,6 +2450,7 @@ fn render_todo_row_with_selection(todo: &TuiTodo, width: usize, is_selected: boo
         Span::styled(sel_marker, Style::default().fg(sel_color).bg(bg)),
         Span::styled(format!("{} ", icon), Style::default().fg(color).bg(bg)),
         Span::styled(priority.0, Style::default().fg(priority.1).bg(bg)),
+        Span::styled(id_col, Style::default().fg(TEXT_SECONDARY).bg(bg)),
         Span::styled(content, Style::default().fg(text_color).bg(bg)),
         Span::styled(project_col, Style::default().fg(GOLD).bg(bg)),
         Span::styled(due_col, Style::default().fg(MAROON).bg(bg)),
@@ -1901,10 +2461,11 @@ fn render_todo_row_with_selection(todo: &TuiTodo, width: usize, is_selected: boo
 
 /// Render a todo row with indentation (for subtasks)
 fn render_todo_row_with_indent(todo: &TuiTodo, width: usize, is_selected: bool, is_panel_focused: bool, indent: usize) -> Line<'static> {
+    const ID_COL_WIDTH: usize = 9;
     const PROJECT_COL_WIDTH: usize = 14;
     const DUE_COL_WIDTH: usize = 10;
     let indent_chars = indent * 2;
-    let fixed_left: usize = 8 + indent_chars;
+    let fixed_left: usize = 8 + ID_COL_WIDTH + indent_chars;
 
     let (icon, color) = match todo.status {
         TuiTodoStatus::Backlog => ("◌", TEXT_DISABLED),
@@ -1931,6 +2492,10 @@ fn render_todo_row_with_indent(todo: &TuiTodo, width: usize, is_selected: bool, 
     let sel_color = if is_selected && is_panel_focused { SAFFRON } else if is_selected { TEXT_DISABLED } else { Color::Reset };
     let bg = if is_selected { SELECTION_BG } else { Color::Reset };
     let text_color = if todo.status == TuiTodoStatus::Done { TEXT_DISABLED } else { TEXT_PRIMARY };
+
+    // Short ID column (BOLT-1, MEM-2, etc.)
+    let short_id = todo.short_id();
+    let id_col = format!("{:<width$}", short_id, width = ID_COL_WIDTH);
 
     let content_width = width.saturating_sub(fixed_left + PROJECT_COL_WIDTH + DUE_COL_WIDTH + 1);
     let content = if todo.content.chars().count() <= content_width {
@@ -1967,6 +2532,7 @@ fn render_todo_row_with_indent(todo: &TuiTodo, width: usize, is_selected: bool, 
         Span::styled(sel_marker, Style::default().fg(sel_color).bg(bg)),
         Span::styled(format!("{} ", icon), Style::default().fg(color).bg(bg)),
         Span::styled(priority.0, Style::default().fg(priority.1).bg(bg)),
+        Span::styled(id_col, Style::default().fg(TEXT_SECONDARY).bg(bg)),
         Span::styled(content, Style::default().fg(text_color).bg(bg)),
         Span::styled(project_col, Style::default().fg(GOLD).bg(bg)),
         Span::styled(due_col, Style::default().fg(MAROON).bg(bg)),
@@ -2070,11 +2636,16 @@ fn render_sidebar_todo(todo: &TuiTodo, width: usize, is_selected: bool, is_panel
     let sel = if is_selected { "  ▸ " } else { "    " };
     let sel_color = if is_selected && is_panel_focused { SAFFRON } else if is_selected { TEXT_DISABLED } else { Color::Reset };
     let bg = if is_selected { SELECTION_BG } else { Color::Reset };
-    let content_width = width.saturating_sub(12);
+
+    // Short ID (BOLT-1, MEM-2, etc.)
+    let short_id = format!("{:<8}", todo.short_id());
+
+    let content_width = width.saturating_sub(20); // 12 + 8 for short_id
 
     Line::from(vec![
         Span::styled(sel, Style::default().fg(sel_color).bg(bg)),
         Span::styled(format!("{} ", icon), Style::default().fg(color).bg(bg)),
+        Span::styled(short_id, Style::default().fg(TEXT_DISABLED).bg(bg)),
         Span::styled(truncate(&todo.content, content_width), Style::default().fg(TEXT_SECONDARY).bg(bg)),
     ])
 }
@@ -2545,10 +3116,11 @@ fn render_todos_panel(f: &mut Frame, area: Rect, state: &AppState) {
 /// Render a todo line for Dashboard with selection support
 fn render_dashboard_todo_line(todo: &TuiTodo, width: usize, is_selected: bool, is_panel_focused: bool) -> Line<'static> {
     // Fixed column widths for uniform layout
-    // | sel(3) | status(2) | pri(3) | content(flex) | project(14) | due(10) |
+    // | sel(3) | status(2) | pri(3) | id(9) | content(flex) | project(14) | due(10) |
+    const ID_COL_WIDTH: usize = 9;
     const PROJECT_COL_WIDTH: usize = 14;
     const DUE_COL_WIDTH: usize = 10;
-    const FIXED_LEFT: usize = 8; // sel(3) + status(2) + pri(3)
+    const FIXED_LEFT: usize = 8 + ID_COL_WIDTH; // sel(3) + status(2) + pri(3) + id(9)
 
     let (icon, color) = match todo.status {
         TuiTodoStatus::Backlog => ("◌", TEXT_DISABLED),
@@ -2571,6 +3143,10 @@ fn render_dashboard_todo_line(todo: &TuiTodo, width: usize, is_selected: bool, i
     let sel_color = if is_selected && is_panel_focused { SAFFRON } else if is_selected { TEXT_DISABLED } else { Color::Reset };
     let bg = if is_selected { SELECTION_BG } else { Color::Reset };
     let text_color = if todo.status == TuiTodoStatus::Done { TEXT_DISABLED } else { TEXT_PRIMARY };
+
+    // Short ID column (BOLT-1, MEM-2, etc.)
+    let short_id = todo.short_id();
+    let id_col = format!("{:<width$}", short_id, width = ID_COL_WIDTH);
 
     // Calculate content width (flexible column)
     let content_width = width.saturating_sub(FIXED_LEFT + PROJECT_COL_WIDTH + DUE_COL_WIDTH + 1);
@@ -2612,6 +3188,7 @@ fn render_dashboard_todo_line(todo: &TuiTodo, width: usize, is_selected: bool, i
         Span::styled(sel_marker, Style::default().fg(sel_color).bg(bg)),
         Span::styled(format!("{} ", icon), Style::default().fg(color).bg(bg)),
         Span::styled(priority.0, Style::default().fg(priority.1).bg(bg)),
+        Span::styled(id_col, Style::default().fg(TEXT_SECONDARY).bg(bg)),
         Span::styled(content, Style::default().fg(text_color).bg(bg)),
         Span::styled(project_col, Style::default().fg(GOLD).bg(bg)),
         Span::styled(due_col, Style::default().fg(MAROON).bg(bg)),
@@ -2633,9 +3210,15 @@ fn render_todo_line(todo: &TuiTodo) -> Line<'static> {
         ),
     ];
 
+    // Short ID (BOLT-1, MEM-2, etc.)
+    spans.push(Span::styled(
+        format!("{:<9}", todo.short_id()),
+        Style::default().fg(TEXT_SECONDARY),
+    ));
+
     // Content (truncated based on whether we have project name)
     let has_project = todo.project_name.is_some();
-    let max_content_len = if has_project { 18 } else { 28 };
+    let max_content_len = if has_project { 14 } else { 24 }; // Reduced to make room for ID
     let content = if todo.content.len() > max_content_len {
         format!("{}…", &todo.content[..max_content_len])
     } else {
