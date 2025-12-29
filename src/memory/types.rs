@@ -2847,15 +2847,107 @@ impl Recurrence {
     }
 }
 
+/// Unique identifier for todo comments
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TodoCommentId(pub Uuid);
+
+impl TodoCommentId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for TodoCommentId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A comment/activity on a todo item
+/// Used to track progress, notes, and actions taken
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoComment {
+    /// Unique identifier
+    pub id: TodoCommentId,
+
+    /// The todo this comment belongs to
+    pub todo_id: TodoId,
+
+    /// Author of the comment (user_id or system)
+    pub author: String,
+
+    /// Comment content (supports markdown)
+    pub content: String,
+
+    /// Type of activity/comment
+    #[serde(default)]
+    pub comment_type: TodoCommentType,
+
+    /// When the comment was created
+    pub created_at: DateTime<Utc>,
+
+    /// When the comment was last edited (if ever)
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl TodoComment {
+    /// Create a new comment
+    pub fn new(todo_id: TodoId, author: String, content: String) -> Self {
+        Self {
+            id: TodoCommentId::new(),
+            todo_id,
+            author,
+            content,
+            comment_type: TodoCommentType::Comment,
+            created_at: Utc::now(),
+            updated_at: None,
+        }
+    }
+
+    /// Create a system activity comment
+    pub fn system_activity(todo_id: TodoId, content: String) -> Self {
+        Self {
+            id: TodoCommentId::new(),
+            todo_id,
+            author: "system".to_string(),
+            content,
+            comment_type: TodoCommentType::Activity,
+            created_at: Utc::now(),
+            updated_at: None,
+        }
+    }
+}
+
+/// Type of todo comment
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoCommentType {
+    /// User comment
+    #[default]
+    Comment,
+    /// System-generated activity (status change, assignment, etc.)
+    Activity,
+    /// Progress update
+    Progress,
+    /// Resolution/fix description
+    Resolution,
+}
+
 /// A GTD-style todo item
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Todo {
     /// Unique identifier
     pub id: TodoId,
 
-    /// Sequential user-facing number (SHO-1, SHO-2, etc.)
+    /// Sequential number within project (BOLT-1, MEM-2, etc.)
     #[serde(default)]
     pub seq_num: u32,
+
+    /// Cached project prefix for display (e.g., "BOLT", "MEM")
+    /// Set when todo is created with a project
+    #[serde(default)]
+    pub project_prefix: Option<String>,
 
     /// User who owns this todo
     pub user_id: String,
@@ -2909,6 +3001,10 @@ pub struct Todo {
     /// Manual sort order within status group (lower = higher in list)
     #[serde(default)]
     pub sort_order: i32,
+
+    /// Comments and activity history for this todo
+    #[serde(default)]
+    pub comments: Vec<TodoComment>,
 }
 
 impl Todo {
@@ -2917,7 +3013,8 @@ impl Todo {
         let now = Utc::now();
         Self {
             id: TodoId::new(),
-            seq_num: 0, // Will be assigned by TodoStore on creation
+            seq_num: 0,           // Will be assigned by TodoStore on creation
+            project_prefix: None, // Will be set by TodoStore based on project
             user_id,
             content,
             status: TodoStatus::Todo,
@@ -2934,13 +3031,16 @@ impl Todo {
             updated_at: now,
             completed_at: None,
             sort_order: 0,
+            comments: Vec::new(),
         }
     }
 
-    /// Get the user-facing short ID (SHO-1, SHO-2, etc.)
+    /// Get the user-facing short ID (BOLT-1, MEM-2, SHO-3, etc.)
+    /// Uses project prefix if available, otherwise "SHO" for standalone todos
     pub fn short_id(&self) -> String {
         if self.seq_num > 0 {
-            format!("SHO-{}", self.seq_num)
+            let prefix = self.project_prefix.as_deref().unwrap_or("SHO");
+            format!("{}-{}", prefix, self.seq_num)
         } else {
             // Fallback for legacy todos without seq_num
             self.id.short()
@@ -3000,8 +3100,42 @@ impl Todo {
             next.completed_at = None;
             next.created_at = Utc::now();
             next.updated_at = Utc::now();
+            next.comments = Vec::new(); // Fresh comments for new recurrence
             next
         })
+    }
+
+    /// Add a comment to this todo
+    pub fn add_comment(&mut self, author: String, content: String) -> &TodoComment {
+        let comment = TodoComment::new(self.id.clone(), author, content);
+        self.comments.push(comment);
+        self.updated_at = Utc::now();
+        self.comments.last().unwrap()
+    }
+
+    /// Add a progress update
+    pub fn add_progress(&mut self, author: String, content: String) -> &TodoComment {
+        let mut comment = TodoComment::new(self.id.clone(), author, content);
+        comment.comment_type = TodoCommentType::Progress;
+        self.comments.push(comment);
+        self.updated_at = Utc::now();
+        self.comments.last().unwrap()
+    }
+
+    /// Add a resolution comment
+    pub fn add_resolution(&mut self, author: String, content: String) -> &TodoComment {
+        let mut comment = TodoComment::new(self.id.clone(), author, content);
+        comment.comment_type = TodoCommentType::Resolution;
+        self.comments.push(comment);
+        self.updated_at = Utc::now();
+        self.comments.last().unwrap()
+    }
+
+    /// Add a system activity entry
+    pub fn add_activity(&mut self, content: String) {
+        let comment = TodoComment::system_activity(self.id.clone(), content);
+        self.comments.push(comment);
+        self.updated_at = Utc::now();
     }
 }
 
@@ -3028,6 +3162,11 @@ pub struct Project {
     /// Project name
     pub name: String,
 
+    /// Short prefix for todo IDs (e.g., "BOLT", "MEM")
+    /// If not set, derived from first letters of project name
+    #[serde(default)]
+    pub prefix: Option<String>,
+
     /// Optional description
     pub description: Option<String>,
 
@@ -3052,10 +3191,12 @@ pub struct Project {
 impl Project {
     /// Create a new project
     pub fn new(user_id: String, name: String) -> Self {
+        let prefix = Self::derive_prefix(&name);
         Self {
             id: ProjectId::new(),
             user_id,
             name,
+            prefix: Some(prefix),
             description: None,
             status: ProjectStatus::Active,
             color: None,
@@ -3067,10 +3208,12 @@ impl Project {
 
     /// Create a new sub-project under a parent
     pub fn new_subproject(user_id: String, name: String, parent_id: ProjectId) -> Self {
+        let prefix = Self::derive_prefix(&name);
         Self {
             id: ProjectId::new(),
             user_id,
             name,
+            prefix: Some(prefix),
             description: None,
             status: ProjectStatus::Active,
             color: None,
@@ -3078,6 +3221,41 @@ impl Project {
             created_at: Utc::now(),
             completed_at: None,
         }
+    }
+
+    /// Derive a short prefix from project name
+    /// Examples: "bolt-parser" -> "BOLT", "Shodh-memory" -> "MEM", "My Project" -> "MYP"
+    pub fn derive_prefix(name: &str) -> String {
+        let name_clean = name.trim().to_uppercase();
+
+        // If name has a hyphen, use first part
+        if let Some(first_part) = name_clean.split('-').next() {
+            let first_part = first_part.trim();
+            if first_part.len() >= 2 {
+                // Take up to 4 chars from first part
+                return first_part.chars().take(4).collect();
+            }
+        }
+
+        // If name has spaces, use initials
+        let words: Vec<&str> = name_clean.split_whitespace().collect();
+        if words.len() > 1 {
+            return words
+                .iter()
+                .filter_map(|w| w.chars().next())
+                .take(4)
+                .collect();
+        }
+
+        // Single word: take first 3-4 chars
+        name_clean.chars().take(4).collect()
+    }
+
+    /// Get the effective prefix (derived if not explicitly set)
+    pub fn effective_prefix(&self) -> String {
+        self.prefix
+            .clone()
+            .unwrap_or_else(|| Self::derive_prefix(&self.name))
     }
 }
 
