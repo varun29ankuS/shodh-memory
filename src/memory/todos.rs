@@ -16,7 +16,10 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use super::types::{Project, ProjectId, ProjectStatus, Recurrence, Todo, TodoId, TodoStatus};
+use super::types::{
+    Project, ProjectId, ProjectStatus, Recurrence, Todo, TodoComment, TodoCommentId,
+    TodoCommentType, TodoId, TodoStatus,
+};
 
 /// Storage and query engine for todos and projects
 pub struct TodoStore {
@@ -64,9 +67,13 @@ impl TodoStore {
     // SEQUENCE NUMBER MANAGEMENT
     // =========================================================================
 
-    /// Get the next sequence number for a user and increment the counter
-    fn next_seq_num(&self, user_id: &str) -> Result<u32> {
-        let key = format!("seq:{}", user_id);
+    /// Get the next sequence number for a project (or user if no project) and increment the counter
+    /// Key format: "seq:{user_id}:{project_id}" or "seq:{user_id}:_standalone_" for todos without project
+    fn next_seq_num(&self, user_id: &str, project_id: Option<&ProjectId>) -> Result<u32> {
+        let key = match project_id {
+            Some(pid) => format!("seq:{}:{}", user_id, pid.0),
+            None => format!("seq:{}:_standalone_", user_id),
+        };
         let current = match self.index_db.get(key.as_bytes())? {
             Some(data) => {
                 if data.len() >= 4 {
@@ -83,10 +90,16 @@ impl TodoStore {
         Ok(next)
     }
 
-    /// Assign a sequence number to a todo if it doesn't have one
+    /// Assign a sequence number and project prefix to a todo if it doesn't have one
     pub fn assign_seq_num(&self, todo: &mut Todo) -> Result<()> {
         if todo.seq_num == 0 {
-            todo.seq_num = self.next_seq_num(&todo.user_id)?;
+            // Set project prefix if todo has a project
+            if let Some(ref project_id) = todo.project_id {
+                if let Some(project) = self.get_project(&todo.user_id, project_id)? {
+                    todo.project_prefix = Some(project.effective_prefix());
+                }
+            }
+            todo.seq_num = self.next_seq_num(&todo.user_id, todo.project_id.as_ref())?;
         }
         Ok(())
     }
@@ -95,12 +108,21 @@ impl TodoStore {
     // TODO CRUD OPERATIONS
     // =========================================================================
 
-    /// Store a new todo (assigns seq_num if needed, returns stored todo)
+    /// Store a new todo (assigns seq_num and project_prefix if needed, returns stored todo)
     pub fn store_todo(&self, todo: &Todo) -> Result<Todo> {
         // If seq_num is 0, assign one (for new todos)
         let mut todo_to_store = todo.clone();
         if todo_to_store.seq_num == 0 {
-            todo_to_store.seq_num = self.next_seq_num(&todo_to_store.user_id)?;
+            // Set project prefix if todo has a project
+            if let Some(ref project_id) = todo_to_store.project_id {
+                if todo_to_store.project_prefix.is_none() {
+                    if let Some(project) = self.get_project(&todo_to_store.user_id, project_id)? {
+                        todo_to_store.project_prefix = Some(project.effective_prefix());
+                    }
+                }
+            }
+            todo_to_store.seq_num =
+                self.next_seq_num(&todo_to_store.user_id, todo_to_store.project_id.as_ref())?;
         }
 
         let key = format!("{}:{}", todo_to_store.user_id, todo_to_store.id.0);
@@ -114,7 +136,7 @@ impl TodoStore {
 
         tracing::debug!(
             todo_id = %todo_to_store.id,
-            seq_num = todo_to_store.seq_num,
+            short_id = %todo_to_store.short_id(),
             user_id = %todo_to_store.user_id,
             status = ?todo_to_store.status,
             "Stored todo"
@@ -233,26 +255,40 @@ impl TodoStore {
         }
     }
 
-    /// Find todo by short ID prefix
+    /// Find todo by short ID prefix (e.g., "BOLT-1", "MEM-2", "SHO-3", or just "1")
     pub fn find_todo_by_prefix(&self, user_id: &str, prefix: &str) -> Result<Option<Todo>> {
-        // Remove "SHO-" prefix if present
-        let clean_prefix = prefix
-            .strip_prefix("SHO-")
-            .or_else(|| prefix.strip_prefix("sho-"))
-            .unwrap_or(prefix);
-
         let todos = self.list_todos_for_user(user_id, None)?;
 
-        // Check if prefix is a number (e.g., "123" or "SHO-123")
-        if let Ok(seq_num) = clean_prefix.parse::<u32>() {
-            // Exact match on sequential number
+        // Parse prefix in format "PREFIX-NUMBER" or just "NUMBER"
+        let prefix_upper = prefix.trim().to_uppercase();
+
+        // Try to extract project prefix and sequence number
+        if let Some((project_prefix, seq_str)) = prefix_upper.rsplit_once('-') {
+            // Format: "BOLT-1", "MEM-2", "SHO-3"
+            if let Ok(seq_num) = seq_str.parse::<u32>() {
+                // Find todo matching both project prefix and seq_num
+                if let Some(todo) = todos.iter().find(|t| {
+                    t.seq_num == seq_num
+                        && t.project_prefix
+                            .as_ref()
+                            .map(|p| p.to_uppercase() == project_prefix)
+                            .unwrap_or(project_prefix == "SHO")
+                }) {
+                    return Ok(Some(todo.clone()));
+                }
+            }
+        }
+
+        // Try parsing as just a number (e.g., "1", "2")
+        if let Ok(seq_num) = prefix_upper.parse::<u32>() {
+            // Exact match on sequential number (any project)
             if let Some(todo) = todos.iter().find(|t| t.seq_num == seq_num) {
                 return Ok(Some(todo.clone()));
             }
         }
 
-        // Fall back to UUID prefix matching (for legacy or if seq_num not found)
-        let clean_prefix_lower = clean_prefix.to_lowercase();
+        // Fall back to UUID prefix matching (for legacy todos)
+        let clean_prefix_lower = prefix.to_lowercase();
         let matches: Vec<_> = todos
             .into_iter()
             .filter(|t| {
@@ -328,6 +364,104 @@ impl TodoStore {
             Ok(Some((stored_todo, next_todo)))
         } else {
             Ok(None)
+        }
+    }
+
+    // =========================================================================
+    // TODO COMMENTS
+    // =========================================================================
+
+    /// Add a comment to a todo
+    pub fn add_comment(
+        &self,
+        user_id: &str,
+        todo_id: &TodoId,
+        author: String,
+        content: String,
+        comment_type: Option<TodoCommentType>,
+    ) -> Result<Option<TodoComment>> {
+        if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
+            let mut comment = TodoComment::new(todo_id.clone(), author, content);
+            if let Some(ct) = comment_type {
+                comment.comment_type = ct;
+            }
+            let comment_clone = comment.clone();
+            todo.comments.push(comment);
+            self.update_todo(&todo)?;
+
+            tracing::debug!(
+                todo_id = %todo_id,
+                comment_id = %comment_clone.id.0,
+                "Added comment to todo"
+            );
+
+            Ok(Some(comment_clone))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Add a system activity entry to a todo
+    pub fn add_activity(&self, user_id: &str, todo_id: &TodoId, content: String) -> Result<bool> {
+        if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
+            todo.add_activity(content);
+            self.update_todo(&todo)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Update a comment on a todo
+    pub fn update_comment(
+        &self,
+        user_id: &str,
+        todo_id: &TodoId,
+        comment_id: &TodoCommentId,
+        content: String,
+    ) -> Result<Option<TodoComment>> {
+        if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
+            if let Some(comment) = todo.comments.iter_mut().find(|c| c.id == *comment_id) {
+                comment.content = content;
+                comment.updated_at = Some(chrono::Utc::now());
+                let comment_clone = comment.clone();
+                self.update_todo(&todo)?;
+                Ok(Some(comment_clone))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Delete a comment from a todo
+    pub fn delete_comment(
+        &self,
+        user_id: &str,
+        todo_id: &TodoId,
+        comment_id: &TodoCommentId,
+    ) -> Result<bool> {
+        if let Some(mut todo) = self.get_todo(user_id, todo_id)? {
+            let initial_len = todo.comments.len();
+            todo.comments.retain(|c| c.id != *comment_id);
+            if todo.comments.len() < initial_len {
+                self.update_todo(&todo)?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Get all comments for a todo
+    pub fn get_comments(&self, user_id: &str, todo_id: &TodoId) -> Result<Vec<TodoComment>> {
+        if let Some(todo) = self.get_todo(user_id, todo_id)? {
+            Ok(todo.comments)
+        } else {
+            Ok(Vec::new())
         }
     }
 
@@ -731,6 +865,7 @@ impl TodoStore {
         user_id: &str,
         project_id: &ProjectId,
         name: Option<String>,
+        prefix: Option<String>,
         description: Option<Option<String>>,
         status: Option<ProjectStatus>,
         color: Option<Option<String>>,
@@ -742,6 +877,14 @@ impl TodoStore {
             if let Some(new_name) = name {
                 if !new_name.trim().is_empty() && new_name != project.name {
                     project.name = new_name;
+                    changed = true;
+                }
+            }
+
+            if let Some(new_prefix) = prefix {
+                let clean = new_prefix.trim().to_uppercase();
+                if !clean.is_empty() {
+                    project.prefix = Some(clean);
                     changed = true;
                 }
             }
