@@ -53,6 +53,27 @@ Choose your platform:
 
 <p align="center"><i>Knowledge graph visualization — entity connections across memories</i></p>
 
+## GTD Todo System
+
+Built-in task management following GTD (Getting Things Done) methodology:
+
+```python
+# Add todos with context, projects, and priorities
+memory.add_todo("Fix authentication bug", project="Backend", priority="high", contexts=["@computer"])
+
+# List by project or context
+todos = memory.list_todos(project="Backend", status=["todo", "in_progress"])
+
+# Complete tasks (auto-creates next occurrence for recurring)
+memory.complete_todo("SHO-abc123")
+```
+
+**MCP Tools for Claude/Cursor:**
+- `add_todo` — Create tasks with projects, contexts, priorities, due dates
+- `list_todos` — Filter by status, project, context, due date
+- `complete_todo` — Mark done, auto-advances recurring tasks
+- `add_project` / `list_projects` — Organize work into projects
+
 ## How It Works
 
 Experiences flow through three tiers based on Cowan's working memory model:
@@ -91,6 +112,13 @@ claude mcp add shodh-memory -- npx -y @shodh/memory-mcp
   }
 }
 ```
+
+**Key MCP Tools:**
+- `remember` — Store memories with types (Observation, Decision, Learning, etc.)
+- `recall` — Semantic/associative/hybrid search across memories
+- `proactive_context` — Auto-surface relevant memories for current context
+- `add_todo` / `list_todos` — GTD task management
+- `context_summary` — Quick overview of recent learnings and decisions
 
 Config file locations:
 
