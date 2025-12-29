@@ -66,8 +66,8 @@ use memory::{
     GraphStats as VisualizationStats, Memory, MemoryConfig, MemoryId, MemoryStats, MemorySystem,
     PendingFeedback, Project, ProjectId, ProjectStats, ProjectStatus, ProspectiveTask,
     ProspectiveTaskId, ProspectiveTaskStatus, ProspectiveTrigger, Query as MemoryQuery, Recurrence,
-    SharedMemory, SurfacedMemoryInfo, Todo, TodoId, TodoPriority, TodoStatus, TodoStore,
-    UserTodoStats,
+    SharedMemory, SurfacedMemoryInfo, Todo, TodoComment, TodoCommentId, TodoCommentType, TodoId,
+    TodoPriority, TodoStatus, TodoStore, UserTodoStats,
 };
 
 /// Audit event for history tracking
@@ -8829,6 +8829,44 @@ struct TodoCompleteResponse {
     formatted: String,
 }
 
+/// Request to add a comment to a todo
+#[derive(Debug, Deserialize)]
+struct AddCommentRequest {
+    user_id: String,
+    /// Comment content (supports markdown)
+    content: String,
+    /// Optional author (defaults to user_id)
+    #[serde(default)]
+    author: Option<String>,
+    /// Type of comment: comment, progress, resolution, activity
+    #[serde(default)]
+    comment_type: Option<String>,
+}
+
+/// Request to update a comment
+#[derive(Debug, Deserialize)]
+struct UpdateCommentRequest {
+    user_id: String,
+    content: String,
+}
+
+/// Response for comment operations
+#[derive(Debug, Serialize)]
+struct CommentResponse {
+    success: bool,
+    comment: Option<TodoComment>,
+    formatted: String,
+}
+
+/// Response for listing comments
+#[derive(Debug, Serialize)]
+struct CommentListResponse {
+    success: bool,
+    count: usize,
+    comments: Vec<TodoComment>,
+    formatted: String,
+}
+
 /// Request to list todos with filters
 #[derive(Debug, Deserialize)]
 struct ListTodosRequest {
@@ -8904,6 +8942,8 @@ struct CreateProjectRequest {
     user_id: String,
     name: String,
     #[serde(default)]
+    prefix: Option<String>, // Custom prefix for todo IDs (e.g., "BOLT", "MEM")
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     color: Option<String>,
@@ -8935,6 +8975,8 @@ struct UpdateProjectRequest {
     user_id: String,
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    prefix: Option<String>, // Custom prefix for todo IDs (e.g., "BOLT", "MEM")
     #[serde(default)]
     description: Option<Option<String>>,
     #[serde(default)]
@@ -9054,6 +9096,62 @@ async fn create_todo(
         .todo_store
         .store_todo(&todo)
         .map_err(AppError::Internal)?;
+
+    // Create a memory from this todo - future plans affect how we function
+    let memory_content = if let Some(ref proj) = project_name {
+        format!(
+            "[{}] Todo created in {}: {}",
+            todo.short_id(),
+            proj,
+            todo.content
+        )
+    } else {
+        format!("[{}] Todo created: {}", todo.short_id(), todo.content)
+    };
+
+    let mut tags = vec![
+        format!("todo:{}", todo.short_id()),
+        "todo-created".to_string(),
+    ];
+    if let Some(ref proj) = project_name {
+        tags.push(format!("project:{}", proj));
+    }
+
+    let experience = Experience {
+        content: memory_content,
+        experience_type: ExperienceType::Task,
+        tags,
+        ..Default::default()
+    };
+
+    // Store as memory (non-blocking - don't fail todo creation if memory fails)
+    if let Ok(memory) = state.get_user_memory(&req.user_id) {
+        let memory_clone = memory.clone();
+        let exp_clone = experience.clone();
+        let state_clone = state.clone();
+        let user_id = req.user_id.clone();
+
+        tokio::spawn(async move {
+            let memory_result = tokio::task::spawn_blocking(move || {
+                let memory_guard = memory_clone.read();
+                memory_guard.remember(exp_clone, None)
+            })
+            .await;
+
+            if let Ok(Ok(memory_id)) = memory_result {
+                if let Err(e) =
+                    state_clone.process_experience_into_graph(&user_id, &experience, &memory_id)
+                {
+                    tracing::debug!(
+                        "Graph processing failed for todo memory {}: {}",
+                        memory_id.0,
+                        e
+                    );
+                }
+                tracing::debug!(memory_id = %memory_id.0, "Todo creation stored as memory");
+            }
+        });
+    }
 
     let formatted = todo_formatter::format_todo_created(&todo, project_name.as_deref());
 
@@ -9356,6 +9454,88 @@ async fn update_todo(
         .update_todo(&todo)
         .map_err(AppError::Internal)?;
 
+    // Create a memory for significant todo updates - brain tracks all changes
+    let update_description = {
+        let mut changes = Vec::new();
+        if req.status.is_some() {
+            changes.push(format!("status → {:?}", todo.status));
+        }
+        if req.priority.is_some() {
+            changes.push(format!("priority → {:?}", todo.priority));
+        }
+        if req.content.is_some() {
+            changes.push("content updated".to_string());
+        }
+        if req.project.is_some() {
+            changes.push(format!(
+                "project → {}",
+                project_name.as_deref().unwrap_or("none")
+            ));
+        }
+        if req.blocked_on.is_some() {
+            changes.push(format!(
+                "blocked on: {}",
+                todo.blocked_on.as_deref().unwrap_or("cleared")
+            ));
+        }
+        changes.join(", ")
+    };
+
+    if !update_description.is_empty() {
+        let memory_content = format!(
+            "[{}] Todo updated ({}): {}",
+            todo.short_id(),
+            update_description,
+            todo.content
+        );
+
+        let mut tags = vec![
+            format!("todo:{}", todo.short_id()),
+            "todo-updated".to_string(),
+        ];
+        if let Some(ref proj) = project_name {
+            tags.push(format!("project:{}", proj));
+        }
+        if req.status.is_some() {
+            tags.push(format!("status:{:?}", todo.status).to_lowercase());
+        }
+
+        let experience = Experience {
+            content: memory_content,
+            experience_type: ExperienceType::Context,
+            tags,
+            ..Default::default()
+        };
+
+        if let Ok(memory) = state.get_user_memory(&req.user_id) {
+            let memory_clone = memory.clone();
+            let exp_clone = experience.clone();
+            let state_clone = state.clone();
+            let user_id = req.user_id.clone();
+
+            tokio::spawn(async move {
+                let memory_result = tokio::task::spawn_blocking(move || {
+                    let memory_guard = memory_clone.read();
+                    memory_guard.remember(exp_clone, None)
+                })
+                .await;
+
+                if let Ok(Ok(memory_id)) = memory_result {
+                    if let Err(e) =
+                        state_clone.process_experience_into_graph(&user_id, &experience, &memory_id)
+                    {
+                        tracing::debug!(
+                            "Graph processing failed for todo update memory {}: {}",
+                            memory_id.0,
+                            e
+                        );
+                    }
+                    tracing::debug!(memory_id = %memory_id.0, "Todo update stored as memory");
+                }
+            });
+        }
+    }
+
     let formatted = todo_formatter::format_todo_updated(&todo, project_name.as_deref());
 
     // Emit SSE event for live TUI updates
@@ -9623,6 +9803,355 @@ async fn list_subtasks(
     }))
 }
 
+// =====================================================================
+// TODO COMMENTS ENDPOINTS
+// =====================================================================
+
+/// POST /api/todos/{todo_id}/comments - Add a comment to a todo
+async fn add_todo_comment(
+    State(state): State<AppState>,
+    Path(todo_id): Path<String>,
+    Json(req): Json<AddCommentRequest>,
+) -> Result<Json<CommentResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    if req.content.trim().is_empty() {
+        return Err(AppError::InvalidInput {
+            field: "content".to_string(),
+            reason: "Comment content cannot be empty".to_string(),
+        });
+    }
+
+    // Find the todo first
+    let todo = state
+        .todo_store
+        .find_todo_by_prefix(&req.user_id, &todo_id)
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::TodoNotFound(todo_id.clone()))?;
+
+    // Parse comment type
+    let comment_type = req
+        .comment_type
+        .as_ref()
+        .and_then(|ct| match ct.to_lowercase().as_str() {
+            "comment" => Some(TodoCommentType::Comment),
+            "progress" => Some(TodoCommentType::Progress),
+            "resolution" => Some(TodoCommentType::Resolution),
+            "activity" => Some(TodoCommentType::Activity),
+            _ => None,
+        });
+
+    let author = req.author.unwrap_or_else(|| req.user_id.clone());
+
+    let comment = state
+        .todo_store
+        .add_comment(
+            &req.user_id,
+            &todo.id,
+            author.clone(),
+            req.content.clone(),
+            comment_type.clone(),
+        )
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::TodoNotFound(todo_id.clone()))?;
+
+    // Create a memory from this comment - nothing exists outside the brain
+    // Map comment type to experience type
+    let experience_type = match comment_type.as_ref().unwrap_or(&TodoCommentType::Comment) {
+        TodoCommentType::Comment => ExperienceType::Observation,
+        TodoCommentType::Progress => ExperienceType::Learning,
+        TodoCommentType::Resolution => ExperienceType::Learning,
+        TodoCommentType::Activity => ExperienceType::Context,
+    };
+
+    // Build context-rich content for the memory
+    let memory_content = format!(
+        "[{}] {} ({}): {}",
+        todo.short_id(),
+        match comment_type.as_ref().unwrap_or(&TodoCommentType::Comment) {
+            TodoCommentType::Comment => "Comment",
+            TodoCommentType::Progress => "Progress",
+            TodoCommentType::Resolution => "Resolution",
+            TodoCommentType::Activity => "Activity",
+        },
+        todo.content,
+        req.content
+    );
+
+    // Build tags linking to todo and project
+    let mut tags = vec![
+        format!("todo:{}", todo.short_id()),
+        format!("todo-comment:{:?}", comment.comment_type).to_lowercase(),
+    ];
+    // Look up project name from project_id
+    if let Some(ref project_id) = todo.project_id {
+        if let Ok(Some(project)) = state.todo_store.get_project(&req.user_id, project_id) {
+            tags.push(format!("project:{}", project.name));
+        }
+    }
+
+    let experience = Experience {
+        content: memory_content,
+        experience_type,
+        tags,
+        ..Default::default()
+    };
+
+    // Store as memory
+    if let Ok(memory) = state.get_user_memory(&req.user_id) {
+        let memory_clone = memory.clone();
+        let exp_clone = experience.clone();
+        let memory_result = tokio::task::spawn_blocking(move || {
+            let memory_guard = memory_clone.read();
+            memory_guard.remember(exp_clone, None)
+        })
+        .await;
+
+        if let Ok(Ok(memory_id)) = memory_result {
+            // Process into knowledge graph for connections
+            if let Err(e) =
+                state.process_experience_into_graph(&req.user_id, &experience, &memory_id)
+            {
+                tracing::debug!(
+                    "Graph processing failed for todo comment memory {}: {}",
+                    memory_id.0,
+                    e
+                );
+            }
+
+            tracing::debug!(
+                memory_id = %memory_id.0,
+                todo_id = %todo.id,
+                "Todo comment stored as memory"
+            );
+        }
+    }
+
+    let formatted = format!(
+        "✓ Added comment to {}\n\n  {} ({}):\n  {}",
+        todo.short_id(),
+        author,
+        comment.created_at.format("%Y-%m-%d %H:%M"),
+        req.content
+    );
+
+    // Emit SSE event for live TUI updates
+    state.emit_event(MemoryEvent {
+        event_type: "TODO_COMMENT_ADD".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: req.user_id.clone(),
+        memory_id: Some(comment.id.0.to_string()),
+        content_preview: Some(format!(
+            "[{}] {}",
+            todo.short_id(),
+            req.content.chars().take(80).collect::<String>()
+        )),
+        memory_type: Some(format!("{:?}", comment.comment_type)),
+        importance: None,
+        count: None,
+    });
+
+    tracing::debug!(
+        user_id = %req.user_id,
+        todo_id = %todo.id,
+        comment_id = %comment.id.0,
+        "Added comment to todo"
+    );
+
+    Ok(Json(CommentResponse {
+        success: true,
+        comment: Some(comment),
+        formatted,
+    }))
+}
+
+/// GET /api/todos/{todo_id}/comments - List comments for a todo
+async fn list_todo_comments(
+    State(state): State<AppState>,
+    Path(todo_id): Path<String>,
+    Query(query): Query<TodoQuery>,
+) -> Result<Json<CommentListResponse>, AppError> {
+    validation::validate_user_id(&query.user_id).map_validation_err("user_id")?;
+
+    // Find the todo first
+    let todo = state
+        .todo_store
+        .find_todo_by_prefix(&query.user_id, &todo_id)
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::TodoNotFound(todo_id.clone()))?;
+
+    let comments = state
+        .todo_store
+        .get_comments(&query.user_id, &todo.id)
+        .map_err(AppError::Internal)?;
+
+    let formatted = if comments.is_empty() {
+        format!("No comments on {}", todo.short_id())
+    } else {
+        let mut output = format!(
+            "📝 Comments on {} ({} total)\n\n",
+            todo.short_id(),
+            comments.len()
+        );
+        for (i, comment) in comments.iter().enumerate() {
+            let type_icon = match comment.comment_type {
+                TodoCommentType::Comment => "💬",
+                TodoCommentType::Progress => "📊",
+                TodoCommentType::Resolution => "✅",
+                TodoCommentType::Activity => "🔄",
+            };
+            output.push_str(&format!(
+                "{}. {} {} ({})\n   {}\n\n",
+                i + 1,
+                type_icon,
+                comment.author,
+                comment.created_at.format("%Y-%m-%d %H:%M"),
+                comment.content
+            ));
+        }
+        output
+    };
+
+    tracing::debug!(
+        user_id = %query.user_id,
+        todo_id = %todo.id,
+        count = comments.len(),
+        "Listed todo comments"
+    );
+
+    Ok(Json(CommentListResponse {
+        success: true,
+        count: comments.len(),
+        comments,
+        formatted,
+    }))
+}
+
+/// POST /api/todos/{todo_id}/comments/{comment_id}/update - Update a comment
+async fn update_todo_comment(
+    State(state): State<AppState>,
+    Path((todo_id, comment_id)): Path<(String, String)>,
+    Json(req): Json<UpdateCommentRequest>,
+) -> Result<Json<CommentResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    if req.content.trim().is_empty() {
+        return Err(AppError::InvalidInput {
+            field: "content".to_string(),
+            reason: "Comment content cannot be empty".to_string(),
+        });
+    }
+
+    // Find the todo first
+    let todo = state
+        .todo_store
+        .find_todo_by_prefix(&req.user_id, &todo_id)
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::TodoNotFound(todo_id.clone()))?;
+
+    // Parse comment ID
+    let cid = uuid::Uuid::parse_str(&comment_id).map_err(|_| AppError::InvalidInput {
+        field: "comment_id".to_string(),
+        reason: "Invalid comment ID format".to_string(),
+    })?;
+    let comment_id_typed = TodoCommentId(cid);
+
+    let comment = state
+        .todo_store
+        .update_comment(
+            &req.user_id,
+            &todo.id,
+            &comment_id_typed,
+            req.content.clone(),
+        )
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::InvalidInput {
+            field: "comment_id".to_string(),
+            reason: "Comment not found".to_string(),
+        })?;
+
+    let formatted = format!(
+        "✓ Updated comment on {}\n\n  Updated content:\n  {}",
+        todo.short_id(),
+        req.content
+    );
+
+    tracing::debug!(
+        user_id = %req.user_id,
+        todo_id = %todo.id,
+        comment_id = %comment_id_typed.0,
+        "Updated todo comment"
+    );
+
+    Ok(Json(CommentResponse {
+        success: true,
+        comment: Some(comment),
+        formatted,
+    }))
+}
+
+/// DELETE /api/todos/{todo_id}/comments/{comment_id} - Delete a comment
+async fn delete_todo_comment(
+    State(state): State<AppState>,
+    Path((todo_id, comment_id)): Path<(String, String)>,
+    Query(query): Query<TodoQuery>,
+) -> Result<Json<CommentResponse>, AppError> {
+    validation::validate_user_id(&query.user_id).map_validation_err("user_id")?;
+
+    // Find the todo first
+    let todo = state
+        .todo_store
+        .find_todo_by_prefix(&query.user_id, &todo_id)
+        .map_err(AppError::Internal)?
+        .ok_or_else(|| AppError::TodoNotFound(todo_id.clone()))?;
+
+    // Parse comment ID
+    let cid = uuid::Uuid::parse_str(&comment_id).map_err(|_| AppError::InvalidInput {
+        field: "comment_id".to_string(),
+        reason: "Invalid comment ID format".to_string(),
+    })?;
+    let comment_id_typed = TodoCommentId(cid);
+
+    let success = state
+        .todo_store
+        .delete_comment(&query.user_id, &todo.id, &comment_id_typed)
+        .map_err(AppError::Internal)?;
+
+    let formatted = if success {
+        format!("✓ Deleted comment from {}", todo.short_id())
+    } else {
+        "Comment not found".to_string()
+    };
+
+    // Emit SSE event for live TUI updates
+    if success {
+        state.emit_event(MemoryEvent {
+            event_type: "TODO_COMMENT_DELETE".to_string(),
+            timestamp: chrono::Utc::now(),
+            user_id: query.user_id.clone(),
+            memory_id: Some(comment_id.to_string()),
+            content_preview: Some(format!("[{}] comment deleted", todo.short_id())),
+            memory_type: None,
+            importance: None,
+            count: None,
+        });
+    }
+
+    tracing::debug!(
+        user_id = %query.user_id,
+        todo_id = %todo.id,
+        comment_id = %comment_id,
+        success = success,
+        "Deleted todo comment"
+    );
+
+    Ok(Json(CommentResponse {
+        success,
+        comment: None,
+        formatted,
+    }))
+}
+
 /// POST /api/projects - Create a new project
 async fn create_project(
     State(state): State<AppState>,
@@ -9663,6 +10192,13 @@ async fn create_project(
     };
 
     let mut project = Project::new(req.user_id.clone(), req.name.clone());
+    // Override auto-derived prefix if custom prefix provided
+    if let Some(ref custom_prefix) = req.prefix {
+        let clean = custom_prefix.trim().to_uppercase();
+        if !clean.is_empty() {
+            project.prefix = Some(clean);
+        }
+    }
     project.description = req.description;
     project.color = req.color;
     project.parent_id = parent_id;
@@ -9808,6 +10344,7 @@ async fn update_project(
             &req.user_id,
             &project.id,
             req.name,
+            req.prefix,
             req.description,
             req.status,
             req.color,
@@ -10219,6 +10756,16 @@ async fn main() -> Result<()> {
         .route("/api/todos/{todo_id}/complete", post(complete_todo))
         .route("/api/todos/{todo_id}/reorder", post(reorder_todo))
         .route("/api/todos/{todo_id}/subtasks", get(list_subtasks))
+        .route("/api/todos/{todo_id}/comments", post(add_todo_comment))
+        .route("/api/todos/{todo_id}/comments", get(list_todo_comments))
+        .route(
+            "/api/todos/{todo_id}/comments/{comment_id}/update",
+            post(update_todo_comment),
+        )
+        .route(
+            "/api/todos/{todo_id}/comments/{comment_id}",
+            delete(delete_todo_comment),
+        )
         .route("/api/todos/{todo_id}", delete(delete_todo))
         .route("/api/projects", post(create_project))
         .route("/api/projects/list", post(list_projects))
