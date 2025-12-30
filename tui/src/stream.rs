@@ -1488,21 +1488,21 @@ pub async fn scan_project_codebase(
     #[derive(serde::Serialize)]
     struct ScanRequest {
         user_id: String,
-        root_path: String,
+        codebase_path: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        max_files: Option<usize>,
+        force: Option<bool>,
     }
 
     #[derive(serde::Deserialize)]
     struct ScanResponse {
         #[serde(default)]
-        file_paths: Vec<String>,
+        eligible_files: usize,
     }
 
     let request = ScanRequest {
         user_id: user_id.to_string(),
-        root_path: root_path.to_string(),
-        max_files: Some(200),
+        codebase_path: root_path.to_string(),
+        force: Some(false),
     };
 
     let response = client
@@ -1525,7 +1525,7 @@ pub async fn scan_project_codebase(
         .await
         .map_err(|e| format!("Parse error: {}", e))?;
 
-    Ok(resp.file_paths.len())
+    Ok(resp.eligible_files)
 }
 
 /// Index project codebase (extract summaries and key items)
@@ -1542,7 +1542,7 @@ pub async fn index_project_codebase(
     #[derive(serde::Serialize)]
     struct IndexRequest {
         user_id: String,
-        root_path: String,
+        codebase_path: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         force: Option<bool>,
     }
@@ -1555,7 +1555,7 @@ pub async fn index_project_codebase(
 
     let request = IndexRequest {
         user_id: user_id.to_string(),
-        root_path: root_path.to_string(),
+        codebase_path: root_path.to_string(),
         force: Some(false),
     };
 
