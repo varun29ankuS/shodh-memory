@@ -1589,6 +1589,12 @@ pub struct AppState {
     pub file_popup_visible: bool,
     /// File popup scroll offset
     pub file_popup_scroll: usize,
+    /// Codebase path input active
+    pub codebase_input_active: bool,
+    /// Codebase path being entered
+    pub codebase_input_path: String,
+    /// Project ID for codebase input
+    pub codebase_input_project_id: Option<String>,
 }
 
 /// Claude Code context session status
@@ -1693,6 +1699,9 @@ impl AppState {
             scanning_project: None,
             file_popup_visible: false,
             file_popup_scroll: 0,
+            codebase_input_active: false,
+            codebase_input_path: String::new(),
+            codebase_input_project_id: None,
         }
     }
 

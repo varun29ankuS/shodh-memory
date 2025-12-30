@@ -935,6 +935,78 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                         continue;
                     }
 
+                    // Handle codebase path input
+                    if g.codebase_input_active {
+                        match key.code {
+                            KeyCode::Esc => {
+                                g.codebase_input_active = false;
+                                g.codebase_input_path.clear();
+                                g.codebase_input_project_id = None;
+                            }
+                            KeyCode::Enter => {
+                                // Start scanning with entered path
+                                if let Some(pid) = g.codebase_input_project_id.take() {
+                                    let root_path = g.codebase_input_path.clone();
+                                    let user_id = g.current_user.clone();
+                                    g.codebase_input_active = false;
+                                    g.codebase_input_path.clear();
+                                    g.start_scanning(&pid);
+                                    g.set_error(format!("Scanning: {}...", root_path));
+                                    drop(g);
+
+                                    // Scan
+                                    let scan_result = crate::stream::scan_project_codebase(
+                                        &base_url, &api_key, &user_id, &pid, &root_path,
+                                    )
+                                    .await;
+
+                                    let mut g = state.lock().await;
+                                    match scan_result {
+                                        Ok(count) => {
+                                            g.set_error(format!("Scanned {} files, indexing...", count));
+                                            drop(g);
+
+                                            // Index
+                                            let index_result = crate::stream::index_project_codebase(
+                                                &base_url, &api_key, &user_id, &pid, &root_path,
+                                            )
+                                            .await;
+
+                                            let mut g = state.lock().await;
+                                            g.stop_scanning();
+                                            match index_result {
+                                                Ok(indexed) => {
+                                                    g.set_error(format!(
+                                                        "✓ Indexed {} files. Press f to view.",
+                                                        indexed
+                                                    ));
+                                                    g.mark_project_indexed(&pid);
+                                                    g.project_files.remove(&pid);
+                                                    g.files_expanded_projects.insert(pid.clone());
+                                                }
+                                                Err(e) => {
+                                                    g.set_error(format!("Index failed: {}", e));
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            g.stop_scanning();
+                                            g.set_error(format!("Scan failed: {}", e));
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                g.codebase_input_path.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                g.codebase_input_path.push(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     // Normal mode keybindings
                     match key.code {
                         KeyCode::Char('q') => break,
@@ -1181,69 +1253,18 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                             }
                         }
                         KeyCode::Char('S') => {
-                            // Scan codebase for selected project (uppercase S)
+                            // Open codebase path input for selected project (uppercase S)
                             if matches!(g.view_mode, ViewMode::Projects)
                                 && g.focus_panel == FocusPanel::Left
                             {
                                 if let Some(project_id) = g.selected_project_id() {
-                                    let user_id = g.current_user.clone();
-                                    let pid = project_id.clone();
-
-                                    // Set scanning state
-                                    g.start_scanning(&pid);
-                                    g.set_error("Scanning codebase...".to_string());
-                                    drop(g);
-
-                                    // Use current directory as root path
-                                    let root_path =
-                                        std::env::current_dir()
-                                            .map(|p| p.display().to_string())
-                                            .unwrap_or_else(|_| ".".to_string());
-
-                                    // Scan and index
-                                    let scan_result = crate::stream::scan_project_codebase(
-                                        &base_url, &api_key, &user_id, &pid, &root_path,
-                                    )
-                                    .await;
-
-                                    let mut g = state.lock().await;
-                                    match scan_result {
-                                        Ok(count) => {
-                                            g.set_error(format!("Scanned {} files, indexing...", count));
-                                            drop(g);
-
-                                            // Now index the files
-                                            let index_result =
-                                                crate::stream::index_project_codebase(
-                                                    &base_url, &api_key, &user_id, &pid, &root_path,
-                                                )
-                                                .await;
-
-                                            let mut g = state.lock().await;
-                                            g.stop_scanning();
-                                            match index_result {
-                                                Ok(indexed) => {
-                                                    g.set_error(format!(
-                                                        "✓ Indexed {} files. Press f to view.",
-                                                        indexed
-                                                    ));
-                                                    // Mark project as indexed
-                                                    g.mark_project_indexed(&pid);
-                                                    // Clear cached files to force reload
-                                                    g.project_files.remove(&pid);
-                                                    // Auto-expand files section
-                                                    g.files_expanded_projects.insert(pid.clone());
-                                                }
-                                                Err(e) => {
-                                                    g.set_error(format!("Index failed: {}", e));
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            g.stop_scanning();
-                                            g.set_error(format!("Scan failed: {}", e));
-                                        }
-                                    }
+                                    // Pre-fill with current directory
+                                    let default_path = std::env::current_dir()
+                                        .map(|p| p.display().to_string())
+                                        .unwrap_or_else(|_| ".".to_string());
+                                    g.codebase_input_active = true;
+                                    g.codebase_input_path = default_path;
+                                    g.codebase_input_project_id = Some(project_id);
                                 }
                             }
                         }

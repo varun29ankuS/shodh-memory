@@ -1154,6 +1154,54 @@ fn render_projects_view(f: &mut Frame, area: Rect, state: &AppState) {
     if state.file_popup_visible {
         render_file_popup(f, area, state);
     }
+
+    // Render codebase path input if active
+    if state.codebase_input_active {
+        render_codebase_input(f, area, state);
+    }
+}
+
+/// Render codebase path input popup
+fn render_codebase_input(f: &mut Frame, area: Rect, state: &AppState) {
+    let popup_width = area.width.min(80);
+    let popup_height = 5;
+    let popup_x = (area.width - popup_width) / 2;
+    let popup_y = (area.height - popup_height) / 2;
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    // Clear background
+    f.render_widget(Clear, popup_area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            " 📂 Enter codebase directory path: ",
+            Style::default().fg(SAFFRON).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" > ", Style::default().fg(TEXT_SECONDARY)),
+            Span::styled(
+                state.codebase_input_path.clone(),
+                Style::default().fg(TEXT_PRIMARY),
+            ),
+            Span::styled("█", Style::default().fg(SAFFRON)), // Cursor
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Enter", Style::default().fg(TEXT_SECONDARY).add_modifier(Modifier::BOLD)),
+            Span::styled("=scan  ", Style::default().fg(TEXT_DISABLED)),
+            Span::styled("Esc", Style::default().fg(TEXT_SECONDARY).add_modifier(Modifier::BOLD)),
+            Span::styled("=cancel", Style::default().fg(TEXT_DISABLED)),
+        ]),
+    ];
+
+    let popup = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(SAFFRON))
+            .style(Style::default().bg(Color::Rgb(25, 25, 30))),
+    );
+    f.render_widget(popup, popup_area);
 }
 
 /// Render file explorer popup (centered overlay)
