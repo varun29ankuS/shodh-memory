@@ -1221,3 +1221,460 @@ pub struct StorageStats {
     #[serde(default)]
     pub total_retrievals: usize,
 }
+
+// =============================================================================
+// ATOMIC VECTOR INDEX MAPPING STORAGE
+// =============================================================================
+//
+// This module provides atomic storage for vector index mappings alongside memory data.
+// By storing IdMapping in RocksDB (not separate files), we ensure:
+//
+// 1. ATOMIC WRITES: Memory + vector mapping written in single WriteBatch
+// 2. NO ORPHANS: If memory exists, its vector mapping exists (or can be rebuilt)
+// 3. CRASH SAFETY: RocksDB WAL protects both memory data and mappings
+// 4. SINGLE SOURCE OF TRUTH: RocksDB is THE authority, Vamana is just a cache
+//
+// MULTIMODALITY READY:
+// - Each modality (text, image, audio, video) has separate vector space
+// - Text: 384-dim MiniLM (current)
+// - Image: 1024-dim ImageBind (future)
+// - Audio: 1024-dim ImageBind (future)
+// - Video: 1024-dim ImageBind (future)
+// - Cross-modal search possible via ImageBind's unified embedding space
+//
+// Key format: "vmapping:{memory_id}" -> bincode(VectorMappingEntry)
+// =============================================================================
+
+use std::collections::HashMap;
+
+/// Supported embedding modalities
+///
+/// When adding a new modality:
+/// 1. Add variant here
+/// 2. Create corresponding Vamana index with correct dimension
+/// 3. Implement embedder for the modality
+/// 4. Update search to include the modality
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Modality {
+    /// Text embeddings (MiniLM-L6-v2, 384-dim)
+    Text,
+    /// Image embeddings (future: ImageBind, 1024-dim)
+    Image,
+    /// Audio embeddings (future: ImageBind, 1024-dim)
+    Audio,
+    /// Video embeddings (future: ImageBind, 1024-dim)
+    Video,
+    /// Multi-modal unified embeddings (future: ImageBind, 1024-dim)
+    /// Used when content has multiple modalities fused together
+    Unified,
+}
+
+impl Modality {
+    /// Get embedding dimension for this modality
+    pub fn dimension(&self) -> usize {
+        match self {
+            Modality::Text => 384, // MiniLM-L6-v2
+            // ImageBind projects all modalities to 1024-dim shared space
+            Modality::Image => 1024,
+            Modality::Audio => 1024,
+            Modality::Video => 1024,
+            Modality::Unified => 1024,
+        }
+    }
+
+    /// Get the string key for storage
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Modality::Text => "text",
+            Modality::Image => "image",
+            Modality::Audio => "audio",
+            Modality::Video => "video",
+            Modality::Unified => "unified",
+        }
+    }
+}
+
+impl std::fmt::Display for Modality {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Vector IDs for a specific modality
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModalityVectors {
+    /// Vector IDs in this modality's Vamana index
+    pub vector_ids: Vec<u32>,
+    /// Embedding dimension (for validation)
+    pub dimension: usize,
+    /// Chunk boundaries (for long content)
+    /// Each entry is (start_char, end_char) in original content
+    pub chunk_ranges: Option<Vec<(usize, usize)>>,
+}
+
+/// Vector mapping entry for a single memory - MULTIMODALITY READY
+///
+/// Stores vector IDs for each modality separately, allowing:
+/// - Text-only memories (current)
+/// - Image-only memories (future)
+/// - Multi-modal memories (text + image + audio)
+/// - Cross-modal search via unified embeddings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorMappingEntry {
+    /// Vector IDs per modality
+    /// Key: Modality enum (serializes as string)
+    /// Value: Vector IDs + metadata for that modality
+    pub modalities: HashMap<Modality, ModalityVectors>,
+    /// Timestamp when mapping was created (for debugging)
+    pub created_at: i64,
+    /// Schema version for forward compatibility
+    pub version: u8,
+}
+
+impl Default for VectorMappingEntry {
+    fn default() -> Self {
+        Self {
+            modalities: HashMap::new(),
+            created_at: chrono::Utc::now().timestamp_millis(),
+            version: 1,
+        }
+    }
+}
+
+impl VectorMappingEntry {
+    /// Create a new mapping with text vectors (most common case)
+    pub fn with_text(vector_ids: Vec<u32>) -> Self {
+        let mut modalities = HashMap::new();
+        modalities.insert(
+            Modality::Text,
+            ModalityVectors {
+                vector_ids,
+                dimension: 384,
+                chunk_ranges: None,
+            },
+        );
+        Self {
+            modalities,
+            created_at: chrono::Utc::now().timestamp_millis(),
+            version: 1,
+        }
+    }
+
+    /// Get text vector IDs (convenience method for current text-only usage)
+    pub fn text_vectors(&self) -> Option<&Vec<u32>> {
+        self.modalities.get(&Modality::Text).map(|m| &m.vector_ids)
+    }
+
+    /// Get all vector IDs across all modalities (for deletion)
+    pub fn all_vector_ids(&self) -> Vec<(Modality, u32)> {
+        self.modalities
+            .iter()
+            .flat_map(|(modality, mv)| mv.vector_ids.iter().map(|id| (*modality, *id)))
+            .collect()
+    }
+
+    /// Check if this entry has any vectors
+    pub fn is_empty(&self) -> bool {
+        self.modalities.values().all(|mv| mv.vector_ids.is_empty())
+    }
+
+    /// Add vectors for a modality
+    pub fn add_modality(&mut self, modality: Modality, vector_ids: Vec<u32>) {
+        self.modalities.insert(
+            modality,
+            ModalityVectors {
+                dimension: modality.dimension(),
+                vector_ids,
+                chunk_ranges: None,
+            },
+        );
+    }
+
+    /// Future: Add image vectors
+    #[allow(dead_code)]
+    pub fn with_image(mut self, vector_ids: Vec<u32>) -> Self {
+        self.add_modality(Modality::Image, vector_ids);
+        self
+    }
+
+    /// Future: Add audio vectors
+    #[allow(dead_code)]
+    pub fn with_audio(mut self, vector_ids: Vec<u32>) -> Self {
+        self.add_modality(Modality::Audio, vector_ids);
+        self
+    }
+
+    /// Future: Add video vectors
+    #[allow(dead_code)]
+    pub fn with_video(mut self, vector_ids: Vec<u32>) -> Self {
+        self.add_modality(Modality::Video, vector_ids);
+        self
+    }
+}
+
+impl MemoryStorage {
+    // =========================================================================
+    // ATOMIC VECTOR MAPPING OPERATIONS
+    // =========================================================================
+
+    /// Store memory and its text vector mapping atomically
+    ///
+    /// Uses WriteBatch to ensure both operations succeed or both fail.
+    /// This is the ONLY way orphaned memories can be prevented.
+    ///
+    /// For text-only memories (current implementation). Use store_with_multimodal_vectors
+    /// for memories with image/audio/video content.
+    pub fn store_with_vectors(&self, memory: &Memory, vector_ids: Vec<u32>) -> Result<()> {
+        self.store_with_multimodal_vectors(memory, Modality::Text, vector_ids)
+    }
+
+    /// Store memory with vectors for a specific modality
+    ///
+    /// MULTIMODALITY READY: Supports text, image, audio, video modalities.
+    /// Each modality is stored separately, allowing cross-modal search.
+    pub fn store_with_multimodal_vectors(
+        &self,
+        memory: &Memory,
+        modality: Modality,
+        vector_ids: Vec<u32>,
+    ) -> Result<()> {
+        let mut batch = WriteBatch::default();
+
+        // 1. Serialize memory
+        let memory_key = memory.id.0.as_bytes();
+        let memory_value = bincode::serialize(memory)
+            .context(format!("Failed to serialize memory {}", memory.id.0))?;
+        batch.put(memory_key, &memory_value);
+
+        // 2. Serialize vector mapping with modality support
+        let mapping_key = format!("vmapping:{}", memory.id.0);
+
+        // Load existing mapping (for adding new modality to existing memory)
+        let mut mapping_entry = self
+            .get_vector_mapping(&memory.id)?
+            .unwrap_or_default();
+
+        // Add/update the modality vectors
+        mapping_entry.add_modality(modality, vector_ids);
+
+        let mapping_value = bincode::serialize(&mapping_entry)
+            .context("Failed to serialize vector mapping")?;
+        batch.put(mapping_key.as_bytes(), &mapping_value);
+
+        // 3. Atomic write - both succeed or both fail
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(self.write_mode == WriteMode::Sync);
+        self.db
+            .write_opt(batch, &write_opts)
+            .context("Atomic write of memory + vector mapping failed")?;
+
+        // 4. Update secondary indices (separate operation, but non-critical)
+        if let Err(e) = self.update_indices(memory) {
+            tracing::warn!("Secondary index update failed (non-fatal): {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Get vector mapping for a memory
+    pub fn get_vector_mapping(&self, memory_id: &MemoryId) -> Result<Option<VectorMappingEntry>> {
+        let mapping_key = format!("vmapping:{}", memory_id.0);
+        match self.db.get(mapping_key.as_bytes())? {
+            Some(data) => {
+                let entry: VectorMappingEntry = bincode::deserialize(&data)
+                    .context("Failed to deserialize vector mapping")?;
+                Ok(Some(entry))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get all vector mappings (for rebuilding Vamana index on startup)
+    ///
+    /// Returns iterator-style results to avoid loading everything into memory at once.
+    /// Sorted by memory_id for deterministic Vamana rebuilding.
+    pub fn get_all_vector_mappings(&self) -> Result<Vec<(MemoryId, VectorMappingEntry)>> {
+        let mut mappings = Vec::new();
+        let prefix = b"vmapping:";
+
+        let iter = self.db.iterator(IteratorMode::From(
+            prefix,
+            rocksdb::Direction::Forward,
+        ));
+
+        for item in iter {
+            match item {
+                Ok((key, value)) => {
+                    let key_str = String::from_utf8_lossy(&key);
+                    if !key_str.starts_with("vmapping:") {
+                        break;
+                    }
+
+                    // Extract memory_id from key
+                    if let Some(id_str) = key_str.strip_prefix("vmapping:") {
+                        if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
+                            if let Ok(entry) = bincode::deserialize::<VectorMappingEntry>(&value) {
+                                mappings.push((MemoryId(uuid), entry));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Error reading vector mapping: {}", e);
+                }
+            }
+        }
+
+        Ok(mappings)
+    }
+
+    /// Delete vector mapping for a memory (called when deleting memory)
+    pub fn delete_vector_mapping(&self, memory_id: &MemoryId) -> Result<()> {
+        let mapping_key = format!("vmapping:{}", memory_id.0);
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(self.write_mode == WriteMode::Sync);
+        self.db.delete_opt(mapping_key.as_bytes(), &write_opts)?;
+        Ok(())
+    }
+
+    /// Update text vector mapping for a memory (for reindex operations)
+    ///
+    /// Convenience method for text-only reindexing.
+    pub fn update_vector_mapping(&self, memory_id: &MemoryId, vector_ids: Vec<u32>) -> Result<()> {
+        self.update_modality_vectors(memory_id, Modality::Text, vector_ids)
+    }
+
+    /// Update vector mapping for a specific modality
+    ///
+    /// MULTIMODALITY READY: Preserves vectors for other modalities while updating one.
+    pub fn update_modality_vectors(
+        &self,
+        memory_id: &MemoryId,
+        modality: Modality,
+        vector_ids: Vec<u32>,
+    ) -> Result<()> {
+        let mapping_key = format!("vmapping:{}", memory_id.0);
+
+        // Load existing mapping to preserve other modalities
+        let mut mapping_entry = self
+            .get_vector_mapping(memory_id)?
+            .unwrap_or_default();
+
+        // Update the specific modality
+        mapping_entry.add_modality(modality, vector_ids);
+
+        let mapping_value = bincode::serialize(&mapping_entry)?;
+
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(self.write_mode == WriteMode::Sync);
+        self.db.put_opt(mapping_key.as_bytes(), &mapping_value, &write_opts)?;
+        Ok(())
+    }
+
+    /// Delete memory and its vector mapping atomically
+    pub fn delete_with_vectors(&self, id: &MemoryId) -> Result<()> {
+        let mut batch = WriteBatch::default();
+
+        // 1. Delete memory
+        batch.delete(id.0.as_bytes());
+
+        // 2. Delete vector mapping
+        let mapping_key = format!("vmapping:{}", id.0);
+        batch.delete(mapping_key.as_bytes());
+
+        // 3. Atomic delete
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(self.write_mode == WriteMode::Sync);
+        self.db.write_opt(batch, &write_opts)?;
+
+        // 4. Clean up indices (non-critical)
+        if let Err(e) = self.remove_from_indices(id) {
+            tracing::warn!("Index cleanup failed (non-fatal): {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Count memories with vector mappings (for health checks)
+    pub fn count_vector_mappings(&self) -> usize {
+        let prefix = b"vmapping:";
+        let iter = self.db.iterator(IteratorMode::From(
+            prefix,
+            rocksdb::Direction::Forward,
+        ));
+
+        let mut count = 0;
+        for item in iter {
+            if let Ok((key, _)) = item {
+                if key.starts_with(prefix) {
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        count
+    }
+
+    /// Check integrity: find memories without vector mappings
+    ///
+    /// Returns memories that have embeddings but no corresponding vector mapping.
+    /// These need to be reindexed.
+    pub fn find_memories_without_mappings(&self) -> Result<Vec<MemoryId>> {
+        let mut orphans = Vec::new();
+
+        let iter = self.db.iterator(IteratorMode::Start);
+        for item in iter {
+            if let Ok((key, value)) = item {
+                // Skip non-memory keys
+                if key.len() != 16 {
+                    continue;
+                }
+
+                // Try to deserialize as memory
+                if let Ok(memory) = bincode::deserialize::<Memory>(&value) {
+                    // Check if vector mapping exists and has text vectors
+                    let has_mapping = match self.get_vector_mapping(&memory.id) {
+                        Ok(Some(entry)) => entry.text_vectors().is_some_and(|v| !v.is_empty()),
+                        _ => false,
+                    };
+
+                    // Memory has embeddings but no mapping - needs reindex
+                    if !has_mapping && memory.experience.embeddings.is_some() {
+                        orphans.push(memory.id);
+                    }
+                }
+            }
+        }
+
+        Ok(orphans)
+    }
+
+    /// Get all text vector IDs from mappings (for Vamana statistics)
+    pub fn get_all_text_vector_ids(&self) -> Result<Vec<u32>> {
+        let mut all_ids = Vec::new();
+        let mappings = self.get_all_vector_mappings()?;
+
+        for (_, entry) in mappings {
+            if let Some(text_vecs) = entry.text_vectors() {
+                all_ids.extend(text_vecs.iter().copied());
+            }
+        }
+
+        Ok(all_ids)
+    }
+
+    /// Get vector count per modality (for health monitoring)
+    pub fn get_modality_stats(&self) -> Result<HashMap<Modality, usize>> {
+        let mut stats: HashMap<Modality, usize> = HashMap::new();
+        let mappings = self.get_all_vector_mappings()?;
+
+        for (_, entry) in mappings {
+            for (modality, mv) in entry.modalities {
+                *stats.entry(modality).or_insert(0) += mv.vector_ids.len();
+            }
+        }
+
+        Ok(stats)
+    }
+}

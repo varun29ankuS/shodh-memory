@@ -222,6 +222,76 @@ impl MemorySystem {
         )
         .context("Failed to initialize retrieval engine")?;
 
+        // STARTUP RECOVERY: Check for orphaned memories and auto-repair
+        // This fixes memories that were stored but not indexed (crash, embedding failure, etc.)
+        let storage_count = storage.get_stats().map(|s| s.total_count).unwrap_or(0);
+        let indexed_count = retriever.len();
+        let orphaned_count = storage_count.saturating_sub(indexed_count);
+
+        if orphaned_count > 0 {
+            tracing::warn!(
+                storage_count = storage_count,
+                indexed_count = indexed_count,
+                orphaned_count = orphaned_count,
+                "Detected orphaned memories at startup - initiating auto-repair"
+            );
+
+            // Get all memories from storage
+            if let Ok(all_memories) = storage.get_all() {
+                let indexed_ids = retriever.get_indexed_memory_ids();
+                let mut repaired = 0;
+                let mut failed = 0;
+
+                for memory in all_memories {
+                    if indexed_ids.contains(&memory.id) {
+                        continue; // Already indexed
+                    }
+
+                    // Orphaned memory - try to index it
+                    match retriever.index_memory(&memory) {
+                        Ok(_) => {
+                            repaired += 1;
+                            if repaired <= 10 || repaired % 100 == 0 {
+                                tracing::info!(
+                                    memory_id = %memory.id.0,
+                                    progress = format!("{}/{}", repaired, orphaned_count),
+                                    "Repaired orphaned memory"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            tracing::error!(
+                                memory_id = %memory.id.0,
+                                error = %e,
+                                "Failed to repair orphaned memory"
+                            );
+                        }
+                    }
+                }
+
+                // Persist the repaired index
+                if repaired > 0 {
+                    if let Err(e) = retriever.save() {
+                        tracing::error!("Failed to persist repaired index: {}", e);
+                    } else {
+                        tracing::info!(
+                            repaired = repaired,
+                            failed = failed,
+                            final_indexed = retriever.len(),
+                            "Startup repair complete - index persisted"
+                        );
+                    }
+                }
+            }
+        } else if storage_count > 0 {
+            tracing::info!(
+                storage_count = storage_count,
+                indexed_count = indexed_count,
+                "All memories indexed - no repair needed"
+            );
+        }
+
         // Disable visualization logging for production performance
         let logger = Arc::new(RwLock::new(MemoryLogger::new(false)));
 

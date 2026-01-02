@@ -66,6 +66,34 @@ impl ChunkResult {
     }
 }
 
+/// Find the nearest valid char boundary at or before the given byte index
+#[inline]
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    // Walk backwards to find a valid char boundary
+    let mut i = index;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Find the nearest valid char boundary at or after the given byte index
+#[inline]
+fn ceil_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    // Walk forwards to find a valid char boundary
+    let mut i = index;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 /// Chunk text into overlapping segments for embedding
 ///
 /// Uses sentence-aware splitting to avoid breaking mid-sentence when possible.
@@ -86,15 +114,25 @@ pub fn chunk_text(text: &str, config: &ChunkConfig) -> ChunkResult {
     let mut start = 0;
 
     while start < original_length {
-        // Calculate end position for this chunk
-        let mut end = (start + config.chunk_size).min(original_length);
+        // Calculate end position for this chunk, ensuring valid char boundary
+        let mut end = floor_char_boundary(text, (start + config.chunk_size).min(original_length));
 
         // If we're not at the end, try to break at a sentence boundary
         if end < original_length {
             end = find_break_point(text, start, end, config.min_chunk_size);
+            // Ensure the break point is on a valid char boundary
+            end = floor_char_boundary(text, end);
         }
 
-        // Extract chunk
+        // Ensure start is on a valid char boundary
+        start = ceil_char_boundary(text, start);
+
+        // Safety check: ensure we don't have start >= end
+        if start >= end {
+            break;
+        }
+
+        // Extract chunk (now safe - both start and end are valid char boundaries)
         let chunk = text[start..end].trim();
         if chunk.len() >= config.min_chunk_size || chunks.is_empty() {
             chunks.push(chunk.to_string());
@@ -108,11 +146,12 @@ pub fn chunk_text(text: &str, config: &ChunkConfig) -> ChunkResult {
         if end >= original_length {
             break;
         }
-        start = end.saturating_sub(config.overlap);
+        // Ensure new start is on a valid char boundary
+        start = ceil_char_boundary(text, end.saturating_sub(config.overlap));
 
         // Ensure we make progress
         if start <= chunks.len().saturating_sub(1) * (config.chunk_size - config.overlap) {
-            start = end;
+            start = ceil_char_boundary(text, end);
         }
     }
 

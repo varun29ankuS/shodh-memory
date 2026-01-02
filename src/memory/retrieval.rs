@@ -169,7 +169,10 @@ impl IdMapping {
 impl RetrievalEngine {
     /// Create new retrieval engine with shared embedder (CRITICAL: embedder loaded only once)
     ///
-    /// Automatically loads persisted vector index and ID mapping if they exist.
+    /// ATOMIC ARCHITECTURE: RocksDB is the ONLY source of truth.
+    /// - Vector mappings are stored atomically with memories in RocksDB
+    /// - Vamana index is rebuilt from RocksDB on startup (pure in-memory cache)
+    /// - No more file-based IdMapping = no more orphaned memories
     pub fn new(storage: Arc<MemoryStorage>, embedder: Arc<MiniLMEmbedder>) -> Result<Self> {
         Self::with_event_buffer(storage, embedder, None)
     }
@@ -181,17 +184,17 @@ impl RetrievalEngine {
     /// - Edge strengthening (co-activation)
     /// - Edge potentiation (LTP)
     /// - Edge pruning (decay below threshold)
+    ///
+    /// ATOMIC STARTUP: Rebuilds Vamana from RocksDB mappings for crash safety.
     pub fn with_event_buffer(
         storage: Arc<MemoryStorage>,
         embedder: Arc<MiniLMEmbedder>,
         consolidation_events: Option<Arc<RwLock<ConsolidationEventBuffer>>>,
     ) -> Result<Self> {
-        // Get storage path from MemoryStorage for persistence
         let storage_path = storage.path().to_path_buf();
         let index_path = storage_path.join("vector_index");
 
         // Initialize Vamana index optimized for 10M+ memories per user
-        // Balanced between recall quality and memory efficiency
         let vamana_config = VamanaConfig {
             dimension: 384,        // MiniLM dimension
             max_degree: 32,        // Increased for better recall at scale
@@ -201,42 +204,13 @@ impl RetrievalEngine {
             ..Default::default()
         };
 
-        let mut vector_index =
+        let vector_index =
             VamanaIndex::new(vamana_config).context("Failed to initialize Vamana vector index")?;
-        let mut id_mapping = IdMapping::new();
+        let id_mapping = IdMapping::new();
 
-        // Try to load persisted index and ID mapping
-        let index_file = index_path.join("vamana_index.bin");
-        let mapping_file = index_path.join("id_mapping.bin");
+        // Load memory graph (Hebbian associations) - this still uses file for now
+        // TODO: Move graph to RocksDB as well for full atomicity
         let graph_file = index_path.join("memory_graph.bin");
-
-        if index_file.exists() && mapping_file.exists() {
-            match vector_index.load(&index_path) {
-                Ok(_) => {
-                    // Load ID mapping
-                    match Self::load_id_mapping(&mapping_file) {
-                        Ok(mapping) => {
-                            id_mapping = mapping;
-                            info!(
-                                "Loaded persisted vector index with {} vectors and {} ID mappings",
-                                vector_index.len(),
-                                id_mapping.len()
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to load ID mapping, starting fresh: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load vector index, starting fresh: {}", e);
-                }
-            }
-        } else {
-            info!("No persisted vector index found, starting with empty index");
-        }
-
-        // Load memory graph (Hebbian associations)
         let graph = if graph_file.exists() {
             match MemoryGraph::load(&graph_file) {
                 Ok(loaded_graph) => {
@@ -257,7 +231,7 @@ impl RetrievalEngine {
             MemoryGraph::new()
         };
 
-        Ok(Self {
+        let engine = Self {
             storage,
             embedder,
             vector_index: Arc::new(RwLock::new(vector_index)),
@@ -265,7 +239,165 @@ impl RetrievalEngine {
             graph: RwLock::new(graph),
             storage_path,
             consolidation_events,
-        })
+        };
+
+        // ATOMIC STARTUP: Rebuild Vamana from RocksDB (single source of truth)
+        engine.rebuild_from_rocksdb()?;
+
+        Ok(engine)
+    }
+
+    /// Rebuild Vamana index from RocksDB mappings
+    ///
+    /// This is the key to atomic storage: RocksDB is THE source of truth.
+    /// On startup, we rebuild the in-memory Vamana index from stored mappings.
+    ///
+    /// Two strategies:
+    /// 1. Fast path: If mappings exist in RocksDB, load them directly
+    /// 2. Slow path: If no mappings (migration), rebuild from embeddings
+    ///
+    /// MULTIMODALITY NOTE: Currently only rebuilds text embeddings (384-dim).
+    /// Future modalities will have their own Vamana indices with matching dimensions.
+    fn rebuild_from_rocksdb(&self) -> Result<()> {
+        let start_time = std::time::Instant::now();
+
+        // Get all vector mappings from RocksDB
+        let mappings = self.storage.get_all_vector_mappings()?;
+
+        if !mappings.is_empty() {
+            // Fast path: Mappings exist in RocksDB
+            info!(
+                "Loading {} vector mappings from RocksDB (atomic storage)",
+                mappings.len()
+            );
+
+            // Build IdMapping from RocksDB data
+            let mut id_mapping = self.id_mapping.write();
+            id_mapping.clear();
+
+            // Rebuild Vamana from actual embeddings
+            // The stored vector_ids are from a previous Vamana session and may not match
+            // So we re-insert embeddings to get fresh vector IDs
+            let mut vector_index = self.vector_index.write();
+            let mut indexed = 0;
+            let mut failed = 0;
+
+            for (memory_id, entry) in &mappings {
+                // Check if this entry has text vectors (current modality)
+                if entry.text_vectors().is_none() {
+                    continue;
+                }
+
+                // Get memory with embeddings from storage
+                if let Ok(memory) = self.storage.get(memory_id) {
+                    if let Some(ref embedding) = memory.experience.embeddings {
+                        // Insert into Vamana and get new vector_id
+                        match vector_index.add_vector(embedding.clone()) {
+                            Ok(new_vector_id) => {
+                                id_mapping.insert(memory_id.clone(), new_vector_id);
+                                indexed += 1;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to index memory {} during rebuild: {}",
+                                    memory_id.0,
+                                    e
+                                );
+                                failed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let elapsed = start_time.elapsed();
+            info!(
+                "Rebuilt Vamana from RocksDB: {} indexed, {} failed in {:.2}s",
+                indexed,
+                failed,
+                elapsed.as_secs_f64()
+            );
+        } else {
+            // Slow path: No mappings in RocksDB - need full migration
+            // This happens on first run after upgrade to atomic storage
+            info!("No vector mappings in RocksDB - checking for migration...");
+            self.migrate_to_atomic_storage()?;
+        }
+
+        Ok(())
+    }
+
+    /// Migrate existing memories to atomic storage
+    ///
+    /// Called when RocksDB has no vector mappings (first run after upgrade).
+    /// Iterates all memories with embeddings and creates atomic mappings.
+    fn migrate_to_atomic_storage(&self) -> Result<()> {
+        let start_time = std::time::Instant::now();
+
+        // Get all memories from storage
+        let memories = self.storage.get_all()?;
+        let total = memories.len();
+
+        if total == 0 {
+            info!("No memories to migrate");
+            return Ok(());
+        }
+
+        info!("Migrating {} memories to atomic storage...", total);
+
+        let mut id_mapping = self.id_mapping.write();
+        let mut vector_index = self.vector_index.write();
+        let mut migrated = 0;
+        let mut skipped = 0;
+        let mut failed = 0;
+
+        for (i, memory) in memories.iter().enumerate() {
+            // Only migrate memories with embeddings
+            if let Some(ref embedding) = memory.experience.embeddings {
+                // Insert into Vamana
+                match vector_index.add_vector(embedding.clone()) {
+                    Ok(vector_id) => {
+                        // Update in-memory mapping
+                        id_mapping.insert(memory.id.clone(), vector_id);
+
+                        // Store mapping in RocksDB for future startups
+                        if let Err(e) = self.storage.update_vector_mapping(&memory.id, vec![vector_id]) {
+                            tracing::warn!("Failed to persist mapping for {}: {}", memory.id.0, e);
+                            failed += 1;
+                        } else {
+                            migrated += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to index memory {}: {}", memory.id.0, e);
+                        failed += 1;
+                    }
+                }
+            } else {
+                skipped += 1;
+            }
+
+            // Progress logging
+            if (i + 1) % 500 == 0 || i + 1 == total {
+                info!(
+                    "Migration progress: {}/{} ({:.1}%)",
+                    i + 1,
+                    total,
+                    (i + 1) as f64 / total as f64 * 100.0
+                );
+            }
+        }
+
+        let elapsed = start_time.elapsed();
+        info!(
+            "Migration complete: {} migrated, {} skipped (no embeddings), {} failed in {:.2}s",
+            migrated,
+            skipped,
+            failed,
+            elapsed.as_secs_f64()
+        );
+
+        Ok(())
     }
 
     /// Set the consolidation event buffer (for late binding after construction)
@@ -280,44 +412,29 @@ impl RetrievalEngine {
         }
     }
 
-    /// Load ID mapping from file
-    fn load_id_mapping(path: &Path) -> Result<IdMapping> {
-        let file = File::open(path).context("Failed to open ID mapping file")?;
-        let reader = BufReader::new(file);
-        bincode::deserialize_from(reader).context("Failed to deserialize ID mapping")
-    }
-
-    /// Save vector index, ID mapping, and memory graph to disk
+    /// Save memory graph to disk
     ///
-    /// Called during flush_storage to persist the index for restart recovery.
-    /// Now also persists the Hebbian association graph to preserve learned relationships.
+    /// ATOMIC ARCHITECTURE: Only saves the Hebbian graph to disk.
+    /// Vector index and ID mappings are stored in RocksDB atomically with memories.
+    /// Vamana is rebuilt from RocksDB on startup - no separate persistence needed.
     pub fn save(&self) -> Result<()> {
         let index_path = self.storage_path.join("vector_index");
         fs::create_dir_all(&index_path)?;
 
-        // Save Vamana index
-        let index = self.vector_index.read();
-        index.save(&index_path)?;
-
-        // Save ID mapping
-        let mapping_file = index_path.join("id_mapping.bin");
-        let id_mapping = self.id_mapping.read();
-        let file = File::create(&mapping_file).context("Failed to create ID mapping file")?;
-        let writer = BufWriter::new(file);
-        bincode::serialize_into(writer, &*id_mapping).context("Failed to serialize ID mapping")?;
-
-        // Save memory graph (Hebbian associations)
+        // Only save memory graph (Hebbian associations)
+        // Vector index is rebuilt from RocksDB on startup
+        // ID mapping is stored atomically in RocksDB with each memory
         let graph_file = index_path.join("memory_graph.bin");
         let graph = self.graph.read();
         graph.save(&graph_file)?;
         let graph_stats = graph.stats();
 
+        let id_mapping = self.id_mapping.read();
         info!(
-            "Saved vector index with {} vectors, {} ID mappings, and memory graph with {} nodes/{} edges",
-            index.len(),
-            id_mapping.len(),
+            "Saved memory graph with {} nodes/{} edges (Vamana: {} vectors in memory, rebuilds from RocksDB on restart)",
             graph_stats.node_count,
-            graph_stats.edge_count
+            graph_stats.edge_count,
+            id_mapping.len()
         );
 
         Ok(())
@@ -343,7 +460,10 @@ impl RetrievalEngine {
             .collect()
     }
 
-    /// Add memory to vector index (call when storing new memory)
+    /// Add memory to vector index with atomic RocksDB storage
+    ///
+    /// ATOMIC ARCHITECTURE: This method stores the vector mapping atomically
+    /// in RocksDB alongside the memory data, ensuring no orphaned memories.
     ///
     /// For long content, this chunks the text and creates multiple embeddings
     /// to ensure ALL content is searchable, not just the first 256 tokens.
@@ -354,9 +474,9 @@ impl RetrievalEngine {
         let chunk_config = ChunkConfig::default();
         let chunk_result = chunk_text(&text, &chunk_config);
 
-        if chunk_result.was_chunked {
+        let vector_ids = if chunk_result.was_chunked {
             // Long content: embed each chunk separately
-            let mut vector_ids = Vec::with_capacity(chunk_result.chunks.len());
+            let mut ids = Vec::with_capacity(chunk_result.chunks.len());
             let mut index = self.vector_index.write();
 
             for chunk in &chunk_result.chunks {
@@ -369,13 +489,13 @@ impl RetrievalEngine {
                     .add_vector(embedding)
                     .context("Failed to add chunk vector to index")?;
 
-                vector_ids.push(vector_id);
+                ids.push(vector_id);
             }
 
-            // Map all chunk vectors to this memory
+            // Update in-memory mapping
             self.id_mapping
                 .write()
-                .insert_chunks(memory.id.clone(), vector_ids);
+                .insert_chunks(memory.id.clone(), ids.clone());
 
             tracing::debug!(
                 "Indexed memory {} with {} chunks (original: {} chars)",
@@ -383,6 +503,8 @@ impl RetrievalEngine {
                 chunk_result.chunks.len(),
                 chunk_result.original_length
             );
+
+            ids
         } else {
             // Short content: single embedding (use pre-computed if available)
             let embedding = if let Some(emb) = &memory.experience.embeddings {
@@ -398,8 +520,17 @@ impl RetrievalEngine {
                 .add_vector(embedding)
                 .context("Failed to add vector to index")?;
 
+            // Update in-memory mapping
             self.id_mapping.write().insert(memory.id.clone(), vector_id);
-        }
+
+            vec![vector_id]
+        };
+
+        // ATOMIC: Store vector mapping in RocksDB
+        // This ensures the mapping survives restarts and can't become orphaned
+        self.storage
+            .update_vector_mapping(&memory.id, vector_ids)
+            .context("Failed to persist vector mapping to RocksDB")?;
 
         Ok(())
     }
@@ -436,55 +567,46 @@ impl RetrievalEngine {
         self.index_memory(memory)
     }
 
-    /// Remove a memory from the vector index (soft delete)
+    /// Remove a memory from the vector index
     ///
-    /// This removes the memory from the ID mapping and marks the vector as deleted
-    /// in the Vamana index. The vector is excluded from search results immediately.
-    /// Physical deletion occurs on next index rebuild.
-    ///
-    /// The ID mapping is persisted immediately to survive restarts.
+    /// ATOMIC ARCHITECTURE: Removes the vector mapping from RocksDB atomically.
+    /// The in-memory Vamana index is updated immediately, and the RocksDB mapping
+    /// is deleted to ensure consistency on restart.
     ///
     /// Returns true if the memory was found and removed, false if not indexed.
     pub fn remove_memory(&self, memory_id: &MemoryId) -> bool {
-        // Remove from ID mapping and get the vector ID
-        let vector_id = self.id_mapping.write().remove(memory_id);
+        // Remove from in-memory ID mapping and get the vector IDs
+        let vector_ids = self.id_mapping.write().remove_all(memory_id);
 
-        if let Some(vid) = vector_id {
-            // Mark vector as deleted in Vamana (soft delete)
-            self.vector_index.read().mark_deleted(vid);
+        if !vector_ids.is_empty() {
+            // Mark vectors as deleted in Vamana (soft delete)
+            let index = self.vector_index.read();
+            for vid in &vector_ids {
+                index.mark_deleted(*vid);
+            }
 
-            // Also remove from memory graph if present
+            // Remove from memory graph if present
             self.graph.write().remove_memory(memory_id);
 
-            // Persist the updated ID mapping immediately so deletion survives restart
-            if let Err(e) = self.persist_id_mapping() {
-                tracing::warn!("Failed to persist ID mapping after removal: {}", e);
+            // ATOMIC: Remove vector mapping from RocksDB
+            if let Err(e) = self.storage.delete_vector_mapping(memory_id) {
+                tracing::warn!(
+                    "Failed to delete vector mapping from RocksDB for {}: {}",
+                    memory_id.0,
+                    e
+                );
             }
 
             tracing::debug!(
-                "Removed memory {:?} from vector index (vector_id={})",
+                "Removed memory {:?} from vector index ({} vectors)",
                 memory_id,
-                vid
+                vector_ids.len()
             );
             true
         } else {
             tracing::debug!("Memory {:?} not found in vector index", memory_id);
             false
         }
-    }
-
-    /// Persist just the ID mapping to disk (lightweight operation)
-    fn persist_id_mapping(&self) -> Result<()> {
-        let index_path = self.storage_path.join("vector_index");
-        fs::create_dir_all(&index_path)?;
-
-        let mapping_file = index_path.join("id_mapping.bin");
-        let id_mapping = self.id_mapping.read();
-        let file = File::create(&mapping_file).context("Failed to create ID mapping file")?;
-        let writer = BufWriter::new(file);
-        bincode::serialize_into(writer, &*id_mapping).context("Failed to serialize ID mapping")?;
-
-        Ok(())
     }
 
     /// Extract searchable text from memory

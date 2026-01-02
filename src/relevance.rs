@@ -38,23 +38,32 @@ use crate::memory::{Memory, MemorySystem};
 // =============================================================================
 
 /// Default weight for semantic similarity in score fusion
-/// FBK-5: Adjusted to make room for momentum weight
-const DEFAULT_SEMANTIC_WEIGHT: f32 = 0.35;
+/// CTX-3: Reduced to prioritize proven-value signals over looks-good signals
+const DEFAULT_SEMANTIC_WEIGHT: f32 = 0.18;
 
 /// Default weight for entity matching in score fusion
-/// FBK-5: Adjusted to make room for momentum weight
-const DEFAULT_ENTITY_WEIGHT: f32 = 0.30;
+/// CTX-3: Reduced to prioritize proven-value signals
+const DEFAULT_ENTITY_WEIGHT: f32 = 0.17;
 
 /// Default weight for tag matching in score fusion
-/// FBK-5: Adjusted to make room for momentum weight
-const DEFAULT_TAG_WEIGHT: f32 = 0.10;
+const DEFAULT_TAG_WEIGHT: f32 = 0.05;
 
 /// Default weight for importance in score fusion
-const DEFAULT_IMPORTANCE_WEIGHT: f32 = 0.10;
+const DEFAULT_IMPORTANCE_WEIGHT: f32 = 0.05;
 
-/// Default weight for feedback momentum EMA in score fusion (FBK-5)
-/// This incorporates learned behavior from past feedback signals
-const DEFAULT_MOMENTUM_WEIGHT: f32 = 0.15;
+/// Default weight for feedback momentum EMA in score fusion (FBK-5, CTX-3)
+/// Significantly increased to prioritize proven-helpful memories
+/// High momentum = consistently useful in past interactions
+/// This is the PRIMARY signal for memory quality
+const DEFAULT_MOMENTUM_WEIGHT: f32 = 0.28;
+
+/// Default weight for access count in score fusion (CTX-3)
+/// Memories accessed more frequently have proven value
+const DEFAULT_ACCESS_COUNT_WEIGHT: f32 = 0.14;
+
+/// Default weight for graph Hebbian strength in score fusion (CTX-3)
+/// Memories with stronger entity relationship edges have proven associations
+const DEFAULT_GRAPH_STRENGTH_WEIGHT: f32 = 0.13;
 
 /// Learning rate for weight updates from feedback
 const WEIGHT_LEARNING_RATE: f32 = 0.05;
@@ -303,6 +312,8 @@ struct EntityIndexEntry {
 /// - tag: Tag overlap between query context and memory tags
 /// - importance: Memory's stored importance score
 /// - momentum: Feedback momentum EMA (FBK-5) - learned from past interactions
+/// - access_count: How often the memory has been retrieved (CTX-3)
+/// - graph_strength: Hebbian edge strength from knowledge graph (CTX-3)
 ///
 /// Weights are normalized to sum to 1.0 and updated via gradient descent
 /// when user provides feedback on surfaced memories.
@@ -321,6 +332,14 @@ pub struct LearnedWeights {
     /// Lower/negative momentum = memory has been consistently misleading
     #[serde(default = "default_momentum_weight")]
     pub momentum: f32,
+    /// Weight for access count (CTX-3)
+    /// Higher access count = memory has proven retrieval value
+    #[serde(default = "default_access_count_weight")]
+    pub access_count: f32,
+    /// Weight for graph Hebbian strength (CTX-3)
+    /// Higher strength = stronger entity relationships in knowledge graph
+    #[serde(default = "default_graph_strength_weight")]
+    pub graph_strength: f32,
     /// Number of feedback updates applied
     pub update_count: u32,
     /// Last time weights were updated
@@ -331,6 +350,14 @@ fn default_momentum_weight() -> f32 {
     DEFAULT_MOMENTUM_WEIGHT
 }
 
+fn default_access_count_weight() -> f32 {
+    DEFAULT_ACCESS_COUNT_WEIGHT
+}
+
+fn default_graph_strength_weight() -> f32 {
+    DEFAULT_GRAPH_STRENGTH_WEIGHT
+}
+
 impl Default for LearnedWeights {
     fn default() -> Self {
         Self {
@@ -339,6 +366,8 @@ impl Default for LearnedWeights {
             tag: DEFAULT_TAG_WEIGHT,
             importance: DEFAULT_IMPORTANCE_WEIGHT,
             momentum: DEFAULT_MOMENTUM_WEIGHT,
+            access_count: DEFAULT_ACCESS_COUNT_WEIGHT,
+            graph_strength: DEFAULT_GRAPH_STRENGTH_WEIGHT,
             update_count: 0,
             last_updated: None,
         }
@@ -348,13 +377,21 @@ impl Default for LearnedWeights {
 impl LearnedWeights {
     /// Normalize weights to sum to 1.0
     pub fn normalize(&mut self) {
-        let sum = self.semantic + self.entity + self.tag + self.importance + self.momentum;
+        let sum = self.semantic
+            + self.entity
+            + self.tag
+            + self.importance
+            + self.momentum
+            + self.access_count
+            + self.graph_strength;
         if sum > 0.0 {
             self.semantic /= sum;
             self.entity /= sum;
             self.tag /= sum;
             self.importance /= sum;
             self.momentum /= sum;
+            self.access_count /= sum;
+            self.graph_strength /= sum;
         }
     }
 
@@ -404,8 +441,17 @@ impl LearnedWeights {
         tag_score: f32,
         importance_score: f32,
     ) -> f32 {
-        // Use the new method with momentum = 0 (neutral) for backwards compatibility
-        self.fuse_scores_with_momentum(semantic_score, entity_score, tag_score, importance_score, 0.0)
+        // Use the full method with neutral defaults for backwards compatibility
+        // momentum = 0 (neutral), access_count = 0, graph_strength = 0.5 (neutral)
+        self.fuse_scores_full(
+            semantic_score,
+            entity_score,
+            tag_score,
+            importance_score,
+            0.0,
+            0,
+            0.5,
+        )
     }
 
     /// Calculate fused score from component scores including momentum EMA (FBK-5)
@@ -426,6 +472,38 @@ impl LearnedWeights {
         importance_score: f32,
         momentum_ema: f32,
     ) -> f32 {
+        // access_count = 0, graph_strength = 0.5 (neutral)
+        self.fuse_scores_full(
+            semantic_score,
+            entity_score,
+            tag_score,
+            importance_score,
+            momentum_ema,
+            0,
+            0.5,
+        )
+    }
+
+    /// Calculate fused score from all component scores (CTX-3)
+    ///
+    /// # Arguments
+    /// - `semantic_score`: Cosine similarity from vector search (0.0 to 1.0)
+    /// - `entity_score`: Entity name overlap score (0.0 to 1.0)
+    /// - `tag_score`: Tag overlap score (0.0 to 1.0)
+    /// - `importance_score`: Memory's importance score (0.0 to 1.0)
+    /// - `momentum_ema`: Feedback momentum EMA (-1.0 to 1.0, 0.0 = neutral)
+    /// - `access_count`: Number of times this memory has been retrieved
+    /// - `graph_strength`: Hebbian edge strength from knowledge graph (0.0 to 1.0)
+    pub fn fuse_scores_full(
+        &self,
+        semantic_score: f32,
+        entity_score: f32,
+        tag_score: f32,
+        importance_score: f32,
+        momentum_ema: f32,
+        access_count: u32,
+        graph_strength: f32,
+    ) -> f32 {
         // Calibrate each score using sigmoid to normalize different scales
         let calibrated_semantic = calibrate_score(semantic_score);
         let calibrated_entity = calibrate_score(entity_score);
@@ -437,7 +515,35 @@ impl LearnedWeights {
         // EMA of  0.0 (neutral)           -> 0.5
         // EMA of  1.0 (always helpful)    -> 1.0
         let normalized_momentum = (momentum_ema + 1.0) / 2.0;
-        let calibrated_momentum = calibrate_score(normalized_momentum);
+
+        // CTX-3: Apply momentum amplification for high-momentum memories
+        // Aggressive thresholds to strongly differentiate proven vs unproven memories
+        let amplified_momentum = if normalized_momentum > 0.65 {
+            // Positive momentum: 1.5x amplification (threshold lowered from 0.75)
+            (normalized_momentum * 1.5).min(1.0)
+        } else if normalized_momentum < 0.40 {
+            // Negative/neutral momentum: 0.3x penalty (threshold raised, penalty increased)
+            // This aggressively demotes memories that haven't proven helpful
+            (normalized_momentum * 0.3).max(0.0)
+        } else {
+            normalized_momentum
+        };
+        let calibrated_momentum = calibrate_score(amplified_momentum);
+
+        // CTX-3: Transform access count to 0-1 scale with diminishing returns
+        // 0 accesses -> 0.0, 1 -> 0.3, 5 -> 0.6, 10+ -> 0.8+
+        let access_score = if access_count == 0 {
+            0.0
+        } else {
+            // log2 scale with ceiling: log2(1) = 0, log2(2) = 1, log2(8) = 3, log2(16) = 4
+            let log_access = (access_count as f32).log2();
+            // Normalize: 4 accesses (log2=2) -> ~0.5, 16 accesses (log2=4) -> ~1.0
+            (log_access / 4.0).min(1.0)
+        };
+        let calibrated_access = calibrate_score(access_score);
+
+        // CTX-3: Graph strength already in 0-1 range, calibrate directly
+        let calibrated_graph = calibrate_score(graph_strength);
 
         // Weighted sum
         self.semantic * calibrated_semantic
@@ -445,6 +551,8 @@ impl LearnedWeights {
             + self.tag * calibrated_tag
             + self.importance * calibrated_importance
             + self.momentum * calibrated_momentum
+            + self.access_count * calibrated_access
+            + self.graph_strength * calibrated_graph
     }
 }
 
@@ -658,9 +766,24 @@ impl RelevanceEngine {
                     // Calculate tag score
                     let tag_score = self.calculate_tag_score(context, &memory.experience.tags);
 
-                    // Fuse scores using learned weights
-                    let fused_score =
-                        weights.fuse_scores(semantic_score, entity_score, tag_score, importance);
+                    // CTX-3: Get access count for momentum scoring
+                    let access_count = memory.access_count();
+
+                    // CTX-3: Get graph Hebbian strength for this memory
+                    let graph_strength = graph_memory
+                        .and_then(|g| g.get_memory_hebbian_strength(&memory.id))
+                        .unwrap_or(0.5); // Neutral default if no graph or no edges
+
+                    // Fuse scores using learned weights with access count and graph strength (CTX-3)
+                    let fused_score = weights.fuse_scores_full(
+                        semantic_score,
+                        entity_score,
+                        tag_score,
+                        importance,
+                        0.0, // momentum_ema - not available in this path, use momentum lookup version
+                        access_count,
+                        graph_strength,
+                    );
 
                     // Determine relevance reason
                     let reason = if semantic_score > 0.0 && entity_score > 0.0 {
@@ -843,13 +966,23 @@ impl RelevanceEngine {
                     // FBK-5: Look up momentum EMA for this memory
                     let momentum_ema = momentum_lookup.get(&id).copied().unwrap_or(0.0);
 
-                    // Use momentum-aware score fusion
-                    let fused_score = weights.fuse_scores_with_momentum(
+                    // CTX-3: Get access count for scoring
+                    let access_count = memory.access_count();
+
+                    // CTX-3: Get graph Hebbian strength for this memory
+                    let graph_strength = graph_memory
+                        .and_then(|g| g.get_memory_hebbian_strength(&memory.id))
+                        .unwrap_or(0.5); // Neutral default if no graph or no edges
+
+                    // Use full score fusion with momentum, access count, and graph strength (CTX-3)
+                    let fused_score = weights.fuse_scores_full(
                         semantic_score,
                         entity_score,
                         tag_score,
                         importance,
                         momentum_ema,
+                        access_count,
+                        graph_strength,
                     );
 
                     let reason = if semantic_score > 0.0 && entity_score > 0.0 {
@@ -1621,8 +1754,14 @@ mod tests {
     fn test_learned_weights_default() {
         let weights = LearnedWeights::default();
 
-        // Should sum to 1.0 (FBK-5: now includes momentum)
-        let sum = weights.semantic + weights.entity + weights.tag + weights.importance + weights.momentum;
+        // Should sum to 1.0 (includes momentum, access_count, and graph_strength)
+        let sum = weights.semantic
+            + weights.entity
+            + weights.tag
+            + weights.importance
+            + weights.momentum
+            + weights.access_count
+            + weights.graph_strength;
         assert!((sum - 1.0).abs() < 0.001);
 
         // Check default values
@@ -1631,6 +1770,8 @@ mod tests {
         assert_eq!(weights.tag, DEFAULT_TAG_WEIGHT);
         assert_eq!(weights.importance, DEFAULT_IMPORTANCE_WEIGHT);
         assert_eq!(weights.momentum, DEFAULT_MOMENTUM_WEIGHT);
+        assert_eq!(weights.access_count, DEFAULT_ACCESS_COUNT_WEIGHT);
+        assert_eq!(weights.graph_strength, DEFAULT_GRAPH_STRENGTH_WEIGHT);
     }
 
     #[test]
@@ -1640,16 +1781,25 @@ mod tests {
             entity: 0.5,
             tag: 0.5,
             importance: 0.5,
-            momentum: 0.5, // FBK-5: added momentum
+            momentum: 0.5,
+            access_count: 0.5,
+            graph_strength: 0.5, // CTX-3: added graph_strength
             update_count: 0,
             last_updated: None,
         };
 
         weights.normalize();
 
-        let sum = weights.semantic + weights.entity + weights.tag + weights.importance + weights.momentum;
+        let sum = weights.semantic
+            + weights.entity
+            + weights.tag
+            + weights.importance
+            + weights.momentum
+            + weights.access_count
+            + weights.graph_strength;
         assert!((sum - 1.0).abs() < 0.001);
-        assert!((weights.semantic - 0.2).abs() < 0.001); // 0.5/2.5 = 0.2
+        // 0.5/3.5 ≈ 0.143 (7 weights at 0.5 each = 3.5, each normalized = 0.5/3.5 = 1/7)
+        assert!((weights.semantic - 1.0 / 7.0).abs() < 0.001);
     }
 
     #[test]
@@ -1666,8 +1816,14 @@ mod tests {
         assert_eq!(weights.update_count, 1);
         assert!(weights.last_updated.is_some());
 
-        // Weights should still sum to 1.0 (FBK-5: includes momentum)
-        let sum = weights.semantic + weights.entity + weights.tag + weights.importance + weights.momentum;
+        // Weights should still sum to 1.0 (includes momentum, access_count, and graph_strength)
+        let sum = weights.semantic
+            + weights.entity
+            + weights.tag
+            + weights.importance
+            + weights.momentum
+            + weights.access_count
+            + weights.graph_strength;
         assert!((sum - 1.0).abs() < 0.001);
 
         // Semantic + entity together should have gained relative weight
@@ -1683,8 +1839,14 @@ mod tests {
         // Negative feedback - semantic was the main signal
         weights.apply_feedback(true, false, false, false);
 
-        // Weights should still sum to 1.0 (FBK-5: includes momentum)
-        let sum = weights.semantic + weights.entity + weights.tag + weights.importance + weights.momentum;
+        // Weights should still sum to 1.0 (includes momentum, access_count, and graph_strength)
+        let sum = weights.semantic
+            + weights.entity
+            + weights.tag
+            + weights.importance
+            + weights.momentum
+            + weights.access_count
+            + weights.graph_strength;
         assert!((sum - 1.0).abs() < 0.001);
     }
 
@@ -1707,17 +1869,21 @@ mod tests {
     fn test_score_fusion() {
         let weights = LearnedWeights::default();
 
-        // All high scores
-        let high = weights.fuse_scores(0.9, 0.9, 0.9, 0.9);
-        assert!(high > 0.8);
+        // All high scores with high momentum, access count, and graph strength
+        let high = weights.fuse_scores_full(0.9, 0.9, 0.9, 0.9, 0.9, 16, 0.9);
+        assert!(high > 0.8, "high score was {}", high);
 
-        // All low scores
-        let low = weights.fuse_scores(0.1, 0.1, 0.1, 0.1);
-        assert!(low < 0.2);
+        // All low scores with negative momentum, no access, and low graph strength
+        let low = weights.fuse_scores_full(0.1, 0.1, 0.1, 0.1, -0.9, 0, 0.1);
+        assert!(low < 0.3, "low score was {}", low);
 
         // Mixed scores - result should be between
-        let mixed = weights.fuse_scores(0.9, 0.1, 0.5, 0.7);
-        assert!(mixed > 0.2 && mixed < 0.8);
+        let mixed = weights.fuse_scores_full(0.9, 0.1, 0.5, 0.7, 0.0, 2, 0.5);
+        assert!(mixed > 0.2 && mixed < 0.8, "mixed score was {}", mixed);
+
+        // Test backwards compatibility - legacy fuse_scores uses neutral momentum, 0 access, and neutral graph
+        let legacy = weights.fuse_scores(0.9, 0.9, 0.9, 0.9);
+        assert!(legacy > 0.5, "legacy score was {}", legacy); // Lower threshold due to neutral momentum/access/graph
     }
 
     #[test]
@@ -1748,10 +1914,12 @@ mod tests {
     fn test_min_weight_enforcement() {
         let mut weights = LearnedWeights {
             semantic: 0.1,
-            entity: MIN_WEIGHT + 0.01,
-            tag: 0.6,
+            entity: MIN_WEIGHT + 0.01, // 0.06
+            tag: 0.3,                  // Reduced from 0.5 so sum < 1.0
             importance: 0.1,
-            momentum: 0.1, // FBK-5: added momentum
+            momentum: 0.1,
+            access_count: 0.1,
+            graph_strength: 0.1,
             update_count: 0,
             last_updated: None,
         };
@@ -1759,11 +1927,24 @@ mod tests {
         // Apply negative feedback on entity (already near minimum)
         weights.apply_feedback(false, true, false, false);
 
-        // Entity should not go below MIN_WEIGHT
-        assert!(weights.entity >= MIN_WEIGHT);
+        // Entity should not go below MIN_WEIGHT after feedback + normalization
+        // Before normalize: entity = 0.05 (clamped), sum = 0.85
+        // After normalize: entity = 0.05 / 0.85 ≈ 0.059 >= 0.05 ✓
+        assert!(
+            weights.entity >= MIN_WEIGHT,
+            "entity {} < MIN_WEIGHT {}",
+            weights.entity,
+            MIN_WEIGHT
+        );
 
         // Still normalized
-        let sum = weights.semantic + weights.entity + weights.tag + weights.importance + weights.momentum;
+        let sum = weights.semantic
+            + weights.entity
+            + weights.tag
+            + weights.importance
+            + weights.momentum
+            + weights.access_count
+            + weights.graph_strength;
         assert!((sum - 1.0).abs() < 0.001);
     }
 }

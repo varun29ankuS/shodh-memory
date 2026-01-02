@@ -623,6 +623,7 @@ fn test_consolidation_result_structure() {
         facts_extracted: 3,
         facts_reinforced: 5,
         new_fact_ids: vec!["f1".to_string(), "f2".to_string(), "f3".to_string()],
+        new_facts: Vec::new(),
     };
 
     assert_eq!(result.memories_processed, 10);
