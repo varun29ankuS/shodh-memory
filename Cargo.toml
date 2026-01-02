@@ -137,6 +137,9 @@ ndarray = "0.15"
 # Graph visualization
 petgraph = "0.8"
 
+# Full-text search (BM25)
+tantivy = "0.22"
+
 # Bloom filter
 bloomfilter = "1.0"
 

@@ -8,25 +8,25 @@
 
 pub mod compression;
 pub mod context;
+pub mod facts;
+pub mod feedback;
 pub mod files;
+pub mod graph_retrieval;
+pub mod hybrid_search;
+pub mod injection;
 pub mod introspection;
+pub mod lineage;
 pub mod prospective;
 pub mod query_parser;
 pub mod replay;
 pub mod retrieval;
+pub mod segmentation;
+pub mod sessions;
 pub mod storage;
 pub mod todo_formatter;
 pub mod todos;
 pub mod types;
 pub mod visualization;
-// pub mod vector_storage;  // Disabled - requires crate::rag::vamana from parent project
-pub mod facts;
-pub mod feedback;
-pub mod graph_retrieval;
-pub mod injection;
-pub mod lineage;
-pub mod segmentation;
-pub mod sessions;
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -95,6 +95,10 @@ pub use crate::memory::visualization::{GraphStats, MemoryLogger};
 pub use crate::memory::sessions::{
     Session, SessionEvent, SessionId, SessionStats, SessionStatus, SessionStore,
     SessionStoreStats, SessionSummary, TemporalContext, TimeOfDay,
+};
+pub use crate::memory::hybrid_search::{
+    BM25Index, CrossEncoderReranker, HybridSearchConfig, HybridSearchEngine, HybridSearchResult,
+    RRFusion,
 };
 
 /// Configuration for the memory system
@@ -191,6 +195,10 @@ pub struct MemorySystem {
     /// Tracks causal relationships between memories for "why" reasoning
     /// Enables: audit trails, project branching, automatic post-mortems
     lineage_graph: Arc<lineage::LineageGraph>,
+
+    /// Hybrid search engine (BM25 + Vector + RRF + Reranking)
+    /// Combines keyword matching with semantic similarity for better retrieval
+    hybrid_search: Arc<hybrid_search::HybridSearchEngine>,
 }
 
 impl MemorySystem {
@@ -301,10 +309,17 @@ impl MemorySystem {
             let vector_count = retriever.len();
             MemoryStats {
                 total_memories: storage_stats.total_count,
+                working_memory_count: 0, // Working memory is in-memory only, starts empty
+                session_memory_count: 0, // Session memory is in-memory only, starts empty
                 long_term_memory_count: storage_stats.total_count,
                 vector_index_count: vector_count,
+                compressed_count: storage_stats.compressed_count,
+                promotions_to_session: 0, // Runtime counter, not persisted
+                promotions_to_longterm: 0, // Runtime counter, not persisted
                 total_retrievals: storage_stats.total_retrievals,
-                ..Default::default()
+                average_importance: storage_stats.average_importance,
+                graph_nodes: 0, // Loaded separately from GraphMemory
+                graph_edges: 0, // Loaded separately from GraphMemory
             }
         };
 
@@ -315,6 +330,16 @@ impl MemorySystem {
         // SHO-118: Create lineage graph for causal memory tracking
         // Lineage uses "lineage:" prefix for edges and branches
         let lineage_graph = Arc::new(lineage::LineageGraph::new(storage.db()));
+
+        // Initialize hybrid search engine (BM25 + Vector + RRF + Reranking)
+        let bm25_path = storage_path.join("bm25_index");
+        let hybrid_search_config = hybrid_search::HybridSearchConfig::default();
+        let hybrid_search_engine = hybrid_search::HybridSearchEngine::new(
+            &bm25_path,
+            embedder.clone(),
+            hybrid_search_config,
+        )
+        .context("Failed to initialize hybrid search engine")?;
 
         Ok(Self {
             config: config.clone(),
@@ -339,6 +364,8 @@ impl MemorySystem {
             fact_store,
             // SHO-118: Decision lineage graph
             lineage_graph,
+            // Hybrid search engine (always enabled)
+            hybrid_search: Arc::new(hybrid_search_engine),
         })
     }
 
@@ -424,6 +451,16 @@ impl MemorySystem {
 
         // Add to knowledge graph for associative/causal retrieval
         self.retriever.add_to_graph(&memory);
+
+        // Index in BM25 for hybrid search (keyword + semantic)
+        if let Err(e) = self.hybrid_search.index_memory(
+            &memory.id,
+            &memory.experience.content,
+            &memory.experience.tags,
+            &memory.experience.entities,
+        ) {
+            tracing::warn!("Failed to index memory {} in BM25: {}", memory.id.0, e);
+        }
 
         // SHO-106: Check for interference with existing memories
         // Find similar memories and apply retroactive/proactive interference
@@ -523,6 +560,13 @@ impl MemorySystem {
         // Trigger background consolidation if needed
         self.consolidate_if_needed()?;
 
+        // Commit BM25 index changes (makes documents searchable)
+        // Note: This is done per-memory for immediate searchability.
+        // For high-throughput scenarios, consider batching commits.
+        if let Err(e) = self.hybrid_search.commit() {
+            tracing::warn!("Failed to commit BM25 index: {}", e);
+        }
+
         Ok(memory_id)
     }
 
@@ -589,6 +633,16 @@ impl MemorySystem {
         // Add to knowledge graph
         self.retriever.add_to_graph(&memory);
 
+        // Index in BM25 for hybrid search
+        if let Err(e) = self.hybrid_search.index_memory(
+            &memory.id,
+            &memory.experience.content,
+            &memory.experience.tags,
+            &memory.experience.entities,
+        ) {
+            tracing::warn!("Failed to index memory {} in BM25: {}", memory.id.0, e);
+        }
+
         // If important enough, add to session memory
         if importance > self.config.importance_threshold {
             self.session_memory
@@ -605,6 +659,12 @@ impl MemorySystem {
         }
 
         self.consolidate_if_needed()?;
+
+        // Commit BM25 index changes
+        if let Err(e) = self.hybrid_search.commit() {
+            tracing::warn!("Failed to commit BM25 index: {}", e);
+        }
+
         Ok(memory_id)
     }
 
@@ -840,9 +900,42 @@ impl MemorySystem {
         };
 
         // Get memory IDs from vector search (fast HNSW search)
-        let memory_ids = self
+        let vector_results = self
             .retriever
-            .search_ids(&vector_query, query.max_results)?;
+            .search_ids(&vector_query, query.max_results * 2)?; // Get more for hybrid fusion
+
+        // HYBRID SEARCH: Combine BM25 (keyword) + Vector (semantic) with RRF fusion
+        // This improves recall for both exact keyword matches and semantic similarity
+        let memory_ids = {
+            // Get content for reranking
+            let get_content = |id: &MemoryId| -> Option<String> {
+                // Try caches first, then storage
+                if let Some(m) = self.working_memory.read().get(id) {
+                    return Some(m.experience.content.clone());
+                }
+                if let Some(m) = self.session_memory.read().get(id) {
+                    return Some(m.experience.content.clone());
+                }
+                self.long_term_memory.get(id).ok().map(|m| m.experience.content.clone())
+            };
+
+            // Run hybrid search (BM25 + RRF + optional reranking)
+            match self.hybrid_search.search(query_text, vector_results.clone(), get_content) {
+                Ok(hybrid_results) => {
+                    // Convert HybridSearchResult to (MemoryId, score) pairs
+                    hybrid_results
+                        .into_iter()
+                        .take(query.max_results)
+                        .map(|r| (r.memory_id, r.score))
+                        .collect::<Vec<_>>()
+                }
+                Err(e) => {
+                    // Fallback to vector-only if hybrid fails
+                    tracing::warn!("Hybrid search failed, falling back to vector: {}", e);
+                    vector_results
+                }
+            }
+        };
 
         // Fetch memories with cache-aware strategy
         // CRITICAL: Apply filters after fetching to ensure mission_id, robot_id etc. are respected
@@ -1144,8 +1237,20 @@ impl MemorySystem {
     }
 
     /// Get memory statistics
+    ///
+    /// Returns current stats with fresh average_importance calculated from storage.
+    /// Most counters are cached in-memory for performance, but importance is
+    /// recalculated to ensure accuracy after memory modifications.
     pub fn stats(&self) -> MemoryStats {
-        self.stats.read().clone()
+        let mut stats = self.stats.read().clone();
+
+        // Recalculate average_importance from storage for accuracy
+        // This ensures importance reflects current memory state after adds/deletes
+        if let Ok(storage_stats) = self.long_term_memory.get_stats() {
+            stats.average_importance = storage_stats.average_importance;
+        }
+
+        stats
     }
 
     /// Export visualization graph as DOT format for Graphviz
@@ -2659,6 +2764,19 @@ impl MemorySystem {
 
             // Add to knowledge graph
             self.retriever.add_to_graph(&memory);
+
+            // Index in BM25 for hybrid search
+            if let Err(e) = self.hybrid_search.index_memory(
+                &memory.id,
+                &memory.experience.content,
+                &memory.experience.tags,
+                &memory.experience.entities,
+            ) {
+                tracing::warn!("Failed to index memory {} in BM25: {}", memory.id.0, e);
+            }
+            if let Err(e) = self.hybrid_search.commit() {
+                tracing::warn!("Failed to commit BM25 index: {}", e);
+            }
 
             // Add to session if important
             if importance > self.config.importance_threshold {
