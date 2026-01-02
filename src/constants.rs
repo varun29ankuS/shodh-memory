@@ -419,21 +419,60 @@ pub const DEFAULT_MAX_RESULTS: usize = 10;
 /// Reference: Anderson & Pirolli (1984), ACT-R cognitive architecture
 pub const SPREADING_DECAY_RATE: f32 = 0.5;
 
-/// Maximum hops for spreading activation
+/// Maximum hops for spreading activation (upper bound)
 ///
 /// Justification:
 /// - 3 hops captures "friend of a friend of a friend" relationships
 /// - Beyond 3 hops, activation typically falls below threshold anyway
 /// - Limits computational cost for large graphs
+/// - Adaptive algorithm may terminate earlier (see SPREADING_EARLY_TERMINATION_*)
 pub const SPREADING_MAX_HOPS: usize = 3;
 
-/// Activation threshold for pruning weak activations
+/// Minimum hops before early termination is allowed
+///
+/// Ensures at least some spreading even when initial activation is high.
+/// Prevents returning only directly connected entities.
+pub const SPREADING_MIN_HOPS: usize = 1;
+
+/// Activation threshold for pruning weak activations (initial/strict)
 ///
 /// Justification:
 /// - 0.01 (1%) prunes noise while preserving meaningful spread
 /// - Matches MIN_STRENGTH for consistency
 /// - Below this, activation contributes negligibly to final score
 pub const SPREADING_ACTIVATION_THRESHOLD: f32 = 0.01;
+
+/// Relaxed activation threshold when too few candidates found
+///
+/// If fewer than SPREADING_MIN_CANDIDATES are activated, the threshold
+/// is lowered to this value to allow more exploration.
+pub const SPREADING_RELAXED_THRESHOLD: f32 = 0.005;
+
+/// Minimum candidates before relaxing threshold
+///
+/// If fewer than this many entities are activated after a hop,
+/// the activation threshold is relaxed to explore more.
+pub const SPREADING_MIN_CANDIDATES: usize = 5;
+
+/// Early termination threshold - ratio of new activations
+///
+/// If (new_activations / total_activations) < this ratio,
+/// spreading has saturated and we terminate early.
+/// Value of 0.1 = less than 10% new activations → terminate.
+pub const SPREADING_EARLY_TERMINATION_RATIO: f32 = 0.1;
+
+/// Early termination threshold - minimum candidate count
+///
+/// If we have at least this many candidates after minimum hops,
+/// we can terminate early (we have enough coverage).
+pub const SPREADING_EARLY_TERMINATION_CANDIDATES: usize = 20;
+
+/// Activation normalization factor per hop
+///
+/// Prevents unbounded activation growth by normalizing per hop.
+/// After each hop, activations are scaled so max = 1.0 × this factor.
+/// Value > 1.0 allows some accumulation while preventing explosion.
+pub const SPREADING_NORMALIZATION_FACTOR: f32 = 1.5;
 
 // =============================================================================
 // LONG-TERM POTENTIATION (LTP) CONSTANTS

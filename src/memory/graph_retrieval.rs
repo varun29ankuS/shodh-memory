@@ -26,7 +26,9 @@ use crate::constants::{
     DENSITY_GRAPH_WEIGHT_MAX, DENSITY_GRAPH_WEIGHT_MIN, DENSITY_LINGUISTIC_WEIGHT,
     DENSITY_THRESHOLD_MAX, DENSITY_THRESHOLD_MIN, HYBRID_GRAPH_WEIGHT, HYBRID_LINGUISTIC_WEIGHT,
     HYBRID_SEMANTIC_WEIGHT, IMPORTANCE_DECAY_MAX, IMPORTANCE_DECAY_MIN,
-    SPREADING_ACTIVATION_THRESHOLD, SPREADING_MAX_HOPS,
+    SPREADING_ACTIVATION_THRESHOLD, SPREADING_EARLY_TERMINATION_CANDIDATES,
+    SPREADING_EARLY_TERMINATION_RATIO, SPREADING_MAX_HOPS, SPREADING_MIN_CANDIDATES,
+    SPREADING_MIN_HOPS, SPREADING_NORMALIZATION_FACTOR, SPREADING_RELAXED_THRESHOLD,
 };
 use crate::embeddings::Embedder;
 use crate::graph_memory::{EpisodicNode, GraphMemory};
@@ -226,16 +228,21 @@ pub fn spreading_activation_retrieve_with_stats(
     }
 
     // Step 3: Spread activation through graph (Anderson & Pirolli 1984)
-    // With importance-weighted decay (SHO-26)
+    // With importance-weighted decay (SHO-26) and adaptive limits
     let graph_start = Instant::now();
+
+    // Adaptive threshold: start strict, relax if too few candidates
+    let mut current_threshold = SPREADING_ACTIVATION_THRESHOLD;
 
     for hop in 1..=SPREADING_MAX_HOPS {
         stats.graph_hops = hop;
+        let count_before = activation_map.len();
 
         tracing::debug!(
-            "📊 Spreading activation (hop {}/{})",
+            "📊 Spreading activation (hop {}/{}, threshold={:.4})",
             hop,
-            SPREADING_MAX_HOPS
+            SPREADING_MAX_HOPS,
+            current_threshold
         );
 
         // Clone to avoid borrow issues
@@ -244,7 +251,7 @@ pub fn spreading_activation_retrieve_with_stats(
 
         for (entity_uuid, source_activation) in current_activated {
             // Only spread from entities with sufficient activation
-            if source_activation < SPREADING_ACTIVATION_THRESHOLD {
+            if source_activation < current_threshold {
                 continue;
             }
 
@@ -268,18 +275,78 @@ pub fn spreading_activation_retrieve_with_stats(
                 *new_activation += spread_amount;
 
                 // Track newly activated entities
-                if *new_activation >= SPREADING_ACTIVATION_THRESHOLD
-                    && *new_activation - spread_amount < SPREADING_ACTIVATION_THRESHOLD
+                if *new_activation >= current_threshold
+                    && *new_activation - spread_amount < current_threshold
                 {
                     stats.entities_activated += 1;
                 }
             }
         }
 
-        // Prune weak activations (ACT-R model)
-        activation_map.retain(|_, activation| *activation > SPREADING_ACTIVATION_THRESHOLD);
+        // Normalize activations to prevent unbounded growth
+        // Scale so max activation = NORMALIZATION_FACTOR (allows some accumulation)
+        let max_activation = activation_map
+            .values()
+            .cloned()
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(1.0);
 
-        tracing::debug!("  Activated entities: {}", activation_map.len());
+        if max_activation > SPREADING_NORMALIZATION_FACTOR {
+            let scale = SPREADING_NORMALIZATION_FACTOR / max_activation;
+            for activation in activation_map.values_mut() {
+                *activation *= scale;
+            }
+        }
+
+        // Prune weak activations (ACT-R model)
+        activation_map.retain(|_, activation| *activation > current_threshold);
+
+        let count_after = activation_map.len();
+        let new_activations = count_after.saturating_sub(count_before);
+
+        tracing::debug!(
+            "  Activated entities: {} (+{} new)",
+            count_after,
+            new_activations
+        );
+
+        // Adaptive threshold relaxation: if too few candidates, lower threshold
+        if count_after < SPREADING_MIN_CANDIDATES && current_threshold > SPREADING_RELAXED_THRESHOLD
+        {
+            current_threshold = SPREADING_RELAXED_THRESHOLD;
+            tracing::debug!(
+                "  Relaxing threshold to {:.4} (only {} candidates)",
+                current_threshold,
+                count_after
+            );
+        }
+
+        // Early termination checks (only after minimum hops)
+        if hop >= SPREADING_MIN_HOPS {
+            // Check 1: Saturation - very few new activations relative to total
+            let new_ratio = if count_after > 0 {
+                new_activations as f32 / count_after as f32
+            } else {
+                0.0
+            };
+
+            if new_ratio < SPREADING_EARLY_TERMINATION_RATIO && count_after > 0 {
+                tracing::debug!(
+                    "  Early termination: activation saturated ({:.1}% new)",
+                    new_ratio * 100.0
+                );
+                break;
+            }
+
+            // Check 2: Sufficient coverage - we have enough candidates
+            if count_after >= SPREADING_EARLY_TERMINATION_CANDIDATES {
+                tracing::debug!(
+                    "  Early termination: sufficient coverage ({} candidates)",
+                    count_after
+                );
+                break;
+            }
+        }
     }
 
     stats.graph_time_us = graph_start.elapsed().as_micros() as u64;
@@ -495,5 +562,90 @@ mod tests {
 
         // High importance should retain more activation
         assert!(high_importance_final > low_importance_final);
+    }
+
+    #[test]
+    fn test_adaptive_constants_valid() {
+        use crate::constants::*;
+
+        // Relaxed threshold must be lower than strict threshold
+        assert!(SPREADING_RELAXED_THRESHOLD < SPREADING_ACTIVATION_THRESHOLD);
+
+        // Min hops must be <= max hops
+        assert!(SPREADING_MIN_HOPS <= SPREADING_MAX_HOPS);
+
+        // Early termination ratio must be in (0, 1)
+        assert!(SPREADING_EARLY_TERMINATION_RATIO > 0.0);
+        assert!(SPREADING_EARLY_TERMINATION_RATIO < 1.0);
+
+        // Normalization factor must be positive
+        assert!(SPREADING_NORMALIZATION_FACTOR > 0.0);
+
+        // Min candidates for relaxation should be reasonable
+        assert!(SPREADING_MIN_CANDIDATES > 0);
+        assert!(SPREADING_MIN_CANDIDATES < SPREADING_EARLY_TERMINATION_CANDIDATES);
+    }
+
+    #[test]
+    fn test_normalization_prevents_explosion() {
+        use crate::constants::SPREADING_NORMALIZATION_FACTOR;
+
+        // Simulate activation accumulation over hops
+        let mut activations = vec![1.0, 0.8, 0.5, 0.3];
+
+        // Simulate 5 hops of accumulation (each hop adds to existing)
+        for _ in 0..5 {
+            for activation in &mut activations {
+                *activation += *activation * 0.5; // 50% growth per hop
+            }
+
+            // Normalize
+            let max_activation = activations
+                .iter()
+                .cloned()
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(1.0);
+
+            if max_activation > SPREADING_NORMALIZATION_FACTOR {
+                let scale = SPREADING_NORMALIZATION_FACTOR / max_activation;
+                for activation in &mut activations {
+                    *activation *= scale;
+                }
+            }
+        }
+
+        // After normalization, max should never exceed factor
+        let final_max = activations
+            .iter()
+            .cloned()
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(0.0);
+
+        assert!(final_max <= SPREADING_NORMALIZATION_FACTOR + 0.001);
+    }
+
+    #[test]
+    fn test_early_termination_ratio() {
+        use crate::constants::SPREADING_EARLY_TERMINATION_RATIO;
+
+        // Simulate saturation detection
+        let total_before = 50;
+        let total_after = 52; // Only 2 new activations
+
+        let new_activations = total_after - total_before;
+        let new_ratio = new_activations as f32 / total_after as f32;
+
+        // Should trigger early termination (only ~4% new)
+        assert!(new_ratio < SPREADING_EARLY_TERMINATION_RATIO);
+
+        // Simulate rapid growth - should not terminate
+        let growing_before = 10;
+        let growing_after = 25; // 15 new activations
+
+        let growing_new = growing_after - growing_before;
+        let growing_ratio = growing_new as f32 / growing_after as f32;
+
+        // Should NOT trigger early termination (60% new)
+        assert!(growing_ratio >= SPREADING_EARLY_TERMINATION_RATIO);
     }
 }
