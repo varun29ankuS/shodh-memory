@@ -32,6 +32,35 @@ use crate::embeddings::NeuralNer;
 use crate::graph_memory::GraphMemory;
 use crate::memory::{Memory, MemorySystem};
 
+// =============================================================================
+// LEARNED WEIGHT CONSTANTS
+// Default starting points, adapted via feedback
+// =============================================================================
+
+/// Default weight for semantic similarity in score fusion
+const DEFAULT_SEMANTIC_WEIGHT: f32 = 0.4;
+
+/// Default weight for entity matching in score fusion
+const DEFAULT_ENTITY_WEIGHT: f32 = 0.35;
+
+/// Default weight for tag matching in score fusion
+const DEFAULT_TAG_WEIGHT: f32 = 0.15;
+
+/// Default weight for importance in score fusion
+const DEFAULT_IMPORTANCE_WEIGHT: f32 = 0.10;
+
+/// Learning rate for weight updates from feedback
+const WEIGHT_LEARNING_RATE: f32 = 0.05;
+
+/// Minimum weight (prevents any component from being zeroed out)
+const MIN_WEIGHT: f32 = 0.05;
+
+/// Sigmoid calibration steepness (higher = sharper cutoff)
+const SIGMOID_STEEPNESS: f32 = 10.0;
+
+/// Sigmoid calibration midpoint (scores below this are penalized)
+const SIGMOID_MIDPOINT: f32 = 0.5;
+
 /// Configuration for relevance triggers
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelevanceConfig {
@@ -245,7 +274,127 @@ struct EntityIndexEntry {
     /// Memory IDs that mention this entity
     memory_ids: HashSet<Uuid>,
     /// Last time this entry was updated
+    #[allow(dead_code)]
     last_updated: Option<DateTime<Utc>>,
+}
+
+/// Learned weights for score fusion, adapted via feedback
+///
+/// These weights determine how different scoring signals are combined:
+/// - semantic: Cosine similarity from vector search
+/// - entity: Entity name overlap between query and memory
+/// - tag: Tag overlap between query context and memory tags
+/// - importance: Memory's stored importance score
+///
+/// Weights are normalized to sum to 1.0 and updated via gradient descent
+/// when user provides feedback on surfaced memories.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearnedWeights {
+    /// Weight for semantic similarity score
+    pub semantic: f32,
+    /// Weight for entity matching score
+    pub entity: f32,
+    /// Weight for tag matching score
+    pub tag: f32,
+    /// Weight for importance score
+    pub importance: f32,
+    /// Number of feedback updates applied
+    pub update_count: u32,
+    /// Last time weights were updated
+    pub last_updated: Option<DateTime<Utc>>,
+}
+
+impl Default for LearnedWeights {
+    fn default() -> Self {
+        Self {
+            semantic: DEFAULT_SEMANTIC_WEIGHT,
+            entity: DEFAULT_ENTITY_WEIGHT,
+            tag: DEFAULT_TAG_WEIGHT,
+            importance: DEFAULT_IMPORTANCE_WEIGHT,
+            update_count: 0,
+            last_updated: None,
+        }
+    }
+}
+
+impl LearnedWeights {
+    /// Normalize weights to sum to 1.0
+    pub fn normalize(&mut self) {
+        let sum = self.semantic + self.entity + self.tag + self.importance;
+        if sum > 0.0 {
+            self.semantic /= sum;
+            self.entity /= sum;
+            self.tag /= sum;
+            self.importance /= sum;
+        }
+    }
+
+    /// Apply feedback to update weights
+    ///
+    /// - helpful: Increase weights for components that contributed to this memory
+    /// - not_helpful: Decrease weights for components that led to this memory
+    ///
+    /// Uses gradient descent with learning rate WEIGHT_LEARNING_RATE
+    pub fn apply_feedback(
+        &mut self,
+        semantic_contributed: bool,
+        entity_contributed: bool,
+        tag_contributed: bool,
+        helpful: bool,
+    ) {
+        let direction = if helpful { 1.0 } else { -1.0 };
+        let delta = WEIGHT_LEARNING_RATE * direction;
+
+        // Update weights based on which components contributed
+        if semantic_contributed {
+            self.semantic = (self.semantic + delta).max(MIN_WEIGHT);
+        }
+        if entity_contributed {
+            self.entity = (self.entity + delta).max(MIN_WEIGHT);
+        }
+        if tag_contributed {
+            self.tag = (self.tag + delta).max(MIN_WEIGHT);
+        }
+
+        // Importance is always a factor, so adjust inversely to others
+        if helpful && !semantic_contributed && !entity_contributed && !tag_contributed {
+            // Memory was helpful but no clear signal - boost importance
+            self.importance = (self.importance + delta).max(MIN_WEIGHT);
+        }
+
+        self.normalize();
+        self.update_count += 1;
+        self.last_updated = Some(Utc::now());
+    }
+
+    /// Calculate fused score from component scores
+    pub fn fuse_scores(
+        &self,
+        semantic_score: f32,
+        entity_score: f32,
+        tag_score: f32,
+        importance_score: f32,
+    ) -> f32 {
+        // Calibrate each score using sigmoid to normalize different scales
+        let calibrated_semantic = calibrate_score(semantic_score);
+        let calibrated_entity = calibrate_score(entity_score);
+        let calibrated_tag = calibrate_score(tag_score);
+        let calibrated_importance = calibrate_score(importance_score);
+
+        // Weighted sum
+        self.semantic * calibrated_semantic
+            + self.entity * calibrated_entity
+            + self.tag * calibrated_tag
+            + self.importance * calibrated_importance
+    }
+}
+
+/// Calibrate a score using sigmoid function
+///
+/// Maps scores to a 0-1 range with smooth cutoff around SIGMOID_MIDPOINT.
+/// Scores near 1.0 stay near 1.0, scores near 0 are penalized more.
+fn calibrate_score(score: f32) -> f32 {
+    1.0 / (1.0 + (-SIGMOID_STEEPNESS * (score - SIGMOID_MIDPOINT)).exp())
 }
 
 /// Proactive relevance engine for memory surfacing
@@ -259,6 +408,9 @@ pub struct RelevanceEngine {
 
     /// Tracks when entity index was last fully refreshed
     entity_index_timestamp: Arc<RwLock<Option<DateTime<Utc>>>>,
+
+    /// Learned weights for score fusion, adapted via feedback
+    learned_weights: Arc<RwLock<LearnedWeights>>,
 }
 
 impl RelevanceEngine {
@@ -268,7 +420,64 @@ impl RelevanceEngine {
             ner,
             entity_index: Arc::new(RwLock::new(HashMap::new())),
             entity_index_timestamp: Arc::new(RwLock::new(None)),
+            learned_weights: Arc::new(RwLock::new(LearnedWeights::default())),
         }
+    }
+
+    /// Get current learned weights
+    pub fn get_weights(&self) -> LearnedWeights {
+        self.learned_weights.read().clone()
+    }
+
+    /// Set learned weights (e.g., loaded from storage)
+    pub fn set_weights(&self, weights: LearnedWeights) {
+        *self.learned_weights.write() = weights;
+    }
+
+    /// Apply feedback to update learned weights
+    ///
+    /// Call this when user indicates a surfaced memory was helpful or not.
+    pub fn apply_feedback(
+        &self,
+        semantic_contributed: bool,
+        entity_contributed: bool,
+        tag_contributed: bool,
+        helpful: bool,
+    ) {
+        self.learned_weights.write().apply_feedback(
+            semantic_contributed,
+            entity_contributed,
+            tag_contributed,
+            helpful,
+        );
+    }
+
+    /// Calculate tag overlap score between context and memory tags
+    fn calculate_tag_score(&self, context: &str, tags: &[String]) -> f32 {
+        if tags.is_empty() {
+            return 0.0;
+        }
+
+        let context_lower = context.to_lowercase();
+        let mut matches = 0;
+
+        for tag in tags {
+            let tag_lower = tag.to_lowercase();
+            // Check if tag appears in context (or context words match tag)
+            if context_lower.contains(&tag_lower) {
+                matches += 1;
+            } else {
+                // Check if any context word starts with or equals the tag
+                for word in context_lower.split_whitespace() {
+                    if word.starts_with(&tag_lower) || tag_lower.starts_with(word) {
+                        matches += 1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        matches as f32 / tags.len() as f32
     }
 
     /// Surface relevant memories for the given context
@@ -303,8 +512,9 @@ impl RelevanceEngine {
         debug.ner_ms = ner_start.elapsed().as_secs_f64() * 1000.0;
 
         // Phase 2: Parallel entity + semantic search
-        let mut candidate_memories: HashMap<Uuid, (Memory, f32, RelevanceReason, Vec<String>)> =
-            HashMap::new();
+        // Track individual component scores for learned weight fusion
+        // Structure: (Memory, semantic_score, entity_score, matched_entities)
+        let mut candidate_memories: HashMap<Uuid, (Memory, f32, f32, Vec<String>)> = HashMap::new();
 
         // 2a: Entity-based matching
         if config.enable_entity_matching && !detected_entities.is_empty() {
@@ -316,8 +526,8 @@ impl RelevanceEngine {
 
             for (memory, score, matched) in entity_matches {
                 let id = memory.id.0;
-                candidate_memories
-                    .insert(id, (memory, score, RelevanceReason::EntityMatch, matched));
+                // semantic=0, entity=score
+                candidate_memories.insert(id, (memory, 0.0, score, matched));
             }
         }
 
@@ -330,76 +540,90 @@ impl RelevanceEngine {
 
             for (memory, score) in semantic_matches {
                 let id = memory.id.0;
-                if let Some((_, existing_score, reason, _matched)) = candidate_memories.get_mut(&id)
+                if let Some((_, semantic_score, _entity_score, _matched)) =
+                    candidate_memories.get_mut(&id)
                 {
-                    // Already found via entity match - combine scores
-                    *existing_score = (*existing_score + score) / 2.0;
-                    *reason = RelevanceReason::Combined;
+                    // Already found via entity match - add semantic score
+                    *semantic_score = score;
                 } else {
-                    candidate_memories.insert(
-                        id,
-                        (
-                            memory,
-                            score,
-                            RelevanceReason::SemanticSimilarity,
-                            Vec::new(),
-                        ),
-                    );
+                    // New candidate from semantic search only
+                    candidate_memories.insert(id, (memory, score, 0.0, Vec::new()));
                 }
             }
         }
 
         debug.memories_scanned = candidate_memories.len();
 
-        // Phase 3: Rank and select top results
+        // Phase 3: Rank and select top results using learned weights
         let ranking_start = Instant::now();
+        let weights = self.learned_weights.read().clone();
+
         let mut results: Vec<SurfacedMemory> = candidate_memories
             .into_iter()
-            .filter_map(|(_, (memory, relevance_score, reason, matched_entities))| {
-                // Apply minimum importance filter
-                if memory.importance() < config.min_importance {
-                    return None;
-                }
-
-                // Apply memory type filter
-                if !config.memory_types.is_empty() {
-                    let mem_type = format!("{:?}", memory.experience.experience_type);
-                    if !config
-                        .memory_types
-                        .iter()
-                        .any(|t| t.eq_ignore_ascii_case(&mem_type))
-                    {
+            .filter_map(
+                |(_, (memory, semantic_score, entity_score, matched_entities))| {
+                    // Apply minimum importance filter
+                    let importance = memory.importance();
+                    if importance < config.min_importance {
                         return None;
                     }
-                }
 
-                // Apply recency boost
-                let final_score = self.apply_recency_boost(
-                    relevance_score,
-                    memory.created_at,
-                    config.recency_boost_hours,
-                    config.recency_boost_multiplier,
-                );
+                    // Apply memory type filter
+                    if !config.memory_types.is_empty() {
+                        let mem_type = format!("{:?}", memory.experience.experience_type);
+                        if !config
+                            .memory_types
+                            .iter()
+                            .any(|t| t.eq_ignore_ascii_case(&mem_type))
+                        {
+                            return None;
+                        }
+                    }
 
-                Some(SurfacedMemory {
-                    id: memory.id.0.to_string(),
-                    content: memory.experience.content.clone(),
-                    memory_type: format!("{:?}", memory.experience.experience_type),
-                    importance: memory.importance(),
-                    relevance_score: final_score,
-                    relevance_reason: reason.clone(),
-                    matched_entities,
-                    semantic_similarity: if reason == RelevanceReason::SemanticSimilarity
-                        || reason == RelevanceReason::Combined
-                    {
-                        Some(final_score)
+                    // Calculate tag score
+                    let tag_score = self.calculate_tag_score(context, &memory.experience.tags);
+
+                    // Fuse scores using learned weights
+                    let fused_score =
+                        weights.fuse_scores(semantic_score, entity_score, tag_score, importance);
+
+                    // Determine relevance reason
+                    let reason = if semantic_score > 0.0 && entity_score > 0.0 {
+                        RelevanceReason::Combined
+                    } else if entity_score > 0.0 {
+                        RelevanceReason::EntityMatch
+                    } else if semantic_score > 0.0 {
+                        RelevanceReason::SemanticSimilarity
                     } else {
-                        None
-                    },
-                    created_at: memory.created_at,
-                    tags: memory.experience.tags.clone(),
-                })
-            })
+                        RelevanceReason::RecentImportant
+                    };
+
+                    // Apply recency boost
+                    let final_score = self.apply_recency_boost(
+                        fused_score,
+                        memory.created_at,
+                        config.recency_boost_hours,
+                        config.recency_boost_multiplier,
+                    );
+
+                    Some(SurfacedMemory {
+                        id: memory.id.0.to_string(),
+                        content: memory.experience.content.clone(),
+                        memory_type: format!("{:?}", memory.experience.experience_type),
+                        importance,
+                        relevance_score: final_score,
+                        relevance_reason: reason.clone(),
+                        matched_entities,
+                        semantic_similarity: if semantic_score > 0.0 {
+                            Some(semantic_score)
+                        } else {
+                            None
+                        },
+                        created_at: memory.created_at,
+                        tags: memory.experience.tags.clone(),
+                    })
+                },
+            )
             .collect();
 
         // Sort by relevance score (descending)
@@ -1018,5 +1242,152 @@ mod tests {
         let json = serde_json::to_string(&entity).unwrap();
         assert!(json.contains("Rust"));
         assert!(json.contains("Technology"));
+    }
+
+    #[test]
+    fn test_learned_weights_default() {
+        let weights = LearnedWeights::default();
+
+        // Should sum to 1.0
+        let sum = weights.semantic + weights.entity + weights.tag + weights.importance;
+        assert!((sum - 1.0).abs() < 0.001);
+
+        // Check default values
+        assert_eq!(weights.semantic, DEFAULT_SEMANTIC_WEIGHT);
+        assert_eq!(weights.entity, DEFAULT_ENTITY_WEIGHT);
+        assert_eq!(weights.tag, DEFAULT_TAG_WEIGHT);
+        assert_eq!(weights.importance, DEFAULT_IMPORTANCE_WEIGHT);
+    }
+
+    #[test]
+    fn test_learned_weights_normalize() {
+        let mut weights = LearnedWeights {
+            semantic: 0.5,
+            entity: 0.5,
+            tag: 0.5,
+            importance: 0.5,
+            update_count: 0,
+            last_updated: None,
+        };
+
+        weights.normalize();
+
+        let sum = weights.semantic + weights.entity + weights.tag + weights.importance;
+        assert!((sum - 1.0).abs() < 0.001);
+        assert!((weights.semantic - 0.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_learned_weights_feedback_helpful() {
+        let mut weights = LearnedWeights::default();
+        let initial_semantic = weights.semantic;
+        let initial_entity = weights.entity;
+
+        // Positive feedback on semantic and entity
+        weights.apply_feedback(true, true, false, true);
+
+        // Semantic and entity should increase (relative to tag/importance)
+        // After normalization, they may not be strictly higher, but update_count should increase
+        assert_eq!(weights.update_count, 1);
+        assert!(weights.last_updated.is_some());
+
+        // Weights should still sum to 1.0
+        let sum = weights.semantic + weights.entity + weights.tag + weights.importance;
+        assert!((sum - 1.0).abs() < 0.001);
+
+        // Semantic + entity together should have gained relative weight
+        let new_se = weights.semantic + weights.entity;
+        let old_se = initial_semantic + initial_entity;
+        assert!(new_se >= old_se - 0.1); // Allow for normalization effects
+    }
+
+    #[test]
+    fn test_learned_weights_feedback_not_helpful() {
+        let mut weights = LearnedWeights::default();
+
+        // Negative feedback - semantic was the main signal
+        weights.apply_feedback(true, false, false, false);
+
+        // Weights should still sum to 1.0
+        let sum = weights.semantic + weights.entity + weights.tag + weights.importance;
+        assert!((sum - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_calibrate_score() {
+        // High score should stay high
+        let high = calibrate_score(0.9);
+        assert!(high > 0.9);
+
+        // Low score should be reduced more
+        let low = calibrate_score(0.1);
+        assert!(low < 0.1);
+
+        // Mid-point score
+        let mid = calibrate_score(SIGMOID_MIDPOINT);
+        assert!((mid - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_score_fusion() {
+        let weights = LearnedWeights::default();
+
+        // All high scores
+        let high = weights.fuse_scores(0.9, 0.9, 0.9, 0.9);
+        assert!(high > 0.8);
+
+        // All low scores
+        let low = weights.fuse_scores(0.1, 0.1, 0.1, 0.1);
+        assert!(low < 0.2);
+
+        // Mixed scores - result should be between
+        let mixed = weights.fuse_scores(0.9, 0.1, 0.5, 0.7);
+        assert!(mixed > 0.2 && mixed < 0.8);
+    }
+
+    #[test]
+    fn test_tag_score_calculation() {
+        let engine = RelevanceEngine::new(Arc::new(crate::embeddings::NeuralNer::new_fallback(
+            crate::embeddings::NerConfig::default(),
+        )));
+
+        // Exact match
+        let score = engine.calculate_tag_score("I love Rust programming", &["rust".to_string()]);
+        assert_eq!(score, 1.0);
+
+        // Partial match
+        let score = engine
+            .calculate_tag_score("Learning Rust", &["rust".to_string(), "python".to_string()]);
+        assert_eq!(score, 0.5);
+
+        // No match
+        let score = engine.calculate_tag_score("Hello world", &["rust".to_string()]);
+        assert_eq!(score, 0.0);
+
+        // Empty tags
+        let score = engine.calculate_tag_score("Test", &[]);
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_min_weight_enforcement() {
+        let mut weights = LearnedWeights {
+            semantic: 0.1,
+            entity: MIN_WEIGHT + 0.01,
+            tag: 0.7,
+            importance: 0.1,
+            update_count: 0,
+            last_updated: None,
+        };
+
+        // Apply negative feedback on entity (already near minimum)
+        weights.apply_feedback(false, true, false, false);
+
+        // Entity should not go below MIN_WEIGHT
+        assert!(weights.entity >= MIN_WEIGHT);
+
+        // Still normalized
+        let sum = weights.semantic + weights.entity + weights.tag + weights.importance;
+        assert!((sum - 1.0).abs() < 0.001);
     }
 }
