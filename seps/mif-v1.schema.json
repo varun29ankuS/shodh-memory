@@ -1,0 +1,416 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shodh-memory.dev/schemas/mif-v1.json",
+  "title": "Memory Interchange Format v1.0",
+  "description": "Open, portable format for AI agent memory export/import",
+  "type": "object",
+  "required": ["mif_version", "export", "memories"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri"
+    },
+    "mif_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "MIF specification version (MAJOR.MINOR)"
+    },
+    "generator": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      },
+      "required": ["name", "version"]
+    },
+    "export": {
+      "type": "object",
+      "required": ["id", "created_at", "user_id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^exp_[a-zA-Z0-9]+$"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "user_id": {
+          "type": "string"
+        },
+        "checksum": {
+          "type": "string",
+          "pattern": "^sha256:[a-fA-F0-9]{64}$"
+        }
+      }
+    },
+    "memories": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/memory" }
+    },
+    "todos": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/todo" }
+    },
+    "graph": { "$ref": "#/$defs/graph" },
+    "metadata": { "$ref": "#/$defs/metadata" }
+  },
+  "$defs": {
+    "memory": {
+      "type": "object",
+      "required": ["id", "content", "type", "created_at"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^mem_[a-fA-F0-9-]+$"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100000
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "Observation", "Decision", "Learning", "Error", "Discovery",
+            "Pattern", "Context", "Task", "CodeEdit", "FileAccess",
+            "Search", "Command", "Conversation"
+          ]
+        },
+        "importance": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "accessed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "access_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decay_rate": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["conversation", "file", "api", "hook", "user"]
+            },
+            "session_id": { "type": "string" },
+            "agent": { "type": "string" }
+          }
+        },
+        "entities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["text", "type"],
+            "properties": {
+              "text": { "type": "string" },
+              "type": { "type": "string" },
+              "confidence": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+              }
+            }
+          }
+        },
+        "embedding": { "$ref": "#/$defs/embedding" },
+        "relations": {
+          "type": "object",
+          "properties": {
+            "related_memories": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "related_todos": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "todo": {
+      "type": "object",
+      "required": ["id", "content", "status", "created_at"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^todo_[a-fA-F0-9-]+$"
+        },
+        "short_id": {
+          "type": "string",
+          "pattern": "^[A-Z]+-[0-9]+$"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 10000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["backlog", "todo", "in_progress", "blocked", "done", "cancelled"]
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["urgent", "high", "medium", "low", "none"]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "due_date": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "project": {
+          "type": ["object", "null"],
+          "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string" },
+            "prefix": { "type": "string" }
+          }
+        },
+        "contexts": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "notes": { "type": ["string", "null"] },
+        "parent_id": { "type": ["string", "null"] },
+        "subtask_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "blocked_on": { "type": ["string", "null"] },
+        "recurrence": {
+          "type": ["string", "null"],
+          "enum": ["daily", "weekly", "monthly", null]
+        },
+        "related_memory_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "embedding": { "$ref": "#/$defs/embedding" },
+        "comments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "content", "created_at"],
+            "properties": {
+              "id": { "type": "string" },
+              "content": { "type": "string" },
+              "type": {
+                "type": "string",
+                "enum": ["comment", "progress", "resolution", "activity"]
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      }
+    },
+    "embedding": {
+      "type": "object",
+      "required": ["model", "dimensions", "vector"],
+      "properties": {
+        "model": {
+          "type": "string",
+          "enum": [
+            "minilm-l6-v2",
+            "bge-small-en-v1.5",
+            "text-embedding-3-small",
+            "text-embedding-3-large",
+            "voyage-3"
+          ]
+        },
+        "dimensions": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "vector": {
+          "type": "array",
+          "items": { "type": "number" }
+        },
+        "normalized": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "graph": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": ["adjacency_list"]
+        },
+        "node_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "edge_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "type"],
+            "properties": {
+              "id": { "type": "string" },
+              "type": {
+                "type": "string",
+                "enum": ["memory", "todo", "entity"]
+              },
+              "entity_type": { "type": "string" }
+            }
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["source", "target", "weight", "type"],
+            "properties": {
+              "source": { "type": "string" },
+              "target": { "type": "string" },
+              "weight": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "semantic_association",
+                  "entity_mention",
+                  "temporal_sequence",
+                  "causal",
+                  "user_linked",
+                  "todo_memory"
+                ]
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "strengthened_count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "hebbian_config": {
+          "type": "object",
+          "properties": {
+            "learning_rate": { "type": "number" },
+            "decay_rate": { "type": "number" },
+            "ltp_threshold": { "type": "number" },
+            "max_weight": { "type": "number" }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "total_memories": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_todos": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "date_range": {
+          "type": "object",
+          "properties": {
+            "earliest": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "latest": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        },
+        "memory_types": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        },
+        "top_entities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "text": { "type": "string" },
+              "count": { "type": "integer" }
+            }
+          }
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "todo_count": { "type": "integer" }
+            }
+          }
+        },
+        "privacy": {
+          "type": "object",
+          "properties": {
+            "pii_detected": { "type": "boolean" },
+            "secrets_detected": { "type": "boolean" },
+            "redacted_fields": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

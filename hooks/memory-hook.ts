@@ -2,11 +2,10 @@
 /**
  * Shodh Memory Hook - Native Claude Code Integration
  *
- * This replaces Cortex entirely. Instead of a proxy, we hook directly
- * into Claude Code's lifecycle events.
+ * Aggressive proactive context surfacing at every opportunity.
+ * Memory should be woven into every interaction - the AI thinks with memory.
  *
- * Usage: Called by Claude Code hooks system
- * Events: SessionStart, UserPromptSubmit, Stop, PostToolUse
+ * Events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, SubagentStop, Stop
  */
 
 const SHODH_API_URL = process.env.SHODH_API_URL || "http://127.0.0.1:3030";
@@ -21,22 +20,22 @@ interface HookInput {
   tool_output?: string;
   stop_reason?: string;
   session_id?: string;
+  subagent_type?: string;
+  subagent_result?: string;
 }
 
-interface Memory {
+interface SurfacedMemory {
   id: string;
   content: string;
   memory_type: string;
-  score: number;
+  relevance_score: number;
+  created_at: string;
 }
 
 interface ProactiveResponse {
-  memories: Memory[];
-  memory_count: number;
-}
-
-interface RecallResponse {
-  results: Memory[];
+  memories: SurfacedMemory[];
+  detected_entities: { text: string; entity_type: string }[];
+  latency_ms: number;
 }
 
 async function callBrain(endpoint: string, body: Record<string, unknown>): Promise<unknown> {
@@ -50,77 +49,237 @@ async function callBrain(endpoint: string, body: Record<string, unknown>): Promi
       body: JSON.stringify(body),
     });
 
-    if (!response.ok) {
-      console.error(`Brain error: ${response.status}`);
-      return null;
-    }
-
+    if (!response.ok) return null;
     return await response.json();
-  } catch (e) {
-    // Brain unavailable - fail silently, don't block Claude
+  } catch {
     return null;
   }
 }
 
-async function handleSessionStart(): Promise<void> {
-  // Get project context
-  const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const projectName = projectDir.split("/").pop() || "unknown";
+function formatRelativeTime(isoDate: string): string {
+  const d = new Date(isoDate);
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
-  // Build context string
-  let context = `Starting session in: ${projectName}`;
+  if (diffDays === 0) return "today";
+  if (diffDays === 1) return "yesterday";
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
 
-  // Query proactive context
-  const response = await callBrain("/api/proactive_context", {
+function formatMemoriesForContext(memories: SurfacedMemory[]): string {
+  if (!memories.length) return "";
+
+  return memories
+    .map((m) => {
+      const time = formatRelativeTime(m.created_at);
+      const score = Math.round(m.relevance_score * 100);
+      return `• [${score}%] (${time}) ${m.content.slice(0, 120)}${m.content.length > 120 ? "..." : ""}`;
+    })
+    .join("\n");
+}
+
+async function surfaceProactiveContext(context: string, maxResults = 3): Promise<string | null> {
+  const response = (await callBrain("/api/relevant", {
     user_id: SHODH_USER_ID,
     context,
-    max_results: 5,
-    auto_ingest: true, // NOW WE ENABLE IT - brain sees session start
-  }) as ProactiveResponse | null;
+    config: {
+      semantic_threshold: 0.6,
+      entity_match_weight: 0.3,
+      semantic_weight: 0.5,
+      recency_weight: 0.2,
+      max_results: maxResults,
+    },
+  })) as ProactiveResponse | null;
 
-  if (response?.memories?.length) {
-    console.error(`[shodh] Loaded ${response.memories.length} memories`);
+  if (!response?.memories?.length) return null;
 
-    // Format for Claude's context
-    const memoryBlock = response.memories
-      .map((m, i) => `${i + 1}. [${m.memory_type}] ${m.content.slice(0, 200)}...`)
-      .join("\n");
+  const now = new Date();
+  const header = `📅 ${now.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 
-    // Write to project memory file for auto-loading
+  return `${header}\n${formatMemoriesForContext(response.memories)}`;
+}
+
+async function handleSessionStart(): Promise<void> {
+  const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const projectName = projectDir.split(/[/\\]/).pop() || "unknown";
+
+  const context = `Starting session in project: ${projectName}`;
+  const memoryContext = await surfaceProactiveContext(context, 5);
+
+  if (memoryContext) {
+    console.error(`[shodh] Session context loaded`);
+
+    // Write to project memory file
     const memoryFile = `${projectDir}/.claude/memory-context.md`;
-    await Bun.write(memoryFile, `# Session Memory\n\n${memoryBlock}\n`);
+    try {
+      await Bun.write(memoryFile, `# Shodh Memory Context\n\n${memoryContext}\n`);
+    } catch {
+      // Directory might not exist
+    }
   }
+
+  // Also ingest session start
+  await callBrain("/api/remember", {
+    user_id: SHODH_USER_ID,
+    content: `Session started in ${projectName}`,
+    memory_type: "Context",
+    tags: ["session:start", `project:${projectName}`],
+  });
 }
 
 async function handleUserPrompt(input: HookInput): Promise<void> {
   const prompt = input.prompt;
   if (!prompt || prompt.length < 10) return;
 
-  // Semantic search for relevant memories
-  const response = await callBrain("/api/recall", {
+  // Surface proactive context for this prompt
+  const memoryContext = await surfaceProactiveContext(prompt.slice(0, 500), 3);
+
+  if (memoryContext) {
+    console.log(
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "UserPromptSubmit",
+          additionalContext: `\n<shodh-memory>\n${memoryContext}\n</shodh-memory>`,
+        },
+      })
+    );
+  }
+
+  // Ingest the prompt itself (brain sees what user is asking)
+  await callBrain("/api/proactive_context", {
     user_id: SHODH_USER_ID,
-    query: prompt.slice(0, 500),
-    limit: 3,
-  }) as RecallResponse | null;
+    context: prompt.slice(0, 1000),
+    auto_ingest: true,
+    max_results: 0, // Just ingest, don't need results
+  });
+}
 
-  if (response?.results?.length) {
-    // Output additional context for Claude to see
-    const context = response.results
-      .map(m => `[${m.memory_type}] ${m.content.slice(0, 100)}`)
-      .join("; ");
+async function handlePreToolUse(input: HookInput): Promise<void> {
+  const toolName = input.tool_name;
+  const toolInput = input.tool_input;
+  if (!toolName || !toolInput) return;
 
-    // Return hook output - Claude Code will inject this
-    console.log(JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "UserPromptSubmit",
-        additionalContext: `Relevant memories: ${context}`,
-      },
-    }));
+  // Build context from tool input
+  let context = `About to use ${toolName}`;
+
+  if (toolName === "Edit" || toolName === "Write") {
+    const filePath = toolInput.file_path as string;
+    if (filePath) {
+      context = `Editing file: ${filePath}`;
+    }
+  } else if (toolName === "Bash") {
+    const command = toolInput.command as string;
+    if (command) {
+      context = `Running command: ${command.slice(0, 100)}`;
+    }
+  }
+
+  // Surface relevant context BEFORE the tool runs
+  const memoryContext = await surfaceProactiveContext(context, 2);
+
+  if (memoryContext) {
+    console.log(
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          additionalContext: `\n<shodh-memory context="pre-${toolName.toLowerCase()}">\n${memoryContext}\n</shodh-memory>`,
+        },
+      })
+    );
   }
 }
 
+async function handlePostToolUse(input: HookInput): Promise<void> {
+  const toolName = input.tool_name;
+  const toolInput = input.tool_input;
+  const toolOutput = input.tool_output;
+
+  if (!toolName) return;
+
+  // Store significant tool uses
+  if (toolName === "Edit" || toolName === "Write") {
+    const filePath = toolInput?.file_path as string;
+    if (filePath) {
+      await callBrain("/api/remember", {
+        user_id: SHODH_USER_ID,
+        content: `Modified file: ${filePath}`,
+        memory_type: "FileAccess",
+        tags: [`tool:${toolName}`, `file:${filePath.split(/[/\\]/).pop()}`],
+      });
+    }
+  } else if (toolName === "Bash" && toolOutput) {
+    const command = toolInput?.command as string;
+
+    // Store errors/failures for learning
+    if (
+      toolOutput.includes("error") ||
+      toolOutput.includes("Error") ||
+      toolOutput.includes("failed") ||
+      toolOutput.includes("FAILED")
+    ) {
+      await callBrain("/api/remember", {
+        user_id: SHODH_USER_ID,
+        content: `Command failed: ${command?.slice(0, 100)} → ${toolOutput.slice(0, 200)}`,
+        memory_type: "Error",
+        tags: ["tool:Bash", "error"],
+      });
+
+      // Surface past errors for this type of command
+      const memoryContext = await surfaceProactiveContext(
+        `Error with command: ${command?.slice(0, 100)}`,
+        2
+      );
+      if (memoryContext) {
+        console.log(
+          JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: "PostToolUse",
+              additionalContext: `\n<shodh-memory context="similar-errors">\n${memoryContext}\n</shodh-memory>`,
+            },
+          })
+        );
+      }
+    }
+  } else if (toolName === "Read") {
+    const filePath = toolInput?.file_path as string;
+    if (filePath) {
+      // Surface what we know about this file
+      const memoryContext = await surfaceProactiveContext(
+        `Reading file: ${filePath}`,
+        2
+      );
+      if (memoryContext) {
+        console.log(
+          JSON.stringify({
+            hookSpecificOutput: {
+              hookEventName: "PostToolUse",
+              additionalContext: `\n<shodh-memory context="file-context">\n${memoryContext}\n</shodh-memory>`,
+            },
+          })
+        );
+      }
+    }
+  }
+}
+
+async function handleSubagentStop(input: HookInput): Promise<void> {
+  const subagentType = input.subagent_type;
+  const result = input.subagent_result;
+
+  if (!subagentType || !result) return;
+
+  // Store significant subagent results
+  await callBrain("/api/remember", {
+    user_id: SHODH_USER_ID,
+    content: `${subagentType} agent completed: ${result.slice(0, 300)}`,
+    memory_type: "Task",
+    tags: [`subagent:${subagentType}`, "source:hook"],
+  });
+}
+
 async function handleStop(input: HookInput): Promise<void> {
-  // Store that this session ended - useful for session boundary detection
   await callBrain("/api/remember", {
     user_id: SHODH_USER_ID,
     content: `Session ended: ${input.stop_reason || "user_stop"}`,
@@ -129,37 +288,13 @@ async function handleStop(input: HookInput): Promise<void> {
   });
 }
 
-async function handlePostToolUse(input: HookInput): Promise<void> {
-  const toolName = input.tool_name;
-  const toolOutput = input.tool_output;
-
-  // Only store significant tool uses
-  if (!toolName || !toolOutput) return;
-
-  // Skip noisy tools
-  const skipTools = ["Glob", "Grep", "Read", "LSP"];
-  if (skipTools.includes(toolName)) return;
-
-  // Store tool usage pattern
-  const content = `Used ${toolName}: ${JSON.stringify(input.tool_input || {}).slice(0, 200)}`;
-
-  await callBrain("/api/remember", {
-    user_id: SHODH_USER_ID,
-    content,
-    memory_type: "Task",
-    tags: [`tool:${toolName}`, "source:hook"],
-  });
-}
-
 async function main(): Promise<void> {
-  // Read input from stdin
   const inputText = await Bun.stdin.text();
 
   let input: HookInput;
   try {
     input = JSON.parse(inputText);
   } catch {
-    // No input or invalid JSON - check for event type from args
     const eventType = process.argv[2];
     input = { hook_event_name: eventType || "SessionStart" };
   }
@@ -173,14 +308,17 @@ async function main(): Promise<void> {
     case "UserPromptSubmit":
       await handleUserPrompt(input);
       break;
-    case "Stop":
-      await handleStop(input);
+    case "PreToolUse":
+      await handlePreToolUse(input);
       break;
     case "PostToolUse":
       await handlePostToolUse(input);
       break;
-    default:
-      // Unknown event - ignore
+    case "SubagentStop":
+      await handleSubagentStop(input);
+      break;
+    case "Stop":
+      await handleStop(input);
       break;
   }
 }

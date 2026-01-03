@@ -1,0 +1,252 @@
+{
+  "$schema": "https://shodh-memory.dev/schemas/mif-v1.json",
+  "mif_version": "1.0",
+  "generator": {
+    "name": "shodh-memory",
+    "version": "0.1.61"
+  },
+  "export": {
+    "id": "exp_a1b2c3d4e5f6",
+    "created_at": "2026-01-03T10:45:00.000Z",
+    "user_id": "claude-code",
+    "checksum": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "memories": [
+    {
+      "id": "mem_a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "content": "User prefers Rust for systems programming due to memory safety guarantees and zero-cost abstractions",
+      "type": "Learning",
+      "importance": 0.85,
+      "created_at": "2026-01-02T14:30:00.000Z",
+      "updated_at": "2026-01-02T14:30:00.000Z",
+      "accessed_at": "2026-01-03T09:15:00.000Z",
+      "access_count": 7,
+      "decay_rate": 0.1,
+      "tags": ["rust", "preference", "programming", "systems"],
+      "source": {
+        "type": "conversation",
+        "session_id": "sess_xyz789",
+        "agent": "claude-code"
+      },
+      "entities": [
+        {
+          "text": "Rust",
+          "type": "TECHNOLOGY",
+          "confidence": 0.95
+        }
+      ],
+      "embedding": {
+        "model": "minilm-l6-v2",
+        "dimensions": 384,
+        "vector": [0.123, -0.456, 0.789],
+        "normalized": true
+      },
+      "relations": {
+        "related_memories": ["mem_b2c3d4e5-f6a7-8901-bcde-f23456789012"],
+        "related_todos": []
+      }
+    },
+    {
+      "id": "mem_b2c3d4e5-f6a7-8901-bcde-f23456789012",
+      "content": "Decided to use RocksDB for persistence layer - fast, embedded, battle-tested at Facebook scale",
+      "type": "Decision",
+      "importance": 0.92,
+      "created_at": "2026-01-01T10:00:00.000Z",
+      "updated_at": "2026-01-01T10:00:00.000Z",
+      "accessed_at": "2026-01-02T16:30:00.000Z",
+      "access_count": 4,
+      "decay_rate": 0.05,
+      "tags": ["database", "architecture", "rocksdb"],
+      "source": {
+        "type": "conversation",
+        "session_id": "sess_abc123",
+        "agent": "claude-code"
+      },
+      "entities": [
+        {
+          "text": "RocksDB",
+          "type": "TECHNOLOGY",
+          "confidence": 0.98
+        },
+        {
+          "text": "Facebook",
+          "type": "ORGANIZATION",
+          "confidence": 0.90
+        }
+      ],
+      "relations": {
+        "related_memories": ["mem_a1b2c3d4-e5f6-7890-abcd-ef1234567890"],
+        "related_todos": ["todo_c3d4e5f6-a7b8-9012-cdef-345678901234"]
+      }
+    },
+    {
+      "id": "mem_c3d4e5f6-a7b8-9012-cdef-345678901234",
+      "content": "cargo build failed with linking error - fixed by adding lz4 feature flag to rocksdb dependency",
+      "type": "Error",
+      "importance": 0.70,
+      "created_at": "2025-12-28T11:20:00.000Z",
+      "updated_at": "2025-12-28T11:45:00.000Z",
+      "accessed_at": "2025-12-28T11:45:00.000Z",
+      "access_count": 2,
+      "decay_rate": 0.15,
+      "tags": ["cargo", "build", "error", "rocksdb", "linking"],
+      "source": {
+        "type": "hook",
+        "agent": "claude-code"
+      },
+      "entities": [
+        {
+          "text": "cargo",
+          "type": "TOOL",
+          "confidence": 0.92
+        },
+        {
+          "text": "lz4",
+          "type": "TECHNOLOGY",
+          "confidence": 0.88
+        }
+      ],
+      "relations": {
+        "related_memories": [],
+        "related_todos": []
+      }
+    }
+  ],
+  "todos": [
+    {
+      "id": "todo_c3d4e5f6-a7b8-9012-cdef-345678901234",
+      "short_id": "BACK-42",
+      "content": "Implement rate limiting on API endpoints using token bucket algorithm",
+      "status": "in_progress",
+      "priority": "high",
+      "created_at": "2026-01-01T09:00:00.000Z",
+      "updated_at": "2026-01-02T15:30:00.000Z",
+      "due_date": "2026-01-05T17:00:00.000Z",
+      "completed_at": null,
+      "project": {
+        "id": "proj_backend",
+        "name": "Backend",
+        "prefix": "BACK"
+      },
+      "contexts": ["@computer", "@deep-work"],
+      "tags": ["api", "security", "performance"],
+      "notes": "Consider tower-governor crate for Axum integration",
+      "parent_id": null,
+      "subtask_ids": [],
+      "blocked_on": null,
+      "recurrence": null,
+      "related_memory_ids": ["mem_b2c3d4e5-f6a7-8901-bcde-f23456789012"],
+      "comments": [
+        {
+          "id": "comment_abc123",
+          "content": "Started implementation, looking at tower middleware options",
+          "type": "progress",
+          "created_at": "2026-01-02T10:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "id": "todo_d4e5f6a7-b8c9-0123-def0-456789012345",
+      "short_id": "BACK-43",
+      "content": "Add MIF export endpoint to REST API",
+      "status": "todo",
+      "priority": "medium",
+      "created_at": "2026-01-03T10:00:00.000Z",
+      "updated_at": "2026-01-03T10:00:00.000Z",
+      "due_date": null,
+      "completed_at": null,
+      "project": {
+        "id": "proj_backend",
+        "name": "Backend",
+        "prefix": "BACK"
+      },
+      "contexts": ["@computer"],
+      "tags": ["export", "mif", "api"],
+      "notes": null,
+      "parent_id": null,
+      "subtask_ids": [],
+      "blocked_on": null,
+      "recurrence": null,
+      "related_memory_ids": [],
+      "comments": []
+    }
+  ],
+  "graph": {
+    "format": "adjacency_list",
+    "node_count": 5,
+    "edge_count": 4,
+    "nodes": [
+      { "id": "mem_a1b2c3d4-e5f6-7890-abcd-ef1234567890", "type": "memory" },
+      { "id": "mem_b2c3d4e5-f6a7-8901-bcde-f23456789012", "type": "memory" },
+      { "id": "mem_c3d4e5f6-a7b8-9012-cdef-345678901234", "type": "memory" },
+      { "id": "entity:Rust", "type": "entity", "entity_type": "TECHNOLOGY" },
+      { "id": "entity:RocksDB", "type": "entity", "entity_type": "TECHNOLOGY" }
+    ],
+    "edges": [
+      {
+        "source": "mem_a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "target": "mem_b2c3d4e5-f6a7-8901-bcde-f23456789012",
+        "weight": 0.72,
+        "type": "semantic_association",
+        "created_at": "2026-01-02T14:35:00.000Z",
+        "strengthened_count": 3
+      },
+      {
+        "source": "mem_a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "target": "entity:Rust",
+        "weight": 0.95,
+        "type": "entity_mention",
+        "created_at": "2026-01-02T14:30:00.000Z",
+        "strengthened_count": 7
+      },
+      {
+        "source": "mem_b2c3d4e5-f6a7-8901-bcde-f23456789012",
+        "target": "entity:RocksDB",
+        "weight": 0.98,
+        "type": "entity_mention",
+        "created_at": "2026-01-01T10:00:00.000Z",
+        "strengthened_count": 4
+      },
+      {
+        "source": "mem_b2c3d4e5-f6a7-8901-bcde-f23456789012",
+        "target": "todo_c3d4e5f6-a7b8-9012-cdef-345678901234",
+        "weight": 0.85,
+        "type": "todo_memory",
+        "created_at": "2026-01-02T15:30:00.000Z",
+        "strengthened_count": 1
+      }
+    ],
+    "hebbian_config": {
+      "learning_rate": 0.1,
+      "decay_rate": 0.05,
+      "ltp_threshold": 0.8,
+      "max_weight": 1.0
+    }
+  },
+  "metadata": {
+    "total_memories": 3,
+    "total_todos": 2,
+    "date_range": {
+      "earliest": "2025-12-28T11:20:00.000Z",
+      "latest": "2026-01-03T10:45:00.000Z"
+    },
+    "memory_types": {
+      "Learning": 1,
+      "Decision": 1,
+      "Error": 1
+    },
+    "top_entities": [
+      { "text": "Rust", "count": 1 },
+      { "text": "RocksDB", "count": 2 },
+      { "text": "cargo", "count": 1 }
+    ],
+    "projects": [
+      { "id": "proj_backend", "name": "Backend", "todo_count": 2 }
+    ],
+    "privacy": {
+      "pii_detected": false,
+      "secrets_detected": false,
+      "redacted_fields": []
+    }
+  }
+}

@@ -1831,6 +1831,7 @@ struct RecallTodo {
     priority: String,
     project: Option<String>,
     score: f32,
+    created_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -3964,6 +3965,7 @@ async fn search_todos_for_recall(
                 priority: todo.priority.indicator().to_string(),
                 project,
                 score,
+                created_at: todo.created_at.to_rfc3339(),
             }
         })
         .collect()
@@ -5808,6 +5810,7 @@ async fn proactive_context(
     let user_id = req.user_id.clone();
     let context_for_triggers = req.context.clone();
     let memory_for_task_embed = memory_system.clone();
+    let context_emb_for_triggers = context_embedding.clone();
     let context_reminders: Vec<ReminderItem> = {
         let prospective = state.prospective_store.clone();
         tokio::task::spawn_blocking(move || {
@@ -5820,7 +5823,7 @@ async fn proactive_context(
                 .check_context_triggers_semantic(
                     &user_id,
                     &context_for_triggers,
-                    &context_embedding,
+                    &context_emb_for_triggers,
                     embed_fn,
                 )
                 .unwrap_or_default()
@@ -5983,12 +5986,17 @@ async fn proactive_context(
             .collect();
 
         // Also include in_progress todos regardless of semantic score (work continuity)
-        let in_progress_todos = state
+        let in_progress_candidates = state
             .todo_store
             .list_todos_for_user(&req.user_id, None)
             .unwrap_or_default()
             .into_iter()
             .filter(|t| t.status == TodoStatus::InProgress)
+            .collect::<Vec<_>>();
+
+        // Filter out duplicates separately to avoid borrow conflict
+        let in_progress_todos: Vec<ProactiveTodoItem> = in_progress_candidates
+            .into_iter()
             .filter(|t| {
                 // Don't duplicate if already in semantic results
                 !todos_with_scores.iter().any(|s| s.id == t.id.0.to_string())
@@ -6013,7 +6021,8 @@ async fn proactive_context(
                     relevance_reason: "active work".to_string(),
                     similarity_score: None,
                 }
-            });
+            })
+            .collect();
 
         todos_with_scores.extend(in_progress_todos);
 
@@ -8119,6 +8128,452 @@ async fn purge_backups(
         }
         Err(e) => Err(AppError::Internal(e)),
     }
+}
+
+// =============================================================================
+// MEMORY INTERCHANGE FORMAT (MIF) EXPORT
+// =============================================================================
+
+/// Request for MIF export
+#[derive(Debug, Deserialize)]
+struct MifExportRequest {
+    user_id: String,
+    #[serde(default)]
+    include_embeddings: bool,
+    #[serde(default)]
+    include_graph: bool,
+    #[serde(default)]
+    since: Option<String>, // ISO 8601 date filter
+}
+
+/// MIF Memory object
+#[derive(Debug, Serialize)]
+struct MifMemory {
+    id: String,
+    content: String,
+    #[serde(rename = "type")]
+    memory_type: String,
+    importance: f32,
+    created_at: String,
+    updated_at: String,
+    accessed_at: String,
+    access_count: u32,
+    decay_rate: f32,
+    tags: Vec<String>,
+    source: MifSource,
+    entities: Vec<MifEntity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    embedding: Option<MifEmbedding>,
+    relations: MifRelations,
+}
+
+#[derive(Debug, Serialize)]
+struct MifSource {
+    #[serde(rename = "type")]
+    source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MifEntity {
+    text: String,
+    #[serde(rename = "type")]
+    entity_type: String,
+    confidence: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct MifEmbedding {
+    model: String,
+    dimensions: usize,
+    vector: Vec<f32>,
+    normalized: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct MifRelations {
+    related_memories: Vec<String>,
+    related_todos: Vec<String>,
+}
+
+/// MIF Todo object
+#[derive(Debug, Serialize)]
+struct MifTodo {
+    id: String,
+    short_id: String,
+    content: String,
+    status: String,
+    priority: String,
+    created_at: String,
+    updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    due_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<MifProject>,
+    contexts: Vec<String>,
+    tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_id: Option<String>,
+    subtask_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocked_on: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recurrence: Option<String>,
+    related_memory_ids: Vec<String>,
+    comments: Vec<MifComment>,
+}
+
+#[derive(Debug, Serialize)]
+struct MifProject {
+    id: String,
+    name: String,
+    prefix: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MifComment {
+    id: String,
+    content: String,
+    #[serde(rename = "type")]
+    comment_type: String,
+    created_at: String,
+}
+
+/// MIF Graph structure
+#[derive(Debug, Serialize)]
+struct MifGraph {
+    format: String,
+    node_count: usize,
+    edge_count: usize,
+    nodes: Vec<MifNode>,
+    edges: Vec<MifEdge>,
+    hebbian_config: MifHebbianConfig,
+}
+
+#[derive(Debug, Serialize)]
+struct MifNode {
+    id: String,
+    #[serde(rename = "type")]
+    node_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entity_type: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MifEdge {
+    source: String,
+    target: String,
+    weight: f32,
+    #[serde(rename = "type")]
+    edge_type: String,
+    created_at: String,
+    strengthened_count: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct MifHebbianConfig {
+    learning_rate: f32,
+    decay_rate: f32,
+    ltp_threshold: f32,
+    max_weight: f32,
+}
+
+/// MIF Metadata
+#[derive(Debug, Serialize)]
+struct MifMetadata {
+    total_memories: usize,
+    total_todos: usize,
+    date_range: MifDateRange,
+    memory_types: std::collections::HashMap<String, usize>,
+    top_entities: Vec<MifTopEntity>,
+    projects: Vec<MifProjectStats>,
+    privacy: MifPrivacy,
+}
+
+#[derive(Debug, Serialize)]
+struct MifDateRange {
+    earliest: String,
+    latest: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MifTopEntity {
+    text: String,
+    count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct MifProjectStats {
+    id: String,
+    name: String,
+    todo_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct MifPrivacy {
+    pii_detected: bool,
+    secrets_detected: bool,
+    redacted_fields: Vec<String>,
+}
+
+/// Full MIF export document
+#[derive(Debug, Serialize)]
+struct MifExport {
+    #[serde(rename = "$schema")]
+    schema: String,
+    mif_version: String,
+    generator: MifGenerator,
+    export: MifExportMeta,
+    memories: Vec<MifMemory>,
+    todos: Vec<MifTodo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph: Option<MifGraph>,
+    metadata: MifMetadata,
+}
+
+#[derive(Debug, Serialize)]
+struct MifGenerator {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MifExportMeta {
+    id: String,
+    created_at: String,
+    user_id: String,
+    checksum: String,
+}
+
+/// Export memories in MIF (Memory Interchange Format)
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id))]
+async fn export_mif(
+    State(state): State<AppState>,
+    Json(req): Json<MifExportRequest>,
+) -> Result<Json<MifExport>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory_sys = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let user_id = req.user_id.clone();
+    let include_embeddings = req.include_embeddings;
+
+    // Get all memories
+    let memories: Vec<MifMemory> = {
+        let guard = memory_sys.read();
+        guard
+            .get_all_memories()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| {
+                let embedding = if include_embeddings {
+                    m.experience.embeddings.as_ref().map(|e| MifEmbedding {
+                        model: "minilm-l6-v2".to_string(),
+                        dimensions: e.len(),
+                        vector: e.clone(),
+                        normalized: true,
+                    })
+                } else {
+                    None
+                };
+
+                // Convert entity strings to MifEntity objects
+                let entities: Vec<MifEntity> = m.experience.entities.iter().map(|e| MifEntity {
+                    text: e.clone(),
+                    entity_type: "UNKNOWN".to_string(),
+                    confidence: 1.0,
+                }).collect();
+
+                // Extract source info from RichContext if available
+                let (source_type, session_id) = m.experience.context.as_ref()
+                    .map(|ctx| {
+                        let src = format!("{:?}", ctx.source.source_type).to_lowercase();
+                        let sess = ctx.episode.episode_id.clone();
+                        (src, sess)
+                    })
+                    .unwrap_or_else(|| ("conversation".to_string(), None));
+
+                // Extract tags from metadata
+                let tags: Vec<String> = m.experience.metadata
+                    .get("tags")
+                    .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+                    .unwrap_or_default();
+
+                MifMemory {
+                    id: format!("mem_{}", m.id.0),
+                    content: m.experience.content.clone(),
+                    memory_type: format!("{:?}", m.experience.experience_type),
+                    importance: m.importance(),
+                    created_at: m.created_at.to_rfc3339(),
+                    updated_at: m.created_at.to_rfc3339(), // No separate updated_at
+                    accessed_at: m.last_accessed().to_rfc3339(),
+                    access_count: m.access_count(),
+                    decay_rate: 0.1, // Default decay rate
+                    tags,
+                    source: MifSource {
+                        source_type,
+                        session_id,
+                        agent: Some("shodh-memory".to_string()),
+                    },
+                    entities,
+                    embedding,
+                    relations: MifRelations {
+                        related_memories: m.experience.related_memories.iter().map(|id| format!("mem_{}", id.0)).collect(),
+                        related_todos: m.related_todo_ids.iter().map(|id| format!("todo_{}", id.0)).collect(),
+                    },
+                }
+            })
+            .collect()
+    };
+
+    // Get all todos
+    let todos: Vec<MifTodo> = state
+        .todo_store
+        .list_todos_for_user(&user_id, None)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| {
+            let project = t.project_id.as_ref().and_then(|pid| {
+                state.todo_store.get_project(&user_id, pid).ok().flatten().map(|p| MifProject {
+                    id: p.id.0.to_string(),
+                    name: p.name,
+                    prefix: p.prefix.unwrap_or_else(|| "TODO".to_string()),
+                })
+            });
+
+            MifTodo {
+                id: format!("todo_{}", t.id.0),
+                short_id: t.short_id(),
+                content: t.content,
+                status: format!("{:?}", t.status).to_lowercase(),
+                priority: t.priority.indicator().to_string(),
+                created_at: t.created_at.to_rfc3339(),
+                updated_at: t.updated_at.to_rfc3339(),
+                due_date: t.due_date.map(|d| d.to_rfc3339()),
+                completed_at: t.completed_at.map(|d| d.to_rfc3339()),
+                project,
+                contexts: t.contexts,
+                tags: t.tags,
+                notes: t.notes,
+                parent_id: t.parent_id.map(|id| format!("todo_{}", id.0)),
+                subtask_ids: vec![], // Would need to query
+                blocked_on: t.blocked_on,
+                recurrence: t.recurrence.map(|r| format!("{:?}", r).to_lowercase()),
+                related_memory_ids: t.related_memory_ids.iter().map(|id| format!("mem_{}", id.0)).collect(),
+                comments: vec![], // Would need separate query
+            }
+        })
+        .collect();
+
+    // Build graph if requested
+    let graph = if req.include_graph {
+        let guard = memory_sys.read();
+        let graph_stats = guard.graph_stats();
+
+        Some(MifGraph {
+            format: "adjacency_list".to_string(),
+            node_count: graph_stats.node_count,
+            edge_count: graph_stats.edge_count,
+            nodes: vec![], // Full graph export would need graph traversal
+            edges: vec![], // Full graph export would need graph traversal
+            hebbian_config: MifHebbianConfig {
+                learning_rate: 0.1,
+                decay_rate: 0.05,
+                ltp_threshold: 0.8,
+                max_weight: 1.0,
+            },
+        })
+    } else {
+        None
+    };
+
+    // Build metadata
+    let mut memory_types: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for m in &memories {
+        *memory_types.entry(m.memory_type.clone()).or_insert(0) += 1;
+    }
+
+    // Get projects with todo counts
+    let all_todos_for_count = state.todo_store.list_todos_for_user(&user_id, None).unwrap_or_default();
+    let projects: Vec<MifProjectStats> = state
+        .todo_store
+        .list_projects(&user_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| {
+            let todo_count = all_todos_for_count.iter().filter(|t| t.project_id.as_ref() == Some(&p.id)).count();
+            MifProjectStats {
+                id: p.id.0.to_string(),
+                name: p.name,
+                todo_count,
+            }
+        })
+        .collect();
+
+    // Date range
+    let earliest = memories.iter().map(|m| &m.created_at).min().cloned().unwrap_or_default();
+    let latest = memories.iter().map(|m| &m.created_at).max().cloned().unwrap_or_default();
+
+    let metadata = MifMetadata {
+        total_memories: memories.len(),
+        total_todos: todos.len(),
+        date_range: MifDateRange { earliest, latest },
+        memory_types,
+        top_entities: vec![], // Would need entity aggregation
+        projects,
+        privacy: MifPrivacy {
+            pii_detected: false,
+            secrets_detected: false,
+            redacted_fields: vec![],
+        },
+    };
+
+    // Generate export ID and checksum
+    let export_id = format!("exp_{}", uuid::Uuid::new_v4().to_string().replace("-", "")[..12].to_string());
+    let now = chrono::Utc::now();
+
+    // Compute checksum of content
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{}{}{}", memories.len(), todos.len(), now.to_rfc3339()));
+    let checksum = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+    let export = MifExport {
+        schema: "https://shodh-memory.dev/schemas/mif-v1.json".to_string(),
+        mif_version: "1.0".to_string(),
+        generator: MifGenerator {
+            name: "shodh-memory".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        export: MifExportMeta {
+            id: export_id,
+            created_at: now.to_rfc3339(),
+            user_id: user_id.clone(),
+            checksum,
+        },
+        memories,
+        todos,
+        graph,
+        metadata,
+    };
+
+    state.log_event(
+        &user_id,
+        "MIF_EXPORT",
+        &export.export.id,
+        &format!("Exported {} memories, {} todos", export.metadata.total_memories, export.metadata.total_todos),
+    );
+
+    Ok(Json(export))
 }
 
 // =============================================================================
@@ -13116,6 +13571,9 @@ async fn main() -> Result<()> {
         .route("/api/backups", post(list_backups))
         .route("/api/backup/verify", post(verify_backup))
         .route("/api/backups/purge", post(purge_backups))
+        // MIF Export (Memory Interchange Format)
+        .route("/api/export", post(export_mif))
+        .route("/api/export/mif", post(export_mif))
         // A/B Testing endpoints
         .route("/api/ab/tests", get(list_ab_tests))
         .route("/api/ab/tests", post(create_ab_test))

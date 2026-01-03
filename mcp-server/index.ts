@@ -499,17 +499,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "recall",
-        description: "Search memories using different retrieval modes. Use this to find relevant past experiences, decisions, or context. Modes: 'semantic' (vector similarity), 'associative' (graph traversal - follows learned connections between memories), 'hybrid' (combines both with density-dependent weighting).",
+        description: "Search memories AND todos using semantic similarity. Returns both relevant memories and matching todos. Use this to find past experiences, decisions, context, or pending work. Modes: 'semantic' (vector similarity), 'associative' (graph traversal), 'hybrid' (combined).",
         inputSchema: {
           type: "object",
           properties: {
             query: {
               type: "string",
-              description: "Natural language search query",
+              description: "Natural language search query - searches both memories and todos",
             },
             limit: {
               type: "number",
-              description: "Maximum number of results (default: 5)",
+              description: "Maximum number of memory results (default: 5). Todos limited to 5.",
               default: 5,
             },
             mode: {
@@ -943,10 +943,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "list_todos",
-        description: "List todos with GTD filters. Returns Linear-style formatted output grouped by status.",
+        description: "List or search todos. Supports semantic search via query parameter, or GTD-style filtering. Returns Linear-style formatted output grouped by status.",
         inputSchema: {
           type: "object",
           properties: {
+            query: {
+              type: "string",
+              description: "Semantic search query - when provided, uses vector similarity to find matching todos instead of listing all",
+            },
             status: {
               type: "array",
               items: { type: "string", enum: ["backlog", "todo", "in_progress", "blocked", "done", "cancelled"] },
@@ -1404,10 +1408,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           retrieval_time_us: number;
         }
 
+        interface RecallTodo {
+          id: string;
+          short_id: string;
+          content: string;
+          status: string;
+          priority: string;
+          project?: string;
+          score: number;
+          created_at: string;
+        }
+
         interface RecallResponse {
           memories: Memory[];
           count: number;
           retrieval_stats?: RetrievalStats;
+          todos?: RecallTodo[];
+          todo_count?: number;
         }
 
         const result = await apiCall<RecallResponse>("/api/recall", "POST", {
@@ -1418,35 +1435,85 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
 
         const memories = result.memories || [];
+        const todos = result.todos || [];
         const stats = result.retrieval_stats;
 
-        if (memories.length === 0) {
+        if (memories.length === 0 && todos.length === 0) {
           return {
             content: [
               {
                 type: "text",
-                text: `🐘 No memories found for: "${query}"\n   Mode: ${mode}`,
+                text: `🐘 No memories or todos found for: "${query}"\n   Mode: ${mode}`,
               },
             ],
           };
         }
 
         // Build formatted response
-        let response = `🐘 Recalled ${memories.length} Memories\n`;
+        const totalCount = memories.length + todos.length;
+        let response = `🐘 Recalled ${totalCount} Results`;
+        if (memories.length > 0 && todos.length > 0) {
+          response += ` (${memories.length} memories, ${todos.length} todos)`;
+        }
+        response += `\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
         response += `Query: "${query.slice(0, 40)}${query.length > 40 ? '...' : ''}" │ Mode: ${mode}\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
-        for (let i = 0; i < memories.length; i++) {
-          const m = memories[i];
-          const content = getContent(m);
-          const score = ((m.score || 0) * 100).toFixed(0);
-          const matchBar = '█'.repeat(Math.round((m.score || 0) * 10)) + '░'.repeat(10 - Math.round((m.score || 0) * 10));
+        // Helper to format timestamp
+        const formatTime = (ts: string | undefined): string => {
+          if (!ts) return '';
+          const d = new Date(ts);
+          const now = new Date();
+          const diffMs = now.getTime() - d.getTime();
+          const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
-          response += `${i + 1}. ${matchBar} ${score}%\n`;
-          response += `   ${content.slice(0, 200)}${content.length > 200 ? '...' : ''}\n`;
-          response += `   ┗━ ${getType(m)} │ ${m.id.slice(0, 8)}...\n`;
-          if (i < memories.length - 1) response += `\n`;
+          if (diffDays === 0) {
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          } else if (diffDays === 1) {
+            return 'Yesterday';
+          } else if (diffDays < 7) {
+            return `${diffDays}d ago`;
+          } else {
+            return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+          }
+        };
+
+        // Format memories
+        if (memories.length > 0) {
+          response += `📝 MEMORIES\n`;
+          for (let i = 0; i < memories.length; i++) {
+            const m = memories[i];
+            const content = getContent(m);
+            const score = ((m.score || 0) * 100).toFixed(0);
+            const matchBar = '█'.repeat(Math.round((m.score || 0) * 10)) + '░'.repeat(10 - Math.round((m.score || 0) * 10));
+            const timeStr = formatTime(m.created_at);
+
+            response += `• ${matchBar} ${score}% │ ${timeStr}\n`;
+            response += `  ${content.slice(0, 200)}${content.length > 200 ? '...' : ''}\n`;
+            response += `  ┗━ ${getType(m)} │ ${m.id.slice(0, 8)}...\n`;
+            if (i < memories.length - 1) response += `\n`;
+          }
+        }
+
+        // Format todos
+        if (todos.length > 0) {
+          if (memories.length > 0) response += `\n`;
+          response += `✅ TODOS\n`;
+          for (let i = 0; i < todos.length; i++) {
+            const t = todos[i];
+            const score = ((t.score || 0) * 100).toFixed(0);
+            const matchBar = '█'.repeat(Math.round((t.score || 0) * 10)) + '░'.repeat(10 - Math.round((t.score || 0) * 10));
+            const statusIcon = t.status === 'done' ? '✓' : t.status === 'in_progress' ? '▶' : t.status === 'blocked' ? '⊗' : '○';
+            const timeStr = formatTime(t.created_at);
+
+            response += `• ${matchBar} ${score}% │ ${timeStr}\n`;
+            response += `  ${statusIcon} ${t.content.slice(0, 180)}${t.content.length > 180 ? '...' : ''}\n`;
+            response += `  ┗━ ${t.short_id} │ ${t.status} │ ${t.priority}`;
+            if (t.project) response += ` │ ${t.project}`;
+            response += `\n`;
+            if (i < todos.length - 1) response += `\n`;
+          }
         }
 
         // Build stats summary for associative/hybrid modes
@@ -2152,18 +2219,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        // Format surfaced memories
-        const formatted = memories
-          .map((m, i) => {
-            const score = (m.relevance_score * 100).toFixed(0);
-            const entityMatchStr = (m.matched_entities && m.matched_entities.length > 0)
-              ? `\n   Entity matches: ${m.matched_entities.join(', ')}`
-              : '';
-            const semScore = (m.semantic_similarity * 100).toFixed(0);
-            return `${i + 1}. [${score}% relevant] ${m.content.slice(0, 100)}${m.content.length > 100 ? '...' : ''}\n   Type: ${m.memory_type} | semantic=${semScore}% | reason: ${m.relevance_reason}${entityMatchStr}`;
-          })
-          .join("\n\n");
-
         // Format detected entities summary
         const entitySummary = entities.length > 0
           ? `\n\nDetected entities: ${entities.map(e => `"${e.text}" (${e.entity_type})`).join(', ')}`
@@ -2265,11 +2320,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           console.error("[proactive_context] Todo check failed:", e);
         }
 
+        // Add temporal framing - helps AI reason about time
+        const now = new Date();
+        const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const temporalHeader = `📅 ${dayNames[now.getDay()]}, ${monthNames[now.getMonth()]} ${now.getDate()}, ${now.getFullYear()} at ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}\n\n`;
+
+        // Format memories with relative timestamps for temporal reasoning
+        const formattedWithTime = memories
+          .map((m, i) => {
+            const score = (m.relevance_score * 100).toFixed(0);
+            const entityMatchStr = (m.matched_entities && m.matched_entities.length > 0)
+              ? `\n   Entity matches: ${m.matched_entities.join(', ')}`
+              : '';
+            const semScore = (m.semantic_similarity * 100).toFixed(0);
+
+            // Calculate relative time
+            let timeStr = '';
+            if (m.created_at) {
+              const d = new Date(m.created_at);
+              const diffMs = now.getTime() - d.getTime();
+              const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+              if (diffDays === 0) {
+                timeStr = ` (today at ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`;
+              } else if (diffDays === 1) {
+                timeStr = ` (yesterday)`;
+              } else if (diffDays < 7) {
+                timeStr = ` (${diffDays}d ago)`;
+              } else {
+                timeStr = ` (${d.toLocaleDateString([], { month: 'short', day: 'numeric' })})`;
+              }
+            }
+
+            return `• [${score}%]${timeStr} ${m.content.slice(0, 100)}${m.content.length > 100 ? '...' : ''}\n   Type: ${m.memory_type} | semantic=${semScore}% | reason: ${m.relevance_reason}${entityMatchStr}`;
+          })
+          .join("\n\n");
+
         return {
           content: [
             {
               type: "text",
-              text: `Surfaced ${memories.length} relevant memories:\n\n${formatted}${entitySummary}${reminderBlock}${todoBlock}\n\n[Latency: ${result.latency_ms.toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`,
+              text: `${temporalHeader}Surfaced ${memories.length} relevant memories:\n\n${formattedWithTime}${entitySummary}${reminderBlock}${todoBlock}\n\n[Latency: ${result.latency_ms.toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`,
             },
           ],
         };
@@ -2719,6 +2810,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "list_todos": {
         const {
+          query,
           status: statusFilter,
           project,
           context,
@@ -2727,6 +2819,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           limit = 50,
           offset = 0,
         } = args as {
+          query?: string;
           status?: string[];
           project?: string;
           context?: string;
@@ -2746,6 +2839,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const result = await apiCall<ListTodosResponse>("/api/todos/list", "POST", {
           user_id: USER_ID,
+          query,
           status: statusFilter,
           project,
           context,
