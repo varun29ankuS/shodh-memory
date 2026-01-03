@@ -2172,6 +2172,12 @@ impl MemorySystem {
         self.long_term_memory.get(id)
     }
 
+    /// Update a memory in storage
+    /// Use this after modifying a memory obtained via get_memory()
+    pub fn update_memory(&self, memory: &Memory) -> Result<()> {
+        self.long_term_memory.store(memory)
+    }
+
     /// Decompress a memory
     pub fn decompress_memory(&self, memory: &Memory) -> Result<Memory> {
         self.compressor.decompress(memory)

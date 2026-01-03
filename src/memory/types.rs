@@ -869,6 +869,10 @@ pub struct Memory {
     /// Only populated for memories with external_id (mutable memories)
     /// Empty for regular immutable memories
     pub history: Vec<MemoryRevision>,
+
+    /// Related todo IDs for bidirectional linking with todo system
+    /// Populated when a todo references this memory or vice versa
+    pub related_todo_ids: Vec<TodoId>,
 }
 
 impl Clone for Memory {
@@ -892,6 +896,7 @@ impl Clone for Memory {
             external_id: self.external_id.clone(),
             version: self.version,
             history: self.history.clone(),
+            related_todo_ids: self.related_todo_ids.clone(),
         }
     }
 }
@@ -934,6 +939,8 @@ impl Memory {
             external_id: None,
             version: 1,
             history: Vec::new(),
+            // Todo system linking - empty by default
+            related_todo_ids: Vec::new(),
         }
     }
 
@@ -1000,6 +1007,23 @@ impl Memory {
                 relation,
             });
         }
+    }
+
+    /// Add a related todo ID (bidirectional link to todo system)
+    pub fn add_related_todo(&mut self, todo_id: TodoId) {
+        if !self.related_todo_ids.contains(&todo_id) {
+            self.related_todo_ids.push(todo_id);
+        }
+    }
+
+    /// Remove a related todo ID
+    pub fn remove_related_todo(&mut self, todo_id: &TodoId) {
+        self.related_todo_ids.retain(|id| id != todo_id);
+    }
+
+    /// Check if this memory is linked to a specific todo
+    pub fn has_related_todo(&self, todo_id: &TodoId) -> bool {
+        self.related_todo_ids.contains(todo_id)
     }
 
     /// Get entity IDs for graph operations
@@ -1251,6 +1275,9 @@ struct MemoryFlat {
     external_id: Option<String>,
     version: u32,
     history: Vec<MemoryRevision>,
+    // Todo system linking
+    #[serde(default)]
+    related_todo_ids: Vec<TodoId>,
 }
 
 impl Serialize for Memory {
@@ -1283,6 +1310,8 @@ impl Serialize for Memory {
             external_id: self.external_id.clone(),
             version: self.version,
             history: self.history.clone(),
+            // Todo system linking
+            related_todo_ids: self.related_todo_ids.clone(),
         };
         flat.serialize(serializer)
     }
@@ -1320,6 +1349,8 @@ impl<'de> Deserialize<'de> for Memory {
             external_id: flat.external_id,
             version: flat.version,
             history: flat.history,
+            // Todo system linking
+            related_todo_ids: flat.related_todo_ids,
         })
     }
 }
@@ -3170,6 +3201,25 @@ impl Todo {
         let comment = TodoComment::system_activity(self.id.clone(), content);
         self.comments.push(comment);
         self.updated_at = Utc::now();
+    }
+
+    /// Add a related memory ID (bidirectional link to memory system)
+    pub fn add_related_memory(&mut self, memory_id: MemoryId) {
+        if !self.related_memory_ids.contains(&memory_id) {
+            self.related_memory_ids.push(memory_id);
+            self.updated_at = Utc::now();
+        }
+    }
+
+    /// Remove a related memory ID
+    pub fn remove_related_memory(&mut self, memory_id: &MemoryId) {
+        self.related_memory_ids.retain(|id| id != memory_id);
+        self.updated_at = Utc::now();
+    }
+
+    /// Check if this todo is linked to a specific memory
+    pub fn has_related_memory(&self, memory_id: &MemoryId) -> bool {
+        self.related_memory_ids.contains(memory_id)
     }
 }
 

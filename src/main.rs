@@ -1813,6 +1813,24 @@ struct RecallResponse {
     /// Retrieval statistics (SHO-26) - optional for observability
     #[serde(skip_serializing_if = "Option::is_none")]
     retrieval_stats: Option<memory::types::RetrievalStats>,
+    /// Related todos (semantic search on todo content)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    todos: Vec<RecallTodo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    todo_count: Option<usize>,
+}
+
+/// Todo returned in recall results
+#[derive(Debug, Serialize)]
+struct RecallTodo {
+    id: String,
+    short_id: String,
+    content: String,
+    status: String,
+    priority: String,
+    project: Option<String>,
+    score: f32,
 }
 
 #[derive(Debug, Serialize)]
@@ -3885,6 +3903,72 @@ async fn github_sync(
     }))
 }
 
+/// Helper function to search todos for recall/proactive_context
+/// Returns todos matching the query using semantic search
+async fn search_todos_for_recall(
+    state: &AppState,
+    user_id: &str,
+    query: &str,
+    limit: usize,
+) -> Vec<RecallTodo> {
+    // Compute embedding for the query
+    let memory_system = match state.get_user_memory(user_id) {
+        Ok(ms) => ms,
+        Err(_) => return Vec::new(),
+    };
+
+    let query_clone = query.to_string();
+    let query_embedding: Vec<f32> = match tokio::task::spawn_blocking(move || {
+        let memory_guard = memory_system.read();
+        memory_guard.compute_embedding(&query_clone).unwrap_or_default()
+    })
+    .await
+    {
+        Ok(emb) => emb,
+        Err(_) => return Vec::new(),
+    };
+
+    if query_embedding.is_empty() {
+        return Vec::new();
+    }
+
+    // Search todos using vector similarity
+    let search_results = match state
+        .todo_store
+        .search_similar(user_id, &query_embedding, limit)
+    {
+        Ok(results) => results,
+        Err(_) => return Vec::new(),
+    };
+
+    // Convert to RecallTodo format (filter out completed/cancelled)
+    search_results
+        .into_iter()
+        .filter(|(todo, _)| {
+            todo.status != TodoStatus::Done && todo.status != TodoStatus::Cancelled
+        })
+        .map(|(todo, score)| {
+            let project = todo.project_id.as_ref().and_then(|pid| {
+                state
+                    .todo_store
+                    .get_project(user_id, pid)
+                    .ok()
+                    .flatten()
+                    .map(|p| p.name)
+            });
+            RecallTodo {
+                id: todo.id.0.to_string(),
+                short_id: todo.short_id(),
+                content: todo.content,
+                status: format!("{:?}", todo.status).to_lowercase(),
+                priority: todo.priority.indicator().to_string(),
+                project,
+                score,
+            }
+        })
+        .collect()
+}
+
 /// LLM-friendly /api/recall - hybrid retrieval combining semantic search + graph spreading activation
 /// Example: POST /api/recall { "user_id": "agent-1", "query": "What does user like?" }
 ///
@@ -4027,10 +4111,16 @@ async fn recall(
             }
         }
 
+        // Search todos using same embedding
+        let recall_todos = search_todos_for_recall(&state, &req.user_id, &query_text, 5).await;
+        let todo_count = if recall_todos.is_empty() { None } else { Some(recall_todos.len()) };
+
         return Ok(Json(RecallResponse {
             memories: recall_memories,
             count,
             retrieval_stats: Some(stats),
+            todos: recall_todos,
+            todo_count,
         }));
     }
 
@@ -4294,10 +4384,16 @@ async fn recall(
         }
     }
 
+    // Search todos using same query
+    let recall_todos = search_todos_for_recall(&state, &req.user_id, &req.query, 5).await;
+    let todo_count = if recall_todos.is_empty() { None } else { Some(recall_todos.len()) };
+
     Ok(Json(RecallResponse {
         memories: recall_memories,
         count,
         retrieval_stats: final_stats,
+        todos: recall_todos,
+        todo_count,
     }))
 }
 
@@ -5350,6 +5446,9 @@ struct ProactiveTodoItem {
     project: Option<String>,
     due_date: Option<String>,
     relevance_reason: String,
+    /// Semantic similarity score (0.0 - 1.0)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    similarity_score: Option<f32>,
 }
 
 /// Response for proactive context
@@ -5841,45 +5940,25 @@ async fn proactive_context(
         None
     };
 
-    // 6. Surface relevant todos based on context keywords
+    // 6. Surface relevant todos using semantic search (TMI-5)
     let relevant_todos: Vec<ProactiveTodoItem> = {
-        let context_lower = req.context.to_lowercase();
-        let context_words: std::collections::HashSet<_> = context_lower
-            .split_whitespace()
-            .filter(|w| w.len() > 3)
-            .collect();
-
-        // Get active todos (todo, in_progress, blocked)
-        let all_todos = state
+        // Use semantic search with context embedding for todo retrieval
+        let semantic_results = state
             .todo_store
-            .list_todos_for_user(&req.user_id, None)
+            .search_similar(&req.user_id, &context_embedding, 10)
             .unwrap_or_default();
 
-        all_todos
+        // Filter for active statuses and build ProactiveTodoItem list
+        let mut todos_with_scores: Vec<ProactiveTodoItem> = semantic_results
             .into_iter()
-            .filter(|t| {
+            .filter(|(t, _score)| {
                 matches!(
                     t.status,
                     TodoStatus::Todo | TodoStatus::InProgress | TodoStatus::Blocked
                 )
             })
-            .filter_map(|t| {
-                let content_lower = t.content.to_lowercase();
-                let content_words: std::collections::HashSet<_> = content_lower
-                    .split_whitespace()
-                    .filter(|w| w.len() > 3)
-                    .collect();
-
-                // Check for keyword overlap
-                let overlap: Vec<_> = context_words.intersection(&content_words).collect();
-
-                // Also check tags and project
-                let tag_match = t
-                    .tags
-                    .iter()
-                    .any(|tag| context_lower.contains(&tag.to_lowercase()));
-
-                // Get project name
+            .map(|(t, score)| {
+                // Get project name for display
                 let project_name = t.project_id.as_ref().and_then(|pid| {
                     state
                         .todo_store
@@ -5888,43 +5967,68 @@ async fn proactive_context(
                         .flatten()
                         .map(|p| p.name)
                 });
-                let project_match = project_name
-                    .as_ref()
-                    .map_or(false, |p| context_lower.contains(&p.to_lowercase()));
 
-                if !overlap.is_empty() || tag_match || project_match {
-                    let reason = if !overlap.is_empty() {
-                        format!(
-                            "keyword: {}",
-                            overlap
-                                .into_iter()
-                                .take(2)
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    } else if tag_match {
-                        "tag match".to_string()
-                    } else {
-                        "project match".to_string()
-                    };
-
-                    Some(ProactiveTodoItem {
-                        id: t.id.0.to_string(),
-                        short_id: t.short_id(),
-                        content: t.content.clone(),
-                        status: format!("{:?}", t.status).to_lowercase(),
-                        priority: t.priority.indicator().to_string(),
-                        project: project_name,
-                        due_date: t.due_date.map(|d| d.format("%Y-%m-%d").to_string()),
-                        relevance_reason: reason,
-                    })
-                } else {
-                    None
+                ProactiveTodoItem {
+                    id: t.id.0.to_string(),
+                    short_id: t.short_id(),
+                    content: t.content.clone(),
+                    status: format!("{:?}", t.status).to_lowercase(),
+                    priority: t.priority.indicator().to_string(),
+                    project: project_name,
+                    due_date: t.due_date.map(|d| d.format("%Y-%m-%d").to_string()),
+                    relevance_reason: format!("semantic: {:.0}%", score * 100.0),
+                    similarity_score: Some(score),
                 }
             })
-            .take(5) // Limit to 5 relevant todos
-            .collect()
+            .collect();
+
+        // Also include in_progress todos regardless of semantic score (work continuity)
+        let in_progress_todos = state
+            .todo_store
+            .list_todos_for_user(&req.user_id, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.status == TodoStatus::InProgress)
+            .filter(|t| {
+                // Don't duplicate if already in semantic results
+                !todos_with_scores.iter().any(|s| s.id == t.id.0.to_string())
+            })
+            .map(|t| {
+                let project_name = t.project_id.as_ref().and_then(|pid| {
+                    state
+                        .todo_store
+                        .get_project(&req.user_id, pid)
+                        .ok()
+                        .flatten()
+                        .map(|p| p.name)
+                });
+                ProactiveTodoItem {
+                    id: t.id.0.to_string(),
+                    short_id: t.short_id(),
+                    content: t.content.clone(),
+                    status: "in_progress".to_string(),
+                    priority: t.priority.indicator().to_string(),
+                    project: project_name,
+                    due_date: t.due_date.map(|d| d.format("%Y-%m-%d").to_string()),
+                    relevance_reason: "active work".to_string(),
+                    similarity_score: None,
+                }
+            });
+
+        todos_with_scores.extend(in_progress_todos);
+
+        // Sort by: in_progress first, then by similarity score
+        todos_with_scores.sort_by(|a, b| {
+            let a_in_progress = a.status == "in_progress";
+            let b_in_progress = b.status == "in_progress";
+            match (a_in_progress, b_in_progress) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => b.similarity_score.partial_cmp(&a.similarity_score).unwrap_or(std::cmp::Ordering::Equal),
+            }
+        });
+
+        todos_with_scores.into_iter().take(5).collect()
     };
     let todo_count = relevant_todos.len();
 
@@ -10493,6 +10597,9 @@ struct ListTodosRequest {
     offset: Option<usize>,
     #[serde(default)]
     parent_id: Option<String>,
+    /// Semantic search query - when provided, uses vector similarity search
+    #[serde(default)]
+    query: Option<String>,
 }
 
 /// Request to update a todo
@@ -10841,7 +10948,7 @@ async fn create_todo(
     }))
 }
 
-/// POST /api/todos/list - List todos with filters
+/// POST /api/todos/list - List todos with filters (supports semantic search via query param)
 async fn list_todos(
     State(state): State<AppState>,
     Json(req): Json<ListTodosRequest>,
@@ -10856,7 +10963,39 @@ async fn list_todos(
             .collect()
     });
 
-    let mut todos = if let Some(ref statuses) = status_filter {
+    // If query is provided, use semantic search
+    let mut todos = if let Some(ref query) = req.query {
+        if query.trim().is_empty() {
+            Vec::new()
+        } else {
+            // Compute embedding for the search query
+            let memory_system = state
+                .get_user_memory(&req.user_id)
+                .map_err(AppError::Internal)?;
+
+            let query_clone = query.clone();
+            let query_embedding: Vec<f32> = tokio::task::spawn_blocking(move || {
+                let memory_guard = memory_system.read();
+                memory_guard.compute_embedding(&query_clone).unwrap_or_default()
+            })
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Embedding failed: {e}")))?;
+
+            if query_embedding.is_empty() {
+                Vec::new()
+            } else {
+                // Search using vector similarity (get more for filtering)
+                let limit = req.limit.unwrap_or(50);
+                let search_results = state
+                    .todo_store
+                    .search_similar(&req.user_id, &query_embedding, limit * 2)
+                    .map_err(AppError::Internal)?;
+
+                // Extract todos (already sorted by similarity)
+                search_results.into_iter().map(|(todo, _score)| todo).collect()
+            }
+        }
+    } else if let Some(ref statuses) = status_filter {
         state
             .todo_store
             .list_todos_for_user(&req.user_id, Some(statuses))
@@ -10878,6 +11017,15 @@ async fn list_todos(
                 .collect()
         }
     };
+
+    // Apply status filter for semantic search results too
+    if req.query.is_some() {
+        if let Some(ref statuses) = status_filter {
+            todos.retain(|t| statuses.contains(&t.status));
+        } else if !req.include_completed.unwrap_or(false) {
+            todos.retain(|t| t.status != TodoStatus::Done && t.status != TodoStatus::Cancelled);
+        }
+    }
 
     // Filter by project
     if let Some(ref proj_name) = req.project {
