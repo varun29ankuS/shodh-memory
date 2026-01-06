@@ -797,7 +797,7 @@ mod tests {
         assert_eq!(config.rrf_k, 60.0);
         assert_eq!(config.candidate_count, 100);
         assert_eq!(config.rerank_count, 20);
-        assert!(config.use_reranking);
+        assert!(!config.use_reranking); // Disabled: bi-encoder, not cross-encoder
     }
 
     #[test]
