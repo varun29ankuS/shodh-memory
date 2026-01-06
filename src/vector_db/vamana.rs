@@ -825,14 +825,29 @@ impl VamanaIndex {
         let current_count = self.num_vectors.load(std::sync::atomic::Ordering::Acquire);
         let id = current_count as u32;
 
-        // Add to storage
+        // Add to storage - convert mmap to memory if needed for incremental updates
         let mut storage = self.vectors.write();
         match &mut *storage {
             VectorStorage::Memory(vecs) => {
                 vecs.push(vector.clone());
             }
-            VectorStorage::Mmap { .. } => {
-                return Err(anyhow!("Cannot add to mmap storage, rebuild index"));
+            VectorStorage::Mmap { mmap, num_vectors, dimension } => {
+                // Convert mmap to memory storage for incremental updates
+                tracing::info!(
+                    "Converting mmap storage ({} vectors) to memory for incremental indexing",
+                    num_vectors
+                );
+                let dim = *dimension;
+                let count = *num_vectors;
+                let ptr = mmap.as_ptr() as *const f32;
+                let mut vecs = Vec::with_capacity(count + 1);
+                for i in 0..count {
+                    let start = i * dim;
+                    let slice = unsafe { std::slice::from_raw_parts(ptr.add(start), dim) };
+                    vecs.push(slice.to_vec());
+                }
+                vecs.push(vector.clone());
+                *storage = VectorStorage::Memory(vecs);
             }
         }
         drop(storage);

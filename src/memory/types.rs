@@ -57,6 +57,60 @@ fn default_experience_type() -> ExperienceType {
     ExperienceType::Observation
 }
 
+// =============================================================================
+// MULTIMODAL SUPPORT - Images, Audio, Video embeddings
+// =============================================================================
+
+/// Media type for multimodal memories
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MediaType {
+    /// Image file (JPEG, PNG, WebP, etc.)
+    Image,
+    /// Audio file (WAV, MP3, FLAC, etc.)
+    Audio,
+    /// Video file (MP4, WebM, etc.)
+    Video,
+    /// Document file (PDF with images/diagrams)
+    Document,
+}
+
+/// Reference to attached media with metadata
+///
+/// Media files are stored externally (filesystem or blob storage).
+/// This struct holds the reference and pre-computed embeddings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaRef {
+    /// Media type
+    pub media_type: MediaType,
+
+    /// External reference (file path, blob hash, or URL)
+    /// Not the actual bytes - keeps Memory struct lean
+    pub uri: String,
+
+    /// Original filename (for display)
+    pub filename: Option<String>,
+
+    /// MIME type (e.g., "image/jpeg", "audio/wav")
+    pub mime_type: Option<String>,
+
+    /// File size in bytes
+    pub size_bytes: Option<u64>,
+
+    /// Media-specific metadata
+    /// Images: {"width": "1920", "height": "1080", "format": "jpeg"}
+    /// Audio: {"duration_ms": "30000", "sample_rate": "16000", "channels": "1"}
+    /// Video: {"duration_ms": "60000", "width": "1920", "height": "1080", "fps": "30"}
+    #[serde(default)]
+    pub media_metadata: HashMap<String, String>,
+
+    /// Timestamp within media (for video/audio segments)
+    /// Allows referencing a specific moment, not just the whole file
+    pub timestamp_ms: Option<u64>,
+
+    /// Duration of the segment (for audio/video clips)
+    pub duration_ms: Option<u64>,
+}
+
 /// Rich multi-dimensional context
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RichContext {
@@ -537,6 +591,29 @@ pub struct Experience {
     #[serde(default)]
     pub embeddings: Option<Vec<f32>>,
 
+    // =========================================================================
+    // MULTIMODAL EMBEDDINGS (optional, for images/audio/video)
+    // =========================================================================
+    /// Image embeddings from CLIP/SigLIP (512-768 dims)
+    /// Generated from attached images via vision encoder
+    #[serde(default)]
+    pub image_embeddings: Option<Vec<f32>>,
+
+    /// Audio embeddings from Whisper/wav2vec (768-1024 dims)
+    /// Generated from attached audio via speech encoder
+    #[serde(default)]
+    pub audio_embeddings: Option<Vec<f32>>,
+
+    /// Video embeddings (768+ dims)
+    /// Can be single embedding (averaged frames) or keyframe embedding
+    #[serde(default)]
+    pub video_embeddings: Option<Vec<f32>>,
+
+    /// References to attached media files
+    /// Stores metadata and URIs, not raw bytes
+    #[serde(default)]
+    pub media_refs: Vec<MediaRef>,
+
     /// Related memories (empty by default)
     #[serde(default)]
     pub related_memories: Vec<MemoryId>,
@@ -688,6 +765,10 @@ impl Default for Experience {
             entities: Vec::new(),
             metadata: HashMap::new(),
             embeddings: None,
+            image_embeddings: None,
+            audio_embeddings: None,
+            video_embeddings: None,
+            media_refs: Vec::new(),
             related_memories: Vec::new(),
             causal_chain: Vec::new(),
             outcomes: Vec::new(),

@@ -255,7 +255,21 @@ impl MemorySystem {
                         continue; // Already indexed
                     }
 
+                    // Skip absurdly large memories (>1MB) - likely binary data or log dumps
+                    // MiniLM only uses first ~512 tokens anyway, so this protects ONNX from hanging
+                    const MAX_REPAIR_CONTENT_LEN: usize = 1_000_000;
+                    if memory.experience.content.len() > MAX_REPAIR_CONTENT_LEN {
+                        tracing::warn!(
+                            memory_id = %memory.id.0,
+                            content_len = memory.experience.content.len(),
+                            "Skipping oversized memory during auto-repair (>1MB)"
+                        );
+                        failed += 1;
+                        continue;
+                    }
+
                     // Orphaned memory - try to index it
+                    tracing::info!(memory_id = %memory.id.0, content_len = memory.experience.content.len(), "Attempting to repair orphaned memory...");
                     match retriever.index_memory(&memory) {
                         Ok(_) => {
                             repaired += 1;

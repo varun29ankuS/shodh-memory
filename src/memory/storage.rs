@@ -55,6 +55,61 @@ impl Default for WriteMode {
     }
 }
 
+// ============================================================================
+// BACKWARD-COMPATIBLE DESERIALIZATION
+// Handles both versioned format (SHO magic + checksum) and legacy bincode
+// ============================================================================
+
+const STORAGE_MAGIC: &[u8; 3] = b"SHO";
+
+/// Deserialize memory supporting both versioned (SHO) and legacy formats
+fn deserialize_memory(data: &[u8]) -> Result<Memory> {
+    // Check for versioned format: SHO + version byte + payload + 4-byte CRC32
+    if data.len() >= 8 && &data[0..3] == STORAGE_MAGIC {
+        let version = data[3];
+        let payload_end = data.len() - 4;
+        let stored_checksum = u32::from_le_bytes([
+            data[payload_end],
+            data[payload_end + 1],
+            data[payload_end + 2],
+            data[payload_end + 3],
+        ]);
+        let computed_checksum = crc32_simple(&data[..payload_end]);
+        if stored_checksum != computed_checksum {
+            tracing::warn!(
+                "Checksum mismatch: stored={:08x} computed={:08x}",
+                stored_checksum,
+                computed_checksum
+            );
+        }
+        let payload = &data[4..payload_end];
+        bincode::serde::decode_from_slice::<Memory, _>(payload, bincode::config::standard())
+            .map(|(m, _)| m)
+            .map_err(|e| anyhow!("v{} decode failed: {}", version, e))
+    } else {
+        // Legacy format: raw bincode
+        bincode::serde::decode_from_slice::<Memory, _>(data, bincode::config::standard())
+            .map(|(m, _)| m)
+            .map_err(|e| anyhow!("legacy decode failed: {}", e))
+    }
+}
+
+/// Simple CRC32 implementation (IEEE polynomial)
+fn crc32_simple(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFFFFFF;
+    for byte in data {
+        crc ^= *byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB88320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
 /// Storage engine for long-term memory persistence
 pub struct MemoryStorage {
     db: Arc<DB>,
@@ -274,17 +329,13 @@ impl MemoryStorage {
     pub fn get(&self, id: &MemoryId) -> Result<Memory> {
         let key = id.0.as_bytes();
         match self.db.get(key)? {
-            Some(value) => {
-                bincode::serde::decode_from_slice::<Memory, _>(&value, bincode::config::standard())
-                    .map(|(v, _)| v)
-                    .with_context(|| {
-                        format!(
-                            "Failed to deserialize memory {} ({} bytes)",
-                            id.0,
-                            value.len()
-                        )
-                    })
-            }
+            Some(value) => deserialize_memory(&value).with_context(|| {
+                format!(
+                    "Failed to deserialize memory {} ({} bytes)",
+                    id.0,
+                    value.len()
+                )
+            }),
             None => Err(anyhow!("Memory not found: {id:?}")),
         }
     }
@@ -836,10 +887,7 @@ impl MemoryStorage {
                 if key.len() != 16 {
                     continue;
                 }
-                if let Ok((memory, _)) = bincode::serde::decode_from_slice::<Memory, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok(memory) = deserialize_memory(&value) {
                     memories.push(memory);
                 }
             }
@@ -859,10 +907,7 @@ impl MemoryStorage {
                 if key.len() != 16 {
                     continue;
                 }
-                if let Ok((memory, _)) = bincode::serde::decode_from_slice::<Memory, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok(memory) = deserialize_memory(&value) {
                     if !memory.compressed && memory.created_at < cutoff {
                         memories.push(memory);
                     }
@@ -888,10 +933,7 @@ impl MemoryStorage {
                 if key.len() != 16 {
                     continue;
                 }
-                if let Ok((mut memory, _)) = bincode::serde::decode_from_slice::<Memory, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok(mut memory) = deserialize_memory(&value) {
                     if memory.created_at < cutoff {
                         // Add forgotten flag to metadata
                         memory
@@ -930,10 +972,7 @@ impl MemoryStorage {
                 if key.len() != 16 {
                     continue;
                 }
-                if let Ok((mut memory, _)) = bincode::serde::decode_from_slice::<Memory, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok(mut memory) = deserialize_memory(&value) {
                     if memory.importance() < threshold {
                         memory
                             .experience
@@ -968,10 +1007,7 @@ impl MemoryStorage {
                 if key.len() != 16 {
                     continue;
                 }
-                if let Ok((memory, _)) = bincode::serde::decode_from_slice::<Memory, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok(memory) = deserialize_memory(&value) {
                     if regex.is_match(&memory.experience.content) {
                         to_delete.push(key.to_vec());
                         count += 1;
@@ -1029,12 +1065,7 @@ impl MemoryStorage {
                         continue;
                     }
 
-                    match bincode::serde::decode_from_slice::<Memory, _>(
-                        &value,
-                        bincode::config::standard(),
-                    )
-                    .map(|(v, _)| v)
-                    {
+                    match deserialize_memory(&value) {
                         Ok(memory) => {
                             stats.total_count += 1;
                             stats.total_size_bytes += value.len();
@@ -1666,10 +1697,7 @@ impl MemoryStorage {
                 }
 
                 // Try to deserialize as memory
-                if let Ok((memory, _)) = bincode::serde::decode_from_slice::<Memory, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok(memory) = deserialize_memory(&value) {
                     // Check if vector mapping exists and has text vectors
                     let has_mapping = match self.get_vector_mapping(&memory.id) {
                         Ok(Some(entry)) => entry.text_vectors().is_some_and(|v| !v.is_empty()),

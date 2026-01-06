@@ -562,9 +562,12 @@ impl MiniLMEmbedder {
     /// Lazily loads the model on first call if not already loaded.
     fn generate_embedding_onnx(&self, text: &str) -> Result<Vec<f32>> {
         // Lazy load model on first use
+        tracing::debug!("ONNX: ensuring model loaded...");
         let model = self.ensure_model_loaded()?;
+        tracing::debug!("ONNX: model ready, acquiring session lock...");
 
         let mut session = model.session.lock();
+        tracing::debug!("ONNX: session lock acquired, tokenizing...");
 
         // Tokenize input text
         let encoding = model
@@ -575,6 +578,7 @@ impl MiniLMEmbedder {
         let tokens = encoding.get_ids();
         let attention_mask = encoding.get_attention_mask();
         let max_length = self.config.max_length;
+        tracing::debug!("ONNX: tokenized {} tokens", tokens.len());
 
         // Truncate or pad to max_length
         let mut input_ids = vec![0i64; max_length];
@@ -594,11 +598,13 @@ impl MiniLMEmbedder {
         let token_type_ids_value = Value::from_array((vec![1, max_length], token_type_ids))?;
 
         // Run inference
+        tracing::debug!("ONNX: running inference...");
         let outputs = session.run(ort::inputs![
             "input_ids" => &input_ids_value,
             "attention_mask" => &attention_mask_value,
             "token_type_ids" => &token_type_ids_value,
         ])?;
+        tracing::debug!("ONNX: inference complete");
 
         // Extract embeddings
         let output_tensor = outputs[0].try_extract_tensor::<f32>()?;
