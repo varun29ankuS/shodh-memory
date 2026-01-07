@@ -267,6 +267,21 @@ impl MemoryStorage {
             batch.put(tag_key.as_bytes(), b"1");
         }
 
+        // Index by episode_id (for temporal/episodic retrieval)
+        // Episode is the primary temporal grouping - memories in same episode are highly related
+        if let Some(ctx) = &memory.experience.context {
+            if let Some(episode_id) = &ctx.episode.episode_id {
+                let episode_key = format!("episode:{}:{}", episode_id, memory.id.0);
+                batch.put(episode_key.as_bytes(), b"1");
+
+                // Also index by sequence within episode for temporal ordering
+                if let Some(seq) = ctx.episode.sequence_number {
+                    let seq_key = format!("episode_seq:{}:{}:{}", episode_id, seq, memory.id.0);
+                    batch.put(seq_key.as_bytes(), b"1");
+                }
+            }
+        }
+
         // === Robotics Indices ===
 
         // Index by robot_id (for multi-robot systems)
@@ -440,6 +455,19 @@ impl MemoryStorage {
             batch.delete(tag_key.as_bytes());
         }
 
+        // Episode indices
+        if let Some(ctx) = &memory.experience.context {
+            if let Some(episode_id) = &ctx.episode.episode_id {
+                let episode_key = format!("episode:{}:{}", episode_id, id.0);
+                batch.delete(episode_key.as_bytes());
+
+                if let Some(seq) = ctx.episode.sequence_number {
+                    let seq_key = format!("episode_seq:{}:{}:{}", episode_id, seq, id.0);
+                    batch.delete(seq_key.as_bytes());
+                }
+            }
+        }
+
         // Robot index
         if let Some(ref robot_id) = memory.experience.robot_id {
             let robot_key = format!("robot:{}:{}", robot_id, id.0);
@@ -505,6 +533,18 @@ impl MemoryStorage {
             }
             SearchCriteria::ByTags(tags) => {
                 memory_ids = self.search_by_tags(&tags)?;
+            }
+
+            // === Temporal/Episode Criteria ===
+            SearchCriteria::ByEpisode(episode_id) => {
+                memory_ids = self.search_by_episode(&episode_id)?;
+            }
+            SearchCriteria::ByEpisodeSequence {
+                episode_id,
+                min_sequence,
+                max_sequence,
+            } => {
+                memory_ids = self.search_by_episode_sequence(&episode_id, min_sequence, max_sequence)?;
             }
 
             // === Robotics Criteria ===
@@ -707,6 +747,81 @@ impl MemoryStorage {
         }
 
         Ok(all_ids.into_iter().collect())
+    }
+
+    /// Search memories by episode ID
+    /// Returns all memories in the specified episode
+    fn search_by_episode(&self, episode_id: &str) -> Result<Vec<MemoryId>> {
+        let mut ids = Vec::new();
+        let prefix = format!("episode:{episode_id}:");
+
+        let iter = self.index_db.iterator(IteratorMode::From(
+            prefix.as_bytes(),
+            rocksdb::Direction::Forward,
+        ));
+        for (key, _) in iter.log_errors() {
+            let key_str = String::from_utf8_lossy(&key);
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+            if let Some(id_str) = key_str.strip_prefix(&prefix) {
+                if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
+                    ids.push(MemoryId(uuid));
+                }
+            }
+        }
+
+        Ok(ids)
+    }
+
+    /// Search memories by episode with sequence filtering
+    /// Returns memories in temporal order within the episode
+    fn search_by_episode_sequence(
+        &self,
+        episode_id: &str,
+        min_sequence: Option<u32>,
+        max_sequence: Option<u32>,
+    ) -> Result<Vec<MemoryId>> {
+        let mut results: Vec<(u32, MemoryId)> = Vec::new();
+
+        // Scan the episode_seq index which has format: episode_seq:{episode_id}:{seq}:{memory_id}
+        let prefix = format!("episode_seq:{episode_id}:");
+
+        let iter = self.index_db.iterator(IteratorMode::From(
+            prefix.as_bytes(),
+            rocksdb::Direction::Forward,
+        ));
+
+        for (key, _) in iter.log_errors() {
+            let key_str = String::from_utf8_lossy(&key);
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+
+            // Parse: episode_seq:{episode_id}:{seq}:{memory_id}
+            if let Some(rest) = key_str.strip_prefix(&prefix) {
+                let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    if let (Ok(seq), Ok(uuid)) = (
+                        parts[0].parse::<u32>(),
+                        uuid::Uuid::parse_str(parts[1]),
+                    ) {
+                        // Apply sequence filters
+                        let passes_min = min_sequence.map_or(true, |min| seq >= min);
+                        let passes_max = max_sequence.map_or(true, |max| seq <= max);
+
+                        if passes_min && passes_max {
+                            results.push((seq, MemoryId(uuid)));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by sequence number for temporal ordering
+        results.sort_by_key(|(seq, _)| *seq);
+
+        Ok(results.into_iter().map(|(_, id)| id).collect())
     }
 
     // ========================================================================
@@ -1247,6 +1362,18 @@ pub enum SearchCriteria {
     ByEntity(String),
     /// Filter by tags (matches memories containing ANY of these tags)
     ByTags(Vec<String>),
+
+    // === Temporal/Episode Criteria ===
+    /// Filter by episode ID - memories in the same episode are highly related
+    ByEpisode(String),
+    /// Filter by episode with sequence ordering - returns memories in temporal order
+    ByEpisodeSequence {
+        episode_id: String,
+        /// If provided, only return memories with sequence >= this value
+        min_sequence: Option<u32>,
+        /// If provided, only return memories with sequence <= this value
+        max_sequence: Option<u32>,
+    },
 
     // === Robotics Criteria ===
     /// Filter by robot/drone identifier

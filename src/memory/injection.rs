@@ -61,18 +61,33 @@ pub struct RelevanceWeights {
     /// Weight for negative feedback suppression (MEMO-1)
     #[serde(default)]
     pub suppression: f32,
+    /// Weight for episode coherence boost (SHO-temporal)
+    /// Memories from the same episode as the query get boosted
+    #[serde(default)]
+    pub episode_coherence: f32,
+    /// Weight for graph activation from spreading activation traversal
+    /// Higher activation = stronger association in knowledge graph
+    #[serde(default)]
+    pub graph_activation: f32,
+    /// Weight for linguistic score from query analysis
+    /// Focal entity matches, modifier matches, etc.
+    #[serde(default)]
+    pub linguistic_score: f32,
 }
 
 impl Default for RelevanceWeights {
     fn default() -> Self {
         Self {
-            semantic: 0.50,       // Primary signal - semantic similarity (up from 0.35)
-            recency: 0.12,        // Recent memories get boost (down from 0.15)
-            strength: 0.10,       // Hebbian edge weight (down from 0.15)
-            entity_overlap: 0.12, // Entity Jaccard similarity (down from 0.15)
-            type_boost: 0.08,     // Decision/Learning type boost (down from 0.10)
-            file_match: 0.05,     // File path matching (unchanged)
-            suppression: 0.03,    // Negative feedback penalty (down from 0.05)
+            semantic: 0.40,           // Primary signal - semantic similarity
+            recency: 0.08,            // Recent memories get boost
+            strength: 0.08,           // Hebbian edge weight (from graph)
+            entity_overlap: 0.08,     // Entity Jaccard similarity
+            type_boost: 0.06,         // Decision/Learning type boost
+            file_match: 0.04,         // File path matching
+            suppression: 0.02,        // Negative feedback penalty
+            episode_coherence: 0.06,  // Same-episode boost (prevents bleeding)
+            graph_activation: 0.10,   // Spreading activation from graph traversal
+            linguistic_score: 0.08,   // Query analysis (focal entities, modifiers)
         }
     }
 }
@@ -88,6 +103,9 @@ impl RelevanceWeights {
             type_boost: 0.0,
             file_match: 0.0,
             suppression: 0.0,
+            episode_coherence: 0.0,
+            graph_activation: 0.0,
+            linguistic_score: 0.0,
         }
     }
 }
@@ -165,6 +183,18 @@ pub struct RelevanceInput {
     pub context_files: Vec<String>,
     /// Feedback momentum EMA - negative values indicate often-ignored (MEMO-1)
     pub feedback_momentum: f32,
+    /// Memory's episode ID (SHO-temporal) - for episode coherence scoring
+    pub episode_id: Option<String>,
+    /// Query's episode ID (SHO-temporal) - for episode coherence scoring
+    pub query_episode_id: Option<String>,
+    /// Memory's sequence number within episode (SHO-temporal) - for temporal ordering
+    pub sequence_number: Option<u32>,
+    /// Graph activation level from spreading activation traversal (0.0 - 1.0)
+    /// Higher values mean stronger association via knowledge graph
+    pub graph_activation: f32,
+    /// Linguistic score from query analysis (0.0 - 1.0)
+    /// Measures focal entity matches, modifier matches, etc.
+    pub linguistic_score: f32,
 }
 
 impl RelevanceInput {
@@ -228,13 +258,26 @@ pub fn compute_relevance(
     let file_match = compute_file_match(&input.memory_files, &input.context_files);
     let suppression = compute_suppression(input.feedback_momentum);
 
-    // Weighted sum
+    // Episode coherence (SHO-temporal) - prevents episode bleeding
+    let episode_coherence = compute_episode_coherence(
+        input.episode_id.as_ref(),
+        input.query_episode_id.as_ref(),
+    );
+
+    // Graph and linguistic signals (unified scoring)
+    let graph_activation = input.graph_activation;
+    let linguistic_score = input.linguistic_score;
+
+    // Weighted sum - all signals contribute to final relevance
     let score = w.semantic * semantic
         + w.recency * recency
         + w.strength * strength
         + w.entity_overlap * entity_overlap
         + w.type_boost * type_boost
         + w.file_match * file_match
+        + w.episode_coherence * episode_coherence
+        + w.graph_activation * graph_activation
+        + w.linguistic_score * linguistic_score
         - w.suppression * suppression;
 
     score.clamp(0.0, 1.0)
@@ -337,6 +380,21 @@ fn compute_suppression(feedback_momentum: f32) -> f32 {
     } else {
         // Map negative momentum to suppression: -1.0 → 1.0 suppression
         (-feedback_momentum).clamp(0.0, 1.0)
+    }
+}
+
+/// Compute episode coherence score (SHO-temporal)
+/// Returns 1.0 if memory and query share the same episode_id, 0.0 otherwise
+/// This prevents episode bleeding where unrelated memories mix into results
+fn compute_episode_coherence(
+    memory_episode_id: Option<&String>,
+    query_episode_id: Option<&String>,
+) -> f32 {
+    match (memory_episode_id, query_episode_id) {
+        (Some(mem), Some(query)) if mem == query => 1.0, // Same episode: full coherence
+        (Some(_), None) | (None, Some(_)) => 0.0,        // Mismatched: no boost
+        (None, None) => 0.0,                              // Both missing: no boost
+        _ => 0.0,                                         // Different episodes: no boost
     }
 }
 
@@ -670,6 +728,11 @@ mod tests {
             memory_files: vec!["src/main.rs".to_string()],
             context_files: vec!["src/main.rs".to_string()],
             feedback_momentum: 0.2,
+            episode_id: Some("test-episode".to_string()),
+            query_episode_id: Some("test-episode".to_string()),
+            sequence_number: Some(1),
+            graph_activation: 0.5,
+            linguistic_score: 0.3,
         };
 
         let context = vec![1.0, 0.0, 0.0];

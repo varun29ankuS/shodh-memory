@@ -273,20 +273,25 @@ pub const DENSITY_THRESHOLD_MAX: f32 = 2.0;
 /// Minimum decay rate for high-importance memories
 ///
 /// Justification:
-/// - 0.1 decay preserves ~90% activation per hop for important nodes
+/// - 0.05 decay preserves ~95% activation per hop for important nodes
 /// - High-importance memories (decisions, learnings) maintain strong signal
-/// - Matches ACT-R base-level activation for frequently accessed chunks
+/// - Enables 6-hop traversal with meaningful activation at destination
+/// - At hop 6: e^(-0.05*6) = 0.74 retention (vs 0.55 at 0.1)
 ///
 /// Reference: spreadr R package (Siew, 2019), decay range 0.1-0.3
-pub const IMPORTANCE_DECAY_MIN: f32 = 0.1;
+/// Tuning (2026-01): Lowered from 0.1 to 0.05 for deep traversal
+pub const IMPORTANCE_DECAY_MIN: f32 = 0.05;
 
 /// Maximum decay rate for low-importance memories
 ///
 /// Justification:
-/// - 0.4 decay for transient observations/context
-/// - Low-importance memories spread wider but contribute less
-/// - Prevents noise from dominating associative retrieval
-pub const IMPORTANCE_DECAY_MAX: f32 = 0.4;
+/// - 0.15 decay for transient observations/context
+/// - At hop 6: e^(-0.15*6) = 0.41 retention (enough signal)
+/// - Preserves signal for 6-hop chains even on weak edges
+/// - Still differentiates important vs transient memories
+///
+/// Tuning (2026-01): Lowered from 0.4 to 0.15 for deep traversal
+pub const IMPORTANCE_DECAY_MAX: f32 = 0.15;
 
 /// Type-based importance: Decision memories
 ///
@@ -487,31 +492,39 @@ pub const SPREADING_DECAY_RATE: f32 = 0.5;
 /// Maximum hops for spreading activation (upper bound)
 ///
 /// Justification:
-/// - 3 hops captures "friend of a friend of a friend" relationships
-/// - Beyond 3 hops, activation typically falls below threshold anyway
-/// - Limits computational cost for large graphs
+/// - 6 hops captures deep conceptual chains and distant associations
+/// - With aggressive decay tuning, signal survives to hop 5-6
+/// - Enables discovery of non-obvious relationships
 /// - Adaptive algorithm may terminate earlier (see SPREADING_EARLY_TERMINATION_*)
-pub const SPREADING_MAX_HOPS: usize = 3;
+///
+/// Tuning (2026-01): Increased from 3 to 6 for deep traversal
+pub const SPREADING_MAX_HOPS: usize = 6;
 
 /// Minimum hops before early termination is allowed
 ///
 /// Ensures at least some spreading even when initial activation is high.
 /// Prevents returning only directly connected entities.
-pub const SPREADING_MIN_HOPS: usize = 1;
+///
+/// Tuning (2026-01): Increased from 1 to 3 to guarantee deep exploration
+pub const SPREADING_MIN_HOPS: usize = 3;
 
 /// Activation threshold for pruning weak activations (initial/strict)
 ///
 /// Justification:
-/// - 0.01 (1%) prunes noise while preserving meaningful spread
-/// - Matches MIN_STRENGTH for consistency
-/// - Below this, activation contributes negligibly to final score
-pub const SPREADING_ACTIVATION_THRESHOLD: f32 = 0.01;
+/// - 0.005 allows weak but meaningful signals through
+/// - Enables 6-hop traversal even with moderate edge strengths
+/// - Below this, activation is truly noise
+///
+/// Tuning (2026-01): Lowered from 0.01 to 0.005 for deep traversal
+pub const SPREADING_ACTIVATION_THRESHOLD: f32 = 0.005;
 
 /// Relaxed activation threshold when too few candidates found
 ///
 /// If fewer than SPREADING_MIN_CANDIDATES are activated, the threshold
 /// is lowered to this value to allow more exploration.
-pub const SPREADING_RELAXED_THRESHOLD: f32 = 0.005;
+///
+/// Tuning (2026-01): Lowered from 0.005 to 0.001 for deep traversal
+pub const SPREADING_RELAXED_THRESHOLD: f32 = 0.001;
 
 /// Minimum candidates before relaxing threshold
 ///
@@ -523,21 +536,27 @@ pub const SPREADING_MIN_CANDIDATES: usize = 5;
 ///
 /// If (new_activations / total_activations) < this ratio,
 /// spreading has saturated and we terminate early.
-/// Value of 0.1 = less than 10% new activations → terminate.
-pub const SPREADING_EARLY_TERMINATION_RATIO: f32 = 0.1;
+/// Value of 0.05 = less than 5% new activations → terminate.
+///
+/// Tuning (2026-01): Lowered from 0.1 to 0.05 to resist early termination
+pub const SPREADING_EARLY_TERMINATION_RATIO: f32 = 0.05;
 
 /// Early termination threshold - minimum candidate count
 ///
 /// If we have at least this many candidates after minimum hops,
 /// we can terminate early (we have enough coverage).
-pub const SPREADING_EARLY_TERMINATION_CANDIDATES: usize = 20;
+///
+/// Tuning (2026-01): Increased from 20 to 50 for richer exploration
+pub const SPREADING_EARLY_TERMINATION_CANDIDATES: usize = 50;
 
 /// Activation normalization factor per hop
 ///
 /// Prevents unbounded activation growth by normalizing per hop.
 /// After each hop, activations are scaled so max = 1.0 × this factor.
 /// Value > 1.0 allows some accumulation while preventing explosion.
-pub const SPREADING_NORMALIZATION_FACTOR: f32 = 1.5;
+///
+/// Tuning (2026-01): Increased from 1.5 to 2.0 for more signal preservation
+pub const SPREADING_NORMALIZATION_FACTOR: f32 = 2.0;
 
 // =============================================================================
 // LONG-TERM POTENTIATION (LTP) CONSTANTS

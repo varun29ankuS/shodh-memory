@@ -738,8 +738,8 @@ fn test_activation_serialization_roundtrip() {
     );
     memory.set_activation(0.12345);
 
-    let serialized = bincode::serialize(&memory).unwrap();
-    let deserialized: Memory = bincode::deserialize(&serialized).unwrap();
+    let serialized = bincode::serde::encode_to_vec(&memory, bincode::config::standard()).unwrap();
+    let (deserialized, _): (Memory, _) = bincode::serde::decode_from_slice(&serialized, bincode::config::standard()).unwrap();
 
     assert!((deserialized.activation() - 0.12345).abs() < f32::EPSILON);
 }

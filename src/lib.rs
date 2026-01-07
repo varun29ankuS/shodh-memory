@@ -18,11 +18,13 @@
 pub mod ab_testing;
 pub mod auth;
 pub mod backup;
+pub mod config;
 pub mod constants;
 pub mod decay;
 pub mod embeddings;
 pub mod errors;
 pub mod graph_memory;
+pub mod handlers;
 pub mod integrations;
 pub mod memory;
 pub mod metrics;

@@ -347,21 +347,30 @@ fn bench_serialization(c: &mut Criterion) {
     memory.last_retrieval_id = Some(Uuid::new_v4());
 
     group.bench_function("bincode_serialize", |b| {
-        b.iter(|| bincode::serialize(&memory).expect("Failed to serialize"));
+        b.iter(|| {
+            bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+                .expect("Failed to serialize")
+        });
     });
 
-    let serialized = bincode::serialize(&memory).expect("Failed to serialize");
+    let serialized = bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+        .expect("Failed to serialize");
 
     group.bench_function("bincode_deserialize", |b| {
         b.iter(|| {
-            let _: Memory = bincode::deserialize(&serialized).expect("Failed to deserialize");
+            let (_result, _): (Memory, _) =
+                bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+                    .expect("Failed to deserialize");
         });
     });
 
     group.bench_function("bincode_roundtrip", |b| {
         b.iter(|| {
-            let bytes = bincode::serialize(&memory).expect("Failed to serialize");
-            let _: Memory = bincode::deserialize(&bytes).expect("Failed to deserialize");
+            let bytes = bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+                .expect("Failed to serialize");
+            let (_result, _): (Memory, _) =
+                bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+                    .expect("Failed to deserialize");
         });
     });
 

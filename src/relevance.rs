@@ -1336,44 +1336,50 @@ impl RelevanceEngine {
             return Ok(results);
         }
 
-        // Graph memory lookup for additional entity relationships
+        // Graph memory lookup with TRAVERSAL for additional entity relationships
         let mut graph_results = results;
         if let Some(graph) = graph_memory {
             // Build set of already-found memory IDs to avoid duplicates
-            let found_ids_str: HashSet<String> = graph_results
+            let found_ids: HashSet<Uuid> = graph_results
                 .iter()
-                .map(|(m, _, _)| m.id.0.to_string())
+                .map(|(m, _, _)| m.id.0)
                 .collect();
 
             // Limit graph lookups to avoid latency spikes
-            let max_graph_lookups = 3;
+            let max_graph_lookups = 5;
             for (idx, entity) in entities.iter().enumerate() {
                 if idx >= max_graph_lookups {
                     break;
                 }
 
                 if let Ok(Some(entity_node)) = graph.find_entity_by_name(&entity.name) {
-                    if let Ok(episodes) = graph.get_episodes_by_entity(&entity_node.uuid) {
-                        // Limit episodes to check
-                        for episode in episodes.iter().take(5) {
-                            // Find corresponding memory by ID if available
-                            let score = entity.confidence * entity_node.salience;
-                            if score >= config.entity_threshold {
-                                // Try to find memory with matching content
-                                for shared_memory in &all_memories {
-                                    let id_str = shared_memory.id.0.to_string();
-                                    if !found_ids_str.contains(&id_str)
-                                        && shared_memory
-                                            .experience
-                                            .content
-                                            .contains(&episode.content)
-                                    {
-                                        graph_results.push((
-                                            (**shared_memory).clone(),
-                                            score,
-                                            vec![entity.name.clone()],
-                                        ));
-                                        break;
+                    // GRAPH TRAVERSAL: Traverse to connected entities (2 hops)
+                    // This finds memories connected via entity relationships
+                    if let Ok(traversal) = graph.traverse_from_entity(&entity_node.uuid, 2) {
+                        for traversed in &traversal.entities {
+                            // Get episodes (memories) connected to this entity
+                            if let Ok(episodes) = graph.get_episodes_by_entity(&traversed.entity.uuid) {
+                                for episode in episodes.iter().take(10) {
+                                    // Episode UUID = Memory ID (we store it this way in remember())
+                                    let memory_id = crate::memory::MemoryId(episode.uuid);
+
+                                    // Skip if already found
+                                    if found_ids.contains(&episode.uuid) {
+                                        continue;
+                                    }
+
+                                    // Score = confidence * salience * decay_factor
+                                    // decay_factor accounts for hop distance (0.7^hop)
+                                    let score = entity.confidence * traversed.entity.salience * traversed.decay_factor;
+                                    if score >= config.entity_threshold {
+                                        // Direct memory lookup by ID (fast!)
+                                        if let Ok(memory) = memory_system.get_memory(&memory_id) {
+                                            graph_results.push((
+                                                memory,
+                                                score,
+                                                vec![entity.name.clone(), traversed.entity.name.clone()],
+                                            ));
+                                        }
                                     }
                                 }
                             }

@@ -53,7 +53,7 @@ use crate::constants::{
     TIER_PROMOTION_WORKING_IMPORTANCE,
 };
 
-use crate::memory::storage::MemoryStorage;
+use crate::memory::storage::{MemoryStorage, SearchCriteria};
 pub use crate::memory::types::*;
 // pub use crate::memory::vector_storage::{VectorIndexedMemoryStorage, StorageStats};  // Disabled
 use crate::embeddings::Embedder;
@@ -989,6 +989,53 @@ impl MemorySystem {
             embedding
         };
 
+
+        // ===========================================================================
+        // LAYER 1: TEMPORAL PRE-FILTER (Episode Coherence)
+        // ===========================================================================
+        let episode_candidates: Option<HashSet<MemoryId>> = if let Some(episode_id) = &query.episode_id {
+            match self.long_term_memory.search(SearchCriteria::ByEpisode(episode_id.clone())) {
+                Ok(ep) if !ep.is_empty() => {
+                    tracing::debug!("Layer 1: {} candidates in episode {}", ep.len(), episode_id);
+                    Some(ep.into_iter().map(|m| m.id).collect())
+                }
+                _ => { tracing::debug!("Layer 1: global search"); None }
+            }
+        } else { None };
+
+        // ===========================================================================
+        // LAYER 2: GRAPH EXPANSION (Knowledge Graph Traversal)
+        // ===========================================================================
+        let (graph_results, graph_density): (Vec<(MemoryId, f32, f32)>, Option<f32>) = {
+            if let Some(graph) = &self.graph_memory {
+                let g = graph.read();
+                let a = query_parser::analyze_query(query_text);
+                let d = g.get_stats().ok().and_then(|s| if s.entity_count > 0 { Some(s.relationship_count as f32 / s.entity_count as f32) } else { None });
+                let mut ids = Vec::new();
+                for e in a.focal_entities.iter().map(|e| e.text.as_str()).chain(a.discriminative_modifiers.iter().map(|m| m.text.as_str())) {
+                    if let Ok(Some(ent)) = g.find_entity_by_name(e) {
+                        if let Ok(t) = g.traverse_from_entity(&ent.uuid, 2) {
+                            for tr in &t.entities {
+                                if let Ok(eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
+                                    for ep in eps {
+                                        let mid = MemoryId(ep.uuid);
+                                        if episode_candidates.as_ref().map_or(true, |c| c.contains(&mid)) {
+                                            ids.push((mid, tr.entity.salience * tr.decay_factor, tr.decay_factor));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut seen: std::collections::HashMap<MemoryId, (f32, f32)> = std::collections::HashMap::new();
+                for (id, act, heb) in ids { seen.entry(id).and_modify(|(a,h)| { *a = a.max(act); *h = h.max(heb); }).or_insert((act, heb)); }
+                let r: Vec<_> = seen.into_iter().map(|(id, (a, h))| (id, a, h)).collect();
+                if !r.is_empty() { tracing::debug!("Layer 2: {} graph results", r.len()); }
+                (r, d)
+            } else { (Vec::new(), None) }
+        };
+
         // Create a modified query with the embedding for vector search
         let vector_query = Query {
             query_text: None, // Don't re-generate embedding
@@ -1014,50 +1061,48 @@ impl MemorySystem {
             terrain_type: query.terrain_type.clone(),
             confidence_range: query.confidence_range,
             offset: query.offset,
+            episode_id: query.episode_id.clone(),
+            prospective_signals: query.prospective_signals.clone(),
         };
 
-        // Get memory IDs from vector search (fast HNSW search)
-        let vector_results = self
-            .retriever
-            .search_ids(&vector_query, query.max_results * 2)?; // Get more for hybrid fusion
+        // ===========================================================================
+        // LAYER 3: VECTOR SEARCH (Vamana Index)
+        // ===========================================================================
+        let vr = self.retriever.search_ids(&vector_query, query.max_results * 3)?;
+        let vector_results: Vec<(MemoryId, f32)> = if let Some(ref c) = episode_candidates {
+            vr.into_iter().filter(|(id, _)| c.contains(id)).collect()
+        } else { vr };
+        tracing::debug!("Layer 3: {} vector results", vector_results.len());
 
-        // HYBRID SEARCH: Combine BM25 (keyword) + Vector (semantic) with RRF fusion
-        // This improves recall for both exact keyword matches and semantic similarity
-        let memory_ids = {
-            // Get content for reranking
+        // ===========================================================================
+        // LAYER 4: BM25 + RRF FUSION
+        // ===========================================================================
+        let (memory_ids, hebbian_scores): (Vec<(MemoryId, f32)>, std::collections::HashMap<MemoryId, f32>) = {
             let get_content = |id: &MemoryId| -> Option<String> {
-                // Try caches first, then storage
-                if let Some(m) = self.working_memory.read().get(id) {
-                    return Some(m.experience.content.clone());
-                }
-                if let Some(m) = self.session_memory.read().get(id) {
-                    return Some(m.experience.content.clone());
-                }
-                self.long_term_memory
-                    .get(id)
-                    .ok()
-                    .map(|m| m.experience.content.clone())
+                self.working_memory.read().get(id).map(|m| m.experience.content.clone())
+                    .or_else(|| self.session_memory.read().get(id).map(|m| m.experience.content.clone()))
+                    .or_else(|| self.long_term_memory.get(id).ok().map(|m| m.experience.content.clone()))
             };
+            let hybrid_ids = self.hybrid_search.search(query_text, vector_results.clone(), get_content)
+                .map(|r| r.into_iter().map(|x| (x.memory_id, x.score)).collect::<Vec<_>>())
+                .unwrap_or(vector_results);
 
-            // Run hybrid search (BM25 + RRF + optional reranking)
-            match self
-                .hybrid_search
-                .search(query_text, vector_results.clone(), get_content)
-            {
-                Ok(hybrid_results) => {
-                    // Convert HybridSearchResult to (MemoryId, score) pairs
-                    hybrid_results
-                        .into_iter()
-                        .take(query.max_results)
-                        .map(|r| (r.memory_id, r.score))
-                        .collect::<Vec<_>>()
-                }
-                Err(e) => {
-                    // Fallback to vector-only if hybrid fails
-                    tracing::warn!("Hybrid search failed, falling back to vector: {}", e);
-                    vector_results
-                }
+            const K: f32 = 60.0;
+            let mut fused: std::collections::HashMap<MemoryId, f32> = std::collections::HashMap::new();
+            let mut heb: std::collections::HashMap<MemoryId, f32> = std::collections::HashMap::new();
+            let boost = graph_density.map(|d| 1.1 + d.min(2.0) * 0.7).unwrap_or(1.5);
+            for (r, (id, _, h)) in graph_results.iter().enumerate() {
+                *fused.entry(id.clone()).or_insert(0.0) += boost / (K + r as f32);
+                heb.insert(id.clone(), *h);
             }
+            for (r, (id, _)) in hybrid_ids.iter().enumerate() {
+                *fused.entry(id.clone()).or_insert(0.0) += 1.0 / (K + r as f32);
+            }
+            let mut res: Vec<_> = fused.into_iter().collect();
+            res.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            res.truncate(query.max_results);
+            tracing::debug!("Layer 4: {} fused results", res.len());
+            (res, heb)
         };
 
         // Fetch memories with cache-aware strategy
@@ -1069,6 +1114,9 @@ impl MemorySystem {
         let mut filtered_out = 0;
 
         for (memory_id, score) in memory_ids {
+            // Layer 5: Apply hebbian boost from learned graph weights
+            let hebbian_boost = hebbian_scores.get(&memory_id).copied().unwrap_or(0.0);
+            let final_score = score + hebbian_boost * 0.1; // 10% hebbian contribution
             // Helper to clone memory with score set (Arc<Memory> is immutable)
             let with_score = |mem: &SharedMemory, s: f32| -> SharedMemory {
                 let mut cloned: Memory = mem.as_ref().clone();
@@ -1080,7 +1128,7 @@ impl MemorySystem {
             if let Some(memory) = self.working_memory.read().get(&memory_id) {
                 // CRITICAL FIX: Apply filters before adding to results
                 if self.retriever.matches_filters(&memory, &vector_query) {
-                    memories.push(with_score(&memory, score));
+                    memories.push(with_score(&memory, final_score));
                     if !sources.contains(&"working") {
                         sources.push("working");
                     }
@@ -1095,7 +1143,7 @@ impl MemorySystem {
             if let Some(memory) = self.session_memory.read().get(&memory_id) {
                 // CRITICAL FIX: Apply filters before adding to results
                 if self.retriever.matches_filters(&memory, &vector_query) {
-                    memories.push(with_score(&memory, score));
+                    memories.push(with_score(&memory, final_score));
                     if !sources.contains(&"session") {
                         sources.push("session");
                     }
@@ -1111,7 +1159,7 @@ impl MemorySystem {
                 Ok(mut memory) => {
                     // CRITICAL FIX: Apply filters before adding to results
                     if self.retriever.matches_filters(&memory, &vector_query) {
-                        memory.set_score(score);
+                        memory.set_score(final_score);
                         memories.push(Arc::new(memory));
                         if !sources.contains(&"longterm") {
                             sources.push("longterm");

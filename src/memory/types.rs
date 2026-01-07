@@ -1728,6 +1728,18 @@ pub struct Query {
     /// Filter by confidence range (min, max)
     pub confidence_range: Option<(f32, f32)>,
 
+    // === Prospective Memory Signals ===
+    /// Future intention keywords/content from pending prospective tasks
+    /// When set, memories matching these signals get boosted in retrieval
+    /// This enables "future informs present" - pending reminders influence recall
+    pub prospective_signals: Option<Vec<String>>,
+
+    // === Episode Context (SHO-temporal) ===
+    /// Episode ID for context-aware retrieval
+    /// When set, memories from the same episode get a coherence boost
+    /// This prevents episode bleeding where unrelated memories mix in results
+    pub episode_id: Option<String>,
+
     // === Result Control ===
     pub max_results: usize,
     pub retrieval_mode: RetrievalMode,
@@ -1808,6 +1820,8 @@ impl Default for Query {
             pattern_id: None,
             terrain_type: None,
             confidence_range: None,
+            prospective_signals: None,
+            episode_id: None,
             max_results: DEFAULT_MAX_RESULTS,
             retrieval_mode: RetrievalMode::Hybrid,
             offset: 0,
@@ -2053,6 +2067,19 @@ impl QueryBuilder {
     /// Set offset for pagination (skip first N results)
     pub fn offset(mut self, offset: usize) -> Self {
         self.query.offset = offset;
+        self
+    }
+
+    /// Set prospective memory signals (future intentions that boost related memories)
+    pub fn prospective_signals(mut self, signals: Vec<String>) -> Self {
+        self.query.prospective_signals = Some(signals);
+        self
+    }
+
+    /// Set episode ID for context-aware retrieval
+    /// Memories from the same episode get a coherence boost (prevents episode bleeding)
+    pub fn episode_id(mut self, id: impl Into<String>) -> Self {
+        self.query.episode_id = Some(id.into());
         self
     }
 

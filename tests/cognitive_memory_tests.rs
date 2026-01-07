@@ -652,8 +652,11 @@ fn test_bincode_roundtrip_basic() {
         None,
     );
 
-    let serialized = bincode::serialize(&memory).expect("Failed to serialize");
-    let deserialized: Memory = bincode::deserialize(&serialized).expect("Failed to deserialize");
+    let serialized = bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+        .expect("Failed to serialize");
+    let (deserialized, _): (Memory, _) =
+        bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+            .expect("Failed to deserialize");
 
     assert_eq!(memory.id.0, deserialized.id.0);
     assert_eq!(memory.experience.content, deserialized.experience.content);
@@ -677,8 +680,11 @@ fn test_bincode_roundtrip_with_entity_refs() {
     memory.add_entity_ref(entity1, "robot".to_string(), "subject".to_string());
     memory.add_entity_ref(entity2, "warehouse".to_string(), "location".to_string());
 
-    let serialized = bincode::serialize(&memory).expect("Failed to serialize");
-    let deserialized: Memory = bincode::deserialize(&serialized).expect("Failed to deserialize");
+    let serialized = bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+        .expect("Failed to serialize");
+    let (deserialized, _): (Memory, _) =
+        bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+            .expect("Failed to deserialize");
 
     assert_eq!(deserialized.entity_refs.len(), 2);
     assert_eq!(deserialized.entity_refs[0].entity_id, entity1);
@@ -699,8 +705,11 @@ fn test_bincode_roundtrip_with_tier() {
 
     memory.tier = MemoryTier::LongTerm;
 
-    let serialized = bincode::serialize(&memory).expect("Failed to serialize");
-    let deserialized: Memory = bincode::deserialize(&serialized).expect("Failed to deserialize");
+    let serialized = bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+        .expect("Failed to serialize");
+    let (deserialized, _): (Memory, _) =
+        bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+            .expect("Failed to deserialize");
 
     assert_eq!(deserialized.tier, MemoryTier::LongTerm);
 }
@@ -719,8 +728,11 @@ fn test_bincode_roundtrip_with_activation() {
 
     memory.set_activation(0.42);
 
-    let serialized = bincode::serialize(&memory).expect("Failed to serialize");
-    let deserialized: Memory = bincode::deserialize(&serialized).expect("Failed to deserialize");
+    let serialized = bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+        .expect("Failed to serialize");
+    let (deserialized, _): (Memory, _) =
+        bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+            .expect("Failed to deserialize");
 
     assert!((deserialized.activation() - 0.42).abs() < f32::EPSILON);
 }
@@ -740,8 +752,11 @@ fn test_bincode_roundtrip_with_retrieval_id() {
     let retrieval_id = Uuid::new_v4();
     memory.last_retrieval_id = Some(retrieval_id);
 
-    let serialized = bincode::serialize(&memory).expect("Failed to serialize");
-    let deserialized: Memory = bincode::deserialize(&serialized).expect("Failed to deserialize");
+    let serialized = bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+        .expect("Failed to serialize");
+    let (deserialized, _): (Memory, _) =
+        bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+            .expect("Failed to deserialize");
 
     assert_eq!(deserialized.last_retrieval_id, Some(retrieval_id));
 }
@@ -773,8 +788,11 @@ fn test_bincode_roundtrip_full() {
         memory.record_access();
     }
 
-    let serialized = bincode::serialize(&memory).expect("Failed to serialize");
-    let deserialized: Memory = bincode::deserialize(&serialized).expect("Failed to deserialize");
+    let serialized = bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+        .expect("Failed to serialize");
+    let (deserialized, _): (Memory, _) =
+        bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+            .expect("Failed to deserialize");
 
     assert_eq!(memory.id.0, deserialized.id.0);
     assert_eq!(memory.experience.content, deserialized.experience.content);
@@ -836,8 +854,11 @@ fn test_empty_content() {
 
     assert!(memory.experience.content.is_empty());
 
-    let serialized = bincode::serialize(&memory).expect("Failed to serialize");
-    let deserialized: Memory = bincode::deserialize(&serialized).expect("Failed to deserialize");
+    let serialized = bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+        .expect("Failed to serialize");
+    let (deserialized, _): (Memory, _) =
+        bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+            .expect("Failed to deserialize");
     assert!(deserialized.experience.content.is_empty());
 }
 
@@ -859,8 +880,11 @@ fn test_very_long_content() {
 
     assert_eq!(memory.experience.content.len(), 100_000);
 
-    let serialized = bincode::serialize(&memory).expect("Failed to serialize");
-    let deserialized: Memory = bincode::deserialize(&serialized).expect("Failed to deserialize");
+    let serialized = bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+        .expect("Failed to serialize");
+    let (deserialized, _): (Memory, _) =
+        bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+            .expect("Failed to deserialize");
     assert_eq!(deserialized.experience.content.len(), 100_000);
 }
 
@@ -880,8 +904,11 @@ fn test_unicode_content() {
         None,
     );
 
-    let serialized = bincode::serialize(&memory).expect("Failed to serialize");
-    let deserialized: Memory = bincode::deserialize(&serialized).expect("Failed to deserialize");
+    let serialized = bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+        .expect("Failed to serialize");
+    let (deserialized, _): (Memory, _) =
+        bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+            .expect("Failed to deserialize");
     assert_eq!(deserialized.experience.content, unicode_content);
 }
 
@@ -907,8 +934,11 @@ fn test_many_entity_refs() {
 
     assert_eq!(memory.entity_refs.len(), 1000);
 
-    let serialized = bincode::serialize(&memory).expect("Failed to serialize");
-    let deserialized: Memory = bincode::deserialize(&serialized).expect("Failed to deserialize");
+    let serialized = bincode::serde::encode_to_vec(&memory, bincode::config::standard())
+        .expect("Failed to serialize");
+    let (deserialized, _): (Memory, _) =
+        bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
+            .expect("Failed to deserialize");
     assert_eq!(deserialized.entity_refs.len(), 1000);
 }
 

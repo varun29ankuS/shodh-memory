@@ -64,16 +64,16 @@ pub struct HybridSearchConfig {
 }
 
 fn default_bm25_weight() -> f32 {
-    0.4
+    0.7 // Prioritize keyword matching for better recall accuracy
 }
 fn default_vector_weight() -> f32 {
-    0.6
+    0.3 // Semantic similarity as secondary signal
 }
 fn default_rrf_k() -> f32 {
-    60.0
+    45.0 // Lower k = more emphasis on top-ranked results
 }
 fn default_candidate_count() -> usize {
-    100
+    50 // Reduced from 100 for faster search; still sufficient for recall
 }
 fn default_rerank_count() -> usize {
     20
@@ -82,7 +82,7 @@ fn default_use_reranking() -> bool {
     false // Disabled: current implementation is bi-encoder, not true cross-encoder
 }
 fn default_min_bm25_score() -> f32 {
-    0.1
+    0.01 // Lower threshold to capture more keyword matches
 }
 
 impl Default for HybridSearchConfig {
@@ -239,6 +239,23 @@ impl BM25Index {
     ///
     /// Returns (memory_id, score) pairs sorted by score descending
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<(MemoryId, f32)>> {
+        self.search_with_term_weights(query, limit, None)
+    }
+
+    /// Search using BM25 with IC-weighted term boosting
+    ///
+    /// Term weights are derived from linguistic Information Content (IC):
+    /// - Nouns: IC_NOUN = 1.5 (focal entities, highest weight)
+    /// - Adjectives: IC_ADJECTIVE = 0.9 (discriminative modifiers)
+    /// - Verbs: IC_VERB = 0.7 (relational context)
+    ///
+    /// The weights are applied as Tantivy boost operators (term^weight)
+    pub fn search_with_term_weights(
+        &self,
+        query: &str,
+        limit: usize,
+        term_weights: Option<&HashMap<String, f32>>,
+    ) -> Result<Vec<(MemoryId, f32)>> {
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -251,12 +268,32 @@ impl BM25Index {
             vec![self.content_field, self.tags_field, self.entities_field],
         );
 
+        // Build boosted query if term weights provided
+        let boosted_query = if let Some(weights) = term_weights {
+            let mut boosted_terms: Vec<String> = Vec::new();
+            for word in query.split_whitespace() {
+                let clean_word = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+                if clean_word.is_empty() {
+                    continue;
+                }
+                if let Some(&weight) = weights.get(&clean_word) {
+                    // Apply boost (Tantivy uses ^ for boost, like Lucene)
+                    boosted_terms.push(format!("{}^{:.1}", clean_word, weight));
+                } else {
+                    boosted_terms.push(clean_word);
+                }
+            }
+            boosted_terms.join(" ")
+        } else {
+            query.to_string()
+        };
+
         // Handle query parsing errors gracefully
-        let parsed_query = match query_parser.parse_query(query) {
+        let parsed_query = match query_parser.parse_query(&boosted_query) {
             Ok(q) => q,
             Err(e) => {
-                debug!("BM25 query parse error for '{}': {}", query, e);
-                // Fall back to simple term query
+                debug!("BM25 query parse error for '{}': {}", boosted_query, e);
+                // Fall back to simple term query without boosts
                 let escaped = query.replace(
                     [
                         ':', '^', '~', '*', '?', '[', ']', '{', '}', '(', ')', '"', '\\', '/', '+',
@@ -502,6 +539,17 @@ impl HybridSearchEngine {
         self.bm25_index.commit()
     }
 
+    /// Reload BM25 reader to see committed changes immediately
+    pub fn reload(&self) -> Result<()> {
+        self.bm25_index.reload()
+    }
+
+    /// Commit and reload in one call for immediate searchability
+    pub fn commit_and_reload(&self) -> Result<()> {
+        self.bm25_index.commit()?;
+        self.bm25_index.reload()
+    }
+
     /// Get BM25 index reference for direct searches
     pub fn bm25_index(&self) -> &BM25Index {
         &self.bm25_index
@@ -525,8 +573,33 @@ impl HybridSearchEngine {
     where
         F: Fn(&MemoryId) -> Option<String>,
     {
-        // 1. BM25 search
-        let bm25_results = self.bm25_index.search(query, self.config.candidate_count)?;
+        self.search_with_ic_weights(query, vector_results, get_content, None)
+    }
+
+    /// Perform hybrid search with IC-weighted BM25 term boosting
+    ///
+    /// IC weights from linguistic analysis boost important terms:
+    /// - Nouns (focal entities): IC=1.5
+    /// - Adjectives (modifiers): IC=0.9
+    /// - Verbs (relations): IC=0.7
+    ///
+    /// This improves retrieval by prioritizing semantically important query terms.
+    pub fn search_with_ic_weights<F>(
+        &self,
+        query: &str,
+        vector_results: Vec<(MemoryId, f32)>,
+        get_content: F,
+        term_weights: Option<&HashMap<String, f32>>,
+    ) -> Result<Vec<HybridSearchResult>>
+    where
+        F: Fn(&MemoryId) -> Option<String>,
+    {
+        // 1. BM25 search with IC-weighted term boosting
+        let bm25_results = self.bm25_index.search_with_term_weights(
+            query,
+            self.config.candidate_count,
+            term_weights,
+        )?;
 
         // Filter low BM25 scores
         let bm25_results: Vec<_> = bm25_results
@@ -534,11 +607,22 @@ impl HybridSearchEngine {
             .filter(|(_, score)| *score >= self.config.min_bm25_score)
             .collect();
 
-        debug!(
-            "Hybrid search: {} BM25 results, {} vector results",
-            bm25_results.len(),
-            vector_results.len()
-        );
+        // Log counts at info level for debugging search quality
+        if bm25_results.is_empty() {
+            tracing::warn!(
+                "Hybrid search: BM25 returned 0 results for query '{}', using {} vector results only",
+                query,
+                vector_results.len()
+            );
+        } else {
+            debug!(
+                "Hybrid search: {} BM25 results (top score: {:.3}), {} vector results for '{}'",
+                bm25_results.len(),
+                bm25_results.first().map(|(_, s)| *s).unwrap_or(0.0),
+                vector_results.len(),
+                &query[..query.len().min(50)]
+            );
+        }
 
         // 2. RRF Fusion
         let rrf = RRFusion::new(
@@ -792,10 +876,10 @@ mod tests {
     #[test]
     fn test_hybrid_config_defaults() {
         let config = HybridSearchConfig::default();
-        assert_eq!(config.bm25_weight, 0.4);
-        assert_eq!(config.vector_weight, 0.6);
-        assert_eq!(config.rrf_k, 60.0);
-        assert_eq!(config.candidate_count, 100);
+        assert_eq!(config.bm25_weight, 0.7); // BM25 prioritized for recall accuracy
+        assert_eq!(config.vector_weight, 0.3); // Semantic as secondary signal
+        assert_eq!(config.rrf_k, 45.0); // Lower k for top-rank emphasis
+        assert_eq!(config.candidate_count, 50); // Reduced for speed
         assert_eq!(config.rerank_count, 20);
         assert!(!config.use_reranking); // Disabled: bi-encoder, not cross-encoder
     }

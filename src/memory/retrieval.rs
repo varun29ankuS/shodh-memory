@@ -759,6 +759,22 @@ impl RetrievalEngine {
             return Ok(Vec::new());
         };
 
+        // TEMPORAL PRE-FILTER: If episode_id is provided, narrow search to that episode
+        // This implements the architecture: Temporal → Graph → Semantic
+        // Episode filtering happens FIRST to "point in the right direction"
+        let episode_candidates: Option<HashSet<MemoryId>> = if let Some(episode_id) = &query.episode_id {
+            let episode_memories = self.storage.search(SearchCriteria::ByEpisode(episode_id.clone()))?;
+            if episode_memories.is_empty() {
+                tracing::debug!("No memories found in episode {}, falling back to global search", episode_id);
+                None
+            } else {
+                tracing::debug!("Episode {} has {} memories, using as temporal filter", episode_id, episode_memories.len());
+                Some(episode_memories.into_iter().map(|m| m.id).collect())
+            }
+        } else {
+            None
+        };
+
         // Search vector index - fetch more candidates for chunk deduplication
         let index = self.vector_index.read();
         let results = index
@@ -785,6 +801,13 @@ impl RetrievalEngine {
             let similarity = -distance;
 
             if let Some(memory_id) = id_mapping.get_memory_id(vector_id) {
+                // TEMPORAL FILTER: If episode pre-filter is active, skip memories outside episode
+                if let Some(ref candidates) = episode_candidates {
+                    if !candidates.contains(memory_id) {
+                        continue; // Skip - not in target episode
+                    }
+                }
+
                 // Keep the highest similarity for each memory (best matching chunk)
                 best_scores
                     .entry(memory_id.clone())
@@ -942,12 +965,25 @@ impl RetrievalEngine {
     }
 
     fn temporal_search(&self, query: &Query, limit: usize) -> Result<Vec<SharedMemory>> {
-        let criteria = if let Some((start, end)) = &query.time_range {
+        // TEMPORAL HIERARCHY:
+        // 1. Episode (most specific) - same conversation/session
+        // 2. Date range (fallback) - within time window
+
+        let criteria = if let Some(episode_id) = &query.episode_id {
+            // Episode-based temporal search: memories in same episode, ordered by sequence
+            SearchCriteria::ByEpisodeSequence {
+                episode_id: episode_id.clone(),
+                min_sequence: None, // Get all in episode
+                max_sequence: None,
+            }
+        } else if let Some((start, end)) = &query.time_range {
+            // Date-based temporal search
             SearchCriteria::ByDate {
                 start: *start,
                 end: *end,
             }
         } else {
+            // Default: last 7 days
             let end = chrono::Utc::now();
             let start = end - chrono::Duration::days(7);
             SearchCriteria::ByDate { start, end }
@@ -961,7 +997,24 @@ impl RetrievalEngine {
             .collect();
 
         memories.retain(|m| self.matches_filters(m, query));
-        memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        // Sort by sequence if episode-based, otherwise by created_at
+        if query.episode_id.is_some() {
+            // Episode search already returns in sequence order from storage
+            // But verify ordering by sequence_number if available
+            memories.sort_by(|a, b| {
+                let seq_a = a.experience.context.as_ref()
+                    .and_then(|c| c.episode.sequence_number)
+                    .unwrap_or(0);
+                let seq_b = b.experience.context.as_ref()
+                    .and_then(|c| c.episode.sequence_number)
+                    .unwrap_or(0);
+                seq_a.cmp(&seq_b)
+            });
+        } else {
+            memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        }
+
         memories.truncate(limit);
         Ok(memories)
     }

@@ -32,6 +32,7 @@ use crate::constants::{
 };
 use crate::embeddings::Embedder;
 use crate::graph_memory::{EpisodicNode, GraphMemory};
+use crate::memory::injection::{compute_relevance, InjectionConfig, RelevanceInput};
 use crate::memory::query_parser::{analyze_query, QueryAnalysis};
 use crate::memory::types::{Memory, Query, RetrievalStats, SharedMemory};
 use crate::similarity::cosine_similarity;
@@ -383,7 +384,7 @@ pub fn spreading_activation_retrieve_with_stats(
         activated_memories.len()
     );
 
-    // Step 5: Convert episodes to memories and calculate scores
+    // Step 5: Convert episodes to memories and calculate scores using UNIFIED scoring
     let mut scored_memories = Vec::new();
 
     // Generate query embedding once (for semantic scoring)
@@ -391,23 +392,64 @@ pub fn spreading_activation_retrieve_with_stats(
     let query_embedding = embedder.encode(query_text)?;
     stats.embedding_time_us = embedding_start.elapsed().as_micros() as u64;
 
+    // Unified scoring config - ensures consistency with semantic_retrieve path
+    let injection_config = InjectionConfig::default();
+    let now = chrono::Utc::now();
+
+    // Extract context entities from query analysis for entity overlap calculation
+    let context_entities: Vec<String> = analysis
+        .focal_entities
+        .iter()
+        .map(|e| e.text.clone())
+        .chain(analysis.discriminative_modifiers.iter().map(|m| m.text.clone()))
+        .collect();
+
     for (_episode_uuid, (graph_activation, episode)) in activated_memories {
         // Convert episode to memory
         if let Some(memory) = episode_to_memory_fn(&episode)? {
-            // Calculate semantic similarity
+            // Calculate semantic similarity (still needed for ActivatedMemory debug fields)
             let semantic_score = if let Some(mem_emb) = &memory.experience.embeddings {
                 cosine_similarity(&query_embedding, mem_emb)
             } else {
                 0.0
             };
 
-            // Calculate linguistic match score
-            let linguistic_score = calculate_linguistic_match(&memory, &analysis);
+            // Calculate linguistic match score (normalized to 0.0-1.0)
+            let linguistic_raw = calculate_linguistic_match(&memory, &analysis);
+            let linguistic_score = linguistic_raw; // Already normalized in calculate_linguistic_match
 
-            // SHO-26: Density-dependent hybrid scoring
-            let final_score = graph_weight * graph_activation
-                + semantic_weight * semantic_score
-                + linguistic_weight * linguistic_score;
+            // Extract episode context for episode coherence scoring
+            let episode_id = memory
+                .experience
+                .context
+                .as_ref()
+                .and_then(|ctx| ctx.episode.episode_id.clone());
+            let sequence_number = memory
+                .experience
+                .context
+                .as_ref()
+                .and_then(|ctx| ctx.episode.sequence_number);
+
+            // UNIFIED SCORING via compute_relevance - single source of truth
+            let memory_embedding = memory.experience.embeddings.clone().unwrap_or_default();
+            let input = RelevanceInput {
+                memory_embedding,
+                created_at: memory.created_at,
+                hebbian_strength: graph_activation, // Use graph activation as Hebbian proxy
+                memory_entities: memory.experience.entities.clone(),
+                context_entities: context_entities.clone(),
+                memory_type: Some(memory.experience.experience_type.clone()),
+                memory_files: Vec::new(),
+                context_files: Vec::new(),
+                feedback_momentum: 0.0,
+                episode_id,
+                query_episode_id: query.episode_id.clone(),
+                sequence_number,
+                graph_activation,   // Spreading activation score
+                linguistic_score,   // IC-weighted entity matches
+            };
+
+            let final_score = compute_relevance(&input, &query_embedding, now, &injection_config);
 
             scored_memories.push(ActivatedMemory {
                 memory,

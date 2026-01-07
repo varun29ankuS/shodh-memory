@@ -413,15 +413,16 @@ fn test_cognitive_layer_at_scale() {
     for (domain, start, hop1, hop2, hop3) in &activation_chains {
         println!("  Chain [{}]: {} → {} → {} → {}", domain, start, hop1, hop2, hop3);
 
-        // Query with starting concept
+        // Query with starting concept - use higher max_results to see full activation spread
+        // Spreading activation should surface related concepts even if they're distant
         let query = Query {
             query_text: Some(format!("{} {}", start, hop1)),
-            max_results: 5,
+            max_results: 20, // Increased from 5 to see deeper activation
             ..Default::default()
         };
         let results = memory.recall(&query).unwrap_or_default();
 
-        // Check if chain concepts appear in results
+        // Check if chain concepts appear in results (measures graph connectivity)
         let mut chain_found = [false; 4];
         let concepts = [*start, *hop1, *hop2, *hop3];
 
@@ -435,7 +436,8 @@ fn test_cognitive_layer_at_scale() {
         }
 
         let chain_depth = chain_found.iter().filter(|&&x| x).count();
-        println!("    Depth reached: {}/4 concepts found", chain_depth);
+        let result_count = results.len();
+        println!("    Depth reached: {}/4 concepts found (from {} results)", chain_depth, result_count);
     }
 
     println!("  Time: {:?}", spreading_start.elapsed());

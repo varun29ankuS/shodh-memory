@@ -1,0 +1,56 @@
+//! HTTP API Handlers - Modular organization of the REST API
+//!
+//! This module contains all HTTP handlers extracted from the monolithic main.rs.
+//! Each submodule handles a specific domain of functionality.
+
+// Core modules
+pub mod types;
+pub mod state;
+pub mod router;
+
+// Health and utilities
+pub mod health;
+pub mod utils;
+
+// Memory core operations
+pub mod remember;
+pub mod recall;
+pub mod crud;
+
+// Advanced memory operations
+pub mod search;
+pub mod compression;
+pub mod facts;
+pub mod lineage;
+
+// Knowledge graph
+pub mod graph;
+pub mod visualization;
+
+// Task management
+pub mod todos;
+
+// MCP and webhooks
+pub mod mif;
+pub mod webhooks;
+
+// External integrations
+pub mod integrations;
+
+// Session and user management
+pub mod sessions;
+pub mod users;
+
+// File and codebase memory
+pub mod files;
+
+// Background processing
+pub mod consolidation;
+
+// A/B testing
+pub mod ab_testing;
+
+// Re-export commonly used items
+pub use state::MultiUserMemoryManager;
+pub use types::*;
+pub use router::{build_router, build_public_routes, build_protected_routes, AppState};

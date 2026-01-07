@@ -6,6 +6,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rocksdb::{Options, WriteBatch, DB};
+use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -382,11 +383,19 @@ pub struct GraphMemory {
     /// RocksDB storage for lowercase name -> UUID index (for O(1) case-insensitive lookup)
     entity_lowercase_index_db: Arc<DB>,
 
+    /// RocksDB storage for stemmed name -> UUID index (for linguistic matching)
+    /// Maps Porter-stemmed words to entity UUIDs for "running" -> "run" type matching
+    entity_stemmed_index_db: Arc<DB>,
+
     /// In-memory entity name index for fast lookups (loaded from entity_name_index_db)
     entity_name_index: Arc<parking_lot::RwLock<HashMap<String, Uuid>>>,
 
     /// In-memory lowercase name index for O(1) case-insensitive lookups
     entity_lowercase_index: Arc<parking_lot::RwLock<HashMap<String, Uuid>>>,
+
+    /// In-memory stemmed name index for O(1) linguistic lookups
+    /// Key: Porter-stemmed lowercase name, Value: Entity UUID
+    entity_stemmed_index: Arc<parking_lot::RwLock<HashMap<String, Uuid>>>,
 
     // === Atomic counters for O(1) stats (P1 fix) ===
     /// Entity count - initialized from entity_name_index.len(), updated on add
@@ -420,6 +429,8 @@ impl GraphMemory {
         let entity_name_index_db = Arc::new(DB::open(&opts, path.join("graph_entity_name_index"))?);
         let entity_lowercase_index_db =
             Arc::new(DB::open(&opts, path.join("graph_entity_lowercase_index"))?);
+        let entity_stemmed_index_db =
+            Arc::new(DB::open(&opts, path.join("graph_entity_stemmed_index"))?);
 
         // Load entity name index from persisted DB (O(n) but faster than deserializing entities)
         // If empty, migrate from entities_db (one-time migration for existing data)
@@ -429,6 +440,10 @@ impl GraphMemory {
         // Load/migrate lowercase index for O(1) case-insensitive lookup
         let entity_lowercase_index =
             Self::load_or_migrate_lowercase_index(&entity_lowercase_index_db, &entity_name_index)?;
+
+        // Load/migrate stemmed index for O(1) linguistic lookup
+        let entity_stemmed_index =
+            Self::load_or_migrate_stemmed_index(&entity_stemmed_index_db, &entity_name_index)?;
 
         let entity_count = entity_name_index.len();
 
@@ -445,8 +460,10 @@ impl GraphMemory {
             entity_episodes_db,
             entity_name_index_db,
             entity_lowercase_index_db,
+            entity_stemmed_index_db,
             entity_name_index: Arc::new(parking_lot::RwLock::new(entity_name_index)),
             entity_lowercase_index: Arc::new(parking_lot::RwLock::new(entity_lowercase_index)),
+            entity_stemmed_index: Arc::new(parking_lot::RwLock::new(entity_stemmed_index)),
             entity_count: Arc::new(AtomicUsize::new(entity_count)),
             relationship_count: Arc::new(AtomicUsize::new(relationship_count)),
             episode_count: Arc::new(AtomicUsize::new(episode_count)),
@@ -544,6 +561,55 @@ impl GraphMemory {
         Ok(index)
     }
 
+    /// Load stemmed name->UUID index, or migrate from name_index if empty
+    ///
+    /// This enables O(1) linguistic entity lookup: "running" matches "run"
+    /// Uses Porter2 stemmer for English language stemming.
+    fn load_or_migrate_stemmed_index(
+        stemmed_db: &DB,
+        name_index: &HashMap<String, Uuid>,
+    ) -> Result<HashMap<String, Uuid>> {
+        let mut index = HashMap::new();
+
+        // Try to load from dedicated stemmed index DB
+        let iter = stemmed_db.iterator(rocksdb::IteratorMode::Start);
+        for (key, value) in iter.flatten() {
+            if let (Ok(name), Ok(uuid_bytes)) = (
+                std::str::from_utf8(&key),
+                <[u8; 16]>::try_from(value.as_ref()),
+            ) {
+                index.insert(name.to_string(), Uuid::from_bytes(uuid_bytes));
+            }
+        }
+
+        // If empty but name_index has data, migrate (one-time operation)
+        if index.is_empty() && !name_index.is_empty() {
+            let stemmer = Stemmer::create(Algorithm::English);
+            for (name, uuid) in name_index {
+                let stemmed_name = Self::stem_entity_name(&stemmer, name);
+                stemmed_db.put(stemmed_name.as_bytes(), uuid.as_bytes())?;
+                index.insert(stemmed_name, *uuid);
+            }
+            tracing::info!(
+                "Migrated {} entities to stemmed index DB",
+                name_index.len()
+            );
+        }
+
+        Ok(index)
+    }
+
+    /// Stem an entity name for linguistic matching
+    ///
+    /// For multi-word names (e.g., "New York City"), stems each word and joins.
+    /// Returns lowercase stemmed version for consistent matching.
+    fn stem_entity_name(stemmer: &Stemmer, name: &str) -> String {
+        name.split_whitespace()
+            .map(|word| stemmer.stem(&word.to_lowercase()).to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// Count entries in a RocksDB database (one-time startup cost)
     fn count_db_entries(db: &DB) -> usize {
         db.iterator(rocksdb::IteratorMode::Start).count()
@@ -608,6 +674,8 @@ impl GraphMemory {
         // This is safer than orphaned entities with no index reference.
 
         let lowercase_name = entity.name.to_lowercase();
+        let stemmer = Stemmer::create(Algorithm::English);
+        let stemmed_name = Self::stem_entity_name(&stemmer, &entity.name);
 
         // Update in-memory indices first
         {
@@ -618,12 +686,18 @@ impl GraphMemory {
             let mut lowercase_index = self.entity_lowercase_index.write();
             lowercase_index.insert(lowercase_name.clone(), entity.uuid);
         }
+        {
+            let mut stemmed_index = self.entity_stemmed_index.write();
+            stemmed_index.insert(stemmed_name.clone(), entity.uuid);
+        }
 
         // Persist name->UUID mappings
         self.entity_name_index_db
             .put(entity.name.as_bytes(), entity.uuid.as_bytes())?;
         self.entity_lowercase_index_db
             .put(lowercase_name.as_bytes(), entity.uuid.as_bytes())?;
+        self.entity_stemmed_index_db
+            .put(stemmed_name.as_bytes(), entity.uuid.as_bytes())?;
 
         // Now store entity in database
         let key = entity.uuid.as_bytes();
@@ -653,10 +727,14 @@ impl GraphMemory {
 
     /// Find entity by name (case-insensitive, O(1) lookup)
     ///
-    /// Uses a dedicated lowercase index for O(1) case-insensitive matching,
-    /// improving search quality and performance compared to O(n) linear search.
+    /// Uses a multi-tier matching strategy:
+    /// 1. Exact match (O(1)) - fastest
+    /// 2. Case-insensitive match (O(1)) - common case
+    /// 3. Stemmed match (O(1)) - "running" matches "run"
+    /// 4. Substring match - "York" matches "New York City"
+    /// 5. Word-level match - "York" matches "New York"
     pub fn find_entity_by_name(&self, name: &str) -> Result<Option<EntityNode>> {
-        // First try exact match for best performance
+        // Tier 1: Exact match (O(1))
         let uuid = {
             let index = self.entity_name_index.read();
             index.get(name).copied()
@@ -666,20 +744,165 @@ impl GraphMemory {
             return self.get_entity(&uuid);
         }
 
-        // O(1) case-insensitive lookup using lowercase index
+        // Tier 2: Case-insensitive match (O(1))
+        let name_lower = name.to_lowercase();
         let uuid = {
             let lowercase_index = self.entity_lowercase_index.read();
-            lowercase_index.get(&name.to_lowercase()).copied()
+            lowercase_index.get(&name_lower).copied()
         };
 
-        match uuid {
-            Some(uuid) => self.get_entity(&uuid),
-            None => Ok(None),
+        if let Some(uuid) = uuid {
+            return self.get_entity(&uuid);
         }
+
+        // Tier 3: Stemmed match (O(1)) - "running" matches "run", "conversations" matches "conversation"
+        let stemmer = Stemmer::create(Algorithm::English);
+        let stemmed_name = Self::stem_entity_name(&stemmer, name);
+        let uuid = {
+            let stemmed_index = self.entity_stemmed_index.read();
+            stemmed_index.get(&stemmed_name).copied()
+        };
+
+        if let Some(uuid) = uuid {
+            return self.get_entity(&uuid);
+        }
+
+        // Tier 4 & 5: Fuzzy matching (O(n) but bounded)
+        // Only do fuzzy matching for names >= 3 chars to avoid noise
+        if name.len() >= 3 {
+            let lowercase_index = self.entity_lowercase_index.read();
+
+            // Tier 4: Substring match - query is substring of entity
+            // e.g., "York" matches "New York City"
+            for (entity_name, uuid) in lowercase_index.iter() {
+                if entity_name.contains(&name_lower) {
+                    return self.get_entity(uuid);
+                }
+            }
+
+            // Tier 5: Word-level match - query matches a word in entity
+            // e.g., "York" matches "New York" (word boundary)
+            let query_words: Vec<&str> = name_lower.split_whitespace().collect();
+            for (entity_name, uuid) in lowercase_index.iter() {
+                let entity_words: Vec<&str> = entity_name.split_whitespace().collect();
+                // Check if any query word matches any entity word
+                for qw in &query_words {
+                    if entity_words.iter().any(|ew| ew == qw || ew.starts_with(qw)) {
+                        return self.get_entity(uuid);
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
-    /// Add a relationship edge
+    /// Find all entities matching a name with fuzzy matching
+    ///
+    /// Returns multiple matches ranked by match quality.
+    /// Useful for spreading activation across related entities.
+    pub fn find_entities_fuzzy(&self, name: &str, max_results: usize) -> Result<Vec<EntityNode>> {
+        let mut results = Vec::new();
+        let name_lower = name.to_lowercase();
+
+        // Skip very short queries
+        if name.len() < 2 {
+            return Ok(results);
+        }
+
+        let lowercase_index = self.entity_lowercase_index.read();
+
+        // Score and collect matches
+        let mut scored: Vec<(Uuid, f32)> = Vec::new();
+
+        for (entity_name, uuid) in lowercase_index.iter() {
+            let score = if entity_name == &name_lower {
+                1.0 // Exact match
+            } else if entity_name.starts_with(&name_lower) {
+                0.9 // Prefix match
+            } else if entity_name.contains(&name_lower) {
+                0.7 // Substring match
+            } else {
+                // Word-level match
+                let entity_words: Vec<&str> = entity_name.split_whitespace().collect();
+                let query_words: Vec<&str> = name_lower.split_whitespace().collect();
+
+                let mut word_score: f32 = 0.0;
+                for qw in &query_words {
+                    for ew in &entity_words {
+                        if ew == qw {
+                            word_score += 0.5;
+                        } else if ew.starts_with(qw) {
+                            word_score += 0.3;
+                        }
+                    }
+                }
+                word_score.min(0.6) // Cap word-level score
+            };
+
+            if score > 0.0 {
+                scored.push((*uuid, score));
+            }
+        }
+
+        // Sort by score descending
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Take top results
+        for (uuid, _score) in scored.into_iter().take(max_results) {
+            if let Some(entity) = self.get_entity(&uuid)? {
+                results.push(entity);
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Find existing relationship between two entities (either direction)
+    pub fn find_relationship_between(
+        &self,
+        entity_a: &Uuid,
+        entity_b: &Uuid,
+    ) -> Result<Option<RelationshipEdge>> {
+        // Check edges from entity_a
+        let edges_a = self.get_entity_relationships(entity_a)?;
+        for edge in edges_a {
+            if (edge.from_entity == *entity_a && edge.to_entity == *entity_b)
+                || (edge.from_entity == *entity_b && edge.to_entity == *entity_a)
+            {
+                return Ok(Some(edge));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Add a relationship edge (or strengthen existing one)
+    ///
+    /// If an edge already exists between the two entities, strengthens it
+    /// instead of creating a duplicate. This implements proper Hebbian learning:
+    /// "neurons that fire together, wire together" - repeated co-occurrence
+    /// strengthens the same synapse rather than creating parallel connections.
     pub fn add_relationship(&self, mut edge: RelationshipEdge) -> Result<Uuid> {
+        // Check for existing relationship between these entities
+        if let Some(mut existing) = self.find_relationship_between(&edge.from_entity, &edge.to_entity)? {
+            // Strengthen existing edge instead of creating duplicate
+            existing.strengthen();
+            existing.last_activated = Utc::now();
+
+            // Update context if new context is more informative
+            if edge.context.len() > existing.context.len() {
+                existing.context = edge.context;
+            }
+
+            // Persist the strengthened edge
+            let key = existing.uuid.as_bytes();
+            let value = bincode::serde::encode_to_vec(&existing, bincode::config::standard())?;
+            self.relationships_db.put(key, value)?;
+
+            return Ok(existing.uuid);
+        }
+
+        // No existing edge - create new one
         edge.uuid = Uuid::new_v4();
         edge.created_at = Utc::now();
 
@@ -861,28 +1084,43 @@ impl GraphMemory {
     ///
     /// Implements Hebbian learning: edges traversed during retrieval are strengthened.
     /// This means frequently accessed pathways become stronger over time.
+    ///
+    /// Returns `TraversedEntity` with hop distance and decay factor for proper scoring:
+    /// - hop 0 (start entity): decay = 1.0
+    /// - hop 1: decay = 0.7
+    /// - hop 2: decay = 0.49
+    /// - etc.
     pub fn traverse_from_entity(
         &self,
         start_uuid: &Uuid,
         max_depth: usize,
     ) -> Result<GraphTraversal> {
+        // Use tuned decay from constants (0.15 max decay → ~86% retention per hop)
+        // This enables deeper traversal than the old 0.7 factor
+        use crate::constants::IMPORTANCE_DECAY_MAX;
+        let hop_decay_factor: f32 = (-IMPORTANCE_DECAY_MAX).exp(); // e^(-0.15) ≈ 0.86
+
         let mut visited_entities = HashSet::new();
         let mut visited_edges = HashSet::new();
-        let mut current_level = vec![*start_uuid];
-        let mut all_entities = Vec::new();
+        let mut current_level: Vec<(Uuid, usize)> = vec![(*start_uuid, 0)]; // (uuid, hop_distance)
+        let mut all_entities: Vec<TraversedEntity> = Vec::new();
         let mut all_edges = Vec::new();
         let mut edges_to_strengthen = Vec::new();
 
         visited_entities.insert(*start_uuid);
         if let Some(entity) = self.get_entity(start_uuid)? {
-            all_entities.push(entity);
+            all_entities.push(TraversedEntity {
+                entity,
+                hop_distance: 0,
+                decay_factor: 1.0,
+            });
         }
 
-        for _ in 0..max_depth {
+        for depth in 0..max_depth {
             let mut next_level = Vec::new();
 
-            for entity_uuid in current_level {
-                let edges = self.get_entity_relationships(&entity_uuid)?;
+            for (entity_uuid, _hop) in &current_level {
+                let edges = self.get_entity_relationships(entity_uuid)?;
 
                 for edge in edges {
                     if visited_edges.contains(&edge.uuid) {
@@ -905,7 +1143,7 @@ impl GraphMemory {
                     all_edges.push(edge_with_decay);
 
                     // Add connected entity
-                    let connected_uuid = if edge.from_entity == entity_uuid {
+                    let connected_uuid = if edge.from_entity == *entity_uuid {
                         edge.to_entity
                     } else {
                         edge.from_entity
@@ -913,10 +1151,17 @@ impl GraphMemory {
 
                     if !visited_entities.contains(&connected_uuid) {
                         visited_entities.insert(connected_uuid);
+                        let next_hop = depth + 1;
+                        let decay = hop_decay_factor.powi(next_hop as i32);
+
                         if let Some(entity) = self.get_entity(&connected_uuid)? {
-                            all_entities.push(entity);
+                            all_entities.push(TraversedEntity {
+                                entity,
+                                hop_distance: next_hop,
+                                decay_factor: decay,
+                            });
                         }
-                        next_level.push(connected_uuid);
+                        next_level.push((connected_uuid, next_hop));
                     }
                 }
             }
@@ -1542,9 +1787,21 @@ impl GraphMemory {
             self.entity_lowercase_index_db.delete(key)?;
         }
 
+        // Entity stemmed index
+        let keys: Vec<_> = self
+            .entity_stemmed_index_db
+            .iterator(rocksdb::IteratorMode::Start)
+            .flatten()
+            .map(|(k, _)| k.to_vec())
+            .collect();
+        for key in &keys {
+            self.entity_stemmed_index_db.delete(key)?;
+        }
+
         // Reset in-memory indexes
         self.entity_name_index.write().clear();
         self.entity_lowercase_index.write().clear();
+        self.entity_stemmed_index.write().clear();
 
         // Reset counters
         self.entity_count.store(0, Ordering::Relaxed);
@@ -1800,10 +2057,21 @@ pub struct MemoryUniverse {
     pub bounds: UniverseBounds,
 }
 
+/// Entity with hop distance from traversal origin
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraversedEntity {
+    pub entity: EntityNode,
+    /// Number of hops from the starting entity (0 = start entity)
+    pub hop_distance: usize,
+    /// Decay factor based on hop distance: 1.0 at hop 0, decays with each hop
+    pub decay_factor: f32,
+}
+
 /// Result of graph traversal
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphTraversal {
-    pub entities: Vec<EntityNode>,
+    /// Entities found during traversal with hop distance info
+    pub entities: Vec<TraversedEntity>,
     pub relationships: Vec<RelationshipEdge>,
 }
 
