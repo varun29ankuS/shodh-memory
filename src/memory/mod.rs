@@ -1202,14 +1202,26 @@ impl MemorySystem {
         let mut storage_fetches = 0;
         let mut filtered_out = 0;
 
+        // Layer 5: Unified scoring with hebbian + recency
+        // Recency decay: recent memories get boost, old memories decay
+        // λ = 0.01 means ~50% at 70 hours, ~25% at 140 hours
+        const RECENCY_DECAY_RATE: f32 = 0.01;
+        let now = chrono::Utc::now();
+
         for (memory_id, score) in memory_ids {
-            // Layer 5: Apply hebbian boost from learned graph weights
+            // Hebbian boost from learned graph weights (10% contribution)
             let hebbian_boost = hebbian_scores.get(&memory_id).copied().unwrap_or(0.0);
-            let final_score = score + hebbian_boost * 0.1; // 10% hebbian contribution
-                                                           // Helper to clone memory with score set (Arc<Memory> is immutable)
-            let with_score = |mem: &SharedMemory, s: f32| -> SharedMemory {
+            let base_score = score + hebbian_boost * 0.1;
+
+            // Helper to apply recency decay and set final score
+            let with_unified_score = |mem: &SharedMemory, base: f32| -> SharedMemory {
+                // Recency decay: exponential decay based on age (10% contribution)
+                let hours_old = (now - mem.created_at).num_hours().max(0) as f32;
+                let recency_boost = (-RECENCY_DECAY_RATE * hours_old).exp() * 0.1;
+                let final_score = base + recency_boost;
+
                 let mut cloned: Memory = mem.as_ref().clone();
-                cloned.set_score(s);
+                cloned.set_score(final_score);
                 Arc::new(cloned)
             };
 
@@ -1217,7 +1229,7 @@ impl MemorySystem {
             if let Some(memory) = self.working_memory.read().get(&memory_id) {
                 // CRITICAL FIX: Apply filters before adding to results
                 if self.retriever.matches_filters(&memory, &vector_query) {
-                    memories.push(with_score(&memory, final_score));
+                    memories.push(with_unified_score(&memory, base_score));
                     if !sources.contains(&"working") {
                         sources.push("working");
                     }
@@ -1232,7 +1244,7 @@ impl MemorySystem {
             if let Some(memory) = self.session_memory.read().get(&memory_id) {
                 // CRITICAL FIX: Apply filters before adding to results
                 if self.retriever.matches_filters(&memory, &vector_query) {
-                    memories.push(with_score(&memory, final_score));
+                    memories.push(with_unified_score(&memory, base_score));
                     if !sources.contains(&"session") {
                         sources.push("session");
                     }
@@ -1245,11 +1257,17 @@ impl MemorySystem {
 
             // Cold path: Fetch from RocksDB storage (expensive deserialization)
             match self.retriever.get_from_storage(&memory_id) {
-                Ok(mut memory) => {
+                Ok(memory) => {
                     // CRITICAL FIX: Apply filters before adding to results
                     if self.retriever.matches_filters(&memory, &vector_query) {
-                        memory.set_score(final_score);
-                        memories.push(Arc::new(memory));
+                        // Apply unified scoring (hebbian + recency) for long-term memories
+                        let hours_old = (now - memory.created_at).num_hours().max(0) as f32;
+                        let recency_boost = (-RECENCY_DECAY_RATE * hours_old).exp() * 0.1;
+                        let final_score = base_score + recency_boost;
+
+                        let mut scored_memory = memory;
+                        scored_memory.set_score(final_score);
+                        memories.push(Arc::new(scored_memory));
                         if !sources.contains(&"longterm") {
                             sources.push("longterm");
                         }

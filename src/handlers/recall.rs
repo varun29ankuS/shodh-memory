@@ -20,7 +20,7 @@ use super::types::{
 use super::utils::{is_bare_question, is_boilerplate_response, strip_system_noise};
 use crate::errors::{AppError, ValidationErrorExt};
 use crate::memory::feedback;
-use crate::memory::injection::{compute_relevance, InjectionConfig, RelevanceInput};
+// Note: compute_relevance removed - using unified 5-layer pipeline scoring instead
 use crate::memory::segmentation::{InputSource, SegmentationEngine};
 use crate::memory::sessions::SessionEvent;
 use crate::memory::storage::SearchCriteria;
@@ -851,70 +851,57 @@ pub async fn proactive_context(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Embedding task panicked: {e}")))?;
 
-    // 2. Semantic recall with composite relevance scoring
+    // 2. Retrieve memories using unified 5-layer pipeline
+    // The pipeline already applies: hebbian boost (10%) + recency decay (10%) + RRF fusion
+    // No double-scoring needed - just use the scores from recall() directly
     let context_clone = req.context.clone();
     let max_results = req.max_results;
-    let context_emb_for_scoring = context_embedding.clone();
-    let injection_config = InjectionConfig::default();
     let feedback_store_for_scoring = state.feedback_store.clone();
     let memories: Vec<ProactiveSurfacedMemory> = {
         let memory = memory_system.clone();
-        let graph = graph_memory.clone();
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
-            let graph_guard = graph.read();
             let feedback_guard = feedback_store_for_scoring.read();
-            let now = chrono::Utc::now();
 
             let query = MemoryQuery {
                 query_text: Some(context_clone),
-                max_results: max_results * 2, // Fetch more, filter with injection engine
+                max_results: max_results * 2, // Fetch extra for feedback filtering
                 ..Default::default()
             };
             let results = memory_guard.recall(&query).unwrap_or_default();
 
-            // Compute composite relevance for each memory
+            // Use scores from 5-layer pipeline, apply optional feedback suppression
             let mut candidates: Vec<(SharedMemory, f32)> = results
                 .into_iter()
                 .filter_map(|m| {
-                    // Get embedding (skip if none)
-                    let memory_embedding = m.experience.embeddings.as_ref()?.clone();
+                    // Skip memories without embeddings (can't be meaningfully ranked)
+                    if m.experience.embeddings.is_none() {
+                        return None;
+                    }
 
-                    // Get Hebbian strength from graph (default 0.3 if not found)
-                    // Lower default prevents new memories from scoring too high
-                    let hebbian_strength = graph_guard
-                        .get_memory_hebbian_strength(&m.id)
-                        .unwrap_or(0.3);
+                    // Base score from unified 5-layer pipeline (hebbian + recency + RRF)
+                    let mut score = m.get_score().unwrap_or(0.0);
 
-                    // Get feedback momentum EMA with time decay (0.0 if no feedback history)
-                    // Negative values indicate often-ignored memories → suppression
-                    // AUD-6: Apply time-based decay so stale momentum fades
-                    let feedback_momentum = feedback_guard
-                        .get_momentum(&m.id)
-                        .map(|fm| fm.ema_with_decay())
-                        .unwrap_or(0.0);
+                    // Optional: Apply feedback suppression for frequently-ignored memories
+                    // Negative momentum = often ignored → penalize
+                    if let Some(fm) = feedback_guard.get_momentum(&m.id) {
+                        let momentum = fm.ema_with_decay();
+                        if momentum < 0.0 {
+                            // Suppress by up to 20% for highly negative momentum
+                            score *= 1.0 + (momentum * 0.2).max(-0.2);
+                        }
+                    }
 
-                    let input = RelevanceInput {
-                        memory_embedding,
-                        created_at: m.created_at,
-                        hebbian_strength,
-                        feedback_momentum,
-                        ..Default::default()
-                    };
-
-                    let score =
-                        compute_relevance(&input, &context_emb_for_scoring, now, &injection_config);
                     Some((m, score))
                 })
                 .collect();
 
-            // Sort by composite relevance (highest first)
+            // Sort by score (highest first) - already mostly sorted from recall()
             candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-            // Apply injection threshold and limit
+            // Return top results
             candidates
                 .into_iter()
-                .filter(|(_, score)| *score >= injection_config.min_relevance)
                 .take(max_results)
                 .map(|(m, score)| ProactiveSurfacedMemory {
                     id: m.id.0.to_string(),
