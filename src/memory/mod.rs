@@ -108,9 +108,7 @@ pub use crate::memory::sessions::{
     Session, SessionEvent, SessionId, SessionStats, SessionStatus, SessionStore, SessionStoreStats,
     SessionSummary, TemporalContext, TimeOfDay,
 };
-pub use crate::memory::temporal_facts::{
-    EventType, ResolvedTime, TemporalFact, TemporalFactStore,
-};
+pub use crate::memory::temporal_facts::{EventType, ResolvedTime, TemporalFact, TemporalFactStore};
 pub use crate::memory::todos::{ProjectStats, TodoStore, UserTodoStats};
 pub use crate::memory::visualization::{GraphStats, MemoryLogger};
 
@@ -1259,7 +1257,12 @@ impl MemorySystem {
                     .skip(1) // Skip the entity itself
                     .map(|e| e.text.as_str())
                     .chain(analysis.relational_context.iter().map(|r| r.stem.as_str()))
-                    .chain(analysis.discriminative_modifiers.iter().map(|m| m.text.as_str()))
+                    .chain(
+                        analysis
+                            .discriminative_modifiers
+                            .iter()
+                            .map(|m| m.text.as_str()),
+                    )
                     .collect();
 
                 if !entity.is_empty() && !event_keywords.is_empty() {
@@ -1295,10 +1298,8 @@ impl MemorySystem {
                             );
 
                             // Collect source memory IDs from matching facts
-                            let boosted: HashSet<MemoryId> = facts
-                                .iter()
-                                .map(|f| f.source_memory_id.clone())
-                                .collect();
+                            let boosted: HashSet<MemoryId> =
+                                facts.iter().map(|f| f.source_memory_id.clone()).collect();
                             boosted
                         }
                         Ok(_) => {
@@ -2147,7 +2148,8 @@ impl MemorySystem {
         entities: &[String],
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<usize> {
-        let facts = temporal_facts::extract_temporal_facts(content, memory_id, created_at, entities);
+        let facts =
+            temporal_facts::extract_temporal_facts(content, memory_id, created_at, entities);
         if facts.is_empty() {
             return Ok(0);
         }
@@ -2175,8 +2177,12 @@ impl MemorySystem {
         event_keywords: &[&str],
         event_type: Option<temporal_facts::EventType>,
     ) -> Result<Vec<temporal_facts::TemporalFact>> {
-        self.temporal_fact_store
-            .find_by_entity_and_event(user_id, entity, event_keywords, event_type)
+        self.temporal_fact_store.find_by_entity_and_event(
+            user_id,
+            entity,
+            event_keywords,
+            event_type,
+        )
     }
 
     /// List all temporal facts for a user

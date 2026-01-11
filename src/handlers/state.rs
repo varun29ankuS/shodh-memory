@@ -18,8 +18,8 @@ use crate::embeddings::{
     KeywordExtractor, NerConfig, NeuralNer,
 };
 use crate::graph_memory::{
-    EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, GraphStats, RelationType,
-    RelationshipEdge,
+    EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, GraphStats,
+    RelationType, RelationshipEdge,
 };
 use crate::memory::{
     facts::SemanticFactStore, query_parser, Experience, FeedbackStore, FileMemoryStore,
@@ -1330,7 +1330,7 @@ impl MultiUserMemoryManager {
                     from_entity: entity_uuids[i].1,
                     to_entity: entity_uuids[j].1,
                     relation_type: RelationType::RelatedTo,
-                    strength: 0.5,
+                    strength: EdgeTier::L1Working.initial_weight(),
                     created_at: chrono::Utc::now(),
                     valid_at: chrono::Utc::now(),
                     invalidated_at: None,
@@ -1339,6 +1339,7 @@ impl MultiUserMemoryManager {
                     last_activated: chrono::Utc::now(),
                     activation_count: 1,
                     potentiated: false,
+                    tier: EdgeTier::L1Working,
                 };
 
                 if let Err(e) = graph_guard.add_relationship(edge) {

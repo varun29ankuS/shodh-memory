@@ -15,8 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::constants::{LTP_LEARNING_RATE, LTP_MIN_STRENGTH, LTP_THRESHOLD};
-use crate::decay::hybrid_decay_factor;
+use crate::constants::LTP_MIN_STRENGTH;
 
 /// Entity node in the knowledge graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +101,74 @@ impl EntityLabel {
     }
 }
 
+/// Memory tier for edge consolidation
+///
+/// Based on hippocampal-cortical memory consolidation research:
+/// - L1 (Working): Dense, fast encoding, aggressive pruning (Dentate Gyrus-like)
+/// - L2 (Episodic): Moderate density, Hebbian selection (CA1/CA3-like)
+/// - L3 (Semantic): Sparse, near-permanent (Neocortex-like)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum EdgeTier {
+    /// Working memory tier: new edges, dense, aggressive decay
+    #[default]
+    L1Working,
+    /// Episodic memory tier: proven edges, moderate decay
+    L2Episodic,
+    /// Semantic memory tier: consolidated edges, near-permanent
+    L3Semantic,
+}
+
+impl EdgeTier {
+    /// Get the initial weight for edges in this tier
+    pub fn initial_weight(&self) -> f32 {
+        use crate::constants::*;
+        match self {
+            Self::L1Working => L1_INITIAL_WEIGHT,
+            Self::L2Episodic => L2_PROMOTION_WEIGHT,
+            Self::L3Semantic => L3_PROMOTION_WEIGHT,
+        }
+    }
+
+    /// Get the prune threshold for this tier
+    pub fn prune_threshold(&self) -> f32 {
+        use crate::constants::*;
+        match self {
+            Self::L1Working => L1_PRUNE_THRESHOLD,
+            Self::L2Episodic => L2_PRUNE_THRESHOLD,
+            Self::L3Semantic => L3_PRUNE_THRESHOLD,
+        }
+    }
+
+    /// Get the promotion threshold to move to next tier
+    pub fn promotion_threshold(&self) -> Option<f32> {
+        use crate::constants::*;
+        match self {
+            Self::L1Working => Some(L1_PROMOTION_THRESHOLD),
+            Self::L2Episodic => Some(L2_PROMOTION_THRESHOLD),
+            Self::L3Semantic => None, // Already at highest tier
+        }
+    }
+
+    /// Get the next tier (for promotion)
+    pub fn next_tier(&self) -> Option<Self> {
+        match self {
+            Self::L1Working => Some(Self::L2Episodic),
+            Self::L2Episodic => Some(Self::L3Semantic),
+            Self::L3Semantic => None,
+        }
+    }
+
+    /// Get target density for this tier
+    pub fn target_density(&self) -> f32 {
+        use crate::constants::*;
+        match self {
+            Self::L1Working => L1_TARGET_DENSITY,
+            Self::L2Episodic => L2_TARGET_DENSITY,
+            Self::L3Semantic => L3_TARGET_DENSITY,
+        }
+    }
+}
+
 /// Relationship edge between entities
 ///
 /// Implements Hebbian synaptic plasticity: "Neurons that fire together, wire together"
@@ -156,6 +223,11 @@ pub struct RelationshipEdge {
     /// Once potentiated, decay is dramatically reduced (like biological LTP)
     #[serde(default)]
     pub potentiated: bool,
+
+    /// Memory tier for consolidation (L1→L2→L3)
+    /// Edges start in L1 (working memory) and promote based on Hebbian strength
+    #[serde(default)]
+    pub tier: EdgeTier,
 }
 
 fn default_last_activated() -> DateTime<Utc> {
@@ -177,12 +249,21 @@ impl RelationshipEdge {
     ///
     /// The (1 - w_old) term ensures asymptotic approach to 1.0,
     /// preventing unbounded growth while allowing strong associations.
+    ///
+    /// Also handles tier promotion (L1→L2→L3) when strength exceeds tier threshold.
     pub fn strengthen(&mut self) {
+        use crate::constants::*;
+
         self.activation_count += 1;
         self.last_activated = Utc::now();
 
-        // Hebbian strengthening: diminishing returns as strength approaches 1.0
-        let boost = LTP_LEARNING_RATE * (1.0 - self.strength);
+        // Hebbian strengthening with tier-specific boost
+        let tier_boost = match self.tier {
+            EdgeTier::L1Working => TIER_CO_ACCESS_BOOST,
+            EdgeTier::L2Episodic => TIER_CO_ACCESS_BOOST * 0.8, // Slower growth in higher tiers
+            EdgeTier::L3Semantic => TIER_CO_ACCESS_BOOST * 0.5,
+        };
+        let boost = (LTP_LEARNING_RATE + tier_boost) * (1.0 - self.strength);
         self.strength = (self.strength + boost).min(1.0);
 
         // Check for Long-Term Potentiation threshold
@@ -191,68 +272,108 @@ impl RelationshipEdge {
             // LTP bonus: immediate strength boost
             self.strength = (self.strength + 0.2).min(1.0);
         }
+
+        // Tier promotion: check if strength exceeds current tier's promotion threshold
+        if let Some(threshold) = self.tier.promotion_threshold() {
+            if self.strength >= threshold {
+                if let Some(next_tier) = self.tier.next_tier() {
+                    let old_tier = self.tier;
+                    self.tier = next_tier;
+                    // Reset strength to next tier's initial weight (consolidation)
+                    self.strength = next_tier.initial_weight();
+                    tracing::debug!(
+                        "Edge {} promoted: {:?} → {:?}",
+                        self.uuid,
+                        old_tier,
+                        self.tier
+                    );
+                }
+            }
+        }
+
+        // L3 semantic edges with high strength get LTP automatically
+        if matches!(self.tier, EdgeTier::L3Semantic) && self.strength >= TIER_LTP_THRESHOLD {
+            self.potentiated = true;
+        }
     }
 
     /// Apply time-based decay to this synapse
     ///
-    /// Uses hybrid decay model (SHO-103):
-    /// - t < 3 days: Exponential decay (fast consolidation filtering)
-    /// - t ≥ 3 days: Power-law decay (heavy tail for long-term retention)
+    /// Uses tier-aware decay model (3-tier memory consolidation):
+    /// - L1 (Working): 15%/hour decay, max 4 hours before prune
+    /// - L2 (Episodic): 10%/day decay, max 14 days before prune
+    /// - L3 (Semantic): 2%/month decay, near-permanent
     ///
-    /// Potentiated synapses use lower β exponent for even slower decay.
+    /// Potentiated synapses decay 5x slower.
     ///
     /// **Important:** Updates `last_activated` to prevent double-decay on
-    /// repeated calls. Also caps max decay at 365 days to protect against
-    /// clock jumps.
+    /// repeated calls.
     ///
-    /// Returns true if synapse should be pruned (strength below threshold)
+    /// Returns true if synapse should be pruned (below tier's threshold)
     pub fn decay(&mut self) -> bool {
+        use crate::decay::tier_decay_factor;
+
         let now = Utc::now();
         let elapsed = now.signed_duration_since(self.last_activated);
-        let mut days_elapsed = elapsed.num_seconds() as f64 / 86400.0;
+        let hours_elapsed = elapsed.num_seconds() as f64 / 3600.0;
 
-        if days_elapsed <= 0.0 {
+        if hours_elapsed <= 0.0 {
             return false;
         }
 
-        // Cap max decay to protect against clock jumps (max 1 year per call)
-        const MAX_DECAY_DAYS: f64 = 365.0;
-        if days_elapsed > MAX_DECAY_DAYS {
-            days_elapsed = MAX_DECAY_DAYS;
-        }
+        // Cap max decay to protect against clock jumps (max 1 year = 8760 hours)
+        let hours_elapsed = hours_elapsed.min(8760.0);
 
-        // Hybrid decay: exponential for consolidation, power-law for long-term
-        let decay_factor = hybrid_decay_factor(days_elapsed, self.potentiated);
+        // Tier-aware decay
+        let tier_num = match self.tier {
+            EdgeTier::L1Working => 0,
+            EdgeTier::L2Episodic => 1,
+            EdgeTier::L3Semantic => 2,
+        };
+        let (decay_factor, exceeded_max_age) =
+            tier_decay_factor(hours_elapsed, tier_num, self.potentiated);
         self.strength *= decay_factor;
 
         // Update last_activated to prevent double-decay on repeated calls
         self.last_activated = now;
 
         // Apply floor to prevent complete forgetting
+        let prune_threshold = self.tier.prune_threshold();
         if self.strength < LTP_MIN_STRENGTH {
             self.strength = LTP_MIN_STRENGTH;
         }
 
         // Return whether this synapse should be pruned
-        // Non-potentiated synapses with minimal strength can be removed
-        !self.potentiated && self.strength <= LTP_MIN_STRENGTH
+        // Prune if: exceeded max age OR below prune threshold (unless potentiated)
+        if self.potentiated {
+            false // Never prune potentiated edges
+        } else {
+            exceeded_max_age || self.strength <= prune_threshold
+        }
     }
 
     /// Get the effective strength considering recency
     ///
     /// This is a read-only version that calculates what the strength
     /// would be after decay, without modifying the edge.
-    /// Uses hybrid decay model (exponential → power-law).
+    /// Uses tier-aware decay (L1/L2/L3 have different decay rates).
     pub fn effective_strength(&self) -> f32 {
+        use crate::decay::tier_decay_factor;
+
         let now = Utc::now();
         let elapsed = now.signed_duration_since(self.last_activated);
-        let days_elapsed = elapsed.num_seconds() as f64 / 86400.0;
+        let hours_elapsed = elapsed.num_seconds() as f64 / 3600.0;
 
-        if days_elapsed <= 0.0 {
+        if hours_elapsed <= 0.0 {
             return self.strength;
         }
 
-        let decay_factor = hybrid_decay_factor(days_elapsed, self.potentiated);
+        let tier_num = match self.tier {
+            EdgeTier::L1Working => 0,
+            EdgeTier::L2Episodic => 1,
+            EdgeTier::L3Semantic => 2,
+        };
+        let (decay_factor, _) = tier_decay_factor(hours_elapsed, tier_num, self.potentiated);
         (self.strength * decay_factor).max(LTP_MIN_STRENGTH)
     }
 }
@@ -1973,12 +2094,13 @@ impl GraphMemory {
                     }
                 } else {
                     // Create new CoRetrieved edge (bidirectional represented as single edge)
+                    // Starts in L1 (working memory) with tier-specific initial weight
                     let edge = RelationshipEdge {
                         uuid: Uuid::new_v4(),
                         from_entity: mem_a,
                         to_entity: mem_b,
                         relation_type: RelationType::CoRetrieved,
-                        strength: 0.5, // Initial strength
+                        strength: EdgeTier::L1Working.initial_weight(),
                         created_at: Utc::now(),
                         valid_at: Utc::now(),
                         invalidated_at: None,
@@ -1987,6 +2109,7 @@ impl GraphMemory {
                         last_activated: Utc::now(),
                         activation_count: 1,
                         potentiated: false,
+                        tier: EdgeTier::L1Working,
                     };
 
                     let key = edge.uuid.as_bytes();
@@ -2086,12 +2209,13 @@ impl GraphMemory {
                 }
             } else {
                 // Create new ReplayStrengthened edge
+                // Replay edges start in L2 (episodic) since they represent consolidated associations
                 let edge = RelationshipEdge {
                     uuid: Uuid::new_v4(),
                     from_entity: from_uuid,
                     to_entity: to_uuid,
-                    relation_type: RelationType::CoRetrieved, // Replay strengthens co-retrieval associations
-                    strength: 0.5,                            // Initial strength
+                    relation_type: RelationType::CoRetrieved,
+                    strength: EdgeTier::L2Episodic.initial_weight(),
                     created_at: Utc::now(),
                     valid_at: Utc::now(),
                     invalidated_at: None,
@@ -2100,6 +2224,7 @@ impl GraphMemory {
                     last_activated: Utc::now(),
                     activation_count: 1,
                     potentiated: false,
+                    tier: EdgeTier::L2Episodic,
                 };
 
                 let key = edge.uuid.as_bytes();
@@ -3942,6 +4067,7 @@ mod tests {
             last_activated: Utc::now() - Duration::days(days_since_activated),
             activation_count: 0,
             potentiated: false,
+            tier: EdgeTier::L1Working,
         }
     }
 
@@ -4266,6 +4392,7 @@ mod tests {
             last_activated: Utc::now(), // Just activated - no decay
             activation_count: 5,
             potentiated: false,
+            tier: EdgeTier::L2Episodic, // Use L2 since it has activation count
         };
         graph.add_relationship(edge).unwrap();
 

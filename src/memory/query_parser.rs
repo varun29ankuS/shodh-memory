@@ -26,7 +26,7 @@
 //! - Based on TEMPR approach (Hindsight paper achieving 89.6% on LoCoMo)
 
 use crate::constants::{IC_ADJECTIVE, IC_NOUN, IC_VERB};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -235,30 +235,39 @@ impl TemporalExtraction {
 /// - Day of week: "on Monday", "last Tuesday"
 /// - Month/year: "in May", "last year", "2023"
 pub fn extract_temporal_refs(text: &str) -> TemporalExtraction {
-    use date_time_parser::DateParser;
-
     let now = Utc::now();
     let mut refs = Vec::new();
     let mut earliest: Option<NaiveDate> = None;
     let mut latest: Option<NaiveDate> = None;
 
-    // Try parsing the entire text first for context
-    // date_time_parser::DateParser::parse returns Option<NaiveDate> directly
-    if let Some(date) = DateParser::parse(text) {
-        refs.push(TemporalRef {
-            date,
-            original_text: text.to_string(),
-            confidence: 0.8,
-            position: 0,
-            ref_type: classify_temporal_ref(text, &date, &now),
-        });
-        update_bounds(&mut earliest, &mut latest, date);
+    // Helper to validate date is in reasonable range (1900-2100)
+    let is_valid_date = |date: &NaiveDate| -> bool {
+        let year = date.year();
+        year >= 1900 && year <= 2100
+    };
+
+    // Try dateparser on the full text (returns Result, never panics)
+    if let Ok(parsed) = dateparser::parse(text) {
+        let date = parsed.date_naive();
+        if is_valid_date(&date) {
+            refs.push(TemporalRef {
+                date,
+                original_text: text.to_string(),
+                confidence: 0.8,
+                position: 0,
+                ref_type: classify_temporal_ref(text, &date, &now),
+            });
+            update_bounds(&mut earliest, &mut latest, date);
+        }
     }
 
-    // Also try parsing individual sentences/phrases
+    // Try parsing individual sentences/phrases
     for (pos, sentence) in split_temporal_phrases(text).iter().enumerate() {
-        if let Some(date) = DateParser::parse(sentence) {
-            // Skip if we already found this date
+        if let Ok(parsed) = dateparser::parse(sentence) {
+            let date = parsed.date_naive();
+            if !is_valid_date(&date) {
+                continue;
+            }
             if refs.iter().any(|r| r.date == date) {
                 continue;
             }
@@ -273,9 +282,12 @@ pub fn extract_temporal_refs(text: &str) -> TemporalExtraction {
         }
     }
 
-    // Try explicit date patterns that date_time_parser might miss
+    // Also use regex-based extraction for explicit date patterns
     let explicit_dates = extract_explicit_dates(text);
     for (date, original, pos) in explicit_dates {
+        if !is_valid_date(&date) {
+            continue;
+        }
         if refs.iter().any(|r| r.date == date) {
             continue;
         }
@@ -598,15 +610,348 @@ pub fn detect_temporal_intent(query: &str) -> TemporalIntent {
 ///
 /// Returns true if the query has a temporal component that should be used
 /// to filter/rank memories by their temporal references.
+///
+/// IMPORTANT: "When did X happen?" questions (WhenQuestion) return FALSE
+/// because they are asking FOR a date, not filtering BY a date.
+/// We should search semantically for X and extract the date from results.
+///
+/// "What happened in May 2023?" (SpecificTime) returns TRUE because
+/// it's filtering BY a specific time period.
 pub fn requires_temporal_filtering(query: &str) -> bool {
     let intent = detect_temporal_intent(query);
     matches!(
         intent,
-        TemporalIntent::WhenQuestion
-            | TemporalIntent::SpecificTime
-            | TemporalIntent::Duration
-            | TemporalIntent::Ordering
+        // WhenQuestion is EXCLUDED - it asks FOR a date, not BY a date
+        TemporalIntent::SpecificTime | TemporalIntent::Duration | TemporalIntent::Ordering
     )
+}
+
+/// Check if a query is asking FOR a temporal answer (when did X happen?)
+///
+/// These queries should use semantic search on the event X, then extract
+/// the date from the retrieved content.
+pub fn asks_for_temporal_answer(query: &str) -> bool {
+    matches!(detect_temporal_intent(query), TemporalIntent::WhenQuestion)
+}
+
+// ============================================================================
+// ATTRIBUTE QUERY DETECTION
+// ============================================================================
+// Detect queries asking for specific attributes of entities.
+// These queries need fact-first retrieval, not semantic similarity.
+//
+// Examples:
+// - "What is Caroline's relationship status?" → entity=Caroline, attribute=relationship_status
+// - "What is Melanie's job?" → entity=Melanie, attribute=job
+// - "Where does Caroline live?" → entity=Caroline, attribute=location
+
+/// Type of query for routing to appropriate retrieval strategy
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryType {
+    /// Attribute query: "What is X's Y?" - needs fact lookup
+    Attribute(AttributeQuery),
+    /// Temporal query: "When did X do Y?" - needs temporal filtering
+    Temporal,
+    /// Exploratory query: general semantic search
+    Exploratory,
+}
+
+/// Extracted attribute query components
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeQuery {
+    /// The entity being asked about (e.g., "Caroline")
+    pub entity: String,
+    /// The attribute being requested (e.g., "relationship_status")
+    pub attribute: String,
+    /// Attribute synonyms for matching (e.g., ["status", "single", "married", "dating"])
+    pub attribute_synonyms: Vec<String>,
+    /// Original query text
+    pub original_query: String,
+}
+
+/// Classify a query to determine retrieval strategy
+pub fn classify_query(query: &str) -> QueryType {
+    // First check for attribute queries
+    if let Some(attr_query) = detect_attribute_query(query) {
+        return QueryType::Attribute(attr_query);
+    }
+
+    // Check for temporal queries
+    if asks_for_temporal_answer(query) {
+        return QueryType::Temporal;
+    }
+
+    // Default to exploratory
+    QueryType::Exploratory
+}
+
+/// Detect and extract attribute query components
+///
+/// Patterns detected:
+/// - "What is X's Y?" / "What is X's Y"
+/// - "What is the Y of X?"
+/// - "What Y does X have?"
+/// - "Is X Y?" (boolean attribute)
+/// - "Where does/is X?" (location attribute)
+/// - "How old is X?" (age attribute)
+pub fn detect_attribute_query(query: &str) -> Option<AttributeQuery> {
+    let query_lower = query.to_lowercase();
+    let query_trimmed = query_lower.trim().trim_end_matches('?');
+
+    // Pattern 1: "What is X's Y" / "What's X's Y"
+    if let Some(result) = extract_possessive_pattern(query_trimmed) {
+        return Some(result);
+    }
+
+    // Pattern 2: "What is the Y of X"
+    if let Some(result) = extract_of_pattern(query_trimmed) {
+        return Some(result);
+    }
+
+    // Pattern 3: "Where does/is X" (location attribute)
+    if query_lower.starts_with("where does") || query_lower.starts_with("where is") {
+        if let Some(entity) = extract_entity_after_verb(query_trimmed) {
+            return Some(AttributeQuery {
+                entity,
+                attribute: "location".to_string(),
+                attribute_synonyms: vec![
+                    "live".to_string(),
+                    "lives".to_string(),
+                    "living".to_string(),
+                    "resides".to_string(),
+                    "located".to_string(),
+                    "address".to_string(),
+                    "home".to_string(),
+                    "place".to_string(),
+                ],
+                original_query: query.to_string(),
+            });
+        }
+    }
+
+    // Pattern 4: "How old is X" (age attribute)
+    if query_lower.starts_with("how old") {
+        if let Some(entity) = extract_entity_after_verb(query_trimmed) {
+            return Some(AttributeQuery {
+                entity,
+                attribute: "age".to_string(),
+                attribute_synonyms: vec![
+                    "age".to_string(),
+                    "years old".to_string(),
+                    "born".to_string(),
+                    "birthday".to_string(),
+                ],
+                original_query: query.to_string(),
+            });
+        }
+    }
+
+    // Pattern 5: "Is X married/single/..." (boolean relationship status)
+    if query_lower.starts_with("is ") {
+        let status_words = [
+            "married",
+            "single",
+            "divorced",
+            "engaged",
+            "dating",
+            "in a relationship",
+        ];
+        for status in &status_words {
+            if query_lower.contains(status) {
+                // Extract entity between "is" and status word
+                let after_is = &query_trimmed[3..]; // Skip "is "
+                if let Some(pos) = after_is.find(status) {
+                    let entity = after_is[..pos].trim().to_string();
+                    if !entity.is_empty()
+                        && entity.chars().next().map_or(false, |c| c.is_alphabetic())
+                    {
+                        return Some(AttributeQuery {
+                            entity: capitalize_first(&entity),
+                            attribute: "relationship_status".to_string(),
+                            attribute_synonyms: vec![
+                                "single".to_string(),
+                                "married".to_string(),
+                                "divorced".to_string(),
+                                "engaged".to_string(),
+                                "dating".to_string(),
+                                "relationship".to_string(),
+                                "partner".to_string(),
+                                "spouse".to_string(),
+                                "status".to_string(),
+                            ],
+                            original_query: query.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract "X's Y" pattern from query
+fn extract_possessive_pattern(query: &str) -> Option<AttributeQuery> {
+    // Find possessive marker ('s or s')
+    let possessive_patterns = [
+        ("what is ", "'s "),
+        ("what's ", "'s "),
+        ("what is ", "' "),
+        ("what's ", "' "),
+    ];
+
+    for (prefix, possessive) in possessive_patterns {
+        if let Some(start) = query.find(prefix) {
+            let after_prefix = &query[start + prefix.len()..];
+            if let Some(pos_pos) = after_prefix.find(possessive) {
+                let entity = after_prefix[..pos_pos].trim();
+                let attribute = after_prefix[pos_pos + possessive.len()..].trim();
+
+                if !entity.is_empty() && !attribute.is_empty() {
+                    return Some(AttributeQuery {
+                        entity: capitalize_first(entity),
+                        attribute: normalize_attribute(attribute),
+                        attribute_synonyms: get_attribute_synonyms(attribute),
+                        original_query: query.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract "the Y of X" pattern from query
+fn extract_of_pattern(query: &str) -> Option<AttributeQuery> {
+    // Pattern: "what is the Y of X"
+    let prefixes = ["what is the ", "what's the "];
+
+    for prefix in prefixes {
+        if let Some(start) = query.find(prefix) {
+            let after_prefix = &query[start + prefix.len()..];
+            if let Some(of_pos) = after_prefix.find(" of ") {
+                let attribute = after_prefix[..of_pos].trim();
+                let entity = after_prefix[of_pos + 4..].trim();
+
+                if !entity.is_empty() && !attribute.is_empty() {
+                    return Some(AttributeQuery {
+                        entity: capitalize_first(entity),
+                        attribute: normalize_attribute(attribute),
+                        attribute_synonyms: get_attribute_synonyms(attribute),
+                        original_query: query.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract entity after a verb like "is" or "does"
+fn extract_entity_after_verb(query: &str) -> Option<String> {
+    let verbs = [" is ", " does "];
+    for verb in verbs {
+        if let Some(pos) = query.find(verb) {
+            let after_verb = query[pos + verb.len()..].trim();
+            // Take first word(s) as entity (stop at common words)
+            let stop_words = ["live", "work", "do", "have", "go", "stay", "come"];
+            let words: Vec<&str> = after_verb.split_whitespace().collect();
+            let mut entity_words = Vec::new();
+            for word in words {
+                if stop_words.contains(&word) {
+                    break;
+                }
+                entity_words.push(word);
+            }
+            if !entity_words.is_empty() {
+                return Some(capitalize_first(&entity_words.join(" ")));
+            }
+        }
+    }
+    None
+}
+
+/// Normalize an attribute name (e.g., "relationship status" → "relationship_status")
+fn normalize_attribute(attr: &str) -> String {
+    attr.trim()
+        .to_lowercase()
+        .replace(' ', "_")
+        .replace('-', "_")
+}
+
+/// Get synonyms for common attributes
+fn get_attribute_synonyms(attribute: &str) -> Vec<String> {
+    let attr_lower = attribute.to_lowercase();
+
+    // Relationship status synonyms
+    if attr_lower.contains("relationship")
+        || attr_lower.contains("status")
+        || attr_lower.contains("marital")
+    {
+        return vec![
+            "single".to_string(),
+            "married".to_string(),
+            "divorced".to_string(),
+            "engaged".to_string(),
+            "dating".to_string(),
+            "relationship".to_string(),
+            "partner".to_string(),
+            "spouse".to_string(),
+            "single parent".to_string(),
+            "status".to_string(),
+            "marital".to_string(),
+        ];
+    }
+
+    // Job/occupation synonyms
+    if attr_lower.contains("job")
+        || attr_lower.contains("occupation")
+        || attr_lower.contains("work")
+    {
+        return vec![
+            "job".to_string(),
+            "work".to_string(),
+            "occupation".to_string(),
+            "profession".to_string(),
+            "career".to_string(),
+            "employed".to_string(),
+            "works as".to_string(),
+        ];
+    }
+
+    // Name synonyms
+    if attr_lower.contains("name") {
+        return vec![
+            "name".to_string(),
+            "called".to_string(),
+            "named".to_string(),
+        ];
+    }
+
+    // Age synonyms
+    if attr_lower.contains("age") {
+        return vec![
+            "age".to_string(),
+            "old".to_string(),
+            "years".to_string(),
+            "born".to_string(),
+            "birthday".to_string(),
+        ];
+    }
+
+    // Default: return the attribute itself and common variations
+    vec![attr_lower.clone(), attr_lower.replace('_', " ")]
+}
+
+/// Capitalize first letter of a string
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+    }
 }
 
 /// Extract chunks from text using shallow parsing

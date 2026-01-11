@@ -248,9 +248,7 @@ pub struct GraphDataStats {
 }
 
 /// GET /graph/view - Serve interactive graph visualization HTML
-pub async fn graph_view(
-    Query(params): Query<GraphViewParams>,
-) -> Html<String> {
+pub async fn graph_view(Query(params): Query<GraphViewParams>) -> Html<String> {
     let user_id = params.user_id.unwrap_or_else(|| "default".to_string());
     Html(generate_graph_html(&user_id))
 }
@@ -267,9 +265,9 @@ pub async fn get_graph_data(
         .map_err(AppError::Internal)?;
 
     let memory_guard = memory.read();
-    let graph = memory_guard.graph_memory().ok_or_else(|| {
-        AppError::Internal(anyhow::anyhow!("Graph memory not initialized"))
-    })?;
+    let graph = memory_guard
+        .graph_memory()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Graph memory not initialized")))?;
     let graph_guard = graph.read();
 
     let mut nodes = Vec::new();
@@ -302,18 +300,28 @@ pub async fn get_graph_data(
         use crate::graph_memory::EdgeTier;
 
         // Separate by tier for proportional sampling
-        let l1_edges: Vec<_> = relationships.iter()
+        let l1_edges: Vec<_> = relationships
+            .iter()
             .filter(|r| matches!(r.tier, EdgeTier::L1Working))
-            .take(200).collect();
-        let l2_edges: Vec<_> = relationships.iter()
+            .take(200)
+            .collect();
+        let l2_edges: Vec<_> = relationships
+            .iter()
             .filter(|r| matches!(r.tier, EdgeTier::L2Episodic))
-            .take(200).collect();
-        let l3_edges: Vec<_> = relationships.iter()
+            .take(200)
+            .collect();
+        let l3_edges: Vec<_> = relationships
+            .iter()
             .filter(|r| matches!(r.tier, EdgeTier::L3Semantic))
-            .take(200).collect();
+            .take(200)
+            .collect();
 
         // Add edges from each tier
-        for rel in l1_edges.iter().chain(l2_edges.iter()).chain(l3_edges.iter()) {
+        for rel in l1_edges
+            .iter()
+            .chain(l2_edges.iter())
+            .chain(l3_edges.iter())
+        {
             let tier_str = match rel.tier {
                 EdgeTier::L1Working => {
                     l1_count += 1;
@@ -341,7 +349,8 @@ pub async fn get_graph_data(
 
     // Add memory nodes and connect them to their entities
     let memories = memory_guard.get_longterm_memories(100).unwrap_or_default();
-    let entity_ids: std::collections::HashSet<String> = nodes.iter().map(|n| n.id.clone()).collect();
+    let entity_ids: std::collections::HashSet<String> =
+        nodes.iter().map(|n| n.id.clone()).collect();
 
     for mem in memories {
         let mem_id = mem.id.0.to_string();

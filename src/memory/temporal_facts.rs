@@ -176,11 +176,7 @@ impl TemporalFactStore {
         entity: &str,
         limit: usize,
     ) -> Result<Vec<TemporalFact>> {
-        let prefix = format!(
-            "temporal_by_entity:{}:{}:",
-            user_id,
-            entity.to_lowercase()
-        );
+        let prefix = format!("temporal_by_entity:{}:{}:", user_id, entity.to_lowercase());
         self.find_by_prefix(&prefix, user_id, limit)
     }
 
@@ -335,29 +331,17 @@ pub fn extract_temporal_facts(
         let entity = mentioned_entity.unwrap().clone();
 
         // Try to extract temporal facts using patterns
-        if let Some(fact) = extract_planning_fact(
-            sentence,
-            &entity,
-            memory_id,
-            conversation_date,
-            &stemmer,
-        ) {
+        if let Some(fact) =
+            extract_planning_fact(sentence, &entity, memory_id, conversation_date, &stemmer)
+        {
             facts.push(fact);
-        } else if let Some(fact) = extract_occurred_fact(
-            sentence,
-            &entity,
-            memory_id,
-            conversation_date,
-            &stemmer,
-        ) {
+        } else if let Some(fact) =
+            extract_occurred_fact(sentence, &entity, memory_id, conversation_date, &stemmer)
+        {
             facts.push(fact);
-        } else if let Some(fact) = extract_historical_fact(
-            sentence,
-            &entity,
-            memory_id,
-            conversation_date,
-            &stemmer,
-        ) {
+        } else if let Some(fact) =
+            extract_historical_fact(sentence, &entity, memory_id, conversation_date, &stemmer)
+        {
             facts.push(fact);
         }
     }
@@ -391,9 +375,7 @@ fn extract_planning_fact(
         "soon",
     ];
 
-    let has_planning = planning_patterns
-        .iter()
-        .any(|p| sentence_lower.contains(p));
+    let has_planning = planning_patterns.iter().any(|p| sentence_lower.contains(p));
     if !has_planning {
         return None;
     }
@@ -465,7 +447,9 @@ fn extract_occurred_fact(
     ];
 
     // Check for past tense verbs combined with time patterns
-    let past_verbs = ["ran", "went", "did", "took", "made", "had", "got", "saw", "met"];
+    let past_verbs = [
+        "ran", "went", "did", "took", "made", "had", "got", "saw", "met",
+    ];
     let has_past_event = occurred_patterns.iter().any(|p| sentence_lower.contains(p))
         || past_verbs.iter().any(|v| sentence_lower.contains(v));
 
@@ -623,17 +607,117 @@ fn extract_time_expression(sentence: &str) -> String {
 /// Extract main event/action from sentence
 fn extract_event_from_sentence(sentence: &str) -> String {
     let stopwords: HashSet<&str> = [
-        "i", "we", "you", "they", "he", "she", "it", "the", "a", "an", "is", "are", "was", "were",
-        "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "must", "shall", "can", "to", "of", "in", "for", "on", "with",
-        "at", "by", "from", "as", "into", "through", "during", "before", "after", "above", "below",
-        "between", "under", "again", "further", "then", "once", "here", "there", "when", "where",
-        "why", "how", "all", "each", "few", "more", "most", "other", "some", "such", "no", "nor",
-        "not", "only", "own", "same", "so", "than", "too", "very", "just", "about", "really",
-        "also", "that", "this", "these", "those", "am", "going", "planning", "thinking", "want",
-        "hope", "looking", "forward", "excited", "last", "next", "week", "month", "year",
-        "saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "weekend",
-        "ago", "recently",
+        "i",
+        "we",
+        "you",
+        "they",
+        "he",
+        "she",
+        "it",
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "must",
+        "shall",
+        "can",
+        "to",
+        "of",
+        "in",
+        "for",
+        "on",
+        "with",
+        "at",
+        "by",
+        "from",
+        "as",
+        "into",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "between",
+        "under",
+        "again",
+        "further",
+        "then",
+        "once",
+        "here",
+        "there",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "each",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "nor",
+        "not",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "about",
+        "really",
+        "also",
+        "that",
+        "this",
+        "these",
+        "those",
+        "am",
+        "going",
+        "planning",
+        "thinking",
+        "want",
+        "hope",
+        "looking",
+        "forward",
+        "excited",
+        "last",
+        "next",
+        "week",
+        "month",
+        "year",
+        "saturday",
+        "sunday",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "weekend",
+        "ago",
+        "recently",
     ]
     .into_iter()
     .collect();
@@ -775,10 +859,9 @@ pub fn resolve_relative_time(relative: &str, conversation_date: DateTime<Utc>) -
 /// Find the last occurrence of a weekday before the given date
 fn last_weekday(from: NaiveDate, target: Weekday) -> NaiveDate {
     let current_weekday = from.weekday();
-    let days_back = (current_weekday.num_days_from_monday() as i64
-        - target.num_days_from_monday() as i64
-        + 7)
-        % 7;
+    let days_back =
+        (current_weekday.num_days_from_monday() as i64 - target.num_days_from_monday() as i64 + 7)
+            % 7;
     let days_back = if days_back == 0 { 7 } else { days_back };
     from - Duration::days(days_back)
 }
@@ -786,10 +869,9 @@ fn last_weekday(from: NaiveDate, target: Weekday) -> NaiveDate {
 /// Find the next occurrence of a weekday after the given date
 fn next_weekday(from: NaiveDate, target: Weekday) -> NaiveDate {
     let current_weekday = from.weekday();
-    let days_forward = (target.num_days_from_monday() as i64
-        - current_weekday.num_days_from_monday() as i64
-        + 7)
-        % 7;
+    let days_forward =
+        (target.num_days_from_monday() as i64 - current_weekday.num_days_from_monday() as i64 + 7)
+            % 7;
     let days_forward = if days_forward == 0 { 7 } else { days_forward };
     from + Duration::days(days_forward)
 }

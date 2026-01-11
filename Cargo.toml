@@ -105,7 +105,7 @@ lru = "0.12"
 regex = "1.12"
 rust-stemmers = "1.2"  # Porter2 stemming for linguistic analysis
 dirs = "6.0"  # Platform-specific directory paths
-date_time_parser = "0.2"  # Natural language date extraction for temporal retrieval
+dateparser = "0.2"  # Safe natural language date parsing (returns Result, no panic)
 glob = "0.3"  # Pattern matching for file paths
 yake-rust = "1.0"  # Statistical keyword extraction (position, frequency, capitalization)
 

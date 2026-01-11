@@ -937,6 +937,131 @@ pub const INTERFERENCE_VULNERABILITY_HOURS: i64 = 24;
 pub const INTERFERENCE_MAX_TRACKED: usize = 10;
 
 // =============================================================================
+// 3-TIER GRAPH DENSITY CONSTANTS (SHO-200)
+// Based on neuroscience research on hippocampal-cortical memory consolidation
+// =============================================================================
+//
+// Research basis:
+// - Dentate Gyrus (L1): 2-4% active neurons (dense, fast encoding)
+// - CA1/CA3 (L2): 0.5-2.5% active (moderate, pattern separation)
+// - Neocortex (L3): <1% active (sparse, long-term storage)
+//
+// References:
+// - Engram Memory Encoding (arXiv:2506.01659)
+// - Population sparseness & Hebbian plasticity (bioRxiv:2025.06.16.659837)
+// - Sparse coding of episodic memory (PNAS 2014)
+// =============================================================================
+
+// === L1: WORKING MEMORY (Hippocampus/Dentate Gyrus-like) ===
+// Dense connections, fast encoding, aggressive pruning
+
+/// Target edge density for L1 (working memory tier)
+///
+/// 5% of possible edges should be active at any time.
+/// Dense enough for rich associations, sparse enough to avoid noise.
+pub const L1_TARGET_DENSITY: f32 = 0.05;
+
+/// Initial weight for new edges in L1
+///
+/// New edges start weak and must prove their value through co-activation.
+pub const L1_INITIAL_WEIGHT: f32 = 0.3;
+
+/// Decay rate per hour for unused L1 edges
+///
+/// Aggressive pruning: 15% decay per hour if not accessed.
+/// This clears noise and spurious connections quickly.
+pub const L1_DECAY_PER_HOUR: f32 = 0.15;
+
+/// Maximum age in hours before L1 edge must promote or die
+///
+/// After 4 hours, edges either strengthen enough to promote to L2 or get pruned.
+pub const L1_MAX_AGE_HOURS: u32 = 4;
+
+/// Minimum weight threshold for L1 edges
+///
+/// Edges below this are immediately pruned.
+pub const L1_PRUNE_THRESHOLD: f32 = 0.1;
+
+/// Minimum weight required to promote from L1 to L2
+///
+/// Only edges that reach this strength survive to episodic memory.
+pub const L1_PROMOTION_THRESHOLD: f32 = 0.5;
+
+// === L2: EPISODIC MEMORY (CA1/CA3-like) ===
+// Moderate density, Hebbian learning determines survival
+
+/// Target edge density for L2 (episodic memory tier)
+///
+/// 2.5% of possible edges - sparser than L1 but still associative.
+pub const L2_TARGET_DENSITY: f32 = 0.025;
+
+/// Initial weight for edges promoted to L2 from L1
+///
+/// Promoted edges start at 0.5 (they already proved value in L1).
+pub const L2_PROMOTION_WEIGHT: f32 = 0.5;
+
+/// Decay rate per day for unused L2 edges
+///
+/// Moderate decay: 10% per day if not accessed.
+pub const L2_DECAY_PER_DAY: f32 = 0.10;
+
+/// Maximum age in days before L2 edge must promote or die
+///
+/// After 14 days, edges either consolidate to L3 or get pruned.
+pub const L2_MAX_AGE_DAYS: u32 = 14;
+
+/// Minimum weight threshold for L2 edges
+///
+/// Higher bar than L1 - weak edges don't survive episodic tier.
+pub const L2_PRUNE_THRESHOLD: f32 = 0.2;
+
+/// Minimum weight required to promote from L2 to L3
+///
+/// Only strongly reinforced edges become permanent semantic knowledge.
+pub const L2_PROMOTION_THRESHOLD: f32 = 0.7;
+
+// === L3: SEMANTIC MEMORY (Neocortex-like) ===
+// Very sparse, near-permanent, abstract associations
+
+/// Target edge density for L3 (semantic memory tier)
+///
+/// <1% of possible edges - only the most important survive.
+pub const L3_TARGET_DENSITY: f32 = 0.008;
+
+/// Initial weight for edges promoted to L3 from L2
+///
+/// Consolidated edges are strong (0.7) and resistant to decay.
+pub const L3_PROMOTION_WEIGHT: f32 = 0.7;
+
+/// Decay rate per month for unused L3 edges
+///
+/// Very slow decay: 2% per month. Near-permanent.
+pub const L3_DECAY_PER_MONTH: f32 = 0.02;
+
+/// Minimum weight threshold for L3 edges
+///
+/// Highest bar - only strongest associations remain.
+pub const L3_PRUNE_THRESHOLD: f32 = 0.3;
+
+// === HEBBIAN STRENGTHENING ===
+// Co-activation and retrieval success boost edge weights
+
+/// Weight boost per co-access event
+///
+/// When two memories are retrieved together, their edge strengthens by 15%.
+pub const TIER_CO_ACCESS_BOOST: f32 = 0.15;
+
+/// Weight boost when edge contributes to successful retrieval
+///
+/// If traversing an edge helped answer a query correctly, +25% strength.
+pub const TIER_RETRIEVAL_SUCCESS_BOOST: f32 = 0.25;
+
+/// Threshold for Long-Term Potentiation (LTP) status
+///
+/// Edges above 0.8 weight are considered "potentiated" and decay even slower.
+pub const TIER_LTP_THRESHOLD: f32 = 0.8;
+
+// =============================================================================
 // CONSTANTS USAGE DOCUMENTATION
 // =============================================================================
 //

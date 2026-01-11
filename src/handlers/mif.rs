@@ -1525,6 +1525,7 @@ pub async fn add_relationship(
         last_activated: chrono::Utc::now(),
         activation_count: 1,
         potentiated: false,
+        tier: graph_memory::EdgeTier::L1Working,
     };
 
     graph_guard

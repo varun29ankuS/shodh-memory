@@ -162,6 +162,72 @@ pub fn retention_curve_debug(potentiated: bool) -> String {
     output
 }
 
+/// Tier-aware decay factor for edge consolidation (3-tier memory model)
+///
+/// Each tier has different decay characteristics based on hippocampal-cortical research:
+/// - L1 (Working): Aggressive decay (15%/hour), max 4 hours
+/// - L2 (Episodic): Moderate decay (10%/day), max 14 days
+/// - L3 (Semantic): Minimal decay (2%/month), near-permanent
+///
+/// # Arguments
+///
+/// * `hours_elapsed` - Time since last activation in hours
+/// * `tier` - Memory tier (0=L1, 1=L2, 2=L3)
+/// * `potentiated` - Whether edge has LTP (further reduces decay)
+///
+/// # Returns
+///
+/// Decay factor (0.0-1.0) and whether edge should be pruned
+#[inline]
+pub fn tier_decay_factor(hours_elapsed: f64, tier: u8, potentiated: bool) -> (f32, bool) {
+    use crate::constants::*;
+
+    if hours_elapsed <= 0.0 {
+        return (1.0, false);
+    }
+
+    let (decay_rate, max_age_hours, prune_threshold) = match tier {
+        0 => {
+            // L1 Working: 15%/hour decay, max 4 hours
+            (
+                L1_DECAY_PER_HOUR as f64,
+                (L1_MAX_AGE_HOURS as f64),
+                L1_PRUNE_THRESHOLD,
+            )
+        }
+        1 => {
+            // L2 Episodic: 10%/day decay, max 14 days
+            let decay_per_hour = L2_DECAY_PER_DAY as f64 / 24.0;
+            (
+                decay_per_hour,
+                (L2_MAX_AGE_DAYS as f64) * 24.0,
+                L2_PRUNE_THRESHOLD,
+            )
+        }
+        2 | _ => {
+            // L3 Semantic: 2%/month decay, near-permanent
+            let decay_per_hour = L3_DECAY_PER_MONTH as f64 / (30.0 * 24.0);
+            // Max age: effectively unlimited (10 years)
+            (decay_per_hour, 87600.0, L3_PRUNE_THRESHOLD)
+        }
+    };
+
+    // Potentiated edges decay 5x slower
+    let effective_rate = if potentiated {
+        decay_rate * 0.2
+    } else {
+        decay_rate
+    };
+
+    // Exponential decay: w(t) = w₀ × e^(-λt)
+    let decay_factor = (-effective_rate * hours_elapsed).exp() as f32;
+
+    // Check if edge exceeded max age (should prune)
+    let should_prune = hours_elapsed > max_age_hours && decay_factor < prune_threshold;
+
+    (decay_factor.max(0.001), should_prune)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
