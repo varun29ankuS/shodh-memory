@@ -24,6 +24,7 @@ pub mod retrieval;
 pub mod segmentation;
 pub mod sessions;
 pub mod storage;
+pub mod temporal_facts;
 pub mod todo_formatter;
 pub mod todos;
 pub mod types;
@@ -106,6 +107,9 @@ pub use crate::memory::segmentation::{
 pub use crate::memory::sessions::{
     Session, SessionEvent, SessionId, SessionStats, SessionStatus, SessionStore, SessionStoreStats,
     SessionSummary, TemporalContext, TimeOfDay,
+};
+pub use crate::memory::temporal_facts::{
+    EventType, ResolvedTime, TemporalFact, TemporalFactStore,
 };
 pub use crate::memory::todos::{ProjectStats, TodoStore, UserTodoStats};
 pub use crate::memory::visualization::{GraphStats, MemoryLogger};
@@ -217,6 +221,11 @@ pub struct MemorySystem {
     /// Persistent learning history for significant events
     /// Enables recency-weighted retrieval and learning velocity tracking
     learning_history: Arc<learning_history::LearningHistoryStore>,
+
+    /// Temporal fact store for multi-hop temporal reasoning
+    /// Extracts and indexes facts like "Melanie is planning camping next month"
+    /// Resolves relative dates ("next month" → June 2023) for accurate retrieval
+    temporal_fact_store: Arc<temporal_facts::TemporalFactStore>,
 }
 
 impl MemorySystem {
@@ -408,6 +417,10 @@ impl MemorySystem {
         // Uses the same DB as long-term memory with "learning:" prefix
         let learning_history = Arc::new(learning_history::LearningHistoryStore::new(storage.db()));
 
+        // Initialize temporal fact store for multi-hop temporal reasoning
+        // Uses the same DB with "temporal_facts:", "temporal_by_entity:", "temporal_by_event:" prefixes
+        let temporal_fact_store = Arc::new(temporal_facts::TemporalFactStore::new(storage.db()));
+
         Ok(Self {
             config: config.clone(),
             working_memory: Arc::new(RwLock::new(WorkingMemory::new(config.working_memory_size))),
@@ -437,6 +450,8 @@ impl MemorySystem {
             graph_memory: None,
             // Persistent learning history for retrieval boosting
             learning_history,
+            // Temporal fact store for multi-hop temporal reasoning
+            temporal_fact_store,
         })
     }
 
@@ -510,7 +525,6 @@ impl MemorySystem {
 
         // TEMPORAL EXTRACTION: Extract dates from content for temporal filtering
         // Based on TEMPR approach (Hindsight paper achieving 89.6% on LoCoMo)
-        // Key insight: Temporal filtering is critical for multi-hop retrieval accuracy
         if experience.temporal_refs.is_empty() {
             let temporal = crate::memory::query_parser::extract_temporal_refs(&experience.content);
             for temp_ref in temporal.refs {
@@ -594,12 +608,13 @@ impl MemorySystem {
                     graph_guard.find_entity_by_name(&entity2),
                 ) {
                     // Create edge between co-occurring entities
+                    // Starts in L1 (working memory) with tier-specific initial weight
                     let edge = crate::graph_memory::RelationshipEdge {
                         uuid: Uuid::new_v4(),
                         from_entity: e1.uuid,
                         to_entity: e2.uuid,
                         relation_type: crate::graph_memory::RelationType::CoOccurs,
-                        strength: 0.3, // Start with moderate strength
+                        strength: crate::graph_memory::EdgeTier::L1Working.initial_weight(),
                         created_at: chrono::Utc::now(),
                         valid_at: chrono::Utc::now(),
                         invalidated_at: None,
@@ -608,6 +623,7 @@ impl MemorySystem {
                         last_activated: chrono::Utc::now(),
                         activation_count: 1,
                         potentiated: false,
+                        tier: crate::graph_memory::EdgeTier::L1Working,
                     };
 
                     // add_relationship handles deduplication via Hebbian strengthening
@@ -631,6 +647,30 @@ impl MemorySystem {
             &memory.experience.entities,
         ) {
             tracing::warn!("Failed to index memory {} in BM25: {}", memory.id.0, e);
+        }
+
+        // TEMPORAL FACT EXTRACTION: Extract and index temporal facts for multi-hop reasoning
+        // Key insight: Multi-hop temporal queries like "When is X planning Y?" require:
+        // 1. Finding the FIRST/PLANNING mention, not any mention
+        // 2. Resolving relative dates ("next month", "last Saturday") to absolute dates
+        // This enables accurate answers to temporal questions in LoCoMo benchmark
+        if !memory.experience.entities.is_empty() {
+            let facts = temporal_facts::extract_temporal_facts(
+                &memory.experience.content,
+                &memory.id,
+                memory.created_at,
+                &memory.experience.entities,
+            );
+            if !facts.is_empty() {
+                // Note: We don't have user_id in remember(), will need to pass it
+                // For now, extract facts but don't store - storage happens at handler level
+                // or we can use a placeholder user_id
+                tracing::debug!(
+                    "Extracted {} temporal facts from memory {}",
+                    facts.len(),
+                    memory.id.0
+                );
+            }
         }
 
         // SHO-106: Check for interference with existing memories
@@ -852,7 +892,7 @@ impl MemorySystem {
                         from_entity: e1.uuid,
                         to_entity: e2.uuid,
                         relation_type: crate::graph_memory::RelationType::CoOccurs,
-                        strength: 0.3,
+                        strength: crate::graph_memory::EdgeTier::L1Working.initial_weight(),
                         created_at: chrono::Utc::now(),
                         valid_at: chrono::Utc::now(),
                         invalidated_at: None,
@@ -861,6 +901,7 @@ impl MemorySystem {
                         last_activated: chrono::Utc::now(),
                         activation_count: 1,
                         potentiated: false,
+                        tier: crate::graph_memory::EdgeTier::L1Working,
                     };
 
                     if let Err(e) = graph_guard.add_relationship(edge) {
@@ -1107,6 +1148,182 @@ impl MemorySystem {
             );
         }
 
+        // ===========================================================================
+        // LAYER 0.5: ATTRIBUTE QUERY DETECTION (Fact-First Retrieval)
+        // ===========================================================================
+        // For attribute queries like "What is Caroline's relationship status?",
+        // semantic search fails because "relationship status" doesn't match "single".
+        // Instead, we detect the query pattern, expand with synonyms, and boost
+        // memories containing the entity + attribute values.
+        let query_type = query_parser::classify_query(query_text);
+        let attribute_boost_ids: HashSet<MemoryId> = match &query_type {
+            query_parser::QueryType::Attribute(attr_query) => {
+                tracing::debug!(
+                    "Layer 0.5: Attribute query detected - entity='{}', attribute='{}', synonyms={:?}",
+                    attr_query.entity,
+                    attr_query.attribute,
+                    attr_query.attribute_synonyms
+                );
+
+                // Build expanded query: entity + attribute + all synonyms
+                // E.g., "Caroline single married divorced engaged dating relationship"
+                let mut expanded_terms: Vec<String> = vec![attr_query.entity.clone()];
+                expanded_terms.extend(attr_query.attribute_synonyms.clone());
+
+                // Search BM25 with expanded query to find memories with these terms
+                let expanded_query = expanded_terms.join(" ");
+                let bm25_matches = self
+                    .hybrid_search
+                    .bm25_index()
+                    .search(&expanded_query, query.max_results * 5)
+                    .unwrap_or_default();
+
+                // Filter to memories that contain BOTH entity AND at least one synonym
+                let entity_lower = attr_query.entity.to_lowercase();
+                let mut boosted_ids = HashSet::new();
+
+                for (mem_id, _score) in bm25_matches {
+                    // Get memory content to verify it contains entity + attribute value
+                    let content = self
+                        .working_memory
+                        .read()
+                        .get(&mem_id)
+                        .map(|m| m.experience.content.to_lowercase())
+                        .or_else(|| {
+                            self.session_memory
+                                .read()
+                                .get(&mem_id)
+                                .map(|m| m.experience.content.to_lowercase())
+                        })
+                        .or_else(|| {
+                            self.long_term_memory
+                                .get(&mem_id)
+                                .ok()
+                                .map(|m| m.experience.content.to_lowercase())
+                        });
+
+                    if let Some(content) = content {
+                        // Must contain entity
+                        if !content.contains(&entity_lower) {
+                            continue;
+                        }
+                        // Must contain at least one attribute synonym
+                        let has_synonym = attr_query
+                            .attribute_synonyms
+                            .iter()
+                            .any(|syn| content.contains(&syn.to_lowercase()));
+                        if has_synonym {
+                            boosted_ids.insert(mem_id);
+                        }
+                    }
+                }
+
+                if !boosted_ids.is_empty() {
+                    tracing::info!(
+                        "Layer 0.5: Found {} memories with entity '{}' + attribute values",
+                        boosted_ids.len(),
+                        attr_query.entity
+                    );
+                }
+
+                boosted_ids
+            }
+            _ => HashSet::new(),
+        };
+
+        // ===========================================================================
+        // LAYER 0.6: TEMPORAL FACT LOOKUP (Multi-hop Temporal Reasoning)
+        // ===========================================================================
+        // For temporal queries like "When did Melanie paint a sunrise?" or
+        // "When is Melanie planning on going camping?", we need to:
+        // 1. Detect it's a temporal query (asking "when", "what time", etc.)
+        // 2. Extract entity (Melanie) and event keywords (paint, sunrise, camping)
+        // 3. Look up temporal facts matching these
+        // 4. Boost the source memories of matching facts
+        let temporal_fact_boost_ids: HashSet<MemoryId> = if has_temporal_query {
+            if let Some(user_id) = &query.user_id {
+                // Parse query for entity and event keywords
+                let analysis = query_parser::analyze_query(query_text);
+
+                // Get entity name (first focal entity)
+                let entity = analysis
+                    .focal_entities
+                    .first()
+                    .map(|e| e.text.clone())
+                    .unwrap_or_default();
+
+                // Get event keywords from nouns, verbs, and modifiers
+                let event_keywords: Vec<&str> = analysis
+                    .focal_entities
+                    .iter()
+                    .skip(1) // Skip the entity itself
+                    .map(|e| e.text.as_str())
+                    .chain(analysis.relational_context.iter().map(|r| r.stem.as_str()))
+                    .chain(analysis.discriminative_modifiers.iter().map(|m| m.text.as_str()))
+                    .collect();
+
+                if !entity.is_empty() && !event_keywords.is_empty() {
+                    // Determine event type from query keywords
+                    // "planning", "going to" → Planned
+                    // "did", "ran", "went" → Occurred
+                    // year mentions (2022, 2021) → Historical
+                    let query_lower = query_text.to_lowercase();
+                    let event_type = if query_lower.contains("planning")
+                        || query_lower.contains("going to")
+                        || query_lower.contains("will")
+                    {
+                        Some(temporal_facts::EventType::Planned)
+                    } else if query_lower.contains(" did ")
+                        || query_lower.contains("when did")
+                        || query_lower.contains(" ran ")
+                        || query_lower.contains(" went ")
+                    {
+                        // "When did X" could be Occurred or Historical - search both
+                        None
+                    } else {
+                        None // Any event type
+                    };
+
+                    // Look up matching temporal facts
+                    match self.find_temporal_facts(user_id, &entity, &event_keywords, event_type) {
+                        Ok(facts) if !facts.is_empty() => {
+                            tracing::info!(
+                                "Layer 0.6: Found {} temporal facts for entity='{}', events={:?}",
+                                facts.len(),
+                                entity,
+                                event_keywords
+                            );
+
+                            // Collect source memory IDs from matching facts
+                            let boosted: HashSet<MemoryId> = facts
+                                .iter()
+                                .map(|f| f.source_memory_id.clone())
+                                .collect();
+                            boosted
+                        }
+                        Ok(_) => {
+                            tracing::debug!(
+                                "Layer 0.6: No temporal facts found for entity='{}', events={:?}",
+                                entity,
+                                event_keywords
+                            );
+                            HashSet::new()
+                        }
+                        Err(e) => {
+                            tracing::debug!("Layer 0.6: Temporal fact lookup failed: {}", e);
+                            HashSet::new()
+                        }
+                    }
+                } else {
+                    HashSet::new()
+                }
+            } else {
+                HashSet::new()
+            }
+        } else {
+            HashSet::new()
+        };
+
         // PERFORMANCE: Query embedding cache (80ms → <1μs for repeated queries)
         // SHA256 hash for stable cache keys (survives restarts, unlike DefaultHasher)
         let query_hash = Self::sha256_hash(query_text);
@@ -1317,6 +1534,7 @@ impl MemorySystem {
 
         // Create a modified query with the embedding for vector search
         let vector_query = Query {
+            user_id: query.user_id.clone(),
             query_text: None, // Don't re-generate embedding
             query_embedding: Some(query_embedding),
             time_range: query.time_range,
@@ -1461,6 +1679,61 @@ impl MemorySystem {
             for (r, (id, _)) in hybrid_ids.iter().enumerate() {
                 *fused.entry(id.clone()).or_insert(0.0) += 1.0 / (K + r as f32);
             }
+
+            // ===========================================================================
+            // LAYER 4.5: ATTRIBUTE QUERY BOOST
+            // ===========================================================================
+            // For attribute queries, heavily boost memories that contain BOTH the entity
+            // AND an attribute synonym value. This ensures "Caroline is single" ranks
+            // high for "What is Caroline's relationship status?".
+            if !attribute_boost_ids.is_empty() {
+                const ATTRIBUTE_BOOST: f32 = 5.0; // Strong boost for attribute matches
+                let mut boosted_count = 0;
+                for id in &attribute_boost_ids {
+                    if fused.contains_key(id) {
+                        *fused.get_mut(id).unwrap() += ATTRIBUTE_BOOST;
+                        boosted_count += 1;
+                    } else {
+                        // Also add memories that weren't in the fusion but match attribute
+                        fused.insert(id.clone(), ATTRIBUTE_BOOST);
+                        boosted_count += 1;
+                    }
+                }
+                if boosted_count > 0 {
+                    tracing::info!(
+                        "Layer 4.5: Boosted {} memories for attribute query",
+                        boosted_count
+                    );
+                }
+            }
+
+            // ===========================================================================
+            // LAYER 4.6: TEMPORAL FACT BOOST (Multi-hop Temporal Reasoning)
+            // ===========================================================================
+            // For temporal queries, boost memories that are the source of matching temporal facts.
+            // This ensures "When did Melanie paint a sunrise?" returns the memory where she
+            // mentioned painting the sunrise in 2022, not a later mention.
+            if !temporal_fact_boost_ids.is_empty() {
+                const TEMPORAL_FACT_BOOST: f32 = 6.0; // Very strong boost for temporal fact sources
+                let mut boosted_count = 0;
+                for id in &temporal_fact_boost_ids {
+                    if fused.contains_key(id) {
+                        *fused.get_mut(id).unwrap() += TEMPORAL_FACT_BOOST;
+                        boosted_count += 1;
+                    } else {
+                        // Also add memories that weren't in the fusion but are temporal fact sources
+                        fused.insert(id.clone(), TEMPORAL_FACT_BOOST);
+                        boosted_count += 1;
+                    }
+                }
+                if boosted_count > 0 {
+                    tracing::info!(
+                        "Layer 4.6: Boosted {} memories from temporal facts",
+                        boosted_count
+                    );
+                }
+            }
+
             let mut res: Vec<_> = fused.into_iter().collect();
             res.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             res.truncate(query.max_results);
@@ -1855,6 +2128,64 @@ impl MemorySystem {
         let mut events = self.learning_history.events_since(user_id, since)?;
         events.truncate(limit);
         Ok(events)
+    }
+
+    // ==========================================================================
+    // TEMPORAL FACT EXTRACTION (for multi-hop temporal queries)
+    // ==========================================================================
+
+    /// Extract and store temporal facts from a memory
+    ///
+    /// Call this after remember() when you have access to user_id.
+    /// Extracts facts like "Melanie is planning camping next month" and stores them
+    /// with resolved absolute dates for accurate multi-hop retrieval.
+    pub fn store_temporal_facts_for_memory(
+        &self,
+        user_id: &str,
+        memory_id: &MemoryId,
+        content: &str,
+        entities: &[String],
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<usize> {
+        let facts = temporal_facts::extract_temporal_facts(content, memory_id, created_at, entities);
+        if facts.is_empty() {
+            return Ok(0);
+        }
+
+        let stored = self.temporal_fact_store.store_batch(user_id, &facts)?;
+        if stored > 0 {
+            tracing::debug!(
+                user_id = user_id,
+                memory_id = %memory_id.0,
+                facts_stored = stored,
+                "Stored temporal facts for memory"
+            );
+        }
+        Ok(stored)
+    }
+
+    /// Find temporal facts by entity and event keywords
+    ///
+    /// Used for multi-hop queries like "When did Melanie paint a sunrise?"
+    /// Returns facts sorted by conversation date (earliest first for planning queries).
+    pub fn find_temporal_facts(
+        &self,
+        user_id: &str,
+        entity: &str,
+        event_keywords: &[&str],
+        event_type: Option<temporal_facts::EventType>,
+    ) -> Result<Vec<temporal_facts::TemporalFact>> {
+        self.temporal_fact_store
+            .find_by_entity_and_event(user_id, entity, event_keywords, event_type)
+    }
+
+    /// List all temporal facts for a user
+    pub fn list_temporal_facts(
+        &self,
+        user_id: &str,
+        limit: usize,
+    ) -> Result<Vec<temporal_facts::TemporalFact>> {
+        self.temporal_fact_store.list(user_id, limit)
     }
 
     /// Calculate linguistic boost based on focal entity matches
@@ -3633,7 +3964,7 @@ impl MemorySystem {
                             from_entity: e1.uuid,
                             to_entity: e2.uuid,
                             relation_type: crate::graph_memory::RelationType::CoOccurs,
-                            strength: 0.3,
+                            strength: crate::graph_memory::EdgeTier::L1Working.initial_weight(),
                             created_at: chrono::Utc::now(),
                             valid_at: chrono::Utc::now(),
                             invalidated_at: None,
@@ -3642,6 +3973,7 @@ impl MemorySystem {
                             last_activated: chrono::Utc::now(),
                             activation_count: 1,
                             potentiated: false,
+                            tier: crate::graph_memory::EdgeTier::L1Working,
                         };
 
                         if let Err(e) = graph_guard.add_relationship(edge) {

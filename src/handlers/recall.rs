@@ -346,11 +346,13 @@ pub async fn recall(
     let memories = {
         let memory = memory.clone();
         let signals = prospective_signals.clone();
+        let user_id = req.user_id.clone();
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
 
-            // Build query with prospective signals
+            // Build query with prospective signals and user_id for temporal fact lookup
             let query = MemoryQuery {
+                user_id: Some(user_id),
                 query_text: Some(query_text.clone()),
                 max_results: limit,
                 prospective_signals: signals,
@@ -856,6 +858,7 @@ pub async fn proactive_context(
     // No double-scoring needed - just use the scores from recall() directly
     let context_clone = req.context.clone();
     let max_results = req.max_results;
+    let user_id_for_query = req.user_id.clone();
     let feedback_store_for_scoring = state.feedback_store.clone();
     let memories: Vec<ProactiveSurfacedMemory> = {
         let memory = memory_system.clone();
@@ -864,6 +867,7 @@ pub async fn proactive_context(
             let feedback_guard = feedback_store_for_scoring.read();
 
             let query = MemoryQuery {
+                user_id: Some(user_id_for_query),
                 query_text: Some(context_clone),
                 max_results: max_results * 2, // Fetch extra for feedback filtering
                 ..Default::default()
@@ -1361,12 +1365,14 @@ pub async fn recall_tracked(
 
     let query_text = req.query.clone();
     let limit = req.limit;
+    let user_id = req.user_id.clone();
 
     let memories = {
         let memory = memory.clone();
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
             let query = MemoryQuery {
+                user_id: Some(user_id),
                 query_text: Some(query_text),
                 max_results: limit,
                 ..Default::default()

@@ -51,6 +51,14 @@ pub fn build_public_routes(state: AppState) -> Router {
         .route("/webhook/linear", post(integrations::linear_webhook))
         .route("/webhook/github", post(integrations::github_webhook))
         // =================================================================
+        // GRAPH VISUALIZATION (PUBLIC FOR LOCAL DEV)
+        // =================================================================
+        .route("/graph/view", get(visualization::graph_view))
+        .route(
+            "/api/graph/data/{user_id}",
+            get(visualization::get_graph_data),
+        )
+        // =================================================================
         // STATE
         // =================================================================
         .with_state(state)

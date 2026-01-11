@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shodh Memory Graph</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #000;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+        #header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 60px;
+            background: linear-gradient(135deg, rgba(26,26,46,0.95) 0%, rgba(22,33,62,0.95) 100%);
+            display: flex;
+            align-items: center;
+            padding: 0 20px;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+        #header h1 {
+            font-size: 1.4rem;
+            background: linear-gradient(90deg, #00d4ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        #mode-toggle {
+            margin-left: 20px;
+            display: flex;
+            background: rgba(0,0,0,0.3);
+            border-radius: 20px;
+            padding: 4px;
+        }
+        .mode-btn {
+            padding: 6px 16px;
+            border: none;
+            background: transparent;
+            color: #888;
+            cursor: pointer;
+            border-radius: 16px;
+            font-size: 0.85rem;
+            transition: all 0.3s;
+        }
+        .mode-btn.active {
+            background: linear-gradient(90deg, #00d4ff, #00ff88);
+            color: #000;
+        }
+        #stats {
+            margin-left: auto;
+            display: flex;
+            gap: 20px;
+            font-size: 0.85rem;
+        }
+        .stat {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .stat-value {
+            font-size: 1.2rem;
+            font-weight: bold;
+        }
+        .stat-label { color: #888; }
+        .l1 { color: #ff6b6b; }
+        .l2 { color: #ffd93d; }
+        .l3 { color: #6bcb77; }
+        #controls {
+            position: fixed;
+            top: 70px;
+            right: 20px;
+            background: rgba(26, 26, 46, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 100;
+            backdrop-filter: blur(5px);
+        }
+        .control-group {
+            margin: 10px 0;
+        }
+        .control-group label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            padding: 4px 0;
+            font-size: 0.85rem;
+        }
+        .control-group input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+        }
+        #legend {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(26, 26, 46, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            z-index: 100;
+            backdrop-filter: blur(5px);
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin: 5px 0;
+        }
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        #live-indicator {
+            position: fixed;
+            top: 70px;
+            left: 20px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.8rem;
+            color: #888;
+            background: rgba(26, 26, 46, 0.9);
+            padding: 8px 12px;
+            border-radius: 6px;
+            z-index: 100;
+        }
+        .pulse {
+            width: 8px;
+            height: 8px;
+            background: #00ff88;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.2); }
+        }
+        #tooltip {
+            position: absolute;
+            background: rgba(0,0,0,0.9);
+            color: #fff;
+            padding: 10px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            pointer-events: none;
+            display: none;
+            max-width: 300px;
+            border: 1px solid #333;
+            z-index: 200;
+        }
+        #loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 1.2rem;
+            color: #00d4ff;
+            z-index: 300;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #333;
+            border-top: 3px solid #00d4ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        #info {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            font-size: 0.75rem;
+            color: #666;
+            text-align: right;
+        }
+        #graph-2d {
+            width: 100vw;
+            height: calc(100vh - 60px);
+            margin-top: 60px;
+            display: none;
+        }
+        #graph-3d {
+            width: 100vw;
+            height: calc(100vh - 60px);
+            margin-top: 60px;
+        }
+        .node-memory { fill: #4a9eff; }
+        .node-entity { fill: #ff9f43; }
+        .edge-L1 { stroke: #ff6b6b; stroke-opacity: 0.6; }
+        .edge-L2 { stroke: #ffd93d; stroke-opacity: 0.7; }
+        .edge-L3 { stroke: #6bcb77; stroke-opacity: 0.8; }
+        .node-label {
+            font-size: 10px;
+            fill: #ccc;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h1>🧠 Shodh Memory Graph</h1>
+        <div id="mode-toggle">
+            <button class="mode-btn" id="btn-2d">2D</button>
+            <button class="mode-btn active" id="btn-3d">3D</button>
+        </div>
+        <div id="stats">
+            <div class="stat">
+                <span class="stat-value" id="node-count">0</span>
+                <span class="stat-label">Nodes</span>
+            </div>
+            <div class="stat">
+                <span class="stat-value l1" id="l1-count">0</span>
+                <span class="stat-label">L1 Working</span>
+            </div>
+            <div class="stat">
+                <span class="stat-value l2" id="l2-count">0</span>
+                <span class="stat-label">L2 Episodic</span>
+            </div>
+            <div class="stat">
+                <span class="stat-value l3" id="l3-count">0</span>
+                <span class="stat-label">L3 Semantic</span>
+            </div>
+        </div>
+    </div>
+    <div id="live-indicator">
+        <div class="pulse"></div>
+        <span>Live</span>
+    </div>
+    <div id="controls">
+        <h3 style="margin-bottom: 10px; font-size: 0.9rem;">Filters</h3>
+        <div class="control-group">
+            <label><input type="checkbox" id="show-l1" checked> <span class="l1">L1 Working</span></label>
+            <label><input type="checkbox" id="show-l2" checked> <span class="l2">L2 Episodic</span></label>
+            <label><input type="checkbox" id="show-l3" checked> <span class="l3">L3 Semantic</span></label>
+        </div>
+        <div class="control-group">
+            <label><input type="checkbox" id="show-memories" checked> Memories</label>
+            <label><input type="checkbox" id="show-entities" checked> Entities</label>
+        </div>
+        <div class="control-group" style="margin-top: 15px;" id="rotate-control">
+            <label><input type="checkbox" id="auto-rotate"> Auto Rotate</label>
+        </div>
+    </div>
+    <div id="legend">
+        <div class="legend-item"><div class="legend-color" style="background:#4a9eff"></div>Memory</div>
+        <div class="legend-item"><div class="legend-color" style="background:#ff9f43"></div>Entity</div>
+        <div class="legend-item"><div class="legend-color" style="background:#ff6b6b"></div>L1 Working</div>
+        <div class="legend-item"><div class="legend-color" style="background:#ffd93d"></div>L2 Episodic</div>
+        <div class="legend-item"><div class="legend-color" style="background:#6bcb77"></div>L3 Semantic</div>
+    </div>
+    <div id="tooltip"></div>
+    <div id="loading">
+        <div class="spinner"></div>
+        Loading graph...
+    </div>
+    <svg id="graph-2d"></svg>
+    <canvas id="graph-3d"></canvas>
+    <div id="info">
+        <span id="info-2d" style="display:none">Scroll to zoom | Drag to pan</span>
+        <span id="info-3d">Drag to rotate | Scroll to zoom | Right-click to pan</span>
+    </div>
+
+    <script>
+        const userId = "{{USER_ID}}";
+        let currentMode = '3d';
+        let graphData = { nodes: [], edges: [], stats: {} };
+
+        // Filters
+        const filters = {
+            showL1: true, showL2: true, showL3: true,
+            showMemories: true, showEntities: true,
+            autoRotate: false
+        };
+
+        // Colors
+        const COLORS = {
+            memory: 0x4a9eff, entity: 0xff9f43,
+            L1: 0xff6b6b, L2: 0xffd93d, L3: 0x6bcb77,
+            background: 0x000010
+        };
+        const COLORS_HEX = {
+            memory: '#4a9eff', entity: '#ff9f43',
+            L1: '#ff6b6b', L2: '#ffd93d', L3: '#6bcb77'
+        };
+
+        // ============== 3D SETUP ==============
+        let scene, camera, renderer, controls3d;
+        let nodeObjects3d = new Map();
+        let edgeObjects3d = [];
+        let raycaster, mouse;
+        let hoveredNode3d = null;
+
+        function init3D() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(COLORS.background);
+            scene.fog = new THREE.FogExp2(COLORS.background, 0.0008);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 10000);
+            camera.position.z = 800;
+
+            const canvas = document.getElementById('graph-3d');
+            renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight - 60);
+            renderer.setPixelRatio(window.devicePixelRatio);
+
+            controls3d = new THREE.OrbitControls(camera, renderer.domElement);
+            controls3d.enableDamping = true;
+            controls3d.dampingFactor = 0.05;
+            controls3d.minDistance = 100;
+            controls3d.maxDistance = 3000;
+            controls3d.autoRotate = false;
+            controls3d.autoRotateSpeed = 0.5;
+
+            raycaster = new THREE.Raycaster();
+            mouse = new THREE.Vector2();
+
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.5);
+            scene.add(ambientLight);
+
+            const light1 = new THREE.PointLight(0x00d4ff, 1, 2000);
+            light1.position.set(500, 500, 500);
+            scene.add(light1);
+
+            const light2 = new THREE.PointLight(0x00ff88, 0.8, 2000);
+            light2.position.set(-500, -500, 500);
+            scene.add(light2);
+
+            addParticles();
+        }
+
+        function addParticles() {
+            const particleCount = 300;
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(particleCount * 3);
+            for (let i = 0; i < particleCount; i++) {
+                positions[i * 3] = (Math.random() - 0.5) * 2000;
+                positions[i * 3 + 1] = (Math.random() - 0.5) * 2000;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 2000;
+            }
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            const material = new THREE.PointsMaterial({ color: 0x00d4ff, size: 2, transparent: true, opacity: 0.3 });
+            scene.add(new THREE.Points(geometry, material));
+        }
+
+        function build3DGraph(data) {
+            // Clear existing
+            nodeObjects3d.forEach(obj => scene.remove(obj));
+            nodeObjects3d.clear();
+            edgeObjects3d.forEach(obj => scene.remove(obj));
+            edgeObjects3d = [];
+
+            const nodePositions = new Map();
+            const nodeCount = data.nodes.length;
+
+            // Position nodes using golden spiral
+            data.nodes.forEach((node, i) => {
+                const phi = Math.acos(1 - 2 * (i + 0.5) / nodeCount);
+                const theta = Math.PI * (1 + Math.sqrt(5)) * i;
+                const radius = 300 + Math.random() * 100;
+                const x = radius * Math.sin(phi) * Math.cos(theta);
+                const y = radius * Math.sin(phi) * Math.sin(theta);
+                const z = radius * Math.cos(phi);
+                nodePositions.set(node.id, { x, y, z });
+
+                const isMemory = node.node_type === 'memory';
+                const size = isMemory ? 4 + node.strength * 4 : 6;
+                const color = isMemory ? COLORS.memory : COLORS.entity;
+
+                const geometry = new THREE.SphereGeometry(size, 16, 16);
+                const material = new THREE.MeshPhongMaterial({
+                    color, emissive: color, emissiveIntensity: 0.3, shininess: 50
+                });
+                const sphere = new THREE.Mesh(geometry, material);
+                sphere.position.set(x, y, z);
+                sphere.userData = node;
+                scene.add(sphere);
+                nodeObjects3d.set(node.id, sphere);
+            });
+
+            // Create edges
+            data.edges.forEach(edge => {
+                const sourcePos = nodePositions.get(edge.source);
+                const targetPos = nodePositions.get(edge.target);
+                if (!sourcePos || !targetPos) return;
+
+                const color = COLORS[edge.tier] || 0x666666;
+                const material = new THREE.LineBasicMaterial({
+                    color, transparent: true, opacity: 0.4 + edge.strength * 0.4
+                });
+                const geometry = new THREE.BufferGeometry().setFromPoints([
+                    new THREE.Vector3(sourcePos.x, sourcePos.y, sourcePos.z),
+                    new THREE.Vector3(targetPos.x, targetPos.y, targetPos.z)
+                ]);
+                const line = new THREE.Line(geometry, material);
+                line.userData = { tier: edge.tier };
+                scene.add(line);
+                edgeObjects3d.push(line);
+            });
+        }
+
+        function update3DVisibility() {
+            nodeObjects3d.forEach((obj, id) => {
+                const node = obj.userData;
+                const isMemory = node.node_type === 'memory';
+                obj.visible = isMemory ? filters.showMemories : filters.showEntities;
+            });
+            edgeObjects3d.forEach(line => {
+                const tier = line.userData.tier;
+                if (tier === 'L1') line.visible = filters.showL1;
+                else if (tier === 'L2') line.visible = filters.showL2;
+                else if (tier === 'L3') line.visible = filters.showL3;
+            });
+        }
+
+        function animate3D() {
+            if (currentMode !== '3d') return;
+            requestAnimationFrame(animate3D);
+            controls3d.update();
+            renderer.render(scene, camera);
+        }
+
+        function onMouseMove3D(event) {
+            if (currentMode !== '3d') return;
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -((event.clientY - 60) / (window.innerHeight - 60)) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(Array.from(nodeObjects3d.values()));
+            const tooltip = document.getElementById('tooltip');
+
+            if (intersects.length > 0) {
+                const obj = intersects[0].object;
+                const node = obj.userData;
+                if (hoveredNode3d !== obj) {
+                    if (hoveredNode3d) hoveredNode3d.scale.set(1, 1, 1);
+                    hoveredNode3d = obj;
+                    obj.scale.set(1.5, 1.5, 1.5);
+                }
+                tooltip.innerHTML = `<strong>${node.label}</strong><br>Type: ${node.node_type}<br>Tier: ${node.tier}`;
+                tooltip.style.left = (event.clientX + 15) + 'px';
+                tooltip.style.top = (event.clientY + 15) + 'px';
+                tooltip.style.display = 'block';
+            } else {
+                if (hoveredNode3d) { hoveredNode3d.scale.set(1, 1, 1); hoveredNode3d = null; }
+                tooltip.style.display = 'none';
+            }
+        }
+
+        // ============== 2D SETUP ==============
+        let svg, g, simulation;
+        let nodes2d = [], links2d = [];
+
+        function init2D() {
+            const width = window.innerWidth;
+            const height = window.innerHeight - 60;
+            svg = d3.select("#graph-2d").attr("width", width).attr("height", height);
+            g = svg.append("g");
+            const zoom = d3.zoom().scaleExtent([0.1, 4]).on("zoom", (e) => g.attr("transform", e.transform));
+            svg.call(zoom);
+        }
+
+        function build2DGraph(data) {
+            g.selectAll('*').remove();
+            nodes2d = data.nodes.map(n => ({...n}));
+            links2d = data.edges.map(e => ({ source: e.source, target: e.target, tier: e.tier, strength: e.strength }));
+
+            const width = window.innerWidth;
+            const height = window.innerHeight - 60;
+
+            simulation = d3.forceSimulation(nodes2d)
+                .force("link", d3.forceLink(links2d).id(d => d.id).distance(80))
+                .force("charge", d3.forceManyBody().strength(-150))
+                .force("center", d3.forceCenter(width / 2, height / 2))
+                .force("collision", d3.forceCollide().radius(20));
+
+            const link = g.append("g").selectAll("line").data(links2d).join("line")
+                .attr("class", d => `edge-${d.tier}`)
+                .attr("stroke-width", d => 1 + d.strength * 2);
+
+            const node = g.append("g").selectAll("circle").data(nodes2d).join("circle")
+                .attr("r", d => d.size || 8)
+                .attr("class", d => `node-${d.node_type}`)
+                .call(d3.drag()
+                    .on("start", (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+                    .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+                    .on("end", (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+                )
+                .on("mouseover", (e, d) => {
+                    const tooltip = document.getElementById('tooltip');
+                    tooltip.innerHTML = `<strong>${d.label}</strong><br>Type: ${d.node_type}<br>Tier: ${d.tier}`;
+                    tooltip.style.left = (e.pageX + 10) + 'px';
+                    tooltip.style.top = (e.pageY + 10) + 'px';
+                    tooltip.style.display = 'block';
+                })
+                .on("mouseout", () => document.getElementById('tooltip').style.display = 'none');
+
+            const labels = g.append("g").selectAll("text").data(nodes2d).join("text")
+                .attr("class", "node-label").attr("dx", 12).attr("dy", 4)
+                .text(d => d.label.substring(0, 15));
+
+            simulation.on("tick", () => {
+                link.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+                node.attr("cx", d => d.x).attr("cy", d => d.y);
+                labels.attr("x", d => d.x).attr("y", d => d.y);
+            });
+        }
+
+        function update2DVisibility() {
+            g.selectAll('circle').style('display', d => {
+                const isMemory = d.node_type === 'memory';
+                return (isMemory ? filters.showMemories : filters.showEntities) ? 'block' : 'none';
+            });
+            g.selectAll('line').style('display', d => {
+                if (d.tier === 'L1') return filters.showL1 ? 'block' : 'none';
+                if (d.tier === 'L2') return filters.showL2 ? 'block' : 'none';
+                if (d.tier === 'L3') return filters.showL3 ? 'block' : 'none';
+                return 'block';
+            });
+        }
+
+        // ============== COMMON ==============
+        function updateStats(stats) {
+            document.getElementById('node-count').textContent = stats.total_nodes;
+            document.getElementById('l1-count').textContent = stats.l1_edges;
+            document.getElementById('l2-count').textContent = stats.l2_edges;
+            document.getElementById('l3-count').textContent = stats.l3_edges;
+        }
+
+        function updateVisibility() {
+            if (currentMode === '3d') update3DVisibility();
+            else update2DVisibility();
+        }
+
+        function loadGraph() {
+            fetch(`/api/graph/data/${userId}`)
+                .then(r => r.json())
+                .then(data => {
+                    graphData = data;
+                    updateStats(data.stats);
+                    if (currentMode === '3d') build3DGraph(data);
+                    else build2DGraph(data);
+                    document.getElementById('loading').style.display = 'none';
+                })
+                .catch(err => {
+                    console.error('Failed to load graph:', err);
+                    document.getElementById('loading').innerHTML = 'Failed to load graph';
+                });
+        }
+
+        function switchMode(mode) {
+            currentMode = mode;
+            document.getElementById('btn-2d').classList.toggle('active', mode === '2d');
+            document.getElementById('btn-3d').classList.toggle('active', mode === '3d');
+            document.getElementById('graph-2d').style.display = mode === '2d' ? 'block' : 'none';
+            document.getElementById('graph-3d').style.display = mode === '3d' ? 'block' : 'none';
+            document.getElementById('rotate-control').style.display = mode === '3d' ? 'block' : 'none';
+            document.getElementById('info-2d').style.display = mode === '2d' ? 'inline' : 'none';
+            document.getElementById('info-3d').style.display = mode === '3d' ? 'inline' : 'none';
+
+            if (mode === '3d') {
+                build3DGraph(graphData);
+                animate3D();
+            } else {
+                build2DGraph(graphData);
+            }
+        }
+
+        // Initialize
+        init3D();
+        init2D();
+        loadGraph();
+        animate3D();
+
+        // Event listeners
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / (window.innerHeight - 60);
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight - 60);
+            svg.attr("width", window.innerWidth).attr("height", window.innerHeight - 60);
+        });
+        document.addEventListener('mousemove', onMouseMove3D);
+        document.getElementById('btn-2d').addEventListener('click', () => switchMode('2d'));
+        document.getElementById('btn-3d').addEventListener('click', () => switchMode('3d'));
+
+        // Filter controls
+        document.getElementById('show-l1').addEventListener('change', (e) => { filters.showL1 = e.target.checked; updateVisibility(); });
+        document.getElementById('show-l2').addEventListener('change', (e) => { filters.showL2 = e.target.checked; updateVisibility(); });
+        document.getElementById('show-l3').addEventListener('change', (e) => { filters.showL3 = e.target.checked; updateVisibility(); });
+        document.getElementById('show-memories').addEventListener('change', (e) => { filters.showMemories = e.target.checked; updateVisibility(); });
+        document.getElementById('show-entities').addEventListener('change', (e) => { filters.showEntities = e.target.checked; updateVisibility(); });
+        document.getElementById('auto-rotate').addEventListener('change', (e) => {
+            filters.autoRotate = e.target.checked;
+            controls3d.autoRotate = e.target.checked;
+        });
+
+        // SSE for live updates
+        const evtSource = new EventSource('/api/events/sse');
+        evtSource.addEventListener('MEMORY_CREATE', (e) => {
+            const data = JSON.parse(e.data);
+            if (data.user_id === userId) setTimeout(loadGraph, 1000);
+        });
+
+        // Auto-refresh every 10 seconds
+        setInterval(() => {
+            fetch(`/api/graph/data/${userId}`)
+                .then(r => r.json())
+                .then(data => {
+                    updateStats(data.stats);
+                    if (Math.abs(data.nodes.length - graphData.nodes.length) > 3) {
+                        graphData = data;
+                        if (currentMode === '3d') build3DGraph(data);
+                        else build2DGraph(data);
+                    }
+                })
+                .catch(err => console.log('Refresh error:', err));
+        }, 10000);
+    </script>
+</body>
+</html>

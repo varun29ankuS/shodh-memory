@@ -1697,6 +1697,10 @@ pub fn geohash_search_prefixes(lat: f64, lon: f64, radius_meters: f64) -> Vec<St
 /// Query for retrieving memories
 #[derive(Debug, Clone)]
 pub struct Query {
+    // === User Context ===
+    /// User ID for per-user temporal fact lookup and personalized retrieval
+    pub user_id: Option<String>,
+
     // === Semantic Search ===
     pub query_text: Option<String>,
     pub query_embedding: Option<Vec<f32>>,
@@ -1812,6 +1816,7 @@ impl<T> PaginatedResults<T> {
 impl Default for Query {
     fn default() -> Self {
         Self {
+            user_id: None,
             query_text: None,
             query_embedding: None,
             time_range: None,
@@ -2019,6 +2024,12 @@ pub struct QueryBuilder {
 }
 
 impl QueryBuilder {
+    /// Set user ID for per-user temporal fact lookup and personalized retrieval
+    pub fn user_id(mut self, id: impl Into<String>) -> Self {
+        self.query.user_id = Some(id.into());
+        self
+    }
+
     pub fn query_text(mut self, text: impl Into<String>) -> Self {
         self.query.query_text = Some(text.into());
         self

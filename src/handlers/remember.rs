@@ -369,6 +369,31 @@ pub async fn remember(
         tracing::debug!("Graph processing failed (non-fatal): {}", e);
     }
 
+    // Extract and store temporal facts for multi-hop temporal reasoning
+    // E.g., "planning camping next month" → resolves "next month" to absolute date
+    {
+        let memory = memory.clone();
+        let user_id = req.user_id.clone();
+        let content = req.content.clone();
+        let entities = experience.entities.clone();
+        let created_at = req.created_at.unwrap_or_else(chrono::Utc::now);
+        let memory_id_clone = memory_id.clone(); // Clone before moving into closure
+
+        // Run temporal fact extraction in background (non-blocking)
+        tokio::task::spawn_blocking(move || {
+            let memory_guard = memory.read();
+            if let Err(e) = memory_guard.store_temporal_facts_for_memory(
+                &user_id,
+                &memory_id_clone,
+                &content,
+                &entities,
+                created_at,
+            ) {
+                tracing::debug!("Temporal fact extraction failed (non-fatal): {}", e);
+            }
+        });
+    }
+
     // Record metrics
     let duration = op_start.elapsed().as_secs_f64();
     metrics::MEMORY_STORE_DURATION.observe(duration);
