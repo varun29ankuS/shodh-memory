@@ -1688,7 +1688,7 @@ impl MemorySystem {
             // AND an attribute synonym value. This ensures "Caroline is single" ranks
             // high for "What is Caroline's relationship status?".
             if !attribute_boost_ids.is_empty() {
-                const ATTRIBUTE_BOOST: f32 = 5.0; // Strong boost for attribute matches
+                const ATTRIBUTE_BOOST: f32 = 0.5; // Strong boost for attribute matches
                 let mut boosted_count = 0;
                 for id in &attribute_boost_ids {
                     if fused.contains_key(id) {
@@ -1709,31 +1709,38 @@ impl MemorySystem {
             }
 
             // ===========================================================================
-            // LAYER 4.6: TEMPORAL FACT BOOST (Multi-hop Temporal Reasoning)
+            // LAYER 4.6: TEMPORAL FACT BOOST
             // ===========================================================================
-            // For temporal queries, boost memories that are the source of matching temporal facts.
-            // This ensures "When did Melanie paint a sunrise?" returns the memory where she
-            // mentioned painting the sunrise in 2022, not a later mention.
+            // For temporal queries like "When did Melanie paint a sunrise?", boost memories
+            // that are source memories for matching temporal facts. This ensures the specific
+            // memory containing the answer (e.g., "painted a sunrise in 2022") ranks high.
             if !temporal_fact_boost_ids.is_empty() {
-                const TEMPORAL_FACT_BOOST: f32 = 6.0; // Very strong boost for temporal fact sources
+                const TEMPORAL_FACT_BOOST: f32 = 0.6; // Strong boost for temporal fact matches
                 let mut boosted_count = 0;
                 for id in &temporal_fact_boost_ids {
                     if fused.contains_key(id) {
                         *fused.get_mut(id).unwrap() += TEMPORAL_FACT_BOOST;
                         boosted_count += 1;
                     } else {
-                        // Also add memories that weren't in the fusion but are temporal fact sources
+                        // Also add memories that weren't in the fusion but match temporal facts
                         fused.insert(id.clone(), TEMPORAL_FACT_BOOST);
                         boosted_count += 1;
                     }
                 }
                 if boosted_count > 0 {
                     tracing::info!(
-                        "Layer 4.6: Boosted {} memories from temporal facts",
+                        "Layer 4.6: Boosted {} memories for temporal fact match",
                         boosted_count
                     );
                 }
             }
+
+
+
+
+
+
+
 
             let mut res: Vec<_> = fused.into_iter().collect();
             res.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
