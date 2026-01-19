@@ -542,8 +542,8 @@ fn extract_historical_fact(
 fn extract_event_and_time(sentence: &str, patterns: &[&str]) -> (String, String) {
     let sentence_lower = sentence.to_lowercase();
 
-    // Find which pattern matched
-    let matched_pattern = patterns
+    // Find which pattern matched (used to verify a pattern exists)
+    let _matched_pattern = patterns
         .iter()
         .find(|p| sentence_lower.contains(*p))
         .map(|s| *s)
