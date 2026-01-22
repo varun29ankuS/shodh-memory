@@ -458,6 +458,13 @@ impl PyMemorySystem {
             predicted_outcome,
             prediction_accurate: outcome.and_then(|o| o.prediction_accurate),
             tags: tags.unwrap_or_default(),
+            // Multimodal fields (not exposed in Python API yet)
+            image_embeddings: None,
+            audio_embeddings: None,
+            video_embeddings: None,
+            media_refs: vec![],
+            // Temporal extraction
+            temporal_refs: vec![],
         };
 
         let memory_id = self
@@ -756,6 +763,7 @@ impl PyMemorySystem {
         };
 
         let query_obj = Query {
+            user_id: None,
             query_text: Some(query),
             query_embedding: None,
             time_range: None,
@@ -775,6 +783,8 @@ impl PyMemorySystem {
             pattern_id,
             terrain_type,
             confidence_range,
+            prospective_signals: None,
+            episode_id: None,
             max_results: limit,
             retrieval_mode,
             offset: 0,
@@ -1773,6 +1783,7 @@ impl PyMemorySystem {
 
         // Semantic search for relevant memories
         let query = Query {
+            user_id: None,
             query_text: Some(context.clone()),
             query_embedding: None,
             time_range: None,
@@ -1806,6 +1817,8 @@ impl PyMemorySystem {
             pattern_id: None,
             terrain_type: None,
             confidence_range: None,
+            prospective_signals: None,
+            episode_id: None,
             max_results: max_results * 2, // Get more for filtering
             retrieval_mode: RetrievalMode::Hybrid,
             offset: 0,

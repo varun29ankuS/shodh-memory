@@ -167,8 +167,9 @@ flate2 = "1.1"
 tar = "0.4"
 
 # Python bindings (optional)
-pyo3 = { version = "0.23", features = ["extension-module", "abi3-py38"], optional = true }
-numpy = { version = "0.23", optional = true }
+# NOTE: pyo3 >= 0.24.1 required for RUSTSEC-2025-0020 (buffer overflow fix)
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py38"], optional = true }
+numpy = { version = "0.24", optional = true }
 
 # LLM-based query parsing (optional - heavy dependency)
 
