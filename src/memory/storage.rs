@@ -622,7 +622,7 @@ impl MemoryStorage {
         ));
         for (key, _value) in iter.log_errors() {
             let key_str = String::from_utf8_lossy(&key);
-            if key_str.as_ref() > end_key.as_str() {
+            if &*key_str > end_key.as_str() {
                 break;
             }
             // BUG-001 FIX: Extract memory_id from key (format: date:YYYYMMDD:uuid)
