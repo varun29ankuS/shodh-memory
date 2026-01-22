@@ -1074,6 +1074,7 @@ async fn handle_claude_launch(port: u16, args: Vec<String>) -> Result<()> {
             cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
         }
 
+        #[allow(clippy::zombie_processes)] // Intentionally detached background server
         cmd.spawn().expect("Failed to start shodh-memory-server");
 
         // Wait for server to be ready
@@ -1086,7 +1087,7 @@ async fn handle_claude_launch(port: u16, args: Vec<String>) -> Result<()> {
             }
         }
     } else {
-        eprintln!("🧠 Shodh-memory server already running on port {}", port);
+        eprintln!("🧠 Shodh-memory server already running on port {port}");
     }
 
     // Launch claude with ANTHROPIC_API_BASE pointing to Cortex proxy
