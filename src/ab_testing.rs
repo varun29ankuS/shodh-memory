@@ -858,8 +858,7 @@ impl ABTestAnalyzer {
             match winner {
                 Some(ABTestVariant::Treatment) => {
                     recommendations.push(format!(
-                        "Treatment variant wins with {:.1}% relative improvement",
-                        relative_improvement
+                        "Treatment variant wins with {relative_improvement:.1}% relative improvement"
                     ));
                     recommendations
                         .push("Recommendation: Deploy treatment weights to production".to_string());
@@ -912,8 +911,7 @@ impl ABTestAnalyzer {
 
             if latency_diff.abs() > 20.0 {
                 recommendations.push(format!(
-                    "Warning: Latency differs by {:.1}% between variants - may affect user behavior",
-                    latency_diff
+                    "Warning: Latency differs by {latency_diff:.1}% between variants - may affect user behavior"
                 ));
             }
         }
