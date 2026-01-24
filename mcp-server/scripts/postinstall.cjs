@@ -11,7 +11,7 @@ const path = require('path');
 const https = require('https');
 const { execSync } = require('child_process');
 
-const VERSION = '0.1.73';
+const VERSION = '0.1.74';
 const REPO = 'varun29ankuS/shodh-memory';
 const BIN_DIR = path.join(__dirname, '..', 'bin');
 
