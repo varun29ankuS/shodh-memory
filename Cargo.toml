@@ -134,7 +134,7 @@ rand = "0.8"
 # ONNX Runtime for embeddings (MiniLM-L6-v2)
 # Using load-dynamic for runtime DLL loading (bundled in wheels)
 # CRT conflicts solved via .cargo/config.toml: -crt-static
-ort = { version = "2.0.0-rc.10", default-features = false, features = ["load-dynamic", "half"] }
+ort = { version = "2.0.0-rc.11", default-features = false, features = ["load-dynamic", "half"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 ndarray = "0.16"
 

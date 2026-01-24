@@ -35,9 +35,9 @@ jobs:
           curl -L -o bundled/models/minilm-l6/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
           curl -L -o bundled/models/bert-tiny-ner/model.onnx "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx"
           curl -L -o bundled/models/bert-tiny-ner/tokenizer.json "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json"
-          curl -L -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz"
+          curl -L -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz"
           tar -xzf onnxruntime.tgz
-          cp onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so.1.22.0 bundled/lib/libonnxruntime.so
+          cp onnxruntime-linux-x64-1.23.2/lib/libonnxruntime.so.1.23.2 bundled/lib/libonnxruntime.so
           echo "=== Downloaded files ==="
           ls -la bundled/models/minilm-l6/ bundled/models/bert-tiny-ner/ bundled/lib/
           du -sh bundled/
@@ -126,9 +126,9 @@ jobs:
           curl -L -o bundled/models/minilm-l6/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
           curl -L -o bundled/models/bert-tiny-ner/model.onnx "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx"
           curl -L -o bundled/models/bert-tiny-ner/tokenizer.json "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json"
-          curl -L -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-arm64-1.22.0.tgz"
+          curl -L -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-arm64-1.23.2.tgz"
           tar -xzf onnxruntime.tgz
-          cp onnxruntime-osx-arm64-1.22.0/lib/libonnxruntime.1.22.0.dylib bundled/lib/libonnxruntime.dylib
+          cp onnxruntime-osx-arm64-1.23.2/lib/libonnxruntime.1.23.2.dylib bundled/lib/libonnxruntime.dylib
           echo "=== Downloaded files ==="
           ls -la bundled/lib/ bundled/models/minilm-l6/ bundled/models/bert-tiny-ner/
           du -sh bundled/
@@ -213,9 +213,9 @@ jobs:
           curl -L -o bundled/models/minilm-l6/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
           curl -L -o bundled/models/bert-tiny-ner/model.onnx "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx"
           curl -L -o bundled/models/bert-tiny-ner/tokenizer.json "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json"
-          curl -L -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-x86_64-1.22.0.tgz"
+          curl -L -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-x86_64-1.23.2.tgz"
           tar -xzf onnxruntime.tgz
-          cp onnxruntime-osx-x86_64-1.22.0/lib/libonnxruntime.1.22.0.dylib bundled/lib/libonnxruntime.dylib
+          cp onnxruntime-osx-x86_64-1.23.2/lib/libonnxruntime.1.23.2.dylib bundled/lib/libonnxruntime.dylib
           echo "=== Downloaded files ==="
           ls -la bundled/lib/ bundled/models/minilm-l6/ bundled/models/bert-tiny-ner/
           du -sh bundled/
@@ -300,10 +300,10 @@ jobs:
           Invoke-WebRequest -Uri "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json" -OutFile "bundled/models/minilm-l6/tokenizer.json"
           Invoke-WebRequest -Uri "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx" -OutFile "bundled/models/bert-tiny-ner/model.onnx"
           Invoke-WebRequest -Uri "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json" -OutFile "bundled/models/bert-tiny-ner/tokenizer.json"
-          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip" -OutFile "onnxruntime.zip"
+          Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip" -OutFile "onnxruntime.zip"
           Expand-Archive -Path "onnxruntime.zip" -DestinationPath "."
-          Copy-Item "onnxruntime-win-x64-1.22.0/lib/onnxruntime.dll" -Destination "bundled/lib/onnxruntime.dll"
-          Copy-Item "onnxruntime-win-x64-1.22.0/lib/onnxruntime_providers_shared.dll" -Destination "bundled/lib/onnxruntime_providers_shared.dll"
+          Copy-Item "onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll" -Destination "bundled/lib/onnxruntime.dll"
+          Copy-Item "onnxruntime-win-x64-1.23.2/lib/onnxruntime_providers_shared.dll" -Destination "bundled/lib/onnxruntime_providers_shared.dll"
           Write-Host "=== Downloaded files ==="
           Get-ChildItem -Path bundled -Recurse | Select-Object FullName, Length
 

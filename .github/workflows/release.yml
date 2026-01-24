@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  ORT_VERSION: "1.22.0"
+  ORT_VERSION: "1.23.2"
 
 jobs:
   # Native builds for Linux x64, macOS, and Windows
@@ -23,25 +23,25 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             name: shodh-memory-linux-x64
-            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz
-            ort_lib: libonnxruntime.so.1.22.0
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz
+            ort_lib: libonnxruntime.so.1.23.2
             ort_lib_name: libonnxruntime.so
           - target: x86_64-apple-darwin
             os: macos-latest
             name: shodh-memory-macos-x64
-            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-x86_64-1.22.0.tgz
-            ort_lib: libonnxruntime.1.22.0.dylib
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-x86_64-1.23.2.tgz
+            ort_lib: libonnxruntime.1.23.2.dylib
             ort_lib_name: libonnxruntime.dylib
           - target: aarch64-apple-darwin
             os: macos-latest
             name: shodh-memory-macos-arm64
-            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-arm64-1.22.0.tgz
-            ort_lib: libonnxruntime.1.22.0.dylib
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-arm64-1.23.2.tgz
+            ort_lib: libonnxruntime.1.23.2.dylib
             ort_lib_name: libonnxruntime.dylib
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             name: shodh-memory-windows-x64
-            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip
             ort_lib: onnxruntime.dll
             ort_lib_name: onnxruntime.dll
 
@@ -168,10 +168,10 @@ jobs:
 
       - name: Download ONNX Runtime
         run: |
-          curl -L -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-aarch64-1.22.0.tgz"
+          curl -L -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-aarch64-1.23.2.tgz"
           tar -xzf ort.tgz
           ORT_DIR=$(find . -maxdepth 1 -type d -name "onnxruntime-*" | head -1)
-          cp "$ORT_DIR/lib/libonnxruntime.so.1.22.0" ./libonnxruntime.so
+          cp "$ORT_DIR/lib/libonnxruntime.so.1.23.2" ./libonnxruntime.so
 
       - name: Build Server in Docker
         run: |
