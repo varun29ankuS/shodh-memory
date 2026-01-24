@@ -19,8 +19,8 @@ crossterm = "0.28"
 tokio = { version = "1.40", features = ["full"] }
 futures-util = "0.3"
 
-# HTTP client for SSE
-reqwest = { version = "0.12", features = ["stream", "json"] }
+# HTTP client for SSE (rustls for cross-compilation compatibility)
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 reqwest-eventsource = "0.6"
 
 # Serialization
