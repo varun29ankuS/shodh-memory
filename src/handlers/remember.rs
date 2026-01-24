@@ -297,7 +297,10 @@ pub async fn remember(
         // NER extraction (named entities: Person, Org, Location, Misc)
         tokio::task::spawn_blocking(move || {
             match ner.extract(&content_for_ner) {
-                Ok(entities) => entities.into_iter().map(|e| e.text).collect::<Vec<String>>(),
+                Ok(entities) => entities
+                    .into_iter()
+                    .map(|e| e.text)
+                    .collect::<Vec<String>>(),
                 Err(e) => {
                     tracing::debug!("NER extraction failed: {}", e);
                     Vec::new()

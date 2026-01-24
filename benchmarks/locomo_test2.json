@@ -1,0 +1,63 @@
+{
+  "provider": "openai-compatible",
+  "model": "llama-3.1-8b-instant",
+  "total_items": 2,
+  "overall_accuracy": 0.0,
+  "accuracy_by_type": {
+    "multi_hop": 0.0
+  },
+  "latency_store_ms_avg": 58706.23754999542,
+  "latency_recall_ms_avg": 694.9938500038115,
+  "results": [
+    {
+      "question_id": "conv-26_q0",
+      "question_type": "multi_hop",
+      "correct": false,
+      "predicted_idx": 6,
+      "correct_idx": 5,
+      "latency_store_ms": 59977.242499997374,
+      "latency_recall_ms": 1023.0605000106152,
+      "question_text": "When did Caroline go to the LGBTQ support group?",
+      "retrieved_context": "[Memory 1]: [Conversation on July 20, 2023 at 08:56 PM] Session 10:\n[CAROLINE]: Hey Melanie! Just wanted to say hi!\n[MELANIE]: Hey Caroline! Good to talk to you again. What's up? Anything new since last time?\n[CAROLINE]: Hey Mel! A lot's happened since we last chatted - I just joined a new LGBTQ activist group last Tues. I'm meeting so many cool people who are as passionate as I am about rights and community support. I'm giving my voice and making a real difference, plus it's fulfilling in so many ways. It's just great, you know?\n[MELANIE]: That's awesome, Caroline! Glad to hear you found a great group where you can have an impact. Bet it feels great to be able to speak your truth and stand up for what's right. Want to tell me a bit more about it?\n\n[Memory 2]: [Conversation on June 27, 2023 at 10:37 AM] Session 4:\n[CAROLINE]: I'm still figuring out the details, but I'm thinking of working with trans people, helping them accept themselves and supporting their mental health. Last Friday, I went to an LGBTQ+ counseling workshop and it was really enlightening. They talked about different therapeutic methods and how to best work with trans people. Seeing how passionate these pros were about making a safe space for people like me was amazing.\n[MELANIE]: Woah, Caroline, it sounds like you're doing some impressive work. It's inspiring to see your dedication to helping others. What motivated you to pursue counseling?\n\n[Memory 3]: [Conversation on July 20, 2023 at 08:56 PM] Session 10:\n[MELANIE]: Wow, fantastic, Caroline! Bet the atmosphere was incredible. Oh yeah, we went to the beach recently. It was awesome! The kids had such a blast.\n[CAROLINE]: Sounds fun! What was the best part? Do you do it often with the kids?\n[MELANIE]: Seeing my kids' faces so happy at the beach was the best! We don't go often, usually only once or twice a year. But those times are always special to spend time together and chill.\n[CAROLINE]: Sounds special, those beach trips! Do you have any other summer traditions you all do together? Create those memories!\n[MELANIE]: We always look forward to our family camping trip. We roast marshmallows, tell stories around the campfire and just enjoy each other's company. It's the highlight of our summer!\n\n[Memory 4]: [Conversation on October 13, 2023 at 10:31 AM] Session 17:\n[CAROLINE]: Wow Mel, that's stunning! Love the colors and the chilled-out sunset vibe. What made you paint it? I've been trying out abstract stuff recently. It's kinda freeing, just putting my feelings on the canvas without too much of a plan. It's like a cool form of self-expression.\n[MELANIE]: Thanks, Caroline! I painted it because it was calming. I've done an abstract painting too, take a look! I love how art lets us get our emotions out.\n[CAROLINE]: Wow, that looks great! The blue adds so much to it. What feelings were you hoping to portray?\n[MELANIE]: I wanted a peaceful blue streaks to show tranquility. Blue calms me, so I wanted the painting to have a serene vibe while still having lots of vibrant colors.\n\n[Memory 5]: [Conversation on September 13, 2023 at 12:09 AM] Session 16:\n[CAROLINE]: Since I was 17 or so. I find it soempowering and cathartic. It's amazing how art can show things that are hard to put into words. How long have you been into art?\n[MELANIE]: Seven years now, and I've finally found my real muses: painting and pottery. It's so calming and satisfying. Check out my pottery creation in the pic!\n[CAROLINE]: Melanie, those bowls are amazing! They each have such cool designs. I love that you chose pottery for your art. Painting and drawing have helped me express my feelings and explore my gender identity. Creating art was really important to me during my transition - it helped me understand and accept myself. I'm so grateful.",
+      "correct_answer": "7 May 2023",
+      "predicted_answer": "12 June 2023",
+      "all_choices": [
+        "20 May 2023",
+        "10 May 2023",
+        "6 May 2023",
+        "8 May 2023",
+        "9 May 2023",
+        "7 May 2023",
+        "12 June 2023",
+        "15 May 2023",
+        "14 May 2023",
+        "7 April 2023"
+      ]
+    },
+    {
+      "question_id": "conv-26_q1",
+      "question_type": "multi_hop",
+      "correct": false,
+      "predicted_idx": 6,
+      "correct_idx": 8,
+      "latency_store_ms": 57435.23259999347,
+      "latency_recall_ms": 366.92719999700785,
+      "question_text": "When did Melanie paint a sunrise?",
+      "retrieved_context": "[Memory 1]: [Conversation on August 17, 2023 at 01:50 PM] Session 12 Summary: Caroline tells Melanie about a negative experience she had with religious conservatives while hiking, which reminds her of the work still needed for LGBTQ rights. She expresses gratitude for the support and acceptance she has from those around her. Melanie sympathizes with Caroline and shows her a picture of a pottery project she recently finished. Caroline expresses interest in seeing the picture and compliments Melanie's work. Melanie explains that the colors and patterns were inspired by her love for them and how painting helps her express her feelings. Caroline praises Melanie's creativity and passion. Melanie expresses her deep connection to art and how it brings her happiness and fulfillment. Caroline agrees that surrounding oneself with things that bring joy is important. They both agree that finding happiness is key in life. They express appreciation for each other's friendship and support. They reminisce about a fun time at a Pride fest and discuss plans for a family outing or a special trip just for the two of them. They agree to plan something special and look forward to making more memories together.\n\n[Memory 2]: [Conversation on September 13, 2023 at 12:09 AM] Session 16:\n[CAROLINE]: Since I was 17 or so. I find it soempowering and cathartic. It's amazing how art can show things that are hard to put into words. How long have you been into art?\n[MELANIE]: Seven years now, and I've finally found my real muses: painting and pottery. It's so calming and satisfying. Check out my pottery creation in the pic!\n[CAROLINE]: Melanie, those bowls are amazing! They each have such cool designs. I love that you chose pottery for your art. Painting and drawing have helped me express my feelings and explore my gender identity. Creating art was really important to me during my transition - it helped me understand and accept myself. I'm so grateful.\n\n[Memory 3]: [Conversation on October 13, 2023 at 10:31 AM] Session 17 Summary: Caroline reached out to her friend Melanie to share her excitement about her decision to adopt and become a mother. Melanie mentioned that she knew someone who had successfully adopted. Caroline gave Melanie some advice on how to get started with the adoption process, emphasizing the importance of research and emotional preparation. Melanie mentioned that she had recently experienced a setback due to an injury, but had found solace in reading and painting. Caroline showed interest in Melanie's paintings, and shared her own recent venture into abstract art. They discussed the emotions behind their artwork and the therapeutic nature of self-expression. Caroline also mentioned attending a poetry reading that celebrated transgender identities, which inspired her to create her own art. Melanie praised Caroline's artwork and they affirmed the importance of staying true to oneself and embracing personal growth and exploration.\n\n[Memory 4]: [Conversation on October 20, 2023 at 06:55 PM] Session 18:\n[MELANIE]: Yeah, you're right, Caroline. Family's super important to me. Especially after the accident, I've thought a lot about how much I need them. They mean the world to me and I'm so thankful to have them. Thankfully, they enjoyed the Grand Canyon a lot!\n[CAROLINE]: The kids look so cute, Mel! I bet they bring lots of joy. How did they handle the accident?\n[MELANIE]: Thanks! They were scared but we reassured them and explained their brother would be OK. They're tough kids.\n[CAROLINE]: Kids are amazingly resilient in tough situations. They have an amazing ability to bounce back.\n[MELANIE]: They're really amazing. Wish I was that resilient too. But they give me the strength to keep going.\n[CAROLINE]: Our loved ones give us strength to tackle any challenge - it's amazing!\n\n[Memory 5]: [Conversation on July 12, 2023 at 04:33 PM] Session 7:\n[MELANIE]: Wow, Caroline! Books have such an awesome power! Which one has been your favorite guide?\n[CAROLINE]: I loved \"Becoming Nicole\" by Amy Ellis Nutt. It's a real inspiring true story about a trans girl and her family. It made me feel connected and gave me a lot of hope for my own path. Highly recommend it for sure!\n[MELANIE]: That sounds awesome! What did you take away from it to use in your life?\n[CAROLINE]: It taught me self-acceptance and how to find support. It also showed me that tough times don't last - hope and love exist. Pets bring so much joy too, though.\n[MELANIE]: Caroline, those lessons are great - self-acceptance and finding support are key. Plus pets are awesome for joy and comfort, can't agree more!\n[CAROLINE]: That's so nice! What pet do you have?",
+      "correct_answer": "2022",
+      "predicted_answer": "2023",
+      "all_choices": [
+        "2023-02-10",
+        "2022-01-20",
+        "2020",
+        "January 15, 2022",
+        "December 25, 2021",
+        "2022 December",
+        "2023",
+        "April 5, 2022",
+        "2022",
+        "2021"
+      ]
+    }
+  ]
+}

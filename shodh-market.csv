@@ -1,0 +1,76 @@
+Segment,Sub-segment,Users/Units,Price/Year ($),Market Size ($M),Market Size (₹ Cr),Source,Notes
+AI Developer Tools,GitHub Copilot,1800000,100,180,1494,GitHub 2024,Paid subscribers
+AI Developer Tools,Cursor,500000,200,100,830,Estimate,Growing 50% MoM
+AI Developer Tools,Claude Code,300000,200,60,498,Estimate,New entrant
+AI Developer Tools,Other AI coding tools,2000000,150,300,2490,Industry avg,Tabnine/Codeium/etc
+AI Developer Tools,SUBTOTAL (Today),-,-,640,5312,-,-
+AI Developer Tools,PROJECTED 5yr,25000000,150,3750,31125,40% CAGR,AI coding becoming default
+,,,,,,,
+Enterprise AI,Large Enterprise (10K+ emp),20000,50000,1000,8300,Gartner,Fortune 500
+Enterprise AI,Mid-market (500-10K),150000,10000,1500,12450,Estimate,Fastest growing
+Enterprise AI,SMB (50-500),1000000,2000,2000,16600,Estimate,Volume play
+Enterprise AI,SUBTOTAL (Today),-,-,4500,37350,-,-
+Enterprise AI,PROJECTED 5yr,2000000,-,12000,99600,25% CAGR,Every company adding AI
+,,,,,,,
+Edge AI Devices,Smart home,500000000,5,2500,20750,Statista,Alexa/Google/Apple
+Edge AI Devices,Industrial IoT,50000000,50,2500,20750,McKinsey,Factories/sensors
+Edge AI Devices,Automotive,100000000,20,2000,16600,IHS Markit,In-car AI
+Edge AI Devices,Wearables,200000000,10,2000,16600,IDC,Watches/glasses
+Edge AI Devices,SUBTOTAL (Today),-,-,9000,74700,-,-
+Edge AI Devices,PROJECTED 5yr,2000000000,-,15000,124500,30% CAGR,Edge AI explosion
+,,,,,,,
+AI App Infrastructure,AI startups,50000,20000,1000,8300,Estimate,Need memory layer
+AI App Infrastructure,SaaS adding AI,200000,15000,3000,24900,Estimate,Every SaaS going AI
+AI App Infrastructure,Internal enterprise apps,100000,25000,2500,20750,Estimate,Custom AI tools
+AI App Infrastructure,SUBTOTAL (Today),-,-,6500,53950,-,-
+AI App Infrastructure,PROJECTED 5yr,750000,-,15000,124500,25% CAGR,AI-native default
+,,,,,,,
+TOTAL,TODAY,-,-,20640,171312,-,-
+TOTAL,5 YEAR,-,-,45750,379725,-,-
+,,,,,,,
+,,,,,,,
+SOM - Our Capture,,,,,,,
+Year,Phase,Market Share,Revenue ($M),Revenue (₹ Cr),Key Milestones,,
+1,Developer adoption,0.01%,2,17,10K developers on Claude/Cursor,,
+2,Growth + Enterprise,0.05%,10,83,50K devs + 20 enterprise pilots,,
+3,Enterprise expansion,0.15%,30,249,100K devs + 100 enterprise deals,,
+4,Platform + Edge,0.50%,100,830,Edge SDK launch + 500 enterprise,,
+5,Market leader,1.50%,300,2490,Default memory layer for AI,,
+,,,,,,,
+,,,,,,,
+Pricing Model,,,,,,,
+Tier,Target,$/Month,$/Year,Features,,,
+Free,Individual devs,0,0,1GB local memory,,,
+Pro,Power users,15,180,10GB + sync + priority support,,,
+Team,Small teams (per seat),30,360,50GB + shared memory + collab,,,
+Enterprise,Companies,Custom,10K-100K,Unlimited + SSO + compliance + SLA,,,
+Edge SDK,Device OEMs,0.10/device,1.20/device,Embedded runtime + bulk pricing,,,
+,,,,,,,
+,,,,,,,
+Contribution Margin,,,,,,,
+Item,% of Revenue,Notes,,,,,
+Revenue,100%,Software subscriptions,,,,,
+Hosting/Infra,-8%,Edge-native = low cloud costs,,,,,
+Support,-5%,Scales with automation,,,,,
+Payment processing,-3%,Stripe/payment fees,,,,,
+CONTRIBUTION MARGIN,84%,High due to software model,,,,,
+,,,,,,,
+,,,,,,,
+Competitors,,,,,,,
+Name,What they do,Weakness,Our advantage,,,
+Pinecone,Vector database,Storage only - no learning,Hebbian learning + consolidation,,,
+Weaviate,Vector database,No memory model,Cognitive architecture,,,
+LangChain Memory,Conversation buffer,Append-only - no decay,Strengthening + forgetting,,,
+Mem0,AI memory,Cloud-only,Edge-native + offline,,,
+Context windows,Stuff more tokens,Expensive + no learning,Efficient + learns,,,
+RAG pipelines,Retrieval,Retrieval ≠ memory,True memory system,,,
+Fine-tuning,Bake knowledge,Static + expensive,Dynamic + personalized,,,
+,,,,,,,
+,,,,,,,
+Sources,,,,,,,
+Data Point,Source,Link,,,,,
+GitHub Copilot users,GitHub Blog 2024,github.blog,,,,,
+AI infrastructure market,Gartner 2024,gartner.com,,,,,
+Edge AI forecast,Statista 2024,statista.com,,,,,
+Developer tools benchmarks,Bessemer Cloud Index,bvp.com,,,,,
+Enterprise AI adoption,McKinsey AI Survey,mckinsey.com,,,,,
