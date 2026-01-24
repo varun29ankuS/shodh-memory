@@ -41,6 +41,10 @@ Choose your platform:
 
 ## TUI Dashboard
 
+```bash
+shodh-tui
+```
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/varun29ankuS/shodh-memory/main/assets/dashboard.jpg" width="700" alt="Shodh Dashboard">
 </p>
@@ -52,6 +56,8 @@ Choose your platform:
 </p>
 
 <p align="center"><i>Knowledge graph visualization — entity connections across memories</i></p>
+
+**Keyboard shortcuts:** `Tab` switch panels · `j/k` navigate · `Enter` select · `/` search · `q` quit
 
 ## GTD Todo System
 
