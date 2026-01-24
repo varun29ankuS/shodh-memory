@@ -63,9 +63,9 @@ The server exposes a REST API for memory operations. After starting:
 const AFTER_HELP: &str = r#"
 INTEGRATION:
   Claude Code:   Install hooks from ./hooks/ directory
-  MCP Server:    Run `shodh serve` for Model Context Protocol
+  MCP Server:    Run `shodh` for Model Context Protocol
   Python:        pip install shodh-memory
-  TUI:           Run `cargo run -p shodh-memory-tui`
+  TUI:           Run `shodh-tui` for terminal dashboard
 
 EXAMPLES:
   # Start with defaults (localhost:3030)
@@ -79,6 +79,9 @@ EXAMPLES:
 
   # Using environment variables
   SHODH_PORT=9000 SHODH_HOST=0.0.0.0 shodh-memory-server
+
+  # Verify server is running
+  curl http://localhost:3030/health
 
 DOCUMENTATION:
   GitHub:  https://github.com/varun29ankuS/shodh-memory
