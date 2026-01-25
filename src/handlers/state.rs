@@ -1341,6 +1341,8 @@ impl MultiUserMemoryManager {
                     ltp_status: LtpStatus::None,
                     tier: EdgeTier::L1Working,
                     activation_timestamps: None,
+                    // PIPE-5: Default confidence (will use 0.5 in readiness calculation)
+                    entity_confidence: None,
                 };
 
                 if let Err(e) = graph_guard.add_relationship(edge) {

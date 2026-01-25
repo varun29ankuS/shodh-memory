@@ -1511,6 +1511,9 @@ pub async fn add_relationship(
         })?;
     let to_uuid = to_entity.uuid;
 
+    // PIPE-5: Calculate entity confidence from connected entities' salience
+    let entity_confidence = Some((from_entity.salience + to_entity.salience) / 2.0);
+
     let edge = graph_memory::RelationshipEdge {
         uuid: uuid::Uuid::new_v4(),
         from_entity: from_uuid,
@@ -1527,6 +1530,7 @@ pub async fn add_relationship(
         ltp_status: graph_memory::LtpStatus::None,
         tier: graph_memory::EdgeTier::L1Working,
         activation_timestamps: None,
+        entity_confidence,
     };
 
     graph_guard

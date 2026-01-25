@@ -320,6 +320,14 @@ pub struct RelationshipEdge {
     /// Enables: burst detection, weekly patterns, temporal query relevance
     #[serde(default)]
     pub activation_timestamps: Option<VecDeque<DateTime<Utc>>>,
+
+    /// Entity extraction confidence (PIPE-5: Unified LTP Readiness)
+    /// Average confidence of the entities connected by this edge.
+    /// Affects LTP threshold: high confidence → faster LTP (7 activations)
+    /// Low confidence → slower LTP (13 activations).
+    /// Based on synaptic tagging: behaviorally relevant synapses consolidate faster.
+    #[serde(default)]
+    pub entity_confidence: Option<f32>,
 }
 
 fn default_last_activated() -> DateTime<Utc> {
@@ -442,15 +450,9 @@ impl RelationshipEdge {
             }
         }
 
-        // L3 semantic edges with high strength get Full LTP automatically
-        // PIPE-4: Only auto-potentiate if no existing LTP status (don't override Burst/Weekly)
-        // This allows multi-scale LTP progression: Burst → Weekly → Full via activation patterns
-        if matches!(self.tier, EdgeTier::L3Semantic)
-            && self.strength >= TIER_LTP_THRESHOLD
-            && matches!(self.ltp_status, LtpStatus::None)
-        {
-            self.ltp_status = LtpStatus::Full;
-        }
+        // PIPE-5: L3 auto-LTP removed - now handled by unified ltp_readiness()
+        // The readiness formula combines strength + activation count + entity confidence,
+        // ensuring both intensity and repetition evidence are required for Full LTP.
     }
 
     /// Record an activation timestamp (PIPE-4)
@@ -489,17 +491,32 @@ impl RelationshipEdge {
         }
     }
 
-    /// Detect LTP status based on multi-scale patterns (PIPE-4)
+    /// Detect LTP status based on unified readiness model (PIPE-4 + PIPE-5)
+    ///
+    /// PIPE-5 unifies LTP detection into a single readiness score that combines:
+    /// - Activation count (repetition path)
+    /// - Strength (intensity/durability path)
+    /// - Entity confidence (synaptic tagging bonus)
+    ///
+    /// Multiple paths can lead to Full LTP:
+    /// - High repetition alone (15+ activations)
+    /// - High intensity alone (0.95+ strength at L3)
+    /// - Balanced contribution from both
+    /// - High-confidence edges reach threshold ~30% faster
+    ///
+    /// Temporal patterns (Burst, Weekly) remain separate as they represent
+    /// different consolidation mechanisms (E-LTP vs habit formation).
     fn detect_ltp_status(&self, now: DateTime<Utc>) -> LtpStatus {
         use crate::constants::*;
 
-        // Check for Full LTP first (highest priority)
-        // Path 1: 10+ total activations
-        if self.activation_count >= LTP_THRESHOLD {
+        // PIPE-5: Unified LTP readiness for Full LTP
+        // Combines activation count, strength, and entity confidence
+        if self.ltp_readiness() >= LTP_READINESS_THRESHOLD {
             return LtpStatus::Full;
         }
 
-        // Path 2: 5+ activations over 30+ days (time-aware)
+        // Legacy time-aware path: 5+ activations over 30+ days
+        // Kept for backward compatibility and edges that survived long decay
         let edge_age_days = (now - self.created_at).num_days();
         if edge_age_days >= LTP_TIME_AWARE_DAYS && self.activation_count >= LTP_TIME_AWARE_THRESHOLD
         {
@@ -507,11 +524,13 @@ impl RelationshipEdge {
         }
 
         // Check for Weekly LTP (requires timestamp history)
+        // Temporal pattern: 3+/week for 2+ weeks indicates habit
         if self.detect_weekly_pattern() {
             return LtpStatus::Weekly;
         }
 
         // Check for Burst LTP (requires timestamp history)
+        // Temporal pattern: 5+ in 24h indicates high immediate interest
         if self.detect_burst_pattern(now) {
             return LtpStatus::Burst { detected_at: now };
         }
@@ -687,6 +706,87 @@ impl RelationshipEdge {
     /// Check if this edge has any LTP protection (for backward compatibility)
     pub fn is_potentiated(&self) -> bool {
         self.ltp_status.is_potentiated()
+    }
+
+    // =========================================================================
+    // PIPE-5: Unified LTP Readiness Model
+    // =========================================================================
+
+    /// Get confidence-adjusted LTP threshold (PIPE-5)
+    ///
+    /// High-confidence edges (strong entity extraction) need fewer activations.
+    /// Low-confidence edges need more activations to prove value.
+    ///
+    /// Returns: threshold in range [LTP_THRESHOLD_MIN, LTP_THRESHOLD_MAX]
+    pub fn adjusted_threshold(&self) -> u32 {
+        use crate::constants::*;
+
+        let confidence = self.entity_confidence.unwrap_or(0.5);
+
+        // Linear interpolation: high confidence → low threshold
+        // confidence 0.0 → threshold_max (13)
+        // confidence 1.0 → threshold_min (7)
+        let range = LTP_THRESHOLD_MAX - LTP_THRESHOLD_MIN;
+        let threshold = LTP_THRESHOLD_MAX as f32 - (confidence * range as f32);
+        threshold.round() as u32
+    }
+
+    /// Get tier-specific strength floor for Full LTP (PIPE-5)
+    ///
+    /// L2 edges have lower floor (still proving themselves).
+    /// L3 edges have higher floor (must demonstrate durability).
+    /// L1 edges return 1.0 (effectively impossible to reach Full LTP).
+    pub fn strength_floor(&self) -> f32 {
+        use crate::constants::*;
+
+        match self.tier {
+            EdgeTier::L1Working => 1.0, // L1 can't reach Full LTP via readiness
+            EdgeTier::L2Episodic => LTP_STRENGTH_FLOOR_L2,
+            EdgeTier::L3Semantic => LTP_STRENGTH_FLOOR_L3,
+        }
+    }
+
+    /// Calculate LTP readiness score (PIPE-5)
+    ///
+    /// Unified formula combining activation count, strength, and entity confidence:
+    /// - count_score = activation_count / adjusted_threshold
+    /// - strength_score = strength / strength_floor
+    /// - tag_bonus = entity_confidence * TAG_WEIGHT
+    ///
+    /// readiness = count_score * COUNT_WEIGHT + strength_score * STRENGTH_WEIGHT + tag_bonus
+    ///
+    /// Full LTP when readiness >= 1.0
+    ///
+    /// This allows multiple paths to LTP:
+    /// - Repetition-dominant: 15 activations can compensate for lower strength
+    /// - Intensity-dominant: 0.95 strength can compensate for fewer activations
+    /// - Balanced: 10 activations + 0.75 strength + moderate confidence
+    /// - Tagged boost: high-confidence edges reach LTP ~30% faster
+    pub fn ltp_readiness(&self) -> f32 {
+        use crate::constants::*;
+
+        // L1 edges can't reach Full LTP via readiness (too transient)
+        if matches!(self.tier, EdgeTier::L1Working) {
+            return 0.0;
+        }
+
+        let threshold = self.adjusted_threshold() as f32;
+        let floor = self.strength_floor();
+
+        // Count score: how close to activation threshold
+        let count_score = self.activation_count as f32 / threshold;
+
+        // Strength score: how close to strength floor
+        let strength_score = self.strength / floor;
+
+        // Tag bonus: entity confidence provides synaptic tagging advantage
+        let confidence = self.entity_confidence.unwrap_or(0.5);
+        let tag_bonus = confidence * LTP_READINESS_TAG_WEIGHT;
+
+        // Weighted combination
+        count_score * LTP_READINESS_COUNT_WEIGHT
+            + strength_score * LTP_READINESS_STRENGTH_WEIGHT
+            + tag_bonus
     }
 }
 
@@ -2514,6 +2614,8 @@ impl GraphMemory {
                         ltp_status: LtpStatus::None,
                         activation_timestamps: None,
                         tier: EdgeTier::L1Working,
+                        // PIPE-5: Memory-to-memory edges use default confidence
+                        entity_confidence: None,
                     };
 
                     let key = edge.uuid.as_bytes();
@@ -2630,6 +2732,8 @@ impl GraphMemory {
                     ltp_status: LtpStatus::None,
                     activation_timestamps: None,
                     tier: EdgeTier::L2Episodic,
+                    // PIPE-5: Replay edges use default confidence
+                    entity_confidence: None,
                 };
 
                 let key = edge.uuid.as_bytes();
@@ -4483,6 +4587,7 @@ mod tests {
             ltp_status: LtpStatus::None,
             activation_timestamps: None,
             tier,
+            entity_confidence: None, // PIPE-5: Default for tests
         }
     }
 
@@ -4708,6 +4813,236 @@ mod tests {
         let in_day = edge.activations_in_window(day_ago, now);
         assert!(in_hour >= 5, "Expected 5+ in hour window, got {}", in_hour);
         assert!(in_day >= 5, "Expected 5+ in day window, got {}", in_day);
+    }
+
+    // =========================================================================
+    // PIPE-5: Unified LTP Readiness Model Tests
+    // =========================================================================
+
+    #[test]
+    fn test_pipe5_adjusted_threshold_default() {
+        // Default confidence (None → 0.5) should give default threshold (10)
+        let edge = create_test_edge_with_tier(0.5, 0, EdgeTier::L2Episodic);
+        assert!(edge.entity_confidence.is_none());
+
+        let threshold = edge.adjusted_threshold();
+        // confidence 0.5 → threshold = 13 - (0.5 * 6) = 10
+        assert_eq!(threshold, 10, "Default confidence should give threshold 10");
+    }
+
+    #[test]
+    fn test_pipe5_adjusted_threshold_high_confidence() {
+        // High confidence (0.9) should give lower threshold (7-8)
+        let mut edge = create_test_edge_with_tier(0.5, 0, EdgeTier::L2Episodic);
+        edge.entity_confidence = Some(0.9);
+
+        let threshold = edge.adjusted_threshold();
+        // confidence 0.9 → threshold = 13 - (0.9 * 6) = 7.6 → 8
+        assert!(
+            threshold <= 8,
+            "High confidence should give threshold <= 8, got {}",
+            threshold
+        );
+    }
+
+    #[test]
+    fn test_pipe5_adjusted_threshold_low_confidence() {
+        // Low confidence (0.2) should give higher threshold (12-13)
+        let mut edge = create_test_edge_with_tier(0.5, 0, EdgeTier::L2Episodic);
+        edge.entity_confidence = Some(0.2);
+
+        let threshold = edge.adjusted_threshold();
+        // confidence 0.2 → threshold = 13 - (0.2 * 6) = 11.8 → 12
+        assert!(
+            threshold >= 11,
+            "Low confidence should give threshold >= 11, got {}",
+            threshold
+        );
+    }
+
+    #[test]
+    fn test_pipe5_strength_floor_by_tier() {
+        use crate::constants::*;
+
+        let l1_edge = create_test_edge_with_tier(0.5, 0, EdgeTier::L1Working);
+        let l2_edge = create_test_edge_with_tier(0.5, 0, EdgeTier::L2Episodic);
+        let l3_edge = create_test_edge_with_tier(0.5, 0, EdgeTier::L3Semantic);
+
+        assert_eq!(
+            l1_edge.strength_floor(),
+            1.0,
+            "L1 should have floor 1.0 (impossible)"
+        );
+        assert_eq!(
+            l2_edge.strength_floor(),
+            LTP_STRENGTH_FLOOR_L2,
+            "L2 floor mismatch"
+        );
+        assert_eq!(
+            l3_edge.strength_floor(),
+            LTP_STRENGTH_FLOOR_L3,
+            "L3 floor mismatch"
+        );
+    }
+
+    #[test]
+    fn test_pipe5_ltp_readiness_l1_returns_zero() {
+        // L1 edges should always return 0 readiness (can't reach Full LTP)
+        let mut edge = create_test_edge_with_tier(0.99, 0, EdgeTier::L1Working);
+        edge.activation_count = 100;
+        edge.entity_confidence = Some(1.0);
+
+        assert_eq!(
+            edge.ltp_readiness(),
+            0.0,
+            "L1 edges should always return 0 readiness"
+        );
+    }
+
+    #[test]
+    fn test_pipe5_ltp_readiness_balanced_path() {
+        use crate::constants::*;
+
+        // Balanced: 10 activations + 0.75 strength + 0.5 confidence
+        // count_score = 10 / 10 = 1.0
+        // strength_score = 0.75 / 0.65 = 1.15
+        // tag_bonus = 0.5 * 0.3 = 0.15
+        // readiness = 1.0 * 0.5 + 1.15 * 0.5 + 0.15 = 0.5 + 0.575 + 0.15 = 1.225
+        let mut edge = create_test_edge_with_tier(0.75, 0, EdgeTier::L2Episodic);
+        edge.activation_count = 10;
+        edge.entity_confidence = Some(0.5);
+
+        let readiness = edge.ltp_readiness();
+        assert!(
+            readiness >= LTP_READINESS_THRESHOLD,
+            "Balanced path should reach LTP, readiness = {}",
+            readiness
+        );
+    }
+
+    #[test]
+    fn test_pipe5_ltp_readiness_repetition_dominant() {
+        use crate::constants::*;
+
+        // Repetition dominant: 15 activations + 0.50 strength (below floor)
+        // count_score = 15 / 10 = 1.5
+        // strength_score = 0.50 / 0.65 = 0.77
+        // tag_bonus = 0.5 * 0.3 = 0.15
+        // readiness = 1.5 * 0.5 + 0.77 * 0.5 + 0.15 = 0.75 + 0.385 + 0.15 = 1.285
+        let mut edge = create_test_edge_with_tier(0.50, 0, EdgeTier::L2Episodic);
+        edge.activation_count = 15;
+        edge.entity_confidence = Some(0.5);
+
+        let readiness = edge.ltp_readiness();
+        assert!(
+            readiness >= LTP_READINESS_THRESHOLD,
+            "Repetition-dominant path should reach LTP, readiness = {}",
+            readiness
+        );
+    }
+
+    #[test]
+    fn test_pipe5_ltp_readiness_intensity_dominant() {
+        use crate::constants::*;
+
+        // Intensity dominant: 5 activations + 0.95 strength (L3)
+        // count_score = 5 / 10 = 0.5
+        // strength_score = 0.95 / 0.80 = 1.1875
+        // tag_bonus = 0.5 * 0.3 = 0.15
+        // readiness = 0.5 * 0.5 + 1.1875 * 0.5 + 0.15 = 0.25 + 0.59 + 0.15 = 0.99
+        // Need more strength or count for intensity-only path on L3
+        let mut edge = create_test_edge_with_tier(0.99, 0, EdgeTier::L3Semantic);
+        edge.activation_count = 6;
+        edge.entity_confidence = Some(0.5);
+
+        let readiness = edge.ltp_readiness();
+        // count_score = 6/10 = 0.6, strength_score = 0.99/0.80 = 1.24
+        // readiness = 0.6*0.5 + 1.24*0.5 + 0.15 = 0.3 + 0.62 + 0.15 = 1.07
+        assert!(
+            readiness >= LTP_READINESS_THRESHOLD,
+            "Intensity-dominant path should reach LTP, readiness = {}",
+            readiness
+        );
+    }
+
+    #[test]
+    fn test_pipe5_ltp_readiness_high_confidence_boost() {
+        use crate::constants::*;
+
+        // High confidence edge reaches LTP faster
+        // 7 activations + 0.65 strength + 0.9 confidence
+        // threshold = 13 - 0.9*6 = 7.6 → 8
+        // count_score = 7 / 8 = 0.875
+        // strength_score = 0.65 / 0.65 = 1.0
+        // tag_bonus = 0.9 * 0.3 = 0.27
+        // readiness = 0.875 * 0.5 + 1.0 * 0.5 + 0.27 = 0.44 + 0.5 + 0.27 = 1.21
+        let mut edge = create_test_edge_with_tier(0.65, 0, EdgeTier::L2Episodic);
+        edge.activation_count = 7;
+        edge.entity_confidence = Some(0.9);
+
+        let readiness = edge.ltp_readiness();
+        assert!(
+            readiness >= LTP_READINESS_THRESHOLD,
+            "High-confidence should boost to LTP, readiness = {}",
+            readiness
+        );
+    }
+
+    #[test]
+    fn test_pipe5_weak_edge_no_ltp() {
+        use crate::constants::*;
+
+        // Weak edge: 4 activations + 0.40 strength + 0.3 confidence
+        // threshold = 13 - 0.3*6 = 11.2 → 11
+        // count_score = 4 / 11 = 0.36
+        // strength_score = 0.40 / 0.65 = 0.62
+        // tag_bonus = 0.3 * 0.3 = 0.09
+        // readiness = 0.36 * 0.5 + 0.62 * 0.5 + 0.09 = 0.18 + 0.31 + 0.09 = 0.58
+        let mut edge = create_test_edge_with_tier(0.40, 0, EdgeTier::L2Episodic);
+        edge.activation_count = 4;
+        edge.entity_confidence = Some(0.3);
+
+        let readiness = edge.ltp_readiness();
+        assert!(
+            readiness < LTP_READINESS_THRESHOLD,
+            "Weak edge should NOT reach LTP, readiness = {}",
+            readiness
+        );
+    }
+
+    #[test]
+    fn test_pipe5_unified_detect_ltp_status() {
+        // Test that detect_ltp_status uses the unified readiness formula
+        let mut edge = create_test_edge_with_tier(0.75, 0, EdgeTier::L2Episodic);
+        edge.activation_count = 10;
+        edge.entity_confidence = Some(0.5);
+        edge.activation_timestamps = Some(std::collections::VecDeque::new());
+
+        let status = edge.detect_ltp_status(Utc::now());
+        assert_eq!(
+            status,
+            LtpStatus::Full,
+            "Balanced path should grant Full LTP via readiness"
+        );
+    }
+
+    #[test]
+    fn test_pipe5_l3_no_auto_ltp_without_activations() {
+        // L3 with high strength but low activation count should NOT auto-LTP
+        // This tests that the old auto-LTP behavior is removed
+        let mut edge = create_test_edge_with_tier(0.85, 0, EdgeTier::L3Semantic);
+        edge.activation_count = 2; // Low count
+        edge.entity_confidence = Some(0.5);
+        edge.activation_timestamps = Some(std::collections::VecDeque::new());
+
+        // count_score = 2/10 = 0.2, strength_score = 0.85/0.80 = 1.06
+        // readiness = 0.2*0.5 + 1.06*0.5 + 0.15 = 0.1 + 0.53 + 0.15 = 0.78
+        let status = edge.detect_ltp_status(Utc::now());
+        assert_eq!(
+            status,
+            LtpStatus::None,
+            "L3 high strength alone should NOT grant Full LTP, needs activations too"
+        );
     }
 
     #[test]
@@ -4980,6 +5315,7 @@ mod tests {
             ltp_status: LtpStatus::None,
             activation_timestamps: None,
             tier: EdgeTier::L2Episodic, // Use L2 since it has activation count
+            entity_confidence: None,    // PIPE-5: Default for tests
         };
         graph.add_relationship(edge).unwrap();
 

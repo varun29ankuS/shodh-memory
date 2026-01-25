@@ -633,6 +633,9 @@ impl MemorySystem {
                 ) {
                     // Create edge between co-occurring entities
                     // Starts in L1 (working memory) with tier-specific initial weight
+                    // PIPE-5: Calculate entity confidence from connected entities' salience
+                    let entity_confidence = Some((e1.salience + e2.salience) / 2.0);
+
                     let edge = crate::graph_memory::RelationshipEdge {
                         uuid: Uuid::new_v4(),
                         from_entity: e1.uuid,
@@ -649,6 +652,7 @@ impl MemorySystem {
                         ltp_status: crate::graph_memory::LtpStatus::None,
                         tier: crate::graph_memory::EdgeTier::L1Working,
                         activation_timestamps: None,
+                        entity_confidence,
                     };
 
                     // add_relationship handles deduplication via Hebbian strengthening
@@ -964,6 +968,9 @@ impl MemorySystem {
                     graph_guard.find_entity_by_name(&entity1),
                     graph_guard.find_entity_by_name(&entity2),
                 ) {
+                    // PIPE-5: Calculate entity confidence from connected entities' salience
+                    let entity_confidence = Some((e1.salience + e2.salience) / 2.0);
+
                     let edge = crate::graph_memory::RelationshipEdge {
                         uuid: Uuid::new_v4(),
                         from_entity: e1.uuid,
@@ -980,6 +987,7 @@ impl MemorySystem {
                         ltp_status: crate::graph_memory::LtpStatus::None,
                         tier: crate::graph_memory::EdgeTier::L1Working,
                         activation_timestamps: None,
+                        entity_confidence,
                     };
 
                     if let Err(e) = graph_guard.add_relationship(edge) {
@@ -4120,6 +4128,9 @@ impl MemorySystem {
                         graph_guard.find_entity_by_name(&entity1),
                         graph_guard.find_entity_by_name(&entity2),
                     ) {
+                        // PIPE-5: Calculate entity confidence from connected entities' salience
+                        let entity_confidence = Some((e1.salience + e2.salience) / 2.0);
+
                         let edge = crate::graph_memory::RelationshipEdge {
                             uuid: Uuid::new_v4(),
                             from_entity: e1.uuid,
@@ -4136,6 +4147,7 @@ impl MemorySystem {
                             ltp_status: crate::graph_memory::LtpStatus::None,
                             tier: crate::graph_memory::EdgeTier::L1Working,
                             activation_timestamps: None,
+                            entity_confidence,
                         };
 
                         if let Err(e) = graph_guard.add_relationship(edge) {

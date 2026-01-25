@@ -825,6 +825,90 @@ pub const ACTIVATION_HISTORY_L2_CAPACITY: usize = 20;
 pub const ACTIVATION_HISTORY_L3_CAPACITY: usize = 50;
 
 // =============================================================================
+// UNIFIED LTP READINESS MODEL (PIPE-5)
+// Based on neuroscience: multiple paths to LTP (E-LTP intensity, L-LTP repetition)
+// Unified scoring allows either path to dominate while both contribute.
+// Reference: Frey & Morris (1997) Synaptic tagging and capture
+// =============================================================================
+
+/// Weight for activation count in LTP readiness formula
+///
+/// count_score = activation_count / adjusted_threshold
+/// Higher weight means repetition matters more.
+///
+/// Justification:
+/// - 0.5 gives equal initial weight to count and strength
+/// - Hebbian "fire together wire together" requires repeated co-activation
+pub const LTP_READINESS_COUNT_WEIGHT: f32 = 0.5;
+
+/// Weight for strength in LTP readiness formula
+///
+/// strength_score = strength / strength_floor
+/// Higher weight means intensity/durability matters more.
+///
+/// Justification:
+/// - 0.5 gives equal initial weight to count and strength
+/// - Strength surviving decay proves consistent relevance
+pub const LTP_READINESS_STRENGTH_WEIGHT: f32 = 0.5;
+
+/// Weight for entity confidence bonus (tagging effect)
+///
+/// tag_bonus = entity_confidence * LTP_READINESS_TAG_WEIGHT
+/// High-confidence entities provide synaptic tagging advantage.
+///
+/// Justification:
+/// - 0.3 max bonus allows high-confidence edges to reach LTP ~30% faster
+/// - Based on synaptic tagging: behaviorally relevant synapses consolidate faster
+///
+/// Reference: Moncada & Viola (2007) Behavioral tagging
+pub const LTP_READINESS_TAG_WEIGHT: f32 = 0.3;
+
+/// Minimum LTP threshold (for high-confidence edges)
+///
+/// Edges with high entity confidence need fewer activations.
+///
+/// Justification:
+/// - 7 activations for confidence >= 0.8
+/// - High-quality entity extraction indicates reliable semantic signal
+pub const LTP_THRESHOLD_MIN: u32 = 7;
+
+/// Maximum LTP threshold (for low-confidence edges)
+///
+/// Edges with low entity confidence need more activations.
+///
+/// Justification:
+/// - 13 activations for confidence <= 0.3
+/// - Weak entity extraction needs more behavioral evidence
+pub const LTP_THRESHOLD_MAX: u32 = 13;
+
+/// Strength floor for L2 edges to qualify for Full LTP
+///
+/// L2 edges need strength above this to reach Full LTP status.
+///
+/// Justification:
+/// - 0.65 ensures edge has survived some decay pressure
+/// - Lower than L3 because L2 is still proving itself
+pub const LTP_STRENGTH_FLOOR_L2: f32 = 0.65;
+
+/// Strength floor for L3 edges to qualify for Full LTP
+///
+/// L3 edges need strength above this to reach Full LTP status.
+///
+/// Justification:
+/// - 0.80 matches the old auto-LTP threshold
+/// - L3 edges must demonstrate high durability for permanent protection
+pub const LTP_STRENGTH_FLOOR_L3: f32 = 0.80;
+
+/// LTP readiness threshold for Full LTP status
+///
+/// When ltp_readiness() >= this value, edge gets Full LTP.
+///
+/// Justification:
+/// - 1.0 requires either balanced contribution from both paths
+///   or dominant contribution from one path + tag bonus
+pub const LTP_READINESS_THRESHOLD: f32 = 1.0;
+
+// =============================================================================
 // HYBRID DECAY MODEL CONSTANTS (SHO-103)
 // Based on Wixted & Ebbesen (1991) - power-law forgetting matches human memory
 // Hybrid model: exponential for consolidation, power-law for long-term retention
