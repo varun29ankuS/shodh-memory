@@ -282,9 +282,7 @@ async fn main() -> Result<()> {
         app.into_make_service_with_connect_info::<SocketAddr>(),
     );
 
-    let server_handle = tokio::spawn(async move {
-        server.await
-    });
+    let server_handle = tokio::spawn(async move { server.await });
 
     // Wait for shutdown signal
     shutdown_signal_with_drain().await;
@@ -427,9 +425,8 @@ async fn run_shutdown_cleanup(manager: AppState) {
     let cleanup_future = async {
         // Flush databases (blocking operation, must use spawn_blocking)
         let manager_for_flush = Arc::clone(&manager);
-        let flush_handle = tokio::task::spawn_blocking(move || {
-            manager_for_flush.flush_all_databases()
-        });
+        let flush_handle =
+            tokio::task::spawn_blocking(move || manager_for_flush.flush_all_databases());
 
         match tokio::time::timeout(
             std::time::Duration::from_secs(DATABASE_FLUSH_TIMEOUT_SECS),
@@ -449,9 +446,8 @@ async fn run_shutdown_cleanup(manager: AppState) {
         // Save vector indices (blocking operation, must use spawn_blocking)
         info!("Persisting vector indices...");
         let manager_for_save = Arc::clone(&manager);
-        let save_handle = tokio::task::spawn_blocking(move || {
-            manager_for_save.save_all_vector_indices()
-        });
+        let save_handle =
+            tokio::task::spawn_blocking(move || manager_for_save.save_all_vector_indices());
 
         match tokio::time::timeout(
             std::time::Duration::from_secs(VECTOR_INDEX_SAVE_TIMEOUT_SECS),
