@@ -2148,22 +2148,11 @@ impl MemorySystem {
             .read()
             .log_retrieved(query_text, memories.len(), &sources);
 
-        // Update access counts with instrumentation for consolidation events
-        for memory in &memories {
-            self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
-        }
-
-        // Hebbian learning: co-activation strengthens associations between memories
-        // When memories are retrieved together, they form/strengthen edges in the memory graph
-        if memories.len() >= 2 {
-            if let Some(graph) = &self.graph_memory {
-                let memory_uuids: Vec<uuid::Uuid> = memories.iter().map(|m| m.id.0).collect();
-                let _ = graph.write().record_memory_coactivation(&memory_uuids);
-            }
-        }
-
-        // SHO-106: Apply retrieval competition between similar memories
+        // SHO-106: Apply retrieval competition between similar memories FIRST
         // When highly similar memories are retrieved, they compete for activation
+        // PIPE-10: Competition must happen BEFORE coactivation - we only want to
+        // strengthen associations between memories that "won" the competition.
+        // Suppressed memories should not be coactivated (Hebbian "losers don't learn").
         if memories.len() >= 2 {
             // Calculate similarity scores for competition analysis
             let candidates: Vec<(String, f32, f32)> = memories
@@ -2201,6 +2190,24 @@ impl MemorySystem {
                     "Retrieval competition: {} memories suppressed",
                     competition_result.suppressed.len()
                 );
+            }
+        }
+
+        // Update access counts with instrumentation for consolidation events
+        // (only for memories that survived competition)
+        for memory in &memories {
+            self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+        }
+
+        // PIPE-10: Hebbian learning AFTER competition - only coactivate winners
+        // When memories are retrieved together AND survive competition, they
+        // form/strengthen edges in the memory graph. Suppressed memories don't
+        // participate in coactivation (biological: "neurons that fire together
+        // wire together" but suppressed neurons don't fire).
+        if memories.len() >= 2 {
+            if let Some(graph) = &self.graph_memory {
+                let memory_uuids: Vec<uuid::Uuid> = memories.iter().map(|m| m.id.0).collect();
+                let _ = graph.write().record_memory_coactivation(&memory_uuids);
             }
         }
 
