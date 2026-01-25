@@ -17,6 +17,7 @@ pub mod injection;
 pub mod introspection;
 pub mod learning_history;
 pub mod lineage;
+pub mod pattern_detection;
 pub mod prospective;
 pub mod query_parser;
 pub mod replay;
@@ -197,6 +198,10 @@ pub struct MemorySystem {
     /// Interference detector (SHO-106)
     /// Detects and handles memory interference (retroactive/proactive)
     interference_detector: Arc<RwLock<replay::InterferenceDetector>>,
+
+    /// Pattern detector for intelligent replay triggers (PIPE-2)
+    /// Replaces fixed 1-hour intervals with pattern-based consolidation
+    pattern_detector: Arc<RwLock<pattern_detection::PatternDetector>>,
 
     /// Semantic fact store (SHO-f0e7)
     /// Stores distilled knowledge extracted from episodic memories
@@ -441,6 +446,8 @@ impl MemorySystem {
             replay_manager: Arc::new(RwLock::new(replay::ReplayManager::new())),
             // SHO-106: Interference detector
             interference_detector: Arc::new(RwLock::new(replay::InterferenceDetector::new())),
+            // PIPE-2: Pattern detector for intelligent replay triggers
+            pattern_detector: Arc::new(RwLock::new(pattern_detection::PatternDetector::new())),
             // SHO-f0e7: Semantic fact store
             fact_store,
             // SHO-118: Decision lineage graph
@@ -665,6 +672,57 @@ impl MemorySystem {
             &memory.experience.entities,
         ) {
             tracing::warn!("Failed to index memory {} in BM25: {}", memory.id.0, e);
+        }
+
+        // PIPE-2: Register memory for pattern-triggered replay
+        // Tracks entity co-occurrence, salience spikes, and temporal clusters
+        {
+            let arousal = memory
+                .experience
+                .context
+                .as_ref()
+                .map(|c| c.emotional.arousal)
+                .unwrap_or(0.3);
+
+            let pattern_memory = pattern_detection::PatternMemory {
+                id: memory.id.0.to_string(),
+                content_preview: memory.experience.content.chars().take(100).collect(),
+                entities: memory.experience.entities.clone(),
+                importance,
+                arousal,
+                created_at: memory.created_at,
+                embedding_hash: memory.experience.embeddings.as_ref().map(|e| {
+                    e.iter()
+                        .fold(0u64, |acc, &x| acc.wrapping_add(x.to_bits() as u64))
+                }),
+                session_id: memory
+                    .experience
+                    .context
+                    .as_ref()
+                    .and_then(|c| c.episode.episode_id.clone()),
+                memory_type: format!("{:?}", memory.experience.experience_type),
+            };
+
+            let mut detector = self.pattern_detector.write();
+            detector.register_memory(pattern_memory.clone());
+
+            // Check for immediate salience spike (high-importance memory)
+            if let Some(trigger) = detector.check_salience_spike(&pattern_memory) {
+                tracing::debug!(
+                    "Salience spike detected for memory {}: {}",
+                    memory.id.0,
+                    trigger.description()
+                );
+                // Record event for introspection
+                self.record_consolidation_event(
+                    introspection::ConsolidationEvent::PatternDetected {
+                        trigger_type: trigger.trigger_type_name().to_string(),
+                        description: trigger.description(),
+                        memory_ids: trigger.memory_ids(),
+                        timestamp: chrono::Utc::now(),
+                    },
+                );
+            }
         }
 
         // TEMPORAL FACT EXTRACTION: Extract and index temporal facts for multi-hop reasoning
@@ -4234,11 +4292,62 @@ impl MemorySystem {
             );
         }
 
-        // 4. SHO-105: Memory replay cycle (sleep-like consolidation)
-        // Replays high-value memories to strengthen them and their associations
+        // 4. SHO-105 + PIPE-2: Memory replay cycle (pattern-triggered consolidation)
+        // PIPE-2 replaces fixed 1-hour intervals with intelligent pattern detection:
+        // - Entity co-occurrence patterns
+        // - Salience spikes (high importance/arousal)
+        // - Temporal clusters (sessions)
+        // - Behavioral changes (topic/project switches)
+        // Falls back to timer-based replay if no patterns detected
         let mut replay_result = replay::ReplayCycleResult::default();
         {
-            let should_replay = self.replay_manager.read().should_replay();
+            // PIPE-2: Check for pattern-triggered replay first
+            let pattern_result = self.pattern_detector.write().detect_patterns();
+            let has_pattern_triggers = !pattern_result.triggers.is_empty();
+
+            // Log pattern detection results
+            if has_pattern_triggers {
+                tracing::debug!(
+                    "Pattern detection: {} entity, {} semantic, {} temporal, {} salience, {} behavioral triggers",
+                    pattern_result.entity_patterns_found,
+                    pattern_result.semantic_clusters_found,
+                    pattern_result.temporal_clusters_found,
+                    pattern_result.salience_spikes_found,
+                    pattern_result.behavioral_changes_found
+                );
+
+                // Record pattern-triggered replay events
+                for trigger in &pattern_result.triggers {
+                    self.record_consolidation_event(
+                        introspection::ConsolidationEvent::PatternTriggeredReplay {
+                            trigger_type: trigger.trigger_type_name().to_string(),
+                            memory_ids: trigger.memory_ids(),
+                            pattern_confidence: match trigger {
+                                pattern_detection::ReplayTrigger::EntityCoOccurrence {
+                                    confidence,
+                                    ..
+                                } => *confidence,
+                                pattern_detection::ReplayTrigger::SemanticCluster {
+                                    avg_similarity,
+                                    ..
+                                } => *avg_similarity,
+                                pattern_detection::ReplayTrigger::SalienceSpike {
+                                    importance,
+                                    ..
+                                } => *importance,
+                                _ => 0.7, // Default confidence for other triggers
+                            },
+                            trigger_description: trigger.description(),
+                            timestamp: now,
+                        },
+                    );
+                }
+            }
+
+            // Replay if patterns detected OR timer interval reached (fallback)
+            let timer_should_replay = self.replay_manager.read().should_replay();
+            let should_replay = has_pattern_triggers || timer_should_replay;
+
             if should_replay {
                 // Collect replay candidates from working + session memory
                 // Fetch actual connections from GraphMemory for replay eligibility
@@ -4338,6 +4447,10 @@ impl MemorySystem {
                 }
             }
         }
+
+        // 4.5. PIPE-2: Cleanup old patterns to prevent unbounded memory growth
+        // Removes patterns older than 24 hours
+        self.pattern_detector.write().cleanup();
 
         // 5. Auto-repair index integrity and compact if needed
         // This ensures storage↔index sync and prevents memory leaks from soft-deleted vectors

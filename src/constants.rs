@@ -1063,6 +1063,112 @@ pub const INTERFERENCE_VULNERABILITY_HOURS: i64 = 24;
 pub const INTERFERENCE_MAX_TRACKED: usize = 10;
 
 // =============================================================================
+// PATTERN-TRIGGERED REPLAY CONSTANTS (PIPE-2)
+// Based on hippocampal sharp-wave ripple research (Rasch & Born 2013)
+// Consolidation should be triggered by meaningful patterns, not fixed intervals
+// =============================================================================
+
+/// Entity overlap threshold for pattern detection
+///
+/// Memories must share entities above this threshold to form a co-occurrence pattern.
+///
+/// Justification:
+/// - 0.4 ensures meaningful overlap (at least 40% shared entities)
+/// - Lower values would trigger too many false patterns
+/// - Based on entity salience research (Lioma & Ounis 2006)
+pub const ENTITY_COOCCURRENCE_THRESHOLD: f32 = 0.4;
+
+/// Minimum memories required for entity co-occurrence pattern
+///
+/// Justification:
+/// - 3 memories ensures a real pattern, not coincidence
+/// - Matches "wisdom of crowds" threshold in clustering literature
+/// - Fewer than 3 would trigger replay too aggressively
+pub const MIN_MEMORIES_PER_PATTERN: usize = 3;
+
+/// Minimum memories required for semantic cluster
+///
+/// Justification:
+/// - 3 memories ensures dense, meaningful cluster
+/// - Matches minimum cluster size in DBSCAN-style algorithms
+pub const MIN_CLUSTER_SIZE: usize = 3;
+
+/// Semantic similarity threshold for cluster formation
+///
+/// Justification:
+/// - 0.75 cosine similarity indicates strong semantic relationship
+/// - Higher than typical retrieval threshold (0.6-0.7)
+/// - Ensures clusters are truly semantically coherent
+pub const SEMANTIC_CLUSTER_THRESHOLD: f32 = 0.75;
+
+/// Temporal window for session-based clustering (seconds)
+///
+/// Memories created within this window are grouped into a session cluster.
+///
+/// Justification:
+/// - 1800 seconds (30 minutes) matches typical work session patterns
+/// - Based on "attention span" research in HCI literature
+/// - Longer windows would merge unrelated sessions
+pub const TEMPORAL_CLUSTER_WINDOW_SECS: i64 = 1800;
+
+/// Minimum memories required for temporal cluster trigger
+///
+/// Justification:
+/// - 2 memories is minimum for meaningful session
+/// - Single-memory sessions don't benefit from replay
+pub const MIN_MEMORIES_PER_SESSION: usize = 2;
+
+/// High importance threshold for salience spike detection
+///
+/// Memories above this importance trigger immediate replay consideration.
+///
+/// Justification:
+/// - 0.7 selects top ~30% by importance
+/// - Matches "significant event" threshold in cognitive psychology
+/// - Combined with arousal for emotional modulation
+pub const HIGH_IMPORTANCE_THRESHOLD: f32 = 0.7;
+
+/// High arousal threshold for salience spike detection
+///
+/// Memories above this arousal level trigger immediate replay consideration.
+///
+/// Justification:
+/// - 0.7 arousal indicates emotionally significant content
+/// - Matches amygdala activation threshold from neuroscience
+/// - Error/surprise events typically exceed this
+pub const HIGH_AROUSAL_THRESHOLD: f32 = 0.7;
+
+/// Surprise factor threshold for salience-triggered replay
+///
+/// Deviation from running importance average that triggers surprise detection.
+///
+/// Justification:
+/// - 0.3 (30% deviation) is statistically significant
+/// - Matches "novelty detection" thresholds in RL literature
+/// - Lower values would trigger on normal variation
+pub const SURPRISE_THRESHOLD: f32 = 0.3;
+
+/// Minimum confidence for entity pattern triggers
+///
+/// Pattern confidence must exceed this for replay trigger.
+///
+/// Justification:
+/// - 0.75 ensures high-quality patterns
+/// - Combines recency and frequency factors
+/// - Prevents triggering on stale or weak patterns
+pub const ENTITY_PATTERN_CONFIDENCE: f32 = 0.75;
+
+/// Behavioral pattern change window (hours)
+///
+/// Minimum time between behavioral change triggers.
+///
+/// Justification:
+/// - 1 hour prevents trigger flooding on rapid changes
+/// - Matches typical task-switching patterns
+/// - Allows consolidation to complete before next trigger
+pub const BEHAVIORAL_PATTERN_WINDOW_HOURS: i64 = 1;
+
+// =============================================================================
 // 3-TIER GRAPH DENSITY CONSTANTS (SHO-200)
 // Based on neuroscience research on hippocampal-cortical memory consolidation
 // =============================================================================

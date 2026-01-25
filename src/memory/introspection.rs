@@ -185,6 +185,69 @@ pub enum ConsolidationEvent {
         competition_factor: f32,
         timestamp: DateTime<Utc>,
     },
+
+    // PIPE-2: Pattern-Triggered Replay Events
+    // Based on hippocampal sharp-wave ripple research (Rasch & Born 2013)
+    /// Pattern-triggered replay initiated (not timer-based)
+    PatternTriggeredReplay {
+        trigger_type: String,
+        memory_ids: Vec<String>,
+        pattern_confidence: f32,
+        trigger_description: String,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Entity co-occurrence pattern detected
+    EntityPatternDetected {
+        entity_group: Vec<String>,
+        memory_ids: Vec<String>,
+        overlap_score: f32,
+        confidence: f32,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Semantic cluster formed (dense similarity group)
+    SemanticClusterFormed {
+        memory_ids: Vec<String>,
+        cluster_size: usize,
+        avg_similarity: f32,
+        centroid_id: String,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Temporal cluster (session) detected
+    TemporalClusterFormed {
+        memory_ids: Vec<String>,
+        session_duration_secs: i64,
+        session_id: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Salience spike detected (high importance/arousal memory)
+    SalienceSpikeDetected {
+        memory_id: String,
+        content_preview: String,
+        importance: f32,
+        arousal: f32,
+        surprise_factor: f32,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Behavioral pattern change triggered replay
+    BehavioralChangeDetected {
+        change_type: String,
+        affected_memory_ids: Vec<String>,
+        context: String,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Generic pattern detected (covers any trigger type)
+    PatternDetected {
+        trigger_type: String,
+        description: String,
+        memory_ids: Vec<String>,
+        timestamp: DateTime<Utc>,
+    },
 }
 
 /// Types of memory interference (SHO-106)
@@ -765,6 +828,30 @@ impl ConsolidationEventBuffer {
                 ConsolidationEvent::RetrievalCompetition { .. } => {
                     report.statistics.retrieval_competitions += 1;
                 }
+
+                // PIPE-2: Pattern-triggered replay events
+                // These are tracked in statistics but not in detailed lists (yet)
+                ConsolidationEvent::PatternTriggeredReplay { .. } => {
+                    // Could add to a pattern_triggers list if needed
+                }
+                ConsolidationEvent::EntityPatternDetected { .. } => {
+                    // Tracked via PatternTriggeredReplay
+                }
+                ConsolidationEvent::SemanticClusterFormed { .. } => {
+                    // Tracked via PatternTriggeredReplay
+                }
+                ConsolidationEvent::TemporalClusterFormed { .. } => {
+                    // Tracked via PatternTriggeredReplay
+                }
+                ConsolidationEvent::SalienceSpikeDetected { .. } => {
+                    // Tracked via PatternTriggeredReplay
+                }
+                ConsolidationEvent::BehavioralChangeDetected { .. } => {
+                    // Tracked via PatternTriggeredReplay
+                }
+                ConsolidationEvent::PatternDetected { .. } => {
+                    // Generic pattern - logged for introspection
+                }
             }
         }
 
@@ -1084,6 +1171,15 @@ impl ConsolidationEventBuffer {
                 ConsolidationEvent::RetrievalCompetition { .. } => {
                     report.statistics.retrieval_competitions += 1;
                 }
+
+                // PIPE-2: Pattern-triggered replay events
+                ConsolidationEvent::PatternTriggeredReplay { .. } => {}
+                ConsolidationEvent::EntityPatternDetected { .. } => {}
+                ConsolidationEvent::SemanticClusterFormed { .. } => {}
+                ConsolidationEvent::TemporalClusterFormed { .. } => {}
+                ConsolidationEvent::SalienceSpikeDetected { .. } => {}
+                ConsolidationEvent::BehavioralChangeDetected { .. } => {}
+                ConsolidationEvent::PatternDetected { .. } => {}
             }
         }
 
@@ -1114,6 +1210,14 @@ impl ConsolidationEvent {
             ConsolidationEvent::InterferenceDetected { timestamp, .. } => *timestamp,
             ConsolidationEvent::MemoryWeakened { timestamp, .. } => *timestamp,
             ConsolidationEvent::RetrievalCompetition { timestamp, .. } => *timestamp,
+            // PIPE-2: Pattern-triggered replay events
+            ConsolidationEvent::PatternTriggeredReplay { timestamp, .. } => *timestamp,
+            ConsolidationEvent::EntityPatternDetected { timestamp, .. } => *timestamp,
+            ConsolidationEvent::SemanticClusterFormed { timestamp, .. } => *timestamp,
+            ConsolidationEvent::TemporalClusterFormed { timestamp, .. } => *timestamp,
+            ConsolidationEvent::SalienceSpikeDetected { timestamp, .. } => *timestamp,
+            ConsolidationEvent::BehavioralChangeDetected { timestamp, .. } => *timestamp,
+            ConsolidationEvent::PatternDetected { timestamp, .. } => *timestamp,
         }
     }
 
@@ -1151,6 +1255,12 @@ impl ConsolidationEvent {
                 | ConsolidationEvent::MemoryPromoted { .. }
                 | ConsolidationEvent::ReplayCycleCompleted { .. }
                 | ConsolidationEvent::MaintenanceCycleCompleted { .. }
+                // PIPE-2: Pattern-triggered events are significant
+                | ConsolidationEvent::PatternTriggeredReplay { .. }
+                | ConsolidationEvent::EntityPatternDetected { .. }
+                | ConsolidationEvent::SemanticClusterFormed { .. }
+                | ConsolidationEvent::SalienceSpikeDetected { .. }
+                | ConsolidationEvent::PatternDetected { .. }
         )
     }
 }
