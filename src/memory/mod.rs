@@ -3625,6 +3625,12 @@ impl MemorySystem {
         self.long_term_memory.cleanup_corrupted()
     }
 
+    /// Migrate legacy memories to current format for improved performance
+    /// Returns (migrated_count, already_current_count, failed_count)
+    pub fn migrate_legacy(&self) -> Result<(usize, usize, usize)> {
+        self.long_term_memory.migrate_legacy()
+    }
+
     /// Rebuild vector index from scratch using only valid memories in storage
     /// This removes orphaned index entries and rebuilds with proper ID mappings
     /// Returns (total_memories, total_indexed)

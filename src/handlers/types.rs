@@ -485,6 +485,19 @@ pub struct CleanupCorruptedResponse {
 }
 
 #[derive(Deserialize)]
+pub struct MigrateLegacyRequest {
+    pub user_id: String,
+}
+
+#[derive(Serialize)]
+pub struct MigrateLegacyResponse {
+    pub success: bool,
+    pub migrated_count: usize,
+    pub already_current_count: usize,
+    pub failed_count: usize,
+}
+
+#[derive(Deserialize)]
 pub struct RebuildIndexRequest {
     pub user_id: String,
 }

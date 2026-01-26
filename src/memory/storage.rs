@@ -57,12 +57,114 @@ impl Default for WriteMode {
 
 // ============================================================================
 // BACKWARD-COMPATIBLE DESERIALIZATION
-// Handles both versioned format (SHO magic + checksum) and legacy bincode
+// Handles versioned format (SHO magic + checksum), current, and legacy formats
 // ============================================================================
 
 const STORAGE_MAGIC: &[u8; 3] = b"SHO";
 
-/// Deserialize memory supporting both versioned (SHO) and legacy formats
+/// Legacy v0.1.0 format - matches the initial release serialization
+/// Uses named struct fields (memory_id instead of id, no tier/entity_refs/etc.)
+#[derive(Deserialize)]
+struct LegacyMemoryV1 {
+    #[serde(rename = "memory_id")]
+    id: MemoryId,
+    experience: Experience,
+    importance: f32,
+    access_count: u32,
+    created_at: DateTime<Utc>,
+    last_accessed: DateTime<Utc>,
+    compressed: bool,
+    agent_id: Option<String>,
+    run_id: Option<String>,
+    actor_id: Option<String>,
+    temporal_relevance: f32,
+    score: Option<f32>,
+}
+
+impl LegacyMemoryV1 {
+    /// Convert legacy v1 format to current Memory format
+    fn into_memory(self) -> Memory {
+        Memory::from_legacy(
+            self.id,
+            self.experience,
+            self.importance,
+            self.access_count,
+            self.created_at,
+            self.last_accessed,
+            self.compressed,
+            MemoryTier::LongTerm, // Already persisted = LongTerm
+            Vec::new(),           // entity_refs not in v1
+            1.0,                  // activation - default fully activated
+            None,                 // last_retrieval_id not in v1
+            self.agent_id,
+            self.run_id,
+            self.actor_id,
+            self.temporal_relevance,
+            self.score,
+            None,       // external_id not in v1
+            1,          // version
+            Vec::new(), // history not in v1
+            Vec::new(), // related_todo_ids not in v1
+        )
+    }
+}
+
+/// Legacy v2 format - after cognitive extensions but before external linking
+/// Has tier, entity_refs, activation but no external_id/version/history
+#[derive(Deserialize)]
+struct LegacyMemoryV2 {
+    id: MemoryId,
+    experience: Experience,
+    importance: f32,
+    access_count: u32,
+    created_at: DateTime<Utc>,
+    last_accessed: DateTime<Utc>,
+    compressed: bool,
+    tier: MemoryTier,
+    entity_refs: Vec<EntityRef>,
+    activation: f32,
+    last_retrieval_id: Option<uuid::Uuid>,
+    agent_id: Option<String>,
+    run_id: Option<String>,
+    actor_id: Option<String>,
+    temporal_relevance: f32,
+    score: Option<f32>,
+}
+
+impl LegacyMemoryV2 {
+    /// Convert legacy v2 format to current Memory format
+    fn into_memory(self) -> Memory {
+        Memory::from_legacy(
+            self.id,
+            self.experience,
+            self.importance,
+            self.access_count,
+            self.created_at,
+            self.last_accessed,
+            self.compressed,
+            self.tier,
+            self.entity_refs,
+            self.activation,
+            self.last_retrieval_id,
+            self.agent_id,
+            self.run_id,
+            self.actor_id,
+            self.temporal_relevance,
+            self.score,
+            None,       // external_id not in v2
+            1,          // version
+            Vec::new(), // history not in v2
+            Vec::new(), // related_todo_ids not in v2
+        )
+    }
+}
+
+/// Deserialize memory with multi-version fallback for backwards compatibility
+///
+/// Tries formats in order from newest to oldest:
+/// 1. Current format (with external linking, todos)
+/// 2. Legacy v2 (cognitive extensions, no external linking)
+/// 3. Legacy v1 (original v0.1.0 format)
 fn deserialize_memory(data: &[u8]) -> Result<Memory> {
     // Check for versioned format: SHO + version byte + payload + 4-byte CRC32
     if data.len() >= 8 && &data[0..3] == STORAGE_MAGIC {
@@ -83,15 +185,46 @@ fn deserialize_memory(data: &[u8]) -> Result<Memory> {
             );
         }
         let payload = &data[4..payload_end];
-        bincode::serde::decode_from_slice::<Memory, _>(payload, bincode::config::standard())
-            .map(|(m, _)| m)
-            .map_err(|e| anyhow!("v{} decode failed: {}", version, e))
+        // Try current format first, then fallback to legacy formats
+        deserialize_with_fallback(payload)
+            .map_err(|e| anyhow!("v{version} decode failed: {e}"))
     } else {
-        // Legacy format: raw bincode
-        bincode::serde::decode_from_slice::<Memory, _>(data, bincode::config::standard())
-            .map(|(m, _)| m)
-            .map_err(|e| anyhow!("legacy decode failed: {}", e))
+        // Legacy format: raw bincode (no SHO header)
+        deserialize_with_fallback(data)
+            .map_err(|e| anyhow!("legacy decode failed: {e}"))
     }
+}
+
+/// Try deserializing with multiple format fallbacks
+fn deserialize_with_fallback(data: &[u8]) -> Result<Memory> {
+    // Try current format first
+    if let Ok((memory, _)) =
+        bincode::serde::decode_from_slice::<Memory, _>(data, bincode::config::standard())
+    {
+        return Ok(memory);
+    }
+
+    // Try legacy v2 format (with cognitive extensions)
+    if let Ok((legacy, _)) =
+        bincode::serde::decode_from_slice::<LegacyMemoryV2, _>(data, bincode::config::standard())
+    {
+        tracing::debug!("Migrated memory from legacy v2 format");
+        return Ok(legacy.into_memory());
+    }
+
+    // Try legacy v1 format (original v0.1.0)
+    if let Ok((legacy, _)) =
+        bincode::serde::decode_from_slice::<LegacyMemoryV1, _>(data, bincode::config::standard())
+    {
+        tracing::debug!("Migrated memory from legacy v1 format");
+        return Ok(legacy.into_memory());
+    }
+
+    // All formats failed
+    Err(anyhow!(
+        "Failed to deserialize memory: incompatible format ({} bytes)",
+        data.len()
+    ))
 }
 
 /// Simple CRC32 implementation (IEEE polynomial)
@@ -1248,15 +1381,15 @@ impl MemoryStorage {
         Ok(new_count)
     }
 
-    /// Remove corrupted memories that fail to deserialize
+    /// Remove corrupted memories that fail to deserialize even with legacy fallbacks
     /// Returns the number of entries deleted
     ///
     /// This function safely cleans up:
     /// 1. Entries with keys that are not valid 16-byte UUIDs (corrupted/misplaced)
-    /// 2. Entries with valid UUID keys but corrupted values that fail to deserialize
+    /// 2. Entries with valid UUID keys but corrupted values that fail ALL format fallbacks
     ///
     /// It preserves:
-    /// - Valid Memory entries
+    /// - Valid Memory entries (any format - current or legacy)
     /// - Stats entries (keys starting with "stats:")
     pub fn cleanup_corrupted(&self) -> Result<usize> {
         let mut to_delete = Vec::new();
@@ -1280,13 +1413,8 @@ impl MemoryStorage {
                         key.len()
                     );
                     to_delete.push(key.to_vec());
-                } else if bincode::serde::decode_from_slice::<Memory, _>(
-                    &value,
-                    bincode::config::standard(),
-                )
-                .is_err()
-                {
-                    // Key is valid but value is corrupted
+                } else if deserialize_memory(&value).is_err() {
+                    // Key is valid but value fails all format fallbacks - truly corrupted
                     tracing::debug!(
                         "Marking for deletion: valid key but corrupted value ({} bytes)",
                         value.len()
@@ -1314,6 +1442,98 @@ impl MemoryStorage {
         }
 
         Ok(count)
+    }
+
+    /// Migrate legacy memories to current format for improved performance
+    /// Returns (migrated_count, already_current_count, failed_count)
+    ///
+    /// This function:
+    /// 1. Iterates all memories in storage
+    /// 2. Attempts to deserialize with format fallback
+    /// 3. Re-saves successfully deserialized legacy memories in current format
+    /// 4. Reports migration statistics
+    pub fn migrate_legacy(&self) -> Result<(usize, usize, usize)> {
+        let mut migrated = 0;
+        let mut already_current = 0;
+        let mut failed = 0;
+        let stats_prefix = b"stats:";
+
+        let iter = self.db.iterator(IteratorMode::Start);
+        let mut to_migrate = Vec::new();
+
+        for item in iter {
+            if let Ok((key, value)) = item {
+                // Skip stats entries
+                if key.starts_with(stats_prefix) {
+                    continue;
+                }
+
+                // Skip non-UUID keys
+                if key.len() != 16 {
+                    continue;
+                }
+
+                // Try current format first (quick check)
+                let is_current = bincode::serde::decode_from_slice::<Memory, _>(
+                    &value,
+                    bincode::config::standard(),
+                )
+                .is_ok();
+
+                if is_current {
+                    already_current += 1;
+                    continue;
+                }
+
+                // Not current format - try with fallback
+                match deserialize_memory(&value) {
+                    Ok(memory) => {
+                        // Successfully deserialized legacy format - queue for migration
+                        to_migrate.push((key.to_vec(), memory));
+                    }
+                    Err(_) => {
+                        failed += 1;
+                    }
+                }
+            }
+        }
+
+        // Re-save migrated memories in current format
+        if !to_migrate.is_empty() {
+            tracing::info!("Migrating {} legacy memories to current format", to_migrate.len());
+
+            let mut write_opts = WriteOptions::default();
+            write_opts.set_sync(self.write_mode == WriteMode::Sync);
+
+            for (key, memory) in to_migrate {
+                match bincode::serde::encode_to_vec(&memory, bincode::config::standard()) {
+                    Ok(serialized) => {
+                        if let Err(e) = self.db.put_opt(&key, &serialized, &write_opts) {
+                            tracing::warn!("Failed to migrate memory: {e}");
+                            failed += 1;
+                        } else {
+                            migrated += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to serialize migrated memory: {e}");
+                        failed += 1;
+                    }
+                }
+            }
+
+            // Flush to persist migrations
+            self.flush()?;
+        }
+
+        tracing::info!(
+            "Migration complete: {} migrated, {} already current, {} failed",
+            migrated,
+            already_current,
+            failed
+        );
+
+        Ok((migrated, already_current, failed))
     }
 
     /// Flush both databases to ensure all data is persisted (critical for graceful shutdown)

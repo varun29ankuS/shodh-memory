@@ -150,6 +150,10 @@ pub fn build_protected_routes(state: AppState) -> Router {
             "/api/storage/cleanup",
             post(consolidation::cleanup_corrupted),
         )
+        .route(
+            "/api/storage/migrate",
+            post(consolidation::migrate_legacy),
+        )
         // =================================================================
         // CONSOLIDATION & BACKUPS
         // =================================================================

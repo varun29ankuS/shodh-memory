@@ -1053,6 +1053,57 @@ impl Memory {
         memory
     }
 
+    /// Create memory from legacy storage format during migration
+    /// Preserves all original field values without modification
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_legacy(
+        id: MemoryId,
+        experience: Experience,
+        importance: f32,
+        access_count: u32,
+        created_at: DateTime<Utc>,
+        last_accessed: DateTime<Utc>,
+        compressed: bool,
+        tier: MemoryTier,
+        entity_refs: Vec<EntityRef>,
+        activation: f32,
+        last_retrieval_id: Option<uuid::Uuid>,
+        agent_id: Option<String>,
+        run_id: Option<String>,
+        actor_id: Option<String>,
+        temporal_relevance: f32,
+        score: Option<f32>,
+        external_id: Option<String>,
+        version: u32,
+        history: Vec<MemoryRevision>,
+        related_todo_ids: Vec<TodoId>,
+    ) -> Self {
+        Self {
+            id,
+            experience,
+            metadata: Arc::new(parking_lot::Mutex::new(MemoryMetadata {
+                importance,
+                access_count,
+                last_accessed,
+                temporal_relevance,
+                activation,
+            })),
+            created_at,
+            compressed,
+            tier,
+            entity_refs,
+            last_retrieval_id,
+            agent_id,
+            run_id,
+            actor_id,
+            score,
+            external_id,
+            version,
+            history,
+            related_todo_ids,
+        }
+    }
+
     /// Update this memory's content, pushing old content to history
     /// Returns the new version number
     pub fn update_content(

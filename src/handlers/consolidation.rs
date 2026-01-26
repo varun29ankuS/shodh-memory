@@ -9,9 +9,9 @@ use super::state::MultiUserMemoryManager;
 use super::types::{
     BackupResponse, CleanupCorruptedRequest, CleanupCorruptedResponse, ConsolidateRequest,
     ConsolidateResponse, CreateBackupRequest, ListBackupsRequest, ListBackupsResponse, MemoryEvent,
-    PurgeBackupsRequest, PurgeBackupsResponse, RebuildIndexRequest, RebuildIndexResponse,
-    RepairIndexRequest, RepairIndexResponse, VerifyBackupRequest, VerifyBackupResponse,
-    VerifyIndexRequest,
+    MigrateLegacyRequest, MigrateLegacyResponse, PurgeBackupsRequest, PurgeBackupsResponse,
+    RebuildIndexRequest, RebuildIndexResponse, RepairIndexRequest, RepairIndexResponse,
+    VerifyBackupRequest, VerifyBackupResponse, VerifyIndexRequest,
 };
 use crate::errors::{AppError, ValidationErrorExt};
 use crate::memory;
@@ -233,6 +233,48 @@ pub async fn cleanup_corrupted(
     Ok(Json(CleanupCorruptedResponse {
         success: true,
         deleted_count,
+    }))
+}
+
+/// Migrate legacy memories to current format
+/// This converts old storage formats to the current schema without data loss
+pub async fn migrate_legacy(
+    State(state): State<AppState>,
+    Json(req): Json<MigrateLegacyRequest>,
+) -> Result<Json<MigrateLegacyResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory_sys = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let memory_guard = memory_sys.read();
+    let (migrated, already_current, failed) = memory_guard
+        .migrate_legacy()
+        .map_err(AppError::Internal)?;
+
+    // Broadcast event for real-time dashboard
+    if migrated > 0 {
+        state.emit_event(MemoryEvent {
+            event_type: "MIGRATE".to_string(),
+            timestamp: chrono::Utc::now(),
+            user_id: req.user_id.clone(),
+            memory_id: None,
+            content_preview: Some(format!(
+                "migrated {} memories, {} already current, {} failed",
+                migrated, already_current, failed
+            )),
+            memory_type: None,
+            importance: None,
+            count: Some(migrated),
+        });
+    }
+
+    Ok(Json(MigrateLegacyResponse {
+        success: true,
+        migrated_count: migrated,
+        already_current_count: already_current,
+        failed_count: failed,
     }))
 }
 
