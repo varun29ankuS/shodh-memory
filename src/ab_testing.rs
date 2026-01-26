@@ -1,3 +1,6 @@
+// Statistical coefficients require full precision for accuracy
+#![allow(clippy::excessive_precision)]
+
 //! A/B Testing Infrastructure for Relevance Scoring
 //!
 //! Provides rigorous experimentation framework for comparing different

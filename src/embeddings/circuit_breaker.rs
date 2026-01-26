@@ -223,7 +223,7 @@ impl ResilientEmbedder {
 
     /// Record state change to metrics
     fn record_state_change(&self, new_state: CircuitState) {
-        let label1 = format!("circuit_breaker_{}", new_state);
+        let label1 = format!("circuit_breaker_{new_state}");
         let label2 = String::from("embedding");
         crate::metrics::ERRORS_TOTAL
             .with_label_values(&[&label1, &label2])

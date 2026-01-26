@@ -194,7 +194,7 @@ fn find_break_point(text: &str, start: usize, ideal_end: usize, min_size: usize)
             if (c == '.' || c == '!' || c == '?') && i >= min_size {
                 // Check if followed by space or end
                 let next_char = chunk.chars().nth(i + 1);
-                if next_char.map_or(true, |nc| nc.is_whitespace()) {
+                if next_char.is_none_or(|nc| nc.is_whitespace()) {
                     return Some(start + i + 1);
                 }
             }
@@ -231,7 +231,7 @@ fn find_break_point(text: &str, start: usize, ideal_end: usize, min_size: usize)
 pub fn estimate_tokens(text: &str) -> usize {
     // Average ~4 characters per token for English
     // This is a rough estimate; actual tokenization varies
-    (text.len() + 3) / 4
+    text.len().div_ceil(4)
 }
 
 /// Configuration for semantic chunking
@@ -478,7 +478,7 @@ fn group_segments_into_chunks(
         // Merge tiny trailing chunk with previous if too small
         if trimmed.len() < config.min_size && !chunks.is_empty() {
             let last = chunks.pop().unwrap();
-            chunks.push(format!("{}\n{}", last, trimmed));
+            chunks.push(format!("{last}\n{trimmed}"));
         } else {
             chunks.push(trimmed);
         }

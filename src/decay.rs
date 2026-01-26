@@ -154,7 +154,7 @@ pub fn retention_curve_debug(potentiated: bool) -> String {
     let days = [0.5, 1.0, 3.0, 7.0, 14.0, 30.0, 90.0, 365.0];
     let mode = if potentiated { "potentiated" } else { "normal" };
 
-    let mut output = format!("Retention curve ({}):\n", mode);
+    let mut output = format!("Retention curve ({mode}):\n");
     for d in days {
         let factor = hybrid_decay_factor(d, potentiated);
         output.push_str(&format!("  Day {:>5.1}: {:>6.2}%\n", d, factor * 100.0));
