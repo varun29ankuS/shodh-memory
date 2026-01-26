@@ -100,9 +100,9 @@ struct MemoryWithTypePrefix {
 #[derive(Deserialize)]
 struct MemoryWith3ByteHeader {
     id: MemoryId,
-    _header1: u8, // byte 16
-    _header2: u8, // byte 17
-    _header3: u8, // byte 18
+    _header1: u8,    // byte 16
+    _header2: u8,    // byte 17
+    _header3: u8,    // byte 18
     content: String, // byte 19+
 }
 
@@ -754,8 +754,10 @@ fn deserialize_with_fallback(data: &[u8]) -> Result<Memory> {
     }
 
     // Try bincode 2.x with OLD Experience (before multimodal fields were added)
-    match bincode::serde::decode_from_slice::<LegacyMemoryFlatV2, _>(data, bincode::config::standard())
-    {
+    match bincode::serde::decode_from_slice::<LegacyMemoryFlatV2, _>(
+        data,
+        bincode::config::standard(),
+    ) {
         Ok((legacy, _)) => {
             tracing::debug!("Migrated memory from bincode 2.x pre-multimodal format");
             return Ok(legacy.into_memory());
