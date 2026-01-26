@@ -2023,7 +2023,7 @@ impl GraphMemory {
                 // Only visit if this is a better path
                 let dominated = visited
                     .get(&connected_uuid)
-                    .map_or(false, |&best| new_score <= best);
+                    .is_some_and(|&best| new_score <= best);
                 if dominated {
                     continue;
                 }
@@ -2150,7 +2150,7 @@ impl GraphMemory {
                     // Update forward frontier
                     let dominated = forward_visited
                         .get(&connected)
-                        .map_or(false, |&(best, _)| new_score <= best);
+                        .is_some_and(|&(best, _)| new_score <= best);
                     if !dominated {
                         forward_visited.insert(connected, (new_score, depth + 1));
                         forward_parents.insert(connected, (uuid, edge.uuid));
@@ -2197,7 +2197,7 @@ impl GraphMemory {
                     // Update backward frontier
                     let dominated = backward_visited
                         .get(&connected)
-                        .map_or(false, |&(best, _)| new_score <= best);
+                        .is_some_and(|&(best, _)| new_score <= best);
                     if !dominated {
                         backward_visited.insert(connected, (new_score, depth + 1));
                         backward_parents.insert(connected, (uuid, edge.uuid));
@@ -2340,6 +2340,7 @@ impl GraphMemory {
         Ok(matches)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn match_pattern_recursive(
         &self,
         current_uuid: Uuid,
@@ -2623,8 +2624,8 @@ impl GraphMemory {
                         batch.put(key, value);
 
                         // Also index in the reverse direction for lookup
-                        let idx_key_fwd = format!("mem_edge:{}:{}", mem_a, mem_b);
-                        let idx_key_rev = format!("mem_edge:{}:{}", mem_b, mem_a);
+                        let idx_key_fwd = format!("mem_edge:{mem_a}:{mem_b}");
+                        let idx_key_rev = format!("mem_edge:{mem_b}:{mem_a}");
                         batch.put(idx_key_fwd.as_bytes(), edge.uuid.as_bytes());
                         batch.put(idx_key_rev.as_bytes(), edge.uuid.as_bytes());
 
@@ -2648,7 +2649,7 @@ impl GraphMemory {
         entity_b: &Uuid,
     ) -> Result<Option<RelationshipEdge>> {
         // Check forward index
-        let idx_key = format!("mem_edge:{}:{}", entity_a, entity_b);
+        let idx_key = format!("mem_edge:{entity_a}:{entity_b}");
         if let Some(edge_uuid_bytes) = self.relationships_db.get(idx_key.as_bytes())? {
             if edge_uuid_bytes.len() == 16 {
                 let edge_uuid = Uuid::from_slice(&edge_uuid_bytes)?;
