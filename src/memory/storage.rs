@@ -196,27 +196,25 @@ fn deserialize_memory(data: &[u8]) -> Result<Memory> {
 }
 
 /// Try deserializing with multiple format fallbacks
+/// Supports both bincode 2.x (current) and bincode 1.x (legacy) wire formats
 fn deserialize_with_fallback(data: &[u8]) -> Result<Memory> {
-    // Try current format first
+    // Try current format first (bincode 2.x)
     if let Ok((memory, _)) =
         bincode::serde::decode_from_slice::<Memory, _>(data, bincode::config::standard())
     {
         return Ok(memory);
     }
 
-    // Try legacy v2 format (with cognitive extensions)
-    if let Ok((legacy, _)) =
-        bincode::serde::decode_from_slice::<LegacyMemoryV2, _>(data, bincode::config::standard())
-    {
-        tracing::debug!("Migrated memory from legacy v2 format");
+    // Try bincode 1.x format (used in versions prior to bincode 2.0 migration)
+    // bincode 1.x has a completely different wire format than bincode 2.x
+    if let Ok(legacy) = bincode1::deserialize::<LegacyMemoryV1>(data) {
+        tracing::debug!("Migrated memory from bincode 1.x format");
         return Ok(legacy.into_memory());
     }
 
-    // Try legacy v1 format (original v0.1.0)
-    if let Ok((legacy, _)) =
-        bincode::serde::decode_from_slice::<LegacyMemoryV1, _>(data, bincode::config::standard())
-    {
-        tracing::debug!("Migrated memory from legacy v1 format");
+    // Try legacy v2 format with bincode 1.x (cognitive extensions era)
+    if let Ok(legacy) = bincode1::deserialize::<LegacyMemoryV2>(data) {
+        tracing::debug!("Migrated memory from bincode 1.x v2 format");
         return Ok(legacy.into_memory());
     }
 
