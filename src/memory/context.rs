@@ -377,10 +377,7 @@ impl ContextManager {
             })
             .collect();
 
-        scored_contexts.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored_contexts.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored_contexts
             .into_iter()
             .take(top_k)
