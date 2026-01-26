@@ -501,7 +501,7 @@ impl MultiUserMemoryManager {
         };
 
         let mut memory_system = MemorySystem::new(config).with_context(|| {
-            format!("Failed to initialize memory system for user '{}'", user_id)
+            format!("Failed to initialize memory system for user '{user_id}'")
         })?;
         // Wire up GraphMemory for Layer 2 (spreading activation) and Layer 5 (Hebbian learning)
         let graph = self.get_user_graph(user_id)?;
@@ -555,9 +555,7 @@ impl MultiUserMemoryManager {
                     }
                     Err(e) => {
                         return Err(anyhow::anyhow!(
-                            "Failed to delete user data after {} retries: {}",
-                            max_attempts,
-                            e
+                            "Failed to delete user data after {max_attempts} retries: {e}"
                         ))
                     }
                 }
