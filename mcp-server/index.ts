@@ -501,6 +501,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "ID of the preceding memory (for temporal chains)",
             },
+            parent_id: {
+              type: "string",
+              description: "Parent memory ID for hierarchical organization. Creates memory trees (e.g., '71-research' -> 'algebraic' -> '21×27≡-1')",
+            },
           },
           required: ["content"],
         },
@@ -1269,6 +1273,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           episode_id,
           sequence_number,
           preceding_memory_id,
+          // Hierarchy
+          parent_id,
         } = args as {
           content: string;
           type?: string;
@@ -1282,6 +1288,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           episode_id?: string;
           sequence_number?: number;
           preceding_memory_id?: string;
+          parent_id?: string;
         };
 
         const result = await apiCall<{ id: string }>("/api/remember", "POST", {
@@ -1299,6 +1306,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...(episode_id && { episode_id }),
           ...(sequence_number !== undefined && { sequence_number }),
           ...(preceding_memory_id && { preceding_memory_id }),
+          // Hierarchy
+          ...(parent_id && { parent_id }),
         });
 
         // Format response with branded display
