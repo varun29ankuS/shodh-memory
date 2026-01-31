@@ -439,22 +439,30 @@ impl InterferenceDetector {
         if let Some((winner_id, winner_score)) = scores.first() {
             winners.push((winner_id.clone(), *winner_score));
 
-            // Apply competition suppression to lower-ranked memories
-            for (id, score) in scores.iter().skip(1) {
-                let score_ratio = score / winner_score;
-
-                // Strong suppression for very close competitors
-                if score_ratio > 0.9 {
-                    let suppression = INTERFERENCE_COMPETITION_FACTOR * (1.0 - score_ratio) * 10.0;
-                    let new_score = (score - suppression).max(0.0);
-
-                    if new_score > 0.1 {
-                        winners.push((id.clone(), new_score));
-                    } else {
-                        suppressed.push(id.clone());
-                    }
-                } else {
+            // Guard: skip competition if winner has zero score (all remaining are also zero)
+            if *winner_score <= 0.0 {
+                for (id, score) in scores.iter().skip(1) {
                     winners.push((id.clone(), *score));
+                }
+            } else {
+                // Apply competition suppression to lower-ranked memories
+                for (id, score) in scores.iter().skip(1) {
+                    let score_ratio = score / winner_score;
+
+                    // Strong suppression for very close competitors
+                    if score_ratio > 0.9 {
+                        let suppression =
+                            INTERFERENCE_COMPETITION_FACTOR * (1.0 - score_ratio) * 10.0;
+                        let new_score = (score - suppression).max(0.0);
+
+                        if new_score > 0.1 {
+                            winners.push((id.clone(), new_score));
+                        } else {
+                            suppressed.push(id.clone());
+                        }
+                    } else {
+                        winners.push((id.clone(), *score));
+                    }
                 }
             }
         }
