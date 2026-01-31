@@ -1,12 +1,15 @@
 {
   "mcpServers": {
+    "shodh-memory": {
+      "command": "bun",
+      "args": ["run", "mcp-server/index.ts"],
+      "env": {
+        "SHODH_API_KEY": "sk-shodh-dev-local-testing-key"
+      }
+    },
     "linear": {
       "command": "npx",
-      "args": [
-        "-y",
-        "mcp-remote",
-        "https://mcp.linear.app/mcp"
-      ]
+      "args": ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]
     }
   }
 }
