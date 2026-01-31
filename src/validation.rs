@@ -58,6 +58,34 @@ pub fn validate_memory_id(memory_id: &str) -> Result<uuid::Uuid> {
     uuid::Uuid::parse_str(memory_id).map_err(|e| anyhow!("Invalid memory_id UUID format: {e}"))
 }
 
+/// Validate memory_id as either a full UUID or a hex prefix (8+ chars).
+///
+/// Returns `Ok(Some(uuid))` for valid full UUIDs, `Ok(None)` for valid hex prefixes
+/// that require resolution against stored memories.
+pub fn validate_memory_id_or_prefix(memory_id: &str) -> Result<Option<uuid::Uuid>> {
+    // Fast path: try full UUID first
+    if let Ok(uuid) = uuid::Uuid::parse_str(memory_id) {
+        return Ok(Some(uuid));
+    }
+
+    // Validate as hex prefix: minimum 8 chars, all hex digits
+    let trimmed = memory_id.trim();
+    if trimmed.len() < 8 {
+        return Err(anyhow!(
+            "Memory ID must be a full UUID or at least 8 hex characters, got {} chars",
+            trimmed.len()
+        ));
+    }
+
+    if !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "Memory ID prefix contains invalid characters (only hex digits 0-9, a-f allowed)"
+        ));
+    }
+
+    Ok(None)
+}
+
 /// Validate content
 pub fn validate_content(content: &str, allow_empty: bool) -> Result<()> {
     if !allow_empty && content.trim().is_empty() {
@@ -383,6 +411,42 @@ mod tests {
         // Too many entities
         let too_many: Vec<String> = (0..100).map(|i| format!("entity{i}")).collect();
         assert!(validate_entities(&too_many).is_err());
+    }
+
+    #[test]
+    fn test_memory_id_or_prefix_full_uuid() {
+        let result = validate_memory_id_or_prefix("c77bb954-1234-5678-abcd-ef0123456789");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_memory_id_or_prefix_valid_prefix() {
+        let result = validate_memory_id_or_prefix("c77bb954");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_memory_id_or_prefix_long_prefix() {
+        let result = validate_memory_id_or_prefix("c77bb9541234abcd");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_memory_id_or_prefix_too_short() {
+        assert!(validate_memory_id_or_prefix("c77bb").is_err());
+    }
+
+    #[test]
+    fn test_memory_id_or_prefix_invalid_chars() {
+        assert!(validate_memory_id_or_prefix("c77bb95z").is_err());
+    }
+
+    #[test]
+    fn test_memory_id_or_prefix_empty() {
+        assert!(validate_memory_id_or_prefix("").is_err());
     }
 
     #[test]
