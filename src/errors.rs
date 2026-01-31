@@ -50,6 +50,12 @@ pub enum AppError {
         limit: usize,
     },
 
+    // Ambiguity Errors (400)
+    AmbiguousMemoryId {
+        prefix: String,
+        count: usize,
+    },
+
     // Not Found Errors (404)
     MemoryNotFound(String),
     UserNotFound(String),
@@ -107,6 +113,7 @@ impl AppError {
             Self::InvalidMemoryId(_) => "INVALID_MEMORY_ID",
             Self::InvalidEmbeddings(_) => "INVALID_EMBEDDINGS",
             Self::ContentTooLarge { .. } => "CONTENT_TOO_LARGE",
+            Self::AmbiguousMemoryId { .. } => "AMBIGUOUS_MEMORY_ID",
             Self::ResourceLimit { .. } => "RESOURCE_LIMIT",
             Self::MemoryNotFound(_) => "MEMORY_NOT_FOUND",
             Self::UserNotFound(_) => "USER_NOT_FOUND",
@@ -131,7 +138,8 @@ impl AppError {
             | Self::InvalidUserId(_)
             | Self::InvalidMemoryId(_)
             | Self::InvalidEmbeddings(_)
-            | Self::ContentTooLarge { .. } => StatusCode::BAD_REQUEST,
+            | Self::ContentTooLarge { .. }
+            | Self::AmbiguousMemoryId { .. } => StatusCode::BAD_REQUEST,
 
             Self::ResourceLimit { .. } => StatusCode::TOO_MANY_REQUESTS,
 
@@ -165,6 +173,9 @@ impl AppError {
             Self::InvalidEmbeddings(msg) => format!("Invalid embeddings: {msg}"),
             Self::ContentTooLarge { size, max } => {
                 format!("Content too large: {size} bytes (max: {max} bytes)")
+            }
+            Self::AmbiguousMemoryId { prefix, count } => {
+                format!("Ambiguous memory ID prefix '{prefix}': matches {count} memories. Use a longer prefix or full UUID.")
             }
             Self::ResourceLimit {
                 resource,
