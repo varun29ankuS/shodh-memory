@@ -526,7 +526,18 @@ impl MiniLMEmbedder {
         let model = self.ensure_model_loaded()?;
         tracing::debug!("ONNX: model ready, acquiring session lock...");
 
-        let mut session = model.session.lock();
+        let lock_timeout = std::time::Duration::from_secs(30);
+        let mut session = model
+            .session
+            .try_lock_for(lock_timeout)
+            .ok_or_else(|| {
+                tracing::error!(
+                    "ONNX session lock acquisition timed out after {}s — a previous inference \
+                     call is likely stuck. Falling back to simplified embeddings.",
+                    lock_timeout.as_secs()
+                );
+                anyhow::anyhow!("ONNX session lock timeout ({}s)", lock_timeout.as_secs())
+            })?;
         tracing::debug!("ONNX: session lock acquired, tokenizing...");
 
         // Tokenize input text
