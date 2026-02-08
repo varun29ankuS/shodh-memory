@@ -100,7 +100,7 @@ mod linear_tests {
         let webhook_no_secret = LinearWebhook::new(None);
         let result = webhook_no_secret.verify_signature(b"test", "any");
         assert!(result.is_ok());
-        assert!(result.unwrap()); // Should return true when no secret configured
+        assert!(!result.unwrap()); // Should return false (reject) when no secret configured
     }
 
     #[test]
@@ -419,7 +419,7 @@ mod github_tests {
         let webhook_no_secret = GitHubWebhook::new(None);
         let result = webhook_no_secret.verify_signature(b"test", "any");
         assert!(result.is_ok());
-        assert!(result.unwrap()); // Should return true when no secret configured
+        assert!(!result.unwrap()); // Should return false (reject) when no secret configured
     }
 
     #[test]
