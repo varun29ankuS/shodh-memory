@@ -683,6 +683,12 @@ pub async fn proactive_context(
 ) -> Result<Json<ProactiveContextResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
     validation::validate_max_results(req.max_results).map_validation_err("max_results")?;
+    validation::validate_weight("semantic_threshold", req.semantic_threshold)
+        .map_validation_err("semantic_threshold")?;
+    validation::validate_weight("entity_match_weight", req.entity_match_weight)
+        .map_validation_err("entity_match_weight")?;
+    validation::validate_weight("recency_weight", req.recency_weight)
+        .map_validation_err("recency_weight")?;
 
     let memory_system = state
         .get_user_memory(&req.user_id)

@@ -482,9 +482,26 @@ impl TodoStore {
         let key = format!("{}:{}", user_id, todo_id.0);
 
         if let Some(todo) = self.get_todo(user_id, todo_id)? {
+            // Cascade delete subtasks to prevent orphans
+            let subtasks = self.list_subtasks(todo_id)?;
+            for subtask in &subtasks {
+                self.remove_todo_indices(&subtask)?;
+                let subtask_key = format!("{}:{}", subtask.user_id, subtask.id.0);
+                self.todo_db.delete(subtask_key.as_bytes())?;
+                tracing::debug!(
+                    todo_id = %subtask.id,
+                    parent_id = %todo_id,
+                    "Cascade deleted subtask"
+                );
+            }
+
             self.remove_todo_indices(&todo)?;
             self.todo_db.delete(key.as_bytes())?;
-            tracing::debug!(todo_id = %todo_id, "Deleted todo");
+            tracing::debug!(
+                todo_id = %todo_id,
+                subtasks_deleted = subtasks.len(),
+                "Deleted todo"
+            );
             Ok(true)
         } else {
             Ok(false)

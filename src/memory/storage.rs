@@ -998,13 +998,14 @@ impl MemoryStorage {
         block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true); // Pin L0 for fast reads
         opts.set_block_based_table_factory(&block_opts);
 
-        // Open main database
+        // Open main database (with auto-repair on corruption)
         let main_path = path.join("memories");
-        let db = Arc::new(DB::open(&opts, main_path)?);
+        let db = Arc::new(Self::open_or_repair(&opts, &main_path, "memories")?);
 
-        // Open index database
+        // Open index database (with auto-repair on corruption)
         let index_path = path.join("memory_index");
-        let index_db = Arc::new(DB::open(&opts, index_path)?);
+        let index_db = Arc::new(Self::open_or_repair(&opts, &index_path, "memory_index")?);
+
 
         let write_mode = WriteMode::default();
         tracing::info!(
@@ -1023,6 +1024,48 @@ impl MemoryStorage {
             storage_path: path.to_path_buf(),
             write_mode,
         })
+    }
+
+    /// Open a RocksDB database, automatically repairing if corruption is detected.
+    ///
+    /// On hard kills (ONNX deadlock, OOM, kill -9), RocksDB SST files can be left
+    /// in a partially written state. This attempts repair before giving up.
+    fn open_or_repair(opts: &Options, path: &Path, label: &str) -> Result<DB> {
+        match DB::open(opts, path) {
+            Ok(db) => Ok(db),
+            Err(open_err) => {
+                let err_str = open_err.to_string();
+                // Only attempt repair for corruption-related errors
+                if err_str.contains("Corruption")
+                    || err_str.contains("bad block")
+                    || err_str.contains("checksum mismatch")
+                    || err_str.contains("MANIFEST")
+                    || err_str.contains("CURRENT")
+                {
+                    tracing::warn!(
+                        db = label,
+                        error = %open_err,
+                        "RocksDB corruption detected, attempting repair"
+                    );
+                    if let Err(repair_err) = DB::repair(opts, path) {
+                        tracing::error!(
+                            db = label,
+                            error = %repair_err,
+                            "RocksDB repair failed"
+                        );
+                        return Err(anyhow::anyhow!(
+                            "Failed to open or repair {label} database: open={open_err}, repair={repair_err}"
+                        ));
+                    }
+                    tracing::info!(db = label, "RocksDB repair succeeded, reopening");
+                    DB::open(opts, path).map_err(|e| {
+                        anyhow::anyhow!("Failed to open {label} database after repair: {e}")
+                    })
+                } else {
+                    Err(anyhow::anyhow!("Failed to open {label} database: {open_err}"))
+                }
+            }
+        }
     }
 
     /// Get the base storage path

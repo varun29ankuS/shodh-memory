@@ -452,11 +452,22 @@ pub async fn create_reminder(
     }
 
     let trigger = match req.trigger {
-        ReminderTriggerRequest::Time { at } => ProspectiveTrigger::AtTime { at },
-        ReminderTriggerRequest::Duration { after_seconds } => ProspectiveTrigger::AfterDuration {
-            seconds: after_seconds,
-            from: chrono::Utc::now(),
-        },
+        ReminderTriggerRequest::Time { at } => {
+            validation::validate_reminder_timestamp(&at).map_validation_err("trigger_at")?;
+            ProspectiveTrigger::AtTime { at }
+        }
+        ReminderTriggerRequest::Duration { after_seconds } => {
+            if after_seconds > 5 * 365 * 24 * 3600 {
+                return Err(AppError::InvalidInput {
+                    field: "after_seconds".to_string(),
+                    reason: "Duration cannot exceed 5 years".to_string(),
+                });
+            }
+            ProspectiveTrigger::AfterDuration {
+                seconds: after_seconds,
+                from: chrono::Utc::now(),
+            }
+        }
         ReminderTriggerRequest::Context {
             keywords,
             threshold,
@@ -467,6 +478,8 @@ pub async fn create_reminder(
                     reason: "Context trigger requires at least one keyword".to_string(),
                 });
             }
+            validation::validate_weight("threshold", threshold)
+                .map_validation_err("threshold")?;
             ProspectiveTrigger::OnContext {
                 keywords,
                 threshold,
