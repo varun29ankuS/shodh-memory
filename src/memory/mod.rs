@@ -237,6 +237,34 @@ pub struct MemorySystem {
     temporal_fact_store: Arc<temporal_facts::TemporalFactStore>,
 }
 
+/// Resolve an entity name to a graph label and salience using pre-extracted NER data.
+///
+/// Returns (EntityLabel, salience) based on NER type mapping, defaulting to (Concept, 0.5).
+fn resolve_entity_label(
+    entity_name: &str,
+    ner_lookup: &std::collections::HashMap<String, (String, f32)>,
+) -> (crate::graph_memory::EntityLabel, f32) {
+    if let Some((ner_type, confidence)) = ner_lookup.get(&entity_name.to_lowercase()) {
+        let label = match ner_type.as_str() {
+            "PER" => crate::graph_memory::EntityLabel::Person,
+            "ORG" => crate::graph_memory::EntityLabel::Organization,
+            "LOC" => crate::graph_memory::EntityLabel::Location,
+            _ => crate::graph_memory::EntityLabel::Concept,
+        };
+        (label, *confidence)
+    } else {
+        (crate::graph_memory::EntityLabel::Concept, 0.5)
+    }
+}
+
+/// Build a lookup table from NER entity records for label resolution.
+fn build_ner_lookup(ner_entities: &[NerEntityRecord]) -> std::collections::HashMap<String, (String, f32)> {
+    ner_entities
+        .iter()
+        .map(|r| (r.text.to_lowercase(), (r.entity_type.clone(), r.confidence)))
+        .collect()
+}
+
 impl MemorySystem {
     /// Create a new memory system
     pub fn new(config: MemoryConfig) -> Result<Self> {
@@ -606,36 +634,14 @@ impl MemorySystem {
             // Phase 1: Build entity structs with proper labels from NER (CPU work, no lock needed)
             // Uses pre-extracted NER records for accurate labels (Person, Organization, Location)
             // instead of defaulting everything to Concept
-            let ner_lookup: std::collections::HashMap<String, (&str, f32)> = memory
-                .experience
-                .ner_entities
-                .iter()
-                .map(|r| {
-                    (
-                        r.text.to_lowercase(),
-                        (r.entity_type.as_str(), r.confidence),
-                    )
-                })
-                .collect();
+            let ner_lookup = build_ner_lookup(&memory.experience.ner_entities);
 
             let entities_to_add: Vec<crate::graph_memory::EntityNode> = memory
                 .experience
                 .entities
                 .iter()
                 .map(|entity_name| {
-                    let (label, salience) = if let Some((ner_type, confidence)) =
-                        ner_lookup.get(&entity_name.to_lowercase())
-                    {
-                        let label = match *ner_type {
-                            "PER" => crate::graph_memory::EntityLabel::Person,
-                            "ORG" => crate::graph_memory::EntityLabel::Organization,
-                            "LOC" => crate::graph_memory::EntityLabel::Location,
-                            _ => crate::graph_memory::EntityLabel::Concept,
-                        };
-                        (label, *confidence)
-                    } else {
-                        (crate::graph_memory::EntityLabel::Concept, 0.5)
-                    };
+                    let (label, salience) = resolve_entity_label(entity_name, &ner_lookup);
                     crate::graph_memory::EntityNode {
                         uuid: Uuid::new_v4(),
                         name: entity_name.clone(),
@@ -991,36 +997,14 @@ impl MemorySystem {
             let now = chrono::Utc::now();
 
             // Phase 1: Build entity structs with proper labels from NER
-            let ner_lookup: std::collections::HashMap<String, (&str, f32)> = memory
-                .experience
-                .ner_entities
-                .iter()
-                .map(|r| {
-                    (
-                        r.text.to_lowercase(),
-                        (r.entity_type.as_str(), r.confidence),
-                    )
-                })
-                .collect();
+            let ner_lookup = build_ner_lookup(&memory.experience.ner_entities);
 
             let entities_to_add: Vec<crate::graph_memory::EntityNode> = memory
                 .experience
                 .entities
                 .iter()
                 .map(|entity_name| {
-                    let (label, salience) = if let Some((ner_type, confidence)) =
-                        ner_lookup.get(&entity_name.to_lowercase())
-                    {
-                        let label = match *ner_type {
-                            "PER" => crate::graph_memory::EntityLabel::Person,
-                            "ORG" => crate::graph_memory::EntityLabel::Organization,
-                            "LOC" => crate::graph_memory::EntityLabel::Location,
-                            _ => crate::graph_memory::EntityLabel::Concept,
-                        };
-                        (label, *confidence)
-                    } else {
-                        (crate::graph_memory::EntityLabel::Concept, 0.5)
-                    };
+                    let (label, salience) = resolve_entity_label(entity_name, &ner_lookup);
                     crate::graph_memory::EntityNode {
                         uuid: Uuid::new_v4(),
                         name: entity_name.clone(),
@@ -1641,6 +1625,28 @@ impl MemorySystem {
 
                 let mut ids = Vec::new();
 
+                // Density-adaptive traversal: dense graphs get shallower depth
+                // and stricter strength filters to avoid exploring noisy L1 edges.
+                // Dense graph results are already downweighted in RRF fusion
+                // (graph_w=0.1 at density>2.0), so deep traversals add I/O cost
+                // for results that contribute <0.01% to the fused score.
+                let density_val = d.unwrap_or(0.0);
+                let (bidir_depth, bidir_min_str, weighted_depth, weighted_min_str) =
+                    if density_val > 15.0 {
+                        (3usize, 0.12f32, 3usize, 0.15f32)
+                    } else if density_val > 8.0 {
+                        (4, 0.08, 4, 0.12)
+                    } else {
+                        (6, 0.05, 5, 0.10)
+                    };
+
+                if density_val > 0.0 {
+                    tracing::debug!(
+                        "Layer 2: density={:.1}, bidir_depth={}, bidir_min_str={:.2}, weighted_depth={}, weighted_min_str={:.2}",
+                        density_val, bidir_depth, bidir_min_str, weighted_depth, weighted_min_str
+                    );
+                }
+
                 // Multi-hop: Use bidirectional search between entity pairs
                 if query_entities.len() >= 2 {
                     // Find paths between all pairs of query entities
@@ -1649,8 +1655,8 @@ impl MemorySystem {
                             if let Ok(path) = g.traverse_bidirectional(
                                 &query_entities[i],
                                 &query_entities[j],
-                                6,    // max_depth for bidirectional
-                                0.05, // lower min_strength for multi-hop
+                                bidir_depth,
+                                bidir_min_str,
                             ) {
                                 // Path entities are highly relevant for multi-hop
                                 for tr in &path.entities {
@@ -1681,7 +1687,7 @@ impl MemorySystem {
 
                 // Single-hop or supplement multi-hop: Weighted traversal from each entity
                 for entity_uuid in &query_entities {
-                    if let Ok(t) = g.traverse_weighted(entity_uuid, 5, None, 0.1) {
+                    if let Ok(t) = g.traverse_weighted(entity_uuid, weighted_depth, None, weighted_min_str) {
                         for tr in &t.entities {
                             if let Ok(eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
                                 for ep in eps {
@@ -3674,28 +3680,42 @@ impl MemorySystem {
     /// WARNING: This is a destructive operation. All memories across all tiers
     /// will be permanently deleted. This cannot be undone.
     fn forget_all(&self) -> Result<usize> {
+        // Deletion order: graph → long-term → session → working → stats
+        // This is fail-safe: if we crash mid-way, the most durable data
+        // (graph/long-term) is already deleted. Working/session memory is
+        // ephemeral and will be empty on restart anyway.
+
         let mut count = 0;
 
-        // Collect all IDs from working memory and clear
-        let working_ids: Vec<MemoryId> = {
-            let working = self.working_memory.read();
-            working
-                .all_memories()
-                .iter()
-                .map(|m| m.id.clone())
-                .collect()
-        };
-        let working_count = working_ids.len();
-        for id in &working_ids {
-            self.retriever.remove_memory(id);
+        // Step 1: Clear knowledge graph first (GDPR - complete erasure)
+        // Graph references memories, so clean references before deleting memories
+        if let Some(graph) = &self.graph_memory {
+            match graph.read().clear_all() {
+                Ok((entities, relationships, episodes)) => {
+                    tracing::info!(
+                        entities,
+                        relationships,
+                        episodes,
+                        "Graph cleared during forget_all"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to clear knowledge graph during forget_all");
+                    // Continue — graph cleanup is best-effort for GDPR
+                }
+            }
         }
-        {
-            let mut working = self.working_memory.write();
-            working.clear();
-        }
-        count += working_count;
 
-        // Collect all IDs from session memory and clear
+        // Step 2: Clear long-term memory (persistent, most important to delete)
+        let all_lt = self.long_term_memory.get_all()?;
+        let long_term_count = all_lt.len();
+        for memory in all_lt {
+            self.retriever.remove_memory(&memory.id);
+            self.long_term_memory.delete(&memory.id)?;
+        }
+        count += long_term_count;
+
+        // Step 3: Clear session memory (ephemeral — lost on restart anyway)
         let session_ids: Vec<MemoryId> = {
             let session = self.session_memory.read();
             session
@@ -3714,33 +3734,26 @@ impl MemorySystem {
         }
         count += session_count;
 
-        // Clear all from long-term memory (hard delete)
-        let all_lt = self.long_term_memory.get_all()?;
-        let long_term_count = all_lt.len();
-        for memory in all_lt {
-            self.retriever.remove_memory(&memory.id);
-            self.long_term_memory.delete(&memory.id)?;
+        // Step 4: Clear working memory (ephemeral — lost on restart anyway)
+        let working_ids: Vec<MemoryId> = {
+            let working = self.working_memory.read();
+            working
+                .all_memories()
+                .iter()
+                .map(|m| m.id.clone())
+                .collect()
+        };
+        let working_count = working_ids.len();
+        for id in &working_ids {
+            self.retriever.remove_memory(id);
         }
-        count += long_term_count;
-
-        // Clear entire knowledge graph (GDPR - complete erasure)
-        if let Some(graph) = &self.graph_memory {
-            match graph.read().clear_all() {
-                Ok((entities, relationships, episodes)) => {
-                    tracing::info!(
-                        entities,
-                        relationships,
-                        episodes,
-                        "Graph cleared during forget_all"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to clear knowledge graph during forget_all");
-                }
-            }
+        {
+            let mut working = self.working_memory.write();
+            working.clear();
         }
+        count += working_count;
 
-        // Reset all stats to zero
+        // Step 5: Reset stats last (reflects final state)
         {
             let mut stats = self.stats.write();
             stats.total_memories = 0;
@@ -4566,36 +4579,14 @@ impl MemorySystem {
                 let now = chrono::Utc::now();
 
                 // Phase 1: Build entity structs with proper labels from NER
-                let ner_lookup: std::collections::HashMap<String, (&str, f32)> = memory
-                    .experience
-                    .ner_entities
-                    .iter()
-                    .map(|r| {
-                        (
-                            r.text.to_lowercase(),
-                            (r.entity_type.as_str(), r.confidence),
-                        )
-                    })
-                    .collect();
+                let ner_lookup = build_ner_lookup(&memory.experience.ner_entities);
 
                 let entities_to_add: Vec<crate::graph_memory::EntityNode> = memory
                     .experience
                     .entities
                     .iter()
                     .map(|entity_name| {
-                        let (label, salience) = if let Some((ner_type, confidence)) =
-                            ner_lookup.get(&entity_name.to_lowercase())
-                        {
-                            let label = match *ner_type {
-                                "PER" => crate::graph_memory::EntityLabel::Person,
-                                "ORG" => crate::graph_memory::EntityLabel::Organization,
-                                "LOC" => crate::graph_memory::EntityLabel::Location,
-                                _ => crate::graph_memory::EntityLabel::Concept,
-                            };
-                            (label, *confidence)
-                        } else {
-                            (crate::graph_memory::EntityLabel::Concept, 0.5)
-                        };
+                        let (label, salience) = resolve_entity_label(entity_name, &ner_lookup);
                         crate::graph_memory::EntityNode {
                             uuid: Uuid::new_v4(),
                             name: entity_name.clone(),

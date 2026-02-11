@@ -3035,7 +3035,7 @@ mod tests {
     #[test]
     fn test_crc32_empty() {
         let crc = crc32_simple(b"");
-        assert_ne!(crc, 0);
+        assert_eq!(crc, 0, "IEEE CRC32 of empty input is 0 (init 0xFFFFFFFF XOR final 0xFFFFFFFF)");
     }
 
     #[test]

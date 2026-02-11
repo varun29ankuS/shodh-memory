@@ -1684,9 +1684,13 @@ impl GraphMemory {
         // Remove from entity_edges index for BOTH entities
         // (add_relationship indexes both from_entity and to_entity)
         let from_key = format!("{}:{}", edge.from_entity, uuid);
-        let _ = self.entity_edges_db.delete(from_key.as_bytes());
+        if let Err(e) = self.entity_edges_db.delete(from_key.as_bytes()) {
+            tracing::warn!(edge = %uuid, key = %from_key, error = %e, "Failed to delete from entity_edges index");
+        }
         let to_key = format!("{}:{}", edge.to_entity, uuid);
-        let _ = self.entity_edges_db.delete(to_key.as_bytes());
+        if let Err(e) = self.entity_edges_db.delete(to_key.as_bytes()) {
+            tracing::warn!(edge = %uuid, key = %to_key, error = %e, "Failed to delete from entity_edges index");
+        }
 
         Ok(true)
     }
@@ -1712,7 +1716,9 @@ impl GraphMemory {
         // Remove from entity_episodes inverted index
         for entity_uuid in &episode.entity_refs {
             let key = format!("{entity_uuid}:{episode_uuid}");
-            let _ = self.entity_episodes_db.delete(key.as_bytes());
+            if let Err(e) = self.entity_episodes_db.delete(key.as_bytes()) {
+                tracing::warn!(episode = %episode_uuid, key = %key, error = %e, "Failed to delete from entity_episodes index");
+            }
         }
 
         // Delete edges sourced from this episode
@@ -1842,28 +1848,45 @@ impl GraphMemory {
     /// Get all episodes that contain a specific entity
     ///
     /// Uses inverted index for O(k) lookup instead of O(n) full scan.
+    /// Collects episode UUIDs first, then batch-reads them using multi_get.
     /// Crucial for spreading activation algorithm.
     pub fn get_episodes_by_entity(&self, entity_uuid: &Uuid) -> Result<Vec<EpisodicNode>> {
-        let mut episodes = Vec::new();
         let prefix = format!("{entity_uuid}:");
         tracing::debug!("get_episodes_by_entity: prefix {}", &prefix[..12]);
 
-        // Use inverted index: entity_uuid -> episode_uuids
+        // Phase 1: Collect episode UUIDs from index (fast prefix scan, no data transfer)
+        let mut episode_uuids: Vec<Uuid> = Vec::new();
         let iter = self.entity_episodes_db.prefix_iterator(prefix.as_bytes());
         for (key, _) in iter.flatten() {
             if let Ok(key_str) = std::str::from_utf8(&key) {
                 if !key_str.starts_with(&prefix) {
-                    break; // Prefix iterator exhausted
+                    break;
                 }
-
-                // Extract episode UUID from key
                 if let Some(episode_uuid_str) = key_str.split(':').nth(1) {
                     if let Ok(episode_uuid) = Uuid::parse_str(episode_uuid_str) {
-                        if let Some(episode) = self.get_episode(&episode_uuid)? {
-                            episodes.push(episode);
-                        }
+                        episode_uuids.push(episode_uuid);
                     }
                 }
+            }
+        }
+
+        if episode_uuids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase 2: Batch read all episodes using multi_get (single RocksDB call)
+        let keys: Vec<[u8; 16]> = episode_uuids.iter().map(|u| *u.as_bytes()).collect();
+        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+
+        let results = self.episodes_db.multi_get(&key_refs);
+
+        let mut episodes = Vec::with_capacity(episode_uuids.len());
+        for value in results.into_iter().flatten().flatten() {
+            if let Ok((episode, _)) = bincode::serde::decode_from_slice::<EpisodicNode, _>(
+                &value,
+                bincode::config::standard(),
+            ) {
+                episodes.push(episode);
             }
         }
 

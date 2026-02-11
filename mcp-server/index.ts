@@ -210,11 +210,13 @@ function streamMemory(content: string, tags: string[] = [], source: string = "as
     streamSocket.send(message);
     console.error(`[Stream] Sent memory (${content.length} chars) with tags:`, tags);
   } else {
-    // Buffer message and try to reconnect
-    if (streamBuffer.length < MAX_BUFFER_SIZE) {
-      streamBuffer.push(message);
-      console.error(`[Stream] Buffered memory (socket not ready, buffer size: ${streamBuffer.length})`);
+    // Buffer message with FIFO eviction and try to reconnect
+    if (streamBuffer.length >= MAX_BUFFER_SIZE) {
+      streamBuffer.shift();
+      console.error(`[Stream] Buffer full, evicted oldest message (size: ${MAX_BUFFER_SIZE})`);
     }
+    streamBuffer.push(message);
+    console.error(`[Stream] Buffered memory (socket not ready, buffer size: ${streamBuffer.length})`);
     connectStream().catch(() => {});
   }
 }
