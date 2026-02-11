@@ -920,6 +920,10 @@ pub struct GraphMemory {
     /// RocksDB storage for entity -> relationships index
     entity_edges_db: Arc<DB>,
 
+    /// RocksDB storage for entity-pair -> edge UUID index (O(1) dedup lookups)
+    /// Key: "{min_uuid}:{max_uuid}" (canonical order), Value: edge UUID bytes
+    entity_pair_index_db: Arc<DB>,
+
     /// RocksDB storage for entity -> episodes index (inverted index for fast lookup)
     entity_episodes_db: Arc<DB>,
 
@@ -971,6 +975,7 @@ impl GraphMemory {
         let relationships_db = Arc::new(DB::open(&opts, path.join("graph_relationships"))?);
         let episodes_db = Arc::new(DB::open(&opts, path.join("graph_episodes"))?);
         let entity_edges_db = Arc::new(DB::open(&opts, path.join("graph_entity_edges"))?);
+        let entity_pair_index_db = Arc::new(DB::open(&opts, path.join("graph_entity_pair_index"))?);
         let entity_episodes_db = Arc::new(DB::open(&opts, path.join("graph_entity_episodes"))?);
         let entity_name_index_db = Arc::new(DB::open(&opts, path.join("graph_entity_name_index"))?);
         let entity_lowercase_index_db =
@@ -1003,6 +1008,7 @@ impl GraphMemory {
             relationships_db,
             episodes_db,
             entity_edges_db,
+            entity_pair_index_db,
             entity_episodes_db,
             entity_name_index_db,
             entity_lowercase_index_db,
@@ -1401,18 +1407,64 @@ impl GraphMemory {
         Ok(results)
     }
 
+    /// Canonical pair key for the entity-pair index.
+    /// Uses min/max UUID ordering so A→B and B→A produce the same key.
+    fn pair_key(entity_a: &Uuid, entity_b: &Uuid) -> String {
+        if entity_a < entity_b {
+            format!("{entity_a}:{entity_b}")
+        } else {
+            format!("{entity_b}:{entity_a}")
+        }
+    }
+
+    /// Index an entity pair → edge UUID for O(1) dedup lookups
+    fn index_entity_pair(&self, entity_a: &Uuid, entity_b: &Uuid, edge_uuid: &Uuid) -> Result<()> {
+        let key = Self::pair_key(entity_a, entity_b);
+        self.entity_pair_index_db
+            .put(key.as_bytes(), edge_uuid.as_bytes())?;
+        Ok(())
+    }
+
+    /// Remove entity pair from the pair index
+    fn remove_entity_pair_index(&self, entity_a: &Uuid, entity_b: &Uuid) -> Result<()> {
+        let key = Self::pair_key(entity_a, entity_b);
+        self.entity_pair_index_db.delete(key.as_bytes())?;
+        Ok(())
+    }
+
     /// Find existing relationship between two entities (either direction)
+    ///
+    /// O(1) lookup via entity-pair index, with fallback to linear scan
+    /// for edges created before the pair index existed (migration path).
     pub fn find_relationship_between(
         &self,
         entity_a: &Uuid,
         entity_b: &Uuid,
     ) -> Result<Option<RelationshipEdge>> {
-        // Check edges from entity_a
+        // Fast path: O(1) pair index lookup
+        let key = Self::pair_key(entity_a, entity_b);
+        if let Some(edge_uuid_bytes) = self.entity_pair_index_db.get(key.as_bytes())? {
+            if edge_uuid_bytes.len() == 16 {
+                let edge_uuid = Uuid::from_slice(&edge_uuid_bytes)?;
+                if let Some(edge) = self.get_relationship(&edge_uuid)? {
+                    return Ok(Some(edge));
+                }
+                // Edge was deleted but pair index is stale — clean up and fall through
+                let _ = self.entity_pair_index_db.delete(key.as_bytes());
+            }
+        }
+
+        // Slow path: linear scan for pre-index edges (backward compatibility)
+        // This path is only hit for edges created before the pair index existed.
+        // Once all old edges are either strengthened (which updates the index) or
+        // pruned, this path becomes dead code.
         let edges_a = self.get_entity_relationships(entity_a)?;
         for edge in edges_a {
             if (edge.from_entity == *entity_a && edge.to_entity == *entity_b)
                 || (edge.from_entity == *entity_b && edge.to_entity == *entity_a)
             {
+                // Backfill pair index for this legacy edge
+                let _ = self.index_entity_pair(entity_a, entity_b, &edge.uuid);
                 return Ok(Some(edge));
             }
         }
@@ -1463,6 +1515,15 @@ impl GraphMemory {
         self.index_entity_edge(&edge.from_entity, &edge.uuid)?;
         self.index_entity_edge(&edge.to_entity, &edge.uuid)?;
 
+        // Update entity-pair index for O(1) dedup lookups
+        self.index_entity_pair(&edge.from_entity, &edge.to_entity, &edge.uuid)?;
+
+        // Insert-time degree pruning: cap edges per entity to prevent O(n²) explosion.
+        // If either entity exceeds MAX_ENTITY_DEGREE, prune the weakest edges.
+        // This is the primary defense against graph bloat (132MB for 600KB of content).
+        self.prune_entity_if_over_degree(&edge.from_entity)?;
+        self.prune_entity_if_over_degree(&edge.to_entity)?;
+
         Ok(edge.uuid)
     }
 
@@ -1470,6 +1531,91 @@ impl GraphMemory {
     fn index_entity_edge(&self, entity_uuid: &Uuid, edge_uuid: &Uuid) -> Result<()> {
         let key = format!("{entity_uuid}:{edge_uuid}");
         self.entity_edges_db.put(key.as_bytes(), b"1")?;
+        Ok(())
+    }
+
+    /// Prune an entity's edges if degree exceeds MAX_ENTITY_DEGREE
+    ///
+    /// Loads all edges for the entity, sorts by effective strength, and deletes
+    /// the weakest edges that exceed the cap. LTP-protected edges are preserved
+    /// preferentially (sorted last, so they survive pruning).
+    ///
+    /// This is called at insert time to prevent unbounded edge growth.
+    /// Amortized cost: O(1) for most insertions (only triggers when over cap),
+    /// O(d log d) when pruning is needed (d = entity degree).
+    fn prune_entity_if_over_degree(&self, entity_uuid: &Uuid) -> Result<()> {
+        use crate::constants::MAX_ENTITY_DEGREE;
+
+        // Fast path: count edges without loading them
+        let prefix = format!("{entity_uuid}:");
+        let iter = self.entity_edges_db.prefix_iterator(prefix.as_bytes());
+
+        let mut edge_count = 0usize;
+        for (key, _) in iter.flatten() {
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                if !key_str.starts_with(&prefix) {
+                    break;
+                }
+                edge_count += 1;
+            }
+        }
+
+        if edge_count <= MAX_ENTITY_DEGREE {
+            return Ok(());
+        }
+
+        // Over cap — load all edges, sort, prune weakest
+        let all_edges = self.get_entity_relationships(entity_uuid)?;
+        if all_edges.len() <= MAX_ENTITY_DEGREE {
+            return Ok(()); // Race condition guard
+        }
+
+        // Sort by pruning priority: LTP-protected edges last (survive pruning),
+        // then by effective strength descending (strongest survive)
+        let mut scored: Vec<(Uuid, f32, bool)> = all_edges
+            .iter()
+            .map(|e| {
+                let is_protected = e.is_potentiated();
+                (e.uuid, e.effective_strength(), is_protected)
+            })
+            .collect();
+
+        // Sort: unprotected+weak first (pruning candidates), protected+strong last (survivors)
+        scored.sort_by(|a, b| {
+            // Protected edges sort after unprotected
+            match a.2.cmp(&b.2) {
+                CmpOrdering::Equal => {
+                    // Within same protection class, weaker edges first (prune candidates)
+                    a.1.partial_cmp(&b.1).unwrap_or(CmpOrdering::Equal)
+                }
+                other => other,
+            }
+        });
+
+        // Prune excess: first N edges in sorted order are weakest/unprotected
+        let prune_count = scored.len() - MAX_ENTITY_DEGREE;
+        let to_prune: Vec<Uuid> = scored.iter().take(prune_count).map(|s| s.0).collect();
+
+        for edge_uuid in &to_prune {
+            if let Err(e) = self.delete_relationship(edge_uuid) {
+                tracing::warn!(
+                    edge = %edge_uuid,
+                    entity = %entity_uuid,
+                    "Failed to prune edge during degree cap: {}",
+                    e
+                );
+            }
+        }
+
+        if !to_prune.is_empty() {
+            tracing::info!(
+                entity = %entity_uuid,
+                pruned = to_prune.len(),
+                remaining = MAX_ENTITY_DEGREE,
+                "Pruned edges exceeding degree cap"
+            );
+        }
+
         Ok(())
     }
 
@@ -1481,27 +1627,26 @@ impl GraphMemory {
         self.get_entity_relationships_limited(entity_uuid, None)
     }
 
-    /// Get relationships for an entity with limit
+    /// Get relationships for an entity with limit, ordered by effective strength
     ///
-    /// Collects edge UUIDs first, then batch-reads them using multi_get.
-    /// This eliminates the N+1 query pattern that was causing 60s+ delays.
+    /// Collects ALL edge UUIDs first, batch-reads them, sorts by effective_strength
+    /// descending, then returns the top `limit` strongest edges. This ensures
+    /// traversal and queries always use the most valuable connections.
+    ///
+    /// When no limit is specified, returns all edges sorted by strength.
     pub fn get_entity_relationships_limited(
         &self,
         entity_uuid: &Uuid,
         limit: Option<usize>,
     ) -> Result<Vec<RelationshipEdge>> {
         let prefix = format!("{entity_uuid}:");
-        let max_edges = limit.unwrap_or(usize::MAX);
 
-        // Phase 1: Collect edge UUIDs from index (fast prefix scan)
-        let mut edge_uuids: Vec<Uuid> = Vec::with_capacity(max_edges.min(256));
+        // Phase 1: Collect ALL edge UUIDs from index (fast prefix scan)
+        // We must read all to sort by strength — storage order is arbitrary
+        let mut edge_uuids: Vec<Uuid> = Vec::with_capacity(256);
         let iter = self.entity_edges_db.prefix_iterator(prefix.as_bytes());
 
         for (key, _) in iter.flatten() {
-            if edge_uuids.len() >= max_edges {
-                break;
-            }
-
             if let Ok(key_str) = std::str::from_utf8(&key) {
                 if !key_str.starts_with(&prefix) {
                     break;
@@ -1533,6 +1678,18 @@ impl GraphMemory {
             ) {
                 edges.push(edge);
             }
+        }
+
+        // Phase 3: Sort by effective strength descending (strongest first)
+        edges.sort_by(|a, b| {
+            b.effective_strength()
+                .partial_cmp(&a.effective_strength())
+                .unwrap_or(CmpOrdering::Equal)
+        });
+
+        // Phase 4: Truncate to limit if specified
+        if let Some(max) = limit {
+            edges.truncate(max);
         }
 
         Ok(edges)
@@ -1695,6 +1852,11 @@ impl GraphMemory {
             tracing::warn!(edge = %uuid, key = %to_key, error = %e, "Failed to delete from entity_edges index");
         }
 
+        // Remove from entity-pair index
+        if let Err(e) = self.remove_entity_pair_index(&edge.from_entity, &edge.to_entity) {
+            tracing::warn!(edge = %uuid, "Failed to delete from entity_pair index: {}", e);
+        }
+
         Ok(true)
     }
 
@@ -1771,6 +1933,7 @@ impl GraphMemory {
             &self.relationships_db,
             &self.episodes_db,
             &self.entity_edges_db,
+            &self.entity_pair_index_db,
             &self.entity_episodes_db,
             &self.entity_name_index_db,
             &self.entity_lowercase_index_db,

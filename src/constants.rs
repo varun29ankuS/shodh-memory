@@ -71,6 +71,20 @@ pub const EDGE_INITIAL_STRENGTH: f32 = 0.5;
 /// - Matches IMPORTANCE_FLOOR for consistency
 pub const EDGE_MIN_STRENGTH: f32 = 0.05;
 
+/// Maximum number of edges per entity (insert-time degree cap)
+///
+/// When an entity exceeds this many edges after a new insertion,
+/// the weakest edges (by effective_strength) are pruned to stay at cap.
+///
+/// Justification:
+/// - Prevents O(n²) edge explosion: 100 entities × 100 = 10,000 edges max
+/// - 500 edges per entity is generous for meaningful relationships
+/// - Beyond 500, diminishing returns — weak edges add noise, not signal
+/// - Matches neuroscience: synaptic pruning removes weak connections
+///
+/// Reference: Chechik et al. (1998) "Synaptic Pruning in Development"
+pub const MAX_ENTITY_DEGREE: usize = 500;
+
 /// Edge half-life base in hours (for time-based decay)
 ///
 /// Associations decay exponentially with this half-life.
