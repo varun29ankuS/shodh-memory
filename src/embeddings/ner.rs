@@ -202,10 +202,15 @@ struct LazyNerModel {
 
 impl LazyNerModel {
     fn new(config: &NerConfig) -> Result<Self> {
+        let default_threads = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            1 // Single thread on Apple Silicon to avoid contention with tokio
+        } else {
+            2
+        };
         let num_threads = std::env::var("SHODH_ONNX_THREADS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(2);
+            .unwrap_or(default_threads);
 
         tracing::info!(
             "Loading BERT-NER model from {:?} with {} threads",
@@ -216,7 +221,9 @@ impl LazyNerModel {
         let session = Session::builder()
             .context("Failed to create NER session builder")?
             .with_intra_threads(num_threads)
-            .context("Failed to set NER thread count")?
+            .context("Failed to set NER intra-op thread count")?
+            .with_inter_threads(1)
+            .context("Failed to set NER inter-op thread count")?
             .commit_from_file(&config.model_path)
             .context("Failed to load NER ONNX model")?;
 

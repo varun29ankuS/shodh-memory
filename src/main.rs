@@ -27,6 +27,7 @@ use tracing::info;
 use shodh_memory::{
     auth,
     config::ServerConfig,
+    embeddings::minilm::pre_init_ort_runtime,
     handlers::{self, AppState, MultiUserMemoryManager},
     metrics, middleware,
 };
@@ -149,6 +150,11 @@ async fn main() -> Result<()> {
     }
     std::env::set_var("SHODH_RATE_LIMIT", cli.rate_limit.to_string());
     std::env::set_var("SHODH_MAX_CONCURRENT", cli.max_concurrent.to_string());
+
+    // SAFETY: Pre-initialize ORT_DYLIB_PATH before any tokio worker threads
+    // have been spawned. We are at the very top of async main, before any
+    // .await or tokio::spawn calls, so set_var is safe here.
+    pre_init_ort_runtime(false);
 
     // Load .env file if present (won't override CLI-set vars)
     let _ = dotenvy::dotenv();

@@ -52,13 +52,9 @@ pub fn build_public_routes(state: AppState) -> Router {
         .route("/webhook/linear", post(integrations::linear_webhook))
         .route("/webhook/github", post(integrations::github_webhook))
         // =================================================================
-        // GRAPH VISUALIZATION (PUBLIC FOR LOCAL DEV)
+        // GRAPH VISUALIZATION (PUBLIC - HTML VIEWER ONLY)
         // =================================================================
         .route("/graph/view", get(visualization::graph_view))
-        .route(
-            "/api/graph/data/{user_id}",
-            get(visualization::get_graph_data),
-        )
         // =================================================================
         // STATE
         // =================================================================
@@ -226,6 +222,10 @@ pub fn build_protected_routes(state: AppState) -> Router {
         // VISUALIZATION
         // =================================================================
         .route("/api/brain/{user_id}", get(visualization::get_brain_state))
+        .route(
+            "/api/graph/data/{user_id}",
+            get(visualization::get_graph_data),
+        )
         .route(
             "/api/visualization/{user_id}/stats",
             get(visualization::get_visualization_stats),

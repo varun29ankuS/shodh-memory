@@ -177,6 +177,7 @@ numpy = { version = "0.24", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+http-body-util = "0.1"
 tempfile = "3.24"
 
 [[bench]]

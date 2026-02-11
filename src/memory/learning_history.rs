@@ -143,11 +143,11 @@ impl LearningHistoryStore {
         };
 
         let timestamp = event.timestamp();
-        let timestamp_nanos = timestamp.timestamp_nanos_opt().unwrap_or(0);
+        let timestamp_micros = timestamp.timestamp_micros();
 
         // Primary storage (time-ordered)
         // Use MessagePack (rmp-serde) - binary format that supports serde tagged enums
-        let key = format!("learning:{}:{:020}", user_id, timestamp_nanos);
+        let key = format!("learning:{}:{:020}", user_id, timestamp_micros);
         let value = rmp_serde::to_vec(&stored)?;
         self.db.put(key.as_bytes(), &value)?;
 
@@ -155,7 +155,7 @@ impl LearningHistoryStore {
         if let Some(ref mem_id) = memory_id {
             let mem_key = format!(
                 "learning_by_memory:{}:{}:{:020}",
-                user_id, mem_id, timestamp_nanos
+                user_id, mem_id, timestamp_micros
             );
             self.db.put(mem_key.as_bytes(), key.as_bytes())?;
         }
@@ -164,7 +164,7 @@ impl LearningHistoryStore {
         if let Some(ref related_id) = related_memory_id {
             let related_key = format!(
                 "learning_by_memory:{}:{}:{:020}",
-                user_id, related_id, timestamp_nanos
+                user_id, related_id, timestamp_micros
             );
             self.db.put(related_key.as_bytes(), key.as_bytes())?;
         }
@@ -173,7 +173,7 @@ impl LearningHistoryStore {
         if let Some(ref f_id) = fact_id {
             let fact_key = format!(
                 "learning_by_fact:{}:{}:{:020}",
-                user_id, f_id, timestamp_nanos
+                user_id, f_id, timestamp_micros
             );
             self.db.put(fact_key.as_bytes(), key.as_bytes())?;
         }
@@ -183,7 +183,7 @@ impl LearningHistoryStore {
             "learning_by_type:{}:{}:{:020}",
             user_id,
             event_type.as_str(),
-            timestamp_nanos
+            timestamp_micros
         );
         self.db.put(type_key.as_bytes(), key.as_bytes())?;
 
@@ -275,9 +275,9 @@ impl LearningHistoryStore {
         user_id: &str,
         since: DateTime<Utc>,
     ) -> Result<Vec<StoredLearningEvent>> {
-        let since_nanos = since.timestamp_nanos_opt().unwrap_or(0);
+        let since_micros = since.timestamp_micros();
         let prefix = format!("learning:{}:", user_id);
-        let start_key = format!("learning:{}:{:020}", user_id, since_nanos);
+        let start_key = format!("learning:{}:{:020}", user_id, since_micros);
 
         let mut events = Vec::new();
         let iter = self.db.iterator(IteratorMode::From(

@@ -154,7 +154,7 @@ jobs:
 
       - name: Run all tests
         run: |
-          cargo test --lib --no-fail-fast 2>&1 | tee test-output.txt
+          cargo test --no-fail-fast 2>&1 | tee test-output.txt
 
       - name: Generate test summary
         if: always()

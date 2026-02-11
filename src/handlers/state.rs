@@ -59,7 +59,7 @@ impl MultiUserMemoryManagerRotationHelper {
     /// in timestamp-sorted order. No in-memory sort needed.
     fn rotate_user_audit_logs(&self, user_id: &str) -> Result<usize> {
         let cutoff_time = chrono::Utc::now() - chrono::Duration::days(self.audit_retention_days);
-        let cutoff_nanos = cutoff_time.timestamp_nanos_opt().unwrap_or(0);
+        let cutoff_micros = cutoff_time.timestamp_micros();
         let prefix = format!("{user_id}:");
 
         // Pass 1: Count total entries (no deserialization, just key counting)
@@ -95,9 +95,9 @@ impl MultiUserMemoryManagerRotationHelper {
 
                 // Extract timestamp from key: "{user_id}:{timestamp_nanos}"
                 let should_delete = if let Some(ts_str) = key_str.strip_prefix(&prefix) {
-                    if let Ok(timestamp_nanos) = ts_str.parse::<i64>() {
+                    if let Ok(timestamp_micros) = ts_str.parse::<i64>() {
                         // Delete if: older than cutoff OR in the excess oldest entries
-                        timestamp_nanos < cutoff_nanos || position < excess_count
+                        timestamp_micros < cutoff_micros || position < excess_count
                     } else {
                         // Malformed key - delete it
                         true
@@ -133,8 +133,8 @@ impl MultiUserMemoryManagerRotationHelper {
                 let mut log_guard = log.write();
 
                 log_guard.retain(|event| {
-                    let event_nanos = event.timestamp.timestamp_nanos_opt().unwrap_or(0);
-                    event_nanos >= cutoff_nanos
+                    let event_micros = event.timestamp.timestamp_micros();
+                    event_micros >= cutoff_micros
                 });
 
                 while log_guard.len() > self.audit_max_entries {
@@ -433,9 +433,9 @@ impl MultiUserMemoryManager {
         };
 
         let key = format!(
-            "{}:{}",
+            "{}:{:020}",
             user_id,
-            event.timestamp.timestamp_nanos_opt().unwrap_or(0)
+            event.timestamp.timestamp_micros()
         );
         if let Ok(serialized) = bincode::serde::encode_to_vec(&event, bincode::config::standard()) {
             let db = self.audit_db.clone();
@@ -1417,14 +1417,17 @@ impl MultiUserMemoryManager {
             }
         }
 
-        // Combine all entity groups for insertion
-        let all_entities: Vec<(String, EntityNode)> = ner_entities
+        // Combine all entity groups for insertion, capped at 10 to prevent
+        // O(n²) edge explosion (10 entities → max 45 edges)
+        let mut all_entities: Vec<(String, EntityNode)> = ner_entities
             .into_iter()
             .chain(tag_entities)
             .chain(allcaps_entities)
             .chain(issue_entities)
             .chain(verb_entities)
             .collect();
+        all_entities.sort_by(|a, b| b.1.salience.partial_cmp(&a.1.salience).unwrap_or(std::cmp::Ordering::Equal));
+        all_entities.truncate(10);
 
         // =====================================================================
         // PHASE 2: GRAPH INSERTION (WITH LOCK)
@@ -1491,7 +1494,7 @@ impl MultiUserMemoryManager {
                     valid_at: now,
                     invalidated_at: None,
                     source_episode_id: Some(memory_id.0),
-                    context: experience.content.clone(),
+                    context: experience.content.chars().take(150).collect(),
                     last_activated: now,
                     activation_count: 1,
                     ltp_status: LtpStatus::None,

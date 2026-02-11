@@ -25,9 +25,19 @@ use tokenizers::Tokenizer;
 use super::Embedder;
 
 /// Thread-safe guard for ORT_DYLIB_PATH initialization.
-/// Using OnceLock ensures set_var is called exactly once, before other threads start.
-/// This mitigates the UB risk of concurrent env::set_var calls.
+/// Using OnceLock ensures set_var is called exactly once.
 static ORT_PATH_INIT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+
+/// Pre-initialize the ONNX Runtime path before any async work begins.
+///
+/// # Safety
+/// This function calls `std::env::set_var` which is unsound in multi-threaded
+/// contexts (Rust 1.66+). It MUST be called before `tokio::main` spawns worker
+/// threads — i.e., very early in `async fn main()` before any `.await` or
+/// `tokio::spawn` calls. The OnceLock ensures it only runs once.
+pub fn pre_init_ort_runtime(offline_mode: bool) {
+    let _ = ORT_PATH_INIT.get_or_init(|| MiniLMEmbedder::init_ort_path_inner(offline_mode));
+}
 
 /// Lazily initialized ONNX session and tokenizer
 struct LazyModel {
@@ -37,10 +47,15 @@ struct LazyModel {
 
 impl LazyModel {
     fn new(config: &EmbeddingConfig) -> Result<Self> {
+        let default_threads = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            1 // Single thread on Apple Silicon to avoid contention with tokio
+        } else {
+            2 // Default 2 threads for other platforms
+        };
         let num_threads = std::env::var("SHODH_ONNX_THREADS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(2); // Default 2 threads for edge devices
+            .unwrap_or(default_threads);
 
         tracing::info!(
             "Loading MiniLM-L6-v2 model from {:?} with {} threads",
@@ -51,7 +66,9 @@ impl LazyModel {
         let session = Session::builder()
             .context("Failed to create session builder")?
             .with_intra_threads(num_threads)
-            .context("Failed to set thread count")?
+            .context("Failed to set intra-op thread count")?
+            .with_inter_threads(1)
+            .context("Failed to set inter-op thread count")?
             .commit_from_file(&config.model_path)
             .context("Failed to load ONNX model")?;
 

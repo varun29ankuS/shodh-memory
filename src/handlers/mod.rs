@@ -50,6 +50,10 @@ pub mod consolidation;
 // A/B testing
 pub mod ab_testing;
 
+// Test utilities (compiled only in test builds)
+#[cfg(test)]
+pub mod test_helpers;
+
 // Re-export commonly used items
 pub use router::{build_protected_routes, build_public_routes, build_router, AppState};
 pub use state::MultiUserMemoryManager;
