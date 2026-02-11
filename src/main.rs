@@ -151,9 +151,10 @@ async fn main() -> Result<()> {
     std::env::set_var("SHODH_RATE_LIMIT", cli.rate_limit.to_string());
     std::env::set_var("SHODH_MAX_CONCURRENT", cli.max_concurrent.to_string());
 
-    // SAFETY: Pre-initialize ORT_DYLIB_PATH before any tokio worker threads
-    // have been spawned. We are at the very top of async main, before any
-    // .await or tokio::spawn calls, so set_var is safe here.
+    // Pre-initialize ORT_DYLIB_PATH. Although #[tokio::main] may have already
+    // spawned worker threads, the OnceLock inside pre_init_ort_runtime ensures
+    // set_var is called at most once, and no concurrent readers exist yet
+    // (no .await or tokio::spawn has been reached).
     pre_init_ort_runtime(false);
 
     // Load .env file if present (won't override CLI-set vars)

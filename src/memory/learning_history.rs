@@ -7,7 +7,7 @@
 //! - Audit trail (what did the system learn and when)
 //!
 //! Storage schema:
-//! - `learning:{user_id}:{timestamp_nanos}` - Primary event storage (time-ordered)
+//! - `learning:{user_id}:{timestamp_nanos:020}` - Primary event storage (time-ordered)
 //! - `learning_by_memory:{user_id}:{memory_id}:{timestamp}` - Index by memory
 //! - `learning_by_type:{user_id}:{event_type}:{timestamp}` - Index by event type
 //! - `learning_stats:{user_id}` - Aggregated learning statistics
@@ -143,11 +143,12 @@ impl LearningHistoryStore {
         };
 
         let timestamp = event.timestamp();
-        let timestamp_micros = timestamp.timestamp_micros();
+        let timestamp_nanos = timestamp.timestamp_nanos_opt()
+            .expect("learning event timestamp within i64 nanos range (1677–2262 CE)");
 
         // Primary storage (time-ordered)
         // Use MessagePack (rmp-serde) - binary format that supports serde tagged enums
-        let key = format!("learning:{}:{:020}", user_id, timestamp_micros);
+        let key = format!("learning:{}:{:020}", user_id, timestamp_nanos);
         let value = rmp_serde::to_vec(&stored)?;
         self.db.put(key.as_bytes(), &value)?;
 
@@ -155,7 +156,7 @@ impl LearningHistoryStore {
         if let Some(ref mem_id) = memory_id {
             let mem_key = format!(
                 "learning_by_memory:{}:{}:{:020}",
-                user_id, mem_id, timestamp_micros
+                user_id, mem_id, timestamp_nanos
             );
             self.db.put(mem_key.as_bytes(), key.as_bytes())?;
         }
@@ -164,7 +165,7 @@ impl LearningHistoryStore {
         if let Some(ref related_id) = related_memory_id {
             let related_key = format!(
                 "learning_by_memory:{}:{}:{:020}",
-                user_id, related_id, timestamp_micros
+                user_id, related_id, timestamp_nanos
             );
             self.db.put(related_key.as_bytes(), key.as_bytes())?;
         }
@@ -173,7 +174,7 @@ impl LearningHistoryStore {
         if let Some(ref f_id) = fact_id {
             let fact_key = format!(
                 "learning_by_fact:{}:{}:{:020}",
-                user_id, f_id, timestamp_micros
+                user_id, f_id, timestamp_nanos
             );
             self.db.put(fact_key.as_bytes(), key.as_bytes())?;
         }
@@ -183,7 +184,7 @@ impl LearningHistoryStore {
             "learning_by_type:{}:{}:{:020}",
             user_id,
             event_type.as_str(),
-            timestamp_micros
+            timestamp_nanos
         );
         self.db.put(type_key.as_bytes(), key.as_bytes())?;
 
@@ -275,9 +276,10 @@ impl LearningHistoryStore {
         user_id: &str,
         since: DateTime<Utc>,
     ) -> Result<Vec<StoredLearningEvent>> {
-        let since_micros = since.timestamp_micros();
+        let since_nanos = since.timestamp_nanos_opt()
+            .expect("events_since timestamp within i64 nanos range (1677–2262 CE)");
         let prefix = format!("learning:{}:", user_id);
-        let start_key = format!("learning:{}:{:020}", user_id, since_micros);
+        let start_key = format!("learning:{}:{:020}", user_id, since_nanos);
 
         let mut events = Vec::new();
         let iter = self.db.iterator(IteratorMode::From(
@@ -577,7 +579,8 @@ impl LearningHistoryStore {
     /// Prune old learning history (keep last N days)
     pub fn prune_old_events(&self, user_id: &str, keep_days: i64) -> Result<usize> {
         let cutoff = Utc::now() - Duration::days(keep_days);
-        let cutoff_nanos = cutoff.timestamp_nanos_opt().unwrap_or(0);
+        let cutoff_nanos = cutoff.timestamp_nanos_opt()
+            .expect("prune cutoff timestamp within i64 nanos range (1677–2262 CE)");
 
         let prefix = format!("learning:{}:", user_id);
         let mut deleted = 0;

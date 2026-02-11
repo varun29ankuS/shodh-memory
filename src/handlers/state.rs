@@ -55,11 +55,12 @@ struct MultiUserMemoryManagerRotationHelper {
 impl MultiUserMemoryManagerRotationHelper {
     /// Rotate audit logs for a user - delete old entries and enforce max count.
     ///
-    /// Optimized: Keys are `{user_id}:{timestamp_nanos}` so RocksDB returns them
-    /// in timestamp-sorted order. No in-memory sort needed.
+    /// Optimized: Keys are `{user_id}:{timestamp_nanos:020}` so RocksDB returns
+    /// them in timestamp-sorted order. No in-memory sort needed.
     fn rotate_user_audit_logs(&self, user_id: &str) -> Result<usize> {
         let cutoff_time = chrono::Utc::now() - chrono::Duration::days(self.audit_retention_days);
-        let cutoff_micros = cutoff_time.timestamp_micros();
+        let cutoff_nanos = cutoff_time.timestamp_nanos_opt()
+            .expect("audit cutoff timestamp within i64 nanos range (1677–2262 CE)");
         let prefix = format!("{user_id}:");
 
         // Pass 1: Count total entries (no deserialization, just key counting)
@@ -93,11 +94,11 @@ impl MultiUserMemoryManagerRotationHelper {
                     break;
                 }
 
-                // Extract timestamp from key: "{user_id}:{timestamp_nanos}"
+                // Extract timestamp from key: "{user_id}:{timestamp_nanos:020}"
                 let should_delete = if let Some(ts_str) = key_str.strip_prefix(&prefix) {
-                    if let Ok(timestamp_micros) = ts_str.parse::<i64>() {
+                    if let Ok(timestamp_nanos) = ts_str.parse::<i64>() {
                         // Delete if: older than cutoff OR in the excess oldest entries
-                        timestamp_micros < cutoff_micros || position < excess_count
+                        timestamp_nanos < cutoff_nanos || position < excess_count
                     } else {
                         // Malformed key - delete it
                         true
@@ -133,8 +134,9 @@ impl MultiUserMemoryManagerRotationHelper {
                 let mut log_guard = log.write();
 
                 log_guard.retain(|event| {
-                    let event_micros = event.timestamp.timestamp_micros();
-                    event_micros >= cutoff_micros
+                    let event_nanos = event.timestamp.timestamp_nanos_opt()
+                        .expect("audit event timestamp within i64 nanos range");
+                    event_nanos >= cutoff_nanos
                 });
 
                 while log_guard.len() > self.audit_max_entries {
@@ -435,7 +437,8 @@ impl MultiUserMemoryManager {
         let key = format!(
             "{}:{:020}",
             user_id,
-            event.timestamp.timestamp_micros()
+            event.timestamp.timestamp_nanos_opt()
+                .expect("audit event timestamp within i64 nanos range (1677–2262 CE)")
         );
         if let Ok(serialized) = bincode::serde::encode_to_vec(&event, bincode::config::standard()) {
             let db = self.audit_db.clone();
@@ -1482,6 +1485,8 @@ impl MultiUserMemoryManager {
         }
 
         // Create relationships between co-occurring entities
+        // Pre-compute truncated context once (avoids re-allocating per edge)
+        let truncated_context: String = experience.content.chars().take(150).collect();
         for i in 0..entity_uuids.len() {
             for j in (i + 1)..entity_uuids.len() {
                 let edge = RelationshipEdge {
@@ -1494,7 +1499,7 @@ impl MultiUserMemoryManager {
                     valid_at: now,
                     invalidated_at: None,
                     source_episode_id: Some(memory_id.0),
-                    context: experience.content.chars().take(150).collect(),
+                    context: truncated_context.clone(),
                     last_activated: now,
                     activation_count: 1,
                     ltp_status: LtpStatus::None,

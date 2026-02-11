@@ -16,12 +16,12 @@ use serde::de::DeserializeOwned;
 use tempfile::TempDir;
 use tower::ServiceExt; // for oneshot()
 
-use super::router::build_router;
+use super::router::{build_protected_routes, build_public_routes};
 use super::state::MultiUserMemoryManager;
 use crate::config::ServerConfig;
 
 /// Test API key used in all handler tests.
-pub const TEST_API_KEY: &str = "test-handler-key-2025";
+pub const TEST_API_KEY: &str = "test-handler-key";
 
 /// A self-contained test environment with its own temp storage.
 ///
@@ -65,8 +65,14 @@ impl TestHarness {
     }
 
     /// Build the full application router (public + protected routes).
+    ///
+    /// Mirrors `main.rs`: auth middleware wraps only the protected routes.
     pub fn router(&self) -> Router {
-        build_router(self.manager.clone())
+        let public = build_public_routes(self.manager.clone());
+        let protected = build_protected_routes(self.manager.clone()).layer(
+            axum::middleware::from_fn(crate::auth::auth_middleware),
+        );
+        Router::new().merge(public).merge(protected)
     }
 }
 

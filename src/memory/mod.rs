@@ -5116,7 +5116,8 @@ impl MemorySystem {
 
         // Add persisted events first (these are significant events that survived restart)
         for stored in &persisted_events {
-            let ts = stored.event.timestamp().timestamp_nanos_opt().unwrap_or(0);
+            let ts = stored.event.timestamp().timestamp_nanos_opt()
+                .expect("persisted event timestamp within i64 nanos range");
             if !seen_timestamps.contains(&ts) {
                 seen_timestamps.insert(ts);
                 all_events.push(stored.event.clone());
@@ -5124,9 +5125,12 @@ impl MemorySystem {
         }
 
         // Add ephemeral events that aren't already included
+        let until_nanos = until.timestamp_nanos_opt()
+            .expect("until timestamp within i64 nanos range");
         for event in ephemeral_events {
-            let ts = event.timestamp().timestamp_nanos_opt().unwrap_or(0);
-            if ts <= until.timestamp_nanos_opt().unwrap_or(0) && !seen_timestamps.contains(&ts) {
+            let ts = event.timestamp().timestamp_nanos_opt()
+                .expect("ephemeral event timestamp within i64 nanos range");
+            if ts <= until_nanos && !seen_timestamps.contains(&ts) {
                 seen_timestamps.insert(ts);
                 all_events.push(event);
             }
