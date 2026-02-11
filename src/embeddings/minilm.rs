@@ -499,18 +499,18 @@ impl MiniLMEmbedder {
         use std::hash::{Hash, Hasher};
 
         let mut embedding = vec![0.0; self.dimension];
-        let mut hasher = DefaultHasher::new();
 
         // Use words and character n-grams for better quality
         let words: Vec<&str> = text.split_whitespace().collect();
 
         for (i, word) in words.iter().enumerate() {
+            let mut hasher = DefaultHasher::new();
             word.hash(&mut hasher);
             let hash = hasher.finish();
 
-            // Distribute hash bits across embedding dimensions
+            // Distribute hash bits across embedding dimensions with positional offset
             for j in 0..self.dimension {
-                let index = (i * self.dimension + j) % self.dimension;
+                let index = (i.wrapping_mul(7) + j) % self.dimension;
                 if j < 64 {
                     embedding[index] += ((hash >> j) & 1) as f32 * 0.1;
                 } else {
@@ -522,6 +522,7 @@ impl MiniLMEmbedder {
         // Add character bigram features for better semantic representation
         let chars: Vec<char> = text.chars().collect();
         for i in 0..chars.len().saturating_sub(1) {
+            let mut hasher = DefaultHasher::new();
             let bigram = format!("{}{}", chars[i], chars[i + 1]);
             bigram.hash(&mut hasher);
             let hash = hasher.finish();

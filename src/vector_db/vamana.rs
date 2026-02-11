@@ -906,20 +906,20 @@ impl VamanaIndex {
             if graph[neighbor_id as usize].neighbors.len() > self.config.max_degree {
                 // Get neighbor's vector for distance calculations
                 if let Ok(neighbor_vec) = Self::get_vector_from_storage(&vectors, neighbor_id) {
-                    // Calculate distances to all neighbors
+                    // Calculate distances to all neighbors using configured metric
                     let mut neighbor_distances: Vec<(u32, f32)> = graph[neighbor_id as usize]
                         .neighbors
                         .iter()
                         .filter_map(|&n_id| {
                             Self::get_vector_from_storage(&vectors, n_id)
                                 .ok()
-                                .map(|v| (n_id, dot_product_inline(&neighbor_vec, &v)))
+                                .map(|v| (n_id, self.distance(&neighbor_vec, &v)))
                         })
                         .collect();
 
-                    // Sort by distance (higher dot product = closer for normalized vectors)
+                    // Sort by distance (lower = closer for all metrics)
                     neighbor_distances
-                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+                        .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
 
                     // Keep only max_degree closest neighbors
                     graph[neighbor_id as usize].neighbors = neighbor_distances
@@ -1554,18 +1554,21 @@ impl VamanaIndex {
             .store(data.num_vectors, std::sync::atomic::Ordering::Release);
 
         // Update vector storage
-        match &mut *self.vectors.write() {
-            VectorStorage::Memory(vecs) => {
-                *vecs = data.vectors;
-            }
-            VectorStorage::Mmap { .. } => {
-                // Cannot restore mmap from serialized data - converting to in-memory storage
-                warn!(
-                    "Loading index into mmap-configured instance: converting {} vectors to in-memory storage. \
-                     This may increase memory usage. To use mmap, rebuild the index with build().",
-                    data.num_vectors
-                );
-                *self.vectors.write() = VectorStorage::Memory(data.vectors);
+        let is_mmap = matches!(*self.vectors.read(), VectorStorage::Mmap { .. });
+        if is_mmap {
+            // Cannot restore mmap from serialized data - converting to in-memory storage
+            warn!(
+                "Loading index into mmap-configured instance: converting {} vectors to in-memory storage. \
+                 This may increase memory usage. To use mmap, rebuild the index with build().",
+                data.num_vectors
+            );
+            *self.vectors.write() = VectorStorage::Memory(data.vectors);
+        } else {
+            match &mut *self.vectors.write() {
+                VectorStorage::Memory(vecs) => {
+                    *vecs = data.vectors;
+                }
+                VectorStorage::Mmap { .. } => unreachable!(),
             }
         }
 

@@ -582,11 +582,14 @@ impl SpannIndex {
         let quantizer = self.quantizer.read();
         let partitions = self.partitions.read();
 
-        // Build distance table for PQ (if enabled)
+        // Build distance table for PQ (required for SPANN search)
         let distance_table = if let Some(ref pq) = *quantizer {
             Some(pq.build_distance_table(query)?)
         } else {
-            None
+            anyhow::bail!(
+                "SPANN search requires PQ quantizer but use_pq is disabled. \
+                 PostingEntry stores only PQ codes, not original vectors."
+            );
         };
 
         // Collect candidates from all probed partitions

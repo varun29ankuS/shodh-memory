@@ -190,12 +190,13 @@ fn find_break_point(text: &str, start: usize, ideal_end: usize, min_size: usize)
     // Try to find sentence boundary (. ! ?) followed by space or end
     let sentence_boundaries: Vec<usize> = chunk
         .char_indices()
-        .filter_map(|(i, c)| {
-            if (c == '.' || c == '!' || c == '?') && i >= min_size {
-                // Check if followed by space or end
-                let next_char = chunk.chars().nth(i + 1);
+        .filter_map(|(byte_offset, c)| {
+            if (c == '.' || c == '!' || c == '?') && byte_offset >= min_size {
+                // Check if followed by space or end of chunk
+                let after = byte_offset + c.len_utf8();
+                let next_char = chunk[after..].chars().next();
                 if next_char.is_none_or(|nc| nc.is_whitespace()) {
-                    return Some(start + i + 1);
+                    return Some(start + after);
                 }
             }
             None

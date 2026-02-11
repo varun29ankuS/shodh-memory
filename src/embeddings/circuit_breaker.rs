@@ -240,16 +240,16 @@ impl ResilientEmbedder {
 
         let dimension = self.inner.dimension();
         let mut embedding = vec![0.0; dimension];
-        let mut hasher = DefaultHasher::new();
 
         let words: Vec<&str> = text.split_whitespace().collect();
 
         for (i, word) in words.iter().enumerate() {
+            let mut hasher = DefaultHasher::new();
             word.hash(&mut hasher);
             let hash = hasher.finish();
 
             for j in 0..dimension {
-                let index = (i * dimension + j) % dimension;
+                let index = (i.wrapping_mul(7) + j) % dimension;
                 if j < 64 {
                     embedding[index] += ((hash >> j) & 1) as f32 * 0.1;
                 } else {

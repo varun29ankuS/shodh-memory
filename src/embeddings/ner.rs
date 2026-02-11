@@ -894,11 +894,16 @@ impl NeuralNer {
                 // EntityExtractor returns salience 0.6-0.9, map to confidence 0.5-0.85
                 let confidence = (e.base_salience * 0.9).min(0.85);
 
-                // Find position in original text (case-insensitive search)
+                // Find position in original text (case-insensitive byte-offset search)
+                let name_lower = e.name.to_lowercase();
                 let (start, end) = text
-                    .to_lowercase()
-                    .find(&e.name.to_lowercase())
-                    .map(|pos| (pos, pos + e.name.len()))
+                    .char_indices()
+                    .find(|&(i, _)| {
+                        text[i..]
+                            .get(..e.name.len())
+                            .is_some_and(|slice| slice.eq_ignore_ascii_case(&name_lower))
+                    })
+                    .map(|(pos, _)| (pos, pos + e.name.len()))
                     .unwrap_or((0, e.name.len()));
 
                 NerEntity {

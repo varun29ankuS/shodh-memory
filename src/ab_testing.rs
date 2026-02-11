@@ -812,7 +812,7 @@ impl ABTestAnalyzer {
         } else {
             // Below 0.05 significance
             // Rough approximation: p ≈ exp(-chi_squared/2) for small values
-            0.05 + (1.0 - chi_squared / CHI_SQUARED_CRITICAL_005) * 0.45
+            0.05 + (1.0 - chi_squared / CHI_SQUARED_CRITICAL_005) * 0.95
         }
     }
 
@@ -1053,9 +1053,9 @@ impl ABTestAnalyzer {
 
         // Beta distribution parameters (using Jeffreys prior: alpha=0.5, beta=0.5)
         let alpha_c = control.clicks as f64 + 0.5;
-        let beta_c = (control.impressions - control.clicks) as f64 + 0.5;
+        let beta_c = (control.impressions as f64 - control.clicks as f64) + 0.5;
         let alpha_t = treatment.clicks as f64 + 0.5;
-        let beta_t = (treatment.impressions - treatment.clicks) as f64 + 0.5;
+        let beta_t = (treatment.impressions as f64 - treatment.clicks as f64) + 0.5;
 
         // Monte Carlo simulation for probability of being better
         let n_samples = 10000;

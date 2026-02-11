@@ -1027,6 +1027,7 @@ pub async fn import_mif(
             "Search" => memory::ExperienceType::Search,
             "Command" => memory::ExperienceType::Command,
             "Conversation" => memory::ExperienceType::Conversation,
+            "Intention" => memory::ExperienceType::Intention,
             _ => memory::ExperienceType::Observation,
         };
 

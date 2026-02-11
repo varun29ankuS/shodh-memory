@@ -436,7 +436,10 @@ impl RelationshipEdge {
                     // Expand capacity on L2→L3 promotion
                     if old_tier == EdgeTier::L2Episodic {
                         if let Some(ref mut ts) = self.activation_timestamps {
-                            ts.reserve(ACTIVATION_HISTORY_L3_CAPACITY - ts.capacity());
+                            let current = ts.capacity();
+                            if current < ACTIVATION_HISTORY_L3_CAPACITY {
+                                ts.reserve(ACTIVATION_HISTORY_L3_CAPACITY - current);
+                            }
                         }
                     }
 
@@ -2066,11 +2069,10 @@ impl GraphMemory {
         }
         impl Ord for PQEntry {
             fn cmp(&self, other: &Self) -> CmpOrdering {
-                // Reverse for max-heap (higher score = higher priority)
+                // BinaryHeap is a max-heap: higher score = popped first = explored first
                 self.score
                     .partial_cmp(&other.score)
                     .unwrap_or(CmpOrdering::Equal)
-                    .reverse()
             }
         }
 

@@ -2808,7 +2808,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           formatted: string;
         }
 
-        const result = await apiCall<ProjectResponse>(`/api/projects/${encodeURIComponent(project)}`, "DELETE", {
+        const result = await apiCall<ProjectResponse>(`/api/projects/${encodeURIComponent(project)}/delete`, "POST", {
           user_id: USER_ID,
           delete_todos: delete_todos ?? false,
         });
@@ -3245,7 +3245,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
               content: string;
               status: string;
               priority: string;
-              project?: string;
+              project_prefix?: string;
             }>;
           }>("/api/todos", "POST", {
             user_id: USER_ID,
@@ -3271,7 +3271,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
               parts.push(`\n${status.replace("_", " ").toUpperCase()}:`);
               byStatus[status].forEach((t) => {
                 const priority = t.priority !== "medium" ? ` [${t.priority}]` : "";
-                const project = t.project ? ` (${t.project})` : "";
+                const project = t.project_prefix ? ` (${t.project_prefix})` : "";
                 parts.push(`- ${t.content}${priority}${project}`);
               });
             }
@@ -3532,7 +3532,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
             content: string;
             status: string;
             priority: string;
-            project?: string;
+            project_prefix?: string;
           }>;
         }>("/api/todos", "POST", {
           user_id: USER_ID,
@@ -3562,7 +3562,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
             parts.push(`\n*${status.replace("_", " ").toUpperCase()}:*`);
             byStatus[status].forEach((t) => {
               const priority = t.priority !== "medium" ? ` [${t.priority}]` : "";
-              const project = t.project ? ` (${t.project})` : "";
+              const project = t.project_prefix ? ` (${t.project_prefix})` : "";
               parts.push(`- ${t.content}${priority}${project}`);
             });
           }
@@ -3623,7 +3623,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
         }>(`/api/users/${USER_ID}/stats`, "GET");
 
         const verifyResult = await apiCall<{
-          healthy: boolean;
+          is_healthy: boolean;
           orphaned_count: number;
         }>("/api/index/verify", "POST", { user_id: USER_ID });
 
@@ -3631,7 +3631,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
         parts.push(`Total memories: ${statsResult.total_memories || 0}`);
         parts.push(`Last 24h: ${statsResult.memories_last_24h || 0}`);
         parts.push(`Last 7 days: ${statsResult.memories_last_7d || 0}`);
-        parts.push(`\nIndex status: ${verifyResult.healthy ? "✓ Healthy" : "⚠ Needs repair"}`);
+        parts.push(`\nIndex status: ${verifyResult.is_healthy ? "✓ Healthy" : "⚠ Needs repair"}`);
         if (verifyResult.orphaned_count > 0) {
           parts.push(`Orphaned entries: ${verifyResult.orphaned_count}`);
         }

@@ -329,7 +329,7 @@ pub struct UpsertRequest {
 }
 
 fn default_change_type() -> String {
-    "update".to_string()
+    "content_updated".to_string()
 }
 
 #[derive(Serialize)]
