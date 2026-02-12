@@ -372,6 +372,12 @@ impl KeywordExtractor {
             // Pronouns and possessives
             "i", "you", "he", "she", "we", "they", "me", "him", "her", "us", "them", "my", "your",
             "his", "our", "their",
+            // Common adverbs and adjectives that aren't meaningful entities
+            "also", "always", "never", "often", "sometimes", "usually", "really", "actually",
+            "basically", "currently", "recently", "already", "still", "yet", "now", "here",
+            "carefully", "quickly", "easily", "well", "much", "many", "new", "old", "good",
+            "great", "best", "like", "even", "also", "get", "got", "set", "use", "using",
+            "used", "make", "made", "being",
         ];
 
         words.into_iter().map(String::from).collect()
@@ -741,17 +747,26 @@ impl SemanticConsolidator {
         candidates.truncate(CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY);
 
         // Entity pair relationships (sorted for determinism)
-        // Filter out single-char entities and stop words to avoid noise like "as relates to c"
+        // Filter: min 3 chars, no stop words, remove substring-redundant entities
         if memory.experience.entities.len() >= 2 {
             let mut sorted_entities: Vec<String> = memory
                 .experience
                 .entities
                 .iter()
                 .map(|e| e.to_lowercase())
-                .filter(|e| e.len() >= 2 && !self.keyword_extractor.is_stop_word(e))
+                .filter(|e| e.len() >= 3 && !self.keyword_extractor.is_stop_word(e))
                 .collect();
             sorted_entities.sort();
             sorted_entities.dedup();
+
+            // Remove entities that are substrings of another entity in the set
+            // e.g. "chose" is redundant when "chose rust" exists
+            let before_dedup = sorted_entities.clone();
+            sorted_entities.retain(|entity| {
+                !before_dedup
+                    .iter()
+                    .any(|other| other != entity && other.contains(entity.as_str()))
+            });
 
             let max_entities = sorted_entities.len().min(4);
             for i in 0..max_entities {
@@ -943,7 +958,7 @@ impl SemanticConsolidator {
 
         for sentence in sentences {
             let trimmed = sentence.trim();
-            if trimmed.len() < 10 || trimmed.len() > 200 {
+            if trimmed.len() < 20 || trimmed.len() > 200 {
                 continue;
             }
 
@@ -959,6 +974,11 @@ impl SemanticConsolidator {
                 })
                 .filter(|w| !w.is_empty() && !self.keyword_extractor.is_stop_word(w))
                 .count();
+
+            // Require at least 3 content words for a meaningful statement
+            if content_words < 3 {
+                continue;
+            }
 
             // Bonus for entity mentions
             let entity_bonus: f32 = entity_lower
@@ -988,7 +1008,7 @@ impl SemanticConsolidator {
         let end = end.map(|i| pos + i).unwrap_or(content.len());
 
         let sentence = content[start..end].trim();
-        if sentence.len() > 10 && sentence.len() < 200 {
+        if sentence.len() >= 20 && sentence.len() < 200 {
             Some(sentence.to_string())
         } else {
             None
@@ -1070,7 +1090,7 @@ impl SemanticConsolidator {
         // Add any new entities (filter noise: short tokens, stop words)
         for entity in &memory.experience.entities {
             let lower = entity.to_lowercase();
-            if lower.len() >= 2
+            if lower.len() >= 3
                 && !self.keyword_extractor.is_stop_word(&lower)
                 && !fact.related_entities.contains(entity)
             {
