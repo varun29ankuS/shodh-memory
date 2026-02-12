@@ -5,6 +5,7 @@
 //! building authenticated HTTP requests and reading JSON response bodies.
 
 use std::sync::Arc;
+use std::sync::Once;
 
 use axum::{
     body::Body,
@@ -36,12 +37,13 @@ impl TestHarness {
     ///
     /// Sets `SHODH_API_KEYS` so the auth middleware accepts [`TEST_API_KEY`].
     pub fn new() -> Self {
-        // Ensure the test API key is set before constructing the manager.
-        // Safety: tests run single-threaded by default in each test binary,
-        // and this env var is only read (not race-critical) by the auth layer.
-        unsafe {
-            std::env::set_var("SHODH_API_KEYS", TEST_API_KEY);
-        }
+        // Ensure the test API key is set exactly once (safe for parallel tests).
+        static ENV_INIT: Once = Once::new();
+        ENV_INIT.call_once(|| {
+            unsafe {
+                std::env::set_var("SHODH_API_KEYS", TEST_API_KEY);
+            }
+        });
 
         let temp_dir = TempDir::new().expect("failed to create temp dir");
         let config = ServerConfig {

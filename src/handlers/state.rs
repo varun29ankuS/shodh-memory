@@ -63,55 +63,34 @@ impl MultiUserMemoryManagerRotationHelper {
             .expect("audit cutoff timestamp within i64 nanos range (1677–2262 CE)");
         let prefix = format!("{user_id}:");
 
-        // Pass 1: Count total entries (no deserialization, just key counting)
-        let mut total_count = 0usize;
+        // Single pass: collect all keys, then determine which to delete
+        let mut all_keys: Vec<(Vec<u8>, i64)> = Vec::new();
         let iter = self.audit_db.prefix_iterator(prefix.as_bytes());
         for (key, _) in iter.flatten() {
             if let Ok(key_str) = std::str::from_utf8(&key) {
                 if !key_str.starts_with(&prefix) {
                     break;
                 }
-                total_count += 1;
+                let ts = key_str.strip_prefix(&prefix)
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0); // Malformed keys sort first → get deleted
+                all_keys.push((key.to_vec(), ts));
             }
         }
 
-        if total_count == 0 {
+        if all_keys.is_empty() {
             return Ok(0);
         }
 
-        // Calculate how many excess entries to delete (beyond max_entries)
-        let excess_count = total_count.saturating_sub(self.audit_max_entries);
+        // Keys are already in ascending timestamp order from RocksDB.
+        // Determine excess entries beyond max_entries.
+        let excess_count = all_keys.len().saturating_sub(self.audit_max_entries);
 
-        // Pass 2: Collect keys to delete (oldest first due to key ordering)
-        // Delete entries that are: too old OR part of excess count
+        // Collect keys to delete: too old OR in the excess oldest entries
         let mut keys_to_remove: Vec<Vec<u8>> = Vec::new();
-        let mut position = 0usize;
-
-        let iter = self.audit_db.prefix_iterator(prefix.as_bytes());
-        for (key, _) in iter.flatten() {
-            if let Ok(key_str) = std::str::from_utf8(&key) {
-                if !key_str.starts_with(&prefix) {
-                    break;
-                }
-
-                // Extract timestamp from key: "{user_id}:{timestamp_nanos:020}"
-                let should_delete = if let Some(ts_str) = key_str.strip_prefix(&prefix) {
-                    if let Ok(timestamp_nanos) = ts_str.parse::<i64>() {
-                        // Delete if: older than cutoff OR in the excess oldest entries
-                        timestamp_nanos < cutoff_nanos || position < excess_count
-                    } else {
-                        // Malformed key - delete it
-                        true
-                    }
-                } else {
-                    false
-                };
-
-                if should_delete {
-                    keys_to_remove.push(key.to_vec());
-                }
-
-                position += 1;
+        for (position, (key, ts)) in all_keys.iter().enumerate() {
+            if *ts < cutoff_nanos || position < excess_count {
+                keys_to_remove.push(key.clone());
             }
         }
 
@@ -452,17 +431,16 @@ impl MultiUserMemoryManager {
         }
 
         let max_entries = self.server_config.audit_max_entries_per_user;
-        if let Some(log) = self.audit_logs.get(user_id) {
+        let log = self.audit_logs
+            .entry(user_id.to_string())
+            .or_insert_with(|| Arc::new(parking_lot::RwLock::new(VecDeque::new())))
+            .clone();
+        {
             let mut entries = log.write();
             entries.push_back(event);
             while entries.len() > max_entries {
                 entries.pop_front();
             }
-        } else {
-            let mut deque = VecDeque::new();
-            deque.push_back(event);
-            let log = Arc::new(parking_lot::RwLock::new(deque));
-            self.audit_logs.insert(user_id.to_string(), log);
         }
 
         let count = self
@@ -538,8 +516,9 @@ impl MultiUserMemoryManager {
         }
 
         if !events.is_empty() {
-            let log = Arc::new(parking_lot::RwLock::new(VecDeque::from(events.clone())));
-            self.audit_logs.insert(user_id.to_string(), log);
+            self.audit_logs
+                .entry(user_id.to_string())
+                .or_insert_with(|| Arc::new(parking_lot::RwLock::new(VecDeque::from(events.clone()))));
         }
 
         if let Some(mid) = memory_id {
@@ -689,7 +668,7 @@ impl MultiUserMemoryManager {
                 }
             }
         }
-        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.reverse();
         events.truncate(limit);
         events
     }

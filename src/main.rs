@@ -137,19 +137,23 @@ async fn main() -> Result<()> {
     // Parse CLI arguments FIRST (enables --help without initializing storage)
     let cli = Cli::parse();
 
-    // Set environment variables from CLI args so ServerConfig::from_env() picks them up
-    // CLI args take precedence over existing env vars (clap already handles this)
-    std::env::set_var("SHODH_HOST", &cli.host);
-    std::env::set_var("SHODH_PORT", cli.port.to_string());
-    std::env::set_var(
-        "SHODH_MEMORY_PATH",
-        cli.storage_path.to_string_lossy().to_string(),
-    );
-    if cli.production {
-        std::env::set_var("SHODH_ENV", "production");
+    // Set environment variables from CLI args so ServerConfig::from_env() picks them up.
+    // SAFETY: These set_var calls run before any .await or tokio::spawn in this
+    // async main body. Although #[tokio::main] has spawned worker threads, those
+    // threads are idle (no tasks yet) so there are no concurrent env readers.
+    unsafe {
+        std::env::set_var("SHODH_HOST", &cli.host);
+        std::env::set_var("SHODH_PORT", cli.port.to_string());
+        std::env::set_var(
+            "SHODH_MEMORY_PATH",
+            cli.storage_path.to_string_lossy().to_string(),
+        );
+        if cli.production {
+            std::env::set_var("SHODH_ENV", "production");
+        }
+        std::env::set_var("SHODH_RATE_LIMIT", cli.rate_limit.to_string());
+        std::env::set_var("SHODH_MAX_CONCURRENT", cli.max_concurrent.to_string());
     }
-    std::env::set_var("SHODH_RATE_LIMIT", cli.rate_limit.to_string());
-    std::env::set_var("SHODH_MAX_CONCURRENT", cli.max_concurrent.to_string());
 
     // Pre-initialize ORT_DYLIB_PATH. Although #[tokio::main] may have already
     // spawned worker threads, the OnceLock inside pre_init_ort_runtime ensures

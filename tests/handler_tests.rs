@@ -244,9 +244,9 @@ async fn health_index() {
 async fn metrics_endpoint() {
     let h = Harness::new();
     let status = status_of(h.app(), authed_get("/metrics")).await;
-    // metrics can return 200 or 500 depending on whether prometheus is set up
+    // metrics handler should always return 200 in test harness
     assert!(
-        status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+        status == StatusCode::OK,
         "unexpected metrics status: {status}"
     );
 }
@@ -540,8 +540,7 @@ async fn get_memory_not_found() {
     assert!(
         status == StatusCode::NOT_FOUND
             || status == StatusCode::UNPROCESSABLE_ENTITY
-            || status == StatusCode::BAD_REQUEST
-            || status == StatusCode::INTERNAL_SERVER_ERROR,
+            || status == StatusCode::BAD_REQUEST,
         "expected error status for missing memory, got {status}"
     );
 }
@@ -720,7 +719,9 @@ async fn compress_nonexistent_memory() {
     .await;
     // Should fail gracefully for nonexistent memory
     assert!(
-        !status.is_success() || status == StatusCode::OK,
+        status == StatusCode::NOT_FOUND
+            || status == StatusCode::BAD_REQUEST
+            || status == StatusCode::UNPROCESSABLE_ENTITY,
         "compress returned unexpected: {status}"
     );
 }
@@ -1250,7 +1251,6 @@ async fn linear_sync_no_integration() {
     assert!(
         status == StatusCode::OK
             || status == StatusCode::BAD_REQUEST
-            || status == StatusCode::INTERNAL_SERVER_ERROR
             || status == StatusCode::UNPROCESSABLE_ENTITY,
         "linear sync returned unexpected {status}"
     );
