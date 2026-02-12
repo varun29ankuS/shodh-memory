@@ -3,13 +3,15 @@
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose, Engine as _};
 use lz4;
+use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::types::*;
 use crate::constants::{
     COMPRESSION_ACCESS_THRESHOLD, COMPRESSION_AGE_DAYS, COMPRESSION_IMPORTANCE_HIGH,
-    COMPRESSION_IMPORTANCE_LOW, CONSOLIDATION_MIN_AGE_DAYS, CONSOLIDATION_MIN_SUPPORT,
+    COMPRESSION_IMPORTANCE_LOW, CONSOLIDATION_JACCARD_THRESHOLD,
+    CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY, CONSOLIDATION_MIN_AGE_DAYS, CONSOLIDATION_MIN_SUPPORT,
     FACT_DECAY_BASE_DAYS, FACT_DECAY_PER_SUPPORT_DAYS, MAX_COMPRESSION_RATIO,
     MAX_DECOMPRESSED_SIZE,
 };
@@ -351,8 +353,12 @@ impl KeywordExtractor {
             .collect()
     }
 
+    /// Check if a word is a stop word
+    fn is_stop_word(&self, word: &str) -> bool {
+        self.stop_words.contains(word)
+    }
+
     fn load_stop_words() -> HashSet<String> {
-        // Common English stop words
         let words = vec![
             "the", "is", "at", "which", "on", "and", "a", "an", "as", "are", "was", "were", "been",
             "be", "have", "has", "had", "do", "does", "did", "will", "would", "could", "should",
@@ -363,13 +369,14 @@ impl KeywordExtractor {
             "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "all", "both",
             "each", "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only",
             "own", "same", "so", "than", "too", "very", "just", "but", "or", "if",
+            // Pronouns and possessives
+            "i", "you", "he", "she", "we", "they", "me", "him", "her", "us", "them", "my", "your",
+            "his", "our", "their",
         ];
 
         words.into_iter().map(String::from).collect()
     }
 }
-
-use std::collections::HashSet;
 
 /// Compression statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -464,16 +471,25 @@ pub struct ConsolidationResult {
 
 /// Semantic consolidation engine
 ///
-/// Extracts durable semantic facts from episodic memories based on:
-/// - Repetition: Same information appearing across multiple episodes
-/// - Importance: High-importance memories get extracted faster
-/// - Age: Older memories are consolidated more aggressively
+/// Extracts durable semantic facts from episodic memories using:
+/// - Multi-extractor pipeline: all extractors run on every memory
+/// - Stemmed-token Jaccard clustering: groups semantically similar patterns
+/// - Sentence-level extraction: facts are real content, not synthetic strings
 pub struct SemanticConsolidator {
     keyword_extractor: KeywordExtractor,
     /// Minimum times a pattern must appear to become a fact
     min_support: usize,
     /// Minimum age in days before consolidation
     min_age_days: i64,
+    stemmer: Stemmer,
+}
+
+/// A cluster of semantically similar pattern candidates
+struct PatternCluster {
+    /// Stemmed token set representing this cluster (union of all members)
+    stem_set: HashSet<String>,
+    /// All candidate entries: (pattern_text, memory_id, confidence)
+    members: Vec<(String, MemoryId, f32)>,
 }
 
 impl Default for SemanticConsolidator {
@@ -488,6 +504,7 @@ impl SemanticConsolidator {
             keyword_extractor: KeywordExtractor::new(),
             min_support: CONSOLIDATION_MIN_SUPPORT,
             min_age_days: CONSOLIDATION_MIN_AGE_DAYS,
+            stemmer: Stemmer::create(Algorithm::English),
         }
     }
 
@@ -497,13 +514,17 @@ impl SemanticConsolidator {
             keyword_extractor: KeywordExtractor::new(),
             min_support,
             min_age_days,
+            stemmer: Stemmer::create(Algorithm::English),
         }
     }
 
     /// Extract semantic facts from a set of memories
     ///
-    /// This identifies recurring patterns and converts them to durable facts.
-    /// Returns new facts and IDs of facts that were reinforced.
+    /// Pipeline:
+    /// 1. Filter memories by age threshold
+    /// 2. Run multi-extractor on each eligible memory
+    /// 3. Cluster candidates by stemmed-token Jaccard similarity
+    /// 4. Convert qualifying clusters (>= min_support) into facts
     pub fn consolidate(&self, memories: &[Memory]) -> ConsolidationResult {
         let mut result = ConsolidationResult {
             memories_processed: memories.len(),
@@ -514,7 +535,6 @@ impl SemanticConsolidator {
             return result;
         }
 
-        // Filter to memories old enough for consolidation
         let now = chrono::Utc::now();
         let eligible: Vec<&Memory> = memories
             .iter()
@@ -525,37 +545,43 @@ impl SemanticConsolidator {
             return result;
         }
 
-        // Extract candidate facts from each memory
-        let mut candidates: HashMap<String, Vec<(&Memory, f32)>> = HashMap::new();
-
+        // Phase 1: Extract candidates using multi-extractor pipeline
+        let mut all_candidates: Vec<(String, MemoryId, f32)> = Vec::new();
         for memory in &eligible {
             let extracted = self.extract_fact_candidates(memory);
             for (pattern, confidence) in extracted {
-                candidates
-                    .entry(pattern)
-                    .or_default()
-                    .push((memory, confidence));
+                all_candidates.push((pattern, memory.id.clone(), confidence));
             }
         }
 
-        // Convert patterns with sufficient support into facts
-        for (pattern, sources) in candidates {
-            if sources.len() >= self.min_support {
-                let avg_confidence: f32 =
-                    sources.iter().map(|(_, c)| c).sum::<f32>() / sources.len() as f32;
+        if all_candidates.is_empty() {
+            return result;
+        }
 
-                let source_ids: Vec<MemoryId> = sources.iter().map(|(m, _)| m.id.clone()).collect();
+        // Phase 2: Group by stemmed-token Jaccard similarity
+        let clusters =
+            self.group_candidates_by_similarity(&all_candidates, CONSOLIDATION_JACCARD_THRESHOLD);
 
-                // Extract entities from the pattern
-                let entities = self.keyword_extractor.extract(&pattern);
+        // Phase 3: Convert qualifying clusters to facts
+        for cluster in clusters {
+            if cluster.members.len() >= self.min_support {
+                let representative = Self::select_representative(&cluster.members);
+                let avg_confidence = cluster.members.iter().map(|(_, _, c)| c).sum::<f32>()
+                    / cluster.members.len() as f32;
 
-                let fact_type = self.classify_fact(&pattern);
+                let source_ids: Vec<MemoryId> = cluster
+                    .members
+                    .iter()
+                    .map(|(_, id, _)| id.clone())
+                    .collect();
+                let entities = self.keyword_extractor.extract(representative);
+                let fact_type = self.classify_fact(representative);
 
                 let fact = SemanticFact {
                     id: uuid::Uuid::new_v4().to_string(),
-                    fact: pattern,
+                    fact: representative.to_string(),
                     confidence: avg_confidence.min(1.0),
-                    support_count: sources.len(),
+                    support_count: cluster.members.len(),
                     source_memories: source_ids,
                     related_entities: entities,
                     created_at: now,
@@ -572,79 +598,231 @@ impl SemanticConsolidator {
         result
     }
 
-    /// Extract fact candidates from a single memory
-    fn extract_fact_candidates(&self, memory: &Memory) -> Vec<(String, f32)> {
-        let mut candidates = Vec::new();
-        let content = &memory.experience.content;
+    // ── Clustering ──────────────────────────────────────────────────────────
 
-        // Extract based on experience type
-        match memory.experience.experience_type {
-            ExperienceType::Decision => {
-                // Decision memories often contain procedures
-                if let Some(fact) = self.extract_procedure(content) {
-                    candidates.push((fact, memory.importance()));
+    /// Tokenize text into stemmed tokens, removing stop words and punctuation
+    fn stemmed_tokens(&self, text: &str) -> HashSet<String> {
+        text.split_whitespace()
+            .map(|w| {
+                w.to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
+            })
+            .filter(|w| w.len() >= 2 && !self.keyword_extractor.is_stop_word(w))
+            .map(|w| self.stemmer.stem(&w).to_string())
+            .collect()
+    }
+
+    /// Jaccard similarity between two token sets: |A ∩ B| / |A ∪ B|
+    fn jaccard_similarity(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
+        if a.is_empty() && b.is_empty() {
+            return 0.0;
+        }
+        let intersection = a.intersection(b).count();
+        let union = a.union(b).count();
+        if union == 0 {
+            0.0
+        } else {
+            intersection as f32 / union as f32
+        }
+    }
+
+    /// Group candidates into clusters using greedy single-pass Jaccard matching
+    fn group_candidates_by_similarity(
+        &self,
+        candidates: &[(String, MemoryId, f32)],
+        threshold: f32,
+    ) -> Vec<PatternCluster> {
+        let mut clusters: Vec<PatternCluster> = Vec::new();
+
+        for (pattern, memory_id, confidence) in candidates {
+            let tokens = self.stemmed_tokens(pattern);
+            if tokens.is_empty() {
+                continue;
+            }
+
+            // Find best matching cluster
+            let mut best_idx = None;
+            let mut best_sim = 0.0f32;
+            for (i, cluster) in clusters.iter().enumerate() {
+                let sim = Self::jaccard_similarity(&tokens, &cluster.stem_set);
+                if sim > best_sim {
+                    best_sim = sim;
+                    best_idx = Some(i);
                 }
             }
-            ExperienceType::Learning | ExperienceType::Discovery => {
-                // Learning/Discovery often contain definitions or capabilities
-                if let Some(fact) = self.extract_definition(content) {
-                    candidates.push((fact, memory.importance() * 1.2));
-                }
-            }
-            ExperienceType::Error => {
-                // Errors often reveal patterns
-                if let Some(fact) = self.extract_pattern(content) {
-                    candidates.push((fact, memory.importance() * 1.1));
-                }
-            }
-            ExperienceType::Conversation => {
-                // Conversations may contain preferences
-                if let Some(fact) = self.extract_preference(content) {
-                    candidates.push((fact, memory.importance()));
-                }
-            }
-            _ => {
-                // Generic extraction for other types
-                let keywords = self.keyword_extractor.extract(content);
-                if keywords.len() >= 3 {
-                    let fact = format!("involves: {}", keywords.join(", "));
-                    candidates.push((fact, memory.importance() * 0.5));
-                }
+
+            if best_sim >= threshold {
+                // Merge into existing cluster — expand the stem set
+                let idx = best_idx.unwrap();
+                clusters[idx].stem_set = clusters[idx].stem_set.union(&tokens).cloned().collect();
+                clusters[idx]
+                    .members
+                    .push((pattern.clone(), memory_id.clone(), *confidence));
+            } else {
+                // Create new cluster
+                clusters.push(PatternCluster {
+                    stem_set: tokens,
+                    members: vec![(pattern.clone(), memory_id.clone(), *confidence)],
+                });
             }
         }
 
-        // Also extract entity relationships
+        clusters
+    }
+
+    /// Select the representative fact text from a cluster (highest confidence)
+    fn select_representative(members: &[(String, MemoryId, f32)]) -> &str {
+        members
+            .iter()
+            .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(text, _, _)| text.as_str())
+            .unwrap_or("")
+    }
+
+    // ── Multi-Extractor Pipeline ────────────────────────────────────────────
+
+    /// Extract fact candidates from a single memory using all applicable extractors
+    fn extract_fact_candidates(&self, memory: &Memory) -> Vec<(String, f32)> {
+        let mut candidates = Vec::new();
+        let content = &memory.experience.content;
+        let importance = memory.importance();
+        let exp_type = &memory.experience.experience_type;
+
+        // Run all extractors with type-based confidence multipliers
+        if let Some(fact) = self.extract_procedure(content) {
+            let mult = if *exp_type == ExperienceType::Decision {
+                1.0
+            } else {
+                0.7
+            };
+            candidates.push((fact, importance * mult));
+        }
+
+        if let Some(fact) = self.extract_definition(content) {
+            let mult = if *exp_type == ExperienceType::Learning
+                || *exp_type == ExperienceType::Discovery
+            {
+                1.2
+            } else {
+                0.8
+            };
+            candidates.push((fact, importance * mult));
+        }
+
+        if let Some(fact) = self.extract_pattern(content) {
+            let mult = if *exp_type == ExperienceType::Error {
+                1.1
+            } else {
+                0.7
+            };
+            candidates.push((fact, importance * mult));
+        }
+
+        if let Some(fact) = self.extract_preference(content) {
+            let mult = if *exp_type == ExperienceType::Conversation {
+                1.0
+            } else {
+                0.6
+            };
+            candidates.push((fact, importance * mult));
+        }
+
+        // Universal fallback: extract most salient sentence
+        if let Some(fact) = self.extract_salient_statement(content, &memory.experience.entities) {
+            candidates.push((fact, importance * 0.6));
+        }
+
+        // Deduplicate overlapping extractions from the same memory
+        candidates = self.dedup_within_memory(candidates);
+
+        // Cap per-memory candidates
+        candidates.truncate(CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY);
+
+        // Entity pair relationships (sorted for determinism)
         if memory.experience.entities.len() >= 2 {
-            let relationship = format!(
-                "{} relates to {}",
-                memory.experience.entities[0],
-                memory.experience.entities[1..].join(", ")
-            );
-            candidates.push((relationship, memory.importance() * 0.8));
+            let mut sorted_entities: Vec<String> = memory
+                .experience
+                .entities
+                .iter()
+                .map(|e| e.to_lowercase())
+                .collect();
+            sorted_entities.sort();
+            sorted_entities.dedup();
+
+            let max_entities = sorted_entities.len().min(4);
+            for i in 0..max_entities {
+                for j in (i + 1)..max_entities {
+                    let relationship =
+                        format!("{} relates to {}", sorted_entities[i], sorted_entities[j]);
+                    candidates.push((relationship, importance * 0.8));
+                }
+            }
         }
 
         candidates
     }
 
+    /// Remove overlapping extractions from the same memory (keep highest confidence)
+    fn dedup_within_memory(&self, mut candidates: Vec<(String, f32)>) -> Vec<(String, f32)> {
+        if candidates.len() <= 1 {
+            return candidates;
+        }
+
+        // Sort by confidence descending so we keep higher-confidence versions
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut kept: Vec<(String, f32, HashSet<String>)> = Vec::new();
+        for (text, conf) in candidates {
+            let tokens = self.stemmed_tokens(&text);
+            let overlaps = kept
+                .iter()
+                .any(|(_, _, t)| Self::jaccard_similarity(&tokens, t) > 0.8);
+            if !overlaps {
+                kept.push((text, conf, tokens));
+            }
+        }
+
+        kept.into_iter()
+            .map(|(text, conf, _)| (text, conf))
+            .collect()
+    }
+
+    // ── Individual Extractors ───────────────────────────────────────────────
+
     /// Extract a procedure from content (looks for action words)
     fn extract_procedure(&self, content: &str) -> Option<String> {
         let lower = content.to_lowercase();
         let action_markers = [
-            "to ", "run ", "execute ", "use ", "call ", "invoke ", "create ", "build ", "deploy ",
+            "to ",
+            "run ",
+            "execute ",
+            "use ",
+            "call ",
+            "invoke ",
+            "create ",
+            "build ",
+            "deploy ",
+            "install ",
+            "configure ",
+            "start ",
+            "stop ",
+            "restart ",
+            "set up ",
+            "update ",
+            "remove ",
+            "delete ",
+            "add ",
+            "import ",
+            "export ",
+            "migrate ",
         ];
 
         for marker in action_markers {
             if let Some(pos) = lower.find(marker) {
-                // Extract the sentence containing this marker
-                let start = content[..pos].rfind(|c| c == '.' || c == '!' || c == '?');
-                let start = start.map(|i| i + 1).unwrap_or(0);
-
-                let end = content[pos..].find(|c| c == '.' || c == '!' || c == '?');
-                let end = end.map(|i| pos + i).unwrap_or(content.len());
-
-                let sentence = content[start..end].trim();
-                if sentence.len() > 10 && sentence.len() < 200 {
-                    return Some(sentence.to_string());
+                if let Some(sentence) = Self::extract_sentence(content, pos) {
+                    return Some(sentence);
                 }
             }
         }
@@ -654,7 +832,20 @@ impl SemanticConsolidator {
     /// Extract a definition from content
     fn extract_definition(&self, content: &str) -> Option<String> {
         let lower = content.to_lowercase();
-        let def_markers = [" is ", " are ", " means ", " refers to ", " represents "];
+        let def_markers = [
+            " is ",
+            " are ",
+            " means ",
+            " refers to ",
+            " represents ",
+            " denotes ",
+            " describes ",
+            " consists of ",
+            " defined as ",
+            " known as ",
+            " stands for ",
+            " equivalent to ",
+        ];
 
         for marker in def_markers {
             if let Some(pos) = lower.find(marker) {
@@ -681,7 +872,7 @@ impl SemanticConsolidator {
         None
     }
 
-    /// Extract a pattern from error content
+    /// Extract a pattern from error content (returns the actual sentence)
     fn extract_pattern(&self, content: &str) -> Option<String> {
         let lower = content.to_lowercase();
         let pattern_markers = [
@@ -692,48 +883,150 @@ impl SemanticConsolidator {
             "issue",
             "problem",
             "exception",
+            "warning",
+            "panic",
+            "timeout",
+            "overflow",
+            "deadlock",
+            "leak",
+            "corrupt",
         ];
 
         for marker in pattern_markers {
-            if lower.contains(marker) {
-                // Extract the key phrase around the error
-                let keywords = self.keyword_extractor.extract(content);
-                if keywords.len() >= 2 {
-                    return Some(format!(
-                        "{} can cause issues with {}",
-                        keywords[0],
-                        keywords[1..].join(", ")
-                    ));
+            if let Some(pos) = lower.find(marker) {
+                if let Some(sentence) = Self::extract_sentence(content, pos) {
+                    return Some(sentence);
                 }
             }
         }
         None
     }
 
-    /// Extract a preference from conversation content
+    /// Extract a preference from conversation content (returns the actual sentence)
     fn extract_preference(&self, content: &str) -> Option<String> {
         let lower = content.to_lowercase();
         let pref_markers = [
-            "prefer", "like", "want", "better", "should", "always", "never",
+            "prefer",
+            "like",
+            "want",
+            "better",
+            "should",
+            "always",
+            "never",
+            "dislike",
+            "avoid",
+            "recommend",
+            "favorite",
+            "rather",
+            "instead of",
+            "opt for",
         ];
 
         for marker in pref_markers {
-            if lower.contains(marker) {
-                // Extract the preference statement
-                let keywords = self.keyword_extractor.extract(content);
-                if !keywords.is_empty() {
-                    return Some(format!("preference: {}", keywords.join(", ")));
+            if let Some(pos) = lower.find(marker) {
+                if let Some(sentence) = Self::extract_sentence(content, pos) {
+                    return Some(sentence);
                 }
             }
         }
         None
+    }
+
+    /// Extract the most information-dense sentence from content
+    fn extract_salient_statement(&self, content: &str, entities: &[String]) -> Option<String> {
+        let sentences = Self::split_sentences(content);
+        let entity_lower: Vec<String> = entities.iter().map(|e| e.to_lowercase()).collect();
+
+        let mut best: Option<(String, f32)> = None;
+
+        for sentence in sentences {
+            let trimmed = sentence.trim();
+            if trimmed.len() < 10 || trimmed.len() > 200 {
+                continue;
+            }
+
+            let lower = trimmed.to_lowercase();
+
+            // Score: count of non-stop-words (content density)
+            let content_words: usize = lower
+                .split_whitespace()
+                .map(|w| {
+                    w.chars()
+                        .filter(|c| c.is_alphanumeric())
+                        .collect::<String>()
+                })
+                .filter(|w| !w.is_empty() && !self.keyword_extractor.is_stop_word(w))
+                .count();
+
+            // Bonus for entity mentions
+            let entity_bonus: f32 = entity_lower
+                .iter()
+                .filter(|e| lower.contains(e.as_str()))
+                .count() as f32
+                * 2.0;
+
+            let score = content_words as f32 + entity_bonus;
+
+            if best.as_ref().map_or(true, |(_, s)| score > *s) {
+                best = Some((trimmed.to_string(), score));
+            }
+        }
+
+        best.map(|(s, _)| s)
+    }
+
+    // ── Helpers ─────────────────────────────────────────────────────────────
+
+    /// Extract the sentence containing a character position
+    fn extract_sentence(content: &str, pos: usize) -> Option<String> {
+        let start = content[..pos].rfind(|c| c == '.' || c == '!' || c == '?');
+        let start = start.map(|i| i + 1).unwrap_or(0);
+
+        let end = content[pos..].find(|c| c == '.' || c == '!' || c == '?');
+        let end = end.map(|i| pos + i).unwrap_or(content.len());
+
+        let sentence = content[start..end].trim();
+        if sentence.len() > 10 && sentence.len() < 200 {
+            Some(sentence.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Split content into sentences by sentence-ending punctuation
+    fn split_sentences(content: &str) -> Vec<&str> {
+        let mut sentences = Vec::new();
+        let mut start = 0;
+
+        for (i, c) in content.char_indices() {
+            if c == '.' || c == '!' || c == '?' {
+                let sentence = &content[start..i];
+                if !sentence.trim().is_empty() {
+                    sentences.push(sentence.trim());
+                }
+                start = i + c.len_utf8();
+            }
+        }
+
+        // Trailing content without sentence-ending punctuation
+        let remaining = content[start..].trim();
+        if !remaining.is_empty() {
+            sentences.push(remaining);
+        }
+
+        sentences
     }
 
     /// Classify what type of fact this is
     fn classify_fact(&self, pattern: &str) -> FactType {
         let lower = pattern.to_lowercase();
 
-        if lower.starts_with("preference:") || lower.contains("prefer") || lower.contains("like") {
+        if lower.contains("prefer")
+            || lower.contains("like")
+            || lower.contains("always")
+            || lower.contains("never")
+            || lower.contains("favorite")
+        {
             FactType::Preference
         } else if lower.contains("can ") || lower.contains("able to") || lower.contains("supports")
         {
@@ -1054,5 +1347,196 @@ mod tests {
     fn test_fact_type_default() {
         let fact_type = FactType::default();
         assert_eq!(fact_type, FactType::Pattern);
+    }
+
+    fn create_typed_memory(
+        content: &str,
+        importance: f32,
+        exp_type: ExperienceType,
+        entities: Vec<String>,
+    ) -> Memory {
+        let experience = Experience {
+            content: content.to_string(),
+            experience_type: exp_type,
+            entities,
+            ..Default::default()
+        };
+
+        let created_at = Some(chrono::Utc::now() - chrono::Duration::days(60));
+
+        Memory::new(
+            MemoryId(Uuid::new_v4()),
+            experience,
+            importance,
+            None,
+            None,
+            None,
+            created_at,
+        )
+    }
+
+    #[test]
+    fn test_jaccard_similarity_helper() {
+        let a: HashSet<String> = ["rust", "memory", "safety"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let b: HashSet<String> = ["rust", "memory", "performance"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let c: HashSet<String> = ["python", "web", "django"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let ab = SemanticConsolidator::jaccard_similarity(&a, &b);
+        assert!(ab > 0.4, "rust+memory overlap should give ~0.5, got {ab}");
+        assert!(ab < 0.6);
+
+        let ac = SemanticConsolidator::jaccard_similarity(&a, &c);
+        assert!(ac < 0.01, "disjoint sets should give 0.0, got {ac}");
+
+        let aa = SemanticConsolidator::jaccard_similarity(&a, &a);
+        assert!((aa - 1.0).abs() < 0.001, "identical sets should give 1.0");
+
+        let empty: HashSet<String> = HashSet::new();
+        assert_eq!(
+            SemanticConsolidator::jaccard_similarity(&empty, &empty),
+            0.0
+        );
+    }
+
+    #[test]
+    fn test_stemmed_tokens_removes_stop_words() {
+        let consolidator = SemanticConsolidator::new();
+        let tokens = consolidator.stemmed_tokens("The Rust programming language is very fast");
+
+        assert!(!tokens.is_empty());
+        // "the", "is", "very" should be filtered as stop words
+        assert!(!tokens.contains("the"));
+        assert!(!tokens.contains("is"));
+        assert!(!tokens.contains("very"));
+        // "rust", "programming", "language", "fast" should survive (stemmed)
+        assert!(tokens.contains("rust"));
+        assert!(tokens.contains("fast"));
+    }
+
+    #[test]
+    fn test_similarity_grouping_clusters_similar_patterns() {
+        let consolidator = SemanticConsolidator::with_thresholds(2, 0);
+
+        let m1 = create_test_memory(
+            "Rust provides memory safety and performance guarantees",
+            0.8,
+        );
+        let m2 = create_test_memory("Rust gives memory safety with great performance", 0.7);
+        let m3 = create_test_memory("Python is great for data science and machine learning", 0.6);
+
+        let result = consolidator.consolidate(&[m1, m2, m3]);
+
+        // The two Rust/memory/safety memories should cluster and produce a fact
+        assert!(
+            result.facts_extracted >= 1,
+            "Similar memories about Rust should cluster into at least 1 fact, got {}",
+            result.facts_extracted
+        );
+
+        // Verify the fact contains Rust-related content
+        let has_rust_fact = result
+            .new_facts
+            .iter()
+            .any(|f| f.fact.to_lowercase().contains("rust"));
+        assert!(has_rust_fact, "Should have a fact about Rust");
+    }
+
+    #[test]
+    fn test_multi_extractor_produces_multiple_candidates() {
+        let consolidator = SemanticConsolidator::new();
+
+        // This memory has both a definition ("is") and an action word ("use")
+        let memory = create_typed_memory(
+            "RocksDB is a high-performance embedded database. We should use it for storage.",
+            0.8,
+            ExperienceType::Decision,
+            vec!["RocksDB".to_string()],
+        );
+
+        let candidates = consolidator.extract_fact_candidates(&memory);
+
+        // Should produce multiple candidates from different extractors
+        assert!(
+            candidates.len() >= 2,
+            "Multi-extractor should produce >=2 candidates, got {}",
+            candidates.len()
+        );
+    }
+
+    #[test]
+    fn test_generic_fallback_produces_real_sentence() {
+        let consolidator = SemanticConsolidator::new();
+
+        let memory = create_typed_memory(
+            "The deployment pipeline uses Docker containers for isolation. Each service runs independently.",
+            0.7,
+            ExperienceType::Observation,
+            vec!["Docker".to_string()],
+        );
+
+        let candidates = consolidator.extract_fact_candidates(&memory);
+
+        // Should NOT produce "involves: ..." synthetic patterns
+        let has_involves = candidates
+            .iter()
+            .any(|(text, _)| text.starts_with("involves:"));
+        assert!(
+            !has_involves,
+            "Should not produce synthetic 'involves:' patterns"
+        );
+
+        // Should have at least one real sentence
+        assert!(
+            !candidates.is_empty(),
+            "Should extract at least one candidate"
+        );
+    }
+
+    #[test]
+    fn test_entity_relationships_sorted_deterministic() {
+        let consolidator = SemanticConsolidator::new();
+
+        let m1 = create_typed_memory(
+            "Testing entity ordering",
+            0.7,
+            ExperienceType::Observation,
+            vec!["JWT".to_string(), "Auth".to_string(), "Token".to_string()],
+        );
+
+        let m2 = create_typed_memory(
+            "Testing entity ordering",
+            0.7,
+            ExperienceType::Observation,
+            vec!["Token".to_string(), "Auth".to_string(), "JWT".to_string()],
+        );
+
+        let c1 = consolidator.extract_fact_candidates(&m1);
+        let c2 = consolidator.extract_fact_candidates(&m2);
+
+        // Entity relationships should be identical regardless of input order
+        let relations1: Vec<&str> = c1
+            .iter()
+            .filter(|(t, _)| t.contains("relates to"))
+            .map(|(t, _)| t.as_str())
+            .collect();
+        let relations2: Vec<&str> = c2
+            .iter()
+            .filter(|(t, _)| t.contains("relates to"))
+            .map(|(t, _)| t.as_str())
+            .collect();
+
+        assert_eq!(
+            relations1, relations2,
+            "Entity relationships should be deterministic regardless of input order"
+        );
     }
 }

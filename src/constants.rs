@@ -385,6 +385,23 @@ pub const CONSOLIDATION_MIN_SUPPORT: usize = 2;
 /// - Matches weekly work cycles
 pub const CONSOLIDATION_MIN_AGE_DAYS: i64 = 7;
 
+/// Jaccard similarity threshold for grouping consolidation patterns
+///
+/// Justification:
+/// - Stemmed-token Jaccard collapses inflections ("deployed"/"deploying" → "deploy")
+/// - 0.45 allows semantically similar but differently worded patterns to cluster
+/// - Lower than FactStore dedup (0.7) because we want broader grouping at extraction
+/// - Below 0.3 would create overly broad clusters mixing unrelated topics
+pub const CONSOLIDATION_JACCARD_THRESHOLD: f32 = 0.45;
+
+/// Maximum fact candidates extracted per memory during consolidation
+///
+/// Justification:
+/// - Multi-extractor pipeline runs all extractors on every memory
+/// - 5 is generous: procedure + definition + pattern + preference + salient
+/// - Prevents one verbose memory from dominating the candidate pool
+pub const CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY: usize = 5;
+
 /// Base decay period for semantic facts (days)
 ///
 /// Unreinforced facts start decaying after this period.
@@ -1649,6 +1666,8 @@ pub const TIER_LTP_THRESHOLD: f32 = 0.8;
 // |-------------------------------|---------------------- |-----------------------------------|
 // | CONSOLIDATION_MIN_SUPPORT     | memory/compression.rs | consolidate_semantic_facts()      |
 // | CONSOLIDATION_MIN_AGE_DAYS    | memory/compression.rs | consolidate_semantic_facts()      |
+// | CONSOLIDATION_JACCARD_THRESHOLD | memory/compression.rs | group_candidates_by_similarity()  |
+// | CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY | memory/compression.rs | extract_fact_candidates() |
 // | FACT_DECAY_BASE_DAYS          | memory/compression.rs | fact decay calculation            |
 // | FACT_DECAY_PER_SUPPORT_DAYS   | memory/compression.rs | fact decay per support            |
 //
