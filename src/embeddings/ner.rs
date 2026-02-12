@@ -911,7 +911,7 @@ impl NeuralNer {
 }
 
 /// Return (argmax_index, softmax_probability) without allocating a Vec.
-fn argmax_softmax(logits: &[f32]) -> Option<(usize, f32)> {
+pub(crate) fn argmax_softmax(logits: &[f32]) -> Option<(usize, f32)> {
     if logits.is_empty() {
         return None;
     }

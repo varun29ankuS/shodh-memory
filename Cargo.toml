@@ -224,6 +224,10 @@ harness = false
 name = "hebbian_benchmarks"
 harness = false
 
+[[bench]]
+name = "softmax_benchmarks"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

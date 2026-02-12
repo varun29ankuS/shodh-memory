@@ -5119,7 +5119,7 @@ impl MemorySystem {
         // Add persisted events first (these are significant events that survived restart)
         for stored in &persisted_events {
             let ts = stored.event.timestamp().timestamp_nanos_opt()
-                .expect("persisted event timestamp within i64 nanos range");
+                .unwrap_or(0);
             let key = (ts, std::mem::discriminant(&stored.event));
             if seen_keys.insert(key) {
                 all_events.push(stored.event.clone());
@@ -5128,10 +5128,10 @@ impl MemorySystem {
 
         // Add ephemeral events that aren't already included
         let until_nanos = until.timestamp_nanos_opt()
-            .expect("until timestamp within i64 nanos range");
+            .unwrap_or(i64::MAX);
         for event in ephemeral_events {
             let ts = event.timestamp().timestamp_nanos_opt()
-                .expect("ephemeral event timestamp within i64 nanos range");
+                .unwrap_or(0);
             let key = (ts, std::mem::discriminant(&event));
             if ts <= until_nanos && seen_keys.insert(key) {
                 all_events.push(event);

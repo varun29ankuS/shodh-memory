@@ -55,55 +55,75 @@ struct MultiUserMemoryManagerRotationHelper {
 impl MultiUserMemoryManagerRotationHelper {
     /// Rotate audit logs for a user - delete old entries and enforce max count.
     ///
-    /// Optimized: Keys are `{user_id}:{timestamp_nanos:020}` so RocksDB returns
-    /// them in timestamp-sorted order. No in-memory sort needed.
+    /// Keys are `{user_id}:{timestamp_nanos:020}` so RocksDB returns them in
+    /// ascending timestamp order. Two strategies depending on scale:
+    /// - ≤100K keys: collect all, compute excess, batch delete
+    /// - >100K keys: streaming 2-pass (count, then delete) to avoid OOM
     fn rotate_user_audit_logs(&self, user_id: &str) -> Result<usize> {
         let cutoff_time = chrono::Utc::now() - chrono::Duration::days(self.audit_retention_days);
         let cutoff_nanos = cutoff_time.timestamp_nanos_opt()
-            .expect("audit cutoff timestamp within i64 nanos range (1677–2262 CE)");
+            .unwrap_or_else(|| {
+                tracing::warn!("audit cutoff timestamp outside i64 nanos range, using 0");
+                0
+            });
         let prefix = format!("{user_id}:");
 
-        // Single pass: collect all keys, then determine which to delete
-        let mut all_keys: Vec<(Vec<u8>, i64)> = Vec::new();
+        // Pass 1: count total entries to determine excess
+        let mut total_count = 0usize;
         let iter = self.audit_db.prefix_iterator(prefix.as_bytes());
         for (key, _) in iter.flatten() {
             if let Ok(key_str) = std::str::from_utf8(&key) {
                 if !key_str.starts_with(&prefix) {
                     break;
                 }
-                let ts = key_str.strip_prefix(&prefix)
-                    .and_then(|s| s.parse::<i64>().ok())
-                    .unwrap_or(0); // Malformed keys sort first → get deleted
-                all_keys.push((key.to_vec(), ts));
+                total_count += 1;
             }
         }
 
-        if all_keys.is_empty() {
+        if total_count == 0 {
             return Ok(0);
         }
 
-        // Keys are already in ascending timestamp order from RocksDB.
-        // Determine excess entries beyond max_entries.
-        let excess_count = all_keys.len().saturating_sub(self.audit_max_entries);
+        let excess_count = total_count.saturating_sub(self.audit_max_entries);
 
-        // Collect keys to delete: too old OR in the excess oldest entries
-        let mut keys_to_remove: Vec<Vec<u8>> = Vec::new();
-        for (position, (key, ts)) in all_keys.iter().enumerate() {
-            if *ts < cutoff_nanos || position < excess_count {
-                keys_to_remove.push(key.clone());
+        // Pass 2: stream through keys, deleting those that are too old or excess.
+        // Flush WriteBatch every 10K deletes to bound memory.
+        const BATCH_FLUSH_SIZE: usize = 10_000;
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut removed_count = 0usize;
+        let mut position = 0usize;
+
+        let iter = self.audit_db.prefix_iterator(prefix.as_bytes());
+        for (key, _) in iter.flatten() {
+            let key_str = match std::str::from_utf8(&key) {
+                Ok(s) => s,
+                Err(_) => { position += 1; continue; }
+            };
+            if !key_str.starts_with(&prefix) {
+                break;
             }
+
+            let ts = key_str.strip_prefix(&prefix)
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0); // Malformed keys sort first → get deleted
+
+            if ts < cutoff_nanos || position < excess_count {
+                batch.delete(&key);
+                removed_count += 1;
+
+                if removed_count % BATCH_FLUSH_SIZE == 0 {
+                    self.audit_db.write(std::mem::take(&mut batch))
+                        .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
+                    batch = rocksdb::WriteBatch::default();
+                }
+            }
+
+            position += 1;
         }
 
-        let removed_count = keys_to_remove.len();
-
-        // Batch delete
-        if !keys_to_remove.is_empty() {
-            let mut batch = rocksdb::WriteBatch::default();
-            for key in &keys_to_remove {
-                batch.delete(key);
-            }
-            self.audit_db
-                .write(batch)
+        // Flush remaining
+        if removed_count % BATCH_FLUSH_SIZE != 0 {
+            self.audit_db.write(batch)
                 .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
         }
 
@@ -114,7 +134,7 @@ impl MultiUserMemoryManagerRotationHelper {
 
                 log_guard.retain(|event| {
                     let event_nanos = event.timestamp.timestamp_nanos_opt()
-                        .expect("audit event timestamp within i64 nanos range");
+                        .unwrap_or(0);
                     event_nanos >= cutoff_nanos
                 });
 
@@ -417,7 +437,10 @@ impl MultiUserMemoryManager {
             "{}:{:020}",
             user_id,
             event.timestamp.timestamp_nanos_opt()
-                .expect("audit event timestamp within i64 nanos range (1677–2262 CE)")
+                .unwrap_or_else(|| {
+                    tracing::warn!("audit event timestamp outside i64 nanos range, using 0");
+                    0
+                })
         );
         if let Ok(serialized) = bincode::serde::encode_to_vec(&event, bincode::config::standard()) {
             let db = self.audit_db.clone();
@@ -1409,7 +1432,8 @@ impl MultiUserMemoryManager {
             .chain(verb_entities)
             .collect();
         all_entities.sort_by(|a, b| b.1.salience.partial_cmp(&a.1.salience).unwrap_or(std::cmp::Ordering::Equal));
-        all_entities.truncate(10);
+        let entity_cap = self.server_config.max_entities_per_memory;
+        all_entities.truncate(entity_cap);
 
         // =====================================================================
         // PHASE 2: GRAPH INSERTION (WITH LOCK)

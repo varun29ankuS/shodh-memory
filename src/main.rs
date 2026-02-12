@@ -132,38 +132,47 @@ use shodh_memory::constants::{
     DATABASE_FLUSH_TIMEOUT_SECS, GRACEFUL_SHUTDOWN_TIMEOUT_SECS, VECTOR_INDEX_SAVE_TIMEOUT_SECS,
 };
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Synchronous entry point: sets env vars before any threads are spawned,
+/// then hands off to the async runtime. This eliminates the unsoundness of
+/// calling `std::env::set_var` after `#[tokio::main]` has started workers.
+fn main() -> Result<()> {
     // Parse CLI arguments FIRST (enables --help without initializing storage)
     let cli = Cli::parse();
 
     // Set environment variables from CLI args so ServerConfig::from_env() picks them up.
-    // SAFETY: These set_var calls run before any .await or tokio::spawn in this
-    // async main body. Although #[tokio::main] has spawned worker threads, those
-    // threads are idle (no tasks yet) so there are no concurrent env readers.
-    unsafe {
-        std::env::set_var("SHODH_HOST", &cli.host);
-        std::env::set_var("SHODH_PORT", cli.port.to_string());
-        std::env::set_var(
-            "SHODH_MEMORY_PATH",
-            cli.storage_path.to_string_lossy().to_string(),
-        );
-        if cli.production {
-            std::env::set_var("SHODH_ENV", "production");
-        }
-        std::env::set_var("SHODH_RATE_LIMIT", cli.rate_limit.to_string());
-        std::env::set_var("SHODH_MAX_CONCURRENT", cli.max_concurrent.to_string());
+    // Safe here: no threads exist yet — we haven't built the tokio runtime.
+    std::env::set_var("SHODH_HOST", &cli.host);
+    std::env::set_var("SHODH_PORT", cli.port.to_string());
+    std::env::set_var(
+        "SHODH_MEMORY_PATH",
+        cli.storage_path.to_string_lossy().to_string(),
+    );
+    if cli.production {
+        std::env::set_var("SHODH_ENV", "production");
     }
+    std::env::set_var("SHODH_RATE_LIMIT", cli.rate_limit.to_string());
+    std::env::set_var("SHODH_MAX_CONCURRENT", cli.max_concurrent.to_string());
 
-    // Pre-initialize ORT_DYLIB_PATH. Although #[tokio::main] may have already
-    // spawned worker threads, the OnceLock inside pre_init_ort_runtime ensures
-    // set_var is called at most once, and no concurrent readers exist yet
-    // (no .await or tokio::spawn has been reached).
+    // Pre-initialize ORT_DYLIB_PATH before any threads are spawned.
     pre_init_ort_runtime(false);
+
+    // Set default log level if not configured (before any threads exist)
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "shodh_memory=info,tower_http=warn");
+    }
 
     // Load .env file if present (won't override CLI-set vars)
     let _ = dotenvy::dotenv();
 
+    // Build and enter the tokio runtime
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to build tokio runtime")
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     // Initialize tracing
     #[cfg(feature = "telemetry")]
     {
@@ -171,9 +180,6 @@ async fn main() -> Result<()> {
     }
     #[cfg(not(feature = "telemetry"))]
     {
-        if std::env::var("RUST_LOG").is_err() {
-            std::env::set_var("RUST_LOG", "shodh_memory=info,tower_http=warn");
-        }
         tracing_subscriber::fmt::init();
     }
 
