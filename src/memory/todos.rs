@@ -29,6 +29,48 @@ use crate::vector_db::{VamanaConfig, VamanaIndex};
 /// Embedding dimension (MiniLM-L6-v2)
 const EMBEDDING_DIM: usize = 384;
 
+/// Migrate unpadded `due:{ts}:{uid}:{id}` keys to zero-padded `due:{:020}:{uid}:{id}` format.
+///
+/// Prior versions wrote bare timestamps (e.g. `due:1739404800:user:uuid`), which break
+/// lexicographic ordering (`"9" > "10"`). Zero-padding to 20 digits ensures
+/// lex order = chronological order, enabling ordered range scans.
+fn migrate_due_key_padding(index_db: &DB) -> Result<usize> {
+    let mut batch = WriteBatch::default();
+    let mut count = 0;
+
+    for item in index_db.prefix_iterator(b"due:") {
+        let (key, value) = item.context("Failed to read due index during migration")?;
+        let key_str = std::str::from_utf8(&key).context("Non-UTF8 key in todo due index")?;
+
+        // Key format: due:{timestamp}:{user_id}:{todo_id}
+        let parts: Vec<&str> = key_str.splitn(4, ':').collect();
+        if parts.len() != 4 {
+            continue;
+        }
+
+        // Already padded — nothing to do
+        if parts[1].len() >= 20 {
+            continue;
+        }
+
+        if let Ok(ts) = parts[1].parse::<i64>() {
+            let new_key = format!("due:{:020}:{}:{}", ts, parts[2], parts[3]);
+            batch.delete(&*key);
+            batch.put(new_key.as_bytes(), &*value);
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        index_db
+            .write(batch)
+            .context("Failed to write migrated todo due keys")?;
+        tracing::info!(count, "Migrated todo due keys to zero-padded format");
+    }
+
+    Ok(count)
+}
+
 /// Storage and query engine for todos and projects
 pub struct TodoStore {
     /// Main todo storage: key = {user_id}:{todo_id}
@@ -67,6 +109,9 @@ impl TodoStore {
         let index_db = Arc::new(
             DB::open(&opts, todos_path.join("index")).context("Failed to open todos index DB")?,
         );
+
+        // Migrate any unpadded due keys from prior versions
+        migrate_due_key_padding(&index_db)?;
 
         tracing::info!("Todo store initialized");
 
@@ -317,9 +362,9 @@ impl TodoStore {
             batch.put(project_key.as_bytes(), b"1");
         }
 
-        // Index by due date
+        // Index by due date (zero-padded for correct lexicographic ordering)
         if let Some(ref due) = todo.due_date {
-            let due_key = format!("due:{}:{}:{}", due.timestamp(), todo.user_id, id_str);
+            let due_key = format!("due:{:020}:{}:{}", due.timestamp(), todo.user_id, id_str);
             batch.put(due_key.as_bytes(), b"1");
         }
 
@@ -367,7 +412,7 @@ impl TodoStore {
         }
 
         if let Some(ref due) = todo.due_date {
-            let due_key = format!("due:{}:{}:{}", due.timestamp(), todo.user_id, id_str);
+            let due_key = format!("due:{:020}:{}:{}", due.timestamp(), todo.user_id, id_str);
             batch.delete(due_key.as_bytes());
         }
 
@@ -1297,6 +1342,58 @@ mod tests {
             "Should find by UUID prefix: {}",
             uuid_prefix
         );
+    }
+
+    #[test]
+    fn test_due_key_migration_and_ordering() {
+        let temp_dir = TempDir::new().unwrap();
+        let todos_path = temp_dir.path().join("todos");
+        std::fs::create_dir_all(&todos_path).unwrap();
+
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(true);
+        let index_db = DB::open(&opts, todos_path.join("index")).unwrap();
+
+        let todo_id_a = Uuid::new_v4();
+        let todo_id_b = Uuid::new_v4();
+        // ts_a = 9 (1 digit), ts_b = 10 (2 digits)
+        // Without padding: "due:9:..." > "due:10:..." lexicographically (wrong)
+        index_db
+            .put(format!("due:9:user1:{}", todo_id_a).as_bytes(), b"1")
+            .unwrap();
+        index_db
+            .put(format!("due:10:user1:{}", todo_id_b).as_bytes(), b"1")
+            .unwrap();
+
+        // Run migration
+        let migrated = migrate_due_key_padding(&index_db).unwrap();
+        assert_eq!(migrated, 2);
+
+        // Verify old keys are gone
+        assert!(index_db
+            .get(format!("due:9:user1:{}", todo_id_a).as_bytes())
+            .unwrap()
+            .is_none());
+        assert!(index_db
+            .get(format!("due:10:user1:{}", todo_id_b).as_bytes())
+            .unwrap()
+            .is_none());
+
+        // Verify new padded keys exist
+        let key_a = format!("due:{:020}:user1:{}", 9_i64, todo_id_a);
+        let key_b = format!("due:{:020}:user1:{}", 10_i64, todo_id_b);
+        assert!(index_db.get(key_a.as_bytes()).unwrap().is_some());
+        assert!(index_db.get(key_b.as_bytes()).unwrap().is_some());
+
+        // Verify lexicographic order is now correct: 9 < 10
+        assert!(
+            key_a < key_b,
+            "Padded key for ts=9 should sort before ts=10"
+        );
+
+        // Re-running migration should be a no-op
+        let migrated_again = migrate_due_key_padding(&index_db).unwrap();
+        assert_eq!(migrated_again, 0);
     }
 
     #[test]

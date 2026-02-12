@@ -34,6 +34,48 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
+/// Migrate unpadded `due:{ts}:{id}` keys to zero-padded `due:{:020}:{id}` format.
+///
+/// Prior versions wrote bare timestamps (e.g. `due:1739404800:uuid`), which break
+/// lexicographic ordering (`"9" > "10"`). Zero-padding to 20 digits ensures
+/// lex order = chronological order, enabling early-termination scans.
+fn migrate_due_key_padding(index_db: &DB) -> Result<usize> {
+    let mut batch = WriteBatch::default();
+    let mut count = 0;
+
+    for item in index_db.prefix_iterator(b"due:") {
+        let (key, value) = item.context("Failed to read due index during migration")?;
+        let key_str = std::str::from_utf8(&key).context("Non-UTF8 key in prospective due index")?;
+
+        // Key format: due:{timestamp}:{task_id}
+        let parts: Vec<&str> = key_str.splitn(3, ':').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+
+        // Already padded — nothing to do
+        if parts[1].len() >= 20 {
+            continue;
+        }
+
+        if let Ok(ts) = parts[1].parse::<i64>() {
+            let new_key = format!("due:{:020}:{}", ts, parts[2]);
+            batch.delete(&*key);
+            batch.put(new_key.as_bytes(), &*value);
+            count += 1;
+        }
+    }
+
+    if count > 0 {
+        index_db
+            .write(batch)
+            .context("Failed to write migrated prospective due keys")?;
+        tracing::info!(count, "Migrated prospective due keys to zero-padded format");
+    }
+
+    Ok(count)
+}
+
 /// Storage and query engine for prospective memory (reminders)
 pub struct ProspectiveStore {
     /// Main task storage: key = {user_id}:{task_id}
@@ -65,6 +107,9 @@ impl ProspectiveStore {
             DB::open(&opts, prospective_path.join("index"))
                 .context("Failed to open prospective index DB")?,
         );
+
+        // Migrate any unpadded due keys from prior versions
+        migrate_due_key_padding(&index_db)?;
 
         tracing::info!("Prospective memory store initialized");
 
@@ -127,8 +172,9 @@ impl ProspectiveStore {
         batch.put(status_key.as_bytes(), b"1");
 
         // Index by due time (for time-based trigger queries)
+        // Zero-padded to 20 digits for correct lexicographic ordering
         if let Some(due_at) = task.trigger.due_at() {
-            let due_key = format!("due:{}:{}", due_at.timestamp(), task.id);
+            let due_key = format!("due:{:020}:{}", due_at.timestamp(), task.id);
             batch.put(due_key.as_bytes(), task.user_id.as_bytes());
         }
 
@@ -192,7 +238,7 @@ impl ProspectiveStore {
             batch.delete(status_key.as_bytes());
 
             if let Some(due_at) = task.trigger.due_at() {
-                let due_key = format!("due:{}:{}", due_at.timestamp(), task_id);
+                let due_key = format!("due:{:020}:{}", due_at.timestamp(), task_id);
                 batch.delete(due_key.as_bytes());
             }
 
@@ -296,9 +342,10 @@ impl ProspectiveStore {
                 Err(_) => continue,
             };
 
-            // Skip if not yet due
+            // With zero-padded keys, lexicographic order = chronological order.
+            // All remaining keys are also in the future — stop scanning.
             if task_ts > now_ts {
-                continue;
+                break;
             }
 
             // Check user matches
@@ -679,6 +726,59 @@ mod tests {
             .check_context_triggers("test-user", "Let's update the database schema")
             .unwrap();
         assert_eq!(no_matches.len(), 0);
+    }
+
+    #[test]
+    fn test_due_key_migration_and_ordering() {
+        let temp_dir = TempDir::new().unwrap();
+        let prospective_path = temp_dir.path().join("prospective");
+        std::fs::create_dir_all(&prospective_path).unwrap();
+
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(true);
+        let index_db = DB::open(&opts, prospective_path.join("index")).unwrap();
+
+        // Write unpadded keys simulating old format
+        let task_id_a = uuid::Uuid::new_v4();
+        let task_id_b = uuid::Uuid::new_v4();
+        // ts_a = 9 (1 digit), ts_b = 10 (2 digits)
+        // Without padding: "due:9:..." > "due:10:..." lexicographically (wrong)
+        index_db
+            .put(format!("due:9:{}", task_id_a).as_bytes(), b"user-1")
+            .unwrap();
+        index_db
+            .put(format!("due:10:{}", task_id_b).as_bytes(), b"user-1")
+            .unwrap();
+
+        // Run migration
+        let migrated = migrate_due_key_padding(&index_db).unwrap();
+        assert_eq!(migrated, 2);
+
+        // Verify old keys are gone
+        assert!(index_db
+            .get(format!("due:9:{}", task_id_a).as_bytes())
+            .unwrap()
+            .is_none());
+        assert!(index_db
+            .get(format!("due:10:{}", task_id_b).as_bytes())
+            .unwrap()
+            .is_none());
+
+        // Verify new padded keys exist
+        let key_a = format!("due:{:020}:{}", 9_i64, task_id_a);
+        let key_b = format!("due:{:020}:{}", 10_i64, task_id_b);
+        assert!(index_db.get(key_a.as_bytes()).unwrap().is_some());
+        assert!(index_db.get(key_b.as_bytes()).unwrap().is_some());
+
+        // Verify lexicographic order is now correct: 9 < 10
+        assert!(
+            key_a < key_b,
+            "Padded key for ts=9 should sort before ts=10"
+        );
+
+        // Re-running migration should be a no-op
+        let migrated_again = migrate_due_key_padding(&index_db).unwrap();
+        assert_eq!(migrated_again, 0);
     }
 
     #[test]
