@@ -144,7 +144,10 @@ impl LearningHistoryStore {
 
         let timestamp = event.timestamp();
         let timestamp_nanos = timestamp.timestamp_nanos_opt()
-            .expect("learning event timestamp within i64 nanos range (1677–2262 CE)");
+            .unwrap_or_else(|| {
+                tracing::warn!("learning event timestamp outside i64 nanos range, using 0");
+                0
+            });
 
         // Primary storage (time-ordered)
         // Use MessagePack (rmp-serde) - binary format that supports serde tagged enums
@@ -317,7 +320,10 @@ impl LearningHistoryStore {
         since: DateTime<Utc>,
     ) -> Result<Vec<StoredLearningEvent>> {
         let since_nanos = since.timestamp_nanos_opt()
-            .expect("events_since timestamp within i64 nanos range (1677–2262 CE)");
+            .unwrap_or_else(|| {
+                tracing::warn!("events_since timestamp outside i64 nanos range, using 0");
+                0
+            });
         let prefix = format!("learning:{}:", user_id);
         let start_key = format!("learning:{}:{:020}", user_id, since_nanos);
 
@@ -352,9 +358,15 @@ impl LearningHistoryStore {
         until: DateTime<Utc>,
     ) -> Result<Vec<StoredLearningEvent>> {
         let since_nanos = since.timestamp_nanos_opt()
-            .expect("events_in_range since within i64 nanos range");
+            .unwrap_or_else(|| {
+                tracing::warn!("events_in_range since timestamp outside i64 nanos range, using 0");
+                0
+            });
         let until_nanos = until.timestamp_nanos_opt()
-            .expect("events_in_range until within i64 nanos range");
+            .unwrap_or_else(|| {
+                tracing::warn!("events_in_range until timestamp outside i64 nanos range, using i64::MAX");
+                i64::MAX
+            });
         let prefix = format!("learning:{}:", user_id);
         let start_key = format!("learning:{}:{:020}", user_id, since_nanos);
         let end_key = format!("learning:{}:{:020}", user_id, until_nanos);
@@ -647,7 +659,10 @@ impl LearningHistoryStore {
     pub fn prune_old_events(&self, user_id: &str, keep_days: i64) -> Result<usize> {
         let cutoff = Utc::now() - Duration::days(keep_days);
         let cutoff_nanos = cutoff.timestamp_nanos_opt()
-            .expect("prune cutoff timestamp within i64 nanos range (1677–2262 CE)");
+            .unwrap_or_else(|| {
+                tracing::warn!("prune cutoff timestamp outside i64 nanos range, using 0");
+                0
+            });
 
         let prefix = format!("learning:{}:", user_id);
         let mut batch = rocksdb::WriteBatch::default();

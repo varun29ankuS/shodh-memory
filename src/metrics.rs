@@ -178,6 +178,15 @@ pub static EMBEDDING_TIMEOUT_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     .expect("EMBEDDING_TIMEOUT_TOTAL metric must be valid at compile time")
 });
 
+/// NER session lock timeout count
+pub static NER_LOCK_TIMEOUT_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    IntCounter::new(
+        "shodh_ner_lock_timeout_total",
+        "Total NER session lock timeouts (degraded entity extraction)",
+    )
+    .expect("NER_LOCK_TIMEOUT_TOTAL metric must be valid at compile time")
+});
+
 // ============================================================================
 // Memory Usage Metrics (aggregate, no per-user to avoid cardinality)
 // ============================================================================
@@ -493,6 +502,7 @@ fn do_register_metrics() -> Result<(), MetricsError> {
     register!(EMBEDDING_GENERATE_TOTAL, "EMBEDDING_GENERATE_TOTAL");
     register!(EMBEDDING_GENERATE_DURATION, "EMBEDDING_GENERATE_DURATION");
     register!(EMBEDDING_TIMEOUT_TOTAL, "EMBEDDING_TIMEOUT_TOTAL");
+    register!(NER_LOCK_TIMEOUT_TOTAL, "NER_LOCK_TIMEOUT_TOTAL");
 
     // Memory usage metrics (aggregate)
     register!(ACTIVE_USERS, "ACTIVE_USERS");

@@ -257,6 +257,11 @@ pub struct ServerConfig {
 
     /// Whether backups are enabled (default: true in production, false in dev)
     pub backup_enabled: bool,
+
+    /// Maximum entities extracted per memory for graph insertion (default: 10)
+    /// Caps the number of NER/tag/regex entities to prevent O(n²) edge explosion
+    /// in the knowledge graph. 10 entities → max 45 co-occurrence edges.
+    pub max_entities_per_memory: usize,
 }
 
 impl Default for ServerConfig {
@@ -280,6 +285,7 @@ impl Default for ServerConfig {
             backup_interval_secs: 86400,    // 24 hours
             backup_max_count: 7,            // Keep 7 backups (1 week of daily backups)
             backup_enabled: false,          // Disabled by default, auto-enabled in production
+            max_entities_per_memory: 10,    // Cap entities per memory (10 → max 45 edges)
         }
     }
 }
@@ -397,6 +403,13 @@ impl ServerConfig {
         } else if config.is_production {
             // Auto-enable in production
             config.backup_enabled = true;
+        }
+
+        // Entity extraction cap
+        if let Ok(val) = env::var("SHODH_MAX_ENTITIES") {
+            if let Ok(n) = val.parse::<usize>() {
+                config.max_entities_per_memory = n.clamp(1, 50);
+            }
         }
 
         config

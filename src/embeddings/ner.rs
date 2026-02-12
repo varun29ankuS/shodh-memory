@@ -505,6 +505,7 @@ impl NeuralNer {
             Some(guard) => guard,
             None => {
                 tracing::warn!("NER batch session lock timeout after 30s, returning empty results");
+                crate::metrics::NER_LOCK_TIMEOUT_TOTAL.inc();
                 return Ok(vec![Vec::new(); texts.len()]);
             }
         };
@@ -620,6 +621,7 @@ impl NeuralNer {
             Some(guard) => guard,
             None => {
                 tracing::warn!("NER session lock timeout after 30s, returning empty");
+                crate::metrics::NER_LOCK_TIMEOUT_TOTAL.inc();
                 return Ok(Vec::new());
             }
         };
@@ -891,7 +893,7 @@ impl NeuralNer {
 }
 
 /// Return (argmax_index, softmax_probability) without allocating a Vec.
-fn argmax_softmax(logits: &[f32]) -> Option<(usize, f32)> {
+pub(crate) fn argmax_softmax(logits: &[f32]) -> Option<(usize, f32)> {
     if logits.is_empty() {
         return None;
     }
