@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::constants::LTP_MIN_STRENGTH;
+use crate::constants::{ENTITY_CONCEPT_MERGE_THRESHOLD, LTP_MIN_STRENGTH};
 
 /// Entity node in the knowledge graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -960,6 +960,12 @@ pub struct GraphMemory {
     /// Mutex for serializing synapse updates to prevent race conditions (SHO-64)
     /// Uses parking_lot::Mutex for better performance than std::sync::Mutex
     synapse_update_lock: Arc<parking_lot::Mutex<()>>,
+
+    /// In-memory cache of entity name embeddings for concept merging.
+    /// Maps entity UUID → embedding vector. Loaded on startup, updated on add.
+    /// Used when string-based dedup (exact/case/stemmed) fails — catches synonyms
+    /// like "authentication" ↔ "auth" via cosine similarity.
+    entity_embedding_cache: Arc<parking_lot::RwLock<Vec<(Uuid, Vec<f32>)>>>,
 }
 
 impl GraphMemory {
@@ -1003,6 +1009,12 @@ impl GraphMemory {
         let relationship_count = Self::count_db_entries(&relationships_db);
         let episode_count = Self::count_db_entries(&episodes_db);
 
+        // Load entity embedding cache for concept merging
+        // Only entities with pre-computed name_embeddings are cached
+        let entity_embedding_cache =
+            Self::load_entity_embedding_cache(&entities_db, &entity_name_index);
+        let embedding_cache_size = entity_embedding_cache.len();
+
         let graph = Self {
             entities_db,
             relationships_db,
@@ -1020,12 +1032,14 @@ impl GraphMemory {
             relationship_count: Arc::new(AtomicUsize::new(relationship_count)),
             episode_count: Arc::new(AtomicUsize::new(episode_count)),
             synapse_update_lock: Arc::new(parking_lot::Mutex::new(())),
+            entity_embedding_cache: Arc::new(parking_lot::RwLock::new(entity_embedding_cache)),
         };
 
         if entity_count > 0 || relationship_count > 0 || episode_count > 0 {
             tracing::info!(
-                "Loaded graph with {} entities, {} relationships, {} episodes",
+                "Loaded graph with {} entities ({} with embeddings), {} relationships, {} episodes",
                 entity_count,
+                embedding_cache_size,
                 relationship_count,
                 episode_count
             );
@@ -1164,28 +1178,108 @@ impl GraphMemory {
         db.iterator(rocksdb::IteratorMode::Start).count()
     }
 
+    /// Load entity embedding cache from persisted entities.
+    ///
+    /// Scans entities referenced by the name index and collects those with
+    /// pre-computed name_embeddings into an in-memory cache for O(n) concept
+    /// merging during `add_entity()`. Entities without embeddings (pre-upgrade
+    /// data) are skipped and will gain embeddings on their next mention.
+    fn load_entity_embedding_cache(
+        entities_db: &DB,
+        name_index: &HashMap<String, Uuid>,
+    ) -> Vec<(Uuid, Vec<f32>)> {
+        let mut cache = Vec::new();
+        for uuid in name_index.values() {
+            let key = uuid.as_bytes();
+            if let Ok(Some(value)) = entities_db.get(key) {
+                if let Ok((entity, _)) = bincode::serde::decode_from_slice::<EntityNode, _>(
+                    &value,
+                    bincode::config::standard(),
+                ) {
+                    if let Some(emb) = entity.name_embedding {
+                        cache.push((*uuid, emb));
+                    }
+                }
+            }
+        }
+        cache
+    }
+
     /// Add or update an entity node
     /// Salience is updated using the formula: salience = base_salience * (1 + 0.1 * ln(mention_count))
     /// This means frequently mentioned entities grow in salience (gravitational wells get heavier)
     ///
     /// BUG-002 FIX: Handles crash recovery for orphaned entities/stale indices
     pub fn add_entity(&self, mut entity: EntityNode) -> Result<Uuid> {
-        // Check if entity already exists by name
-        let existing_uuid = {
+        // Multi-tier dedup pipeline: exact → case-insensitive → stemmed → embedding
+        // Each tier is faster than the next; short-circuits on first match.
+
+        // Tier 1: Exact name match (O(1))
+        let mut existing_uuid = {
             let index = self.entity_name_index.read();
             index.get(&entity.name).cloned()
         };
+
+        // Tier 2: Case-insensitive match (O(1))
+        if existing_uuid.is_none() {
+            let lowercase_name = entity.name.to_lowercase();
+            let index = self.entity_lowercase_index.read();
+            existing_uuid = index.get(&lowercase_name).cloned();
+        }
+
+        // Tier 3: Stemmed match (O(1)) — "running" matches "run"
+        if existing_uuid.is_none() {
+            let stemmer = Stemmer::create(Algorithm::English);
+            let stemmed_name = Self::stem_entity_name(&stemmer, &entity.name);
+            let index = self.entity_stemmed_index.read();
+            existing_uuid = index.get(&stemmed_name).cloned();
+        }
+
+        // Tier 4: Embedding-based concept merge (O(n) over cache)
+        // Catches synonyms like "authentication" ↔ "auth" that string matching misses.
+        // Only runs when the entity carries a name_embedding (populated by caller).
+        if existing_uuid.is_none() {
+            if let Some(ref new_emb) = entity.name_embedding {
+                let cache = self.entity_embedding_cache.read();
+                let mut best_match: Option<(Uuid, f32)> = None;
+                for (uuid, existing_emb) in cache.iter() {
+                    let sim = crate::similarity::cosine_similarity(new_emb, existing_emb);
+                    if sim >= ENTITY_CONCEPT_MERGE_THRESHOLD {
+                        if best_match.map_or(true, |(_, best_sim)| sim > best_sim) {
+                            best_match = Some((*uuid, sim));
+                        }
+                    }
+                }
+                if let Some((matched_uuid, sim)) = best_match {
+                    tracing::debug!(
+                        "Concept merge: '{}' matched existing entity {} (cosine={:.3})",
+                        entity.name,
+                        matched_uuid,
+                        sim
+                    );
+                    existing_uuid = Some(matched_uuid);
+                }
+            }
+        }
 
         let is_new_entity;
         if let Some(uuid) = existing_uuid {
             // BUG-002 FIX: Verify entity actually exists in DB (handles stale index)
             if let Some(existing) = self.get_entity(&uuid)? {
-                // Update existing entity
+                // Update existing entity — merge into canonical node
                 entity.uuid = uuid;
                 entity.mention_count = existing.mention_count + 1;
                 entity.last_seen_at = Utc::now();
-                entity.created_at = existing.created_at; // Preserve original creation time
+                entity.created_at = existing.created_at;
                 entity.is_proper_noun = existing.is_proper_noun || entity.is_proper_noun;
+
+                // Preserve the canonical name (first-seen name wins)
+                entity.name = existing.name.clone();
+
+                // Preserve existing embedding if the incoming one is None
+                if entity.name_embedding.is_none() {
+                    entity.name_embedding = existing.name_embedding;
+                }
 
                 // Update salience with frequency boost
                 // Formula: salience = base_salience * (1 + 0.1 * ln(mention_count))
@@ -1195,7 +1289,6 @@ impl GraphMemory {
                 is_new_entity = false;
             } else {
                 // BUG-002 FIX: Stale index entry - entity in index but not in DB
-                // Treat as new entity (index will be updated below)
                 tracing::warn!(
                     "Stale index entry for entity '{}' (uuid={}), recreating",
                     entity.name,
@@ -1208,25 +1301,20 @@ impl GraphMemory {
                 is_new_entity = true;
             }
         } else {
-            // New entity
+            // Genuinely new entity — no match at any tier
             entity.uuid = Uuid::new_v4();
             entity.created_at = Utc::now();
             entity.last_seen_at = entity.created_at;
             entity.mention_count = 1;
-            // Salience stays at base_salience for new entities
             is_new_entity = true;
         }
 
         // BUG-002 FIX: Write index FIRST, then entity
-        // Rationale: If crash after index write but before entity write,
-        // next add_entity call will detect stale index (above) and recover.
-        // This is safer than orphaned entities with no index reference.
-
         let lowercase_name = entity.name.to_lowercase();
         let stemmer = Stemmer::create(Algorithm::English);
         let stemmed_name = Self::stem_entity_name(&stemmer, &entity.name);
 
-        // Update in-memory indices first
+        // Update in-memory indices
         {
             let mut index = self.entity_name_index.write();
             index.insert(entity.name.clone(), entity.uuid);
@@ -1240,6 +1328,19 @@ impl GraphMemory {
             stemmed_index.insert(stemmed_name.clone(), entity.uuid);
         }
 
+        // Update entity embedding cache for future concept merges
+        if let Some(ref emb) = entity.name_embedding {
+            let mut cache = self.entity_embedding_cache.write();
+            if is_new_entity {
+                cache.push((entity.uuid, emb.clone()));
+            } else {
+                // Update existing entry in cache (embedding may have changed)
+                if let Some(entry) = cache.iter_mut().find(|(uuid, _)| *uuid == entity.uuid) {
+                    entry.1 = emb.clone();
+                }
+            }
+        }
+
         // Persist name->UUID mappings
         self.entity_name_index_db
             .put(entity.name.as_bytes(), entity.uuid.as_bytes())?;
@@ -1248,7 +1349,7 @@ impl GraphMemory {
         self.entity_stemmed_index_db
             .put(stemmed_name.as_bytes(), entity.uuid.as_bytes())?;
 
-        // Now store entity in database
+        // Store entity in database
         let key = entity.uuid.as_bytes();
         let value = bincode::serde::encode_to_vec(&entity, bincode::config::standard())?;
         self.entities_db.put(key, value)?;

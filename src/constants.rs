@@ -97,6 +97,54 @@ pub const MAX_ENTITY_DEGREE: usize = 500;
 pub const EDGE_HALF_LIFE_HOURS: f64 = 24.0;
 
 // =============================================================================
+// GRAPH QUALITY: CONCEPT MERGING, SEMANTIC EDGES, DEGREE NORMALIZATION
+// =============================================================================
+
+/// Cosine similarity threshold for merging entity nodes as the same concept.
+///
+/// When string-based dedup (exact/case/stemmed) fails to find a match,
+/// entities with name embeddings above this threshold are treated as synonyms
+/// and merged into a single graph node.
+///
+/// Justification:
+/// - 0.85 is conservative — avoids false merges ("Rust language" vs "Rust game")
+/// - Catches abbreviations and synonyms ("authentication" ↔ "auth" ↔ "auth system")
+/// - Based on typical cosine similarity distributions for MiniLM-L6-v2:
+///   synonyms cluster 0.82–0.95, unrelated pairs fall below 0.60
+///
+/// Reference: Reimers & Gurevych (2019) "Sentence-BERT"
+pub const ENTITY_CONCEPT_MERGE_THRESHOLD: f32 = 0.85;
+
+/// Floor multiplier for semantic edge weighting.
+///
+/// Initial edge weight = L1_INITIAL_WEIGHT × (floor + (1 − floor) × cosine_sim).
+///
+/// Justification:
+/// - At floor=0.2: unrelated co-occurring entities get weight 0.06 (decays fast)
+///   while semantically related pairs get up to 0.30 (full L1 weight)
+/// - Prevents noisy edges from polluting the graph without blocking them entirely
+/// - Floor > 0 ensures even unrelated pairs can strengthen through repeated
+///   coactivation (Hebbian learning overrides initial weakness)
+///
+/// Reference: Lund & Burgess (1996) "Producing high-dimensional semantic spaces"
+pub const EDGE_SEMANTIC_WEIGHT_FLOOR: f32 = 0.2;
+
+/// Whether to apply degree normalization during spreading activation.
+///
+/// When true, outgoing activation per edge is divided by sqrt(1 + degree).
+/// Effect: node with 1 edge → factor 0.71, 10 edges → 0.30,
+/// 100 edges → 0.099, 500 edges → 0.045.
+///
+/// Justification:
+/// - Without normalization, hub nodes (500+ edges) propagate identical per-edge
+///   activation as leaf nodes (2 edges), drowning out precise signals
+/// - sqrt(1+k) matches the fan effect in ACT-R spreading activation
+/// - Can be disabled as an escape hatch without code changes
+///
+/// Reference: Anderson & Reder (1999) "The fan effect: New results and new theories"
+pub const SPREADING_DEGREE_NORMALIZATION: bool = true;
+
+// =============================================================================
 // COMPRESSION THRESHOLDS
 // Based on information theory and cognitive psychology research on memory decay
 // =============================================================================

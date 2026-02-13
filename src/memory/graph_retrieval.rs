@@ -40,9 +40,9 @@ use crate::constants::{
     IMPORTANCE_DECAY_MAX, IMPORTANCE_DECAY_MIN, MEMORY_TIER_GRAPH_MULT_ARCHIVE,
     MEMORY_TIER_GRAPH_MULT_LONGTERM, MEMORY_TIER_GRAPH_MULT_SESSION,
     MEMORY_TIER_GRAPH_MULT_WORKING, SALIENCE_BOOST_FACTOR, SPREADING_ACTIVATION_THRESHOLD,
-    SPREADING_EARLY_TERMINATION_CANDIDATES, SPREADING_EARLY_TERMINATION_RATIO, SPREADING_MAX_HOPS,
-    SPREADING_MIN_CANDIDATES, SPREADING_MIN_HOPS, SPREADING_NORMALIZATION_FACTOR,
-    SPREADING_RELAXED_THRESHOLD,
+    SPREADING_DEGREE_NORMALIZATION, SPREADING_EARLY_TERMINATION_CANDIDATES,
+    SPREADING_EARLY_TERMINATION_RATIO, SPREADING_MAX_HOPS, SPREADING_MIN_CANDIDATES,
+    SPREADING_MIN_HOPS, SPREADING_NORMALIZATION_FACTOR, SPREADING_RELAXED_THRESHOLD,
 };
 use crate::embeddings::Embedder;
 use crate::graph_memory::{EdgeTier, EpisodicNode, GraphMemory};
@@ -182,6 +182,15 @@ fn spread_single_direction(
             let edges =
                 graph.get_entity_relationships_limited(&entity_uuid, Some(MAX_EDGES_PER_SPREAD))?;
 
+            // Degree normalization: prevent hub nodes from flooding the network.
+            // Divides outgoing activation by sqrt(1 + degree), matching the fan effect
+            // in ACT-R spreading activation (Anderson & Reder 1999).
+            let degree_norm = if SPREADING_DEGREE_NORMALIZATION {
+                1.0 / (1.0 + edges.len() as f32).sqrt()
+            } else {
+                1.0
+            };
+
             for edge in edges {
                 let target_uuid = edge.to_entity;
 
@@ -201,7 +210,8 @@ fn spread_single_direction(
                 let decay_rate = calculate_importance_weighted_decay(importance);
                 let decay = (-decay_rate * hop as f32).exp();
 
-                let spread_amount = source_activation * decay * edge.strength * tier_trust;
+                let spread_amount =
+                    source_activation * decay * edge.strength * tier_trust * degree_norm;
 
                 let new_activation = activation_map.entry(target_uuid).or_insert(0.0);
                 *new_activation += spread_amount;

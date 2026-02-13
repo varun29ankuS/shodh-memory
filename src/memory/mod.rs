@@ -48,9 +48,9 @@ use crate::metrics::{
 
 use crate::constants::{
     DEFAULT_COMPRESSION_AGE_DAYS, DEFAULT_IMPORTANCE_THRESHOLD, DEFAULT_MAX_HEAP_PER_USER_MB,
-    DEFAULT_SESSION_MEMORY_SIZE_MB, DEFAULT_WORKING_MEMORY_SIZE, ESTIMATED_BYTES_PER_MEMORY,
-    HEBBIAN_BOOST_HELPFUL, HEBBIAN_DECAY_MISLEADING, POTENTIATION_ACCESS_THRESHOLD,
-    POTENTIATION_MAINTENANCE_BOOST, TIER_PROMOTION_SESSION_AGE_SECS,
+    DEFAULT_SESSION_MEMORY_SIZE_MB, DEFAULT_WORKING_MEMORY_SIZE, EDGE_SEMANTIC_WEIGHT_FLOOR,
+    ESTIMATED_BYTES_PER_MEMORY, HEBBIAN_BOOST_HELPFUL, HEBBIAN_DECAY_MISLEADING,
+    POTENTIATION_ACCESS_THRESHOLD, POTENTIATION_MAINTENANCE_BOOST, TIER_PROMOTION_SESSION_AGE_SECS,
     TIER_PROMOTION_SESSION_IMPORTANCE, TIER_PROMOTION_WORKING_AGE_SECS,
     TIER_PROMOTION_WORKING_IMPORTANCE,
 };
@@ -657,11 +657,36 @@ impl MemorySystem {
             // instead of defaulting everything to Concept
             let ner_lookup = build_ner_lookup(&memory.experience.ner_entities);
 
+            // Batch-encode entity names for concept-level dedup in graph.
+            // This populates name_embedding on each EntityNode, enabling
+            // graph_memory::add_entity() to merge synonyms via cosine similarity.
+            let entity_names: Vec<&str> = memory
+                .experience
+                .entities
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            let entity_embeddings: Vec<Option<Vec<f32>>> = if entity_names.is_empty() {
+                Vec::new()
+            } else {
+                match self.embedder.encode_batch(&entity_names) {
+                    Ok(embs) => embs.into_iter().map(Some).collect(),
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "Entity name embedding failed, concept merge disabled for this batch"
+                        );
+                        vec![None; entity_names.len()]
+                    }
+                }
+            };
+
             let entities_to_add: Vec<crate::graph_memory::EntityNode> = memory
                 .experience
                 .entities
                 .iter()
-                .map(|entity_name| {
+                .zip(entity_embeddings.into_iter())
+                .map(|(entity_name, embedding)| {
                     let (label, salience) = resolve_entity_label(entity_name, &ner_lookup);
                     crate::graph_memory::EntityNode {
                         uuid: Uuid::new_v4(),
@@ -672,7 +697,7 @@ impl MemorySystem {
                         mention_count: 1,
                         summary: String::new(),
                         attributes: std::collections::HashMap::new(),
-                        name_embedding: None,
+                        name_embedding: embedding,
                         salience,
                         is_proper_noun: entity_name
                             .chars()
@@ -706,7 +731,11 @@ impl MemorySystem {
                 }
             }
 
-            // Insert all relationships
+            // Insert all relationships with semantic edge weighting.
+            // Initial edge strength is modulated by the cosine similarity between
+            // the two entities' name embeddings: related pairs get full L1 weight,
+            // unrelated co-occurrences get a fraction (decays to zero faster).
+            let l1_base_weight = crate::graph_memory::EdgeTier::L1Working.initial_weight();
             for (entity1, entity2) in cooccurrence_pairs {
                 if let (Ok(Some(e1)), Ok(Some(e2))) = (
                     graph_guard.find_entity_by_name(&entity1),
@@ -714,12 +743,22 @@ impl MemorySystem {
                 ) {
                     let entity_confidence = Some((e1.salience + e2.salience) / 2.0);
 
+                    // Semantic edge weighting: scale initial strength by entity relatedness
+                    let semantic_weight = match (&e1.name_embedding, &e2.name_embedding) {
+                        (Some(emb1), Some(emb2)) => {
+                            let sim = crate::similarity::cosine_similarity(emb1, emb2).max(0.0);
+                            EDGE_SEMANTIC_WEIGHT_FLOOR + (1.0 - EDGE_SEMANTIC_WEIGHT_FLOOR) * sim
+                        }
+                        // No embeddings available → full weight (legacy behavior)
+                        _ => 1.0,
+                    };
+
                     let edge = crate::graph_memory::RelationshipEdge {
                         uuid: Uuid::new_v4(),
                         from_entity: e1.uuid,
                         to_entity: e2.uuid,
                         relation_type: crate::graph_memory::RelationType::CoOccurs,
-                        strength: crate::graph_memory::EdgeTier::L1Working.initial_weight(),
+                        strength: l1_base_weight * semantic_weight,
                         created_at: now,
                         valid_at: now,
                         invalidated_at: None,
@@ -1043,11 +1082,34 @@ impl MemorySystem {
             // Phase 1: Build entity structs with proper labels from NER
             let ner_lookup = build_ner_lookup(&memory.experience.ner_entities);
 
+            // Batch-encode entity names for concept-level dedup
+            let entity_names: Vec<&str> = memory
+                .experience
+                .entities
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            let entity_embeddings: Vec<Option<Vec<f32>>> = if entity_names.is_empty() {
+                Vec::new()
+            } else {
+                match self.embedder.encode_batch(&entity_names) {
+                    Ok(embs) => embs.into_iter().map(Some).collect(),
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "Entity name embedding failed, concept merge disabled for this batch"
+                        );
+                        vec![None; entity_names.len()]
+                    }
+                }
+            };
+
             let entities_to_add: Vec<crate::graph_memory::EntityNode> = memory
                 .experience
                 .entities
                 .iter()
-                .map(|entity_name| {
+                .zip(entity_embeddings.into_iter())
+                .map(|(entity_name, embedding)| {
                     let (label, salience) = resolve_entity_label(entity_name, &ner_lookup);
                     crate::graph_memory::EntityNode {
                         uuid: Uuid::new_v4(),
@@ -1058,7 +1120,7 @@ impl MemorySystem {
                         mention_count: 1,
                         summary: String::new(),
                         attributes: std::collections::HashMap::new(),
-                        name_embedding: None,
+                        name_embedding: embedding,
                         salience,
                         is_proper_noun: entity_name
                             .chars()
@@ -1088,6 +1150,8 @@ impl MemorySystem {
                 }
             }
 
+            // Semantic edge weighting
+            let l1_base_weight = crate::graph_memory::EdgeTier::L1Working.initial_weight();
             for (entity1, entity2) in cooccurrence_pairs {
                 if let (Ok(Some(e1)), Ok(Some(e2))) = (
                     graph_guard.find_entity_by_name(&entity1),
@@ -1095,12 +1159,20 @@ impl MemorySystem {
                 ) {
                     let entity_confidence = Some((e1.salience + e2.salience) / 2.0);
 
+                    let semantic_weight = match (&e1.name_embedding, &e2.name_embedding) {
+                        (Some(emb1), Some(emb2)) => {
+                            let sim = crate::similarity::cosine_similarity(emb1, emb2).max(0.0);
+                            EDGE_SEMANTIC_WEIGHT_FLOOR + (1.0 - EDGE_SEMANTIC_WEIGHT_FLOOR) * sim
+                        }
+                        _ => 1.0,
+                    };
+
                     let edge = crate::graph_memory::RelationshipEdge {
                         uuid: Uuid::new_v4(),
                         from_entity: e1.uuid,
                         to_entity: e2.uuid,
                         relation_type: crate::graph_memory::RelationType::CoOccurs,
-                        strength: crate::graph_memory::EdgeTier::L1Working.initial_weight(),
+                        strength: l1_base_weight * semantic_weight,
                         created_at: now,
                         valid_at: now,
                         invalidated_at: None,
@@ -4558,6 +4630,34 @@ impl MemorySystem {
         let mut entities_added = 0;
         let mut edges_added = 0;
 
+        // Collect all unique entity names across all facts for batch encoding
+        let mut all_entity_names: Vec<String> = Vec::new();
+        for fact in facts {
+            for name in &fact.related_entities {
+                if !all_entity_names.contains(name) {
+                    all_entity_names.push(name.clone());
+                }
+            }
+        }
+
+        // Batch-encode entity names for concept-level dedup
+        let embedding_map: std::collections::HashMap<String, Vec<f32>> =
+            if all_entity_names.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                let name_refs: Vec<&str> = all_entity_names.iter().map(|s| s.as_str()).collect();
+                match self.embedder.encode_batch(&name_refs) {
+                    Ok(embs) => all_entity_names.into_iter().zip(embs).collect(),
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "Fact entity name embedding failed, concept merge disabled"
+                        );
+                        std::collections::HashMap::new()
+                    }
+                }
+            };
+
         for fact in facts {
             // Ensure all related entities exist as graph nodes
             for entity_name in &fact.related_entities {
@@ -4570,7 +4670,7 @@ impl MemorySystem {
                     mention_count: 1,
                     summary: String::new(),
                     attributes: std::collections::HashMap::new(),
-                    name_embedding: None,
+                    name_embedding: embedding_map.get(entity_name).cloned(),
                     salience: fact.confidence * 0.5,
                     is_proper_noun: entity_name
                         .chars()
@@ -4583,20 +4683,30 @@ impl MemorySystem {
                 }
             }
 
-            // Create edges between all pairs of related entities
+            // Create edges between all pairs of related entities with semantic weighting
             let entities = &fact.related_entities;
+            let l2_base_weight = crate::graph_memory::EdgeTier::L2Episodic.initial_weight();
             for i in 0..entities.len() {
                 for j in (i + 1)..entities.len() {
                     if let (Ok(Some(e1)), Ok(Some(e2))) = (
                         graph_guard.find_entity_by_name(&entities[i]),
                         graph_guard.find_entity_by_name(&entities[j]),
                     ) {
+                        let semantic_weight = match (&e1.name_embedding, &e2.name_embedding) {
+                            (Some(emb1), Some(emb2)) => {
+                                let sim = crate::similarity::cosine_similarity(emb1, emb2).max(0.0);
+                                EDGE_SEMANTIC_WEIGHT_FLOOR
+                                    + (1.0 - EDGE_SEMANTIC_WEIGHT_FLOOR) * sim
+                            }
+                            _ => 1.0,
+                        };
+
                         let edge = crate::graph_memory::RelationshipEdge {
                             uuid: Uuid::new_v4(),
                             from_entity: e1.uuid,
                             to_entity: e2.uuid,
                             relation_type: crate::graph_memory::RelationType::RelatedTo,
-                            strength: crate::graph_memory::EdgeTier::L2Episodic.initial_weight(),
+                            strength: l2_base_weight * semantic_weight,
                             created_at: now,
                             valid_at: now,
                             invalidated_at: None,
@@ -4865,11 +4975,34 @@ impl MemorySystem {
                 // Phase 1: Build entity structs with proper labels from NER
                 let ner_lookup = build_ner_lookup(&memory.experience.ner_entities);
 
+                // Batch-encode entity names for concept-level dedup
+                let entity_names: Vec<&str> = memory
+                    .experience
+                    .entities
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect();
+                let entity_embeddings: Vec<Option<Vec<f32>>> = if entity_names.is_empty() {
+                    Vec::new()
+                } else {
+                    match self.embedder.encode_batch(&entity_names) {
+                        Ok(embs) => embs.into_iter().map(Some).collect(),
+                        Err(e) => {
+                            tracing::debug!(
+                                error = %e,
+                                "Entity name embedding failed, concept merge disabled for this batch"
+                            );
+                            vec![None; entity_names.len()]
+                        }
+                    }
+                };
+
                 let entities_to_add: Vec<crate::graph_memory::EntityNode> = memory
                     .experience
                     .entities
                     .iter()
-                    .map(|entity_name| {
+                    .zip(entity_embeddings.into_iter())
+                    .map(|(entity_name, embedding)| {
                         let (label, salience) = resolve_entity_label(entity_name, &ner_lookup);
                         crate::graph_memory::EntityNode {
                             uuid: Uuid::new_v4(),
@@ -4880,7 +5013,7 @@ impl MemorySystem {
                             mention_count: 1,
                             summary: String::new(),
                             attributes: std::collections::HashMap::new(),
-                            name_embedding: None,
+                            name_embedding: embedding,
                             salience,
                             is_proper_noun: entity_name
                                 .chars()
@@ -4910,6 +5043,8 @@ impl MemorySystem {
                     }
                 }
 
+                // Semantic edge weighting
+                let l1_base_weight = crate::graph_memory::EdgeTier::L1Working.initial_weight();
                 for (entity1, entity2) in cooccurrence_pairs {
                     if let (Ok(Some(e1)), Ok(Some(e2))) = (
                         graph_guard.find_entity_by_name(&entity1),
@@ -4917,12 +5052,21 @@ impl MemorySystem {
                     ) {
                         let entity_confidence = Some((e1.salience + e2.salience) / 2.0);
 
+                        let semantic_weight = match (&e1.name_embedding, &e2.name_embedding) {
+                            (Some(emb1), Some(emb2)) => {
+                                let sim = crate::similarity::cosine_similarity(emb1, emb2).max(0.0);
+                                EDGE_SEMANTIC_WEIGHT_FLOOR
+                                    + (1.0 - EDGE_SEMANTIC_WEIGHT_FLOOR) * sim
+                            }
+                            _ => 1.0,
+                        };
+
                         let edge = crate::graph_memory::RelationshipEdge {
                             uuid: Uuid::new_v4(),
                             from_entity: e1.uuid,
                             to_entity: e2.uuid,
                             relation_type: crate::graph_memory::RelationType::CoOccurs,
-                            strength: crate::graph_memory::EdgeTier::L1Working.initial_weight(),
+                            strength: l1_base_weight * semantic_weight,
                             created_at: now,
                             valid_at: now,
                             invalidated_at: None,
