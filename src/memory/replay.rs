@@ -446,6 +446,8 @@ impl InterferenceDetector {
                 }
             } else {
                 // Apply competition suppression to lower-ranked memories
+                // RIF feedback: record interference for suppressed and close-survivor memories
+                // so Layer 4.6 (PIPE-3) can boost survivors and suppress chronic losers
                 for (id, score) in scores.iter().skip(1) {
                     let score_ratio = score / winner_score;
 
@@ -457,13 +459,31 @@ impl InterferenceDetector {
 
                         if new_score > 0.1 {
                             winners.push((id.clone(), new_score));
+                            // Mild interference record for close survivors ("battle-tested")
+                            self.record_interference(
+                                id,
+                                winner_id,
+                                score_ratio,
+                                InterferenceType::RetrievalCompetition,
+                                suppression * 0.3,
+                            );
                         } else {
                             suppressed.push(id.clone());
+                            // Strong interference record for fully suppressed memories
+                            self.record_interference(
+                                id,
+                                winner_id,
+                                score_ratio,
+                                InterferenceType::RetrievalCompetition,
+                                suppression,
+                            );
                         }
                     } else {
                         winners.push((id.clone(), *score));
                     }
                 }
+
+                self.total_interference_events += suppressed.len();
             }
         }
 
@@ -639,6 +659,85 @@ impl InterferenceDetector {
             .get(memory_id)
             .map(|h| h.len() >= 2) // At least 2 interference events
             .unwrap_or(false)
+    }
+
+    // =========================================================================
+    // PERSISTENCE HELPERS
+    // =========================================================================
+
+    /// Bulk load interference history from persistent storage on startup
+    ///
+    /// Replaces the in-memory HashMap with persisted data. Called once during
+    /// MemorySystem initialization.
+    pub fn load_history(
+        &mut self,
+        history: HashMap<String, Vec<InterferenceRecord>>,
+        total_events: usize,
+    ) {
+        self.interference_history = history;
+        self.total_interference_events = total_events;
+        tracing::info!(
+            memories_tracked = self.interference_history.len(),
+            total_events = self.total_interference_events,
+            "Loaded interference history from persistent storage"
+        );
+    }
+
+    /// Get memory IDs affected by a storage interference check
+    ///
+    /// Returns IDs that had interference records modified, for targeted persistence.
+    pub fn get_affected_ids_from_check(
+        &self,
+        new_memory_id: &str,
+        result: &InterferenceCheckResult,
+    ) -> Vec<String> {
+        let mut ids: Vec<String> = result
+            .retroactive_targets
+            .iter()
+            .map(|(id, _, _)| id.clone())
+            .collect();
+
+        if result.proactive_decay > 0.0 {
+            ids.push(new_memory_id.to_string());
+        }
+
+        ids
+    }
+
+    /// Get memory IDs affected by retrieval competition
+    ///
+    /// Returns IDs of all memories that had interference recorded
+    /// (both suppressed and close survivors with score_ratio > 0.9).
+    pub fn get_affected_ids_from_competition(&self, result: &CompetitionResult) -> Vec<String> {
+        let mut ids = result.suppressed.clone();
+
+        // Include close survivors that had mild interference recorded
+        if let Some((_, winner_score)) = result.winners.first() {
+            if *winner_score > 0.0 {
+                for (id, score) in result.winners.iter().skip(1) {
+                    let score_ratio = score / winner_score;
+                    if score_ratio > 0.9 {
+                        ids.push(id.clone());
+                    }
+                }
+            }
+        }
+
+        ids
+    }
+
+    /// Get interference records for specific memory IDs (for targeted persistence)
+    pub fn get_records_for_ids<'a>(
+        &'a self,
+        ids: &'a [String],
+    ) -> Vec<(&'a str, &'a Vec<InterferenceRecord>)> {
+        ids.iter()
+            .filter_map(|id| {
+                self.interference_history
+                    .get(id)
+                    .map(|records| (id.as_str(), records))
+            })
+            .collect()
     }
 }
 

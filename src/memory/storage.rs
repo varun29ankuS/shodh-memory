@@ -3054,6 +3054,157 @@ impl MemoryStorage {
 
         Ok(stats)
     }
+
+    // =========================================================================
+    // INTERFERENCE PERSISTENCE (SHO-106 RIF)
+    // =========================================================================
+    //
+    // Persists InterferenceDetector state to the main RocksDB database using
+    // key prefix "interference:{memory_id}" for per-memory records and
+    // "interference_meta:total" for the aggregate event counter.
+    //
+    // This ensures retrieval-induced forgetting history survives server restarts.
+    // =========================================================================
+
+    /// Persist interference records for a single memory
+    ///
+    /// Key format: `interference:{memory_id}` → JSON `Vec<InterferenceRecord>`
+    pub fn save_interference_records(
+        &self,
+        memory_id: &str,
+        records: &[super::replay::InterferenceRecord],
+    ) -> Result<()> {
+        let key = format!("interference:{memory_id}");
+        let value =
+            serde_json::to_vec(records).context("Failed to serialize interference records")?;
+
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(self.write_mode == WriteMode::Sync);
+        self.db
+            .put_opt(key.as_bytes(), &value, &write_opts)
+            .context("Failed to persist interference records")?;
+
+        Ok(())
+    }
+
+    /// Load all interference records from storage on startup
+    ///
+    /// Scans all `interference:` prefixed keys and deserializes records.
+    /// Returns `(history_map, total_event_count)` for bulk-loading into InterferenceDetector.
+    pub fn load_all_interference_records(
+        &self,
+    ) -> Result<(
+        HashMap<String, Vec<super::replay::InterferenceRecord>>,
+        usize,
+    )> {
+        let prefix = b"interference:";
+        let mut history: HashMap<String, Vec<super::replay::InterferenceRecord>> = HashMap::new();
+        let mut total_events: usize = 0;
+
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(prefix, rocksdb::Direction::Forward));
+
+        for item in iter.log_errors() {
+            let (key, value) = item;
+            let key_str = String::from_utf8_lossy(&key);
+
+            if !key_str.starts_with("interference:") {
+                break;
+            }
+
+            if let Some(memory_id) = key_str.strip_prefix("interference:") {
+                match serde_json::from_slice::<Vec<super::replay::InterferenceRecord>>(&value) {
+                    Ok(records) => {
+                        total_events += records.len();
+                        history.insert(memory_id.to_string(), records);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            key = %key_str,
+                            error = %e,
+                            "Failed to deserialize interference records, skipping"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Load persisted total count (may be higher than sum of records due to eviction)
+        let persisted_total = self
+            .db
+            .get(b"interference_meta:total")
+            .ok()
+            .flatten()
+            .and_then(|v| {
+                if v.len() == 8 {
+                    Some(u64::from_le_bytes(v[..8].try_into().unwrap()) as usize)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(total_events);
+
+        Ok((history, persisted_total.max(total_events)))
+    }
+
+    /// Delete interference records for a single memory (called on forget/delete)
+    pub fn delete_interference_records(&self, memory_id: &str) -> Result<()> {
+        let key = format!("interference:{memory_id}");
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(self.write_mode == WriteMode::Sync);
+        self.db
+            .delete_opt(key.as_bytes(), &write_opts)
+            .context("Failed to delete interference records")?;
+        Ok(())
+    }
+
+    /// Persist the total interference event count
+    ///
+    /// Key: `interference_meta:total` → 8-byte little-endian u64
+    pub fn save_interference_event_count(&self, count: usize) -> Result<()> {
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(self.write_mode == WriteMode::Sync);
+        self.db
+            .put_opt(
+                b"interference_meta:total",
+                &(count as u64).to_le_bytes(),
+                &write_opts,
+            )
+            .context("Failed to persist interference event count")?;
+        Ok(())
+    }
+
+    /// Delete ALL interference records (GDPR forget_all)
+    ///
+    /// Batch-deletes all `interference:` and `interference_meta:` keys.
+    pub fn clear_all_interference_records(&self) -> Result<usize> {
+        let prefix = b"interference";
+        let mut batch = WriteBatch::default();
+        let mut count = 0;
+
+        let iter = self
+            .db
+            .iterator(IteratorMode::From(prefix, rocksdb::Direction::Forward));
+
+        for item in iter.log_errors() {
+            let (key, _) = item;
+            let key_str = String::from_utf8_lossy(&key);
+            if !key_str.starts_with("interference") {
+                break;
+            }
+            batch.delete(&key);
+            count += 1;
+        }
+
+        if count > 0 {
+            let mut write_opts = WriteOptions::default();
+            write_opts.set_sync(self.write_mode == WriteMode::Sync);
+            self.db.write_opt(batch, &write_opts)?;
+        }
+
+        Ok(count)
+    }
 }
 
 #[cfg(test)]

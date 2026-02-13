@@ -460,6 +460,25 @@ impl MemorySystem {
         // Uses the same DB with "temporal_facts:", "temporal_by_entity:", "temporal_by_event:" prefixes
         let temporal_fact_store = Arc::new(temporal_facts::TemporalFactStore::new(storage.db()));
 
+        // SHO-106: Load persisted interference history from RocksDB
+        let interference_detector = {
+            let mut detector = replay::InterferenceDetector::new();
+            match storage.load_all_interference_records() {
+                Ok((history, total_events)) => {
+                    if !history.is_empty() {
+                        detector.load_history(history, total_events);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to load interference history, starting fresh"
+                    );
+                }
+            }
+            Arc::new(RwLock::new(detector))
+        };
+
         Ok(Self {
             config: config.clone(),
             working_memory: Arc::new(RwLock::new(WorkingMemory::new(config.working_memory_size))),
@@ -479,8 +498,8 @@ impl MemorySystem {
             consolidation_events, // Use the shared buffer created earlier
             // SHO-105: Memory replay manager
             replay_manager: Arc::new(RwLock::new(replay::ReplayManager::new())),
-            // SHO-106: Interference detector
-            interference_detector: Arc::new(RwLock::new(replay::InterferenceDetector::new())),
+            // SHO-106: Interference detector (loaded from RocksDB)
+            interference_detector,
             // PIPE-2: Pattern detector for intelligent replay triggers
             pattern_detector: Arc::new(RwLock::new(pattern_detection::PatternDetector::new())),
             // SHO-f0e7: Semantic fact store
@@ -870,8 +889,8 @@ impl MemorySystem {
                         }
 
                         // Record interference events
-                        for event in interference_result.events {
-                            self.record_consolidation_event(event);
+                        for event in &interference_result.events {
+                            self.record_consolidation_event(event.clone());
                         }
 
                         // Handle duplicates - don't duplicate here, just log
@@ -880,6 +899,29 @@ impl MemorySystem {
                                 memory_id = %memory.id.0,
                                 "Memory detected as near-duplicate of existing memory"
                             );
+                        }
+
+                        // Persist affected interference records to RocksDB
+                        {
+                            let detector = self.interference_detector.read();
+                            let affected_ids = detector.get_affected_ids_from_check(
+                                &memory.id.0.to_string(),
+                                &interference_result,
+                            );
+                            for (id, records) in detector.get_records_for_ids(&affected_ids) {
+                                if let Err(e) =
+                                    self.long_term_memory.save_interference_records(id, records)
+                                {
+                                    tracing::debug!("Failed to persist interference records: {e}");
+                                }
+                            }
+                            let (total_events, _) = detector.stats();
+                            if let Err(e) = self
+                                .long_term_memory
+                                .save_interference_event_count(total_events)
+                            {
+                                tracing::debug!("Failed to persist interference event count: {e}");
+                            }
                         }
                     }
                 }
@@ -2263,8 +2305,8 @@ impl MemorySystem {
                 .apply_retrieval_competition(&candidates, query_text);
 
             // Record competition event if any memories were suppressed
-            if let Some(event) = competition_result.event {
-                self.record_consolidation_event(event);
+            if let Some(ref event) = competition_result.event {
+                self.record_consolidation_event(event.clone());
             }
 
             // Re-order memories based on competition results (winners first)
@@ -2282,6 +2324,27 @@ impl MemorySystem {
                     "Retrieval competition: {} memories suppressed",
                     competition_result.suppressed.len()
                 );
+            }
+
+            // Persist interference records from retrieval competition
+            {
+                let detector = self.interference_detector.read();
+                let affected_ids = detector.get_affected_ids_from_competition(&competition_result);
+                if !affected_ids.is_empty() {
+                    for (id, records) in detector.get_records_for_ids(&affected_ids) {
+                        if let Err(e) = self.long_term_memory.save_interference_records(id, records)
+                        {
+                            tracing::debug!("Failed to persist competition interference: {e}");
+                        }
+                    }
+                    let (total_events, _) = detector.stats();
+                    if let Err(e) = self
+                        .long_term_memory
+                        .save_interference_event_count(total_events)
+                    {
+                        tracing::debug!("Failed to persist interference event count: {e}");
+                    }
+                }
             }
         }
 
@@ -2568,6 +2631,9 @@ impl MemorySystem {
                     );
                 }
 
+                // Clean up interference records
+                self.cleanup_interference_for_ids(&[memory_id.clone()]);
+
                 // Update stats - decrement each tier count that had this memory
                 if deleted_from_any {
                     let mut stats = self.stats.write();
@@ -2609,6 +2675,7 @@ impl MemorySystem {
                     let _ = self.hybrid_search.remove_memory(id);
                 }
                 self.cleanup_graph_for_ids(&flagged_ids);
+                self.cleanup_interference_for_ids(&flagged_ids);
 
                 // Update stats for hard-deleted and soft-deleted tiers
                 {
@@ -2647,6 +2714,7 @@ impl MemorySystem {
                     let _ = self.hybrid_search.remove_memory(id);
                 }
                 self.cleanup_graph_for_ids(&flagged_ids);
+                self.cleanup_interference_for_ids(&flagged_ids);
 
                 // Update stats for hard-deleted and soft-deleted tiers
                 {
@@ -3365,6 +3433,24 @@ impl MemorySystem {
         }
     }
 
+    /// Clean up interference records for a batch of deleted memory IDs (best-effort)
+    fn cleanup_interference_for_ids(&self, ids: &[MemoryId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut detector = self.interference_detector.write();
+        for id in ids {
+            let id_str = id.0.to_string();
+            detector.clear_memory(&id_str);
+            if let Err(e) = self.long_term_memory.delete_interference_records(&id_str) {
+                tracing::debug!(
+                    "Interference cleanup failed for {}: {e}",
+                    &id_str[..8.min(id_str.len())]
+                );
+            }
+        }
+    }
+
     /// Forget memories matching a pattern
     ///
     /// Uses validated regex compilation with ReDoS protection
@@ -3437,13 +3523,14 @@ impl MemorySystem {
             }
         }
 
-        // Clean up graph episodes for all deleted memories
+        // Clean up graph episodes and interference records for all deleted memories
         let all_ids: Vec<MemoryId> = working_ids
             .into_iter()
             .chain(session_ids)
             .chain(lt_ids)
             .collect();
         self.cleanup_graph_for_ids(&all_ids);
+        self.cleanup_interference_for_ids(&all_ids);
 
         // Update stats
         {
@@ -3521,8 +3608,9 @@ impl MemorySystem {
             }
         }
 
-        // Clean up graph episodes for all deleted memories
+        // Clean up graph episodes and interference records for all deleted memories
         self.cleanup_graph_for_ids(&all_deleted_ids);
+        self.cleanup_interference_for_ids(&all_deleted_ids);
 
         // Update stats
         {
@@ -3610,13 +3698,14 @@ impl MemorySystem {
             count += 1;
         }
 
-        // Clean up graph episodes for all deleted memories
+        // Clean up graph episodes and interference records for all deleted memories
         let all_ids: Vec<MemoryId> = working_ids
             .into_iter()
             .chain(session_ids)
             .chain(lt_ids)
             .collect();
         self.cleanup_graph_for_ids(&all_ids);
+        self.cleanup_interference_for_ids(&all_ids);
 
         // Update stats
         {
@@ -3700,13 +3789,14 @@ impl MemorySystem {
             count += 1;
         }
 
-        // Clean up graph episodes for all deleted memories
+        // Clean up graph episodes and interference records for all deleted memories
         let all_ids: Vec<MemoryId> = working_ids
             .into_iter()
             .chain(session_ids)
             .chain(lt_ids)
             .collect();
         self.cleanup_graph_for_ids(&all_ids);
+        self.cleanup_interference_for_ids(&all_ids);
 
         // Update stats
         {
@@ -3847,7 +3937,16 @@ impl MemorySystem {
             }
         }
 
-        // Step 7: Reset stats last (reflects final state)
+        // Step 7: Clear interference history (in-memory + persisted)
+        {
+            let mut detector = self.interference_detector.write();
+            *detector = replay::InterferenceDetector::new();
+        }
+        if let Err(e) = self.long_term_memory.clear_all_interference_records() {
+            tracing::warn!(error = %e, "Failed to clear interference records during forget_all");
+        }
+
+        // Step 8: Reset stats last (reflects final state)
         {
             let mut stats = self.stats.write();
             stats.total_memories = 0;
