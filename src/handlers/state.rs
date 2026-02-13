@@ -350,6 +350,9 @@ impl MultiUserMemoryManager {
         info!("Prospective memory store initialized");
 
         let todo_store = Arc::new(TodoStore::new(&base_path)?);
+        if let Err(e) = todo_store.load_vector_indices() {
+            tracing::warn!("Failed to load todo vector indices: {}, semantic todo search will rebuild on first use", e);
+        }
         info!("Todo store initialized");
 
         let file_store = Arc::new(FileMemoryStore::new(&base_path)?);

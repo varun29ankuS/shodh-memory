@@ -63,17 +63,42 @@ const DECAY_HALF_LIFE_DAYS: f32 = 14.0; // Half-life of 14 days
 const DECAY_STABILITY_HALF_LIFE_DAYS: f32 = 30.0; // Stability decays slower
 
 /// Negative keywords indicating correction/failure
+/// Multi-word phrases checked first (contains match on lowercased text)
 const NEGATIVE_KEYWORDS: &[&str] = &[
-    "no",
+    // Direct negation / correction
     "wrong",
     "incorrect",
+    "not correct",
+    "nope",
+    // Frustration / repetition
     "not what i meant",
     "that's not right",
+    "that's wrong",
     "i already said",
     "i told you",
-    "not correct",
-    "that's wrong",
-    "nope",
+    "i already told",
+    "already mentioned",
+    // Irrelevance / unhelpfulness
+    "not helpful",
+    "not relevant",
+    "not useful",
+    "irrelevant",
+    "useless",
+    "doesn't help",
+    "didn't help",
+    "not related",
+    // Failure / broken
+    "doesn't work",
+    "didn't work",
+    "broken",
+    "still broken",
+    "that failed",
+    // Explicit rejection
+    "forget that",
+    "ignore that",
+    "disregard",
+    "stop suggesting",
+    "don't show",
 ];
 
 // =============================================================================
@@ -1399,10 +1424,27 @@ mod tests {
 
     #[test]
     fn test_negative_keyword_detection() {
+        // Multi-word phrase detection
         let text = "No, that's not what I meant";
         let keywords = detect_negative_keywords(text);
-        assert!(keywords.contains(&"no".to_string()));
         assert!(keywords.contains(&"not what i meant".to_string()));
+
+        // Irrelevance signals
+        let text2 = "That's not helpful at all, it's irrelevant";
+        let keywords2 = detect_negative_keywords(text2);
+        assert!(keywords2.contains(&"not helpful".to_string()));
+        assert!(keywords2.contains(&"irrelevant".to_string()));
+
+        // Explicit rejection
+        let text3 = "Please forget that, it doesn't work";
+        let keywords3 = detect_negative_keywords(text3);
+        assert!(keywords3.contains(&"forget that".to_string()));
+        assert!(keywords3.contains(&"doesn't work".to_string()));
+
+        // No false positives on neutral text
+        let text4 = "Can you help me debug this function?";
+        let keywords4 = detect_negative_keywords(text4);
+        assert!(keywords4.is_empty());
     }
 
     #[test]

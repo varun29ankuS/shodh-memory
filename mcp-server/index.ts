@@ -2013,6 +2013,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           entity_type: string;
         }
 
+        interface ProactiveFact {
+          id: string;
+          fact: string;
+          confidence: number;
+          support_count: number;
+          related_entities: string[];
+        }
+
         interface ProactiveContextResponse {
           memories: ProactiveSurfacedMemory[];
           due_reminders: ReminderItem[];
@@ -2023,6 +2031,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           feedback_processed: FeedbackProcessed | null;
           relevant_todos: ProactiveTodoItem[];
           todo_count: number;
+          relevant_facts: ProactiveFact[];
           latency_ms: number;
           detected_entities: DetectedEntityInfo[];
         }
@@ -2046,7 +2055,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const memories = result.memories || [];
         const entities = result.detected_entities || [];
 
-        if (memories.length === 0 && result.reminder_count === 0 && result.todo_count === 0) {
+        const facts = result.relevant_facts || [];
+        if (memories.length === 0 && result.reminder_count === 0 && result.todo_count === 0 && facts.length === 0) {
           const entityList = entities.length > 0
             ? `\n\nDetected entities: ${entities.map(e => `"${e.name}" (${e.entity_type})`).join(', ')}`
             : '';
@@ -2119,6 +2129,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
+        // Format consolidated facts from knowledge graph
+        let factsBlock = "";
+        {
+          const facts = result.relevant_facts || [];
+          if (facts.length > 0) {
+            factsBlock = "\n\n🧠 Known Facts:\n";
+            for (const f of facts) {
+              const conf = (f.confidence * 100).toFixed(0);
+              const entities = f.related_entities.length > 0 ? ` [${f.related_entities.slice(0, 3).join(', ')}]` : '';
+              factsBlock += `  • (${conf}%) ${f.fact}${entities}\n`;
+            }
+          }
+        }
+
         // Add temporal framing - helps AI reason about time
         const now = new Date();
         const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -2127,10 +2151,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Format memories with relative timestamps for temporal reasoning
         const formattedWithTime = memories
-          .map((m) => {
+          .map((m, i) => {
             const score = (m.score * 100).toFixed(0);
             const entityMatchStr = (m.matched_entities && m.matched_entities.length > 0)
-              ? `\n   Entity matches: ${m.matched_entities.join(', ')}`
+              ? `\n   Matched: ${m.matched_entities.join(', ')}`
+              : '';
+            const tagsStr = (m.tags && m.tags.length > 0)
+              ? `\n   Tags: ${m.tags.slice(0, 5).join(', ')}`
               : '';
 
             // Calculate relative time
@@ -2150,16 +2177,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               }
             }
 
-            return `• [${score}%]${timeStr} ${m.content.slice(0, 100)}${m.content.length > 100 ? '...' : ''}\n   Type: ${m.memory_type} | importance: ${(m.importance * 100).toFixed(0)}% | reason: ${m.relevance_reason}${entityMatchStr}`;
+            const importanceBar = m.importance >= 0.8 ? '🔴' : m.importance >= 0.5 ? '🟡' : '⚪';
+            return `${i + 1}. ${importanceBar} [${score}%]${timeStr} ${m.content.slice(0, 150)}${m.content.length > 150 ? '...' : ''}\n   ${m.memory_type} | ${m.relevance_reason}${entityMatchStr}${tagsStr}`;
           })
           .join("\n\n");
 
         // Feedback loop status
         const feedbackNote = result.feedback_processed
-          ? `\n[Feedback: ${result.feedback_processed.memories_evaluated} evaluated, ${result.feedback_processed.reinforced.length} reinforced, ${result.feedback_processed.weakened.length} weakened]`
+          ? `\n[Feedback loop: ${result.feedback_processed.memories_evaluated} evaluated, ${result.feedback_processed.reinforced.length} reinforced, ${result.feedback_processed.weakened.length} weakened]`
           : '';
 
-        const responseText = `${temporalHeader}Surfaced ${memories.length} relevant memories:\n\n${formattedWithTime}${entitySummary}${reminderBlock}${todoBlock}${feedbackNote}\n\n[Latency: ${result.latency_ms.toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`;
+        // Ingestion confirmation
+        const ingestNote = result.ingested_memory_id
+          ? `\n[Context ingested: ${result.ingested_memory_id.slice(0, 8)}]`
+          : '';
+
+        // Summary counts
+        const summaryParts: string[] = [];
+        if (memories.length > 0) summaryParts.push(`${memories.length} memories`);
+        if (facts.length > 0) summaryParts.push(`${facts.length} facts`);
+        if (result.todo_count > 0) summaryParts.push(`${result.todo_count} todos`);
+        if (result.reminder_count > 0) summaryParts.push(`${result.reminder_count} reminders`);
+        const summary = summaryParts.length > 0 ? `Surfaced ${summaryParts.join(', ')}` : 'No relevant context found';
+
+        const responseText = `${temporalHeader}${summary}:\n\n${formattedWithTime}${entitySummary}${factsBlock}${reminderBlock}${todoBlock}${feedbackNote}${ingestNote}\n\n[Latency: ${result.latency_ms.toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`;
 
         // Store for implicit feedback on next call
         lastProactiveResponse = responseText;

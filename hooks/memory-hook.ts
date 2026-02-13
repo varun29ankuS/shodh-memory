@@ -46,6 +46,7 @@ interface ProactiveContextResponse {
   feedback_processed: { memories_evaluated: number; reinforced: string[]; weakened: string[] } | null;
   relevant_todos: { id: string; short_id: string; content: string; status: string; priority: string; project: string | null; due_date: string | null; relevance_reason: string }[];
   todo_count: number;
+  relevant_facts: { id: string; fact: string; confidence: number; support_count: number; related_entities: string[] }[];
   latency_ms: number;
   detected_entities: { name: string; entity_type: string }[];
 }
@@ -103,12 +104,40 @@ async function surfaceProactiveContext(context: string, maxResults = 3, autoInge
     auto_ingest: autoIngest,
   })) as ProactiveContextResponse | null;
 
-  if (!response?.memories?.length) return null;
+  if (!response) return null;
+
+  const hasMemories = response.memories?.length > 0;
+  const hasFacts = response.relevant_facts?.length > 0;
+  const hasTodos = response.relevant_todos?.length > 0;
+  const hasReminders = (response.due_reminders?.length || 0) + (response.context_reminders?.length || 0) > 0;
+
+  if (!hasMemories && !hasFacts && !hasTodos && !hasReminders) return null;
 
   const now = new Date();
   const header = `📅 ${now.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 
-  return `${header}\n${formatMemoriesForContext(response.memories)}`;
+  let output = header;
+  if (hasMemories) {
+    output += `\n${formatMemoriesForContext(response.memories)}`;
+  }
+  if (hasFacts) {
+    output += `\n🧠 Facts:`;
+    for (const f of response.relevant_facts.slice(0, 3)) {
+      output += `\n• (${Math.round(f.confidence * 100)}%) ${f.fact}`;
+    }
+  }
+  if (hasTodos) {
+    output += `\n📋 Todos:`;
+    for (const t of response.relevant_todos.slice(0, 3)) {
+      const icon = t.status === "in_progress" ? "🔄" : "☐";
+      output += `\n${icon} ${t.content.slice(0, 80)}`;
+    }
+  }
+  if (hasReminders) {
+    const allReminders = [...(response.due_reminders || []), ...(response.context_reminders || [])];
+    output += `\n⏰ ${allReminders.length} reminder(s) active`;
+  }
+  return output;
 }
 
 async function handleSessionStart(): Promise<void> {
