@@ -801,9 +801,7 @@ impl RelevanceEngine {
                     let momentum_ema = feedback_store
                         .and_then(|fs| {
                             let store = fs.read();
-                            store
-                                .get_momentum(&memory.id)
-                                .map(|m| m.ema)
+                            store.get_momentum(&memory.id).map(|m| m.ema)
                         })
                         .unwrap_or(0.0);
 
@@ -1735,9 +1733,9 @@ impl ContextMonitor {
             return Ok(None);
         }
 
-        let response = self
-            .engine
-            .surface_relevant(context, memory_system, graph_memory, cfg, None)?;
+        let response =
+            self.engine
+                .surface_relevant(context, memory_system, graph_memory, cfg, None)?;
 
         // Only return if we found relevant memories
         if response.memories.is_empty() {

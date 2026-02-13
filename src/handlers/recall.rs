@@ -901,24 +901,19 @@ pub async fn proactive_context(
     let context_for_ner = req.context.clone();
     let (detected_entities, context_entity_names): (Vec<DetectedEntityInfo>, Vec<String>) = {
         let ner = ner.clone();
-        tokio::task::spawn_blocking(move || {
-            match ner.extract(&context_for_ner) {
-                Ok(entities) => {
-                    let infos: Vec<DetectedEntityInfo> = entities
-                        .iter()
-                        .map(|e| DetectedEntityInfo {
-                            name: e.text.clone(),
-                            entity_type: format!("{:?}", e.entity_type),
-                        })
-                        .collect();
-                    let names: Vec<String> = entities
-                        .iter()
-                        .map(|e| e.text.to_lowercase())
-                        .collect();
-                    (infos, names)
-                }
-                Err(_) => (Vec::new(), Vec::new()),
+        tokio::task::spawn_blocking(move || match ner.extract(&context_for_ner) {
+            Ok(entities) => {
+                let infos: Vec<DetectedEntityInfo> = entities
+                    .iter()
+                    .map(|e| DetectedEntityInfo {
+                        name: e.text.clone(),
+                        entity_type: format!("{:?}", e.entity_type),
+                    })
+                    .collect();
+                let names: Vec<String> = entities.iter().map(|e| e.text.to_lowercase()).collect();
+                (infos, names)
             }
+            Err(_) => (Vec::new(), Vec::new()),
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("NER task panicked: {e}")))?
@@ -975,7 +970,11 @@ pub async fn proactive_context(
                         .collect();
                     let matched: Vec<String> = entity_names_for_recall
                         .iter()
-                        .filter(|ctx_ent| memory_entities_lower.iter().any(|me| me.contains(ctx_ent.as_str()) || ctx_ent.contains(me.as_str())))
+                        .filter(|ctx_ent| {
+                            memory_entities_lower.iter().any(|me| {
+                                me.contains(ctx_ent.as_str()) || ctx_ent.contains(me.as_str())
+                            })
+                        })
                         .cloned()
                         .collect();
                     let has_entity_match = !matched.is_empty();
