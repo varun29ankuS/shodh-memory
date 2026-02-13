@@ -418,6 +418,63 @@ pub const FACT_DECAY_BASE_DAYS: i64 = 30;
 /// - Fact with 5 supporters: 30 + 35 = 65 days before decay
 pub const FACT_DECAY_PER_SUPPORT_DAYS: i64 = 7;
 
+/// Cosine similarity threshold for hybrid fact deduplication
+///
+/// Justification:
+/// - MiniLM-L6-v2 cosine > 0.80 indicates near-paraphrase for short factual statements
+/// - Below 0.80 risks merging topically related but semantically distinct facts
+/// - Combined with entity + polarity gates for high precision
+/// Reference: Reimers & Gurevych 2019 (Sentence-BERT)
+pub const FACT_DEDUP_COSINE_THRESHOLD: f32 = 0.80;
+
+/// Jaccard sanity floor for hybrid fact deduplication
+///
+/// Justification:
+/// - Even with high cosine, facts with zero lexical overlap are suspicious
+/// - 0.30 ensures at least ~30% word overlap as a cross-check
+/// - Prevents pure embedding hallucination from causing false merges
+pub const FACT_DEDUP_JACCARD_FLOOR: f32 = 0.30;
+
+/// Legacy Jaccard-only threshold (fallback when embedder is unavailable)
+///
+/// Justification:
+/// - Original threshold for pure Jaccard dedup (preserved for graceful degradation)
+/// - Used when embedder fails (circuit breaker open, model load failure)
+/// - Also used per-candidate when an existing fact has no stored embedding
+pub const FACT_DEDUP_JACCARD_FALLBACK: f32 = 0.70;
+
+/// Negation markers for polarity detection in fact deduplication
+///
+/// Justification:
+/// - "X uses JWT" vs "X does not use JWT" have high cosine but opposite meaning
+/// - Scanning for negation markers catches the most common contradictions
+/// - Double-negation handling: even count of markers = positive polarity
+pub const FACT_NEGATION_MARKERS: &[&str] = &[
+    "not",
+    "n't",
+    "never",
+    "no",
+    "none",
+    "neither",
+    "nor",
+    "cannot",
+    "can't",
+    "won't",
+    "don't",
+    "doesn't",
+    "didn't",
+    "shouldn't",
+    "wouldn't",
+    "couldn't",
+    "isn't",
+    "aren't",
+    "wasn't",
+    "weren't",
+    "hasn't",
+    "haven't",
+    "hadn't",
+];
+
 // =============================================================================
 // DEFAULT CONFIGURATION VALUES
 // =============================================================================
@@ -1670,6 +1727,10 @@ pub const TIER_LTP_THRESHOLD: f32 = 0.8;
 // | CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY | memory/compression.rs | extract_fact_candidates() |
 // | FACT_DECAY_BASE_DAYS          | memory/compression.rs | fact decay calculation            |
 // | FACT_DECAY_PER_SUPPORT_DAYS   | memory/compression.rs | fact decay per support            |
+// | FACT_DEDUP_COSINE_THRESHOLD   | memory/facts.rs       | find_similar() hybrid dedup       |
+// | FACT_DEDUP_JACCARD_FLOOR      | memory/facts.rs       | find_similar() hybrid dedup       |
+// | FACT_DEDUP_JACCARD_FALLBACK   | memory/facts.rs       | find_similar() fallback mode      |
+// | FACT_NEGATION_MARKERS         | memory/facts.rs       | detect_polarity()                 |
 //
 // ## Default Configuration Constants
 // | Constant                      | File                | Function/Context                    |

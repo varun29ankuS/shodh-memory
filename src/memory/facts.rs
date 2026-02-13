@@ -7,6 +7,7 @@
 //! - `facts:{user_id}:{fact_id}` - Primary fact storage
 //! - `facts_by_entity:{user_id}:{entity}:{fact_id}` - Entity index for fast lookup
 //! - `facts_by_type:{user_id}:{type}:{fact_id}` - Type index
+//! - `facts_embedding:{user_id}:{fact_id}` - Pre-computed embedding vector (384-dim)
 
 use anyhow::Result;
 use rocksdb::{IteratorMode, DB};
@@ -129,6 +130,9 @@ impl SemanticFactStore {
             // Delete primary record
             let key = format!("facts:{}:{}", user_id, fact_id);
             self.db.delete(key.as_bytes())?;
+
+            // Delete embedding if present
+            let _ = self.delete_embedding(user_id, fact_id);
 
             Ok(true)
         } else {
@@ -317,38 +321,139 @@ impl SemanticFactStore {
         Ok(decaying)
     }
 
-    /// Check if a similar fact already exists (for deduplication)
+    /// Check if a similar fact already exists (hybrid dedup)
+    ///
+    /// Multi-gate pipeline when embedding is provided:
+    /// 1. Entity gate: at least 1 shared entity, OR both have zero entities
+    /// 2. Polarity gate: same negation polarity (prevents merging contradictions)
+    /// 3. Cosine gate: embedding similarity >= FACT_DEDUP_COSINE_THRESHOLD
+    /// 4. Jaccard floor: word overlap >= FACT_DEDUP_JACCARD_FLOOR
+    ///
+    /// Falls back to pure Jaccard (0.70) if no embedding is provided.
     pub fn find_similar(
         &self,
         user_id: &str,
         fact_content: &str,
-        threshold: f32,
+        fact_entities: &[String],
+        new_embedding: Option<&[f32]>,
     ) -> Result<Option<SemanticFact>> {
+        use crate::constants::{
+            FACT_DEDUP_COSINE_THRESHOLD, FACT_DEDUP_JACCARD_FALLBACK, FACT_DEDUP_JACCARD_FLOOR,
+        };
+        use crate::similarity::cosine_similarity;
+
         let facts = self.list(user_id, 1000)?;
         let query_lower = fact_content.to_lowercase();
+        let query_words: std::collections::HashSet<&str> = query_lower.split_whitespace().collect();
+        let new_polarity = detect_polarity(&query_lower);
+        let new_entity_set: std::collections::HashSet<&str> =
+            fact_entities.iter().map(|s| s.as_str()).collect();
 
-        // Simple substring matching for now (could use embeddings for semantic similarity)
+        let use_hybrid = new_embedding.is_some();
+        let mut best_match: Option<(f32, SemanticFact)> = None;
+
         for fact in facts {
             let fact_lower = fact.fact.to_lowercase();
-
-            // Check for significant overlap
-            let query_words: std::collections::HashSet<&str> =
-                query_lower.split_whitespace().collect();
             let fact_words: std::collections::HashSet<&str> =
                 fact_lower.split_whitespace().collect();
 
+            // Compute Jaccard (needed in both modes)
             let intersection = query_words.intersection(&fact_words).count();
             let union = query_words.union(&fact_words).count();
+            let jaccard = if union > 0 {
+                intersection as f32 / union as f32
+            } else {
+                0.0
+            };
 
-            if union > 0 {
-                let jaccard = intersection as f32 / union as f32;
-                if jaccard >= threshold {
+            if use_hybrid {
+                // Gate 1: Entity overlap — at least 1 shared entity, or both empty
+                let existing_entity_set: std::collections::HashSet<&str> =
+                    fact.related_entities.iter().map(|s| s.as_str()).collect();
+                let both_empty = new_entity_set.is_empty() && existing_entity_set.is_empty();
+                let has_overlap = !new_entity_set.is_disjoint(&existing_entity_set);
+                if !both_empty && !has_overlap {
+                    continue;
+                }
+
+                // Gate 2: Polarity match — prevents merging contradictions
+                let existing_polarity = detect_polarity(&fact_lower);
+                if new_polarity != existing_polarity {
+                    continue;
+                }
+
+                // Gate 3: Cosine similarity
+                let new_emb = new_embedding.unwrap();
+                match self.get_embedding(user_id, &fact.id) {
+                    Ok(Some(existing_emb)) => {
+                        let cosine = cosine_similarity(new_emb, &existing_emb);
+                        if cosine < FACT_DEDUP_COSINE_THRESHOLD {
+                            continue;
+                        }
+
+                        // Gate 4: Jaccard sanity floor
+                        if jaccard < FACT_DEDUP_JACCARD_FLOOR {
+                            continue;
+                        }
+
+                        // Passed all gates — rank by cosine
+                        if best_match.as_ref().map_or(true, |(s, _)| cosine > *s) {
+                            best_match = Some((cosine, fact));
+                        }
+                    }
+                    _ => {
+                        // No stored embedding — fall back to Jaccard-only for this candidate
+                        if jaccard >= FACT_DEDUP_JACCARD_FALLBACK
+                            && best_match.as_ref().map_or(true, |(s, _)| jaccard > *s)
+                        {
+                            best_match = Some((jaccard, fact));
+                        }
+                    }
+                }
+            } else {
+                // Fallback: pure Jaccard (legacy behavior when embedder unavailable)
+                if jaccard >= FACT_DEDUP_JACCARD_FALLBACK {
                     return Ok(Some(fact));
                 }
             }
         }
 
-        Ok(None)
+        Ok(best_match.map(|(_, fact)| fact))
+    }
+
+    // =========================================================================
+    // EMBEDDING PERSISTENCE
+    // =========================================================================
+
+    /// Store pre-computed embedding vector for a fact
+    ///
+    /// Key format: `facts_embedding:{user_id}:{fact_id}` → bincode Vec<f32>
+    /// Stored separately from SemanticFact struct for backward compatibility.
+    pub fn store_embedding(&self, user_id: &str, fact_id: &str, embedding: &[f32]) -> Result<()> {
+        let key = format!("facts_embedding:{user_id}:{fact_id}");
+        let value = bincode::serde::encode_to_vec(embedding, bincode::config::standard())?;
+        self.db.put(key.as_bytes(), &value)?;
+        Ok(())
+    }
+
+    /// Get pre-computed embedding vector for a fact
+    pub fn get_embedding(&self, user_id: &str, fact_id: &str) -> Result<Option<Vec<f32>>> {
+        let key = format!("facts_embedding:{user_id}:{fact_id}");
+        match self.db.get(key.as_bytes())? {
+            Some(data) => {
+                let (embedding, _): (Vec<f32>, _) =
+                    bincode::serde::decode_from_slice(&data, bincode::config::standard())?;
+                Ok(Some(embedding))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Delete embedding for a fact (called during fact deletion)
+    pub fn delete_embedding(&self, user_id: &str, fact_id: &str) -> Result<()> {
+        let key = format!("facts_embedding:{user_id}:{fact_id}");
+        self.db.delete(key.as_bytes())?;
+        Ok(())
     }
 
     /// List all unique user IDs that have facts
@@ -387,6 +492,21 @@ impl SemanticFactStore {
 
         Ok(users.into_iter().collect())
     }
+}
+
+/// Detect negation polarity of a fact statement.
+///
+/// Returns `true` for positive polarity (even negation count, including 0),
+/// `false` for negative polarity (odd negation count).
+/// Handles double-negation: "not unlike" = positive.
+fn detect_polarity(text_lower: &str) -> bool {
+    use crate::constants::FACT_NEGATION_MARKERS;
+    let words: Vec<&str> = text_lower.split_whitespace().collect();
+    let negation_count = words
+        .iter()
+        .filter(|w| FACT_NEGATION_MARKERS.iter().any(|marker| *w == marker))
+        .count();
+    negation_count % 2 == 0
 }
 
 #[cfg(test)]

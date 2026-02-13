@@ -3904,7 +3904,12 @@ impl MemorySystem {
             let db = self.long_term_memory.db();
             let mut batch = rocksdb::WriteBatch::default();
             let mut facts_deleted = 0usize;
-            for prefix in &["facts:", "facts_by_entity:", "facts_by_type:"] {
+            for prefix in &[
+                "facts:",
+                "facts_by_entity:",
+                "facts_by_type:",
+                "facts_embedding:",
+            ] {
                 let iter = db.prefix_iterator(prefix.as_bytes());
                 for item in iter {
                     if let Ok((key, _)) = item {
@@ -5142,7 +5147,7 @@ impl MemorySystem {
 
         // 3.7. Fact extraction: consolidate episodic memories into semantic facts
         // Runs SemanticConsolidator to extract patterns, procedures, preferences, etc.
-        // Deduplicates against existing facts via Jaccard similarity (threshold 0.7)
+        // Deduplicates against existing facts via hybrid embedding+entity+polarity pipeline
         // Connects newly extracted facts to the knowledge graph as L2 entity edges
         let mut facts_extracted_count = 0;
         let mut facts_reinforced_count = 0;
@@ -5158,11 +5163,40 @@ impl MemorySystem {
                 let consolidation_result = consolidator.consolidate(&memories);
 
                 if !consolidation_result.new_facts.is_empty() {
-                    let mut truly_new = Vec::new();
+                    // Batch-encode all new fact texts for hybrid dedup
+                    let fact_texts: Vec<&str> = consolidation_result
+                        .new_facts
+                        .iter()
+                        .map(|f| f.fact.as_str())
+                        .collect();
+                    let fact_embeddings: Vec<Option<Vec<f32>>> = match self
+                        .embedder
+                        .encode_batch(&fact_texts)
+                    {
+                        Ok(embs) => embs.into_iter().map(Some).collect(),
+                        Err(e) => {
+                            tracing::debug!(
+                                error = %e,
+                                "Fact embedding batch failed, falling back to Jaccard-only dedup"
+                            );
+                            vec![None; fact_texts.len()]
+                        }
+                    };
 
-                    for fact in &consolidation_result.new_facts {
-                        // Dedup: check if a similar fact already exists
-                        match self.fact_store.find_similar(user_id, &fact.fact, 0.7) {
+                    let mut truly_new: Vec<(SemanticFact, Option<Vec<f32>>)> = Vec::new();
+
+                    for (fact, embedding) in consolidation_result
+                        .new_facts
+                        .iter()
+                        .zip(fact_embeddings.into_iter())
+                    {
+                        // Hybrid dedup: embedding cosine + entity gate + polarity + Jaccard floor
+                        match self.fact_store.find_similar(
+                            user_id,
+                            &fact.fact,
+                            &fact.related_entities,
+                            embedding.as_deref(),
+                        ) {
                             Ok(Some(mut existing)) => {
                                 // Reinforce the existing fact
                                 existing.support_count += 1;
@@ -5186,6 +5220,14 @@ impl MemorySystem {
                                 if let Err(e) = self.fact_store.update(user_id, &existing) {
                                     tracing::debug!("Failed to reinforce fact: {e}");
                                 } else {
+                                    // Update existing fact's embedding with latest encoding
+                                    if let Some(ref emb) = embedding {
+                                        let _ = self.fact_store.store_embedding(
+                                            user_id,
+                                            &existing.id,
+                                            emb,
+                                        );
+                                    }
                                     facts_reinforced_count += 1;
                                     self.record_consolidation_event_for_user(
                                         user_id,
@@ -5201,17 +5243,24 @@ impl MemorySystem {
                                 }
                             }
                             _ => {
-                                truly_new.push(fact.clone());
+                                truly_new.push((fact.clone(), embedding));
                             }
                         }
                     }
 
                     // Store new facts
                     if !truly_new.is_empty() {
-                        match self.fact_store.store_batch(user_id, &truly_new) {
+                        let facts_only: Vec<SemanticFact> =
+                            truly_new.iter().map(|(f, _)| f.clone()).collect();
+                        match self.fact_store.store_batch(user_id, &facts_only) {
                             Ok(stored) => {
                                 facts_extracted_count = stored;
-                                for fact in &truly_new {
+                                // Store embeddings for newly persisted facts
+                                for (fact, embedding) in &truly_new {
+                                    if let Some(emb) = embedding {
+                                        let _ =
+                                            self.fact_store.store_embedding(user_id, &fact.id, emb);
+                                    }
                                     self.record_consolidation_event_for_user(
                                         user_id,
                                         ConsolidationEvent::FactExtracted {
@@ -5231,7 +5280,7 @@ impl MemorySystem {
                         }
 
                         // Connect newly extracted facts to the knowledge graph
-                        self.connect_facts_to_graph(&truly_new);
+                        self.connect_facts_to_graph(&facts_only);
                     }
 
                     if facts_extracted_count > 0 || facts_reinforced_count > 0 {
@@ -5644,6 +5693,14 @@ impl MemorySystem {
                 facts_stored = stored,
                 "Semantic distillation complete"
             );
+
+            // Batch-encode and store embeddings for distilled facts
+            let texts: Vec<&str> = result.new_facts.iter().map(|f| f.fact.as_str()).collect();
+            if let Ok(batch_embs) = self.embedder.encode_batch(&texts) {
+                for (fact, emb) in result.new_facts.iter().zip(batch_embs.iter()) {
+                    let _ = self.fact_store.store_embedding(user_id, &fact.id, emb);
+                }
+            }
 
             // Record consolidation event for each fact (persists significant events)
             for fact in &result.new_facts {
