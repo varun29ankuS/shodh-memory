@@ -2132,13 +2132,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Format consolidated facts from knowledge graph
         let factsBlock = "";
         {
-          const facts = result.relevant_facts || [];
+          const facts = (result.relevant_facts || [])
+            .filter((f: ProactiveFact) => f.confidence >= 0.4);
           if (facts.length > 0) {
             factsBlock = "\n\n🧠 Known Facts:\n";
             for (const f of facts) {
               const conf = (f.confidence * 100).toFixed(0);
               const entities = f.related_entities.length > 0 ? ` [${f.related_entities.slice(0, 3).join(', ')}]` : '';
-              factsBlock += `  • (${conf}%) ${f.fact}${entities}\n`;
+              const factText = f.fact.length > 120 ? f.fact.slice(0, 120) + '...' : f.fact;
+              factsBlock += `  • (${conf}%) ${factText}${entities}\n`;
             }
           }
         }
@@ -2178,7 +2180,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
 
             const importanceBar = m.importance >= 0.8 ? '🔴' : m.importance >= 0.5 ? '🟡' : '⚪';
-            return `${i + 1}. ${importanceBar} [${score}%]${timeStr} ${m.content.slice(0, 150)}${m.content.length > 150 ? '...' : ''}\n   ${m.memory_type} | ${m.relevance_reason}${entityMatchStr}${tagsStr}`;
+            // Truncate at sentence boundary within 200 chars for cleaner display
+            let preview = m.content;
+            if (preview.length > 200) {
+              const sentenceEnd = preview.slice(0, 200).lastIndexOf('. ');
+              preview = sentenceEnd > 80 ? preview.slice(0, sentenceEnd + 1) : preview.slice(0, 200) + '...';
+            }
+            return `${i + 1}. ${importanceBar} [${score}%]${timeStr} ${preview}\n   ${m.memory_type} | ${m.relevance_reason}${entityMatchStr}${tagsStr}`;
           })
           .join("\n\n");
 
