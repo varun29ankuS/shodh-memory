@@ -50,7 +50,7 @@
     "PostToolUse": [
       {
         "matcher": {
-          "tool_name": ["Edit", "Write", "Bash", "TodoWrite", "Read"]
+          "tool_name": ["Edit", "Write", "Bash", "TodoWrite", "Read", "Task"]
         },
         "hooks": [
           {
