@@ -2,7 +2,10 @@
 //!
 //! Handlers for memory compression and decompression operations.
 
-use axum::{extract::State, response::Json};
+use axum::{
+    extract::{Query, State},
+    response::Json,
+};
 use serde::Deserialize;
 
 use super::state::MultiUserMemoryManager;
@@ -104,10 +107,10 @@ pub struct StorageStatsRequest {
     pub user_id: String,
 }
 
-/// POST /api/storage/stats - Get storage statistics
+/// GET /api/storage/stats - Get storage statistics
 pub async fn get_storage_stats(
     State(state): State<AppState>,
-    Json(req): Json<StorageStatsRequest>,
+    Query(req): Query<StorageStatsRequest>,
 ) -> Result<Json<memory::storage::StorageStats>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 

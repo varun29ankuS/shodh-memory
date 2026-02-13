@@ -327,7 +327,10 @@ pub fn build_protected_routes(state: AppState) -> Router {
             "/api/reminders/{reminder_id}/dismiss",
             post(todos::dismiss_reminder),
         )
-        .route("/api/reminders/delete", post(todos::delete_reminder))
+        .route(
+            "/api/reminders/{reminder_id}/delete",
+            post(todos::delete_reminder),
+        )
         // =================================================================
         // SESSIONS
         // =================================================================
