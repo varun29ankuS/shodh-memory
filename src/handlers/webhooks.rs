@@ -548,6 +548,7 @@ async fn handle_context_monitor_socket(socket: WebSocket, state: AppState) {
                     &memory_guard,
                     Some(&*graph_guard),
                     &effective_config,
+                    None,
                 )
             })
             .await

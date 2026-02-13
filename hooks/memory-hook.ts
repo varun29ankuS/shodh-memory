@@ -28,14 +28,26 @@ interface SurfacedMemory {
   id: string;
   content: string;
   memory_type: string;
-  relevance_score: number;
+  score: number;
+  importance: number;
   created_at: string;
+  tags: string[];
+  relevance_reason: string;
+  matched_entities: string[];
 }
 
-interface ProactiveResponse {
+interface ProactiveContextResponse {
   memories: SurfacedMemory[];
-  detected_entities: { text: string; entity_type: string }[];
+  due_reminders: unknown[];
+  context_reminders: unknown[];
+  memory_count: number;
+  reminder_count: number;
+  ingested_memory_id: string | null;
+  feedback_processed: { memories_evaluated: number; reinforced: string[]; weakened: string[] } | null;
+  relevant_todos: { id: string; short_id: string; content: string; status: string; priority: string; project: string | null; due_date: string | null; relevance_reason: string }[];
+  todo_count: number;
   latency_ms: number;
+  detected_entities: { name: string; entity_type: string }[];
 }
 
 async function callBrain(endpoint: string, body: Record<string, unknown>): Promise<unknown> {
@@ -74,24 +86,22 @@ function formatMemoriesForContext(memories: SurfacedMemory[]): string {
   return memories
     .map((m) => {
       const time = formatRelativeTime(m.created_at);
-      const score = Math.round(m.relevance_score * 100);
+      const score = Math.round(m.score * 100);
       return `• [${score}%] (${time}) ${m.content.slice(0, 120)}${m.content.length > 120 ? "..." : ""}`;
     })
     .join("\n");
 }
 
-async function surfaceProactiveContext(context: string, maxResults = 3): Promise<string | null> {
-  const response = (await callBrain("/api/relevant", {
+async function surfaceProactiveContext(context: string, maxResults = 3, autoIngest = false): Promise<string | null> {
+  const response = (await callBrain("/api/proactive_context", {
     user_id: SHODH_USER_ID,
     context,
-    config: {
-      semantic_threshold: 0.6,
-      entity_match_weight: 0.3,
-      semantic_weight: 0.5,
-      recency_weight: 0.2,
-      max_results: maxResults,
-    },
-  })) as ProactiveResponse | null;
+    max_results: maxResults,
+    semantic_threshold: 0.6,
+    entity_match_weight: 0.3,
+    recency_weight: 0.2,
+    auto_ingest: autoIngest,
+  })) as ProactiveContextResponse | null;
 
   if (!response?.memories?.length) return null;
 
@@ -133,8 +143,8 @@ async function handleUserPrompt(input: HookInput): Promise<void> {
   const prompt = input.prompt;
   if (!prompt || prompt.length < 10) return;
 
-  // Surface proactive context for this prompt
-  const memoryContext = await surfaceProactiveContext(prompt.slice(0, 500), 3);
+  // Single call: surface memories AND ingest the prompt in one pipeline pass
+  const memoryContext = await surfaceProactiveContext(prompt.slice(0, 1000), 3, true);
 
   if (memoryContext) {
     console.log(
@@ -146,14 +156,6 @@ async function handleUserPrompt(input: HookInput): Promise<void> {
       })
     );
   }
-
-  // Ingest the prompt itself (brain sees what user is asking)
-  await callBrain("/api/proactive_context", {
-    user_id: SHODH_USER_ID,
-    context: prompt.slice(0, 1000),
-    auto_ingest: true,
-    max_results: 0, // Just ingest, don't need results
-  });
 }
 
 async function handlePreToolUse(input: HookInput): Promise<void> {

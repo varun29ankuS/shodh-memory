@@ -145,11 +145,24 @@ pub struct ProactiveSurfacedMemory {
     pub content: String,
     pub memory_type: String,
     pub score: f32,
+    pub importance: f32,
     pub created_at: String,
     pub tags: Vec<String>,
+    /// Why this memory was surfaced ("semantic", "entity", "combined")
+    pub relevance_reason: String,
+    /// Entities from this memory that matched the query context
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_entities: Vec<String>,
     /// Embedding for semantic feedback (not serialized to response)
     #[serde(skip)]
     pub embedding: Vec<f32>,
+}
+
+/// Entity detected in the query context
+#[derive(Debug, Clone, Serialize)]
+pub struct DetectedEntityInfo {
+    pub name: String,
+    pub entity_type: String,
 }
 
 /// Todo item in proactive context response
@@ -208,6 +221,11 @@ pub struct ProactiveContextResponse {
     /// Todo count
     #[serde(default)]
     pub todo_count: usize,
+    /// Processing latency in milliseconds
+    pub latency_ms: f64,
+    /// Entities detected in the query context
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detected_entities: Vec<DetectedEntityInfo>,
 }
 
 // =============================================================================
@@ -704,6 +722,8 @@ pub async fn proactive_context(
     validation::validate_weight("recency_weight", req.recency_weight)
         .map_validation_err("recency_weight")?;
 
+    let op_start = std::time::Instant::now();
+
     let memory_system = state
         .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
@@ -876,12 +896,41 @@ pub async fn proactive_context(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Embedding task panicked: {e}")))?;
 
+    // 1.5. Extract entities from context for relevance annotation
+    let ner = state.get_neural_ner();
+    let context_for_ner = req.context.clone();
+    let (detected_entities, context_entity_names): (Vec<DetectedEntityInfo>, Vec<String>) = {
+        let ner = ner.clone();
+        tokio::task::spawn_blocking(move || {
+            match ner.extract(&context_for_ner) {
+                Ok(entities) => {
+                    let infos: Vec<DetectedEntityInfo> = entities
+                        .iter()
+                        .map(|e| DetectedEntityInfo {
+                            name: e.text.clone(),
+                            entity_type: format!("{:?}", e.entity_type),
+                        })
+                        .collect();
+                    let names: Vec<String> = entities
+                        .iter()
+                        .map(|e| e.text.to_lowercase())
+                        .collect();
+                    (infos, names)
+                }
+                Err(_) => (Vec::new(), Vec::new()),
+            }
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("NER task panicked: {e}")))?
+    };
+
     // 2. Retrieve memories using unified 5-layer pipeline
     // The pipeline already applies: RRF fusion + hebbian + recency + feedback (PIPE-9)
     // No double-scoring needed - just use the scores from recall() directly
     let context_clone = req.context.clone();
     let max_results = req.max_results;
     let user_id_for_query = req.user_id.clone();
+    let entity_names_for_recall = context_entity_names.clone();
     let memories: Vec<ProactiveSurfacedMemory> = {
         let memory = memory_system.clone();
         tokio::task::spawn_blocking(move || {
@@ -912,18 +961,46 @@ pub async fn proactive_context(
             // Sort by score (highest first) - already mostly sorted from recall()
             candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-            // Return top results
+            // Return top results with entity overlap annotation
             candidates
                 .into_iter()
                 .take(max_results)
-                .map(|(m, score)| ProactiveSurfacedMemory {
-                    id: m.id.0.to_string(),
-                    content: m.experience.content.clone(),
-                    memory_type: format!("{:?}", m.experience.experience_type),
-                    score,
-                    created_at: m.created_at.to_rfc3339(),
-                    tags: m.experience.entities.clone(),
-                    embedding: m.experience.embeddings.clone().unwrap_or_default(),
+                .map(|(m, score)| {
+                    // Compute entity overlap between context entities and memory entities
+                    let memory_entities_lower: Vec<String> = m
+                        .experience
+                        .entities
+                        .iter()
+                        .map(|e| e.to_lowercase())
+                        .collect();
+                    let matched: Vec<String> = entity_names_for_recall
+                        .iter()
+                        .filter(|ctx_ent| memory_entities_lower.iter().any(|me| me.contains(ctx_ent.as_str()) || ctx_ent.contains(me.as_str())))
+                        .cloned()
+                        .collect();
+                    let has_entity_match = !matched.is_empty();
+                    let has_semantic_match = score > 0.0;
+                    let relevance_reason = if has_entity_match && has_semantic_match {
+                        "combined"
+                    } else if has_entity_match {
+                        "entity"
+                    } else {
+                        "semantic"
+                    }
+                    .to_string();
+
+                    ProactiveSurfacedMemory {
+                        id: m.id.0.to_string(),
+                        content: m.experience.content.clone(),
+                        memory_type: format!("{:?}", m.experience.experience_type),
+                        score,
+                        importance: m.importance(),
+                        created_at: m.created_at.to_rfc3339(),
+                        tags: m.experience.entities.clone(),
+                        relevance_reason,
+                        matched_entities: matched,
+                        embedding: m.experience.embeddings.clone().unwrap_or_default(),
+                    }
                 })
                 .collect()
         })
@@ -1300,6 +1377,8 @@ pub async fn proactive_context(
         );
     }
 
+    let latency_ms = op_start.elapsed().as_secs_f64() * 1000.0;
+
     Ok(Json(ProactiveContextResponse {
         memories,
         due_reminders,
@@ -1310,6 +1389,8 @@ pub async fn proactive_context(
         feedback_processed,
         relevant_todos,
         todo_count,
+        latency_ms,
+        detected_entities,
     }))
 }
 
@@ -1334,9 +1415,8 @@ pub async fn surface_relevant(
     let graph_memory = state
         .get_user_graph(&req.user_id)
         .map_err(AppError::Internal)?;
-    let ner = state.get_neural_ner();
-
-    let engine = relevance::RelevanceEngine::new(ner);
+    let engine = state.relevance_engine.clone();
+    let feedback_store = state.feedback_store.clone();
 
     let response = {
         let memory_sys = memory_sys.clone();
@@ -1347,7 +1427,13 @@ pub async fn surface_relevant(
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory_sys.read();
             let graph_guard = graph_memory.read();
-            engine.surface_relevant(&context, &memory_guard, Some(&*graph_guard), &config)
+            engine.surface_relevant(
+                &context,
+                &memory_guard,
+                Some(&*graph_guard),
+                &config,
+                Some(&feedback_store),
+            )
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?

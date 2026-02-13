@@ -98,6 +98,10 @@ const STREAM_MIN_CONTENT_LENGTH = 50; // minimum content length to stream
 const PROACTIVE_SURFACING = process.env.SHODH_PROACTIVE !== "false"; // enabled by default
 const PROACTIVE_MIN_CONTEXT_LENGTH = 30; // minimum context length to trigger surfacing
 
+// Track last proactive_context response for implicit feedback loop
+// The backend uses this to evaluate whether surfaced memories were helpful
+let lastProactiveResponse: string = "";
+
 // =============================================================================
 // STREAMING MEMORY INGESTION - Continuous background memory capture
 // =============================================================================
@@ -1958,131 +1962,120 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           auto_ingest?: boolean;
         };
 
-        // Stream context to memory (non-blocking, uses WebSocket)
-        if (auto_ingest && context.length > 100) {
-          streamMemory(context.slice(0, 2000), ["proactive-context"]);
-          // Flush immediately to ensure context is persisted (don't wait for checkpoint)
-          streamFlush();
-        }
+        // --- Response types matching ProactiveContextResponse (Rust backend) ---
 
-        interface DetectedEntity {
-          text: string;
-          entity_type: string;
-          confidence: number;
-          matched_memories: number;
-        }
-
-        interface SurfacedMemory {
+        interface ProactiveSurfacedMemory {
           id: string;
           content: string;
           memory_type: string;
+          score: number;
           importance: number;
-          relevance_score: number;
-          relevance_reason: string;
-          matched_entities: string[];
-          semantic_similarity: number;
           created_at: string;
           tags: string[];
+          relevance_reason: string;
+          matched_entities: string[];
         }
 
-        interface RelevanceResponse {
-          memories: SurfacedMemory[];
-          detected_entities: DetectedEntity[];
+        interface ReminderItem {
+          id: string;
+          content: string;
+          trigger_type: string;
+          status: string;
+          due_at: string | null;
+          created_at: string;
+          triggered_at: string | null;
+          dismissed_at: string | null;
+          priority: number;
+          tags: string[];
+          overdue_seconds: number | null;
+        }
+
+        interface FeedbackProcessed {
+          memories_evaluated: number;
+          reinforced: string[];
+          weakened: string[];
+        }
+
+        interface ProactiveTodoItem {
+          id: string;
+          short_id: string;
+          content: string;
+          status: string;
+          priority: string;
+          project: string | null;
+          due_date: string | null;
+          relevance_reason: string;
+          similarity_score: number | null;
+        }
+
+        interface DetectedEntityInfo {
+          name: string;
+          entity_type: string;
+        }
+
+        interface ProactiveContextResponse {
+          memories: ProactiveSurfacedMemory[];
+          due_reminders: ReminderItem[];
+          context_reminders: ReminderItem[];
+          memory_count: number;
+          reminder_count: number;
+          ingested_memory_id: string | null;
+          feedback_processed: FeedbackProcessed | null;
+          relevant_todos: ProactiveTodoItem[];
+          todo_count: number;
           latency_ms: number;
-          config_used: {
-            semantic_threshold: number;
-            entity_match_weight: number;
-            semantic_weight: number;
-            recency_weight: number;
-            max_results: number;
-            recency_half_life_hours: number;
-            memory_types: string[];
-          };
+          detected_entities: DetectedEntityInfo[];
         }
 
-        const result = await apiCall<RelevanceResponse>("/api/relevant", "POST", {
+        // Single API call to the full proactive context pipeline:
+        // feedback loop, coactivation, segmented ingest, semantic todos, context reminders
+        const result = await apiCall<ProactiveContextResponse>("/api/proactive_context", "POST", {
           user_id: USER_ID,
           context,
-          config: {
-            semantic_threshold,
-            entity_match_weight,
-            semantic_weight: 1.0 - entity_match_weight - recency_weight,
-            recency_weight,
-            max_results,
-            memory_types,
-          },
+          max_results,
+          semantic_threshold,
+          entity_match_weight,
+          recency_weight,
+          memory_types,
+          auto_ingest,
+          // Implicit feedback: send previous response so backend can evaluate which memories helped
+          previous_response: lastProactiveResponse || undefined,
+          user_followup: lastProactiveResponse ? context : undefined,
         });
 
         const memories = result.memories || [];
         const entities = result.detected_entities || [];
 
-        if (memories.length === 0) {
-          // No relevant memories, but show detected entities if any
-          if (entities.length > 0) {
-            const entityList = entities
-              .map(e => `  - "${e.text}" (${e.entity_type}, ${(e.confidence * 100).toFixed(0)}% confidence)`)
-              .join('\n');
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `No relevant memories surfaced for this context.\n\nDetected entities:\n${entityList}\n\n[Latency: ${result.latency_ms.toFixed(1)}ms]`,
-                },
-              ],
-            };
-          }
+        if (memories.length === 0 && result.reminder_count === 0 && result.todo_count === 0) {
+          const entityList = entities.length > 0
+            ? `\n\nDetected entities: ${entities.map(e => `"${e.name}" (${e.entity_type})`).join(', ')}`
+            : '';
+          const feedbackNote = result.feedback_processed
+            ? `\n[Feedback: ${result.feedback_processed.memories_evaluated} evaluated, ${result.feedback_processed.reinforced.length} reinforced, ${result.feedback_processed.weakened.length} weakened]`
+            : '';
+
+          const emptyText = `No relevant memories surfaced for this context.${entityList}${feedbackNote}\n\n[Latency: ${result.latency_ms.toFixed(1)}ms]`;
+          lastProactiveResponse = emptyText;
+
           return {
-            content: [
-              {
-                type: "text",
-                text: `No relevant memories surfaced for this context.\n\n[Latency: ${result.latency_ms.toFixed(1)}ms]`,
-              },
-            ],
+            content: [{ type: "text", text: emptyText }],
           };
         }
 
         // Format detected entities summary
         const entitySummary = entities.length > 0
-          ? `\n\nDetected entities: ${entities.map(e => `"${e.text}" (${e.entity_type})`).join(', ')}`
+          ? `\n\nDetected entities: ${entities.map(e => `"${e.name}" (${e.entity_type})`).join(', ')}`
           : '';
 
-        // Check for due reminders and context-triggered reminders (SHO-116)
+        // Format reminders from unified response (due + context-triggered)
         let reminderBlock = "";
-        try {
-          // Check time-based due reminders
-          interface ReminderItem {
-            id: string;
-            content: string;
-            trigger_type: string;
-            priority: number;
-            overdue_seconds: number | null;
-            due_at: string | null;
-          }
-          interface DueRemindersResponse {
-            reminders: ReminderItem[];
-            count: number;
-          }
-
-          const dueResult = await apiCall<DueRemindersResponse>("/api/reminders/due", "POST", {
-            user_id: USER_ID,
-            mark_triggered: false,  // Don't auto-trigger, let user dismiss manually
-          });
-
-          // Check context-triggered reminders
-          const contextResult = await apiCall<DueRemindersResponse>("/api/reminders/context", "POST", {
-            user_id: USER_ID,
-            context,
-            mark_triggered: false,  // Don't auto-trigger, let user dismiss manually
-          });
-
-          // Combine all triggered reminders
-          const allReminders = [...dueResult.reminders, ...contextResult.reminders];
+        {
+          const allReminders = [...(result.due_reminders || []), ...(result.context_reminders || [])];
           const uniqueReminders = allReminders.filter((r, i, arr) =>
             arr.findIndex(x => x.id === r.id) === i
           );
 
           if (uniqueReminders.length > 0) {
-            // 54 chars wide box
             reminderBlock = `\n\n`;
             reminderBlock += `🐘━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━🧠\n`;
             reminderBlock += `┃  SHODH MEMORY                    REMINDERS (${String(uniqueReminders.length).padStart(2)})  ┃\n`;
@@ -2108,38 +2101,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             reminderBlock += `┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n`;
             reminderBlock += `\n💡 Use dismiss_reminder with the [id] shown above`;
           }
-        } catch (e) {
-          // Log reminder check failures for debugging
-          console.error("[proactive_context] Reminder check failed:", e);
         }
 
-        // Check for due todos (GTD integration)
+        // Format todos from unified response (semantic + in_progress)
         let todoBlock = "";
-        try {
-          interface DueTodoItem {
-            id: string;
-            content: string;
-            status: string;
-            priority: string;
-            due_date: string | null;
-            project_name: string | null;
+        {
+          const todos = result.relevant_todos || [];
+          if (todos.length > 0) {
+            todoBlock = "\n\n📋 Relevant Todos:\n";
+            for (const t of todos) {
+              const statusIcon = t.status === "in_progress" ? "🔄" : t.status === "blocked" ? "🚫" : "☐";
+              const proj = t.project ? ` [${t.project}]` : "";
+              const due = t.due_date ? ` (due: ${t.due_date})` : "";
+              todoBlock += `  ${statusIcon} ${t.priority} ${t.short_id}: ${t.content.slice(0, 60)}${t.content.length > 60 ? '...' : ''}${proj}${due}\n`;
+              todoBlock += `     ${t.relevance_reason}\n`;
+            }
           }
-          interface DueTodosResponse {
-            todos: DueTodoItem[];
-            formatted: string;
-            count: number;
-          }
-
-          const dueTodosResult = await apiCall<DueTodosResponse>("/api/todos/due", "POST", {
-            user_id: USER_ID,
-          });
-
-          if (dueTodosResult.count > 0) {
-            todoBlock = "\n\n" + dueTodosResult.formatted;
-          }
-        } catch (e) {
-          // Log todo check failures for debugging
-          console.error("[proactive_context] Todo check failed:", e);
         }
 
         // Add temporal framing - helps AI reason about time
@@ -2150,12 +2127,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Format memories with relative timestamps for temporal reasoning
         const formattedWithTime = memories
-          .map((m, i) => {
-            const score = (m.relevance_score * 100).toFixed(0);
+          .map((m) => {
+            const score = (m.score * 100).toFixed(0);
             const entityMatchStr = (m.matched_entities && m.matched_entities.length > 0)
               ? `\n   Entity matches: ${m.matched_entities.join(', ')}`
               : '';
-            const semScore = (m.semantic_similarity * 100).toFixed(0);
 
             // Calculate relative time
             let timeStr = '';
@@ -2174,17 +2150,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               }
             }
 
-            return `• [${score}%]${timeStr} ${m.content.slice(0, 100)}${m.content.length > 100 ? '...' : ''}\n   Type: ${m.memory_type} | semantic=${semScore}% | reason: ${m.relevance_reason}${entityMatchStr}`;
+            return `• [${score}%]${timeStr} ${m.content.slice(0, 100)}${m.content.length > 100 ? '...' : ''}\n   Type: ${m.memory_type} | importance: ${(m.importance * 100).toFixed(0)}% | reason: ${m.relevance_reason}${entityMatchStr}`;
           })
           .join("\n\n");
 
+        // Feedback loop status
+        const feedbackNote = result.feedback_processed
+          ? `\n[Feedback: ${result.feedback_processed.memories_evaluated} evaluated, ${result.feedback_processed.reinforced.length} reinforced, ${result.feedback_processed.weakened.length} weakened]`
+          : '';
+
+        const responseText = `${temporalHeader}Surfaced ${memories.length} relevant memories:\n\n${formattedWithTime}${entitySummary}${reminderBlock}${todoBlock}${feedbackNote}\n\n[Latency: ${result.latency_ms.toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`;
+
+        // Store for implicit feedback on next call
+        lastProactiveResponse = responseText;
+
         return {
-          content: [
-            {
-              type: "text",
-              text: `${temporalHeader}Surfaced ${memories.length} relevant memories:\n\n${formattedWithTime}${entitySummary}${reminderBlock}${todoBlock}\n\n[Latency: ${result.latency_ms.toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`,
-            },
-          ],
+          content: [{ type: "text", text: responseText }],
         };
       }
 

@@ -31,6 +31,7 @@ use uuid::Uuid;
 
 use crate::embeddings::NeuralNer;
 use crate::graph_memory::GraphMemory;
+use crate::memory::feedback::FeedbackStore;
 use crate::memory::{Memory, MemorySystem};
 
 // =============================================================================
@@ -694,6 +695,7 @@ impl RelevanceEngine {
         memory_system: &MemorySystem,
         graph_memory: Option<&GraphMemory>,
         config: &RelevanceConfig,
+        feedback_store: Option<&RwLock<FeedbackStore>>,
     ) -> Result<RelevanceResponse> {
         let start = Instant::now();
         let mut debug = RelevanceDebug {
@@ -795,13 +797,23 @@ impl RelevanceEngine {
                         .and_then(|g| g.get_memory_hebbian_strength(&memory.id))
                         .unwrap_or(0.5); // Neutral default if no graph or no edges
 
-                    // Fuse scores using learned weights with access count and graph strength (CTX-3)
+                    // Look up momentum EMA from feedback store when available
+                    let momentum_ema = feedback_store
+                        .and_then(|fs| {
+                            let store = fs.read();
+                            store
+                                .get_momentum(&memory.id)
+                                .map(|m| m.ema)
+                        })
+                        .unwrap_or(0.0);
+
+                    // Fuse scores using learned weights with all signals including momentum
                     let fused_score = weights.fuse_scores_full(
                         semantic_score,
                         entity_score,
                         tag_score,
                         importance,
-                        0.0, // momentum_ema - not available in this path, use momentum lookup version
+                        momentum_ema,
                         access_count,
                         graph_strength,
                     );
@@ -1131,8 +1143,8 @@ impl RelevanceEngine {
         let original_weights = self.get_weights();
         self.set_weights(weights);
 
-        // Run the actual surfacing
-        let response = self.surface_relevant(context, memory_system, graph_memory, config)?;
+        // Run the actual surfacing (no feedback store in A/B path — weights override already applied)
+        let response = self.surface_relevant(context, memory_system, graph_memory, config, None)?;
 
         // Restore original weights
         self.set_weights(original_weights);
@@ -1430,13 +1442,13 @@ impl RelevanceEngine {
         // Use memory system's semantic recall (uses vector index)
         match memory_system.recall(&query) {
             Ok(shared_memories) => {
-                // Results are ordered by vector similarity (closest first).
-                // Use reciprocal rank scoring: score = 1/(rank+1)
-                // This gives: rank 0 -> 1.0, rank 1 -> 0.5, rank 2 -> 0.33, etc.
-                // This is the same pattern used in the /api/recall endpoint.
+                // Use the unified 5-layer pipeline score when available.
+                // Falls back to reciprocal rank scoring when pipeline score is absent.
                 for (rank, shared_memory) in shared_memories.into_iter().enumerate() {
                     let memory = (*shared_memory).clone();
-                    let score = 1.0 / (rank as f32 + 1.0);
+                    let score = shared_memory
+                        .get_score()
+                        .unwrap_or(1.0 / (rank as f32 + 1.0));
                     if score >= config.semantic_threshold {
                         results.push((memory, score));
                     }
@@ -1725,7 +1737,7 @@ impl ContextMonitor {
 
         let response = self
             .engine
-            .surface_relevant(context, memory_system, graph_memory, cfg)?;
+            .surface_relevant(context, memory_system, graph_memory, cfg, None)?;
 
         // Only return if we found relevant memories
         if response.memories.is_empty() {
