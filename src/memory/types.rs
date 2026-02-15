@@ -2791,6 +2791,9 @@ pub struct IndexIntegrityReport {
     pub orphaned_ids: Vec<MemoryId>,
     /// Whether the index is healthy (no orphans)
     pub is_healthy: bool,
+    /// Compat alias for `is_healthy` (Cloudflare Worker clients use `healthy`)
+    #[serde(default, skip_deserializing)]
+    pub healthy: bool,
 }
 
 /// Retrieval statistics for SHO-26 associative retrieval (debugging/observability)
@@ -3363,6 +3366,10 @@ pub struct Todo {
     #[serde(default)]
     pub project_prefix: Option<String>,
 
+    /// Compat alias for `project_prefix` (Cloudflare Worker clients use `project`)
+    #[serde(default, skip_deserializing)]
+    pub project: Option<String>,
+
     /// User who owns this todo
     pub user_id: String,
 
@@ -3444,6 +3451,7 @@ impl Todo {
             id: TodoId::new(),
             seq_num: 0,           // Will be assigned by TodoStore on creation
             project_prefix: None, // Will be set by TodoStore based on project
+            project: None,        // Synced from project_prefix
             user_id,
             content,
             status: TodoStatus::Todo,
@@ -3465,6 +3473,12 @@ impl Todo {
             embedding: None,
             related_memory_ids: Vec::new(),
         }
+    }
+
+    /// Sync compat alias fields from their canonical counterparts.
+    /// Call after construction or deserialization to keep aliases in sync.
+    pub fn sync_compat_fields(&mut self) {
+        self.project = self.project_prefix.clone();
     }
 
     /// Get the user-facing short ID (BOLT-1, MEM-2, SHO-3, etc.)

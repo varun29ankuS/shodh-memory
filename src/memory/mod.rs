@@ -4282,12 +4282,14 @@ impl MemorySystem {
 
         let orphaned_count = total_storage.saturating_sub(total_indexed);
 
+        let is_healthy = orphaned_count == 0;
         Ok(IndexIntegrityReport {
             total_storage,
             total_indexed,
             orphaned_count,
             orphaned_ids,
-            is_healthy: orphaned_count == 0,
+            is_healthy,
+            healthy: is_healthy,
         })
     }
 

@@ -289,6 +289,7 @@ impl TodoStore {
                 }
             }
             todo.seq_num = self.next_seq_num(&todo.user_id, todo.project_id.as_ref())?;
+            todo.sync_compat_fields();
         }
         Ok(())
     }
@@ -313,6 +314,7 @@ impl TodoStore {
             todo_to_store.seq_num =
                 self.next_seq_num(&todo_to_store.user_id, todo_to_store.project_id.as_ref())?;
         }
+        todo_to_store.sync_compat_fields();
 
         let key = format!("{}:{}", todo_to_store.user_id, todo_to_store.id.0);
         let value = serde_json::to_vec(&todo_to_store).context("Failed to serialize todo")?;
@@ -436,8 +438,9 @@ impl TodoStore {
 
         match self.todo_db.get(key.as_bytes())? {
             Some(value) => {
-                let todo: Todo =
+                let mut todo: Todo =
                     serde_json::from_slice(&value).context("Failed to deserialize todo")?;
+                todo.sync_compat_fields();
                 Ok(Some(todo))
             }
             None => Ok(None),

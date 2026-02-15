@@ -316,6 +316,40 @@ pub async fn list_memories_post(
     State(state): State<AppState>,
     Json(req): Json<ListMemoriesRequest>,
 ) -> Result<Json<ListResponse>, AppError> {
+    list_memories_inner(state, req).await
+}
+
+/// Query parameters for GET /api/memories
+#[derive(Debug, Deserialize)]
+pub struct ListMemoriesQuery {
+    pub user_id: String,
+    pub limit: Option<usize>,
+    #[serde(rename = "type")]
+    pub memory_type: Option<String>,
+    pub query: Option<String>,
+}
+
+/// GET /api/memories?user_id=...&limit=... - List memories via query params
+/// Cloudflare Worker compatibility alias for POST /api/memories
+#[tracing::instrument(skip(state), fields(user_id = %params.user_id))]
+pub async fn list_memories_get(
+    State(state): State<AppState>,
+    Query(params): Query<ListMemoriesQuery>,
+) -> Result<Json<ListResponse>, AppError> {
+    let req = ListMemoriesRequest {
+        user_id: params.user_id,
+        limit: params.limit,
+        memory_type: params.memory_type,
+        query: params.query,
+    };
+    list_memories_inner(state, req).await
+}
+
+/// Shared implementation for both POST and GET list_memories
+async fn list_memories_inner(
+    state: AppState,
+    req: ListMemoriesRequest,
+) -> Result<Json<ListResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
     let memory = state

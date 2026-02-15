@@ -1120,6 +1120,7 @@ pub async fn import_mif(
             id: memory::TodoId(uuid::Uuid::new_v4()),
             seq_num: 0,
             project_prefix: None,
+            project: None,
             user_id: req.user_id.clone(),
             content: mif_todo.content.clone(),
             status,

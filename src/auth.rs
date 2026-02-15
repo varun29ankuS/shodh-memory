@@ -219,13 +219,20 @@ pub async fn auth_middleware(request: Request, next: Next) -> Response {
         return next.run(request).await;
     }
 
-    // Extract and clone API key value (borrow ends after this expression)
+    // Extract API key: try X-API-Key header first, then Authorization: Bearer fallback
     let api_key_value = match request
         .headers()
         .get("X-API-Key")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-    {
+        .or_else(|| {
+            request
+                .headers()
+                .get("Authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer "))
+                .map(|s| s.to_string())
+        }) {
         Some(key) => key,
         None => return AuthError::MissingApiKey.into_response(),
     };

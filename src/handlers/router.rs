@@ -30,6 +30,7 @@ pub fn build_public_routes(state: AppState) -> Router {
         // =================================================================
         // HEALTH & KUBERNETES PROBES
         // =================================================================
+        .route("/", get(health::health)) // Cloudflare compat alias
         .route("/health", get(health::health))
         .route("/health/live", get(health::health_live))
         .route("/health/ready", get(health::health_ready))
@@ -94,11 +95,13 @@ pub fn build_protected_routes(state: AppState) -> Router {
         // MEMORY CRUD OPERATIONS
         // =================================================================
         .route("/api/memory/{memory_id}", get(crud::get_memory))
+        .route("/api/memories/{memory_id}", get(crud::get_memory)) // Cloudflare compat alias
         .route("/api/memory/{memory_id}", put(crud::update_memory))
         .route("/api/memory/{memory_id}", delete(crud::delete_memory))
         .route("/api/forget/{memory_id}", delete(crud::delete_memory)) // OpenAPI alias
         .route("/api/list/{user_id}", get(crud::list_memories)) // TUI uses this
         .route("/api/memories", post(crud::list_memories_post)) // POST version
+        .route("/api/memories", get(crud::list_memories_get)) // Cloudflare compat alias
         .route("/api/memories/bulk", post(crud::bulk_delete_memories))
         .route("/api/memories/clear", post(crud::clear_all_memories))
         // =================================================================
@@ -284,6 +287,7 @@ pub fn build_protected_routes(state: AppState) -> Router {
         .route("/api/projects/list", post(todos::list_projects)) // MCP alias
         .route("/api/projects/add", post(todos::create_project)) // Legacy alias
         .route("/api/projects/{project_id}", get(todos::get_project))
+        .route("/api/projects/{project_id}", delete(todos::delete_project)) // Cloudflare compat alias
         .route(
             "/api/projects/{project_id}/update",
             post(todos::update_project),
