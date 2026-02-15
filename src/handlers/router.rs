@@ -104,6 +104,7 @@ pub fn build_protected_routes(state: AppState) -> Router {
         // =================================================================
         // FORGET OPERATIONS
         // =================================================================
+        .route("/api/forget", post(crud::forget_by_id))
         .route("/api/forget/age", post(crud::forget_by_age))
         .route("/api/forget/importance", post(crud::forget_by_importance))
         .route("/api/forget/pattern", post(crud::forget_by_pattern))

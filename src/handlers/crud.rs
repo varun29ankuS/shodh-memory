@@ -109,6 +109,13 @@ pub struct DeleteMemoryResponse {
 // FORGET REQUEST TYPES (local - not in shared types.rs)
 // =============================================================================
 
+/// Forget a single memory by ID (POST body variant)
+#[derive(Debug, Deserialize)]
+pub struct ForgetByIdRequest {
+    pub user_id: String,
+    pub memory_id: String,
+}
+
 /// Forget memories by age
 #[derive(Debug, Deserialize)]
 pub struct ForgetByAgeRequest {
@@ -469,6 +476,55 @@ pub async fn delete_memory(
         event_type: "DELETE".to_string(),
         timestamp: chrono::Utc::now(),
         user_id: user_id.to_string(),
+        memory_id: Some(resolved_id_str.clone()),
+        content_preview: None,
+        memory_type: None,
+        importance: None,
+        count: None,
+    });
+
+    Ok(Json(DeleteMemoryResponse {
+        success: true,
+        id: resolved_id_str,
+        message: "Memory deleted successfully".to_string(),
+    }))
+}
+
+// =============================================================================
+// FORGET BY ID (POST BODY VARIANT)
+// =============================================================================
+
+/// POST /api/forget - Delete a single memory by ID from JSON body
+///
+/// Convenience endpoint matching the POST pattern of other forget endpoints
+/// (/api/forget/age, /api/forget/tags, etc.). Delegates to the same logic as
+/// DELETE /api/forget/{memory_id}.
+#[tracing::instrument(skip(state), fields(memory_id = %req.memory_id))]
+pub async fn forget_by_id(
+    State(state): State<AppState>,
+    Json(req): Json<ForgetByIdRequest>,
+) -> Result<Json<DeleteMemoryResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+    let memory_guard = memory.read();
+
+    let shared_memory = resolve_memory(&memory_guard, &req.memory_id)?;
+    let resolved_id = shared_memory.id.clone();
+    let resolved_id_str = resolved_id.0.to_string();
+
+    memory_guard
+        .forget(memory::ForgetCriteria::ById(resolved_id))
+        .map_err(AppError::Internal)?;
+
+    state.log_event(&req.user_id, "DELETE", &resolved_id_str, "Memory deleted");
+
+    state.emit_event(MemoryEvent {
+        event_type: "DELETE".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: req.user_id.clone(),
         memory_id: Some(resolved_id_str.clone()),
         content_preview: None,
         memory_type: None,
