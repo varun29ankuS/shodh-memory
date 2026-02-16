@@ -9,6 +9,7 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt;
+use tracing::{debug, info, trace};
 
 /// Node type in the memory graph
 #[derive(Debug, Clone)]
@@ -184,10 +185,10 @@ impl MemoryGraph {
             (self.node_map.get(&from_key), self.node_map.get(&to_key))
         {
             self.add_edge(from_idx, to_idx, MemoryEdge::Promotion);
-            println!(
-                "🧠 [GRAPH] {} → {}",
-                from_tier.to_uppercase(),
-                to_tier.to_uppercase()
+            debug!(
+                from = from_tier.to_uppercase().as_str(),
+                to = to_tier.to_uppercase().as_str(),
+                "Graph tier promotion"
             );
         }
     }
@@ -220,54 +221,21 @@ impl MemoryGraph {
 
     /// Print ASCII visualization of current memory state
     pub fn print_ascii_visualization(&self) {
-        println!("\n╔════════════════════════════════════════════════════════════╗");
-        println!("║           MEMORY SYSTEM - NEURAL NETWORK VIEW              ║");
-        println!("╚════════════════════════════════════════════════════════════╝");
-
         let stats = self.stats();
 
-        println!("\n📊 Memory Tier Statistics:");
-        println!("   ┌─────────────────────┬──────┐");
-        println!(
-            "   │ Working Memory      │ {:>4} │",
-            stats.working_memory_count
+        info!(
+            working = stats.working_memory_count,
+            session = stats.session_memory_count,
+            longterm = stats.longterm_memory_count,
+            nodes = stats.total_nodes,
+            edges = stats.total_edges,
+            "Memory system visualization: working={}, session={}, longterm={}, nodes={}, edges={}",
+            stats.working_memory_count,
+            stats.session_memory_count,
+            stats.longterm_memory_count,
+            stats.total_nodes,
+            stats.total_edges,
         );
-        println!(
-            "   │ Session Memory      │ {:>4} │",
-            stats.session_memory_count
-        );
-        println!(
-            "   │ Long-term Memory    │ {:>4} │",
-            stats.longterm_memory_count
-        );
-        println!("   ├─────────────────────┼──────┤");
-        println!("   │ Total Nodes         │ {:>4} │", stats.total_nodes);
-        println!("   │ Total Connections   │ {:>4} │", stats.total_edges);
-        println!("   └─────────────────────┴──────┘");
-
-        // Visual representation
-        println!("\n🧠 Memory Flow Visualization:");
-        println!("   ");
-        println!("   ┌──────────┐");
-        println!("   │ WORKING  │  ({} memories)", stats.working_memory_count);
-        println!("   │  MEMORY  │  Fast access, recent experiences");
-        println!("   └────┬─────┘");
-        println!("        │ Promotion (LRU eviction)");
-        println!("        ▼");
-        println!("   ┌──────────┐");
-        println!("   │ SESSION  │  ({} memories)", stats.session_memory_count);
-        println!("   │  MEMORY  │  Session context, patterns");
-        println!("   └────┬─────┘");
-        println!("        │ Important memories (score > 0.6)");
-        println!("        ▼");
-        println!("   ┌──────────┐");
-        println!(
-            "   │ LONGTERM │  ({} memories)",
-            stats.longterm_memory_count
-        );
-        println!("   │  MEMORY  │  Compressed, searchable");
-        println!("   └──────────┘");
-        println!();
     }
 }
 
@@ -301,11 +269,11 @@ impl MemoryLogger {
             return;
         }
 
-        println!(
-            "🧠 [CREATE] {} memory: importance={:.2}, type={:?}",
-            tier.to_uppercase(),
-            memory.importance(),
-            memory.experience.experience_type
+        debug!(
+            tier = tier.to_uppercase().as_str(),
+            importance = memory.importance(),
+            experience_type = ?memory.experience.experience_type,
+            "Memory created"
         );
 
         self.graph.add_memory(memory, tier);
@@ -317,10 +285,10 @@ impl MemoryLogger {
             return;
         }
 
-        println!(
-            "🧠 [ACCESS] {} memory: id={}",
-            tier.to_uppercase(),
-            memory_id.0
+        trace!(
+            tier = tier.to_uppercase().as_str(),
+            memory_id = %memory_id.0,
+            "Memory accessed"
         );
     }
 
@@ -330,11 +298,11 @@ impl MemoryLogger {
             return;
         }
 
-        println!(
-            "🧠 [PROMOTE] {} → {}: {} memories",
-            from.to_uppercase(),
-            to.to_uppercase(),
-            count
+        debug!(
+            from = from.to_uppercase().as_str(),
+            to = to.to_uppercase().as_str(),
+            count,
+            "Memory tier promotion"
         );
 
         self.graph.log_promotion(from, to, memory_id);
@@ -352,8 +320,11 @@ impl MemoryLogger {
         }
 
         let ratio = (compressed_size as f32 / original_size as f32 * 100.0) as usize;
-        println!(
-            "🧠 [COMPRESS] Memory compressed: {original_size} → {compressed_size} bytes ({ratio}%)"
+        debug!(
+            original_size,
+            compressed_size,
+            ratio,
+            "Memory compressed"
         );
     }
 
@@ -363,11 +334,11 @@ impl MemoryLogger {
             return;
         }
 
-        println!(
-            "🧠 [RETRIEVE] Query: '{}' → {} results from: {}",
-            query.chars().take(50).collect::<String>(),
+        debug!(
+            query = %query.chars().take(50).collect::<String>(),
             result_count,
-            sources.join(", ")
+            sources = %sources.join(", "),
+            "Memory retrieved"
         );
     }
 
@@ -388,7 +359,7 @@ impl MemoryLogger {
 
         let dot = self.graph.to_dot();
         std::fs::write(path, dot)?;
-        println!("🧠 [EXPORT] Graph exported to: {}", path.display());
+        info!(path = %path.display(), "Graph exported");
         Ok(())
     }
 

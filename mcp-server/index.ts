@@ -55,6 +55,11 @@ const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1000;
 const REQUEST_TIMEOUT_MS = 10000;
 
+// Input validation limits
+const MAX_CONTENT_LENGTH = 100_000; // 100KB max for content fields
+const MAX_QUERY_LENGTH = 10_000;    // 10KB max for search queries
+const MAX_LIMIT = 250;              // Max results per query
+
 // =============================================================================
 // TOKEN TRACKING - Context window awareness (SHO-115)
 // =============================================================================
@@ -166,8 +171,8 @@ async function connectStream(): Promise<void> {
             console.error(`[Stream] Flushed ${bufferedCount} buffered messages`);
           }
         }
-      } catch {
-        // Ignore parse errors
+      } catch (e) {
+        console.error("[Stream] Failed to parse incoming message:", e);
       }
     };
 
@@ -181,7 +186,7 @@ async function connectStream(): Promise<void> {
         streamReconnectTimer = setTimeout(() => {
           streamReconnectTimer = null;
           console.error("[Stream] Attempting reconnect...");
-          connectStream().catch(() => {});
+          connectStream().catch((e) => console.error("[Stream] Reconnect failed:", e));
         }, 5000);
       }
     };
@@ -221,7 +226,7 @@ function streamMemory(content: string, tags: string[] = [], source: string = "as
     }
     streamBuffer.push(message);
     console.error(`[Stream] Buffered memory (socket not ready, buffer size: ${streamBuffer.length})`);
-    connectStream().catch(() => {});
+    connectStream().catch((e) => console.error("[Stream] Reconnect failed:", e));
   }
 }
 
@@ -323,7 +328,8 @@ async function surfaceRelevant(context: string, maxResults: number = 3): Promise
 
     const result = await response.json() as { memories?: SurfacedMemory[] };
     return result.memories || null;
-  } catch {
+  } catch (e) {
+    console.error("[Proactive] Failed to surface memories:", e);
     return null;
   }
 }
@@ -1297,6 +1303,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           parent_id?: string;
         };
 
+        if (!content || content.length === 0) {
+          return { content: [{ type: "text", text: "Error: 'content' is required and cannot be empty" }], isError: true };
+        }
+        if (content.length > MAX_CONTENT_LENGTH) {
+          return { content: [{ type: "text", text: `Error: 'content' exceeds maximum length of ${MAX_CONTENT_LENGTH} characters` }], isError: true };
+        }
+
         const result = await apiCall<{ id: string }>("/api/remember", "POST", {
           user_id: USER_ID,
           content,
@@ -1333,7 +1346,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "recall": {
-        const { query, limit = 5, mode = "hybrid" } = args as { query: string; limit?: number; mode?: string };
+        const { query, limit: rawLimit = 5, mode = "hybrid" } = args as { query: string; limit?: number; mode?: string };
+
+        if (!query || query.length === 0) {
+          return { content: [{ type: "text", text: "Error: 'query' is required and cannot be empty" }], isError: true };
+        }
+        if (query.length > MAX_QUERY_LENGTH) {
+          return { content: [{ type: "text", text: `Error: 'query' exceeds maximum length of ${MAX_QUERY_LENGTH} characters` }], isError: true };
+        }
+        const validModes = ["semantic", "associative", "hybrid"];
+        if (!validModes.includes(mode)) {
+          return { content: [{ type: "text", text: `Error: 'mode' must be one of: ${validModes.join(", ")}` }], isError: true };
+        }
+        const limit = Math.max(1, Math.min(Math.floor(rawLimit), MAX_LIMIT));
 
         interface RetrievalStats {
           mode: string;
@@ -2407,6 +2432,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           tags?: string[];
         };
 
+        if (!content || content.length === 0) {
+          return { content: [{ type: "text", text: "Error: 'content' is required and cannot be empty" }], isError: true };
+        }
+        if (content.length > MAX_CONTENT_LENGTH) {
+          return { content: [{ type: "text", text: `Error: 'content' exceeds maximum length of ${MAX_CONTENT_LENGTH} characters` }], isError: true };
+        }
+        if (priority < 1 || priority > 5 || !Number.isFinite(priority)) {
+          return { content: [{ type: "text", text: "Error: 'priority' must be between 1 and 5" }], isError: true };
+        }
+
         // Build trigger object based on type
         let trigger: Record<string, unknown>;
         switch (trigger_type) {
@@ -2589,6 +2624,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           recurrence?: string;
         };
 
+        if (!todoContent || todoContent.length === 0) {
+          return { content: [{ type: "text", text: "Error: 'content' is required and cannot be empty" }], isError: true };
+        }
+        if (todoContent.length > MAX_CONTENT_LENGTH) {
+          return { content: [{ type: "text", text: `Error: 'content' exceeds maximum length of ${MAX_CONTENT_LENGTH} characters` }], isError: true };
+        }
+
         interface TodoResponse {
           success: boolean;
           todo: {
@@ -2642,6 +2684,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           offset?: number;
         };
 
+        const clampedLimit = Math.max(1, Math.min(Math.floor(limit), MAX_LIMIT));
+        const clampedOffset = Math.max(0, Math.floor(offset));
+
         interface ListTodosResponse {
           success: boolean;
           todos: unknown[];
@@ -2658,8 +2703,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           context,
           priority,
           due,
-          limit,
-          offset,
+          limit: clampedLimit,
+          offset: clampedOffset,
         });
 
         return {
@@ -3005,8 +3050,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             `/api/memory/${memory_id}?user_id=${encodeURIComponent(USER_ID)}`,
             "GET"
           );
-        } catch {
-          // Not found or invalid prefix
+        } catch (e) {
+          console.error(`[Memory] Failed to fetch memory ${memory_id}:`, e);
         }
 
         if (!memory) {
@@ -3169,7 +3214,8 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => {
     return {
       resources: [...staticResources, ...memoryResources],
     };
-  } catch {
+  } catch (e) {
+    console.error("[Resources] Failed to list memory resources:", e);
     return { resources: staticResources };
   }
 });
@@ -3890,8 +3936,8 @@ function cleanupServer() {
       try {
         // Kill the process group (negative PID)
         process.kill(-serverProcess.pid, "SIGTERM");
-      } catch {
-        // Fallback to direct kill if process group kill fails
+      } catch (e) {
+        console.error("[Cleanup] Process group kill failed, falling back to direct kill:", e);
         serverProcess.kill("SIGTERM");
       }
     } else {
