@@ -311,30 +311,34 @@ impl MultiUserMemoryManager {
                 if cause == moka::notification::RemovalCause::Size {
                     evictions_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                    // Persist vector index before eviction to prevent data loss
+                    // Spawn blocking task to persist vector index without holding the lock
+                    // during I/O. The eviction listener runs synchronously inside moka,
+                    // so we must not block here for disk writes.
                     let index_path = eviction_base_path.join(key.as_str()).join("vector_index");
-                    if let Some(guard) = value.try_read() {
-                        match guard.save_vector_index(&index_path) {
-                            Ok(()) => {
-                                info!(
-                                    "Evicted user '{}' from memory cache (LRU, cache_size={}) - vector index saved",
-                                    key, max_cache
-                                );
+                    let user_key = key.clone();
+                    std::thread::spawn(move || {
+                        if let Some(guard) = value.try_read() {
+                            match guard.save_vector_index(&index_path) {
+                                Ok(()) => {
+                                    info!(
+                                        "Evicted user '{}' from memory cache (LRU, cache_size={}) - vector index saved",
+                                        user_key, max_cache
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Evicted user '{}' from memory cache (LRU) - failed to save vector index: {}",
+                                        user_key, e
+                                    );
+                                }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Evicted user '{}' from memory cache (LRU) - failed to save vector index: {}",
-                                    key, e
-                                );
-                            }
+                        } else {
+                            tracing::warn!(
+                                "Evicted user '{}' from memory cache (LRU) - could not acquire lock to save index",
+                                user_key
+                            );
                         }
-                    } else {
-                        // Lock contention during eviction - unusual but possible
-                        tracing::warn!(
-                            "Evicted user '{}' from memory cache (LRU) - could not acquire lock to save index",
-                            key
-                        );
-                    }
+                    });
                 }
             })
             .build();
@@ -390,6 +394,8 @@ impl MultiUserMemoryManager {
             info!("Backup engine initialized (auto-backup disabled)");
         }
 
+        let broadcast_capacity = (server_config.max_users_in_memory * 4).max(64);
+
         let manager = Self {
             user_memories,
             audit_logs: Arc::new(DashMap::new()),
@@ -411,7 +417,7 @@ impl MultiUserMemoryManager {
             backup_engine,
             context_sessions: Arc::new(DashMap::new()),
             context_broadcaster: {
-                let (tx, _) = tokio::sync::broadcast::channel(16);
+                let (tx, _) = tokio::sync::broadcast::channel(broadcast_capacity);
                 tx
             },
             ab_test_manager: Arc::new(ab_testing::ABTestManager::new()),

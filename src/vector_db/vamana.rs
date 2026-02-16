@@ -21,8 +21,7 @@
 //! ```
 
 use super::distance_inline::{
-    cosine_similarity_inline, dot_product_inline, euclidean_squared_inline,
-    normalized_distance_inline,
+    cosine_similarity_inline, euclidean_squared_inline, normalized_distance_inline,
 };
 use anyhow::{anyhow, Result};
 use memmap2::MmapMut;
@@ -573,9 +572,10 @@ impl VamanaIndex {
         let graph = self.graph.read();
         let storage = self.vectors.read(); // Hold lock for entire search (zero-copy access)
 
-        let mut visited = HashSet::new();
-        let mut candidates = BinaryHeap::new();
-        let mut w = BinaryHeap::new();
+        let search_cap = self.config.search_list_size;
+        let mut visited = HashSet::with_capacity(search_cap);
+        let mut candidates = BinaryHeap::with_capacity(search_cap);
+        let mut w = BinaryHeap::with_capacity(search_cap);
 
         // Start from entry point (zero-copy slice access)
         let entry_slice = Self::get_slice_from_storage(&storage, entry)?;
