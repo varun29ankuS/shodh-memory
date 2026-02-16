@@ -21,7 +21,7 @@ Usage (Session):
     from shodh_memory.integrations.openai_agents import ShodhSession
     from agents import Agent, Runner
 
-    session = ShodhSession(user_id="agent-1", api_key="your-key")
+    session = ShodhSession(session_id="conv-123", user_id="agent-1", api_key="your-key")
     agent = Agent(name="my-agent", instructions="You are a helpful assistant.")
     result = await Runner.run(agent, "My name is Alice", session=session)
     result = await Runner.run(agent, "What's my name?", session=session)
@@ -405,7 +405,7 @@ class ShodhTools(_ShodhHTTPClient):
 class ShodhSession(_ShodhHTTPClient):
     """OpenAI Agents SDK Session backed by Shodh-Memory.
 
-    Persists conversation history through shodh-memory's cognitive storage.
+    Implements the Session protocol for automatic conversation persistence.
     Memories benefit from Hebbian learning, activation decay, and semantic
     consolidation — not just raw storage.
 
@@ -413,28 +413,37 @@ class ShodhSession(_ShodhHTTPClient):
         from shodh_memory.integrations.openai_agents import ShodhSession
         from agents import Agent, Runner
 
-        session = ShodhSession(user_id="agent-1", api_key="your-key")
+        session = ShodhSession(session_id="conv-123", user_id="agent-1", api_key="your-key")
         result = await Runner.run(agent, "My name is Alice", session=session)
         # Later, in a new run:
         result = await Runner.run(agent, "What's my name?", session=session)
     """
 
+    session_id: str
+    session_settings: Any = None
+
     def __init__(
         self,
+        session_id: str = "default",
         server_url: str = "http://localhost:3030",
         user_id: str = "default",
         api_key: Optional[str] = None,
         session_tag: str = "openai-agents-session",
     ):
         super().__init__(server_url=server_url, user_id=user_id, api_key=api_key)
-        self.session_tag = session_tag
+        self.session_id = session_id
+        self.session_tag = f"{session_tag}:{session_id}"
 
-    async def get_items(self, limit: int = 100) -> list:
-        """Retrieve recent conversation items from memory."""
+    async def get_items(self, limit: Optional[int] = None) -> list:
+        """Retrieve conversation items from memory.
+
+        Args:
+            limit: Maximum number of items to retrieve. If None, retrieves all items.
+        """
         result = self._post("/api/recall/tags", {
             "user_id": self.user_id,
             "tags": [self.session_tag],
-            "limit": limit,
+            "limit": limit if limit is not None else 1000,
         })
         if "error" in result:
             return []
