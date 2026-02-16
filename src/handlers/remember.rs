@@ -428,12 +428,28 @@ pub async fn remember(
         tracing::debug!("Graph processing failed (non-fatal): {}", e);
     }
 
-    // Set parent_id for hierarchical organization
+    // Set parent_id for hierarchical organization (accepts full UUID or 8+ char prefix)
     if let Some(ref parent_id_str) = req.parent_id {
-        if let Ok(parent_uuid) = uuid::Uuid::parse_str(parent_id_str) {
+        let resolved_parent = if let Ok(parent_uuid) = uuid::Uuid::parse_str(parent_id_str) {
+            Some(crate::memory::MemoryId(parent_uuid))
+        } else {
+            let mem = memory.clone();
+            let prefix = parent_id_str.clone();
+            tokio::task::spawn_blocking(move || {
+                let guard = mem.read();
+                guard
+                    .find_memory_by_prefix(&prefix)
+                    .ok()
+                    .flatten()
+                    .map(|m| m.id.clone())
+            })
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Parent resolve panicked: {e}")))?
+        };
+
+        if let Some(parent_id) = resolved_parent {
             let memory = memory.clone();
             let memory_id_clone = memory_id.clone();
-            let parent_id = crate::memory::MemoryId(parent_uuid);
             tokio::task::spawn_blocking(move || {
                 let memory_guard = memory.read();
                 if let Err(e) = memory_guard.set_memory_parent(&memory_id_clone, Some(parent_id)) {
@@ -443,7 +459,7 @@ pub async fn remember(
             .await
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Parent set task panicked: {e}")))?;
         } else {
-            tracing::warn!("Invalid parent_id format: {}", parent_id_str);
+            tracing::warn!("Could not resolve parent_id: {}", parent_id_str);
         }
     }
 

@@ -4325,9 +4325,30 @@ impl MemorySystem {
         memory_id: &MemoryId,
         parent_id: Option<MemoryId>,
     ) -> Result<()> {
+        // Update the persistent copy in long-term storage
         let mut memory = self.long_term_memory.get(memory_id)?;
-        memory.set_parent(parent_id);
-        self.long_term_memory.update(&memory)
+        memory.set_parent(parent_id.clone());
+        self.long_term_memory.update(&memory)?;
+
+        // Also update the in-memory tier copy (working or session) so reads
+        // reflect the parent_id immediately without waiting for tier promotion
+        let updated = Arc::new(memory);
+        {
+            let mut wm = self.working_memory.write();
+            if wm.contains(memory_id) {
+                let _ = wm.remove(memory_id);
+                let _ = wm.add_shared(Arc::clone(&updated));
+            }
+        }
+        {
+            let mut sm = self.session_memory.write();
+            if sm.contains(memory_id) {
+                let _ = sm.remove(memory_id);
+                let _ = sm.add_shared(Arc::clone(&updated));
+            }
+        }
+
+        Ok(())
     }
 
     /// Get children of a memory
