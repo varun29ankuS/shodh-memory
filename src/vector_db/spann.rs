@@ -594,7 +594,8 @@ impl SpannIndex {
 
         // Collect candidates from all probed partitions
         // Use max-heap to keep k smallest distances: pop() removes largest (worst) match
-        let mut heap: BinaryHeap<(ordered_float::OrderedFloat<f32>, u32)> = BinaryHeap::new();
+        let mut heap: BinaryHeap<(ordered_float::OrderedFloat<f32>, u32)> =
+            BinaryHeap::with_capacity(k);
 
         if !partitions.is_empty() {
             // In-memory search (before save or after full load)
