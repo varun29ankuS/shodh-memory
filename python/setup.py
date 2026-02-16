@@ -9,7 +9,7 @@ long_description = readme_file.read_text() if readme_file.exists() else ""
 
 setup(
     name="shodh-memory",
-    version="0.1.5",
+    version="0.1.75",
     author="Shodh Team",
     author_email="29.varuns@gmail.com",
     description="Cognitive memory system for AI agents - biological memory processing in a single binary",
@@ -29,6 +29,7 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
     ],
     python_requires=">=3.8",
     install_requires=[
@@ -41,9 +42,15 @@ setup(
         "llamaindex": [
             "llama-index-core>=0.10.0",
         ],
+        "openai-agents": [
+            "openai-agents>=0.0.7",
+            "pydantic>=2.0.0",
+        ],
         "all": [
             "langchain-core>=0.2.0",
             "llama-index-core>=0.10.0",
+            "openai-agents>=0.0.7",
+            "pydantic>=2.0.0",
         ],
         "dev": [
             "pytest>=7.0.0",

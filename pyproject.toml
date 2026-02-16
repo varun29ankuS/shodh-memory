@@ -38,6 +38,12 @@ Repository = "https://github.com/varun29ankuS/shodh-memory"
 Documentation = "https://www.shodh-rag.com/memory"
 "Bug Tracker" = "https://github.com/varun29ankuS/shodh-memory/issues"
 
+[project.optional-dependencies]
+langchain = ["langchain-core>=0.2.0"]
+llamaindex = ["llama-index-core>=0.10.0"]
+openai-agents = ["openai-agents>=0.0.7", "pydantic>=2.0.0"]
+all = ["langchain-core>=0.2.0", "llama-index-core>=0.10.0", "openai-agents>=0.0.7", "pydantic>=2.0.0"]
+
 [tool.maturin]
 features = ["python"]
 python-source = "python"
