@@ -9,7 +9,7 @@ long_description = readme_file.read_text() if readme_file.exists() else ""
 
 setup(
     name="shodh-memory",
-    version="0.1.75",
+    version="0.1.8",
     author="Shodh Team",
     author_email="29.varuns@gmail.com",
     description="Cognitive memory system for AI agents - biological memory processing in a single binary",
