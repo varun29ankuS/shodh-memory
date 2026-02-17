@@ -1,0 +1,90 @@
+cff-version: 1.2.0
+message: "If you use shodh-memory in your research, please cite it as below."
+type: software
+title: "shodh-memory"
+abstract: >-
+  Persistent cognitive memory for AI agents and edge devices.
+  Implements Hebbian learning, 3-tier memory architecture (Cowan 2001),
+  hybrid decay curves (Wixted 2004), spreading activation (Anderson 1984),
+  and knowledge graphs with Long-Term Potentiation. Single binary, runs offline.
+authors:
+  - family-names: "Sharma"
+    given-names: "Varun"
+    email: "29.varuns@gmail.com"
+    orcid: ""
+version: "0.1.80"
+date-released: "2026-02-17"
+license: "Apache-2.0"
+url: "https://www.shodh-memory.com"
+repository-code: "https://github.com/varun29ankuS/shodh-memory"
+keywords:
+  - "cognitive memory"
+  - "AI agents"
+  - "Hebbian learning"
+  - "memory decay"
+  - "knowledge graph"
+  - "spreading activation"
+  - "edge AI"
+  - "MCP server"
+  - "Rust"
+references:
+  - type: article
+    authors:
+      - family-names: "Wixted"
+        given-names: "J.T."
+    title: "The Psychology and Neuroscience of Forgetting"
+    journal: "Annual Review of Psychology"
+    volume: 55
+    start: 235
+    end: 269
+    year: 2004
+    doi: "10.1146/annurev.psych.55.090902.141555"
+  - type: article
+    authors:
+      - family-names: "Cowan"
+        given-names: "N."
+    title: "The Magical Number 4 in Short-Term Memory"
+    journal: "Behavioral and Brain Sciences"
+    volume: 24
+    issue: 1
+    start: 87
+    end: 114
+    year: 2001
+    doi: "10.1017/S0140525X01003922"
+  - type: book
+    authors:
+      - family-names: "Hebb"
+        given-names: "D.O."
+    title: "The Organization of Behavior"
+    publisher:
+      name: "Wiley"
+      city: "New York"
+    year: 1949
+  - type: article
+    authors:
+      - family-names: "Anderson"
+        given-names: "J.R."
+      - family-names: "Pirolli"
+        given-names: "P.L."
+    title: "Spread of Activation"
+    journal: "Journal of Experimental Psychology: Learning, Memory, and Cognition"
+    volume: 10
+    issue: 4
+    start: 791
+    end: 798
+    year: 1984
+    doi: "10.1037/0278-7393.10.4.791"
+  - type: article
+    authors:
+      - family-names: "Bi"
+        given-names: "G.Q."
+      - family-names: "Poo"
+        given-names: "M.M."
+    title: "Synaptic Modifications in Cultured Hippocampal Neurons"
+    journal: "Journal of Neuroscience"
+    volume: 18
+    issue: 24
+    start: 10464
+    end: 10472
+    year: 1998
+    doi: "10.1523/JNEUROSCI.18-24-10464.1998"
