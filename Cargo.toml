@@ -24,6 +24,7 @@ exclude = [
     "*.pdf",
     "*.odt",
     "*.html",
+    "!src/handlers/graph_view.html",
     "*.py",
     "*.log",
     "*.json",
