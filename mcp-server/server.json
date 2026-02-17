@@ -1,7 +1,7 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
   "name": "io.github.varun29ankuS/shodh-memory",
-  "description": "Persistent AI memory with semantic search. Store and recall context across sessions.",
+  "description": "Cognitive memory for AI agents — semantic search, Hebbian learning, knowledge graphs.",
   "icons": [
     {
       "src": "https://raw.githubusercontent.com/varun29ankuS/shodh-memory/main/assets/logo.png",
