@@ -56,8 +56,14 @@ COGNITIVE_ARCHITECTURE.md
 literature/
 literature/
 
-# Paper (not for public release)
-paper/
+# Paper drafts (compiled PDFs only; source is tracked)
+paper/*.pdf
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.bbl
+paper/*.blg
+paper/*.synctex*
 
 # ONNX Runtime binaries (downloaded per-platform during CI wheel builds)
 python/shodh_memory/lib/*.dll

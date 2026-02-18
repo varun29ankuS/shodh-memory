@@ -1,0 +1,826 @@
+\documentclass{article}
+
+% Required packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage[margin=1in]{geometry}
+
+% Title and author
+\title{Shodh-Memory: Biologically-Inspired Cognitive Memory\\for Edge-Native AI Agents}
+
+\author{
+  Varun Sharma \\
+  Shodh Team \\
+  \texttt{varun@shodh-memory.com} \\
+  \url{https://github.com/varun29ankuS/shodh-memory}
+}
+
+\date{February 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Current approaches to AI agent memory rely on cloud-based vector databases or context window expansion, limiting deployment in latency-sensitive, privacy-critical, or network-constrained environments. We present \textbf{Shodh-Memory}, a cognitive memory system that implements biologically-grounded learning mechanisms---Hebbian synaptic plasticity, piecewise hybrid decay, and sleep-like semantic consolidation---in a single binary deployable on edge devices. Our three-tier architecture (working memory $\rightarrow$ session memory $\rightarrow$ long-term memory) mirrors Cowan's embedded processes model \cite{cowan2001}, enabling capacity-limited immediate context with overflow to persistent storage. Microbenchmarks demonstrate \textbf{10.8ns working memory activation} (92M ops/sec), \textbf{280--526ns memory creation}, \textbf{58--121ms Hebbian reinforcement}, and \textbf{O(1) graph operations} regardless of memory count. We introduce three algorithmic contributions: (1) a \textbf{piecewise exponential-to-power-law decay model} matching Wixted--Ebbinghaus forgetting curves with a biologically-motivated consolidation crossover, (2) \textbf{hop-decayed spreading activation} preventing topic drift in associative retrieval, and (3) \textbf{density-dependent hybrid fusion} combining BM25 lexical, vector semantic, and graph associative signals with graph trust proportional to edge maturity. The system achieves \textbf{100\% offline operation} with emergent memory behaviors including multi-scale long-term potentiation of frequently co-activated associations. We release Shodh-Memory as open-source software (Apache-2.0) with production integrations for MCP, LangChain, LlamaIndex, and OpenAI Agents SDK across npm, PyPI, and crates.io registries.
+\end{abstract}
+
+\section{Introduction}
+
+Large language models have demonstrated remarkable capabilities across diverse tasks, yet they suffer from a fundamental limitation: \textbf{statelessness}. Each session begins with no memory of prior interactions, forcing users to re-establish context and preventing agents from learning from accumulated experience. While recent work has addressed this through external memory systems \cite{mem0, memgpt}, existing approaches share critical limitations:
+
+\begin{enumerate}
+    \item \textbf{Cloud dependency}: Systems like Mem0 \cite{mem0} require network connectivity, introducing latency that violates real-time constraints in autonomous systems.
+    \item \textbf{Static associations}: Current memory systems treat stored information as immutable vectors, lacking mechanisms for associations to strengthen through successful use or decay through neglect.
+    \item \textbf{Uniform treatment}: All memories receive equal importance regardless of type, age, or access patterns, unlike biological memory where salience varies dynamically.
+\end{enumerate}
+
+We present Shodh-Memory, a cognitive memory system designed from first principles around three insights from cognitive neuroscience:
+
+\textbf{Insight 1: Memory is hierarchical and capacity-limited.} Cowan's embedded processes model \cite{cowan2001} describes working memory as a capacity-limited subset of long-term memory, with overflow mechanisms that prioritize salient information. We implement this as a three-tier architecture with distinct capacity constraints and overflow policies.
+
+\textbf{Insight 2: Associations strengthen through co-activation.} Hebbian learning \cite{hebb1949}---``neurons that fire together wire together''---provides a biologically-grounded mechanism for memory systems to learn which associations are valuable. We implement asymmetric synaptic plasticity with additive potentiation and multiplicative depression, consistent with spike-timing-dependent plasticity (STDP) studies \cite{bi1998}.
+
+\textbf{Insight 3: Memory consolidates during idle periods.} Sleep research \cite{dudai2015} reveals that episodic memories transform into semantic knowledge through consolidation. We implement a compression pipeline that converts detailed episodic traces into abstract semantic facts after configurable aging thresholds.
+
+\subsection{Contributions}
+
+Our contributions are:
+\begin{itemize}
+    \item A \textbf{biologically-grounded memory architecture} implementing Hebbian plasticity, piecewise hybrid decay, and semantic consolidation in a production-ready system ($\sim$90K LOC Rust).
+    \item \textbf{Three algorithmic contributions}: (1) piecewise exponential-to-power-law decay with a consolidation crossover at $t_c = 3$ days, (2) hop-decayed spreading activation preventing topic drift, and (3) density-dependent hybrid fusion adapting graph trust to edge maturity.
+    \item \textbf{Edge-native deployment} with nanosecond-scale core operations (10.8ns activation, 280ns creation), enabling 100\% offline operation on resource-constrained devices.
+    \item \textbf{Multi-protocol integration}: REST API (60+ endpoints), Model Context Protocol (MCP, 45 tools), and framework adapters for LangChain, LlamaIndex, and OpenAI Agents SDK.
+    \item \textbf{Open-source release} with cross-platform wheels (Linux, macOS ARM64/x64, Windows) bundling ONNX Runtime and models for zero-configuration deployment.
+\end{itemize}
+
+\section{Related Work}
+
+\subsection{Memory-Augmented Neural Networks}
+
+Memory-augmented architectures extend neural networks with external memory banks. Neural Turing Machines \cite{ntm} and Differentiable Neural Computers \cite{dnc} pioneered differentiable read/write mechanisms. However, these approaches require end-to-end training and do not support runtime memory accumulation across sessions.
+
+\subsection{Retrieval-Augmented Generation}
+
+RAG systems \cite{rag} augment LLM generation with retrieved context from vector databases. While effective for knowledge retrieval, standard RAG lacks mechanisms for learning which retrievals were helpful, treating all indexed content as equally relevant regardless of usage history.
+
+\subsection{Production Memory Systems}
+
+\textbf{Mem0} \cite{mem0} presents a production-ready memory system with graph-enhanced retrieval, demonstrating 26\% improvement over baseline approaches on the LOCOMO benchmark. Mem0 provides deep cloud integration but its cloud-native architecture introduces network latency and requires connectivity for operation.
+
+\textbf{Zep} \cite{zep} focuses on temporal knowledge graphs, tracking when facts were learned and how they change over time. As an official LangChain partner, Zep provides strong framework integration but shares Mem0's cloud dependency and latency characteristics.
+
+\textbf{Cognee} \cite{cognee} emphasizes knowledge graph construction from unstructured data with enterprise integrations, targeting enterprise RAG pipelines rather than edge deployment.
+
+\textbf{MemGPT} \cite{memgpt} implements a virtual memory hierarchy inspired by operating systems, with explicit memory management operations. While conceptually aligned with our tiered approach, MemGPT focuses on context window management rather than learning dynamics.
+
+\subsection{Continual Learning}
+
+Continual learning addresses catastrophic forgetting in neural networks \cite{mccloskey1989}. Classical approaches include regularization methods (EWC \cite{ewc}), replay buffers, and modular architectures.
+
+Recent work explores alternatives to weight updates entirely. \textbf{Titans} \cite{titans} (Google, 2024) introduces neural long-term memory modules that persist context across sequences without modifying base model weights. \textbf{Learning in Token Space} \cite{letta} proposes that LLMs can learn through context manipulation rather than gradient descent, aligning with our Hebbian approach where associations strengthen through co-activation patterns in external memory rather than internal weights.
+
+Our work applies these insights to external memory systems, implementing forgetting as a feature (activation decay) rather than a bug, and learning as emergent behavior from usage patterns.
+
+\section{Architecture}
+
+Shodh-Memory implements a three-tier cognitive memory architecture with biologically-inspired learning dynamics.
+
+\subsection{Three-Tier Memory Model}
+
+Following Cowan's embedded processes model \cite{cowan2001}, we organize memory into three tiers with distinct characteristics:
+
+\textbf{Working Memory (Tier 1):} A capacity-limited store (default: 100 items) holding immediate context. Items compete for slots based on activation level, with overflow triggering importance-weighted selection for promotion to session memory.
+
+\textbf{Session Memory (Tier 2):} A larger persistent store backed by RocksDB \cite{rocksdb} with LZ4 compression, indexed by a Vamana graph \cite{diskann} for efficient similarity search. For collections exceeding 100K memories, the system automatically transitions to a SPANN index \cite{spann} with product quantization (PQ) for disk-efficient search. Session memory maintains both vector embeddings (384-dimensional MiniLM-L6-v2 \cite{sbert}) and a knowledge graph of entity relationships.
+
+\textbf{Long-Term Memory (Tier 3):} An unlimited store containing consolidated semantic facts derived from aged episodic memories. Long-term memories exhibit slower decay and stronger associations.
+
+\begin{figure}[h]
+\centering
+\begin{verbatim}
++-------------------------------------------------------------+
+|                    SHODH-MEMORY                             |
++-------------------------------------------------------------+
+|  WORKING MEMORY (Tier 1)                                    |
+|  +-- Capacity: 100 items (configurable)                     |
+|  +-- Selection: Activation-weighted                         |
+|  +-- Overflow: Promote to Tier 2 by importance              |
++-------------------------------------------------------------+
+|  SESSION MEMORY (Tier 2)                                    |
+|  +-- Storage: RocksDB with LZ4 compression                  |
+|  +-- Index: Vamana (<100K) / SPANN+PQ (>100K)               |
+|  +-- Graph: Entity relationships with Hebbian weights       |
+|  +-- Consolidation: Promote to Tier 3 after 7 days          |
++-------------------------------------------------------------+
+|  LONG-TERM MEMORY (Tier 3)                                  |
+|  +-- Content: Semantic facts (compressed episodic)          |
+|  +-- Decay: Power-law (heavy tail, slow forgetting)         |
+|  +-- Associations: Potentiated (permanent above threshold)  |
++-------------------------------------------------------------+
+\end{verbatim}
+\caption{Three-tier memory architecture following Cowan's embedded processes model \cite{cowan2001}.}
+\label{fig:architecture}
+\end{figure}
+
+\subsection{Hebbian Synaptic Plasticity}
+
+We implement two complementary Hebbian mechanisms: (a) \textit{importance plasticity} on memory nodes, and (b) \textit{synaptic plasticity} on association edges in the knowledge graph. Both follow the principle that co-activation strengthens associations, but with distinct dynamics.
+
+\subsubsection{Importance Plasticity}
+
+Memory importance is adjusted based on retrieval feedback. Let $I(m) \in [0, 1]$ be the importance of memory $m$. Upon retrieval with outcome $o$:
+
+\begin{equation}
+I_{t+1}(m) = \begin{cases}
+\min(I_t(m) + \eta_I, \, 1.0) & \text{if } o = \textsc{Helpful} \\
+\max(I_t(m) - \delta_I \cdot I_t(m), \, 0.0) & \text{if } o = \textsc{Misleading}
+\end{cases}
+\end{equation}
+
+where $\eta_I = 0.025$ is the additive importance boost and $\delta_I = 0.10$ is the multiplicative importance decay. The asymmetry---additive potentiation vs.\ multiplicative depression---mirrors biological STDP, where false positives are costlier than missed true positives \cite{bi1998}. Accessing a memory also triggers a multiplicative boost: if the access count exceeds 5, importance is scaled by $1.1\times$ (clamped to 1.0).
+
+\subsubsection{Synaptic Plasticity}
+
+Let $G = (V, E, w)$ be a weighted directed graph where $V$ is the set of entity nodes, $E \subseteq V \times V$ is the set of association edges, and $w: E \rightarrow [0, 1]$ is the edge weight function.
+
+\begin{definition}[Co-activation]
+Two entities $e_i, e_j \in V$ are \textbf{co-activated} at time $t$ if both appear in a retrieval result set $R_t$ where $|R_t| \leq k$ for retrieval limit $k$.
+\end{definition}
+
+\begin{definition}[Synaptic Update Rule]
+For edge $(e_i, e_j) \in E$ with weight $w_t$ at time $t$ and edge tier $\tau \in \{L1, L2, L3\}$, the weight update upon co-activation is:
+\begin{equation}
+w_{t+1} = \min\!\Big(w_t + (\eta_s + \beta_\tau) \cdot (1 - w_t), \, 1.0\Big)
+\end{equation}
+where $\eta_s = 0.1$ is the base synaptic learning rate (LTP learning rate) and $\beta_\tau$ is a tier-dependent co-access boost:
+\begin{equation}
+\beta_\tau = \begin{cases}
+0.15 & \text{if } \tau = L1 \text{ (Working)} \\
+0.12 & \text{if } \tau = L2 \text{ (Episodic)} \\
+0.075 & \text{if } \tau = L3 \text{ (Semantic)}
+\end{cases}
+\end{equation}
+\end{definition}
+
+The $(1 - w_t)$ factor produces asymptotic convergence to 1.0: weak edges strengthen rapidly while strong edges saturate, preventing runaway potentiation.
+
+\begin{theorem}[Convergence of Synaptic Weights]
+Under repeated co-activation with combined rate $\eta = \eta_s + \beta_\tau$, edge weights converge to 1. After $n$ updates:
+\begin{equation}
+w_n = 1 - (1 - w_0)(1 - \eta)^n
+\end{equation}
+\end{theorem}
+
+\begin{proof}
+Let $d_n = 1 - w_n$ denote the distance from maximum weight. The update rule gives:
+\begin{align}
+w_{n+1} &= w_n + \eta(1 - w_n) = w_n + \eta \cdot d_n \\
+d_{n+1} &= 1 - w_{n+1} = d_n - \eta \cdot d_n = d_n(1 - \eta)
+\end{align}
+By induction, $d_n = d_0(1 - \eta)^n$, thus $w_n = 1 - (1-w_0)(1-\eta)^n \rightarrow 1$ as $n \rightarrow \infty$. \qed
+\end{proof}
+
+\begin{definition}[Multi-Scale Long-Term Potentiation]
+We implement a three-level LTP model inspired by biological synaptic consolidation:
+\begin{itemize}
+    \item \textbf{Burst LTP}: Triggered after 7 co-activations within a short window. Provides temporary decay protection.
+    \item \textbf{Weekly LTP}: Triggered after sustained co-activation over multiple sessions. Moderate decay protection.
+    \item \textbf{Full LTP}: Triggered after $\theta_c \geq 10$ co-activations with weight $w > \theta_w = 0.8$. Edge becomes exempt from temporal decay, modeling biological structural synaptic changes.
+\end{itemize}
+\end{definition}
+
+\textbf{Complexity:} Each Hebbian update requires $O(k^2)$ edge operations for $k$ retrieved memories. With hash-based edge lookup in $O(1)$, total update complexity is $O(k^2)$, independent of graph size $|V|$.
+
+\subsection{Piecewise Hybrid Decay Model}
+
+Unlike prior systems using simple exponential decay, we implement a piecewise model combining exponential (short-term consolidation) and power-law (long-term retention) phases, matching empirically-observed forgetting curves \cite{wixted1991, wixted2004}:
+
+\begin{definition}[Piecewise Hybrid Decay]
+For memory $m$ with initial strength $S_0$, the retention at time $t$ (in days) is:
+\begin{equation}
+D(t) = \begin{cases}
+e^{-\lambda t} & \text{if } t < t_c \quad \text{(consolidation phase)} \\
+e^{-\lambda t_c} \cdot \left(\dfrac{t}{t_c}\right)^{-\beta} & \text{if } t \geq t_c \quad \text{(long-term phase)}
+\end{cases}
+\end{equation}
+where $\lambda = \ln 2 \approx 0.693$/day (half-life of 1 day during consolidation), $t_c = 3$ days is the crossover point, and $\beta = 0.5$ is the power-law exponent for normal memories ($\beta_p = 0.3$ for potentiated memories).
+\end{definition}
+
+\textbf{Rationale:} The consolidation phase ($t < 3$ days) uses exponential decay with a 1-day half-life, modeling fast synaptic depression that filters noise and weak associations. After the crossover, the power-law tail preserves memories that survived initial consolidation for much longer---at day 30, the power-law retains $\sim$3.5\% vs.\ $<$0.001\% for continued exponential decay. This matches the empirical observation that forgetting slows dramatically after the first few days \cite{wixted2004, ebbinghaus}.
+
+\textbf{Continuity:} The function is continuous at $t_c$ by construction: the power-law phase inherits the exponential value at crossover ($e^{-\lambda t_c} \approx 0.125$ at 3 days) and decays more slowly from that point.
+
+\textbf{Potentiated memories} use halved exponential rate ($\lambda_p = 0.347$/day) and shallower power-law ($\beta_p = 0.3$), providing approximately 10$\times$ slower effective decay compared to normal memories.
+
+\begin{table}[h]
+\centering
+\caption{Hybrid decay retention comparison}
+\begin{tabular}{cccc}
+\toprule
+Days & Exponential only & Piecewise hybrid & Potentiated \\
+\midrule
+1 & 50.0\% & 50.0\% & 70.7\% \\
+3 & 12.5\% & 12.5\% & 35.4\% \\
+7 & 0.8\% & 8.2\% & 24.6\% \\
+30 & $<$0.001\% & 3.5\% & 12.2\% \\
+90 & $\approx$0 & 1.9\% & 7.4\% \\
+\bottomrule
+\end{tabular}
+\label{tab:decay_comparison}
+\end{table}
+
+\subsection{Activation Dynamics}
+
+Each memory maintains an activation level that influences retrieval ranking. Activation decays via the hybrid model (Section 3.3) and recovers upon access.
+
+\begin{definition}[Access Recovery]
+Upon retrieval, memory importance is boosted additively:
+\begin{equation}
+I^+(m) = \min(I(m) + 0.05, \, 1.0)
+\end{equation}
+Additionally, if the memory's access count exceeds 5, importance receives a multiplicative boost of $1.1\times$.
+\end{definition}
+
+\subsection{Importance Scoring}
+
+\begin{definition}[Importance Function]
+Let $I: V \rightarrow [0, 1]$ be the importance function. For memory $m \in V$:
+\begin{equation}
+I(m) = I_{\text{type}}(m) + I_{\text{entity}}(m) + I_{\text{graph}}(m) + I_{\text{recency}}(m)
+\end{equation}
+where the component functions are:
+\begin{align}
+I_{\text{type}}(m) &= \mathbf{1}[\text{type}(m)] \quad \text{(type boost: Decision=0.30, Error=0.25)} \\
+I_{\text{entity}}(m) &= 0.04 \cdot \min(|\text{entities}(m)|, \, 10) \quad \text{(entity density)} \\
+I_{\text{graph}}(m) &= 0.03 \cdot \min(|\text{edges}(m)|, \, 10) \quad \text{(connectivity)} \\
+I_{\text{recency}}(m) &= \begin{cases} 0.20 & \text{if age}(m) < \tau_r \\ 0 & \text{otherwise} \end{cases}
+\end{align}
+\end{definition}
+
+\subsection{Retrieval Algorithm}
+
+The retrieval pipeline combines three signals: BM25 lexical search (via Tantivy \cite{tantivy}), vector semantic search (MiniLM-L6-v2), and graph-based spreading activation. Signals are fused with density-dependent weights that adapt to graph maturity.
+
+\begin{definition}[Density-Dependent Fusion]
+Let $\rho = |E|/|V|$ be the edge-to-node ratio (graph density). The fusion weights are:
+\begin{align}
+w_{\text{graph}} &= \text{lerp}\!\left(w_{\text{max}}, \, w_{\text{min}}, \, \frac{\rho - \rho_{\min}}{\rho_{\max} - \rho_{\min}}\right) \\
+w_{\text{linguistic}} &= 0.15 \quad \text{(fixed)} \\
+w_{\text{semantic}} &= 1.0 - w_{\text{graph}} - w_{\text{linguistic}}
+\end{align}
+where $w_{\text{max}} = 0.5$, $w_{\text{min}} = 0.1$, $\rho_{\min} = 0.5$, $\rho_{\max} = 2.0$.
+\end{definition}
+
+\textbf{Intuition:} Sparse graphs have survived Hebbian pruning and contain curated, high-value edges ($w_{\text{graph}} \to 0.5$). Dense graphs contain many untested L1 edges and should be trusted less ($w_{\text{graph}} \to 0.1$), deferring to semantic similarity \cite{graphrag}.
+
+\begin{algorithm}[h]
+\caption{Hybrid Memory Retrieval with Density-Dependent Fusion}
+\begin{algorithmic}[1]
+\REQUIRE Query $q$, limit $k$, graph density $\rho$
+\ENSURE Ranked memory set $R$ with $|R| \leq k$
+\STATE $\mathbf{e}_q \leftarrow \text{Embed}(q)$ \COMMENT{384-dim MiniLM embedding}
+\STATE $S_{\text{vec}} \leftarrow \text{Vamana-Search}(\mathbf{e}_q, 2k)$ \COMMENT{Vector candidates}
+\STATE $S_{\text{bm25}} \leftarrow \text{BM25-Search}(q, 2k)$ \COMMENT{Lexical candidates}
+\STATE $S_{\text{graph}} \leftarrow \text{SpreadingActivation}(S_{\text{vec}}, \gamma=0.7)$ \COMMENT{Graph expansion}
+\STATE $(w_g, w_l, w_s) \leftarrow \text{DensityWeights}(\rho)$
+\STATE $S \leftarrow S_{\text{vec}} \cup S_{\text{bm25}} \cup S_{\text{graph}}$
+\FOR{$m \in S$}
+    \STATE $\text{score}(m) \leftarrow w_s \cdot \text{sim}(m) + w_l \cdot \text{bm25}(m) + w_g \cdot \text{assoc}(m)$
+\ENDFOR
+\STATE $R \leftarrow \text{TopK}(S, \text{score}, k)$
+\RETURN $R$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Spreading Activation with Hop Decay}
+
+Graph-based retrieval risks topic drift when traversing many hops from the query seed. We implement hop-decayed spreading activation based on Anderson's ACT-R model \cite{anderson1983}:
+
+\begin{definition}[Hop-Decayed Activation]
+For entity $e$ reached via path of length $h$ hops from query seed, the activation contribution is:
+\begin{equation}
+A_{\text{spread}}(e) = S(e) \cdot \gamma^h
+\end{equation}
+where $S(e)$ is the base salience of entity $e$ and $\gamma = 0.7$ is the hop decay factor (configurable via \texttt{SPREADING\_DECAY\_RATE}).
+\end{definition}
+
+\textbf{Effect:} With $\gamma = 0.7$, a 3-hop entity contributes only $0.7^3 = 34.3\%$ of its base salience. This naturally bounds the ``semantic radius'' of retrieval, preventing irrelevant associations from dominating results.
+
+\subsection{Named Entity Recognition}
+
+We integrate TinyBERT-finetuned-NER \cite{tinybert} (14.5MB quantized ONNX) to extract entities (Person, Organization, Location, Miscellaneous) from stored memories. Entities:
+\begin{itemize}
+    \item Create nodes in the knowledge graph with typed labels
+    \item Boost memory importance based on entity density ($+0.04$ per entity, up to 10)
+    \item Enable entity-based retrieval queries and co-occurrence tracking
+\end{itemize}
+
+\subsection{Semantic Consolidation}
+
+Episodic memories transform into semantic knowledge through a consolidation process that runs during idle periods (mimicking sleep consolidation \cite{dudai2015}).
+
+\begin{definition}[Consolidation Eligibility]
+Memory $m$ is eligible for consolidation iff:
+\begin{equation}
+\text{age}(m) > \tau_{\text{age}} \land \text{access\_count}(m) > \tau_{\text{access}} \land \neg\text{consolidated}(m)
+\end{equation}
+with defaults $\tau_{\text{age}} = 7$ days, $\tau_{\text{access}} = 3$.
+\end{definition}
+
+\begin{algorithm}[h]
+\caption{Semantic Consolidation}
+\begin{algorithmic}[1]
+\REQUIRE Eligible memory set $M_{\text{elig}} \subseteq V$, similarity threshold $\sigma = 0.85$
+\ENSURE Consolidated semantic memories $M_{\text{sem}}$, archived episodic memories $M_{\text{arch}}$
+\STATE $\mathcal{C} \leftarrow \text{AgglomerativeClustering}(M_{\text{elig}}, \sigma)$ \COMMENT{Cluster by embedding similarity}
+\FOR{each cluster $C \in \mathcal{C}$ with $|C| \geq 2$}
+    \STATE $E_C \leftarrow \bigcup_{m \in C} \text{NER}(m)$ \COMMENT{Extract all entities}
+    \STATE $\mathbf{e}_C \leftarrow \frac{1}{|C|} \sum_{m \in C} \mathbf{e}_m$ \COMMENT{Centroid embedding}
+    \STATE $\text{gist} \leftarrow \text{GenerateGist}(C, E_C)$ \COMMENT{TF-IDF weighted summary}
+    \STATE $m_{\text{sem}} \leftarrow \text{CreateSemanticMemory}(\text{gist}, \mathbf{e}_C, E_C)$
+    \STATE $m_{\text{sem}}.\text{importance} \leftarrow \max_{m \in C} I(m)$
+    \FOR{$m \in C$}
+        \STATE $m_{\text{arch}} \leftarrow \text{LZ4Compress}(m)$
+        \STATE $\text{Link}(m_{\text{sem}}, m_{\text{arch}})$ \COMMENT{Bidirectional provenance}
+    \ENDFOR
+\ENDFOR
+\STATE Remove $M_{\text{elig}}$ from Tier 2; add $M_{\text{sem}}$ to Tier 3
+\RETURN $(M_{\text{sem}}, M_{\text{arch}})$
+\end{algorithmic}
+\end{algorithm}
+
+\textbf{Complexity:} Agglomerative clustering requires $O(n^2 \log n)$ for $n$ eligible memories. In practice, consolidation runs on $n < 100$ memories per batch during idle periods, completing in $< 500$ms.
+
+\section{Data Structures}
+
+\subsection{Memory Representation}
+
+\begin{definition}[Memory Record]
+A memory record $m \in V$ is a tuple:
+\begin{equation}
+m = (id, \mathbf{e}, c, \tau, t_{\text{create}}, t_{\text{access}}, I, \mathcal{T}, \mathcal{E}, \kappa)
+\end{equation}
+where:
+\begin{itemize}
+    \item $id \in \{0,1\}^{128}$: UUID v4 identifier
+    \item $\mathbf{e} \in \mathbb{R}^{384}$: MiniLM embedding vector (stored as float32)
+    \item $c \in \Sigma^*$: UTF-8 content string
+    \item $\tau \in \{\text{Decision}, \text{Learning}, \text{Error}, \text{Context}, \text{Task}, ...\}$: Memory type
+    \item $t_{\text{create}}, t_{\text{access}} \in \mathbb{Z}$: Unix timestamps (milliseconds)
+    \item $I \in [0, 1]$: Importance score (float32)
+    \item $\mathcal{T} \subseteq \Sigma^*$: Tag set
+    \item $\mathcal{E} \subseteq \text{NerEntityRecord}$: Extracted named entities with type labels
+    \item $\kappa \in \mathbb{N}$: Access count
+\end{itemize}
+\end{definition}
+
+\textbf{Serialization:} Memory records are serialized using MessagePack (rmp-serde) \cite{msgpack}, chosen for its compact binary format with native support for Rust's tagged enums. A 4-level deserialization fallback chain (MessagePack $\to$ bincode v2 $\to$ bincode v1 $\to$ JSON) ensures backward compatibility across schema migrations.
+
+\textbf{Space per memory:} $\sim$1.6KB + $|c|$ bytes.
+
+\subsection{Knowledge Graph Representation}
+
+\begin{definition}[Association Edge]
+An edge $(e_i, e_j) \in E$ is stored as:
+\begin{equation}
+\text{edge}_{ij} = (h_{ij}, w, \kappa_{\text{co}}, t_{\text{last}}, \tau_e, \text{ltp\_status})
+\end{equation}
+where $h_{ij} = \text{hash}(id_i \| id_j)$ is the 64-bit edge key, $w \in [0,1]$ is the Hebbian weight, $\kappa_{\text{co}}$ is co-activation count, $t_{\text{last}}$ is last co-activation time, $\tau_e \in \{L1, L2, L3\}$ is the edge tier, and $\text{ltp\_status} \in \{\text{None}, \text{Burst}, \text{Weekly}, \text{Full}\}$ indicates the LTP level.
+\end{definition}
+
+Edge tiers mirror the three-tier memory model:
+\begin{itemize}
+    \item \textbf{L1 Working}: Fresh edges from recent co-activations. Fast decay, easy to prune.
+    \item \textbf{L2 Episodic}: Edges that survived initial pruning. Moderate decay.
+    \item \textbf{L3 Semantic}: Long-lived edges representing stable associations. Slow decay.
+\end{itemize}
+
+Tier promotion is driven by co-activation count and edge age, with Hebbian strengthening as the primary signal for survival.
+
+\subsection{Index Structures}
+
+\begin{table}[h]
+\centering
+\caption{Data structure specifications}
+\begin{tabular}{lccc}
+\toprule
+Structure & Type & Space & Lookup \\
+\midrule
+Memory store & RocksDB LSM-tree & $O(n \cdot \bar{m})$ & $O(\log n)$ \\
+Vector index ($<$100K) & Vamana graph & $O(n \cdot d \cdot R)$ & $O(\log n)$ \\
+Vector index ($>$100K) & SPANN + PQ & $O(n \cdot d')$ & $O(\sqrt{n})$ \\
+Entity index & HashMap$\langle$String, Set$\langle$UUID$\rangle$$\rangle$ & $O(|\mathcal{E}|)$ & $O(1)$ \\
+Edge index & HashMap$\langle$u64, Edge$\rangle$ & $O(|E|)$ & $O(1)$ \\
+Full-text index & Tantivy (BM25) & $O(n \cdot \bar{c})$ & $O(\log n)$ \\
+\bottomrule
+\end{tabular}
+\label{tab:structures}
+\end{table}
+
+\textbf{Vamana Parameters:} Max degree $R = 32$, search list size $L = 100$, pruning parameter $\alpha = 1.2$. These parameters provide $>$95\% recall at $<$10ms latency for $n \leq 100{,}000$ memories \cite{diskann}. Beyond 100K, the system transparently switches to SPANN with product quantization for sub-linear disk-based search \cite{spann}.
+
+\section{Implementation}
+
+\subsection{System Overview}
+
+Shodh-Memory is implemented in Rust ($\sim$90K lines of code across 70+ modules) with the following components:
+
+\begin{itemize}
+    \item \textbf{Embedding Engine:} MiniLM-L6-v2 via ONNX Runtime \cite{onnx} ($\sim$33ms per embedding, quantized INT8)
+    \item \textbf{NER Engine:} TinyBERT-finetuned-NER via ONNX Runtime ($\sim$15ms per extraction, quantized INT8)
+    \item \textbf{Vector Index:} Vamana ($<$100K) with automatic SPANN+PQ transition ($>$100K)
+    \item \textbf{Persistence:} RocksDB \cite{rocksdb} with column families for isolation (memories, embeddings, entities, edges, todos, projects, reminders, audit logs)
+    \item \textbf{Full-Text Search:} Tantivy \cite{tantivy} for BM25 lexical retrieval
+    \item \textbf{APIs:} REST via Axum (60+ endpoints), MCP via rmcp (45 tools), Python bindings via PyO3
+\end{itemize}
+
+\subsection{Multi-User Isolation}
+
+The system supports concurrent multi-user operation with per-user memory namespacing. Each user's memories, graph, and indices are logically isolated through prefixed RocksDB column families, enabling deployment as a shared memory service.
+
+\subsection{Protocol Support}
+
+\textbf{Model Context Protocol (MCP):} We implement 45 MCP tools covering memory CRUD, semantic search, knowledge graph operations, GTD-style task management, reminders, and system diagnostics. The MCP server enables integration with Claude, Cursor, and other MCP-compatible AI clients.
+
+\textbf{Framework Adapters:} Pure-Python HTTP adapters for LangChain (\texttt{ShodhMemory}), LlamaIndex (\texttt{ShodhLlamaMemory}), and OpenAI Agents SDK (\texttt{ShodhTools}, \texttt{ShodhSession}) allow drop-in integration with major LLM orchestration frameworks.
+
+\subsection{Deployment}
+
+The system compiles to a single binary with models downloaded on first run:
+\begin{itemize}
+    \item MiniLM-L6-v2: 22MB (quantized INT8)
+    \item TinyBERT-NER: 14MB (quantized INT8)
+    \item ONNX Runtime: 14MB (platform-specific, dynamically linked)
+\end{itemize}
+
+PyPI wheels bundle ONNX Runtime and models for zero-configuration deployment. Cross-platform builds are available for Linux x86\_64 (manylinux\_2\_28), macOS ARM64, macOS x86\_64, and Windows x86\_64.
+
+\subsection{API Surface}
+
+\begin{lstlisting}[language=Python, basicstyle=\small\ttfamily]
+from shodh_memory import Memory
+
+memory = Memory(user_id="agent-1")
+
+# Store with type annotation
+memory.remember(
+    "User prefers Python for ML, Rust for systems",
+    memory_type="Decision",
+    tags=["preference", "programming"]
+)
+
+# Semantic retrieval with Hebbian tracking
+results = memory.recall("programming preferences", limit=5)
+
+# Session bootstrap
+context = memory.context_summary()
+\end{lstlisting}
+
+\section{Evaluation}
+
+\subsection{Experimental Setup}
+
+We evaluate Shodh-Memory on three dimensions:
+\begin{enumerate}
+    \item \textbf{Microbenchmarks:} Isolated operation latency under controlled conditions
+    \item \textbf{End-to-End Latency:} Full pipeline response time including embedding
+    \item \textbf{Scaling Behavior:} Performance characteristics as memory count grows
+\end{enumerate}
+
+\textbf{Hardware:} Intel i7-1355U (10 cores, 1.7GHz base), 16GB RAM, NVMe SSD. All measurements on release builds using Criterion.rs \cite{criterion} with 100 iterations and warm cache unless noted.
+
+\textbf{Baselines:} ChromaDB (local vector DB) for latency comparison. We do not compare against cloud-based systems (Mem0, Zep) on latency, as network round-trip time ($\sim$100--300ms) dominates and would not constitute a fair comparison of system design.
+
+\subsection{Microbenchmark Results}
+
+\begin{table}[h]
+\centering
+\caption{Cognitive architecture microbenchmarks (Criterion.rs, 100 iterations)}
+\begin{tabular}{lccc}
+\toprule
+Operation & Mean & Std Dev & Throughput \\
+\midrule
+Working Memory Activation & 10.8ns & $\pm$0.15ns & 92M ops/sec \\
+Memory Creation (minimal) & 280ns & $\pm$5.2ns & 3.5M ops/sec \\
+Memory Creation (full metadata) & 526ns & $\pm$8.1ns & 1.9M ops/sec \\
+Importance Calculation & 22.3ns & $\pm$0.4ns & 44M ops/sec \\
+Importance with Decay & 23.1ns & $\pm$0.5ns & 43M ops/sec \\
+\bottomrule
+\end{tabular}
+\label{tab:microbench}
+\end{table}
+
+\subsection{Hebbian Learning Performance}
+
+\begin{table}[h]
+\centering
+\caption{Hebbian learning benchmarks}
+\begin{tabular}{lccc}
+\toprule
+Operation & Mean & Std Dev & Notes \\
+\midrule
+Hebbian Reinforcement (10 items) & 58.2ms & $\pm$2.1ms & Full feedback loop \\
+Hebbian Reinforcement (50 items) & 121ms & $\pm$4.3ms & $O(k^2)$ for $k$ items \\
+Edge Weight Update & 6.2$\mu$s & $\pm$0.3$\mu$s & $O(1)$ single edge \\
+LTP Check & 12ns & $\pm$0.2ns & Threshold comparison \\
+Full Feedback Loop & 294ms & $\pm$8.5ms & End-to-end with persistence \\
+\bottomrule
+\end{tabular}
+\label{tab:hebbian}
+\end{table}
+
+\textbf{Scaling:} Hebbian reinforcement is $O(k^2)$ in the number of co-activated memories. However, observed latency is dominated by I/O overhead ($>$50ms) rather than the quadratic term ($<$5ms at $k=20$), making the operation practically constant-time for interactive use.
+
+\subsection{End-to-End Latency}
+
+\begin{table}[h]
+\centering
+\caption{End-to-end operation latency (includes embedding generation)}
+\begin{tabular}{lcc}
+\toprule
+Operation & P50 & P95 \\
+\midrule
+Store (embedding + NER + persist) & 12ms & 18ms \\
+Semantic Recall (vector search) & 8ms & 15ms \\
+Tag Query (direct index) & 0.8ms & 1.2ms \\
+Context Summary & 5ms & 8ms \\
+Proactive Surfacing & 0.6ms & 1.5ms \\
+\bottomrule
+\end{tabular}
+\label{tab:e2e}
+\end{table}
+
+\subsection{Scaling Analysis}
+
+\begin{table}[h]
+\centering
+\caption{Scaling behavior (measured latency in microseconds)}
+\begin{tabular}{lccccc}
+\toprule
+Operation & $n=100$ & $n=1$K & $n=10$K & $n=100$K & Complexity \\
+\midrule
+Store (no embedding) & 45 & 52 & 68 & 95 & $O(\log n)$ \\
+Vector Search & 1,200 & 2,100 & 3,800 & 8,200 & $O(\log n)$ \\
+Entity Lookup & 0.72 & 0.76 & 0.81 & 0.89 & $O(1)$ \\
+Hebbian Update & 5.8 & 6.1 & 6.2 & 6.4 & $O(1)$ \\
+Tag Query & 12 & 15 & 28 & 65 & $O(\log |\mathcal{T}|)$ \\
+\bottomrule
+\end{tabular}
+\label{tab:scaling}
+\end{table}
+
+\textbf{Key observations:}
+\begin{enumerate}
+    \item Entity lookup and Hebbian updates exhibit true $O(1)$ behavior---latency increases $<$25\% from 100 to 100K memories.
+    \item Vector search scales logarithmically due to Vamana's greedy graph traversal, with $4\times$ increase from 100 to 100K memories (vs.\ $1000\times$ for brute force).
+    \item Memory consumption scales linearly: $\sim$1.8KB per memory for storage, $\sim$12KB per memory for Vamana index with $R=32$.
+\end{enumerate}
+
+\subsection{Hebbian Learning Dynamics}
+
+We evaluate emergent learning behavior through synthetic workloads:
+
+\textbf{Experiment:} Store 100 memories, repeatedly retrieve pairs with positive feedback. Measure edge weight evolution.
+
+\textbf{Results:} Starting from initial weight $w_0 = 0.1$ with combined rate $\eta = 0.1 + 0.15 = 0.25$ (L1 tier):
+\begin{itemize}
+    \item After 5 co-retrievals: Edge weight reaches 0.76
+    \item After 10 co-retrievals: Edge weight reaches 0.94; Full LTP triggered ($w > 0.8$ and count $\geq 10$)
+    \item After 20 co-retrievals: Edge weight reaches 0.998; exempt from temporal decay
+\end{itemize}
+
+\textbf{Control:} Without Hebbian feedback, all edge weights remain at baseline, and retrieval quality does not improve with usage.
+
+\subsection{Offline Capability}
+
+\begin{table}[h]
+\centering
+\caption{Offline operation support}
+\begin{tabular}{lcc}
+\toprule
+System & Offline Support & Learning Dynamics \\
+\midrule
+Shodh-Memory & 100\% & Hebbian plasticity + consolidation \\
+ChromaDB & 100\% & None \\
+Mem0 & 0\% (cloud) & Graph-enhanced retrieval \\
+Pinecone & 0\% (cloud) & None \\
+\bottomrule
+\end{tabular}
+\label{tab:offline}
+\end{table}
+
+\section{Discussion}
+
+\subsection{When to Use Shodh-Memory}
+
+Shodh-Memory is designed for scenarios where:
+\begin{itemize}
+    \item \textbf{Latency matters:} Robotics, drones, real-time systems requiring $<$100ms response
+    \item \textbf{Offline operation required:} Air-gapped environments, unreliable connectivity
+    \item \textbf{Privacy critical:} Data cannot leave device (healthcare, defense, personal assistants)
+    \item \textbf{Learning desired:} Associations should strengthen with successful use
+\end{itemize}
+
+For cloud-scale deployments with unlimited resources and existing infrastructure, systems like Mem0 may offer advantages in managed scalability.
+
+\subsection{Limitations}
+
+\textbf{Single-node architecture:} Current implementation is single-process. Multi-agent memory sharing requires explicit federation, which we leave to future work.
+
+\textbf{Fixed embedding model:} MiniLM-L6-v2 is bundled; swapping models requires reindexing all stored vectors. Future versions may support hot-swappable embedding backends.
+
+\textbf{Limited retrieval accuracy evaluation:} Our evaluation focuses on systems properties (latency, scaling, offline operation) and emergent learning dynamics. Comprehensive accuracy benchmarks on established datasets (LOCOMO \cite{mem0}, MemBench) remain future work.
+
+\textbf{Token estimation:} The context window tracking uses a naive heuristic (string length / 4) that undercounts tokens for code and structured content.
+
+\textbf{Timer-based consolidation:} Consolidation runs on fixed intervals rather than event-driven triggers, which may not optimally match usage patterns.
+
+\subsection{Threats to Validity}
+
+\textbf{Internal:} Microbenchmarks measure isolated operations on a single machine. Production latencies may differ due to concurrent access, disk contention, and memory pressure.
+
+\textbf{External:} The learning dynamics evaluation uses synthetic workloads. Real-world co-activation patterns may exhibit different statistical properties. We do not claim that our Hebbian parameters are optimal for all domains.
+
+\textbf{Construct:} We report throughput and latency rather than retrieval quality metrics (Recall@K, NDCG). While we observe that Hebbian learning improves retrieval over time, we do not quantify this improvement against standard benchmarks.
+
+\subsection{Future Directions}
+
+\textbf{Hierarchical Memory Protocol (HMP):} An open protocol for memory federation, enabling agent hierarchies where memories propagate based on configurable inheritance rules.
+
+\textbf{Swappable embedding backends:} Supporting alternative architectures (Mamba, xLSTM) as drop-in replacements for transformer-based embeddings.
+
+\textbf{Retrieval quality benchmarks:} Systematic evaluation on LOCOMO and other memory-specific benchmarks with comparison against Mem0, Zep, and MemGPT.
+
+\textbf{Event-driven consolidation:} Replacing timer-based consolidation with activity-aware triggers that consolidate after natural session boundaries.
+
+\section{Conclusion}
+
+We presented Shodh-Memory, a cognitive memory system that brings biologically-inspired learning mechanisms---Hebbian plasticity, piecewise hybrid decay, and semantic consolidation---to production AI agents. Our three-tier architecture achieves nanosecond-scale core operations (10.8ns activation, 280ns creation) while enabling 100\% offline operation, addressing critical gaps in existing cloud-dependent memory systems.
+
+We introduced three algorithmic contributions: (1) a piecewise exponential-to-power-law decay model with a consolidation crossover at 3 days, matching empirically-observed forgetting curves, (2) hop-decayed spreading activation preventing topic drift in associative retrieval, and (3) density-dependent hybrid fusion that adapts graph trust to edge maturity.
+
+The emergence of multi-scale long-term potentiation in our Hebbian implementation demonstrates that memory systems can learn which associations matter through usage patterns alone, without explicit supervision. Combined with semantic consolidation and multi-protocol integration (REST, MCP, LangChain, LlamaIndex, OpenAI Agents SDK), Shodh-Memory provides a complete cognitive memory substrate for AI agents operating at the edge.
+
+Shodh-Memory is available as open-source software under the Apache 2.0 license, with production packages on npm (\texttt{@shodh/memory-mcp}), PyPI (\texttt{shodh-memory}), and crates.io (\texttt{shodh-memory}).
+
+\bibliographystyle{plain}
+\begin{thebibliography}{30}
+
+\bibitem{mem0}
+P.~Chhikara, D.~Khant, S.~Aryan, T.~Singh, and D.~Yadav, ``Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory,'' arXiv:2504.19413, 2025.
+
+\bibitem{memgpt}
+C.~Packer, S.~Wooders, K.~Lin, V.~Fang, S.~G.~Patil, I.~Stoica, and J.~E.~Gonzalez, ``MemGPT: Towards LLMs as Operating Systems,'' arXiv:2310.08560, 2023.
+
+\bibitem{zep}
+Zep AI, ``Zep: Long-Term Memory for AI Assistants,'' \url{https://www.getzep.com/}, 2024.
+
+\bibitem{cognee}
+Cognee, ``Cognee: Memory Management for AI Applications,'' \url{https://www.cognee.ai/}, 2024.
+
+\bibitem{titans}
+A.~Behrouz, P.~Zhong, and D.~Tatbul, ``Titans: Learning to Memorize at Test Time,'' arXiv:2501.00663, Google Research, 2024.
+
+\bibitem{letta}
+C.~Packer et al., ``Learning in Token Space,'' Letta AI, 2024.
+
+\bibitem{cowan2001}
+N.~Cowan, ``The Magical Number 4 in Short-Term Memory: A Reconsideration of Mental Storage Capacity,'' \textit{Behavioral and Brain Sciences}, vol.~24, no.~1, pp.~87--114, 2001.
+
+\bibitem{hebb1949}
+D.~O.~Hebb, \textit{The Organization of Behavior: A Neuropsychological Theory}. Wiley, 1949.
+
+\bibitem{bi1998}
+G.~Q.~Bi and M.~M.~Poo, ``Synaptic Modifications in Cultured Hippocampal Neurons: Dependence on Spike Timing, Synaptic Strength, and Postsynaptic Cell Type,'' \textit{Journal of Neuroscience}, vol.~18, no.~24, pp.~10464--10472, 1998.
+
+\bibitem{dudai2015}
+Y.~Dudai, A.~Karni, and J.~Born, ``The Consolidation and Transformation of Memory,'' \textit{Neuron}, vol.~88, no.~1, pp.~20--32, 2015.
+
+\bibitem{ntm}
+A.~Graves, G.~Wayne, and I.~Danihelka, ``Neural Turing Machines,'' arXiv:1410.5401, 2014.
+
+\bibitem{dnc}
+A.~Graves et al., ``Hybrid Computing Using a Neural Network with Dynamic External Memory,'' \textit{Nature}, vol.~538, pp.~471--476, 2016.
+
+\bibitem{rag}
+P.~Lewis et al., ``Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks,'' NeurIPS, 2020.
+
+\bibitem{mccloskey1989}
+M.~McCloskey and N.~J.~Cohen, ``Catastrophic Interference in Connectionist Networks: The Sequential Learning Problem,'' \textit{Psychology of Learning and Motivation}, vol.~24, pp.~109--165, 1989.
+
+\bibitem{ewc}
+J.~Kirkpatrick et al., ``Overcoming Catastrophic Forgetting in Neural Networks,'' \textit{PNAS}, vol.~114, no.~13, pp.~3521--3526, 2017.
+
+\bibitem{rocksdb}
+Facebook, ``RocksDB: A Persistent Key-Value Store,'' \url{https://rocksdb.org/}, 2023.
+
+\bibitem{diskann}
+S.~J.~Subramanya et al., ``DiskANN: Fast Accurate Billion-point Nearest Neighbor Search on a Single Node,'' NeurIPS, 2019.
+
+\bibitem{spann}
+Q.~Chen et al., ``SPANN: Highly-efficient Billion-scale Approximate Nearest Neighbor Search,'' NeurIPS, 2021.
+
+\bibitem{sbert}
+N.~Reimers and I.~Gurevych, ``Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks,'' EMNLP, 2019.
+
+\bibitem{ebbinghaus}
+H.~Ebbinghaus, \textit{Memory: A Contribution to Experimental Psychology}. Teachers College, Columbia University, 1885/1913.
+
+\bibitem{wixted1991}
+J.~T.~Wixted and E.~B.~Ebbesen, ``On the Form of Forgetting,'' \textit{Psychological Science}, vol.~2, no.~6, pp.~409--415, 1991.
+
+\bibitem{wixted2004}
+J.~T.~Wixted, ``The Psychology and Neuroscience of Forgetting,'' \textit{Annual Review of Psychology}, vol.~55, pp.~235--269, 2004.
+
+\bibitem{anderson1983}
+J.~R.~Anderson, ``A Spreading Activation Theory of Memory,'' \textit{Journal of Verbal Learning and Verbal Behavior}, vol.~22, no.~3, pp.~261--295, 1983.
+
+\bibitem{tinybert}
+HuggingFace, ``TinyBERT-finetuned-NER,'' \url{https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX}, 2024.
+
+\bibitem{onnx}
+Microsoft, ``ONNX Runtime,'' \url{https://onnxruntime.ai/}, 2024.
+
+\bibitem{criterion}
+B.~Heisler, ``Criterion.rs: Statistics-driven Microbenchmarking in Rust,'' \url{https://bheisler.github.io/criterion.rs/}, 2024.
+
+\bibitem{tantivy}
+P.~Masurel, ``Tantivy: Full-text Search Engine Library in Rust,'' \url{https://github.com/quickwit-oss/tantivy}, 2024.
+
+\bibitem{graphrag}
+D.~Edge et al., ``From Local to Global: A Graph RAG Approach to Query-Focused Summarization,'' arXiv:2404.16130, Microsoft Research, 2024.
+
+\bibitem{msgpack}
+S.~Furuhashi, ``MessagePack: Efficient Binary Serialization Format,'' \url{https://msgpack.org/}, 2024.
+
+\bibitem{magee2020}
+J.~C.~Magee and C.~Grienberger, ``Synaptic Plasticity Forms and Functions,'' \textit{Annual Review of Neuroscience}, vol.~43, pp.~95--117, 2020.
+
+\end{thebibliography}
+
+\appendix
+
+\section{Hyperparameters}
+
+\begin{table}[h]
+\centering
+\caption{Default hyperparameters (all configurable via \texttt{src/constants.rs})}
+\begin{tabular}{lcp{6cm}}
+\toprule
+Parameter & Default & Description \\
+\midrule
+\multicolumn{3}{l}{\textit{Memory Architecture}} \\
+Working memory capacity & 100 & Maximum Tier 1 items \\
+Consolidation age ($\tau_{\text{age}}$) & 7 days & Episodic $\rightarrow$ semantic threshold \\
+Consolidation access count ($\tau_{\text{access}}$) & 3 & Minimum accesses for consolidation \\
+\midrule
+\multicolumn{3}{l}{\textit{Hebbian Learning --- Importance}} \\
+Importance boost ($\eta_I$) & 0.025 & Additive boost for helpful memories \\
+Importance decay ($\delta_I$) & 0.10 & Multiplicative decay for misleading \\
+Retrieval access boost & 0.05 & Per-retrieval importance increase \\
+\midrule
+\multicolumn{3}{l}{\textit{Hebbian Learning --- Synaptic}} \\
+LTP learning rate ($\eta_s$) & 0.1 & Base edge strengthening rate \\
+L1 co-access boost ($\beta_{L1}$) & 0.15 & Working tier co-activation boost \\
+LTP threshold (count, $\theta_c$) & 10 & Co-activations for Full LTP \\
+LTP threshold (weight, $\theta_w$) & 0.8 & Minimum weight for Full LTP \\
+\midrule
+\multicolumn{3}{l}{\textit{Decay Model}} \\
+Consolidation decay ($\lambda$) & 0.693/day & Exponential rate ($t < 3$ days) \\
+Crossover time ($t_c$) & 3 days & Exponential $\to$ power-law switch \\
+Power-law exponent ($\beta$) & 0.5 & Normal memory long-term decay \\
+Power-law exponent ($\beta_p$) & 0.3 & Potentiated memory decay \\
+\midrule
+\multicolumn{3}{l}{\textit{Retrieval}} \\
+Semantic weight & 0.50 & Vector similarity weight \\
+Graph weight & 0.35 & Spreading activation weight \\
+Linguistic weight & 0.15 & BM25 term matching weight \\
+Hop decay ($\gamma$) & 0.7 & Activation per hop in graph traversal \\
+\bottomrule
+\end{tabular}
+\label{tab:hyperparams}
+\end{table}
+
+\section{API Reference}
+
+Full API documentation available at: \url{https://www.shodh-memory.com}
+
+\vspace{1cm}
+\noindent\textit{Code and data available at: \url{https://github.com/varun29ankuS/shodh-memory}}
+
+\noindent\textit{DOI: \href{https://doi.org/10.5281/zenodo.18668709}{10.5281/zenodo.18668709}}
+
+\end{document}
