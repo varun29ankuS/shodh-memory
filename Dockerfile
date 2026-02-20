@@ -2,15 +2,22 @@
 # Stage 1: Build the Rust binary with all native dependencies
 FROM rust:1-slim-bookworm AS builder
 
-# Install build dependencies: LLVM for RocksDB bindgen, OpenSSL for TLS
+# Install build dependencies:
+#   g++ / clang-14  — C++ compiler for RocksDB (cc-rs looks for "c++")
+#   llvm-14         — libclang for bindgen
+#   cmake / make    — native dep build systems
+#   libssl-dev      — OpenSSL headers for TLS
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     llvm-14 \
     libclang-14-dev \
     clang-14 \
+    g++ \
+    make \
     curl \
     cmake \
+    && rustup component add rustfmt \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LIBCLANG_PATH=/usr/lib/llvm-14/lib
