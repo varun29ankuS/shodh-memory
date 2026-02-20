@@ -86,3 +86,15 @@ jobs:
             org.opencontainers.image.description=Cognitive memory system for AI agents
           cache-from: type=gha
         continue-on-error: true
+
+      # Step 3: Sync README to Docker Hub description
+      - name: Update Docker Hub description
+        if: steps.dockerhub_login.outcome == 'success'
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKERHUB_IMAGE }}
+          short-description: Cognitive memory system for AI agents — Hebbian learning, semantic decay, knowledge graph
+          readme-filepath: ./README.md
+        continue-on-error: true
