@@ -19,7 +19,7 @@
 use chrono::Utc;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use shodh_memory::graph_memory::{
-    EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, RelationType,
+    EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, LtpStatus, RelationType,
     RelationshipEdge,
 };
 use std::collections::{HashMap, HashSet};
@@ -63,7 +63,10 @@ fn create_relationship(
         context: String::new(),
         last_activated: Utc::now(),
         activation_count: 0,
-        potentiated: false,
+        ltp_status: LtpStatus::None,
+        tier: Default::default(),
+        activation_timestamps: None,
+        entity_confidence: None,
     }
 }
 

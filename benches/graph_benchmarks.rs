@@ -13,7 +13,7 @@ use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criteri
 use shodh_memory::chrono::Utc;
 use shodh_memory::embeddings::ner::{NerConfig, NerEntityType, NeuralNer};
 use shodh_memory::graph_memory::{
-    EntityLabel, EntityNode, GraphMemory, RelationType, RelationshipEdge,
+    EntityLabel, EntityNode, GraphMemory, LtpStatus, RelationType, RelationshipEdge,
 };
 use shodh_memory::uuid::Uuid;
 use std::collections::HashMap;
@@ -78,7 +78,10 @@ fn create_relationship(
         // Hebbian plasticity fields
         last_activated: Utc::now(),
         activation_count: 0,
-        potentiated: false,
+        ltp_status: LtpStatus::None,
+        tier: Default::default(),
+        activation_timestamps: None,
+        entity_confidence: None,
     }
 }
 

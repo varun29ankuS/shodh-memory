@@ -20,8 +20,10 @@ WORKDIR /app
 # Copy manifests first for Docker layer caching
 COPY Cargo.toml Cargo.lock ./
 
-# Copy source code
+# Copy source and all paths referenced by Cargo.toml (benches, tests)
 COPY src ./src
+COPY benches ./benches
+COPY tests ./tests
 
 # Download ONNX Runtime for embedding model inference
 ARG ORT_VERSION=1.23.2
