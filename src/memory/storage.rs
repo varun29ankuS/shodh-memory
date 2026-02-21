@@ -2199,8 +2199,11 @@ impl MemoryStorage {
     pub fn get_all(&self) -> Result<Vec<Memory>> {
         let mut memories = Vec::new();
 
-        // Iterate through all memories
-        let iter = self.db.iterator(IteratorMode::Start);
+        // fill_cache(false) prevents this maintenance scan from polluting
+        // the block cache with cold data, reducing C++ peak memory
+        let mut read_opts = rocksdb::ReadOptions::default();
+        read_opts.fill_cache(false);
+        let iter = self.db.iterator_opt(IteratorMode::Start, read_opts);
         for item in iter {
             if let Ok((key, value)) = item {
                 // Only process valid 16-byte UUID keys (consistent with get_stats)

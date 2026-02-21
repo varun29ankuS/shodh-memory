@@ -7,6 +7,9 @@
 //!
 //! Both modes use the same core memory functionality, ready for future MCP push.
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use rmcp::{

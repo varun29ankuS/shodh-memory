@@ -205,13 +205,13 @@ fn spread_single_direction(
                     }
                 };
 
-                // Importance-weighted decay
-                let importance = edge.strength;
-                let decay_rate = calculate_importance_weighted_decay(importance);
+                // Importance-weighted decay (using effective_strength for time-aware decay)
+                let effective = edge.effective_strength();
+                let decay_rate = calculate_importance_weighted_decay(effective);
                 let decay = (-decay_rate * hop as f32).exp();
 
                 let spread_amount =
-                    source_activation * decay * edge.strength * tier_trust * degree_norm;
+                    source_activation * decay * effective * tier_trust * degree_norm;
 
                 let new_activation = activation_map.entry(target_uuid).or_insert(0.0);
                 *new_activation += spread_amount;
@@ -594,12 +594,12 @@ pub fn spreading_activation_retrieve_with_stats(
                         }
                     };
 
-                    // SHO-26: Importance-weighted decay
-                    let importance = edge.strength;
-                    let decay_rate = calculate_importance_weighted_decay(importance);
+                    // SHO-26: Importance-weighted decay (using effective_strength for time-aware decay)
+                    let effective = edge.effective_strength();
+                    let decay_rate = calculate_importance_weighted_decay(effective);
                     let decay = (-decay_rate * hop as f32).exp();
 
-                    let spread_amount = source_activation * decay * edge.strength * tier_trust;
+                    let spread_amount = source_activation * decay * effective * tier_trust;
 
                     let new_activation = activation_map.entry(target_uuid).or_insert(0.0);
                     *new_activation += spread_amount;

@@ -91,6 +91,9 @@ path = "src/mcp.rs"
 # MCP Protocol
 rmcp = { version = "0.12", features = ["server", "macros", "transport-io"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+# Global allocator — replaces Windows default heap (eliminates segment doubling / commit bloat)
+mimalloc = "0.1"
+
 # Core
 anyhow = "1.0"
 thiserror = "2.0"

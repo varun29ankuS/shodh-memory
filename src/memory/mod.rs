@@ -235,6 +235,11 @@ pub struct MemorySystem {
     /// Extracts and indexes facts like "Melanie is planning camping next month"
     /// Resolves relative dates ("next month" → June 2023) for accurate retrieval
     temporal_fact_store: Arc<temporal_facts::TemporalFactStore>,
+
+    /// Flag: new memories stored since last fact extraction cycle.
+    /// When false, fact extraction is skipped entirely (no RocksDB scan, no clones).
+    /// Set to true in remember(), cleared by maintenance after extraction runs.
+    fact_extraction_needed: std::sync::atomic::AtomicBool,
 }
 
 /// Resolve an entity name to a graph label and salience using pre-extracted NER data.
@@ -515,6 +520,8 @@ impl MemorySystem {
             learning_history,
             // Temporal fact store for multi-hop temporal reasoning
             temporal_fact_store,
+            // Dirty flag for fact extraction: run on first cycle, then only when new memories stored
+            fact_extraction_needed: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -1003,6 +1010,10 @@ impl MemorySystem {
             tracing::warn!("Failed to commit/reload BM25 index: {}", e);
         }
 
+        // Signal that fact extraction should run on next maintenance cycle
+        self.fact_extraction_needed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
         Ok(memory_id)
     }
 
@@ -1230,6 +1241,10 @@ impl MemorySystem {
         if let Err(e) = self.hybrid_search.commit_and_reload() {
             tracing::warn!("Failed to commit/reload BM25 index: {}", e);
         }
+
+        // Signal that fact extraction should run on next maintenance cycle
+        self.fact_extraction_needed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
         Ok(memory_id)
     }
@@ -5352,9 +5367,17 @@ impl MemorySystem {
     /// 2. Decay activation levels on all memories
     /// 3. Run graph maintenance (prune weak edges)
     ///
+    /// `is_heavy`: when true, runs expensive operations (fact extraction, auto-repair)
+    /// that require full RocksDB scans. Light cycles only touch in-memory data.
+    ///
     /// Returns the number of memories processed for activation decay.
     /// Also records consolidation events for introspection.
-    pub fn run_maintenance(&self, decay_factor: f32, user_id: &str) -> Result<MaintenanceResult> {
+    pub fn run_maintenance(
+        &self,
+        decay_factor: f32,
+        user_id: &str,
+        is_heavy: bool,
+    ) -> Result<MaintenanceResult> {
         let start_time = std::time::Instant::now();
         let now = chrono::Utc::now();
 
@@ -5482,9 +5505,13 @@ impl MemorySystem {
         // (via graph_maintenance()) and in state.rs. Now only state.rs calls it,
         // and the result is used for orphan detection (Direction 2 coupling).
 
-        // 3.5. Temporal fact decay: decay/delete stale facts
-        // Facts that haven't been reinforced lose confidence over time
-        let (facts_decayed, facts_deleted) = self.decay_facts_for_all_users().unwrap_or((0, 0));
+        // 3.5. Temporal fact decay: decay/delete stale facts (heavy only)
+        // Scans all facts via RocksDB iterator — deferred to heavy cycles
+        let (facts_decayed, facts_deleted) = if is_heavy {
+            self.decay_facts_for_all_users().unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
         if facts_decayed > 0 || facts_deleted > 0 {
             tracing::debug!(
                 "Temporal fact maintenance: {} decayed, {} deleted",
@@ -5494,11 +5521,17 @@ impl MemorySystem {
         }
 
         // 3.7. Fact extraction: consolidate episodic memories into semantic facts
-        // Runs SemanticConsolidator to extract patterns, procedures, preferences, etc.
-        // Deduplicates against existing facts via hybrid embedding+entity+polarity pipeline
-        // Connects newly extracted facts to the knowledge graph as L2 entity edges
+        // HEAVY ONLY: requires full RocksDB scan of all memories (get_all_memories)
+        // plus ONNX inference for embedding new facts. Deferred to heavy cycles
+        // (~30 min) to avoid per-cycle 5GB memory spikes from C++ iterator allocations.
+        // The dirty flag (fact_extraction_needed) is only checked on heavy cycles;
+        // it stays set across light cycles until the next heavy cycle processes it.
         let mut facts_extracted_count = 0;
         let mut facts_reinforced_count = 0;
+        if is_heavy
+            && self
+                .fact_extraction_needed
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
             let all_memories = self.get_all_memories().unwrap_or_default();
             if !all_memories.is_empty() {
@@ -5640,6 +5673,8 @@ impl MemorySystem {
                     }
                 }
             }
+        } else {
+            tracing::debug!("Fact extraction skipped: no new memories since last cycle");
         }
 
         // 4. SHO-105 + PIPE-2: Memory replay cycle (pattern-triggered consolidation)
@@ -5804,9 +5839,11 @@ impl MemorySystem {
         // Removes patterns older than 24 hours
         self.pattern_detector.write().cleanup();
 
-        // 5. Auto-repair index integrity and compact if needed
-        // This ensures storage↔index sync and prevents memory leaks from soft-deleted vectors
-        self.auto_repair_and_compact();
+        // 5. Auto-repair index integrity and compact if needed (heavy only)
+        // repair_vector_index() does a full RocksDB scan + ONNX inference per orphan
+        if is_heavy {
+            self.auto_repair_and_compact();
+        }
 
         let duration_ms = start_time.elapsed().as_millis() as u64;
 

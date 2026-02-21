@@ -994,6 +994,14 @@ pub struct GraphMemory {
     /// Used when string-based dedup (exact/case/stemmed) fails — catches synonyms
     /// like "authentication" ↔ "auth" via cosine similarity.
     entity_embedding_cache: Arc<parking_lot::RwLock<Vec<(Uuid, Vec<f32>)>>>,
+
+    /// Edges found below prune threshold during lazy-decay reads.
+    /// Flushed as batch deletes on each maintenance cycle (no full scan needed).
+    pending_prune: parking_lot::Mutex<Vec<Uuid>>,
+
+    /// Entities that may have become orphaned from pruned edges.
+    /// Checked during flush_pending_maintenance().
+    pending_orphan_checks: parking_lot::Mutex<Vec<Uuid>>,
 }
 
 impl GraphMemory {
@@ -1056,6 +1064,14 @@ impl GraphMemory {
         opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB — graph entries are small KV pairs
         opts.set_max_write_buffer_number(2);
 
+        // Bounded block cache prevents unbounded C++ heap growth during full scans.
+        // 32MB is sufficient for the graph DB (entities + edges are small KV pairs).
+        use rocksdb::{BlockBasedOptions, Cache};
+        let mut block_opts = BlockBasedOptions::default();
+        block_opts.set_block_cache(&Cache::new_lru_cache(32 * 1024 * 1024));
+        block_opts.set_cache_index_and_filter_blocks(true);
+        opts.set_block_based_table_factory(&block_opts);
+
         // Build column family descriptors — all CFs share the same options
         let cf_descriptors: Vec<ColumnFamilyDescriptor> = GRAPH_CF_NAMES
             .iter()
@@ -1110,6 +1126,8 @@ impl GraphMemory {
             episode_count: Arc::new(AtomicUsize::new(episode_count)),
             synapse_update_lock: Arc::new(parking_lot::Mutex::new(())),
             entity_embedding_cache: Arc::new(parking_lot::RwLock::new(entity_embedding_cache)),
+            pending_prune: parking_lot::Mutex::new(Vec::new()),
+            pending_orphan_checks: parking_lot::Mutex::new(Vec::new()),
         };
 
         if entity_count > 0 || relationship_count > 0 || episode_count > 0 {
@@ -2121,6 +2139,35 @@ impl GraphMemory {
 
         // Phase 3: Sort by effective strength descending (strongest first)
         edges.sort_by(|a, b| b.effective_strength().total_cmp(&a.effective_strength()));
+
+        // Phase 3.5: Opportunistic pruning — queue edges that have decayed below
+        // their tier's threshold for batch deletion on next maintenance cycle.
+        // This replaces the eager full-scan apply_decay() with lazy on-read pruning.
+        let mut has_prunable = false;
+        for edge in &edges {
+            if edge.effective_strength() < edge.tier.prune_threshold()
+                && !edge.ltp_status.is_potentiated()
+            {
+                has_prunable = true;
+                break;
+            }
+        }
+        if has_prunable {
+            let mut prune_queue = self.pending_prune.lock();
+            let mut orphan_queue = self.pending_orphan_checks.lock();
+            edges.retain(|edge| {
+                if edge.effective_strength() < edge.tier.prune_threshold()
+                    && !edge.ltp_status.is_potentiated()
+                {
+                    prune_queue.push(edge.uuid);
+                    orphan_queue.push(edge.from_entity);
+                    orphan_queue.push(edge.to_entity);
+                    false // remove from results
+                } else {
+                    true
+                }
+            });
+        }
 
         // Phase 4: Truncate to limit if specified
         if let Some(max) = limit {
@@ -3807,18 +3854,24 @@ impl GraphMemory {
         let mut to_prune = Vec::new();
 
         for edge in edges.iter_mut() {
+            let strength_before = edge.strength;
             let should_prune = edge.decay();
 
-            let key = edge.uuid.as_bytes();
-            match bincode::serde::encode_to_vec(&*edge, bincode::config::standard()) {
-                Ok(value) => {
-                    batch.put_cf(self.relationships_cf(), key, value);
-                    if should_prune {
-                        to_prune.push(edge.uuid);
+            // Only write back edges whose strength actually changed (or need pruning).
+            // With 300s maintenance intervals, most edges won't have meaningful decay,
+            // so this reduces the WriteBatch from ~12MB (all 34k edges) to ~150KB.
+            if should_prune || (edge.strength - strength_before).abs() > f32::EPSILON {
+                let key = edge.uuid.as_bytes();
+                match bincode::serde::encode_to_vec(&*edge, bincode::config::standard()) {
+                    Ok(value) => {
+                        batch.put_cf(self.relationships_cf(), key, value);
+                        if should_prune {
+                            to_prune.push(edge.uuid);
+                        }
                     }
-                }
-                Err(e) => {
-                    tracing::debug!("Failed to serialize edge {}: {}", edge.uuid, e);
+                    Err(e) => {
+                        tracing::debug!("Failed to serialize edge {}: {}", edge.uuid, e);
+                    }
                 }
             }
         }
@@ -3899,6 +3952,61 @@ impl GraphMemory {
         })
     }
 
+    /// Flush pending maintenance from opportunistic pruning queues.
+    ///
+    /// Called every maintenance cycle (5 min). Instead of scanning all 34k+ edges,
+    /// this only processes edges that were found below prune threshold during normal
+    /// reads (via `get_entity_relationships_limited`). Typical cost: 0-50 targeted
+    /// deletes per cycle vs a full CF iterator scan.
+    pub fn flush_pending_maintenance(&self) -> Result<crate::memory::types::GraphDecayResult> {
+        // 1. Drain queues (fast — just swaps empty Vecs)
+        let to_prune: Vec<Uuid> = std::mem::take(&mut *self.pending_prune.lock());
+        let orphan_candidates: Vec<Uuid> = std::mem::take(&mut *self.pending_orphan_checks.lock());
+
+        if to_prune.is_empty() {
+            return Ok(crate::memory::types::GraphDecayResult::default());
+        }
+
+        // 2. Dedup UUIDs
+        let to_prune: std::collections::HashSet<Uuid> = to_prune.into_iter().collect();
+        let orphan_candidates: std::collections::HashSet<Uuid> =
+            orphan_candidates.into_iter().collect();
+
+        // 3. Batch delete pruned edges
+        let mut pruned_count = 0;
+        for edge_uuid in &to_prune {
+            if self.delete_relationship(edge_uuid)? {
+                pruned_count += 1;
+            }
+        }
+
+        // 4. Check which candidate entities became orphaned (lost ALL edges)
+        let mut orphaned_entity_ids = Vec::new();
+        for entity_uuid in &orphan_candidates {
+            let remaining = self.get_entity_relationships(entity_uuid)?;
+            if remaining.is_empty() {
+                orphaned_entity_ids.push(entity_uuid.to_string());
+                if let Err(e) = self.delete_entity(entity_uuid) {
+                    tracing::warn!("Failed to delete orphaned entity {}: {}", entity_uuid, e);
+                }
+            }
+        }
+
+        if pruned_count > 0 {
+            tracing::debug!(
+                "Lazy pruning: {} edges deleted, {} entities orphaned",
+                pruned_count,
+                orphaned_entity_ids.len()
+            );
+        }
+
+        Ok(crate::memory::types::GraphDecayResult {
+            pruned_count,
+            orphaned_entity_ids,
+            orphaned_memory_ids: Vec::new(),
+        })
+    }
+
     /// Get graph statistics - O(1) using atomic counters
     pub fn get_stats(&self) -> Result<GraphStats> {
         Ok(GraphStats {
@@ -3912,9 +4020,11 @@ impl GraphMemory {
     pub fn get_all_entities(&self) -> Result<Vec<EntityNode>> {
         let mut entities = Vec::new();
 
-        let iter = self
-            .db
-            .iterator_cf(self.entities_cf(), rocksdb::IteratorMode::Start);
+        let mut read_opts = rocksdb::ReadOptions::default();
+        read_opts.fill_cache(false);
+        let iter =
+            self.db
+                .iterator_cf_opt(self.entities_cf(), read_opts, rocksdb::IteratorMode::Start);
         for (_, value) in iter.flatten() {
             if let Ok(entity) = bincode::serde::decode_from_slice::<EntityNode, _>(
                 &value,
@@ -3936,9 +4046,16 @@ impl GraphMemory {
     pub fn get_all_relationships(&self) -> Result<Vec<RelationshipEdge>> {
         let mut relationships = Vec::new();
 
-        let iter = self
-            .db
-            .iterator_cf(self.relationships_cf(), rocksdb::IteratorMode::Start);
+        // fill_cache(false) prevents this full scan from evicting hot data from
+        // the block cache. Decompressed blocks are used transiently and freed
+        // after the iterator advances, reducing peak C++ heap usage.
+        let mut read_opts = rocksdb::ReadOptions::default();
+        read_opts.fill_cache(false);
+        let iter = self.db.iterator_cf_opt(
+            self.relationships_cf(),
+            read_opts,
+            rocksdb::IteratorMode::Start,
+        );
         for (_, value) in iter.flatten() {
             if let Ok(edge) = bincode::serde::decode_from_slice::<RelationshipEdge, _>(
                 &value,
@@ -4010,8 +4127,8 @@ impl GraphMemory {
                 entity_indices.get(&rel.from_entity),
                 entity_indices.get(&rel.to_entity),
             ) {
-                // Apply small gravitational pull based on connection strength
-                let pull_factor = rel.strength * 0.05;
+                // Apply small gravitational pull based on effective (decay-aware) strength
+                let pull_factor = rel.effective_strength() * 0.05;
 
                 let from_pos = stars[*from_idx].position.clone();
                 let to_pos = stars[*to_idx].position.clone();
@@ -4043,7 +4160,7 @@ impl GraphMemory {
                     from_id: rel.from_entity.to_string(),
                     to_id: rel.to_entity.to_string(),
                     relation_type: rel.relation_type.as_str().to_string(),
-                    strength: rel.strength,
+                    strength: rel.effective_strength(),
                     from_position: stars[*from_idx].position.clone(),
                     to_position: stars[*to_idx].position.clone(),
                 })

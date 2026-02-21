@@ -70,7 +70,7 @@ pub async fn consolidate_memories(
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
             // run_maintenance returns the number of decayed memories
-            memory_guard.run_maintenance(0.95, &user_id_for_maintenance) // 5% decay factor
+            memory_guard.run_maintenance(0.95, &user_id_for_maintenance, true) // 5% decay factor, always heavy for on-demand
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Maintenance task panicked: {e}")))?

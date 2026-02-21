@@ -232,6 +232,11 @@ pub struct MultiUserMemoryManager {
 
     /// Shared relevance engine for proactive memory surfacing (entity cache + learned weights persist)
     pub relevance_engine: Arc<RelevanceEngine>,
+
+    /// Maintenance cycle counter: cycles 0..5 are lightweight (in-memory only),
+    /// cycle 0 (mod 6) is heavyweight (graph decay, fact extraction, flush).
+    /// At 300s intervals, heavy cycles fire every 30 minutes.
+    maintenance_cycle: std::sync::atomic::AtomicU64,
 }
 
 impl MultiUserMemoryManager {
@@ -476,6 +481,7 @@ impl MultiUserMemoryManager {
             ab_test_manager: Arc::new(ab_testing::ABTestManager::new()),
             session_store: Arc::new(SessionStore::new()),
             relevance_engine,
+            maintenance_cycle: std::sync::atomic::AtomicU64::new(1),
         };
 
         info!("Running initial audit log rotation...");
@@ -1004,6 +1010,24 @@ impl MultiUserMemoryManager {
 
     /// Run maintenance on all cached user memories
     pub fn run_maintenance_all_users(&self) -> usize {
+        let cycle = self
+            .maintenance_cycle
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Heavy cycle every 6th iteration (30 min at 300s intervals).
+        // Heavy cycles run graph decay (full edge scan), fact extraction (full memory scan),
+        // and flush databases (triggers compaction). Light cycles only touch in-memory data.
+        let is_heavy = cycle % 6 == 0;
+
+        if is_heavy {
+            tracing::info!(
+                "Maintenance cycle {} (HEAVY — graph decay + fact extraction + flush)",
+                cycle
+            );
+        } else {
+            tracing::debug!("Maintenance cycle {} (light — in-memory only)", cycle);
+        }
+
         let decay_factor = self.server_config.activation_decay_factor;
         let mut total_processed = 0;
 
@@ -1022,7 +1046,7 @@ impl MultiUserMemoryManager {
         for user_id in user_ids {
             let maintenance_result = if let Ok(memory_lock) = self.get_user_memory(&user_id) {
                 let memory = memory_lock.read();
-                match memory.run_maintenance(decay_factor, &user_id) {
+                match memory.run_maintenance(decay_factor, &user_id, is_heavy) {
                     Ok(result) => {
                         total_processed += result.decayed_count;
                         total_facts_extracted += result.facts_extracted;
@@ -1084,10 +1108,13 @@ impl MultiUserMemoryManager {
                 }
             }
 
-            // Direction 2: Graph decay + orphan compensation
+            // Direction 2: Lazy decay — flush opportunistic pruning queue
+            // Instead of scanning all 34k+ edges (apply_decay), we queue edges found
+            // below threshold during normal reads and batch-delete them here.
+            // Runs every cycle since it's just targeted deletes, not a full scan.
             if let Ok(graph) = self.get_user_graph(&user_id) {
                 let graph_guard = graph.read();
-                match graph_guard.apply_decay() {
+                match graph_guard.flush_pending_maintenance() {
                     Ok(decay_result) => {
                         edges_decayed += decay_result.pruned_count;
 
@@ -1118,14 +1145,24 @@ impl MultiUserMemoryManager {
                         }
                     }
                     Err(e) => {
-                        tracing::debug!("Graph decay failed for user {}: {}", user_id, e);
+                        tracing::debug!("Graph lazy pruning failed for user {}: {}", user_id, e);
                     }
                 }
             }
         }
 
+        // Flush databases only on heavy cycles — flush triggers RocksDB compaction
+        // which allocates significant C++ memory through Windows CRT
+        if is_heavy {
+            if let Err(e) = self.flush_all_databases() {
+                tracing::warn!("Periodic flush failed: {}", e);
+            }
+        }
+
         tracing::info!(
-            "Maintenance complete: {} memories processed, {} edges strengthened, {} weak edges pruned, {} facts extracted, {} facts reinforced across {} users",
+            "Maintenance complete (cycle {}, {}): {} memories processed, {} edges strengthened, {} weak edges pruned, {} facts extracted, {} facts reinforced across {} users",
+            cycle,
+            if is_heavy { "heavy" } else { "light" },
             total_processed,
             edges_strengthened,
             edges_decayed,

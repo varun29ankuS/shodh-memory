@@ -13,6 +13,9 @@
 //!   -h, --help                Print help
 //!   -V, --version             Print version
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::Result;
 use clap::Parser;
 use std::net::SocketAddr;
@@ -367,6 +370,9 @@ fn start_maintenance_scheduler(manager: AppState, interval_secs: u64) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
 
+        // Skip first immediate tick — let server warm up before running maintenance
+        interval.tick().await;
+
         loop {
             interval.tick().await;
 
@@ -384,12 +390,11 @@ fn start_maintenance_scheduler(manager: AppState, interval_secs: u64) {
             }
 
             // Run maintenance in blocking thread pool
+            // Heavy cycles (every 6th = ~30 min) include graph decay + flush;
+            // light cycles only touch in-memory data (no RocksDB full scans)
             let manager_clone = Arc::clone(&manager);
             tokio::task::spawn_blocking(move || {
                 manager_clone.run_maintenance_all_users();
-                if let Err(e) = manager_clone.flush_all_databases() {
-                    tracing::warn!("Periodic flush failed: {}", e);
-                }
             });
         }
     });
