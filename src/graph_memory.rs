@@ -2438,6 +2438,10 @@ impl GraphMemory {
         self.relationship_count.store(0, Ordering::Relaxed);
         self.episode_count.store(0, Ordering::Relaxed);
 
+        // Drain pending maintenance queues — they reference now-deleted entities/edges
+        let _ = std::mem::take(&mut *self.pending_prune.lock());
+        let _ = std::mem::take(&mut *self.pending_orphan_checks.lock());
+
         tracing::info!(
             "Graph data cleared (GDPR erasure): {} entities, {} relationships, {} episodes",
             entity_count,

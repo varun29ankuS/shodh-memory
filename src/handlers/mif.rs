@@ -1154,11 +1154,102 @@ pub async fn import_mif(
 
     // Import graph edges if present
     if let Some(ref graph) = req.data.graph {
-        for edge in &graph.edges {
-            if !edge.source.starts_with("mem_") || !edge.target.starts_with("mem_") {
-                continue;
+        // Only attempt edge import if there are entity-type edges
+        let entity_edges: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|e| e.source.starts_with("entity:") && e.target.starts_with("entity:"))
+            .collect();
+
+        if !entity_edges.is_empty() {
+            let graph_memory = state
+                .get_user_graph(&req.user_id)
+                .map_err(AppError::Internal)?;
+            let graph_guard = graph_memory.read();
+
+            for edge in entity_edges {
+                // Parse entity identifiers: "entity:{uuid}" or "entity:{name}"
+                let source_id = &edge.source["entity:".len()..];
+                let target_id = &edge.target["entity:".len()..];
+
+                // Try resolving as UUID first, then by name
+                let from_entity = uuid::Uuid::parse_str(source_id)
+                    .ok()
+                    .and_then(|uuid| graph_guard.get_entity(&uuid).ok().flatten())
+                    .or_else(|| graph_guard.find_entity_by_name(source_id).ok().flatten());
+
+                let to_entity = uuid::Uuid::parse_str(target_id)
+                    .ok()
+                    .and_then(|uuid| graph_guard.get_entity(&uuid).ok().flatten())
+                    .or_else(|| graph_guard.find_entity_by_name(target_id).ok().flatten());
+
+                let (Some(from_node), Some(to_node)) = (from_entity, to_entity) else {
+                    warnings.push(format!(
+                        "Edge skipped: could not resolve entities '{}' → '{}'",
+                        source_id, target_id
+                    ));
+                    continue;
+                };
+
+                let relation_type = match edge.edge_type.as_str() {
+                    "relatedto" => graph_memory::RelationType::RelatedTo,
+                    "associatedwith" => graph_memory::RelationType::AssociatedWith,
+                    "partof" => graph_memory::RelationType::PartOf,
+                    "contains" => graph_memory::RelationType::Contains,
+                    "ownedby" => graph_memory::RelationType::OwnedBy,
+                    "createdby" => graph_memory::RelationType::CreatedBy,
+                    "developedby" => graph_memory::RelationType::DevelopedBy,
+                    "uses" => graph_memory::RelationType::Uses,
+                    "workswith" => graph_memory::RelationType::WorksWith,
+                    "worksat" => graph_memory::RelationType::WorksAt,
+                    "employedby" => graph_memory::RelationType::EmployedBy,
+                    "locatedin" => graph_memory::RelationType::LocatedIn,
+                    "locatedat" => graph_memory::RelationType::LocatedAt,
+                    "causes" => graph_memory::RelationType::Causes,
+                    "resultsin" => graph_memory::RelationType::ResultsIn,
+                    "learned" => graph_memory::RelationType::Learned,
+                    "knows" => graph_memory::RelationType::Knows,
+                    "teaches" => graph_memory::RelationType::Teaches,
+                    "coretrieved" => graph_memory::RelationType::CoRetrieved,
+                    "cooccurs" => graph_memory::RelationType::CoOccurs,
+                    other => graph_memory::RelationType::Custom(other.to_string()),
+                };
+
+                let created_at = chrono::DateTime::parse_from_rfc3339(&edge.created_at)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+
+                let entity_confidence = Some((from_node.salience + to_node.salience) / 2.0);
+
+                let new_edge = graph_memory::RelationshipEdge {
+                    uuid: uuid::Uuid::new_v4(),
+                    from_entity: from_node.uuid,
+                    to_entity: to_node.uuid,
+                    relation_type,
+                    strength: edge.weight,
+                    created_at,
+                    valid_at: created_at,
+                    invalidated_at: None,
+                    source_episode_id: None,
+                    context: String::new(),
+                    last_activated: created_at,
+                    activation_count: edge.strengthened_count.max(1),
+                    ltp_status: graph_memory::LtpStatus::None,
+                    tier: graph_memory::EdgeTier::L1Working,
+                    activation_timestamps: None,
+                    entity_confidence,
+                };
+
+                match graph_guard.add_relationship(new_edge) {
+                    Ok(_) => imported.edges += 1,
+                    Err(e) => {
+                        warnings.push(format!(
+                            "Failed to import edge {} → {}: {}",
+                            source_id, target_id, e
+                        ));
+                    }
+                }
             }
-            imported.edges += 1;
         }
     }
 

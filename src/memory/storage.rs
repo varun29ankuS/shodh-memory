@@ -2193,6 +2193,26 @@ impl MemoryStorage {
         Ok(result)
     }
 
+    /// Get all memory IDs without loading full Memory objects.
+    ///
+    /// Returns only 16-byte UUID keys (lightweight). Use with `get()` to load
+    /// individual memories in batches to avoid OOM on large datasets.
+    pub fn get_all_ids(&self) -> Result<Vec<MemoryId>> {
+        let mut ids = Vec::new();
+        let mut read_opts = rocksdb::ReadOptions::default();
+        read_opts.fill_cache(false);
+        let iter = self.db.iterator_opt(IteratorMode::Start, read_opts);
+        for item in iter {
+            if let Ok((key, _)) = item {
+                if key.len() == 16 {
+                    let uuid_bytes: [u8; 16] = key[..16].try_into().unwrap();
+                    ids.push(MemoryId(uuid::Uuid::from_bytes(uuid_bytes)));
+                }
+            }
+        }
+        Ok(ids)
+    }
+
     /// Get all memories from long-term storage
     ///
     /// Only returns entries with valid 16-byte UUID keys (consistent with get_stats)

@@ -949,6 +949,7 @@ pub async fn proactive_context(
                     .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
                     .filter(|w| w.len() >= 3)
                     .collect();
+                let context_lower = context_for_ner.to_lowercase();
 
                 let filtered: Vec<_> = entities
                     .into_iter()
@@ -966,10 +967,15 @@ pub async fn proactive_context(
                         ) {
                             return false;
                         }
-                        // Validate: entity must appear as a whole word in context,
-                        // not as a subword fragment (e.g., "ian" from "Hebbian")
-                        context_words.contains(t)
-                            || context_words.iter().any(|w| w.eq_ignore_ascii_case(t))
+                        // Validate: entity must appear in context.
+                        // Single-word: check word set (prevents subword fragments like "ian" from "Hebbian")
+                        // Multi-word: check case-insensitive substring of original context
+                        if !t.contains(' ') {
+                            context_words.contains(t)
+                                || context_words.iter().any(|w| w.eq_ignore_ascii_case(t))
+                        } else {
+                            context_lower.contains(&lower)
+                        }
                     })
                     .collect();
                 let infos: Vec<DetectedEntityInfo> = filtered
@@ -1272,6 +1278,7 @@ pub async fn proactive_context(
     let content_hash = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        req.user_id.hash(&mut hasher);
         clean_context.hash(&mut hasher);
         hasher.finish()
     };

@@ -261,19 +261,29 @@ impl TodoStore {
         Ok(None)
     }
 
-    /// Store the mapping from vector_id to todo_id
+    /// Store the mapping from vector_id to todo_id (and reverse)
     pub fn store_vector_id_mapping(
         &self,
         user_id: &str,
         vector_id: u32,
         todo_id: &TodoId,
     ) -> Result<()> {
-        let key = format!("vector_id:{}:{}", user_id, vector_id);
-        self.db.put_cf(
-            self.todo_index_cf(),
-            key.as_bytes(),
+        let mut batch = WriteBatch::default();
+        let index_cf = self.todo_index_cf();
+
+        // Forward: vector_id → todo_id (for search result resolution)
+        let fwd_key = format!("vector_id:{}:{}", user_id, vector_id);
+        batch.put_cf(
+            index_cf,
+            fwd_key.as_bytes(),
             todo_id.0.to_string().as_bytes(),
-        )?;
+        );
+
+        // Reverse: todo_id → vector_id (for cleanup on delete)
+        let rev_key = format!("todo_vector:{}:{}", user_id, todo_id.0);
+        batch.put_cf(index_cf, rev_key.as_bytes(), vector_id.to_le_bytes());
+
+        self.db.write(batch)?;
         Ok(())
     }
 
@@ -458,7 +468,7 @@ impl TodoStore {
         Ok(())
     }
 
-    /// Remove todo indices
+    /// Remove todo indices and clean up vector embeddings
     fn remove_todo_indices(&self, todo: &Todo) -> Result<()> {
         let mut batch = WriteBatch::default();
         let id_str = todo.id.0.to_string();
@@ -496,6 +506,27 @@ impl TodoStore {
         if let Some(ref parent_id) = todo.parent_id {
             let parent_key = format!("parent:{}:{}", parent_id.0, id_str);
             batch.delete_cf(index_cf, parent_key.as_bytes());
+        }
+
+        // Clean up vector index mapping: look up vector_id from reverse mapping
+        let rev_key = format!("todo_vector:{}:{}", todo.user_id, id_str);
+        if let Some(vid_bytes) = self.db.get_cf(index_cf, rev_key.as_bytes())? {
+            if vid_bytes.len() >= 4 {
+                let vector_id =
+                    u32::from_le_bytes([vid_bytes[0], vid_bytes[1], vid_bytes[2], vid_bytes[3]]);
+
+                // Mark deleted in Vamana index
+                let indices = self.vector_indices.read();
+                if let Some(index) = indices.get(&todo.user_id) {
+                    index.mark_deleted(vector_id);
+                }
+
+                // Remove forward mapping
+                let fwd_key = format!("vector_id:{}:{}", todo.user_id, vector_id);
+                batch.delete_cf(index_cf, fwd_key.as_bytes());
+            }
+            // Remove reverse mapping
+            batch.delete_cf(index_cf, rev_key.as_bytes());
         }
 
         self.db.write(batch)?;
@@ -1285,6 +1316,12 @@ impl TodoStore {
         } else {
             Ok(false)
         }
+    }
+
+    /// Purge a user's vector index from memory (used during GDPR user deletion)
+    pub fn purge_user_vectors(&self, user_id: &str) {
+        let mut indices = self.vector_indices.write();
+        indices.remove(user_id);
     }
 
     // =========================================================================

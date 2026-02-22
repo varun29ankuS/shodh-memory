@@ -553,13 +553,13 @@ impl LearnedWeights {
         let calibrated_momentum = calibrate_score(amplified_momentum);
 
         // CTX-3: Transform access count to 0-1 scale with diminishing returns
-        // 0 accesses -> 0.0, 1 -> 0.3, 5 -> 0.6, 10+ -> 0.8+
+        // 0 accesses -> 0.0, 1 -> 0.25, 2 -> 0.40, 5 -> 0.65, 16+ -> 1.0
         let access_score = if access_count == 0 {
             0.0
         } else {
-            // log2 scale with ceiling: log2(1) = 0, log2(2) = 1, log2(8) = 3, log2(16) = 4
-            let log_access = (access_count as f32).log2();
-            // Normalize: 4 accesses (log2=2) -> ~0.5, 16 accesses (log2=4) -> ~1.0
+            // log2(n+1) ensures access_count=1 produces a non-zero score (log2(2)=1.0)
+            // unlike log2(1)=0 which made first-access indistinguishable from never-accessed
+            let log_access = (access_count as f32 + 1.0).log2();
             (log_access / 4.0).min(1.0)
         };
         let calibrated_access = calibrate_score(access_score);
@@ -697,6 +697,25 @@ impl RelevanceEngine {
         config: &RelevanceConfig,
         feedback_store: Option<&RwLock<FeedbackStore>>,
     ) -> Result<RelevanceResponse> {
+        self.surface_relevant_inner(
+            context,
+            memory_system,
+            graph_memory,
+            config,
+            feedback_store,
+            None,
+        )
+    }
+
+    fn surface_relevant_inner(
+        &self,
+        context: &str,
+        memory_system: &MemorySystem,
+        graph_memory: Option<&GraphMemory>,
+        config: &RelevanceConfig,
+        feedback_store: Option<&RwLock<FeedbackStore>>,
+        weights_override: Option<LearnedWeights>,
+    ) -> Result<RelevanceResponse> {
         let start = Instant::now();
         let mut debug = RelevanceDebug {
             ner_ms: 0.0,
@@ -762,7 +781,7 @@ impl RelevanceEngine {
 
         // Phase 3: Rank and select top results using learned weights
         let ranking_start = Instant::now();
-        let weights = self.learned_weights.read().clone();
+        let weights = weights_override.unwrap_or_else(|| self.learned_weights.read().clone());
 
         let mut results: Vec<SurfacedMemory> = candidate_memories
             .into_iter()
@@ -1129,15 +1148,15 @@ impl RelevanceEngine {
             (self.get_weights(), None)
         };
 
-        // Temporarily set weights for this request
-        let original_weights = self.get_weights();
-        self.set_weights(weights);
-
-        // Run the actual surfacing (no feedback store in A/B path — weights override already applied)
-        let response = self.surface_relevant(context, memory_system, graph_memory, config, None)?;
-
-        // Restore original weights
-        self.set_weights(original_weights);
+        // Use per-request weights override (thread-safe: no global state mutation)
+        let response = self.surface_relevant_inner(
+            context,
+            memory_system,
+            graph_memory,
+            config,
+            None,
+            Some(weights),
+        )?;
 
         // Record impression for A/B test if active
         if let (Some(ref test_id), Some(ref _v)) = (&active_test, &variant) {
@@ -1252,7 +1271,9 @@ impl RelevanceEngine {
                                 .entry(memory_id)
                                 .and_modify(|(existing_score, matched)| {
                                     *existing_score += score;
-                                    matched.push(entity.name.clone());
+                                    if !matched.contains(&entity.name) {
+                                        matched.push(entity.name.clone());
+                                    }
                                 })
                                 .or_insert((score, vec![entity.name.clone()]));
                         }

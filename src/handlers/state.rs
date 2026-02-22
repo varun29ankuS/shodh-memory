@@ -734,6 +734,11 @@ impl MultiUserMemoryManager {
     }
 
     /// Delete user data (GDPR compliance)
+    ///
+    /// Cleans up:
+    /// 1. In-memory caches (user_memories, graph_memories)
+    /// 2. Shared RocksDB: todos, projects, todo indices, reminders, files, feedback, audit
+    /// 3. Per-user filesystem: per-user RocksDB, graph DB, vector indices
     pub fn forget_user(&self, user_id: &str) -> Result<()> {
         self.user_memories.invalidate(user_id);
         self.graph_memories.invalidate(user_id);
@@ -748,6 +753,19 @@ impl MultiUserMemoryManager {
             self.graph_memories.run_pending_tasks();
         }
 
+        // Clean up all user data from shared RocksDB column families
+        self.purge_user_from_shared_db(user_id)?;
+
+        // Clean up todo vector indices
+        self.todo_store.purge_user_vectors(user_id);
+
+        // Clean up in-memory feedback state
+        {
+            let mut fb = self.feedback_store.write();
+            fb.take_pending(user_id);
+        }
+
+        // Delete per-user filesystem (memories DB, graph DB, vector index files)
         let user_path = self.base_path.join(user_id);
         if user_path.exists() {
             let mut attempts = 0;
@@ -777,6 +795,134 @@ impl MultiUserMemoryManager {
         }
 
         info!("Deleted all data for user: {}", user_id);
+        Ok(())
+    }
+
+    /// Prefix-scan and batch-delete all keys starting with `{user_id}:` from a column family
+    fn delete_by_prefix(db: &rocksdb::DB, cf: &rocksdb::ColumnFamily, prefix: &[u8]) -> usize {
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut count = 0;
+        let iter = db.prefix_iterator_cf(cf, prefix);
+        for item in iter.flatten() {
+            let (key, _) = item;
+            if !key.starts_with(prefix) {
+                break;
+            }
+            batch.delete_cf(cf, &key);
+            count += 1;
+        }
+        if count > 0 {
+            let _ = db.write(batch);
+        }
+        count
+    }
+
+    /// Purge all user data from shared RocksDB (todos, reminders, files, feedback, audit)
+    fn purge_user_from_shared_db(&self, user_id: &str) -> Result<()> {
+        let prefix = format!("{user_id}:");
+        let prefix_bytes = prefix.as_bytes();
+
+        // Shared CF names that use `{user_id}:` as key prefix
+        let cf_names = ["todos", "projects", "prospective"];
+        for name in &cf_names {
+            if let Some(cf) = self.shared_db.cf_handle(name) {
+                let n = Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes);
+                if n > 0 {
+                    tracing::debug!("GDPR: purged {n} entries from {name} CF for {user_id}");
+                }
+            }
+        }
+
+        // Index CFs use varied key prefixes — scan all relevant patterns
+        if let Some(cf) = self.shared_db.cf_handle("todo_index") {
+            let prefixes = [
+                format!("user:{user_id}:"),
+                format!("status:Backlog:{user_id}:"),
+                format!("status:Todo:{user_id}:"),
+                format!("status:InProgress:{user_id}:"),
+                format!("status:Blocked:{user_id}:"),
+                format!("status:Done:{user_id}:"),
+                format!("status:Cancelled:{user_id}:"),
+                format!("vector_id:{user_id}:"),
+                format!("todo_vector:{user_id}:"),
+            ];
+            for p in &prefixes {
+                Self::delete_by_prefix(&self.shared_db, cf, p.as_bytes());
+            }
+            // Priority and due/context keys also contain user_id but at varying positions.
+            // Full scan of index CF to catch them all.
+            let mut batch = rocksdb::WriteBatch::default();
+            let iter = self.shared_db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            for item in iter.flatten() {
+                let (key, _) = item;
+                if let Ok(key_str) = std::str::from_utf8(&key) {
+                    if key_str.contains(&prefix) {
+                        batch.delete_cf(cf, &key);
+                    }
+                }
+            }
+            let _ = self.shared_db.write(batch);
+        }
+
+        if let Some(cf) = self.shared_db.cf_handle("prospective_index") {
+            let prefixes = [
+                format!("user:{user_id}:"),
+                format!("status:Pending:{user_id}:"),
+                format!("status:Triggered:{user_id}:"),
+                format!("status:Dismissed:{user_id}:"),
+            ];
+            for p in &prefixes {
+                Self::delete_by_prefix(&self.shared_db, cf, p.as_bytes());
+            }
+            // Context keyword indices: `context:{keyword}:{user_id}:{id}`
+            let mut batch = rocksdb::WriteBatch::default();
+            let iter = self.shared_db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            for item in iter.flatten() {
+                let (key, _) = item;
+                if let Ok(key_str) = std::str::from_utf8(&key) {
+                    if key_str.contains(&prefix) {
+                        batch.delete_cf(cf, &key);
+                    }
+                }
+            }
+            let _ = self.shared_db.write(batch);
+        }
+
+        // Files
+        if let Some(cf) = self.shared_db.cf_handle("files") {
+            Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes);
+        }
+        if let Some(cf) = self.shared_db.cf_handle("file_index") {
+            let idx_prefix = format!("file_idx:{user_id}:");
+            Self::delete_by_prefix(&self.shared_db, cf, idx_prefix.as_bytes());
+            // Also catch other patterns
+            let mut batch = rocksdb::WriteBatch::default();
+            let iter = self.shared_db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            for item in iter.flatten() {
+                let (key, _) = item;
+                if let Ok(key_str) = std::str::from_utf8(&key) {
+                    if key_str.contains(&prefix) {
+                        batch.delete_cf(cf, &key);
+                    }
+                }
+            }
+            let _ = self.shared_db.write(batch);
+        }
+
+        // Feedback: `pending:{user_id}`
+        if let Some(cf) = self.shared_db.cf_handle("feedback") {
+            let pending_key = format!("pending:{user_id}");
+            let _ = self.shared_db.delete_cf(cf, pending_key.as_bytes());
+        }
+
+        // Audit logs
+        if let Some(cf) = self.shared_db.cf_handle("audit") {
+            Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes);
+        }
+
+        // Clear in-memory audit log cache
+        self.audit_logs.remove(user_id);
+
         Ok(())
     }
 

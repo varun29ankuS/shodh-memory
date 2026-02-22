@@ -6,7 +6,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Query, State,
     },
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -21,6 +21,12 @@ use super::state::MultiUserMemoryManager;
 use crate::relevance;
 use crate::streaming;
 use crate::validation;
+
+/// Query parameters for SSE endpoints
+#[derive(Debug, serde::Deserialize)]
+pub struct SseQuery {
+    pub user_id: Option<String>,
+}
 
 /// Application state type alias
 pub type AppState = std::sync::Arc<MultiUserMemoryManager>;
@@ -58,20 +64,35 @@ pub async fn context_status_sse(
 /// SSE endpoint for real-time memory events
 ///
 /// Streams CREATE, RETRIEVE, DELETE events to connected dashboard clients.
-/// No authentication required - read-only, lightweight event stream.
+/// Accepts optional `?user_id=X` query parameter to filter events.
+/// Without user_id, no events are sent (secure by default).
 pub async fn memory_events_sse(
     State(state): State<AppState>,
+    Query(params): Query<SseQuery>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let receiver = state.subscribe_events();
     let stream = BroadcastStream::new(receiver);
+    let filter_user_id = params.user_id;
 
-    let event_stream = stream.filter_map(|result| async move {
-        match result {
-            Ok(event) => {
-                let json = serde_json::to_string(&event).ok()?;
-                Some(Ok(Event::default().event(&event.event_type).data(json)))
+    let event_stream = stream.filter_map(move |result| {
+        let filter_uid = filter_user_id.clone();
+        async move {
+            match result {
+                Ok(event) => {
+                    // Filter by user_id: only send events belonging to the subscribed user
+                    if let Some(ref uid) = filter_uid {
+                        if event.user_id != *uid {
+                            return None;
+                        }
+                    } else {
+                        // No user_id specified — drop event (secure by default)
+                        return None;
+                    }
+                    let json = serde_json::to_string(&event).ok()?;
+                    Some(Ok(Event::default().event(&event.event_type).data(json)))
+                }
+                Err(_) => None,
             }
-            Err(_) => None, // Lagged receiver, skip event
         }
     });
 

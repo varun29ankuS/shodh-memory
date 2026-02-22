@@ -1225,11 +1225,9 @@ impl RetrievalEngine {
     /// - On failure, next rebuild/repair continues from where it left off
     /// - Logs progress every 1000 memories for monitoring
     pub fn rebuild_index(&self) -> Result<()> {
-        // Get all memories from storage
-        let end = chrono::Utc::now();
-        let start = chrono::DateTime::from_timestamp(0, 0).unwrap();
-        let memories = self.storage.search(SearchCriteria::ByDate { start, end })?;
-        let total = memories.len();
+        // Phase 1: Collect only memory IDs (16 bytes each — bounded even at 10M)
+        let all_ids = self.storage.get_all_ids()?;
+        let total = all_ids.len();
 
         if total == 0 {
             tracing::info!("No memories to index");
@@ -1247,23 +1245,39 @@ impl RetrievalEngine {
         let mut failed = 0;
         let start_time = std::time::Instant::now();
 
-        for (i, memory) in memories.iter().enumerate() {
+        // Phase 2: Process one memory at a time — O(1) peak memory per iteration
+        for (i, memory_id) in all_ids.iter().enumerate() {
             // Skip already indexed memories (makes rebuild resumable)
-            if indexed_ids.contains(&memory.id) {
+            if indexed_ids.contains(memory_id) {
                 skipped += 1;
-                continue;
-            }
-
-            // Index this memory
-            match self.index_memory(memory) {
-                Ok(_) => indexed += 1,
-                Err(e) => {
-                    failed += 1;
-                    tracing::warn!(
-                        "Failed to index memory {} during rebuild: {}",
-                        memory.id.0,
-                        e
-                    );
+            } else {
+                // Load single memory from RocksDB, index it, then drop
+                match self.storage.get(memory_id) {
+                    Ok(memory) => {
+                        if memory.is_forgotten() {
+                            skipped += 1;
+                        } else {
+                            match self.index_memory(&memory) {
+                                Ok(_) => indexed += 1,
+                                Err(e) => {
+                                    failed += 1;
+                                    tracing::warn!(
+                                        "Failed to index memory {} during rebuild: {}",
+                                        memory_id.0,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        tracing::warn!(
+                            "Failed to load memory {} during rebuild: {}",
+                            memory_id.0,
+                            e
+                        );
+                    }
                 }
             }
 
