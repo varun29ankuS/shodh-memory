@@ -27,100 +27,167 @@ pub type AppState = std::sync::Arc<MultiUserMemoryManager>;
 
 /// Consolidate memories into semantic facts (SHO-AUD-7)
 ///
-/// Analyzes memories to extract durable semantic facts (preferences, procedures, patterns).
-/// Facts are reinforced when seen multiple times across different memories.
+/// Spawns the full pipeline (fact extraction → replay → edge strengthening) as a
+/// background task and returns immediately with 202 Accepted. This avoids the 60s
+/// HTTP timeout killing the handler mid-flight for large memory stores.
+/// Results are logged server-side and visible via `/api/consolidation/report`.
 #[tracing::instrument(skip(state), fields(user_id = %req.user_id))]
 pub async fn consolidate_memories(
     State(state): State<AppState>,
     Json(req): Json<ConsolidateRequest>,
 ) -> Result<Json<ConsolidateResponse>, AppError> {
-    let op_start = std::time::Instant::now();
-
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let memory = state
+    // Validate user exists before spawning background work
+    let _ = state
         .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
+    let user_id = req.user_id.clone();
     let min_support = req.min_support;
     let min_age_days = req.min_age_days;
-    let user_id = req.user_id.clone();
+    let state_clone = state.clone();
 
-    // Run consolidation via MemorySystem::distill_facts which stores in the
-    // per-user fact store (same DB that list_facts/search_facts read from).
-    // Previously this stored in state.fact_store (a separate standalone DB)
-    // which was never read by any endpoint — a silent data loss bug.
-    let (result, warnings) = {
-        let memory = memory.clone();
-        tokio::task::spawn_blocking(move || {
-            let memory_guard = memory.read();
-            memory_guard.distill_facts(&user_id, min_support, min_age_days)
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
-        .map(|r| (r, Vec::<String>::new()))
-        .map_err(AppError::Internal)?
-    };
+    // Spawn the entire pipeline as a detached background task.
+    // This survives HTTP timeout cancellation — the work always completes.
+    tokio::task::spawn(async move {
+        let op_start = std::time::Instant::now();
 
-    // AUD-9: Run memory replay/maintenance cycle
-    // This includes: tier consolidation, decay, graph maintenance, and memory replay
-    let maintenance_result = {
-        let memory = memory.clone();
-        let user_id_for_maintenance = req.user_id.clone();
-        tokio::task::spawn_blocking(move || {
-            let memory_guard = memory.read();
-            // run_maintenance returns the number of decayed memories
-            memory_guard.run_maintenance(0.95, &user_id_for_maintenance, true) // 5% decay factor, always heavy for on-demand
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Maintenance task panicked: {e}")))?
-        .unwrap_or_default()
-    };
+        let memory = match state_clone.get_user_memory(&user_id) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(user_id = %user_id, "Consolidation: failed to get memory: {e}");
+                return;
+            }
+        };
 
-    // Get replay stats from the consolidation report (last cycle)
-    let (memories_replayed, edges_strengthened) = {
-        let memory_guard = memory.read();
-        let report = memory_guard.get_consolidation_report(
-            chrono::Utc::now() - chrono::Duration::hours(1),
-            Some(chrono::Utc::now()),
+        // Step 1: Fact extraction
+        let result = {
+            let memory = memory.clone();
+            let uid = user_id.clone();
+            match tokio::task::spawn_blocking(move || {
+                let memory_guard = memory.read();
+                memory_guard.distill_facts(&uid, min_support, min_age_days)
+            })
+            .await
+            {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    tracing::error!(user_id = %user_id, "Consolidation fact extraction failed: {e}");
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(user_id = %user_id, "Consolidation fact extraction panicked: {e}");
+                    return;
+                }
+            }
+        };
+
+        // Step 2: Maintenance (replay + tier consolidation + decay)
+        let decay_factor = state_clone.server_config().activation_decay_factor;
+        let maintenance_result = {
+            let memory = memory.clone();
+            let uid = user_id.clone();
+            match tokio::task::spawn_blocking(move || {
+                let memory_guard = memory.read();
+                memory_guard.run_maintenance(decay_factor, &uid, true)
+            })
+            .await
+            {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    tracing::error!(user_id = %user_id, "Consolidation maintenance failed: {e}");
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!(user_id = %user_id, "Consolidation maintenance panicked: {e}");
+                    return;
+                }
+            }
+        };
+
+        // Step 3: Apply graph strengthening from replay results
+        let mut edges_strengthened: usize = 0;
+        let mut entity_edges_strengthened: usize = 0;
+
+        // Direction 1: Edge strengthening + promotion boost propagation
+        if !maintenance_result.edge_boosts.is_empty() {
+            if let Ok(graph) = state_clone.get_user_graph(&user_id) {
+                let graph_guard = graph.read();
+                match graph_guard.strengthen_memory_edges(&maintenance_result.edge_boosts) {
+                    Ok((count, promotion_boosts)) => {
+                        edges_strengthened += count;
+                        if !promotion_boosts.is_empty() {
+                            let memory_guard = memory.read();
+                            let _ = memory_guard.apply_edge_promotion_boosts(&promotion_boosts);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("On-demand edge boost failed: {e}");
+                    }
+                }
+            }
+        }
+
+        // Direction 3: Entity-entity Hebbian reinforcement for replayed memories
+        if !maintenance_result.replay_memory_ids.is_empty() {
+            if let Ok(graph) = state_clone.get_user_graph(&user_id) {
+                let graph_guard = graph.read();
+                for mem_id_str in &maintenance_result.replay_memory_ids {
+                    if let Ok(uuid) = uuid::Uuid::parse_str(mem_id_str) {
+                        match graph_guard.strengthen_episode_entity_edges(&uuid) {
+                            Ok(count) => entity_edges_strengthened += count,
+                            Err(e) => {
+                                tracing::debug!(
+                                    "Entity edge strengthening failed for {mem_id_str}: {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Direction 2: Lazy decay — flush opportunistic pruning queue
+        if let Ok(graph) = state_clone.get_user_graph(&user_id) {
+            let graph_guard = graph.read();
+            let _ = graph_guard.flush_pending_maintenance();
+        }
+
+        let duration = op_start.elapsed().as_secs_f64();
+        metrics::CONSOLIDATE_DURATION.observe(duration);
+        metrics::CONSOLIDATE_TOTAL
+            .with_label_values(&["success"])
+            .inc();
+
+        tracing::info!(
+            user_id = %user_id,
+            memories_processed = result.memories_processed,
+            facts_extracted = result.facts_extracted,
+            facts_reinforced = result.facts_reinforced,
+            memories_replayed = maintenance_result.replay_memory_ids.len(),
+            edges_strengthened,
+            entity_edges_strengthened,
+            memories_decayed = maintenance_result.decayed_count,
+            duration_secs = format!("{:.1}", duration),
+            "Consolidation complete (background)"
         );
-        (
-            report.statistics.memories_replayed,
-            report.statistics.edges_strengthened,
-        )
-    };
+    });
 
-    tracing::info!(
-        user_id = %req.user_id,
-        memories_processed = result.memories_processed,
-        facts_extracted = result.facts_extracted,
-        facts_reinforced = result.facts_reinforced,
-        memories_replayed = memories_replayed,
-        edges_strengthened = edges_strengthened,
-        memories_decayed = maintenance_result.decayed_count,
-        "Semantic consolidation and replay complete"
-    );
-
-    // Record metrics
-    let duration = op_start.elapsed().as_secs_f64();
-    metrics::CONSOLIDATE_DURATION.observe(duration);
-    metrics::CONSOLIDATE_TOTAL
-        .with_label_values(&["success"])
-        .inc();
-
-    // Combine fact counts from both the explicit distill and the maintenance loop
-    let total_extracted = result.facts_extracted + maintenance_result.facts_extracted;
-    let total_reinforced = result.facts_reinforced + maintenance_result.facts_reinforced;
-
+    // Return immediately — work continues in background
     Ok(Json(ConsolidateResponse {
-        memories_analyzed: result.memories_processed,
-        facts_extracted: total_extracted,
-        facts_reinforced: total_reinforced,
-        fact_ids: result.new_fact_ids,
-        memories_replayed,
-        edges_strengthened,
-        memories_decayed: maintenance_result.decayed_count,
-        warnings,
+        memories_analyzed: 0,
+        facts_extracted: 0,
+        facts_reinforced: 0,
+        fact_ids: vec![],
+        memories_replayed: 0,
+        edges_strengthened: 0,
+        entity_edges_strengthened: 0,
+        memories_decayed: 0,
+        warnings: vec![
+            "Consolidation started in background. Check /api/consolidation/report for results."
+                .to_string(),
+        ],
     }))
 }
 

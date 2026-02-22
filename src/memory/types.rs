@@ -4177,6 +4177,8 @@ pub struct MaintenanceResult {
     /// Edge boosts from replay: (from_memory_id, to_memory_id, boost_value)
     /// These should be applied via GraphMemory.strengthen_memory_edge()
     pub edge_boosts: Vec<(String, String, f32)>,
+    /// Memory IDs that were replayed — used for entity-entity edge strengthening
+    pub replay_memory_ids: Vec<String>,
     /// Number of memories replayed during consolidation
     pub memories_replayed: usize,
     /// Total priority score of replayed memories

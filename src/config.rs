@@ -280,12 +280,12 @@ impl Default for ServerConfig {
             request_timeout_secs: 60,
             is_production: false,
             cors: CorsConfig::default(),
-            maintenance_interval_secs: 300, // 5 minutes
-            activation_decay_factor: 0.95,  // 5% decay per cycle
-            backup_interval_secs: 86400,    // 24 hours
-            backup_max_count: 7,            // Keep 7 backups (1 week of daily backups)
-            backup_enabled: false,          // Disabled by default, auto-enabled in production
-            max_entities_per_memory: 10,    // Cap entities per memory (10 → max 45 edges)
+            maintenance_interval_secs: 3600, // 1 hour (aligns with biological consolidation timescales)
+            activation_decay_factor: 0.98, // 2% decay per cycle → 62% retained after 24hr, near-zero at 30 days
+            backup_interval_secs: 86400,   // 24 hours
+            backup_max_count: 7,           // Keep 7 backups (1 week of daily backups)
+            backup_enabled: false,         // Disabled by default, auto-enabled in production
+            max_entities_per_memory: 10,   // Cap entities per memory (10 → max 45 edges)
         }
     }
 }

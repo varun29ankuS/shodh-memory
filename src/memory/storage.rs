@@ -3330,6 +3330,35 @@ impl MemoryStorage {
         Ok(())
     }
 
+    /// Load the fact extraction watermark for a user.
+    ///
+    /// Key: `_watermark:fact_extraction:{user_id}` → 8-byte little-endian i64 (unix millis)
+    /// Returns None if no watermark has been persisted yet.
+    pub fn get_fact_watermark(&self, user_id: &str) -> Option<i64> {
+        let key = format!("_watermark:fact_extraction:{user_id}");
+        match self.db.get(key.as_bytes()) {
+            Ok(Some(bytes)) if bytes.len() == 8 => {
+                Some(i64::from_le_bytes(bytes[..8].try_into().unwrap()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Persist the fact extraction watermark for a user.
+    ///
+    /// Key: `_watermark:fact_extraction:{user_id}` → 8-byte little-endian i64 (unix millis)
+    pub fn set_fact_watermark(&self, user_id: &str, timestamp_millis: i64) {
+        let key = format!("_watermark:fact_extraction:{user_id}");
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(self.write_mode == WriteMode::Sync);
+        if let Err(e) =
+            self.db
+                .put_opt(key.as_bytes(), &timestamp_millis.to_le_bytes(), &write_opts)
+        {
+            tracing::warn!("Failed to persist fact extraction watermark: {e}");
+        }
+    }
+
     /// Delete ALL interference records (GDPR forget_all)
     ///
     /// Batch-deletes all `interference:` and `interference_meta:` keys.

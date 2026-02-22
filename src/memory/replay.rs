@@ -19,8 +19,7 @@ use crate::constants::{
     INTERFERENCE_PROACTIVE_THRESHOLD, INTERFERENCE_RETROACTIVE_DECAY,
     INTERFERENCE_SEVERE_THRESHOLD, INTERFERENCE_SIMILARITY_THRESHOLD,
     INTERFERENCE_VULNERABILITY_HOURS, REPLAY_AROUSAL_THRESHOLD, REPLAY_BATCH_SIZE,
-    REPLAY_EDGE_BOOST, REPLAY_IMPORTANCE_THRESHOLD, REPLAY_MAX_AGE_DAYS, REPLAY_MIN_CONNECTIONS,
-    REPLAY_STRENGTH_BOOST,
+    REPLAY_EDGE_BOOST, REPLAY_IMPORTANCE_THRESHOLD, REPLAY_MAX_AGE_DAYS, REPLAY_STRENGTH_BOOST,
 };
 use crate::memory::introspection::{ConsolidationEvent, InterferenceType};
 use chrono::{DateTime, Duration, Utc};
@@ -50,6 +49,8 @@ pub struct ReplayCycleResult {
     /// Edge boosts: (from_memory_id, to_memory_id, boost_value)
     /// To be applied via GraphMemory at API layer
     pub edge_boosts: Vec<(String, String, f32)>,
+    /// Memory IDs that were replayed — used for entity-entity edge strengthening
+    pub replay_memory_ids: Vec<String>,
 }
 
 /// Manager for memory replay during consolidation
@@ -114,9 +115,8 @@ impl ReplayManager {
                     if *importance < REPLAY_IMPORTANCE_THRESHOLD {
                         return None;
                     }
-                    if connections.len() < REPLAY_MIN_CONNECTIONS {
-                        return None;
-                    }
+                    // REPLAY_MIN_CONNECTIONS=0: importance alone qualifies for replay.
+                    // Connections still boost priority via connectivity_factor below.
 
                     // Calculate priority score
                     // Priority = importance × recency_factor × (1 + arousal_boost) × connectivity_factor

@@ -240,6 +240,12 @@ pub struct MemorySystem {
     /// When false, fact extraction is skipped entirely (no RocksDB scan, no clones).
     /// Set to true in remember(), cleared by maintenance after extraction runs.
     fact_extraction_needed: std::sync::atomic::AtomicBool,
+
+    /// Watermark: only memories with created_at > this timestamp (unix millis) are
+    /// processed for fact extraction. Persisted to RocksDB so server restarts don't
+    /// re-process the entire memory store. Initialized from the latest fact's
+    /// created_at or 0 if no facts exist.
+    fact_extraction_watermark: std::sync::atomic::AtomicI64,
 }
 
 /// Resolve an entity name to a graph label and salience using pre-extracted NER data.
@@ -522,6 +528,9 @@ impl MemorySystem {
             temporal_fact_store,
             // Dirty flag for fact extraction: run on first cycle, then only when new memories stored
             fact_extraction_needed: std::sync::atomic::AtomicBool::new(true),
+            // Watermark for incremental fact extraction — initialized to 0 (sentinel).
+            // On first maintenance call, loaded from RocksDB or derived from latest fact timestamp.
+            fact_extraction_watermark: std::sync::atomic::AtomicI64::new(0),
         })
     }
 
@@ -5569,10 +5578,16 @@ impl MemorySystem {
             );
         }
 
-        // 3.7. Fact extraction: consolidate episodic memories into semantic facts
-        // HEAVY ONLY: requires full RocksDB scan of all memories (get_all_memories)
-        // plus ONNX inference for embedding new facts. Deferred to heavy cycles
-        // (~30 min) to avoid per-cycle 5GB memory spikes from C++ iterator allocations.
+        // 3.7. Heavy cycle: load all memories once for both fact extraction and replay.
+        // This avoids two separate RocksDB full scans on the same cycle.
+        let all_memories_for_heavy: Vec<SharedMemory> = if is_heavy {
+            self.get_all_memories().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // 3.8. Fact extraction: consolidate episodic memories into semantic facts
+        // HEAVY ONLY: requires ONNX inference for embedding new facts.
         // The dirty flag (fact_extraction_needed) is only checked on heavy cycles;
         // it stays set across light cycles until the next heavy cycle processes it.
         let mut facts_extracted_count = 0;
@@ -5582,12 +5597,41 @@ impl MemorySystem {
                 .fact_extraction_needed
                 .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
-            let all_memories = self.get_all_memories().unwrap_or_default();
+            let all_memories = &all_memories_for_heavy;
             if !all_memories.is_empty() {
+                // Incremental: only process memories created since last extraction watermark.
+                // First run (watermark=0) processes everything; subsequent runs only new memories.
+                // Lazy init: if watermark is 0 (startup sentinel), load persisted value
+                // or derive from the latest fact's created_at timestamp.
+                let mut watermark_millis = self
+                    .fact_extraction_watermark
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if watermark_millis == 0 {
+                    watermark_millis = self
+                        .long_term_memory
+                        .get_fact_watermark(user_id)
+                        .or_else(|| self.fact_store.latest_fact_created_at(user_id))
+                        .unwrap_or(0);
+                    if watermark_millis > 0 {
+                        self.fact_extraction_watermark
+                            .store(watermark_millis, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                let watermark_dt = chrono::DateTime::from_timestamp_millis(watermark_millis)
+                    .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+
                 let memories: Vec<Memory> = all_memories
-                    .into_iter()
-                    .map(|arc_mem| (*arc_mem).clone())
+                    .iter()
+                    .filter(|m| m.created_at > watermark_dt)
+                    .map(|arc_mem| arc_mem.as_ref().clone())
                     .collect();
+
+                tracing::info!(
+                    total_memories = all_memories.len(),
+                    new_since_watermark = memories.len(),
+                    watermark = %watermark_dt.format("%Y-%m-%dT%H:%M:%S"),
+                    "Incremental fact extraction"
+                );
 
                 let consolidator = compression::SemanticConsolidator::new();
                 let consolidation_result = consolidator.consolidate(&memories);
@@ -5721,18 +5765,29 @@ impl MemorySystem {
                         );
                     }
                 }
+
+                // Advance watermark: all memories up to now have been processed.
+                // Next cycle will only see memories created after this point.
+                if !memories.is_empty() {
+                    let new_watermark = chrono::Utc::now().timestamp_millis();
+                    self.fact_extraction_watermark
+                        .store(new_watermark, std::sync::atomic::Ordering::Relaxed);
+                    self.long_term_memory
+                        .set_fact_watermark(user_id, new_watermark);
+                }
             }
         } else {
             tracing::debug!("Fact extraction skipped: no new memories since last cycle");
         }
 
-        // 4. SHO-105 + PIPE-2: Memory replay cycle (pattern-triggered consolidation)
-        // PIPE-2 replaces fixed 1-hour intervals with intelligent pattern detection:
-        // - Entity co-occurrence patterns
-        // - Salience spikes (high importance/arousal)
-        // - Temporal clusters (sessions)
-        // - Behavioral changes (topic/project switches)
-        // Falls back to timer-based replay if no patterns detected
+        // 4. SHO-105 + PIPE-2: Memory replay cycle (consolidation during heavy cycles)
+        //
+        // HEAVY ONLY: Replay draws candidates from ALL memory tiers (including long-term
+        // via the shared all_memories_for_heavy loaded above). Light cycles skip replay
+        // entirely — analogous to "consolidation during deep sleep, not during waking."
+        //
+        // Pattern detection still runs to record triggers, but actual replay execution
+        // only happens on heavy cycles where we have the full memory corpus.
         let mut replay_result = replay::ReplayCycleResult::default();
         {
             // PIPE-2: Check for pattern-triggered replay first
@@ -5778,52 +5833,44 @@ impl MemorySystem {
                 }
             }
 
-            // Replay if patterns detected OR timer interval reached (fallback)
+            // Replay only on heavy cycles — uses shared all_memories_for_heavy
             let timer_should_replay = self.replay_manager.read().should_replay();
-            let should_replay = has_pattern_triggers || timer_should_replay;
+            let should_replay = is_heavy && (has_pattern_triggers || timer_should_replay);
 
-            if should_replay {
-                // Collect replay candidates from working + session memory
-                // Fetch actual connections from GraphMemory for replay eligibility
+            if should_replay && !all_memories_for_heavy.is_empty() {
+                // Build replay candidates from ALL memory tiers (not just working+session)
                 let graph_ref = self.graph_memory.clone();
-                let candidates_data: Vec<_> = {
-                    let working = self.working_memory.read();
-                    let session = self.session_memory.read();
-
-                    working
-                        .all_memories()
-                        .iter()
-                        .chain(session.all_memories().iter())
-                        .map(|m| {
-                            // Fetch actual connections from GraphMemory
-                            let connections: Vec<String> = if let Some(ref graph) = graph_ref {
-                                let graph_guard = graph.read();
-                                graph_guard
-                                    .find_memory_associations(&m.id.0, 10)
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .map(|(uuid, _)| uuid.to_string())
-                                    .collect()
-                            } else {
-                                Vec::new()
-                            };
-                            let arousal = m
-                                .experience
-                                .context
-                                .as_ref()
-                                .map(|c| c.emotional.arousal)
-                                .unwrap_or(0.3);
-                            (
-                                m.id.0.to_string(),
-                                m.importance(),
-                                arousal,
-                                m.created_at,
-                                connections,
-                                m.experience.content.chars().take(50).collect::<String>(),
-                            )
-                        })
-                        .collect()
-                };
+                let candidates_data: Vec<_> = all_memories_for_heavy
+                    .iter()
+                    .map(|m| {
+                        // Fetch actual connections from GraphMemory
+                        let connections: Vec<String> = if let Some(ref graph) = graph_ref {
+                            let graph_guard = graph.read();
+                            graph_guard
+                                .find_memory_associations(&m.id.0, 10)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|(uuid, _)| uuid.to_string())
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let arousal = m
+                            .experience
+                            .context
+                            .as_ref()
+                            .map(|c| c.emotional.arousal)
+                            .unwrap_or(0.3);
+                        (
+                            m.id.0.to_string(),
+                            m.importance(),
+                            arousal,
+                            m.created_at,
+                            connections,
+                            m.experience.content.chars().take(50).collect::<String>(),
+                        )
+                    })
+                    .collect();
 
                 // Identify and execute replay
                 let candidates = self
@@ -5839,6 +5886,10 @@ impl MemorySystem {
                     replay_result.edges_strengthened = edge_boosts.len();
                     replay_result.total_priority_score =
                         candidates.iter().map(|c| c.priority_score).sum();
+
+                    // Collect replayed memory IDs for entity-entity edge strengthening
+                    replay_result.replay_memory_ids =
+                        candidates.iter().map(|c| c.memory_id.clone()).collect();
 
                     // Apply memory boosts
                     for (mem_id_str, boost) in &memory_boosts {
@@ -5917,6 +5968,7 @@ impl MemorySystem {
         Ok(MaintenanceResult {
             decayed_count,
             edge_boosts: replay_result.edge_boosts,
+            replay_memory_ids: replay_result.replay_memory_ids,
             memories_replayed: replay_result.memories_replayed,
             total_priority_score: replay_result.total_priority_score,
             facts_extracted: facts_extracted_count,
@@ -6105,11 +6157,36 @@ impl MemorySystem {
         // Get all memories for consolidation
         let all_memories = self.get_all_memories()?;
 
-        // Convert SharedMemory to Memory for consolidator
+        // Incremental: only process memories created since last extraction watermark
+        let mut watermark_millis = self
+            .fact_extraction_watermark
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if watermark_millis == 0 {
+            watermark_millis = self
+                .long_term_memory
+                .get_fact_watermark(user_id)
+                .or_else(|| self.fact_store.latest_fact_created_at(user_id))
+                .unwrap_or(0);
+            if watermark_millis > 0 {
+                self.fact_extraction_watermark
+                    .store(watermark_millis, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let watermark_dt = chrono::DateTime::from_timestamp_millis(watermark_millis)
+            .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+
         let memories: Vec<Memory> = all_memories
-            .into_iter()
-            .map(|arc_mem| (*arc_mem).clone())
+            .iter()
+            .filter(|m| m.created_at > watermark_dt)
+            .map(|arc_mem| arc_mem.as_ref().clone())
             .collect();
+
+        tracing::info!(
+            total_memories = all_memories.len(),
+            new_since_watermark = memories.len(),
+            watermark = %watermark_dt.format("%Y-%m-%dT%H:%M:%S"),
+            "Incremental fact extraction (on-demand)"
+        );
 
         // Create consolidator with custom thresholds
         let consolidator =
@@ -6150,6 +6227,15 @@ impl MemorySystem {
                     },
                 );
             }
+        }
+
+        // Advance watermark after successful extraction
+        if !memories.is_empty() {
+            let new_watermark = chrono::Utc::now().timestamp_millis();
+            self.fact_extraction_watermark
+                .store(new_watermark, std::sync::atomic::Ordering::Relaxed);
+            self.long_term_memory
+                .set_fact_watermark(user_id, new_watermark);
         }
 
         Ok(result)

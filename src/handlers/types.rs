@@ -447,6 +447,7 @@ pub struct ConsolidateResponse {
     pub fact_ids: Vec<String>,
     pub memories_replayed: usize,
     pub edges_strengthened: usize,
+    pub entity_edges_strengthened: usize,
     pub memories_decayed: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,

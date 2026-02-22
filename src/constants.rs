@@ -1419,10 +1419,10 @@ pub const REPLAY_IMPORTANCE_THRESHOLD: f32 = 0.3;
 /// Maximum age in days for memories eligible for replay
 ///
 /// Justification:
-/// - 7 days matches sleep consolidation window in neuroscience
+/// - 14 days gives wider window for hourly consolidation cycles
 /// - Older memories are already consolidated (in power-law phase)
 /// - Focus replay resources on recent, unconsolidated memories
-pub const REPLAY_MAX_AGE_DAYS: i64 = 7;
+pub const REPLAY_MAX_AGE_DAYS: i64 = 14;
 
 /// Minimum emotional arousal for priority replay
 ///
@@ -1463,10 +1463,10 @@ pub const REPLAY_BATCH_SIZE: usize = 50;
 /// Minimum connected memories required for replay network
 ///
 /// Justification:
-/// - 2 minimum ensures replay involves co-activation (not isolated memories)
-/// - Replay benefits from network effects
-/// - Isolated memories should wait for more connections
-pub const REPLAY_MIN_CONNECTIONS: usize = 2;
+/// - 0 allows importance-only qualification (connections not required)
+/// - Isolated memories can bootstrap graph edges through replay co-activation
+/// - Prevents chicken-and-egg: memories need connections to replay, but replay creates connections
+pub const REPLAY_MIN_CONNECTIONS: usize = 0;
 
 // =============================================================================
 // MEMORY INTERFERENCE CONSTANTS (SHO-106)
@@ -1687,19 +1687,19 @@ pub const L1_TARGET_DENSITY: f32 = 0.05;
 
 /// Initial weight for new edges in L1
 ///
-/// New edges start weak and must prove their value through co-activation.
-pub const L1_INITIAL_WEIGHT: f32 = 0.3;
+/// Edges start at 0.4, needing one co-activation to reach L2 promotion (0.5).
+pub const L1_INITIAL_WEIGHT: f32 = 0.4;
 
 /// Decay rate per hour for unused L1 edges
 ///
-/// Aggressive pruning: 15% decay per hour if not accessed.
-/// This clears noise and spurious connections quickly.
-pub const L1_DECAY_PER_HOUR: f32 = 0.15;
+/// Calibrated so edges reach L1_PRUNE_THRESHOLD (0.1) at 48 hours:
+/// 0.4 × e^(-0.029 × 48) ≈ 0.1
+pub const L1_DECAY_PER_HOUR: f32 = 0.029;
 
 /// Maximum age in hours before L1 edge must promote or die
 ///
-/// After 4 hours, edges either strengthen enough to promote to L2 or get pruned.
-pub const L1_MAX_AGE_HOURS: u32 = 4;
+/// 48-hour window gives edges time to accumulate co-activations before pruning.
+pub const L1_MAX_AGE_HOURS: u32 = 48;
 
 /// Minimum weight threshold for L1 edges
 ///
@@ -1726,13 +1726,14 @@ pub const L2_PROMOTION_WEIGHT: f32 = 0.5;
 
 /// Decay rate per day for unused L2 edges
 ///
-/// Moderate decay: 10% per day if not accessed.
-pub const L2_DECAY_PER_DAY: f32 = 0.10;
+/// Calibrated so edges reach L2_PRUNE_THRESHOLD (0.2) at 30 days:
+/// 0.5 × e^(-0.031 × 30) ≈ 0.2
+pub const L2_DECAY_PER_DAY: f32 = 0.031;
 
 /// Maximum age in days before L2 edge must promote or die
 ///
-/// After 14 days, edges either consolidate to L3 or get pruned.
-pub const L2_MAX_AGE_DAYS: u32 = 14;
+/// 30-day window gives episodic associations a full month to consolidate to L3.
+pub const L2_MAX_AGE_DAYS: u32 = 30;
 
 /// Minimum weight threshold for L2 edges
 ///

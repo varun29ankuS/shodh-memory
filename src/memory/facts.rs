@@ -300,6 +300,44 @@ impl SemanticFactStore {
         })
     }
 
+    /// Find the creation timestamp of the most recent fact for a user.
+    ///
+    /// Used at startup to initialize the fact extraction watermark when no
+    /// persisted watermark exists. Returns None if user has no facts.
+    pub fn latest_fact_created_at(&self, user_id: &str) -> Option<i64> {
+        let prefix = format!("facts:{user_id}:");
+        let mut max_millis: Option<i64> = None;
+
+        let iter = self.db.iterator(IteratorMode::From(
+            prefix.as_bytes(),
+            rocksdb::Direction::Forward,
+        ));
+
+        for item in iter {
+            let (key, value) = match item {
+                Ok(kv) => kv,
+                Err(_) => break,
+            };
+            let key_str = String::from_utf8_lossy(&key);
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+            // Skip index keys (entity/type sub-keys have extra colons)
+            if key_str.matches(':').count() > 2 {
+                continue;
+            }
+            if let Ok((fact, _)) = bincode::serde::decode_from_slice::<SemanticFact, _>(
+                &value,
+                bincode::config::standard(),
+            ) {
+                let millis = fact.created_at.timestamp_millis();
+                max_millis = Some(max_millis.map_or(millis, |cur| cur.max(millis)));
+            }
+        }
+
+        max_millis
+    }
+
     /// Find facts that should decay (no reinforcement for too long)
     pub fn find_decaying_facts(
         &self,

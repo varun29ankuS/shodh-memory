@@ -3712,6 +3712,71 @@ impl GraphMemory {
         Ok(associations)
     }
 
+    /// Strengthen entity-entity edges for a replayed memory's episode.
+    ///
+    /// During consolidation replay, this reinforces the entity relationships that
+    /// were involved in the replayed memory. This is "Direction 3" of the Hebbian
+    /// maintenance system — entity-entity edges get strengthened alongside
+    /// memory-to-memory edges (Direction 1) and lazy pruning (Direction 2).
+    ///
+    /// Algorithm:
+    /// 1. Look up EpisodicNode for episode_id → get entity_refs
+    /// 2. For each pair of entities, find their RelationshipEdge
+    /// 3. Call strengthen() on each edge (Hebbian boost + LTP detection + tier promotion)
+    /// 4. Batch write all updates
+    pub fn strengthen_episode_entity_edges(&self, episode_id: &Uuid) -> Result<usize> {
+        let episode = match self.get_episode(episode_id) {
+            Ok(Some(ep)) => ep,
+            Ok(None) => return Ok(0),
+            Err(_) => return Ok(0),
+        };
+
+        if episode.entity_refs.len() < 2 {
+            return Ok(0);
+        }
+
+        let _guard = self.synapse_update_lock.lock();
+        let mut batch = WriteBatch::default();
+        let mut strengthened = 0;
+
+        // Iterate over unique entity pairs
+        let refs = &episode.entity_refs;
+        let max_pairs = refs.len().min(20); // Cap to avoid O(n²) on large episodes
+        for i in 0..max_pairs {
+            for j in (i + 1)..max_pairs {
+                let entity_a = &refs[i];
+                let entity_b = &refs[j];
+
+                // Find existing edge between this entity pair
+                if let Ok(Some(mut edge)) = self.find_edge_between_entities(entity_a, entity_b) {
+                    if edge.invalidated_at.is_some() {
+                        continue;
+                    }
+                    let _ = edge.strengthen();
+                    let key = edge.uuid.as_bytes();
+                    if let Ok(value) =
+                        bincode::serde::encode_to_vec(&edge, bincode::config::standard())
+                    {
+                        batch.put_cf(self.relationships_cf(), key, value);
+                        strengthened += 1;
+                    }
+                }
+                // Don't create new edges — only strengthen existing ones from NER
+            }
+        }
+
+        if strengthened > 0 {
+            self.db.write(batch)?;
+            tracing::debug!(
+                "Strengthened {} entity-entity edges for episode {}",
+                strengthened,
+                &episode_id.to_string()[..8]
+            );
+        }
+
+        Ok(strengthened)
+    }
+
     /// Get average Hebbian strength for a memory based on its entity relationships
     ///
     /// This looks up the entities referenced by the memory and averages their

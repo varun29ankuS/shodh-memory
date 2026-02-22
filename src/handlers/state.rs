@@ -481,7 +481,7 @@ impl MultiUserMemoryManager {
             ab_test_manager: Arc::new(ab_testing::ABTestManager::new()),
             session_store: Arc::new(SessionStore::new()),
             relevance_engine,
-            maintenance_cycle: std::sync::atomic::AtomicU64::new(1),
+            maintenance_cycle: std::sync::atomic::AtomicU64::new(0),
         };
 
         info!("Running initial audit log rotation...");
@@ -1160,8 +1160,8 @@ impl MultiUserMemoryManager {
             .maintenance_cycle
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Heavy cycle every 6th iteration (30 min at 300s intervals).
-        // Heavy cycles run graph decay (full edge scan), fact extraction (full memory scan),
+        // Heavy cycle every 6th iteration (6 hours at 3600s intervals).
+        // Heavy cycles run replay, entity-entity strengthening, fact extraction (full memory scan),
         // and flush databases (triggers compaction). Light cycles only touch in-memory data.
         let is_heavy = cycle % 6 == 0;
 
@@ -1186,6 +1186,7 @@ impl MultiUserMemoryManager {
         let user_count = user_ids.len();
         let mut edges_decayed = 0;
         let mut edges_strengthened = 0;
+        let mut entity_edges_strengthened = 0;
         let mut total_facts_extracted = 0;
         let mut total_facts_reinforced = 0;
 
@@ -1254,6 +1255,31 @@ impl MultiUserMemoryManager {
                 }
             }
 
+            // Direction 3: Entity-entity Hebbian reinforcement for replayed memories
+            // During replay, memories are re-activated — strengthen edges between entities
+            // that co-occur in the same episode, reinforcing semantic associations.
+            if let Some(ref result) = maintenance_result {
+                if !result.replay_memory_ids.is_empty() {
+                    if let Ok(graph) = self.get_user_graph(&user_id) {
+                        let graph_guard = graph.read();
+                        for mem_id_str in &result.replay_memory_ids {
+                            if let Ok(uuid) = uuid::Uuid::parse_str(mem_id_str) {
+                                match graph_guard.strengthen_episode_entity_edges(&uuid) {
+                                    Ok(count) => entity_edges_strengthened += count,
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            "Entity edge strengthening failed for memory {}: {}",
+                                            mem_id_str,
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Direction 2: Lazy decay — flush opportunistic pruning queue
             // Instead of scanning all 34k+ edges (apply_decay), we queue edges found
             // below threshold during normal reads and batch-delete them here.
@@ -1306,11 +1332,12 @@ impl MultiUserMemoryManager {
         }
 
         tracing::info!(
-            "Maintenance complete (cycle {}, {}): {} memories processed, {} edges strengthened, {} weak edges pruned, {} facts extracted, {} facts reinforced across {} users",
+            "Maintenance complete (cycle {}, {}): {} memories processed, {} edges strengthened, {} entity edges strengthened, {} weak edges pruned, {} facts extracted, {} facts reinforced across {} users",
             cycle,
             if is_heavy { "heavy" } else { "light" },
             total_processed,
             edges_strengthened,
+            entity_edges_strengthened,
             edges_decayed,
             total_facts_extracted,
             total_facts_reinforced,
