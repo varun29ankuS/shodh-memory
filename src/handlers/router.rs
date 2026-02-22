@@ -398,12 +398,16 @@ pub fn build_protected_routes(state: AppState) -> Router {
         .route("/api/events", get(webhooks::memory_events_sse)) // TUI alias
         .route("/api/stream", get(webhooks::streaming_memory_ws))
         // =================================================================
-        // SEARCH & MIF (Memory Interchange Format)
+        // MULTIMODAL & ROBOTICS SEARCH
         // =================================================================
-        .route("/api/search/multimodal", post(mif::multimodal_search))
-        .route("/api/search/robotics", post(mif::robotics_search))
+        .route("/api/search/multimodal", post(search::multimodal_search))
+        .route("/api/search/robotics", post(search::robotics_search))
+        // =================================================================
+        // MIF (Memory Interchange Format) v2
+        // =================================================================
         .route("/api/export/mif", post(mif::export_mif))
         .route("/api/import/mif", post(mif::import_mif))
+        .route("/api/mif/adapters", get(mif::list_adapters))
         // =================================================================
         // STATE
         // =================================================================

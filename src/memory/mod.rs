@@ -563,6 +563,55 @@ impl MemorySystem {
         self.feedback_store.as_ref()
     }
 
+    /// Store a new memory with an explicit ID.
+    ///
+    /// Used by MIF import to preserve original UUIDs. Stores the memory with
+    /// embedding generation and vector indexing, but skips graph entity extraction
+    /// (imported memories already have their entity relationships established).
+    pub fn remember_with_id(
+        &self,
+        memory_id: MemoryId,
+        mut experience: Experience,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<MemoryId> {
+        self.check_resource_limits()?;
+        let importance = self.calculate_importance(&experience);
+
+        // Generate embedding if not provided
+        if experience.embeddings.is_none() {
+            let content_hash = Self::sha256_hash(&experience.content);
+            if let Some(cached) = self.content_cache.get(&content_hash) {
+                experience.embeddings = Some(cached.clone());
+            } else if let Ok(embedding) = self.embedder.encode(&experience.content) {
+                self.content_cache.insert(content_hash, embedding.clone());
+                experience.embeddings = Some(embedding);
+            }
+        }
+
+        let memory = Arc::new(Memory::new(
+            memory_id.clone(),
+            experience,
+            importance,
+            None,
+            None,
+            None,
+            created_at,
+        ));
+
+        self.long_term_memory.store(&memory)?;
+        self.logger.write().log_created(&memory, "import");
+
+        self.working_memory
+            .write()
+            .add_shared(Arc::clone(&memory))?;
+
+        if let Err(e) = self.retriever.index_memory(&memory) {
+            tracing::warn!("Failed to index imported memory {}: {}", memory.id.0, e);
+        }
+
+        Ok(memory_id)
+    }
+
     /// Store a new memory (takes ownership to avoid clones)
     /// Thread-safe: uses interior mutability for all internal state
     /// If `created_at` is None, uses current time (Utc::now())

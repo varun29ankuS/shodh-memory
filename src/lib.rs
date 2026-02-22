@@ -29,6 +29,7 @@ pub mod integrations;
 pub mod memory;
 pub mod metrics;
 pub mod middleware;
+pub mod mif;
 pub mod query_parsing;
 pub mod relevance;
 pub mod similarity;
