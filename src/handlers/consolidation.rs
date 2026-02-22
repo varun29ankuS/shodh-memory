@@ -138,7 +138,9 @@ pub async fn consolidate_memories(
                         match graph_guard.strengthen_episode_entity_edges(&uuid) {
                             Ok(count) => entity_edges_strengthened += count,
                             Err(e) => {
-                                tracing::debug!("Entity edge strengthening failed for {mem_id_str}: {e}");
+                                tracing::debug!(
+                                    "Entity edge strengthening failed for {mem_id_str}: {e}"
+                                );
                             }
                         }
                     }
@@ -182,7 +184,10 @@ pub async fn consolidate_memories(
         edges_strengthened: 0,
         entity_edges_strengthened: 0,
         memories_decayed: 0,
-        warnings: vec!["Consolidation started in background. Check /api/consolidation/report for results.".to_string()],
+        warnings: vec![
+            "Consolidation started in background. Check /api/consolidation/report for results."
+                .to_string(),
+        ],
     }))
 }
 

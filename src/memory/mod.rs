@@ -5772,7 +5772,8 @@ impl MemorySystem {
                     let new_watermark = chrono::Utc::now().timestamp_millis();
                     self.fact_extraction_watermark
                         .store(new_watermark, std::sync::atomic::Ordering::Relaxed);
-                    self.long_term_memory.set_fact_watermark(user_id, new_watermark);
+                    self.long_term_memory
+                        .set_fact_watermark(user_id, new_watermark);
                 }
             }
         } else {
@@ -6233,7 +6234,8 @@ impl MemorySystem {
             let new_watermark = chrono::Utc::now().timestamp_millis();
             self.fact_extraction_watermark
                 .store(new_watermark, std::sync::atomic::Ordering::Relaxed);
-            self.long_term_memory.set_fact_watermark(user_id, new_watermark);
+            self.long_term_memory
+                .set_fact_watermark(user_id, new_watermark);
         }
 
         Ok(result)

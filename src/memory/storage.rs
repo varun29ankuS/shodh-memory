@@ -3351,11 +3351,10 @@ impl MemoryStorage {
         let key = format!("_watermark:fact_extraction:{user_id}");
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(self.write_mode == WriteMode::Sync);
-        if let Err(e) = self.db.put_opt(
-            key.as_bytes(),
-            &timestamp_millis.to_le_bytes(),
-            &write_opts,
-        ) {
+        if let Err(e) =
+            self.db
+                .put_opt(key.as_bytes(), &timestamp_millis.to_le_bytes(), &write_opts)
+        {
             tracing::warn!("Failed to persist fact extraction watermark: {e}");
         }
     }
