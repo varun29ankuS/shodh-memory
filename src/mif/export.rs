@@ -56,18 +56,32 @@ pub fn build_document(
         redacted_fields: Vec::new(),
     };
 
-    // Build entity UUID -> EntityNode lookup from graph for type resolution
-    let entity_map: HashMap<Uuid, Vec<String>> = if let Some(g) = graph {
-        g.get_all_entities()
-            .unwrap_or_default()
-            .into_iter()
+    // Build entity lookup maps from graph for type resolution.
+    // Two maps: UUID-based (primary) and name-based (fallback), because
+    // entity_refs on memories may store UUIDs that don't match graph entity UUIDs
+    // when the NER pipeline created refs before the graph entity was consolidated.
+    let (entity_map_by_id, entity_map_by_name): (
+        HashMap<Uuid, Vec<String>>,
+        HashMap<String, Vec<String>>,
+    ) = if let Some(g) = graph {
+        let entities = g.get_all_entities().unwrap_or_default();
+        let by_id: HashMap<Uuid, Vec<String>> = entities
+            .iter()
             .map(|e| {
                 let types: Vec<String> = e.labels.iter().map(label_to_string).collect();
                 (e.uuid, types)
             })
-            .collect()
+            .collect();
+        let by_name: HashMap<String, Vec<String>> = entities
+            .iter()
+            .map(|e| {
+                let types: Vec<String> = e.labels.iter().map(label_to_string).collect();
+                (e.name.to_lowercase(), types)
+            })
+            .collect();
+        (by_id, by_name)
     } else {
-        HashMap::new()
+        (HashMap::new(), HashMap::new())
     };
 
     // Convert memories
@@ -106,14 +120,19 @@ pub fn build_document(
             (m.experience.content.clone(), None)
         };
 
-        // Resolve entity types from graph
+        // Resolve entity types from graph (UUID lookup, then name fallback)
         let entities: Vec<MifEntityRef> = m
             .entity_refs
             .iter()
             .map(|eref| {
-                let entity_type = entity_map
+                let entity_type = entity_map_by_id
                     .get(&eref.entity_id)
                     .and_then(|types| types.first().cloned())
+                    .or_else(|| {
+                        entity_map_by_name
+                            .get(&eref.name.to_lowercase())
+                            .and_then(|types| types.first().cloned())
+                    })
                     .unwrap_or_else(|| "unknown".to_string());
                 MifEntityRef {
                     name: eref.name.clone(),
@@ -123,7 +142,8 @@ pub fn build_document(
             })
             .collect();
 
-        // Also include experience.entities that didn't make it to entity_refs
+        // Also include experience.entities that didn't make it to entity_refs,
+        // resolving types from the graph name map when possible.
         let ref_names: std::collections::HashSet<&str> =
             m.entity_refs.iter().map(|r| r.name.as_str()).collect();
         let mut extra_entities: Vec<MifEntityRef> = m
@@ -131,10 +151,16 @@ pub fn build_document(
             .entities
             .iter()
             .filter(|e| !ref_names.contains(e.as_str()))
-            .map(|e| MifEntityRef {
-                name: e.clone(),
-                entity_type: "unknown".to_string(),
-                confidence: 0.8,
+            .map(|e| {
+                let entity_type = entity_map_by_name
+                    .get(&e.to_lowercase())
+                    .and_then(|types| types.first().cloned())
+                    .unwrap_or_else(|| "unknown".to_string());
+                MifEntityRef {
+                    name: e.clone(),
+                    entity_type,
+                    confidence: 0.8,
+                }
             })
             .collect();
 
