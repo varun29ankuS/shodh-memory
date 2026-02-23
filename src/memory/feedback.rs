@@ -582,7 +582,6 @@ impl FeedbackMomentum {
         // Decay towards 0
         self.ema * decay_factor
     }
-
 }
 
 // =============================================================================

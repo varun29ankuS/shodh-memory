@@ -853,11 +853,8 @@ pub async fn proactive_context(
                 // Detect context patterns: repetition (user re-asking) or topic change
                 // Modifies signal values based on detected user behavior patterns
                 if !pending.context_embedding.is_empty() {
-                    if let Some((is_repetition, is_topic_change, similarity)) =
-                        store.detect_context_pattern(
-                            &user_id_for_feedback,
-                            &pending.context_embedding,
-                        )
+                    if let Some((is_repetition, is_topic_change, similarity)) = store
+                        .detect_context_pattern(&user_id_for_feedback, &pending.context_embedding)
                     {
                         if is_repetition || is_topic_change {
                             feedback::apply_context_pattern_signals(

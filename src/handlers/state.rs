@@ -1351,11 +1351,7 @@ impl MultiUserMemoryManager {
                             }
                         }
                         Err(e) => {
-                            tracing::debug!(
-                                "Full graph decay failed for user {}: {}",
-                                user_id,
-                                e
-                            );
+                            tracing::debug!("Full graph decay failed for user {}: {}", user_id, e);
                         }
                     }
                 }
