@@ -772,7 +772,7 @@ async fn main() -> Result<()> {
     }
 
     let stream = MemoryStream::new(
-        &format!("{}/api/events", base_url),
+        &format!("{}/api/events?user_id={}", base_url, user),
         &api_key,
         &user,
         Arc::clone(&state),
