@@ -212,6 +212,34 @@ pub fn strip_system_noise(content: &str) -> String {
         }
     }
 
+    // Remove <shodh-memory>...</shodh-memory> blocks (hook-injected context that shouldn't be re-ingested)
+    while let Some(start) = result.find("<shodh-memory") {
+        if let Some(end) = result.find("</shodh-memory>") {
+            let end_pos = end + "</shodh-memory>".len();
+            if end_pos <= result.len() && start < end_pos {
+                result = format!("{}{}", &result[..start], &result[end_pos..]);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Remove session lifecycle messages (low-value noise from hooks)
+    // These match patterns like "Session ended: user_stop" or "Session started in project-name"
+    let lines: Vec<&str> = result.lines().collect();
+    let filtered_lines: Vec<&str> = lines
+        .into_iter()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("Session ended:")
+                && !trimmed.starts_with("Session started")
+                && !trimmed.starts_with("Modified file:")
+        })
+        .collect();
+    result = filtered_lines.join("\n");
+
     // Remove Claude Code file content blocks - Windows paths
     while let Some(start) = result.find("Contents of C:\\") {
         let search_area = &result[start..];

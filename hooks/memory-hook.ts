@@ -170,13 +170,8 @@ async function handleSessionStart(): Promise<void> {
     }
   }
 
-  // Also ingest session start
-  await callBrain("/api/remember", {
-    user_id: SHODH_USER_ID,
-    content: `Session started in ${projectName}`,
-    memory_type: "Context",
-    tags: ["session:start", `project:${projectName}`],
-  });
+  // Session start is tracked implicitly — the proactive_context call above
+  // surfaces relevant memories without creating noise in the activity log.
 }
 
 async function handleUserPrompt(input: HookInput): Promise<void> {
@@ -483,13 +478,10 @@ async function handleSubagentStop(input: HookInput): Promise<void> {
   });
 }
 
-async function handleStop(input: HookInput): Promise<void> {
-  await callBrain("/api/remember", {
-    user_id: SHODH_USER_ID,
-    content: `Session ended: ${input.stop_reason || "user_stop"}`,
-    memory_type: "Context",
-    tags: ["session:end", `reason:${input.stop_reason || "unknown"}`],
-  });
+async function handleStop(_input: HookInput): Promise<void> {
+  // Session end is tracked implicitly by memory timestamps and decay.
+  // Storing explicit "Session ended" memories creates noise in the activity log
+  // and gets re-ingested by proactive_context auto-ingest, causing duplicate events.
 }
 
 async function main(): Promise<void> {

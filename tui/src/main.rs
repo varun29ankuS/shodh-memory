@@ -1643,14 +1643,7 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<TuiExitAction> {
                                 FocusPanel::Right => g.select_event_prev(),
                                 FocusPanel::Detail => g.detail_scroll_up(),
                             },
-                            ViewMode::ActivityLogs => {
-                                let has_rich = g.selected_event.and_then(|i| g.events.get(i)).map_or(false, |e| e.event.results.is_some());
-                                if has_rich && g.event_detail_scroll > 0 {
-                                    g.event_detail_scroll = g.event_detail_scroll.saturating_sub(1);
-                                } else {
-                                    g.select_event_prev();
-                                }
-                            }
+                            ViewMode::ActivityLogs => g.select_event_prev(),
                             ViewMode::Projects => match g.focus_panel {
                                 FocusPanel::Left => {
                                     if g.projects_selected > 0 {
@@ -1685,14 +1678,7 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<TuiExitAction> {
                                     }
                                 }
                             }
-                            ViewMode::ActivityLogs => {
-                                let has_rich = g.selected_event.and_then(|i| g.events.get(i)).map_or(false, |e| e.event.results.is_some());
-                                if has_rich {
-                                    g.event_detail_scroll += 1;
-                                } else {
-                                    g.select_event_next();
-                                }
-                            }
+                            ViewMode::ActivityLogs => g.select_event_next(),
                             ViewMode::Projects => {
                                 match g.focus_panel {
                                     FocusPanel::Left => {
@@ -1840,14 +1826,7 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<TuiExitAction> {
                                             g.select_event_prev()
                                         }
                                     }
-                                    ViewMode::ActivityLogs => {
-                                        let has_rich = g.selected_event.and_then(|i| g.events.get(i)).map_or(false, |e| e.event.results.is_some());
-                                        if has_rich {
-                                            g.event_detail_scroll = g.event_detail_scroll.saturating_sub(1);
-                                        } else {
-                                            g.select_event_prev();
-                                        }
-                                    }
+                                    ViewMode::ActivityLogs => g.select_event_prev(),
                                     ViewMode::Projects => match g.focus_panel {
                                         FocusPanel::Left => {
                                             if g.projects_selected > 0 {
@@ -1884,14 +1863,7 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<TuiExitAction> {
                                             g.select_event_next()
                                         }
                                     }
-                                    ViewMode::ActivityLogs => {
-                                        let has_rich = g.selected_event.and_then(|i| g.events.get(i)).map_or(false, |e| e.event.results.is_some());
-                                        if has_rich {
-                                            g.event_detail_scroll += 1;
-                                        } else {
-                                            g.select_event_next();
-                                        }
-                                    }
+                                    ViewMode::ActivityLogs => g.select_event_next(),
                                     ViewMode::Projects => match g.focus_panel {
                                         FocusPanel::Left => {
                                             let total_items = g.left_panel_flat_count();
