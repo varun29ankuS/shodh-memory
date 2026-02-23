@@ -561,11 +561,30 @@ pub async fn batch_remember(
     let mut validation_errors: Vec<BatchErrorItem> = Vec::new();
     let mut valid_items: Vec<(usize, BatchMemoryItem)> = Vec::new();
 
+    let mut seen_content: HashSet<u64> = HashSet::new();
     for (index, item) in req.memories.into_iter().enumerate() {
         if let Err(e) = validation::validate_content(&item.content, false) {
             validation_errors.push(BatchErrorItem {
                 index,
                 error: e.to_string(),
+            });
+            continue;
+        }
+        // Deduplicate within the batch: skip items with identical content
+        let content_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            item.content.hash(&mut hasher);
+            hasher.finish()
+        };
+        if !seen_content.insert(content_hash) {
+            tracing::debug!(
+                batch_index = index,
+                "Skipping duplicate content in batch (same content already queued)"
+            );
+            validation_errors.push(BatchErrorItem {
+                index,
+                error: "Duplicate content within batch".to_string(),
             });
             continue;
         }
@@ -845,6 +864,29 @@ pub async fn upsert_memory(
     };
 
     // Build episodic graph for multi-hop retrieval
+    // On updates, clean up the old episode's edges/entities first to prevent
+    // stale graph data from accumulating (entity_episodes index, orphan edges).
+    if was_update {
+        if let Ok(graph) = state.get_user_graph(&req.user_id) {
+            let graph_guard = graph.read();
+            match graph_guard.delete_episode(&memory_id.0) {
+                Ok(true) => {
+                    tracing::debug!(
+                        "Cleaned up old episode {} before graph rebuild",
+                        &memory_id.0.to_string()[..8]
+                    );
+                }
+                Ok(false) => {} // No prior episode existed
+                Err(e) => {
+                    tracing::debug!(
+                        "Old episode cleanup failed for {} (non-fatal): {}",
+                        &memory_id.0.to_string()[..8],
+                        e
+                    );
+                }
+            }
+        }
+    }
     if let Err(e) = state.process_experience_into_graph(&req.user_id, &experience, &memory_id) {
         tracing::debug!("Graph processing failed (non-fatal): {}", e);
     }

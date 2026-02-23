@@ -105,6 +105,34 @@ const STREAM_MIN_CONTENT_LENGTH = 50; // minimum content length to stream
 // When enabled, relevant memories are automatically surfaced with tool responses
 const PROACTIVE_SURFACING = process.env.SHODH_PROACTIVE !== "false"; // enabled by default
 const PROACTIVE_MIN_CONTEXT_LENGTH = 30; // minimum context length to trigger surfacing
+const MAX_CONTEXT_LENGTH = 4000; // max chars sent to backend (MiniLM truncates at ~256 tokens anyway)
+
+/**
+ * Strip system scaffolding from context before sending to the memory backend.
+ * AI clients often pass the full conversation context including XML tags like
+ * <task-notification>, <system-reminder>, etc. These overwhelm BM25/embedding
+ * and provide zero semantic signal for memory retrieval.
+ *
+ * The Rust backend has its own strip_system_noise(), but we clean client-side too
+ * to avoid sending multi-KB payloads over the wire.
+ */
+function stripSystemNoise(text: string): string {
+  let result = text;
+  // Remove common system XML blocks (non-greedy, handles multiline)
+  const tagPatterns = [
+    /<task-notification>[\s\S]*?<\/task-notification>/g,
+    /<system-reminder>[\s\S]*?<\/system-reminder>/g,
+    /<shodh-context[\s\S]*?<\/shodh-context>/g,
+    /<shodh-memory[\s\S]*?<\/shodh-memory>/g,
+    /<command-name>[\s\S]*?<\/command-name>/g,
+  ];
+  for (const pattern of tagPatterns) {
+    result = result.replace(pattern, "");
+  }
+  // Collapse runs of whitespace
+  result = result.replace(/\s{3,}/g, " ").trim();
+  return result;
+}
 
 // Track last proactive_context response for implicit feedback loop
 // The backend uses this to evaluate whether surfaced memories were helpful
@@ -2064,11 +2092,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           detected_entities: DetectedEntityInfo[];
         }
 
+        // Clean system scaffolding from context — AI clients pass full conversation
+        // including <task-notification> XML which overwhelms BM25 and embedding.
+        const cleanedContext = stripSystemNoise(context).slice(0, MAX_CONTEXT_LENGTH);
+        if (cleanedContext.length < PROACTIVE_MIN_CONTEXT_LENGTH) {
+          return {
+            content: [{ type: "text", text: "No relevant memories surfaced (context too short after cleaning).\n\n[Latency: 0.0ms]" }],
+          };
+        }
+
         // Single API call to the full proactive context pipeline:
         // feedback loop, coactivation, segmented ingest, semantic todos, context reminders
         const result = await apiCall<ProactiveContextResponse>("/api/proactive_context", "POST", {
           user_id: USER_ID,
-          context,
+          context: cleanedContext,
           max_results,
           semantic_threshold,
           entity_match_weight,
@@ -2077,7 +2114,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           auto_ingest,
           // Implicit feedback: send previous response so backend can evaluate which memories helped
           previous_response: lastProactiveResponse || undefined,
-          user_followup: lastProactiveResponse ? context : undefined,
+          user_followup: lastProactiveResponse ? cleanedContext : undefined,
         });
 
         const memories = result.memories || [];

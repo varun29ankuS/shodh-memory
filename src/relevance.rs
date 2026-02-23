@@ -820,7 +820,7 @@ impl RelevanceEngine {
                     let momentum_ema = feedback_store
                         .and_then(|fs| {
                             let store = fs.read();
-                            store.get_momentum(&memory.id).map(|m| m.ema)
+                            store.get_momentum(&memory.id).map(|m| m.ema_with_decay())
                         })
                         .unwrap_or(0.0);
 
