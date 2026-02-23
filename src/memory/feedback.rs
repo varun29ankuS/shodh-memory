@@ -63,7 +63,6 @@ const TREND_DECLINING_THRESHOLD: f32 = -0.1;
 /// Time decay constants for momentum (AUD-6)
 /// Momentum should decay towards 0 when not reinforced
 const DECAY_HALF_LIFE_DAYS: f32 = 14.0; // Half-life of 14 days
-const DECAY_STABILITY_HALF_LIFE_DAYS: f32 = 30.0; // Stability decays slower
 
 /// Negative keywords indicating correction/failure
 /// Multi-word phrases checked first (contains match on lowercased text)
@@ -584,29 +583,6 @@ impl FeedbackMomentum {
         self.ema * decay_factor
     }
 
-    /// Apply time-based decay to stability (AUD-6)
-    /// Stability decays slower than EMA since it represents long-term confidence.
-    pub fn stability_with_decay(&self) -> f32 {
-        let days_since_last = self
-            .last_signal_at
-            .map(|last| {
-                let duration = Utc::now() - last;
-                duration.num_hours() as f32 / 24.0
-            })
-            .unwrap_or(0.0);
-
-        if days_since_last < 1.0 {
-            // Recent signal, no decay
-            return self.stability;
-        }
-
-        // Decay towards neutral (0.5) with longer half-life
-        let decay_factor = 0.5_f32.powf(days_since_last / DECAY_STABILITY_HALF_LIFE_DAYS);
-        let neutral = 0.5;
-
-        // Decay towards neutral: stability + (neutral - stability) * (1 - decay_factor)
-        neutral + (self.stability - neutral) * decay_factor
-    }
 }
 
 // =============================================================================

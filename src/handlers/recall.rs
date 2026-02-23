@@ -760,7 +760,7 @@ pub async fn context_summary(
 #[tracing::instrument(skip(state), fields(user_id = %req.user_id))]
 pub async fn proactive_context(
     State(state): State<AppState>,
-    Json(req): Json<ProactiveContextRequest>,
+    Json(mut req): Json<ProactiveContextRequest>,
 ) -> Result<Json<ProactiveContextResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
     validation::validate_max_results(req.max_results).map_validation_err("max_results")?;
@@ -770,6 +770,19 @@ pub async fn proactive_context(
         .map_validation_err("entity_match_weight")?;
     validation::validate_weight("recency_weight", req.recency_weight)
         .map_validation_err("recency_weight")?;
+
+    // Strip system noise BEFORE any processing — <task-notification>, <system-reminder>,
+    // <shodh-context>, code blocks, file contents, etc. This ensures embedding, NER, BM25,
+    // and auto-ingest all operate on meaningful user content, not XML scaffolding.
+    let raw_len = req.context.len();
+    req.context = strip_system_noise(&req.context);
+    if raw_len > 0 && req.context.len() < raw_len {
+        tracing::debug!(
+            "proactive_context: stripped system noise from context ({} -> {} bytes)",
+            raw_len,
+            req.context.len()
+        );
+    }
 
     // Validate context: must be non-empty and have meaningful content
     let trimmed_context = req.context.trim();
@@ -830,12 +843,39 @@ pub async fn proactive_context(
                 };
 
                 // Process the feedback with semantic similarity
-                let signals = feedback::process_implicit_feedback_with_semantics(
+                let mut signals = feedback::process_implicit_feedback_with_semantics(
                     &pending,
                     &response_text,
                     followup.as_deref(),
                     response_embedding.as_deref(),
                 );
+
+                // Detect context patterns: repetition (user re-asking) or topic change
+                // Modifies signal values based on detected user behavior patterns
+                if !pending.context_embedding.is_empty() {
+                    if let Some((is_repetition, is_topic_change, similarity)) =
+                        store.detect_context_pattern(
+                            &user_id_for_feedback,
+                            &pending.context_embedding,
+                        )
+                    {
+                        if is_repetition || is_topic_change {
+                            feedback::apply_context_pattern_signals(
+                                &mut signals,
+                                is_repetition,
+                                is_topic_change,
+                                similarity,
+                            );
+                            tracing::debug!(
+                                user_id = %user_id_for_feedback,
+                                is_repetition,
+                                is_topic_change,
+                                similarity,
+                                "Applied context pattern signals to feedback"
+                            );
+                        }
+                    }
+                }
 
                 let mut reinforced = Vec::new();
                 let mut weakened = Vec::new();
@@ -908,13 +948,15 @@ pub async fn proactive_context(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Feedback task panicked: {e}")))?;
 
-        // Apply reinforcement to memory system based on feedback
+        // Apply reinforcement to memory system and graph based on feedback
         if !helpful_ids.is_empty() || !misleading_ids.is_empty() {
             let memory_sys_for_reinforce = memory_system.clone();
+            let graph_for_reinforce = graph_memory.clone();
+            let helpful_ids_for_graph = helpful_ids.clone();
             tokio::task::spawn_blocking(move || {
                 let memory_guard = memory_sys_for_reinforce.read();
 
-                // Reinforce helpful memories
+                // Reinforce helpful memories (importance boost)
                 if !helpful_ids.is_empty() {
                     if let Err(e) = memory_guard
                         .reinforce_recall(&helpful_ids, crate::memory::RetrievalOutcome::Helpful)
@@ -923,13 +965,39 @@ pub async fn proactive_context(
                     }
                 }
 
-                // Weaken misleading memories
+                // Weaken misleading memories (importance decay)
                 if !misleading_ids.is_empty() {
                     if let Err(e) = memory_guard.reinforce_recall(
                         &misleading_ids,
                         crate::memory::RetrievalOutcome::Misleading,
                     ) {
                         tracing::warn!("Failed to weaken misleading memories: {}", e);
+                    }
+                }
+
+                // Strengthen graph edges for helpful memories (Hebbian: "what fires together, wires together")
+                // When feedback confirms a memory was useful, strengthen its episode's entity edges
+                // so the knowledge graph learns which associations are valuable.
+                if !helpful_ids_for_graph.is_empty() {
+                    let graph_guard = graph_for_reinforce.read();
+                    for memory_id in &helpful_ids_for_graph {
+                        match graph_guard.strengthen_episode_entity_edges(&memory_id.0) {
+                            Ok(count) if count > 0 => {
+                                tracing::debug!(
+                                    memory_id = %memory_id.0,
+                                    edges = count,
+                                    "Feedback-driven edge strengthening applied"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    memory_id = %memory_id.0,
+                                    "Feedback edge strengthening failed: {}",
+                                    e
+                                );
+                            }
+                            _ => {}
+                        }
                     }
                 }
             })
@@ -1254,6 +1322,12 @@ pub async fn proactive_context(
             })
             .collect();
 
+        let surfaced_memory_ids: Vec<MemoryId> = memories
+            .iter()
+            .filter_map(|m| uuid::Uuid::parse_str(&m.id).ok())
+            .map(MemoryId)
+            .collect();
+
         let pending = feedback::PendingFeedback::new(
             req.user_id.clone(),
             req.context.clone(),
@@ -1261,7 +1335,19 @@ pub async fn proactive_context(
             surfaced_infos,
         );
         let feedback_store = state.feedback_store.clone();
-        feedback_store.write().set_pending(pending);
+        {
+            let mut store = feedback_store.write();
+            store.set_pending(pending);
+
+            // Track this context for repetition/topic-change detection on the next call.
+            // detect_context_pattern() compares the next call's embedding against this one.
+            store.set_previous_context(
+                &req.user_id,
+                req.context.clone(),
+                context_embedding.clone(),
+                surfaced_memory_ids,
+            );
+        }
     }
 
     // 4. Auto-ingest previous assistant response — fire-and-forget
@@ -1313,7 +1399,8 @@ pub async fn proactive_context(
         parking_lot::Mutex<std::collections::HashMap<u64, std::time::Instant>>,
     > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
-    let clean_context = strip_system_noise(&req.context);
+    // req.context is already cleaned at handler entry — no redundant strip needed
+    let clean_context = req.context.clone();
     let content_hash = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();

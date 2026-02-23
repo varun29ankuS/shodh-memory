@@ -1321,6 +1321,45 @@ impl MultiUserMemoryManager {
                     }
                 }
             }
+
+            // Direction 4: Full graph decay on heavy cycles
+            // Lazy pruning (above) only processes edges found below threshold during reads.
+            // Edges that are never read still need decay applied. Run full apply_decay()
+            // every heavy cycle (6 hours) to ensure no edge escapes time-based weakening.
+            if is_heavy {
+                if let Ok(graph) = self.get_user_graph(&user_id) {
+                    let graph_guard = graph.read();
+                    match graph_guard.apply_decay() {
+                        Ok(decay_result) => {
+                            if decay_result.pruned_count > 0 {
+                                edges_decayed += decay_result.pruned_count;
+                                tracing::debug!(
+                                    user_id = %user_id,
+                                    pruned = decay_result.pruned_count,
+                                    orphaned = decay_result.orphaned_entity_ids.len(),
+                                    "Full graph decay applied"
+                                );
+                            }
+
+                            if !decay_result.orphaned_entity_ids.is_empty() {
+                                if let Ok(memory_lock) = self.get_user_memory(&user_id) {
+                                    let memory = memory_lock.read();
+                                    let _ = memory.compensate_orphaned_memories(
+                                        &decay_result.orphaned_entity_ids,
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "Full graph decay failed for user {}: {}",
+                                user_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // Flush databases only on heavy cycles — flush triggers RocksDB compaction
