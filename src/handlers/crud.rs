@@ -518,6 +518,7 @@ pub async fn delete_memory(
         memory_type: None,
         importance: None,
         count: None,
+        results: None,
     });
 
     Ok(Json(DeleteMemoryResponse {
@@ -567,6 +568,7 @@ pub async fn forget_by_id(
         memory_type: None,
         importance: None,
         count: None,
+        results: None,
     });
 
     Ok(Json(DeleteMemoryResponse {
@@ -805,6 +807,7 @@ pub async fn forget_by_tags(
         memory_type: None,
         importance: None,
         count: Some(deleted_count),
+        results: None,
     });
 
     Ok(Json(serde_json::json!({
@@ -864,6 +867,7 @@ pub async fn forget_by_date(
         memory_type: None,
         importance: None,
         count: Some(deleted_count),
+        results: None,
     });
 
     Ok(Json(serde_json::json!({

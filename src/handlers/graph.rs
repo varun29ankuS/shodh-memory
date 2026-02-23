@@ -210,6 +210,7 @@ pub async fn clear_user_graph(
         memory_type: Some("graph".to_string()),
         importance: None,
         count: Some(entities + relationships + episodes),
+        results: None,
     });
 
     Ok(Json(serde_json::json!({
@@ -285,6 +286,7 @@ pub async fn rebuild_user_graph(
         memory_type: Some("graph".to_string()),
         importance: None,
         count: Some(entities_created + relationships_created),
+        results: None,
     });
 
     Ok(Json(serde_json::json!({
@@ -335,6 +337,7 @@ pub async fn invalidate_relationship(
         memory_type: Some("graph".to_string()),
         importance: None,
         count: None,
+        results: None,
     });
 
     Ok(Json(serde_json::json!({

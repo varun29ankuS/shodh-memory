@@ -851,6 +851,9 @@ pub struct MemoryEvent {
     pub from_id: Option<String>,
     #[serde(default)]
     pub to_id: Option<String>,
+    /// Full command results for rich display (recall, proactive_context)
+    #[serde(default)]
+    pub results: Option<serde_json::Value>,
 }
 
 impl MemoryEvent {
@@ -1632,6 +1635,8 @@ pub struct AppState {
     pub codebase_input_path: String,
     /// Project ID for codebase input
     pub codebase_input_project_id: Option<String>,
+    /// Scroll offset for rich event detail panel (recall/proactive_context results)
+    pub event_detail_scroll: usize,
 }
 
 /// Claude Code context session status
@@ -1747,6 +1752,7 @@ impl AppState {
             codebase_input_active: false,
             codebase_input_path: String::new(),
             codebase_input_project_id: None,
+            event_detail_scroll: 0,
         }
     }
 
@@ -1898,6 +1904,7 @@ impl AppState {
         if self.events.is_empty() {
             return;
         }
+        self.event_detail_scroll = 0;
         match self.selected_event {
             None => self.selected_event = Some(0),
             Some(i) => {
@@ -1914,6 +1921,7 @@ impl AppState {
         if self.events.is_empty() {
             return;
         }
+        self.event_detail_scroll = 0;
         let max = self.events.len().saturating_sub(1);
         match self.selected_event {
             None => self.selected_event = Some(0),
@@ -1926,6 +1934,7 @@ impl AppState {
 
     pub fn clear_event_selection(&mut self) {
         self.selected_event = None;
+        self.event_detail_scroll = 0;
     }
 
     pub fn set_view(&mut self, mode: ViewMode) {

@@ -249,6 +249,7 @@ pub async fn update_context_status(
         memory_type: Some("Context".to_string()),
         importance: None,
         count: None,
+        results: None,
     });
 
     Json(serde_json::json!({

@@ -193,14 +193,11 @@ pub struct MemoryStream {
 }
 
 impl MemoryStream {
-    pub fn new(url: &str, api_key: &str, user_id: &str, state: Arc<Mutex<AppState>>) -> Self {
-        let base_url = url
-            .trim_end_matches("/api/events")
-            .trim_end_matches("/events")
-            .to_string();
+    pub fn new(base_url: &str, api_key: &str, user_id: &str, state: Arc<Mutex<AppState>>) -> Self {
+        let base = base_url.trim_end_matches('/').to_string();
         Self {
-            url: url.to_string(),
-            base_url,
+            url: format!("{}/api/events?user_id={}", base, user_id),
+            base_url: base,
             api_key: api_key.to_string(),
             user_id: user_id.to_string(),
             state,
@@ -354,10 +351,25 @@ impl MemoryStream {
         Ok((todos, projects, todo_stats))
     }
 
+    fn debug_log(msg: &str) {
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("tui_debug.log")
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "[{}] {}", chrono::Local::now().format("%H:%M:%S%.3f"), msg)
+            });
+    }
+
     async fn fetch_initial_data(&self) {
         let user_id = &self.user_id;
+        Self::debug_log(&format!("fetch_initial_data start user_id={} base_url={}", user_id, self.base_url));
         match self.fetch_user_stats(user_id).await {
             Ok(stats) => {
+                Self::debug_log(&format!("stats OK: total={} working={} session={} lt={}",
+                    stats.total_memories, stats.working_memory_count,
+                    stats.session_memory_count, stats.long_term_memory_count));
                 let mut state = self.state.lock().await;
                 state.total_memories += stats.total_memories as u64;
                 state.total_recalls += stats.total_retrievals as u64;
@@ -367,90 +379,108 @@ impl MemoryStream {
                 state.index_healthy = stats.vector_index_count >= stats.total_memories;
             }
             Err(e) => {
+                Self::debug_log(&format!("stats FAILED: {}", e));
                 let mut state = self.state.lock().await;
                 state.set_error(format!("Failed to load stats: {}", e));
             }
         }
-        if let Ok(list) = self.fetch_memory_list(user_id).await {
-            let mut state = self.state.lock().await;
-            let mut memories = list.memories;
-            memories.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-            for mem in memories {
-                state.type_stats.increment(&mem.memory_type);
-                for tag in &mem.tags {
-                    state.entity_stats.total += 1;
-                    if let Some(pos) = state
+        Self::debug_log("fetching memory list...");
+        match self.fetch_memory_list(user_id).await {
+            Ok(list) => {
+                Self::debug_log(&format!("memory list OK: {} memories", list.memories.len()));
+                let mut state = self.state.lock().await;
+                let mut memories = list.memories;
+                memories.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+                for mem in memories {
+                    state.type_stats.increment(&mem.memory_type);
+                    for tag in &mem.tags {
+                        state.entity_stats.total += 1;
+                        if let Some(pos) = state
+                            .entity_stats
+                            .top_entities
+                            .iter()
+                            .position(|(e, _)| e == tag)
+                        {
+                            state.entity_stats.top_entities[pos].1 += 1;
+                        } else {
+                            state.entity_stats.top_entities.push((tag.clone(), 1));
+                        }
+                    }
+                    state
                         .entity_stats
                         .top_entities
-                        .iter()
-                        .position(|(e, _)| e == tag)
-                    {
-                        state.entity_stats.top_entities[pos].1 += 1;
+                        .sort_by(|a, b| b.1.cmp(&a.1));
+                    state.entity_stats.top_entities.truncate(10);
+                    let short_id = if mem.id.len() > 8 {
+                        mem.id[..8].to_string()
                     } else {
-                        state.entity_stats.top_entities.push((tag.clone(), 1));
-                    }
+                        mem.id.clone()
+                    };
+                    let n = state.graph_data.nodes.len() as f32;
+                    let (x, y, z) = (
+                        (n * 0.618).sin() * 0.35 + 0.5,
+                        (n * 0.618).cos() * 0.35 + 0.5,
+                        ((n * 0.3).sin() * 0.2 + 0.5).clamp(0.1, 0.9),
+                    );
+                    let content_preview = mem.content.clone();
+                    let content = if mem.content.chars().count() > 40 {
+                        let truncated: String = mem.content.chars().take(37).collect();
+                        format!("{}...", truncated)
+                    } else {
+                        mem.content.clone()
+                    };
+                    state.add_event(MemoryEvent {
+                        event_type: "HISTORY".to_string(),
+                        timestamp: mem.created_at,
+                        user_id: user_id.to_string(),
+                        memory_id: Some(mem.id.clone()),
+                        content_preview: Some(content_preview),
+                        memory_type: Some(mem.memory_type.clone()),
+                        importance: None,
+                        count: None,
+                        retrieval_mode: None,
+                        latency_ms: None,
+                        entities: if mem.tags.is_empty() {
+                            None
+                        } else {
+                            Some(mem.tags.clone())
+                        },
+                        edge_weight: None,
+                        from_id: None,
+                        to_id: None,
+                        results: None,
+                    });
+                    state.graph_data.nodes.push(GraphNode {
+                        id: mem.id,
+                        short_id,
+                        content,
+                        memory_type: mem.memory_type,
+                        connections: 0,
+                        x,
+                        y,
+                        z,
+                    });
                 }
-                state
-                    .entity_stats
-                    .top_entities
-                    .sort_by(|a, b| b.1.cmp(&a.1));
-                state.entity_stats.top_entities.truncate(10);
-                let short_id = if mem.id.len() > 8 {
-                    mem.id[..8].to_string()
-                } else {
-                    mem.id.clone()
-                };
-                let n = state.graph_data.nodes.len() as f32;
-                let (x, y, z) = (
-                    (n * 0.618).sin() * 0.35 + 0.5,
-                    (n * 0.618).cos() * 0.35 + 0.5,
-                    ((n * 0.3).sin() * 0.2 + 0.5).clamp(0.1, 0.9),
-                );
-                let content_preview = mem.content.clone();
-                let content = if mem.content.len() > 40 {
-                    format!("{}...", &mem.content[..37.min(mem.content.len())])
-                } else {
-                    mem.content.clone()
-                };
-                state.add_event(MemoryEvent {
-                    event_type: "HISTORY".to_string(),
-                    timestamp: mem.created_at,
-                    user_id: user_id.to_string(),
-                    memory_id: Some(mem.id.clone()),
-                    content_preview: Some(content_preview),
-                    memory_type: Some(mem.memory_type.clone()),
-                    importance: None,
-                    count: None,
-                    retrieval_mode: None,
-                    latency_ms: None,
-                    entities: if mem.tags.is_empty() {
-                        None
-                    } else {
-                        Some(mem.tags.clone())
-                    },
-                    edge_weight: None,
-                    from_id: None,
-                    to_id: None,
-                });
-                state.graph_data.nodes.push(GraphNode {
-                    id: mem.id,
-                    short_id,
-                    content,
-                    memory_type: mem.memory_type,
-                    connections: 0,
-                    x,
-                    y,
-                    z,
-                });
+                state.graph_stats.nodes = state.graph_data.nodes.len() as u32;
             }
-            state.graph_stats.nodes = state.graph_data.nodes.len() as u32;
+            Err(e) => {
+                Self::debug_log(&format!("memory list FAILED: {}", e));
+            }
         }
-        if let Ok(gs) = self.fetch_graph_stats(user_id).await {
-            let mut state = self.state.lock().await;
-            state.total_edges += gs.relationship_count as u64;
-            state.graph_stats.edges += gs.relationship_count as u32;
-            state.total_entities += gs.entity_count as u64;
+        Self::debug_log("fetching graph stats...");
+        match self.fetch_graph_stats(user_id).await {
+            Ok(gs) => {
+                Self::debug_log(&format!("graph stats OK: entities={} relationships={}", gs.entity_count, gs.relationship_count));
+                let mut state = self.state.lock().await;
+                state.total_edges += gs.relationship_count as u64;
+                state.graph_stats.edges += gs.relationship_count as u32;
+                state.total_entities += gs.entity_count as u64;
+            }
+            Err(e) => {
+                Self::debug_log(&format!("graph stats FAILED: {}", e));
+            }
         }
+        Self::debug_log("fetching universe...");
         if let Ok(universe) = self.fetch_universe(user_id).await {
             let mut state = self.state.lock().await;
             let valid_stars: Vec<_> = universe
@@ -532,8 +562,10 @@ impl MemoryStream {
             state.graph_data.apply_force_layout(50);
         }
         // Fetch todos and projects
+        Self::debug_log("fetching todos...");
         match self.fetch_todos(user_id).await {
             Ok((todos, projects, stats)) => {
+                Self::debug_log(&format!("todos OK: {} todos, {} projects", todos.len(), projects.len()));
                 let mut state = self.state.lock().await;
                 state.todos = todos;
                 // Mark projects with indexed files
@@ -546,15 +578,24 @@ impl MemoryStream {
                 state.todo_stats = stats;
             }
             Err(e) => {
+                Self::debug_log(&format!("todos FAILED: {}", e));
                 let mut state = self.state.lock().await;
                 state.set_error(format!("Failed to load todos: {}", e));
             }
         }
         // Fetch Claude Code context sessions (no auth required)
-        if let Ok(sessions) = self.fetch_context_sessions().await {
-            let mut state = self.state.lock().await;
-            state.context_sessions = sessions;
+        Self::debug_log("fetching context sessions...");
+        match self.fetch_context_sessions().await {
+            Ok(sessions) => {
+                Self::debug_log(&format!("context sessions OK: {} sessions", sessions.len()));
+                let mut state = self.state.lock().await;
+                state.context_sessions = sessions;
+            }
+            Err(e) => {
+                Self::debug_log(&format!("context sessions FAILED: {}", e));
+            }
         }
+        Self::debug_log("fetch_initial_data complete, starting SSE connect...");
     }
 
     /// Fetch context sessions from Claude Code status line updates
@@ -755,6 +796,7 @@ impl MemoryStream {
     }
 
     async fn connect(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Self::debug_log(&format!("SSE connecting to: {}", self.url));
         let mut es = EventSource::new(
             self.client
                 .get(&self.url)
@@ -763,6 +805,7 @@ impl MemoryStream {
         while let Some(event) = es.next().await {
             match event {
                 Ok(Event::Open) => {
+                    Self::debug_log("SSE connection opened");
                     self.state.lock().await.set_connected(true);
                 }
                 Ok(Event::Message(msg)) => {
@@ -803,7 +846,10 @@ impl MemoryStream {
                         }
                     }
                 }
-                Err(reqwest_eventsource::Error::StreamEnded) | Err(_) => break,
+                Err(e) => {
+                    Self::debug_log(&format!("SSE error: {:?}", e));
+                    break;
+                }
             }
         }
         Ok(())
@@ -1628,8 +1674,9 @@ pub fn read_file_content(path: &str, max_lines: usize) -> Result<Vec<String>, St
         .filter_map(|l| l.ok())
         .map(|l| {
             // Truncate very long lines for display
-            if l.len() > 200 {
-                format!("{}...", &l[..197])
+            if l.chars().count() > 200 {
+                let truncated: String = l.chars().take(197).collect();
+                format!("{}...", truncated)
             } else {
                 l
             }

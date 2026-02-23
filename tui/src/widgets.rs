@@ -4569,8 +4569,13 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
+    let has_rich_selected = state.selected_event.and_then(|i| state.events.get(i)).map_or(false, |e| e.event.results.is_some());
     let detail_height = if state.selected_event.is_some() {
-        12u16 // Expanded view for full content
+        if has_rich_selected {
+            (inner.height * 3 / 4).max(15)
+        } else {
+            12u16
+        }
     } else {
         0u16
     };
@@ -4898,24 +4903,40 @@ fn render_event_card(f: &mut Frame, area: Rect, event: &DisplayEvent, _index: us
 }
 
 fn render_event_detail(f: &mut Frame, area: Rect, event: &DisplayEvent, state: &AppState) {
+    let has_rich = event.event.results.is_some();
+    let right_hint = if has_rich {
+        " j/k scroll  Backspace close "
+    } else {
+        " Backspace to close "
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
         .title(Span::styled(
-            " ▼ MEMORY DETAILS ",
+            if has_rich {
+                " ▼ RESULTS "
+            } else {
+                " ▼ MEMORY DETAILS "
+            },
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ))
         .title(
             block::Title::from(Span::styled(
-                " Backspace to close ",
+                right_hint,
                 Style::default().fg(Color::DarkGray),
             ))
             .alignment(Alignment::Right),
         );
     let inner = block.inner(area);
     f.render_widget(block, area);
+
+    if has_rich {
+        render_rich_results(f, inner, event, state);
+        return;
+    }
 
     let color = event.event.event_color();
     let mut lines = Vec::new();
@@ -4944,7 +4965,6 @@ fn render_event_detail(f: &mut Frame, area: Rect, event: &DisplayEvent, state: &
     // Full content - word wrapped across multiple lines
     if let Some(content) = &event.event.content_preview {
         lines.push(Line::from(""));
-        // Split content into lines that fit the width
         let max_width = inner.width.saturating_sub(2) as usize;
         let mut remaining = content.as_str();
         let mut content_lines = 0;
@@ -4998,6 +5018,285 @@ fn render_event_detail(f: &mut Frame, area: Rect, event: &DisplayEvent, state: &
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Render rich results panel for RETRIEVE / PROACTIVE_CONTEXT events
+fn render_rich_results(f: &mut Frame, area: Rect, event: &DisplayEvent, state: &AppState) {
+    let results = match &event.event.results {
+        Some(v) => v,
+        None => return,
+    };
+    let max_w = area.width.saturating_sub(1) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header: event type, mode/context, latency, count
+    let is_retrieve = event.event.event_type == "RETRIEVE";
+    let color = event.event.event_color();
+
+    let mut hdr = vec![Span::styled(
+        if is_retrieve { "RECALL" } else { "PROACTIVE" },
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )];
+
+    if let Some(mode) = results.get("mode").and_then(|v| v.as_str()) {
+        hdr.push(Span::styled(
+            format!(" [{}]", mode),
+            Style::default().fg(Color::Rgb(255, 200, 150)),
+        ));
+    }
+    if let Some(lat) = results.get("latency_ms").and_then(|v| v.as_f64()) {
+        hdr.push(Span::styled(
+            format!(" {:.0}ms", lat),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    let query_or_ctx = if is_retrieve { "query" } else { "context" };
+    if let Some(q) = results.get(query_or_ctx).and_then(|v| v.as_str()) {
+        let display: String = q.chars().take(max_w.saturating_sub(30)).collect();
+        hdr.push(Span::styled(
+            format!("  \"{}\"", display),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    lines.push(Line::from(hdr));
+    lines.push(Line::from(""));
+
+    // Memories section
+    if let Some(mems) = results.get("memories").and_then(|v| v.as_array()) {
+        if !mems.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!(" Memories ({})", mems.len()),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for mem in mems {
+                let score = mem.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let pct = (score * 100.0).round() as u16;
+                let bar_filled = (score * 8.0).round() as usize;
+                let bar: String = "█".repeat(bar_filled)
+                    + &"░".repeat(8usize.saturating_sub(bar_filled));
+                let mtype = mem
+                    .get("memory_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let bar_color = if pct >= 80 {
+                    Color::Green
+                } else if pct >= 50 {
+                    Color::Yellow
+                } else {
+                    Color::Red
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {} {:>3}%", bar, pct),
+                        Style::default().fg(bar_color),
+                    ),
+                    Span::styled(
+                        format!(" | {}", mtype),
+                        Style::default().fg(Color::Rgb(255, 200, 150)),
+                    ),
+                ]));
+
+                // Content (wrapped to max 2 lines)
+                if let Some(content) = mem.get("content").and_then(|v| v.as_str()) {
+                    let content_w = max_w.saturating_sub(4);
+                    let first: String = content.chars().take(content_w).collect();
+                    lines.push(Line::from(Span::styled(
+                        format!("    {}", first),
+                        Style::default().fg(state.theme.fg()),
+                    )));
+                    if content.chars().count() > content_w {
+                        let second: String =
+                            content.chars().skip(content_w).take(content_w).collect();
+                        lines.push(Line::from(Span::styled(
+                            format!("    {}", second),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                }
+
+                // Tags
+                if let Some(tags) = mem.get("tags").and_then(|v| v.as_array()) {
+                    if !tags.is_empty() {
+                        let tag_strs: Vec<&str> =
+                            tags.iter().filter_map(|t| t.as_str()).collect();
+                        if !tag_strs.is_empty() {
+                            lines.push(Line::from(Span::styled(
+                                format!("    #{}", tag_strs.join(" #")),
+                                Style::default().fg(Color::Rgb(180, 230, 180)),
+                            )));
+                        }
+                    }
+                }
+
+                // Separator between memories
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", "─".repeat(max_w.saturating_sub(4))),
+                    Style::default().fg(Color::Rgb(60, 60, 60)),
+                )));
+            }
+        }
+    }
+
+    // Facts section
+    if let Some(facts) = results.get("facts").and_then(|v| v.as_array()) {
+        if !facts.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!(" Facts ({})", facts.len()),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for fact in facts {
+                let conf = fact
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let text = fact.get("fact").and_then(|v| v.as_str()).unwrap_or("?");
+                let display: String = text.chars().take(max_w.saturating_sub(12)).collect();
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  ({:>2}%) ", (conf * 100.0).round() as u16),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::styled(display, Style::default().fg(state.theme.fg())),
+                ]));
+            }
+        }
+    }
+
+    // Todos section
+    if let Some(todos) = results.get("todos").and_then(|v| v.as_array()) {
+        if !todos.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!(" Todos ({})", todos.len()),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for todo in todos {
+                let sid = todo
+                    .get("short_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let content = todo
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let pri = todo
+                    .get("priority")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let status = todo
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let pri_color = match pri {
+                    "urgent" => Color::Red,
+                    "high" => Color::Rgb(255, 165, 0),
+                    "medium" => Color::Yellow,
+                    _ => Color::DarkGray,
+                };
+                let display: String = content.chars().take(max_w.saturating_sub(25)).collect();
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {}: ", sid), Style::default().fg(Color::Cyan)),
+                    Span::styled(display, Style::default().fg(state.theme.fg())),
+                    Span::styled(
+                        format!(" [{}]", pri),
+                        Style::default().fg(pri_color),
+                    ),
+                    Span::styled(
+                        format!(" {}", status),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+        }
+    }
+
+    // Reminders section (due + context combined)
+    let mut all_reminders: Vec<&serde_json::Value> = Vec::new();
+    if let Some(r) = results.get("reminders").and_then(|v| v.as_array()) {
+        all_reminders.extend(r.iter());
+    }
+    if let Some(r) = results.get("due_reminders").and_then(|v| v.as_array()) {
+        all_reminders.extend(r.iter());
+    }
+    if let Some(r) = results.get("context_reminders").and_then(|v| v.as_array()) {
+        all_reminders.extend(r.iter());
+    }
+    if !all_reminders.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" Reminders ({})", all_reminders.len()),
+            Style::default()
+                .fg(Color::Rgb(255, 100, 100))
+                .add_modifier(Modifier::BOLD),
+        )));
+        for rem in &all_reminders {
+            let content = rem
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let display: String = content.chars().take(max_w.saturating_sub(6)).collect();
+            lines.push(Line::from(vec![
+                Span::styled("  ! ", Style::default().fg(Color::Red)),
+                Span::styled(display, Style::default().fg(state.theme.fg())),
+            ]));
+        }
+    }
+
+    // Detected entities (proactive_context)
+    if let Some(entities) = results.get("detected_entities").and_then(|v| v.as_array()) {
+        if !entities.is_empty() {
+            lines.push(Line::from(""));
+            let names: Vec<&str> = entities
+                .iter()
+                .filter_map(|e| e.get("name").and_then(|v| v.as_str()))
+                .collect();
+            lines.push(Line::from(vec![
+                Span::styled(
+                    " Entities: ",
+                    Style::default()
+                        .fg(Color::Rgb(180, 230, 180))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    names.join(", "),
+                    Style::default().fg(Color::Rgb(180, 230, 180)),
+                ),
+            ]));
+        }
+    }
+
+    // Apply scroll offset and render visible lines
+    let visible_height = area.height as usize;
+    let total = lines.len();
+    let scroll = state.event_detail_scroll.min(total.saturating_sub(visible_height));
+    let visible: Vec<Line> = lines.into_iter().skip(scroll).take(visible_height).collect();
+
+    f.render_widget(Paragraph::new(visible), area);
+
+    // Scrollbar hint if content exceeds visible area
+    if total > visible_height {
+        let indicator = format!(" {}/{} ", scroll + visible_height.min(total), total);
+        let ind_area = Rect {
+            x: area.x + area.width.saturating_sub(indicator.len() as u16 + 1),
+            y: area.y + area.height.saturating_sub(1),
+            width: indicator.len() as u16,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                indicator,
+                Style::default().fg(Color::DarkGray),
+            )),
+            ind_area,
+        );
+    }
+}
+
 fn render_activity_logs(f: &mut Frame, area: Rect, state: &AppState) {
     let content_area = with_ribbon_layout(f, area, state);
 
@@ -5032,8 +5331,13 @@ fn render_activity_logs(f: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
+    let has_rich_selected_logs = state.selected_event.and_then(|i| state.events.get(i)).map_or(false, |e| e.event.results.is_some());
     let detail_height = if state.selected_event.is_some() {
-        12u16 // Expanded view for full content
+        if has_rich_selected_logs {
+            (inner.height * 3 / 4).max(15)
+        } else {
+            12u16
+        }
     } else {
         0u16
     };
@@ -6586,13 +6890,6 @@ pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
         ),
         Span::styled("activity ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            "g ",
-            Style::default()
-                .fg(Color::Rgb(255, 200, 150))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("graph ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
             "j/k ",
             Style::default()
                 .fg(Color::Rgb(255, 200, 150))
@@ -6602,75 +6899,7 @@ pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
     ];
 
     // Add view-specific controls
-    if is_graph_view {
-        keys.extend([
-            Span::styled(
-                "r ",
-                Style::default()
-                    .fg(Color::Rgb(180, 230, 180))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("rebuild ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "R ",
-                Style::default()
-                    .fg(Color::Rgb(255, 200, 150))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("refresh ", Style::default().fg(Color::DarkGray)),
-        ]);
-    } else if matches!(state.view_mode, ViewMode::Dashboard | ViewMode::Projects) {
-        // Todo controls for Dashboard/Projects - show full priority labels
-        keys.extend([
-            Span::styled(
-                "x ",
-                Style::default()
-                    .fg(Color::Rgb(180, 230, 180))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("done ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "Spc ",
-                Style::default()
-                    .fg(Color::Rgb(255, 200, 150))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("status ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "[] ",
-                Style::default()
-                    .fg(Color::Rgb(255, 200, 150))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("move ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "! ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("urg ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "@ ",
-                Style::default()
-                    .fg(Color::Rgb(255, 165, 0))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("hi ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "# ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("med ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "$ ",
-                Style::default()
-                    .fg(Color::Rgb(180, 200, 255)) // Pastel blue
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("low ", Style::default().fg(Color::DarkGray)),
-        ]);
-    } else {
+    if matches!(state.view_mode, ViewMode::ActivityLogs) {
         keys.extend([
             Span::styled(
                 "+/- ",
@@ -6682,24 +6911,14 @@ pub fn render_footer(f: &mut Frame, area: Rect, state: &AppState) {
         ]);
     }
 
-    // Theme toggle
-    let theme_label = match state.theme {
-        crate::types::Theme::Dark => "◐",
-        crate::types::Theme::Light => "◑",
-    };
     keys.extend([
         Span::styled(
-            "t ",
+            "^U ",
             Style::default()
                 .fg(Color::Rgb(255, 200, 150))
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(theme_label, Style::default().fg(state.theme.accent())),
-        Span::raw(" "),
-    ]);
-
-    keys.extend([
-        Span::raw(" "),
+        Span::styled("switch ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             format!("[{}]", view_name),
             Style::default()

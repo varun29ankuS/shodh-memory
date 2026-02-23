@@ -303,6 +303,7 @@ pub async fn index_project_codebase(
         memory_type: Some("Codebase".to_string()),
         importance: None,
         count: Some(result.indexed_files),
+        results: None,
     });
 
     info!(

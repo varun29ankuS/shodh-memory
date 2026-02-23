@@ -267,6 +267,7 @@ pub async fn cleanup_corrupted(
             memory_type: None,
             importance: None,
             count: Some(deleted_count),
+            results: None,
         });
     }
 
@@ -306,6 +307,7 @@ pub async fn migrate_legacy(
             memory_type: None,
             importance: None,
             count: Some(migrated),
+            results: None,
         });
     }
 

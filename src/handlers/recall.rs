@@ -570,7 +570,44 @@ pub async fn recall(
         .with_label_values(&[&mode])
         .observe(count as f64);
 
-    // Broadcast RETRIEVE event for real-time dashboard
+    // Broadcast RETRIEVE event for real-time dashboard with full results
+    let results_json = serde_json::json!({
+        "query": req.query,
+        "mode": mode,
+        "count": count,
+        "latency_ms": duration * 1000.0,
+        "memories": recall_memories.iter().map(|m| serde_json::json!({
+            "id": m.id,
+            "content": m.experience.content,
+            "memory_type": m.experience.memory_type,
+            "tags": m.experience.tags,
+            "score": m.score,
+            "importance": m.importance,
+            "tier": m.tier,
+            "created_at": m.created_at,
+        })).collect::<Vec<_>>(),
+        "facts": facts.iter().map(|f| serde_json::json!({
+            "id": f.id,
+            "fact": f.fact,
+            "confidence": f.confidence,
+            "support_count": f.support_count,
+            "related_entities": f.related_entities,
+        })).collect::<Vec<_>>(),
+        "todos": todos.iter().map(|t| serde_json::json!({
+            "short_id": t.short_id,
+            "content": t.content,
+            "status": t.status,
+            "priority": t.priority,
+            "project": t.project,
+            "score": t.score,
+        })).collect::<Vec<_>>(),
+        "reminders": triggered_reminders.iter().map(|r| serde_json::json!({
+            "id": r.id,
+            "content": r.content,
+            "keywords": r.keywords,
+            "priority": r.priority,
+        })).collect::<Vec<_>>(),
+    });
     state.emit_event(MemoryEvent {
         event_type: "RETRIEVE".to_string(),
         timestamp: chrono::Utc::now(),
@@ -580,6 +617,7 @@ pub async fn recall(
         memory_type: Some(mode),
         importance: None,
         count: Some(count),
+        results: Some(results_json),
     });
 
     // Track session event
@@ -914,6 +952,7 @@ pub async fn proactive_context(
                     memory_type: Some("feedback".to_string()),
                     importance: None,
                     count: Some(feedback.memories_evaluated),
+                    results: None,
                 });
             }
         }
@@ -1608,7 +1647,56 @@ pub async fn proactive_context(
     let memory_count = memories.len();
     let reminder_count = due_reminders.len() + context_reminders.len();
 
-    // Emit event for dashboard
+    // Emit event for dashboard with full results
+    let proactive_latency = op_start.elapsed().as_secs_f64() * 1000.0;
+    let proactive_results = serde_json::json!({
+        "context": req.context,
+        "memory_count": memory_count,
+        "reminder_count": reminder_count,
+        "todo_count": todo_count,
+        "latency_ms": proactive_latency,
+        "memories": memories.iter().map(|m| serde_json::json!({
+            "id": m.id,
+            "content": m.content,
+            "memory_type": m.memory_type,
+            "tags": m.tags,
+            "score": m.score,
+            "importance": m.importance,
+            "tier": m.tier,
+            "created_at": m.created_at,
+            "relevance_reason": m.relevance_reason,
+        })).collect::<Vec<_>>(),
+        "facts": relevant_facts.iter().map(|f| serde_json::json!({
+            "id": f.id,
+            "fact": f.fact,
+            "confidence": f.confidence,
+            "support_count": f.support_count,
+            "related_entities": f.related_entities,
+        })).collect::<Vec<_>>(),
+        "todos": relevant_todos.iter().map(|t| serde_json::json!({
+            "short_id": t.short_id,
+            "content": t.content,
+            "status": t.status,
+            "priority": t.priority,
+            "project": t.project,
+        })).collect::<Vec<_>>(),
+        "due_reminders": due_reminders.iter().map(|r| serde_json::json!({
+            "id": r.id,
+            "content": r.content,
+            "trigger_type": r.trigger_type,
+            "priority": r.priority,
+        })).collect::<Vec<_>>(),
+        "context_reminders": context_reminders.iter().map(|r| serde_json::json!({
+            "id": r.id,
+            "content": r.content,
+            "trigger_type": r.trigger_type,
+            "priority": r.priority,
+        })).collect::<Vec<_>>(),
+        "detected_entities": detected_entities.iter().map(|e| serde_json::json!({
+            "name": e.name,
+            "type": e.entity_type,
+        })).collect::<Vec<_>>(),
+    });
     state.emit_event(MemoryEvent {
         event_type: "PROACTIVE_CONTEXT".to_string(),
         timestamp: chrono::Utc::now(),
@@ -1618,6 +1706,7 @@ pub async fn proactive_context(
         memory_type: Some("proactive".to_string()),
         importance: None,
         count: Some(memory_count + reminder_count),
+        results: Some(proactive_results),
     });
 
     // Audit log for proactive context operations
@@ -1730,6 +1819,7 @@ pub async fn surface_relevant(
         memory_type: Some("proactive".to_string()),
         importance: None,
         count: Some(response.memories.len()),
+        results: None,
     });
 
     Ok(Json(response))
@@ -1980,6 +2070,7 @@ pub async fn recall_by_tags(
         memory_type: Some("by_tags".to_string()),
         importance: None,
         count: Some(count),
+        results: None,
     });
 
     Ok(Json(RetrieveResponse { memories, count }))
@@ -2048,6 +2139,7 @@ pub async fn recall_by_date(
         memory_type: Some("by_date".to_string()),
         importance: None,
         count: Some(count),
+        results: None,
     });
 
     Ok(Json(RetrieveResponse { memories, count }))

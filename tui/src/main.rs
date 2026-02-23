@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
@@ -28,6 +28,11 @@ use stream::{
 };
 use types::{AppState, FocusPanel, SearchMode, ViewMode};
 use widgets::{render_footer, render_header, render_main};
+
+enum TuiExitAction {
+    Quit,
+    SwitchUser,
+}
 
 /// Set the terminal window title
 fn set_terminal_title(title: &str) {
@@ -747,45 +752,61 @@ async fn main() -> Result<()> {
     // Show splash screen
     run_splash(&mut terminal).await?;
 
-    // Run user selector
-    let user = match run_user_selector(&mut terminal, &base_url, &api_key).await? {
-        Some(u) => u,
-        None => {
-            // Clean up terminal before exit
-            disable_raw_mode()?;
-            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-            terminal.show_cursor()?;
-            return Ok(());
+    let mut show_splash = false;
+    loop {
+        // Run user selector (skip splash on switch-user re-entry)
+        if show_splash {
+            // Terminal already in alternate screen from previous run_tui cleanup
         }
-    };
+        let user = match run_user_selector(&mut terminal, &base_url, &api_key).await? {
+            Some(u) => u,
+            None => {
+                // Clean up terminal before exit
+                disable_raw_mode()?;
+                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                terminal.show_cursor()?;
+                return Ok(());
+            }
+        };
 
-    // Clean up terminal - run_tui will create its own session
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    drop(terminal);
+        // Clean up terminal - run_tui will create its own session
+        disable_raw_mode()?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        terminal.show_cursor()?;
+        drop(terminal);
 
-    let state = Arc::new(Mutex::new(AppState::new()));
-    {
-        let mut s = state.lock().await;
-        s.current_user = user.clone();
+        let state = Arc::new(Mutex::new(AppState::new()));
+        {
+            let mut s = state.lock().await;
+            s.current_user = user.clone();
+        }
+
+        let stream = MemoryStream::new(
+            &base_url,
+            &api_key,
+            &user,
+            Arc::clone(&state),
+        );
+        let h = tokio::spawn(async move {
+            stream.run().await;
+        });
+        let action = run_tui(state).await?;
+        h.abort();
+
+        match action {
+            TuiExitAction::Quit => return Ok(()),
+            TuiExitAction::SwitchUser => {
+                // Re-create terminal for user selector
+                enable_raw_mode()?;
+                execute!(io::stdout(), EnterAlternateScreen)?;
+                terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+                show_splash = true;
+            }
+        }
     }
-
-    let stream = MemoryStream::new(
-        &format!("{}/api/events?user_id={}", base_url, user),
-        &api_key,
-        &user,
-        Arc::clone(&state),
-    );
-    let h = tokio::spawn(async move {
-        stream.run().await;
-    });
-    let r = run_tui(state).await;
-    h.abort();
-    r
 }
 
-async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
+async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<TuiExitAction> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -808,6 +829,7 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
         title
     };
 
+    let mut exit_action = TuiExitAction::Quit;
     loop {
         {
             let g = state.lock().await;
@@ -1110,6 +1132,14 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                             _ => {}
                         }
                         continue;
+                    }
+
+                    // Ctrl+U: switch user
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('u')
+                    {
+                        exit_action = TuiExitAction::SwitchUser;
+                        break;
                     }
 
                     // Normal mode keybindings
@@ -1613,7 +1643,14 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                 FocusPanel::Right => g.select_event_prev(),
                                 FocusPanel::Detail => g.detail_scroll_up(),
                             },
-                            ViewMode::ActivityLogs => g.select_event_prev(),
+                            ViewMode::ActivityLogs => {
+                                let has_rich = g.selected_event.and_then(|i| g.events.get(i)).map_or(false, |e| e.event.results.is_some());
+                                if has_rich && g.event_detail_scroll > 0 {
+                                    g.event_detail_scroll = g.event_detail_scroll.saturating_sub(1);
+                                } else {
+                                    g.select_event_prev();
+                                }
+                            }
                             ViewMode::Projects => match g.focus_panel {
                                 FocusPanel::Left => {
                                     if g.projects_selected > 0 {
@@ -1648,7 +1685,14 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                     }
                                 }
                             }
-                            ViewMode::ActivityLogs => g.select_event_next(),
+                            ViewMode::ActivityLogs => {
+                                let has_rich = g.selected_event.and_then(|i| g.events.get(i)).map_or(false, |e| e.event.results.is_some());
+                                if has_rich {
+                                    g.event_detail_scroll += 1;
+                                } else {
+                                    g.select_event_next();
+                                }
+                            }
                             ViewMode::Projects => {
                                 match g.focus_panel {
                                     FocusPanel::Left => {
@@ -1796,7 +1840,14 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                             g.select_event_prev()
                                         }
                                     }
-                                    ViewMode::ActivityLogs => g.select_event_prev(),
+                                    ViewMode::ActivityLogs => {
+                                        let has_rich = g.selected_event.and_then(|i| g.events.get(i)).map_or(false, |e| e.event.results.is_some());
+                                        if has_rich {
+                                            g.event_detail_scroll = g.event_detail_scroll.saturating_sub(1);
+                                        } else {
+                                            g.select_event_prev();
+                                        }
+                                    }
                                     ViewMode::Projects => match g.focus_panel {
                                         FocusPanel::Left => {
                                             if g.projects_selected > 0 {
@@ -1833,7 +1884,14 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
                                             g.select_event_next()
                                         }
                                     }
-                                    ViewMode::ActivityLogs => g.select_event_next(),
+                                    ViewMode::ActivityLogs => {
+                                        let has_rich = g.selected_event.and_then(|i| g.events.get(i)).map_or(false, |e| e.event.results.is_some());
+                                        if has_rich {
+                                            g.event_detail_scroll += 1;
+                                        } else {
+                                            g.select_event_next();
+                                        }
+                                    }
                                     ViewMode::Projects => match g.focus_panel {
                                         FocusPanel::Left => {
                                             let total_items = g.left_panel_flat_count();
@@ -1910,7 +1968,7 @@ async fn run_tui(state: Arc<Mutex<AppState>>) -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
-    Ok(())
+    Ok(exit_action)
 }
 
 async fn execute_search(

@@ -521,6 +521,7 @@ pub async fn remember(
         memory_type: Some(experience_type_str),
         importance: None,
         count: None,
+        results: None,
     });
 
     Ok(Json(RememberResponse {
@@ -873,6 +874,7 @@ pub async fn upsert_memory(
         memory_type: req.memory_type.clone(),
         importance: None,
         count: None,
+        results: None,
     });
 
     Ok(Json(UpsertResponse {
