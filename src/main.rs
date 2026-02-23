@@ -217,6 +217,9 @@ async fn async_main() -> Result<()> {
         server_config.maintenance_interval_secs,
     );
 
+    // Start active reminder scheduler (checks every 60s for due reminders)
+    start_reminder_scheduler(Arc::clone(&manager));
+
     // Start backup scheduler if enabled
     if server_config.backup_enabled && server_config.backup_interval_secs > 0 {
         start_backup_scheduler(
@@ -434,6 +437,29 @@ fn start_backup_scheduler(manager: AppState, interval_secs: u64, max_backups: us
         interval_secs / 3600,
         max_backups
     );
+}
+
+fn start_reminder_scheduler(manager: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+
+        // Skip first immediate tick — let server warm up
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+
+            let manager_clone = Arc::clone(&manager);
+            tokio::task::spawn_blocking(move || {
+                let triggered = manager_clone.check_and_emit_due_reminders();
+                if triggered > 0 {
+                    info!("Active reminder check: {} reminder(s) triggered", triggered);
+                }
+            });
+        }
+    });
+
+    info!("Active reminder scheduler started (interval: 60s)");
 }
 
 // =============================================================================

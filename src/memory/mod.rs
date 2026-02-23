@@ -2371,7 +2371,12 @@ impl MemorySystem {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(memory_id = %memory_id.0, error = %e, "Failed to fetch from storage");
+                    tracing::warn!(
+                        memory_id = %memory_id.0,
+                        error = %e,
+                        "Stale vector reference — cleaning up orphaned index entry"
+                    );
+                    self.retriever.remove_memory(&memory_id);
                 }
             }
 

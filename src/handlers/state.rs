@@ -1423,6 +1423,48 @@ impl MultiUserMemoryManager {
         self.user_memories.entry_count() as usize
     }
 
+    /// Active reminder check: scan all users for due reminders, mark them triggered,
+    /// and emit `REMINDER_DUE` events to the broadcast channel.
+    ///
+    /// Called by the dedicated 60-second reminder scheduler in main.rs.
+    /// Returns the number of reminders triggered.
+    pub fn check_and_emit_due_reminders(&self) -> usize {
+        let due_tasks = match self.prospective_store.get_all_due_tasks() {
+            Ok(tasks) => tasks,
+            Err(e) => {
+                tracing::debug!("Active reminder check failed: {}", e);
+                return 0;
+            }
+        };
+
+        let mut triggered = 0;
+        for (user_id, task) in &due_tasks {
+            let _ = self.prospective_store.mark_triggered(user_id, &task.id);
+
+            self.emit_event(MemoryEvent {
+                event_type: "REMINDER_DUE".to_string(),
+                timestamp: chrono::Utc::now(),
+                user_id: user_id.clone(),
+                memory_id: Some(task.id.0.to_string()),
+                content_preview: Some(task.content.chars().take(100).collect()),
+                memory_type: Some("reminder".to_string()),
+                importance: Some(task.priority as f32 / 5.0),
+                count: None,
+            });
+
+            tracing::info!(
+                user_id = %user_id,
+                reminder_id = %task.id.0,
+                content = %task.content.chars().take(50).collect::<String>(),
+                "Reminder triggered (active)"
+            );
+
+            triggered += 1;
+        }
+
+        triggered
+    }
+
     /// Collect references to all secondary store databases for comprehensive backup.
     /// All shared stores (todos, prospective, files, feedback, audit) share a single DB,
     /// so we return one reference. BackupEngine handles all CFs automatically.

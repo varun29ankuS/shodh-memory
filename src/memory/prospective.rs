@@ -455,6 +455,48 @@ impl ProspectiveStore {
         Ok(due_tasks)
     }
 
+    /// Scan ALL users for due reminders (used by active reminder scheduler).
+    ///
+    /// Returns `(user_id, task)` pairs for all pending tasks whose due time has passed.
+    /// Leverages the zero-padded `due:{timestamp}:{task_id}` index for efficient scanning:
+    /// lexicographic order = chronological, so we stop at the first future timestamp.
+    pub fn get_all_due_tasks(&self) -> Result<Vec<(String, ProspectiveTask)>> {
+        let now_ts = Utc::now().timestamp();
+        let mut due_tasks = Vec::new();
+
+        for item in self.db.prefix_iterator_cf(self.index_cf(), b"due:") {
+            let (key, value) = item.context("Failed to read due index")?;
+            let key_str = String::from_utf8_lossy(&key);
+
+            let parts: Vec<&str> = key_str.splitn(3, ':').collect();
+            if parts.len() != 3 {
+                continue;
+            }
+
+            let task_ts: i64 = match parts[1].parse() {
+                Ok(ts) => ts,
+                Err(_) => continue,
+            };
+
+            if task_ts > now_ts {
+                break;
+            }
+
+            let user_id = String::from_utf8_lossy(&value).to_string();
+
+            if let Ok(uuid) = uuid::Uuid::parse_str(parts[2]) {
+                let task_id = ProspectiveTaskId(uuid);
+                if let Some(task) = self.get(&user_id, &task_id)? {
+                    if task.status == ProspectiveTaskStatus::Pending {
+                        due_tasks.push((user_id, task));
+                    }
+                }
+            }
+        }
+
+        Ok(due_tasks)
+    }
+
     /// Check for context-triggered reminders based on text content (keyword match only)
     ///
     /// Returns tasks where:
