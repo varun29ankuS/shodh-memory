@@ -198,6 +198,20 @@ pub fn strip_system_noise(content: &str) -> String {
         }
     }
 
+    // Remove <task-notification>...</task-notification> blocks
+    while let Some(start) = result.find("<task-notification>") {
+        if let Some(end) = result.find("</task-notification>") {
+            let end_pos = end + "</task-notification>".len();
+            if end_pos <= result.len() && start < end_pos {
+                result = format!("{}{}", &result[..start], &result[end_pos..]);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
     // Remove Claude Code file content blocks - Windows paths
     while let Some(start) = result.find("Contents of C:\\") {
         let search_area = &result[start..];
