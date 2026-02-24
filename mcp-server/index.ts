@@ -370,7 +370,7 @@ function formatSurfacedMemories(memories: SurfacedMemory[]): string {
   if (!memories || memories.length === 0) return "";
 
   const formatted = memories
-    .map((m, i) => `  ${i + 1}. [${(m.relevance_score * 100).toFixed(0)}%] ${m.content.slice(0, 80)}...`)
+    .map((m, i) => `  ${i + 1}. [${((m.relevance_score ?? 0) * 100).toFixed(0)}%] ${m.content.slice(0, 80)}...`)
     .join("\n");
 
   return `\n\n[Relevant memories surfaced]\n${formatted}`;
@@ -1523,7 +1523,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           response += `📊 Retrieval Stats\n`;
           const graphPct = (stats.graph_weight * 100).toFixed(0);
           const semPct = (stats.semantic_weight * 100).toFixed(0);
-          response += `   Graph: ${graphPct}% │ Semantic: ${semPct}% │ Density: ${stats.graph_density.toFixed(2)}\n`;
+          response += `   Graph: ${graphPct}% │ Semantic: ${semPct}% │ Density: ${(stats.graph_density ?? 0).toFixed(2)}\n`;
           response += `   Candidates: ${stats.graph_candidates} graph + ${stats.semantic_candidates} semantic\n`;
           response += `   Entities: ${stats.entities_activated} │ Time: ${(stats.retrieval_time_us / 1000).toFixed(1)}ms`;
         }
@@ -2133,7 +2133,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ? `\n[Feedback: ${result.feedback_processed.memories_evaluated} evaluated, ${result.feedback_processed.reinforced.length} reinforced, ${result.feedback_processed.weakened.length} weakened]`
             : '';
 
-          const emptyText = `No relevant memories surfaced for this context.${entityList}${feedbackNote}\n\n[Latency: ${result.latency_ms.toFixed(1)}ms]`;
+          const emptyText = `No relevant memories surfaced for this context.${entityList}${feedbackNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms]`;
           lastProactiveResponse = emptyText;
 
           return {
@@ -2277,7 +2277,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (result.reminder_count > 0) summaryParts.push(`${result.reminder_count} reminders`);
         const summary = summaryParts.length > 0 ? `Surfaced ${summaryParts.join(', ')}` : 'No relevant context found';
 
-        const responseText = `${temporalHeader}${summary}:\n\n${formattedWithTime}${entitySummary}${factsBlock}${reminderBlock}${todoBlock}${feedbackNote}${ingestNote}\n\n[Latency: ${result.latency_ms.toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`;
+        const responseText = `${temporalHeader}${summary}:\n\n${formattedWithTime}${entitySummary}${factsBlock}${reminderBlock}${todoBlock}${feedbackNote}${ingestNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`;
 
         // Store for implicit feedback on next call
         lastProactiveResponse = responseText;
