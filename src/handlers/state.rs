@@ -1358,6 +1358,30 @@ impl MultiUserMemoryManager {
             }
         }
 
+        // Heavy cycle: clean up old triggered/dismissed reminders (C4 fix)
+        if is_heavy {
+            for (user_id_arc, _) in self.user_memories.iter() {
+                let user_id = user_id_arc.as_ref();
+                match self.prospective_store.cleanup_old_tasks(user_id, 30) {
+                    Ok(deleted) if deleted > 0 => {
+                        tracing::info!(
+                            user_id = %user_id,
+                            deleted = deleted,
+                            "Cleaned up old prospective tasks (>30 days)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            user_id = %user_id,
+                            error = %e,
+                            "Prospective task cleanup failed"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // Flush databases only on heavy cycles — flush triggers RocksDB compaction
         // which allocates significant C++ memory through Windows CRT
         if is_heavy {
@@ -1474,7 +1498,27 @@ impl MultiUserMemoryManager {
 
         let mut triggered = 0;
         for (user_id, task) in &due_tasks {
-            let _ = self.prospective_store.mark_triggered(user_id, &task.id);
+            match self.prospective_store.mark_triggered(user_id, &task.id) {
+                Ok(true) => {} // successfully triggered
+                Ok(false) => {
+                    // Already triggered by concurrent call — skip event emission
+                    tracing::debug!(
+                        user_id = %user_id,
+                        reminder_id = %task.id.0,
+                        "Reminder already triggered (scheduler race)"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        reminder_id = %task.id.0,
+                        error = %e,
+                        "Failed to mark reminder triggered in scheduler"
+                    );
+                    continue;
+                }
+            }
 
             self.emit_event(MemoryEvent {
                 event_type: "REMINDER_DUE".to_string(),

@@ -490,6 +490,22 @@ pub async fn create_reminder(
     task.tags = req.tags;
     task.priority = req.priority.clamp(1, 5);
 
+    // Cache embedding at creation time for context triggers (avoids recomputation on every check)
+    if matches!(task.trigger, ProspectiveTrigger::OnContext { .. }) {
+        if let Ok(memory_system) = state.get_user_memory(&req.user_id) {
+            let content_for_embed = task.content.clone();
+            let memory_clone = memory_system.clone();
+            if let Ok(Ok(embedding)) = tokio::task::spawn_blocking(move || {
+                let guard = memory_clone.read();
+                guard.compute_embedding(&content_for_embed)
+            })
+            .await
+            {
+                task.embedding = Some(embedding);
+            }
+        }
+    }
+
     let trigger_type = match &task.trigger {
         ProspectiveTrigger::AtTime { .. } => "time",
         ProspectiveTrigger::AfterDuration { .. } => "duration",
@@ -586,20 +602,43 @@ pub async fn get_due_reminders(
 ) -> Result<Json<DueRemindersResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let mut due_tasks = state
+    let due_tasks = state
         .prospective_store
         .get_due_tasks(&req.user_id)
         .map_err(AppError::Internal)?;
 
-    if req.mark_triggered {
-        for task in &mut due_tasks {
-            let _ = state
+    // Mark triggered and re-read actual state from DB (fixes C1: timestamp mismatch,
+    // C2: stale snapshot, C3: silent error swallowing)
+    let tasks_for_response: Vec<ProspectiveTask> = if req.mark_triggered {
+        let mut result = Vec::with_capacity(due_tasks.len());
+        for task in &due_tasks {
+            match state
                 .prospective_store
-                .mark_triggered(&req.user_id, &task.id);
+                .mark_triggered(&req.user_id, &task.id)
+            {
+                Ok(true) => {
+                    // Re-read to get the actual DB state with correct triggered_at timestamp
+                    match state.prospective_store.get(&req.user_id, &task.id) {
+                        Ok(Some(updated)) => result.push(updated),
+                        _ => result.push(task.clone()),
+                    }
+                }
+                Ok(false) => {
+                    // Already triggered by concurrent call (race) — skip
+                    tracing::debug!(task_id = %task.id, "Reminder already triggered (concurrent)");
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %task.id, error = %e, "Failed to mark reminder triggered");
+                    result.push(task.clone());
+                }
+            }
         }
-    }
+        result
+    } else {
+        due_tasks
+    };
 
-    let reminders: Vec<ReminderItem> = due_tasks
+    let reminders: Vec<ReminderItem> = tasks_for_response
         .into_iter()
         .map(|t| {
             let overdue_seconds = t.overdue_seconds();
@@ -611,18 +650,10 @@ pub async fn get_due_reminders(
                     ProspectiveTrigger::AfterDuration { .. } => "duration".to_string(),
                     ProspectiveTrigger::OnContext { .. } => "context".to_string(),
                 },
-                status: if req.mark_triggered {
-                    "triggered".to_string()
-                } else {
-                    format!("{:?}", t.status).to_lowercase()
-                },
+                status: format!("{:?}", t.status).to_lowercase(),
                 due_at: t.trigger.due_at(),
                 created_at: t.created_at,
-                triggered_at: if req.mark_triggered {
-                    Some(chrono::Utc::now())
-                } else {
-                    t.triggered_at
-                },
+                triggered_at: t.triggered_at,
                 dismissed_at: t.dismissed_at,
                 priority: t.priority,
                 tags: t.tags,
@@ -698,32 +729,42 @@ pub async fn check_context_reminders(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?;
 
-    if mark_triggered {
-        for (task, _) in &matched_tasks {
-            let _ = state
+    // Mark triggered and re-read actual state (same C1+C2+C3 fixes as get_due_reminders)
+    let tasks_with_scores: Vec<(ProspectiveTask, f32)> = if mark_triggered {
+        let mut result = Vec::with_capacity(matched_tasks.len());
+        for (task, score) in &matched_tasks {
+            match state
                 .prospective_store
-                .mark_triggered(&req.user_id, &task.id);
+                .mark_triggered(&req.user_id, &task.id)
+            {
+                Ok(true) => match state.prospective_store.get(&req.user_id, &task.id) {
+                    Ok(Some(updated)) => result.push((updated, *score)),
+                    _ => result.push((task.clone(), *score)),
+                },
+                Ok(false) => {
+                    tracing::debug!(task_id = %task.id, "Context reminder already triggered (concurrent)");
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %task.id, error = %e, "Failed to mark context reminder triggered");
+                    result.push((task.clone(), *score));
+                }
+            }
         }
-    }
+        result
+    } else {
+        matched_tasks
+    };
 
-    let reminders: Vec<ReminderItem> = matched_tasks
+    let reminders: Vec<ReminderItem> = tasks_with_scores
         .into_iter()
         .map(|(t, score)| ReminderItem {
             id: t.id.to_string(),
             content: t.content,
             trigger_type: format!("context (score: {:.2})", score),
-            status: if mark_triggered {
-                "triggered".to_string()
-            } else {
-                format!("{:?}", t.status).to_lowercase()
-            },
+            status: format!("{:?}", t.status).to_lowercase(),
             due_at: None,
             created_at: t.created_at,
-            triggered_at: if mark_triggered {
-                Some(chrono::Utc::now())
-            } else {
-                t.triggered_at
-            },
+            triggered_at: t.triggered_at,
             dismissed_at: t.dismissed_at,
             priority: t.priority,
             tags: t.tags,

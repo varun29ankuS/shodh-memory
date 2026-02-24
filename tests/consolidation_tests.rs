@@ -955,7 +955,7 @@ fn test_consolidation_report_after_maintenance() {
     }
 
     // Run maintenance to potentially trigger decay events (0.95 = standard decay factor)
-    system.run_maintenance(0.95, "test-user").unwrap();
+    system.run_maintenance(0.95, "test-user", false).unwrap();
 
     // Get report
     let report = system.get_consolidation_report(epoch(), None);
@@ -1115,7 +1115,7 @@ fn test_consolidation_report_stats_consistency() {
     }
 
     // Run maintenance with standard decay factor
-    system.run_maintenance(0.95, "test-user").unwrap();
+    system.run_maintenance(0.95, "test-user", false).unwrap();
 
     // Get report
     let report = system.get_consolidation_report(epoch(), None);

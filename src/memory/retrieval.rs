@@ -1497,13 +1497,14 @@ impl RetrievalEngine {
             ..Default::default()
         };
 
+        // Hebbian coactivation: count pair associations for non-misleading outcomes
+        if !matches!(outcome, RetrievalOutcome::Misleading) && memory_ids.len() >= 2 {
+            let n = memory_ids.len();
+            stats.associations_strengthened = n * (n - 1) / 2;
+        }
+
         match outcome {
             RetrievalOutcome::Helpful => {
-                // NOTE: Coactivation (Hebbian strengthening) is now handled at the API layer
-                // via GraphMemory.record_memory_coactivation() which provides persistent
-                // storage and proper Hebbian learning. This method now only handles
-                // importance boosting for backwards compatibility.
-
                 // Boost importance of helpful memories and PERSIST to storage
                 for id in memory_ids {
                     if let Ok(memory) = self.storage.get(id) {
@@ -1549,9 +1550,7 @@ impl RetrievalEngine {
                         }
                     }
                 }
-                // NOTE: Association strengthening for neutral outcomes is now handled
-                // at the API layer via GraphMemory.record_memory_coactivation() which
-                // provides persistent storage and proper Hebbian learning.
+                // Association strengthening for neutral outcomes is counted above (pair counting)
             }
         }
 

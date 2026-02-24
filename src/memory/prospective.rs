@@ -290,59 +290,122 @@ impl ProspectiveStore {
     }
 
     /// Update a task (e.g., mark as triggered/dismissed)
+    ///
+    /// Atomic: reads old task, builds a single WriteBatch containing old-index
+    /// deletes + new task write + new index writes, then commits once.
     pub fn update(&self, task: &ProspectiveTask) -> Result<()> {
-        // Remove old indices first
-        self.remove_indices(&task.user_id, &task.id)?;
+        let mut batch = WriteBatch::default();
 
-        // Store updated task
-        self.store(task)
-    }
-
-    /// Remove indices for a task (used during update/delete)
-    fn remove_indices(&self, user_id: &str, task_id: &ProspectiveTaskId) -> Result<()> {
-        // Get the task to know what indices to remove
-        if let Some(task) = self.get(user_id, task_id)? {
-            let mut batch = WriteBatch::default();
-
-            let user_key = format!("user:{}:{}", user_id, task_id);
+        // 1. Remove old indices (need to read old task to know what to delete)
+        if let Some(old_task) = self.get(&task.user_id, &task.id)? {
+            let user_key = format!("user:{}:{}", task.user_id, task.id);
             batch.delete_cf(self.index_cf(), user_key.as_bytes());
 
-            let status_key = format!("status:{:?}:{}:{}", task.status, user_id, task_id);
+            let status_key = format!("status:{:?}:{}:{}", old_task.status, task.user_id, task.id);
             batch.delete_cf(self.index_cf(), status_key.as_bytes());
 
-            if let Some(due_at) = task.trigger.due_at() {
-                let due_key = format!("due:{:020}:{}", due_at.timestamp(), task_id);
+            if let Some(due_at) = old_task.trigger.due_at() {
+                let due_key = format!("due:{:020}:{}", due_at.timestamp(), task.id);
                 batch.delete_cf(self.index_cf(), due_key.as_bytes());
             }
 
-            if let ProspectiveTrigger::OnContext { ref keywords, .. } = task.trigger {
+            if let ProspectiveTrigger::OnContext { ref keywords, .. } = old_task.trigger {
                 for keyword in keywords {
-                    let kw_key =
-                        format!("context:{}:{}:{}", keyword.to_lowercase(), user_id, task_id);
+                    let kw_key = format!(
+                        "context:{}:{}:{}",
+                        keyword.to_lowercase(),
+                        task.user_id,
+                        task.id
+                    );
                     batch.delete_cf(self.index_cf(), kw_key.as_bytes());
                 }
             }
-
-            self.db.write(batch)?;
         }
+
+        // 2. Write new task data
+        let key = format!("{}:{}", task.user_id, task.id);
+        let value =
+            serde_json::to_vec(task).context("Failed to serialize prospective task to JSON")?;
+        batch.put_cf(self.tasks_cf(), key.as_bytes(), &value);
+
+        // 3. Write new indices
+        let user_key = format!("user:{}:{}", task.user_id, task.id);
+        batch.put_cf(self.index_cf(), user_key.as_bytes(), b"1");
+
+        let status_key = format!("status:{:?}:{}:{}", task.status, task.user_id, task.id);
+        batch.put_cf(self.index_cf(), status_key.as_bytes(), b"1");
+
+        // Only index due time for Pending tasks — triggered/dismissed tasks
+        // don't need to appear in due scans (fixes M13: stale due index bloat)
+        if task.status == ProspectiveTaskStatus::Pending {
+            if let Some(due_at) = task.trigger.due_at() {
+                let due_key = format!("due:{:020}:{}", due_at.timestamp(), task.id);
+                batch.put_cf(self.index_cf(), due_key.as_bytes(), task.user_id.as_bytes());
+            }
+        }
+
+        if let ProspectiveTrigger::OnContext { ref keywords, .. } = task.trigger {
+            for keyword in keywords {
+                let kw_key = format!(
+                    "context:{}:{}:{}",
+                    keyword.to_lowercase(),
+                    task.user_id,
+                    task.id
+                );
+                batch.put_cf(self.index_cf(), kw_key.as_bytes(), b"1");
+            }
+        }
+
+        // 4. Single atomic commit
+        self.db
+            .write(batch)
+            .context("Failed to atomically update prospective task")?;
+
+        tracing::debug!(
+            task_id = %task.id,
+            user_id = %task.user_id,
+            status = ?task.status,
+            "Updated prospective task (atomic)"
+        );
 
         Ok(())
     }
 
-    /// Delete a task
+    /// Delete a task (atomic: removes task + all indices in single WriteBatch)
     pub fn delete(&self, user_id: &str, task_id: &ProspectiveTaskId) -> Result<bool> {
-        let key = format!("{}:{}", user_id, task_id);
+        let task = match self.get(user_id, task_id)? {
+            Some(t) => t,
+            None => return Ok(false),
+        };
 
-        // Check if exists
-        if self.db.get_cf(self.tasks_cf(), key.as_bytes())?.is_none() {
-            return Ok(false);
+        let mut batch = WriteBatch::default();
+
+        // Delete task data
+        let key = format!("{}:{}", user_id, task_id);
+        batch.delete_cf(self.tasks_cf(), key.as_bytes());
+
+        // Delete all indices
+        let user_key = format!("user:{}:{}", user_id, task_id);
+        batch.delete_cf(self.index_cf(), user_key.as_bytes());
+
+        let status_key = format!("status:{:?}:{}:{}", task.status, user_id, task_id);
+        batch.delete_cf(self.index_cf(), status_key.as_bytes());
+
+        if let Some(due_at) = task.trigger.due_at() {
+            let due_key = format!("due:{:020}:{}", due_at.timestamp(), task_id);
+            batch.delete_cf(self.index_cf(), due_key.as_bytes());
         }
 
-        // Remove indices
-        self.remove_indices(user_id, task_id)?;
+        if let ProspectiveTrigger::OnContext { ref keywords, .. } = task.trigger {
+            for keyword in keywords {
+                let kw_key = format!("context:{}:{}:{}", keyword.to_lowercase(), user_id, task_id);
+                batch.delete_cf(self.index_cf(), kw_key.as_bytes());
+            }
+        }
 
-        // Delete task
-        self.db.delete_cf(self.tasks_cf(), key.as_bytes())?;
+        self.db
+            .write(batch)
+            .context("Failed to atomically delete prospective task")?;
 
         tracing::debug!(task_id = %task_id, user_id = %user_id, "Deleted prospective task");
 
@@ -592,8 +655,14 @@ impl ProspectiveStore {
                     continue;
                 }
 
-                // 2. Try semantic matching
-                if let Some(task_embedding) = embed_fn(&task.content) {
+                // 2. Try semantic matching (prefer cached embedding, fallback to embed_fn)
+                let task_emb = task
+                    .embedding
+                    .as_deref()
+                    .map(|e| std::borrow::Cow::Borrowed(e))
+                    .or_else(|| embed_fn(&task.content).map(std::borrow::Cow::Owned));
+
+                if let Some(task_embedding) = task_emb {
                     let similarity = cosine_similarity(context_embedding, &task_embedding);
                     if similarity >= threshold {
                         seen_ids.insert(task.id.0);

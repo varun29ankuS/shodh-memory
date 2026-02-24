@@ -3,6 +3,7 @@
 //! These tests download the TinyBERT-finetuned-NER model and run entity extraction.
 //! Requires network access on first run to download the model (~14.5MB quantized).
 
+use shodh_memory::embeddings::minilm::pre_init_ort_runtime;
 use shodh_memory::embeddings::ner::{NerConfig, NerEntityType, NeuralNer};
 use shodh_memory::embeddings::{
     are_ner_models_downloaded, download_ner_models, get_ner_models_dir,
@@ -38,6 +39,10 @@ fn ensure_models_downloaded() {
 
 /// Create neural NER instance (downloads model if needed)
 fn create_neural_ner() -> NeuralNer {
+    // Initialize ORT_DYLIB_PATH to the bundled/cached runtime before any ONNX code runs.
+    // Without this, the system may pick up a stale onnxruntime.dll from System32.
+    pre_init_ort_runtime(false);
+
     ensure_models_downloaded();
 
     let models_dir = get_ner_models_dir();

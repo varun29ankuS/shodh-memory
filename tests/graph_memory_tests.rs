@@ -895,26 +895,27 @@ fn test_long_term_potentiation_threshold() {
         "Edge should not be potentiated initially"
     );
 
-    // Strengthen 9 times (below threshold of 10)
-    for _ in 0..9 {
+    // PIPE-4: Multi-scale LTP — Burst LTP fires at 5 rapid activations in 24h
+    // Strengthen 4 times (below burst threshold of 5)
+    for _ in 0..4 {
         edge.strengthen();
     }
     assert!(
         !edge.is_potentiated(),
-        "Edge should not be potentiated at 9 activations"
+        "Edge should not be potentiated at 4 activations (burst threshold is 5)"
     );
 
-    // Strengthen once more (reaches threshold)
+    // Strengthen once more (reaches burst threshold)
     let pre_ltp_strength = edge.strength;
     edge.strengthen();
 
     assert!(
         edge.is_potentiated(),
-        "Edge should be potentiated at 10 activations"
+        "Edge should be potentiated at 5 activations (Burst LTP)"
     );
     assert!(
         edge.strength > pre_ltp_strength,
-        "LTP should give bonus strength"
+        "Burst LTP should give bonus strength"
     );
 }
 
@@ -953,7 +954,9 @@ fn test_decay_half_life() {
     let entity_a = Uuid::new_v4();
     let entity_b = Uuid::new_v4();
 
-    // Create edge activated exactly 14 days ago (one half-life)
+    // L2 decay rate: λ = 0.031/day (exponential)
+    // Half-life = ln(2)/0.031 ≈ 22.36 days
+    // After 14 days: e^(-0.031 × 14) = e^(-0.434) ≈ 0.648
     let fourteen_days_ago = Utc::now() - Duration::days(14);
     let mut edge = create_relationship_with_plasticity(
         entity_a,
@@ -967,12 +970,13 @@ fn test_decay_half_life() {
 
     edge.decay();
 
-    // After one half-life, strength should be approximately 0.5
-    let expected = 0.5;
+    // After 14 days with L2 exponential decay (λ=0.031/day), expect ~0.648
+    let expected = 0.648;
     let tolerance = 0.05;
     assert!(
         (edge.strength - expected).abs() < tolerance,
-        "After 14 days (1 half-life), strength should be ~0.5, got {}",
+        "After 14 days with L2 decay (λ=0.031/day), strength should be ~{}, got {}",
+        expected,
         edge.strength
     );
 }
