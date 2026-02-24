@@ -7,7 +7,10 @@
 //! - Importance boost/decay based on helpfulness
 //! - NER integration for entity extraction
 
+use std::sync::Arc;
+
 use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
+use shodh_memory::graph_memory::GraphMemory;
 use shodh_memory::memory::{
     Experience, ExperienceType, MemoryConfig, MemorySystem, Query, RetrievalOutcome,
 };
@@ -32,7 +35,15 @@ fn setup_memory_system() -> (MemorySystem, TempDir) {
         importance_threshold: 0.7,
     };
 
-    let memory_system = MemorySystem::new(config).expect("Failed to create memory system");
+    let mut memory_system = MemorySystem::new(config).expect("Failed to create memory system");
+
+    // Wire up GraphMemory for Hebbian association tests
+    let graph_path = temp_dir.path().join("graph");
+    let graph_memory = GraphMemory::new(&graph_path).expect("Failed to create graph memory");
+    memory_system.set_graph_memory(Arc::new(shodh_memory::parking_lot::RwLock::new(
+        graph_memory,
+    )));
+
     (memory_system, temp_dir)
 }
 
@@ -528,8 +539,8 @@ fn test_ltp_after_multiple_reinforcements() {
         mem2.importance()
     );
 
-    // Verify significant boost (at least 0.3 increase or capped at 1.0)
-    let expected_boost = 0.3;
+    // Verify significant boost: 10 reinforcements × HEBBIAN_BOOST_HELPFUL (0.025) = 0.25
+    let expected_boost = 0.2; // Conservative: at least 0.2 of the theoretical 0.25
     assert!(
         mem1.importance() >= initial1 + expected_boost || mem1.importance() >= 0.95,
         "Importance should boost significantly: {} + {} vs {}",
@@ -718,6 +729,17 @@ fn create_persistence_config(temp_dir: &tempfile::TempDir) -> MemoryConfig {
     }
 }
 
+/// Create a MemorySystem with GraphMemory wired up (for persistence tests)
+fn create_system_with_graph(config: MemoryConfig) -> MemorySystem {
+    let graph_path = config.storage_path.join("graph");
+    let mut system = MemorySystem::new(config).expect("Failed to create memory system");
+    let graph_memory = GraphMemory::new(&graph_path).expect("Failed to create graph memory");
+    system.set_graph_memory(Arc::new(shodh_memory::parking_lot::RwLock::new(
+        graph_memory,
+    )));
+    system
+}
+
 #[test]
 fn test_hebbian_graph_persists_across_restart() {
     let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
@@ -728,7 +750,7 @@ fn test_hebbian_graph_persists_across_restart() {
 
     // Phase 1: Create memories and form associations
     {
-        let mut memory = MemorySystem::new(config.clone()).expect("Failed to create system");
+        let mut memory = create_system_with_graph(config.clone());
 
         id1 = memory
             .remember(create_experience("Hebbian persistence test memory A"), None)
@@ -757,7 +779,7 @@ fn test_hebbian_graph_persists_across_restart() {
 
     // Phase 2: Verify graph persisted
     {
-        let memory = MemorySystem::new(config).expect("Failed to recreate system");
+        let memory = create_system_with_graph(config);
 
         // Verify memories exist
         let mem1 = memory.get_memory(&id1).expect("Memory 1 should exist");
@@ -767,15 +789,11 @@ fn test_hebbian_graph_persists_across_restart() {
 
         // Verify graph stats
         let stats = memory.graph_stats();
+        // Memory coactivation creates edges between memory UUIDs (not entity nodes)
         assert!(
             stats.edge_count > 0,
             "Edges should persist after restart: {}",
             stats.edge_count
-        );
-        assert!(
-            stats.node_count >= 2,
-            "Nodes should persist after restart: {}",
-            stats.node_count
         );
     }
 }
@@ -791,7 +809,7 @@ fn test_hebbian_edge_strength_persists() {
 
     // Phase 1: Create strong associations
     {
-        let mut memory = MemorySystem::new(config.clone()).expect("Failed to create system");
+        let mut memory = create_system_with_graph(config.clone());
 
         id1 = memory
             .remember(create_experience("Edge strength test A"), None)
@@ -819,7 +837,7 @@ fn test_hebbian_edge_strength_persists() {
 
     // Phase 2: Verify strength persisted
     {
-        let memory = MemorySystem::new(config).expect("Failed to recreate system");
+        let memory = create_system_with_graph(config);
 
         let stats = memory.graph_stats();
         let avg_strength_after = stats.avg_strength;
@@ -888,7 +906,7 @@ fn test_ltp_persists_across_restart() {
 
     // Phase 1: Create LTP by many co-activations
     {
-        let mut memory = MemorySystem::new(config.clone()).expect("Failed to create system");
+        let mut memory = create_system_with_graph(config.clone());
 
         id1 = memory
             .remember(create_experience("LTP persistence test A"), None)
@@ -914,7 +932,7 @@ fn test_ltp_persists_across_restart() {
 
     // Phase 2: Verify LTP persisted
     {
-        let memory = MemorySystem::new(config).expect("Failed to recreate system");
+        let memory = create_system_with_graph(config);
 
         let stats = memory.graph_stats();
         // Either potentiated edges persist, or strength is high
@@ -950,17 +968,11 @@ fn test_graph_stats_accuracy() {
 
     let stats = memory.graph_stats();
 
-    // 5 memories = 5 nodes
-    assert!(
-        stats.node_count >= 5,
-        "Should have at least 5 nodes: {}",
-        stats.node_count
-    );
-
-    // 5 memories = 5*4/2 = 10 edges (bidirectional counted once)
+    // Memory coactivation creates edges between memory UUIDs (not entity nodes),
+    // so node_count may be 0. Edge count = C(5,2) = 10 pairs.
     assert!(
         stats.edge_count >= 5,
-        "Should have multiple edges: {}",
+        "Should have multiple edges from coactivation: {}",
         stats.edge_count
     );
 

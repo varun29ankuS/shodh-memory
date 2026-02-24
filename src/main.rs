@@ -25,7 +25,7 @@ use tokio::signal;
 use tower::ServiceBuilder;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::timeout::TimeoutLayer;
-use tracing::info;
+use tracing::{error, info};
 
 use shodh_memory::{
     auth,
@@ -450,12 +450,18 @@ fn start_reminder_scheduler(manager: AppState) {
             interval.tick().await;
 
             let manager_clone = Arc::clone(&manager);
-            tokio::task::spawn_blocking(move || {
-                let triggered = manager_clone.check_and_emit_due_reminders();
-                if triggered > 0 {
-                    info!("Active reminder check: {} reminder(s) triggered", triggered);
+            match tokio::task::spawn_blocking(move || manager_clone.check_and_emit_due_reminders())
+                .await
+            {
+                Ok(triggered) => {
+                    if triggered > 0 {
+                        info!("Active reminder check: {} reminder(s) triggered", triggered);
+                    }
                 }
-            });
+                Err(e) => {
+                    error!("Reminder scheduler task panicked: {}", e);
+                }
+            }
         }
     });
 

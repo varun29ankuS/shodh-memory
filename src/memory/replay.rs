@@ -768,7 +768,7 @@ mod tests {
                 "mem-3".to_string(),
                 0.6,
                 0.4,
-                now - Duration::days(10), // Too old - should be excluded
+                now - Duration::days(15), // Too old (>14 day max) - should be excluded
                 vec!["mem-1".to_string(), "mem-4".to_string()],
                 "Old memory".to_string(),
             ),

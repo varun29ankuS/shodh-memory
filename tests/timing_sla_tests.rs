@@ -607,7 +607,7 @@ fn test_sla_maintenance_latency() {
     // Measure maintenance operation
     let start = Instant::now();
     let processed = system
-        .run_maintenance(0.95, "test-user")
+        .run_maintenance(0.95, "test-user", false)
         .expect("Maintenance failed");
     let duration = start.elapsed().as_millis();
 

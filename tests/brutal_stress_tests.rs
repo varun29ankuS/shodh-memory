@@ -14,6 +14,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
+use shodh_memory::graph_memory::GraphMemory;
 use shodh_memory::memory::{
     retrieval::RetrievalOutcome,
     types::{Experience, ExperienceType, Query},
@@ -58,6 +59,18 @@ fn create_test_system() -> (MemorySystem, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
     let system = MemorySystem::new(config).expect("Failed to create memory system");
+    (system, temp_dir)
+}
+
+fn create_test_system_with_graph() -> (MemorySystem, TempDir) {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config = create_test_config(&temp_dir);
+    let mut system = MemorySystem::new(config).expect("Failed to create memory system");
+    let graph_path = temp_dir.path().join("graph");
+    let graph_memory = GraphMemory::new(&graph_path).expect("Failed to create graph memory");
+    system.set_graph_memory(Arc::new(shodh_memory::parking_lot::RwLock::new(
+        graph_memory,
+    )));
     (system, temp_dir)
 }
 
@@ -592,7 +605,7 @@ fn test_brutal_no_id_collisions() {
 /// Create dense graph with many associations
 #[test]
 fn test_brutal_dense_graph() {
-    let (system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system_with_graph();
 
     let mut ids = Vec::new();
     for i in 0..50 {
@@ -622,7 +635,7 @@ fn test_brutal_dense_graph() {
 /// Repeated graph maintenance cycles
 #[test]
 fn test_brutal_graph_maintenance_cycles() {
-    let (system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system_with_graph();
 
     let mut ids = Vec::new();
     for i in 0..20 {

@@ -819,6 +819,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               items: { type: "string" },
               description: "Optional tags for categorization",
             },
+            threshold: {
+              type: "number",
+              description: "Semantic similarity threshold for 'context' trigger (0.0-1.0, default: 0.7). Lower values match more broadly, higher values require closer semantic match.",
+            },
           },
           required: ["content", "trigger_type"],
         },
@@ -2462,7 +2466,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // =================================================================
 
       case "set_reminder": {
-        const { content, trigger_type, trigger_at, after_seconds, keywords, priority = 3, tags = [] } = args as {
+        const { content, trigger_type, trigger_at, after_seconds, keywords, priority = 3, tags = [], threshold } = args as {
           content: string;
           trigger_type: "time" | "duration" | "context";
           trigger_at?: string;
@@ -2470,6 +2474,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           keywords?: string[];
           priority?: number;
           tags?: string[];
+          threshold?: number;
         };
 
         if (!content || content.length === 0) {
@@ -2510,7 +2515,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 isError: true,
               };
             }
-            trigger = { type: "context", keywords, threshold: 0.7 };
+            const ctxThreshold = (threshold !== undefined && threshold >= 0.0 && threshold <= 1.0) ? threshold : 0.7;
+            trigger = { type: "context", keywords, threshold: ctxThreshold };
             break;
           default:
             return {

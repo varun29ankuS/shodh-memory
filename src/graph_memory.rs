@@ -1921,6 +1921,30 @@ impl GraphMemory {
         Ok(None)
     }
 
+    /// Find existing relationship between two entities with a specific relation type.
+    ///
+    /// Unlike `find_relationship_between` which returns any edge between the pair,
+    /// this method only matches edges with the same `RelationType`. This allows
+    /// multiple semantically distinct edges (e.g. WorksWith + PartOf) between
+    /// the same entity pair.
+    pub fn find_relationship_between_typed(
+        &self,
+        entity_a: &Uuid,
+        entity_b: &Uuid,
+        relation_type: &RelationType,
+    ) -> Result<Option<RelationshipEdge>> {
+        let edges = self.get_entity_relationships(entity_a)?;
+        for edge in edges {
+            if edge.relation_type == *relation_type
+                && ((edge.from_entity == *entity_a && edge.to_entity == *entity_b)
+                    || (edge.from_entity == *entity_b && edge.to_entity == *entity_a))
+            {
+                return Ok(Some(edge));
+            }
+        }
+        Ok(None)
+    }
+
     /// Add a relationship edge (or strengthen existing one)
     ///
     /// If an edge already exists between the two entities, strengthens it
@@ -1928,10 +1952,13 @@ impl GraphMemory {
     /// "neurons that fire together, wire together" - repeated co-occurrence
     /// strengthens the same synapse rather than creating parallel connections.
     pub fn add_relationship(&self, mut edge: RelationshipEdge) -> Result<Uuid> {
-        // Check for existing relationship between these entities
-        if let Some(mut existing) =
-            self.find_relationship_between(&edge.from_entity, &edge.to_entity)?
-        {
+        // Check for existing relationship between these entities WITH SAME TYPE
+        // Different relation types (e.g. WorksWith vs PartOf) are distinct edges
+        if let Some(mut existing) = self.find_relationship_between_typed(
+            &edge.from_entity,
+            &edge.to_entity,
+            &edge.relation_type,
+        )? {
             // Strengthen existing edge instead of creating duplicate
             let _ = existing.strengthen();
             existing.last_activated = Utc::now();
@@ -3377,6 +3404,7 @@ impl GraphMemory {
         let _guard = self.synapse_update_lock.lock();
         let mut batch = WriteBatch::default();
         let mut edges_updated = 0;
+        let mut new_edges = 0;
 
         // Process all pairs
         for i in 0..memories_to_process.len() {
@@ -3441,6 +3469,7 @@ impl GraphMemory {
                         );
 
                         edges_updated += 1;
+                        new_edges += 1;
                     }
                 }
             }
@@ -3448,6 +3477,11 @@ impl GraphMemory {
 
         if edges_updated > 0 {
             self.db.write(batch)?;
+            // Update relationship counter for newly created edges
+            if new_edges > 0 {
+                self.relationship_count
+                    .fetch_add(new_edges, Ordering::Relaxed);
+            }
         }
 
         Ok(edges_updated)
@@ -6050,17 +6084,22 @@ mod tests {
 
     #[test]
     fn test_decay_tier_aware() {
-        // Test tier-aware decay: L2 episodic with 10%/day decay over 7 days
-        // Use L2 tier (max 14 days, 10%/day decay)
+        // Test tier-aware decay: L2 episodic with exponential decay (λ=0.031/day) over 7 days
+        // Expected: e^(-0.031 * 7) ≈ 0.805, so strength decays to ~80%
         let mut edge = create_test_edge_with_tier(1.0, 7, EdgeTier::L2Episodic);
 
         edge.decay();
 
-        // After 7 days with ~10%/day linear decay, expect significant reduction
-        // but still above floor since within max age
+        // After 7 days with L2 exponential decay, expect moderate reduction (~80% retained)
+        // but well above floor since within max age
         assert!(
-            edge.strength < 0.5,
-            "After 7 days with L2 decay, strength should be reduced significantly, got {}",
+            edge.strength < 0.85,
+            "After 7 days with L2 decay, strength should be below 0.85, got {}",
+            edge.strength
+        );
+        assert!(
+            edge.strength > 0.75,
+            "After 7 days with L2 decay, strength should be above 0.75, got {}",
             edge.strength
         );
         assert!(

@@ -10,8 +10,10 @@
 //! Run with: cargo test --test file_memory_tests -- --nocapture
 
 use std::fs;
+use std::sync::Arc;
 use tempfile::TempDir;
 
+use rocksdb::Options;
 use shodh_memory::memory::files::FileMemoryStore;
 use shodh_memory::memory::types::{
     CodebaseConfig, FileMemory, FileMemoryId, FileType, LearnedFrom, ProjectId,
@@ -24,7 +26,18 @@ use uuid::Uuid;
 
 fn create_test_store() -> (FileMemoryStore, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let store = FileMemoryStore::new(temp_dir.path()).expect("Failed to create store");
+    let db_path = temp_dir.path().join("shared_db");
+
+    let mut opts = Options::default();
+    opts.create_if_missing(true);
+    opts.create_missing_column_families(true);
+
+    let cfs = FileMemoryStore::cf_descriptors();
+
+    let db = rocksdb::DB::open_cf_descriptors(&opts, &db_path, cfs).expect("Failed to open DB");
+    let db = Arc::new(db);
+
+    let store = FileMemoryStore::new(db, temp_dir.path()).expect("Failed to create store");
     (store, temp_dir)
 }
 

@@ -2069,6 +2069,69 @@ impl MemorySystem {
                 }
             }
 
+            // ===========================================================================
+            // LAYER 4.7: PROSPECTIVE SIGNAL BOOST ("Future Informs Present")
+            // ===========================================================================
+            // Research basis: Einstein & McDaniel (2005) - Prospective Memory
+            //
+            // Active goals and pending intentions shape what we remember.
+            // When context-triggered prospective tasks match the current query,
+            // memories related to those intentions become more accessible —
+            // just as prospective memory primes retrospective recall in humans.
+            //
+            // Signals come from ProspectiveTasks that matched the current query
+            // via keyword or semantic similarity (built in recall handler C5).
+            if let Some(ref signals) = query.prospective_signals {
+                if !signals.is_empty() {
+                    const PROSPECTIVE_BOOST_PER_MATCH: f32 = 0.15;
+                    const MAX_PROSPECTIVE_BOOST: f32 = 0.5;
+
+                    // Tokenize all signals into unique terms (skip noise words < 3 chars)
+                    let signal_terms: std::collections::HashSet<String> = signals
+                        .iter()
+                        .flat_map(|s| {
+                            s.to_lowercase()
+                                .split_whitespace()
+                                .filter(|w| w.len() >= 3)
+                                .map(|w| w.to_string())
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+
+                    if !signal_terms.is_empty() {
+                        let mut boosted_count = 0;
+                        let ids: Vec<MemoryId> = fused.keys().cloned().collect();
+
+                        for id in &ids {
+                            if let Some(content) = get_content(id) {
+                                let content_lower = content.to_lowercase();
+                                let match_count = signal_terms
+                                    .iter()
+                                    .filter(|term| content_lower.contains(term.as_str()))
+                                    .count();
+
+                                if match_count > 0 {
+                                    // Sqrt scaling: diminishing returns for additional matches
+                                    let boost = (PROSPECTIVE_BOOST_PER_MATCH
+                                        * (match_count as f32).sqrt())
+                                    .min(MAX_PROSPECTIVE_BOOST);
+                                    *fused.get_mut(id).unwrap() += boost;
+                                    boosted_count += 1;
+                                }
+                            }
+                        }
+
+                        if boosted_count > 0 {
+                            tracing::info!(
+                                "Layer 4.7: Boosted {} memories from {} prospective signal terms",
+                                boosted_count,
+                                signal_terms.len()
+                            );
+                        }
+                    }
+                }
+            }
+
             let mut res: Vec<_> = fused.into_iter().collect();
             res.sort_by(|a, b| b.1.total_cmp(&a.1));
             res.truncate(query.max_results);
@@ -4637,9 +4700,30 @@ impl MemorySystem {
             ..Default::default()
         };
 
-        // NOTE: Hebbian associations (coactivation) are now handled at the API layer
-        // via GraphMemory.record_memory_coactivation() which provides persistent
-        // storage and proper Hebbian learning. This method only handles importance updates.
+        // Hebbian coactivation: strengthen associations between co-retrieved memories
+        // Uses GraphMemory if available, otherwise counts pair associations directly
+        if !matches!(outcome, RetrievalOutcome::Misleading) && memory_ids.len() >= 2 {
+            if let Some(graph) = &self.graph_memory {
+                let memory_uuids: Vec<uuid::Uuid> = memory_ids.iter().map(|id| id.0).collect();
+                if memory_uuids.len() >= 2 {
+                    match graph.read().record_memory_coactivation(&memory_uuids) {
+                        Ok(count) => {
+                            stats.associations_strengthened = count;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to record memory coactivation");
+                            // Fallback: count pairs
+                            let n = memory_ids.len();
+                            stats.associations_strengthened = n * (n - 1) / 2;
+                        }
+                    }
+                }
+            } else {
+                // No graph memory available — count pairs directly
+                let n = memory_ids.len();
+                stats.associations_strengthened = n * (n - 1) / 2;
+            }
+        }
 
         // CACHE COHERENT IMPORTANCE UPDATES:
         // 1. First try to find memory in caches (working, session)

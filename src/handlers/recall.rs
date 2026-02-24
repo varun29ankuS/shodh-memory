@@ -308,61 +308,94 @@ pub async fn recall(
         .get_user_graph(&req.user_id)
         .map_err(AppError::Internal)?;
 
-    let query_text = req.query.clone();
     let limit = req.limit;
     let mode = req.mode.clone();
 
-    // PROSPECTIVE MEMORY: Check for context-triggered reminders that match the query
-    // This enables "future informs present" - pending reminders influence what memories are surfaced
-    let (triggered_reminders, prospective_signals) = {
-        let prospective = state.prospective_store.clone();
-        let user_id = req.user_id.clone();
-        let context = req.query.clone();
+    // PROSPECTIVE MEMORY + RECALL: Run inside a single spawn_blocking to share
+    // the computed query embedding between prospective semantic matching and recall.
+    // This fixes C5 (keyword-only → semantic) and sets up prospective_signals for boosting.
+    let prospective_for_recall = state.prospective_store.clone();
+    let memory_for_recall = memory.clone();
+    let user_id_for_recall = req.user_id.clone();
+    let query_for_recall = req.query.clone();
 
-        // Check for keyword-matched context triggers
-        let matched_tasks = prospective
-            .check_context_triggers(&user_id, &context)
-            .unwrap_or_default();
+    let (memories, triggered_reminders, _prospective_signals) =
+        tokio::task::spawn_blocking(move || {
+            let memory_guard = memory_for_recall.read();
 
-        // Build triggered_reminders for response and prospective_signals for boosting
-        let mut signals: Vec<String> = Vec::new();
-        let reminders: Vec<super::types::RecallReminder> = matched_tasks
-            .into_iter()
-            .map(|task| {
-                // Extract keywords from trigger for signals
-                let keywords = if let ProspectiveTrigger::OnContext { keywords, .. } = &task.trigger
-                {
-                    keywords.clone()
-                } else {
-                    vec![]
-                };
+            // 1. Compute query embedding (reused for prospective + recall)
+            let query_embedding = memory_guard
+                .compute_embedding(&query_for_recall)
+                .unwrap_or_else(|_| vec![0.0; 384]);
 
-                // Add task content and keywords to prospective signals
-                signals.push(task.content.clone());
-                for kw in &keywords {
-                    signals.push(kw.clone());
-                }
+            // 2. Semantic prospective matching (fixes C5: was keyword-only)
+            let embed_fn =
+                |text: &str| -> Option<Vec<f32>> { memory_guard.compute_embedding(text).ok() };
 
-                super::types::RecallReminder {
-                    id: task.id.0.to_string(),
-                    content: task.content,
-                    keywords,
-                    match_type: "keyword_match".to_string(),
-                    priority: task.priority,
-                    created_at: task.created_at.to_rfc3339(),
-                }
-            })
-            .collect();
+            let matched_tasks = prospective_for_recall
+                .check_context_triggers_semantic(
+                    &user_id_for_recall,
+                    &query_for_recall,
+                    &query_embedding,
+                    embed_fn,
+                )
+                .unwrap_or_default();
 
-        (
-            reminders,
-            if signals.is_empty() {
+            // 3. Build signals and response reminders from matched tasks
+            let mut signals: Vec<String> = Vec::new();
+            let reminders: Vec<super::types::RecallReminder> = matched_tasks
+                .into_iter()
+                .map(|(task, score)| {
+                    let keywords =
+                        if let ProspectiveTrigger::OnContext { keywords, .. } = &task.trigger {
+                            keywords.clone()
+                        } else {
+                            vec![]
+                        };
+
+                    signals.push(task.content.clone());
+                    for kw in &keywords {
+                        signals.push(kw.clone());
+                    }
+
+                    let match_type = if score >= 1.0 {
+                        "keyword_match".to_string()
+                    } else {
+                        format!("semantic ({:.2})", score)
+                    };
+
+                    super::types::RecallReminder {
+                        id: task.id.0.to_string(),
+                        content: task.content,
+                        keywords,
+                        match_type,
+                        priority: task.priority,
+                        created_at: task.created_at.to_rfc3339(),
+                    }
+                })
+                .collect();
+
+            let prospective_signals = if signals.is_empty() {
                 None
             } else {
                 Some(signals)
-            },
-        )
-    };
+            };
+
+            // 4. Execute recall with prospective signals for future-informed retrieval
+            let query = MemoryQuery {
+                user_id: Some(user_id_for_recall),
+                query_text: Some(query_for_recall),
+                max_results: limit,
+                prospective_signals: prospective_signals.clone(),
+                ..Default::default()
+            };
+
+            let memories = memory_guard.recall(&query).unwrap_or_default();
+
+            (memories, reminders, prospective_signals)
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?;
 
     let triggered_reminder_count = triggered_reminders.len();
     if triggered_reminder_count > 0 {
@@ -372,38 +405,6 @@ pub async fn recall(
             "Context-triggered reminders found - future intentions will boost related memories"
         );
     }
-
-    // Execute recall - the recall() method already does hybrid retrieval
-    // (semantic + graph traversal + Hebbian learning)
-    // Now also passes prospective_signals to enable future-informed retrieval
-    let memories = {
-        let memory = memory.clone();
-        let signals = prospective_signals.clone();
-        let user_id = req.user_id.clone();
-        tokio::task::spawn_blocking(move || {
-            let memory_guard = memory.read();
-
-            // Build query with prospective signals and user_id for temporal fact lookup
-            let query = MemoryQuery {
-                user_id: Some(user_id),
-                query_text: Some(query_text.clone()),
-                max_results: limit,
-                prospective_signals: signals,
-                ..Default::default()
-            };
-
-            // recall() internally:
-            // 1. Generates query embedding
-            // 2. Searches vector index for semantic similarity
-            // 3. Traverses knowledge graph for entity connections
-            // 4. Applies prospective boost for future intention matches
-            // 5. Records coactivation for Hebbian learning
-            // 6. Returns ranked results
-            memory_guard.recall(&query).unwrap_or_default()
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
-    };
 
     // Convert to response format
     let total = memories.len();
@@ -1102,6 +1103,55 @@ pub async fn proactive_context(
     let (detected_entities, context_entity_names): (Vec<DetectedEntityInfo>, Vec<String>) =
         ner_result.map_err(|e| AppError::Internal(anyhow::anyhow!("NER task panicked: {e}")))?;
 
+    // 1.8: Check context-triggered prospective tasks — builds signals for recall boost
+    // This runs before recall so that "future informs present" can influence retrieval.
+    // Fast operation: scans pending tasks for this user (typically < 10 tasks).
+    let ctx_trigger_uid = req.user_id.clone();
+    let ctx_trigger_context = req.context.clone();
+    let ctx_trigger_emb = context_embedding.clone();
+    let ctx_trigger_memory = memory_system.clone();
+    let ctx_trigger_prosp = state.prospective_store.clone();
+
+    let (prospective_signals, cached_context_triggers) = tokio::task::spawn_blocking(move || {
+        let embed_fn = |text: &str| -> Option<Vec<f32>> {
+            let memory_guard = ctx_trigger_memory.read();
+            memory_guard.compute_embedding(text).ok()
+        };
+        let matched = ctx_trigger_prosp
+            .check_context_triggers_semantic(
+                &ctx_trigger_uid,
+                &ctx_trigger_context,
+                &ctx_trigger_emb,
+                embed_fn,
+            )
+            .unwrap_or_default();
+
+        if matched.is_empty() {
+            (None, Vec::new())
+        } else {
+            let mut signals = Vec::new();
+            for (task, _score) in &matched {
+                signals.push(task.content.clone());
+                if let ProspectiveTrigger::OnContext { keywords, .. } = &task.trigger {
+                    for kw in keywords {
+                        signals.push(kw.clone());
+                    }
+                }
+            }
+            (Some(signals), matched)
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Prospective check panicked: {e}")))?;
+
+    if !cached_context_triggers.is_empty() {
+        tracing::debug!(
+            user_id = %req.user_id,
+            count = cached_context_triggers.len(),
+            "Context-triggered prospective tasks found — will boost related memories"
+        );
+    }
+
     // 2. Retrieve memories using unified 5-layer pipeline
     // The pipeline already applies: RRF fusion + hebbian + recency + feedback (PIPE-9)
     // No double-scoring needed - just use the scores from recall() directly
@@ -1132,6 +1182,7 @@ pub async fn proactive_context(
                 query_text: Some(context_clone),
                 max_results,
                 recency_weight: Some(recency_weight),
+                prospective_signals,
                 ..Default::default()
             };
             let results = memory_guard.recall(&query).unwrap_or_default();
@@ -1491,12 +1542,6 @@ pub async fn proactive_context(
     let due_uid = req.user_id.clone();
     let due_prospective = state.prospective_store.clone();
 
-    let ctx_uid = req.user_id.clone();
-    let ctx_context = req.context.clone();
-    let ctx_emb = context_embedding.clone();
-    let ctx_memory = memory_system.clone();
-    let ctx_prospective = state.prospective_store.clone();
-
     let todo_uid = req.user_id.clone();
     let todo_emb = context_embedding.clone();
     let todo_store = state.todo_store.clone();
@@ -1504,7 +1549,29 @@ pub async fn proactive_context(
     let fact_uid = req.user_id.clone();
     let fact_memory = memory_system.clone();
 
-    let (due_result, ctx_result, todo_result, fact_result) = tokio::join!(
+    // B: Context-triggered reminders — reuse cached results from step 1.8
+    // (already checked before recall to build prospective_signals for the boost)
+    let context_reminders_from_cache: Vec<ReminderItem> = cached_context_triggers
+        .into_iter()
+        .map(|(t, score)| {
+            let overdue = t.overdue_seconds();
+            ReminderItem {
+                id: t.id.0.to_string(),
+                content: t.content,
+                trigger_type: format!("context (score: {score:.2})"),
+                status: format!("{:?}", t.status).to_lowercase(),
+                due_at: t.trigger.due_at(),
+                created_at: t.created_at,
+                triggered_at: t.triggered_at,
+                dismissed_at: t.dismissed_at,
+                priority: t.priority,
+                tags: t.tags,
+                overdue_seconds: overdue,
+            }
+        })
+        .collect();
+
+    let (due_result, todo_result, fact_result) = tokio::join!(
         // A: Due reminders
         tokio::task::spawn_blocking(move || {
             due_prospective
@@ -1522,34 +1589,6 @@ pub async fn proactive_context(
                         id: t.id.0.to_string(),
                         content: t.content,
                         trigger_type,
-                        status: format!("{:?}", t.status).to_lowercase(),
-                        due_at: t.trigger.due_at(),
-                        created_at: t.created_at,
-                        triggered_at: t.triggered_at,
-                        dismissed_at: t.dismissed_at,
-                        priority: t.priority,
-                        tags: t.tags,
-                        overdue_seconds: overdue,
-                    }
-                })
-                .collect::<Vec<ReminderItem>>()
-        }),
-        // B: Context-triggered reminders
-        tokio::task::spawn_blocking(move || {
-            let embed_fn = |text: &str| -> Option<Vec<f32>> {
-                let memory_guard = ctx_memory.read();
-                memory_guard.compute_embedding(text).ok()
-            };
-            ctx_prospective
-                .check_context_triggers_semantic(&ctx_uid, &ctx_context, &ctx_emb, embed_fn)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(t, score)| {
-                    let overdue = t.overdue_seconds();
-                    ReminderItem {
-                        id: t.id.0.to_string(),
-                        content: t.content,
-                        trigger_type: format!("context (score: {score:.2})"),
                         status: format!("{:?}", t.status).to_lowercase(),
                         due_at: t.trigger.due_at(),
                         created_at: t.created_at,
@@ -1720,8 +1759,7 @@ pub async fn proactive_context(
 
     let due_reminders: Vec<ReminderItem> = due_result
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Due reminders task panicked: {e}")))?;
-    let context_reminders: Vec<ReminderItem> = ctx_result
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Context reminders task panicked: {e}")))?;
+    let context_reminders: Vec<ReminderItem> = context_reminders_from_cache;
     let relevant_todos: Vec<ProactiveTodoItem> = todo_result
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Todo search task panicked: {e}")))?;
     let relevant_facts: Vec<ProactiveFact> = fact_result
