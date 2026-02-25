@@ -2803,11 +2803,13 @@ impl GraphMemory {
         while let Some(PQEntry { score, uuid, depth }) = heap.pop() {
             iterations += 1;
 
-            // Early termination checks
-            if depth >= max_depth
-                || all_entities.len() >= MAX_ENTITIES
-                || iterations >= MAX_ITERATIONS
-            {
+            // Early termination: entity/iteration limits reached, stop draining heap
+            if all_entities.len() >= MAX_ENTITIES || iterations >= MAX_ITERATIONS {
+                break;
+            }
+
+            // Depth limit: skip this node's children but keep processing others
+            if depth >= max_depth {
                 continue;
             }
 

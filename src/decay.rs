@@ -197,7 +197,7 @@ pub fn tier_decay_factor(hours_elapsed: f64, tier: u8, ltp_decay_factor: f32) ->
 
     let (decay_rate, max_age_hours, prune_threshold) = match tier {
         0 => {
-            // L1 Working: 15%/hour decay, max 4 hours
+            // L1 Working: ~2.9%/hour decay (λ=0.029), max 4 hours
             (
                 L1_DECAY_PER_HOUR as f64,
                 (L1_MAX_AGE_HOURS as f64),
@@ -205,7 +205,7 @@ pub fn tier_decay_factor(hours_elapsed: f64, tier: u8, ltp_decay_factor: f32) ->
             )
         }
         1 => {
-            // L2 Episodic: 10%/day decay, max 14 days
+            // L2 Episodic: ~3.1%/day decay (λ=0.031), max 14 days
             let decay_per_hour = L2_DECAY_PER_DAY as f64 / 24.0;
             (
                 decay_per_hour,

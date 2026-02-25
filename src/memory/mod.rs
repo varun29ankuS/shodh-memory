@@ -839,14 +839,19 @@ impl MemorySystem {
                         for (old_id, _similarity, decay_amount) in
                             &interference_result.retroactive_targets
                         {
-                            if let Ok(old_memory) = self
-                                .long_term_memory
-                                .get(&MemoryId(uuid::Uuid::parse_str(old_id).unwrap_or_default()))
-                            {
-                                old_memory.decay_importance(*decay_amount);
-                                if let Err(e) = self.long_term_memory.update(&old_memory) {
-                                    tracing::debug!("Failed to persist retroactive decay: {e}");
+                            if let Ok(old_uuid) = uuid::Uuid::parse_str(old_id) {
+                                if let Ok(old_memory) =
+                                    self.long_term_memory.get(&MemoryId(old_uuid))
+                                {
+                                    old_memory.decay_importance(*decay_amount);
+                                    if let Err(e) = self.long_term_memory.update(&old_memory) {
+                                        tracing::debug!("Failed to persist retroactive decay: {e}");
+                                    }
                                 }
+                            } else {
+                                tracing::warn!(
+                                    "Skipping retroactive decay: malformed UUID '{old_id}'"
+                                );
                             }
                         }
 
