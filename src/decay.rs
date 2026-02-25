@@ -165,9 +165,9 @@ pub fn retention_curve_debug(potentiated: bool) -> String {
 /// Tier-aware decay factor for edge consolidation (3-tier memory model)
 ///
 /// Each tier has different decay characteristics based on hippocampal-cortical research:
-/// - L1 (Working): Aggressive decay (15%/hour), max 4 hours
-/// - L2 (Episodic): Moderate decay (10%/day), max 14 days
-/// - L3 (Semantic): Minimal decay (2%/month), near-permanent
+/// - L1 (Working): ~2.9%/hour decay (λ=0.029), max 48 hours
+/// - L2 (Episodic): ~3.1%/day decay (λ=0.031), max 30 days
+/// - L3 (Semantic): ~2%/month decay (λ=0.02/720h), near-permanent
 ///
 /// # Arguments
 ///
@@ -197,7 +197,7 @@ pub fn tier_decay_factor(hours_elapsed: f64, tier: u8, ltp_decay_factor: f32) ->
 
     let (decay_rate, max_age_hours, prune_threshold) = match tier {
         0 => {
-            // L1 Working: ~2.9%/hour decay (λ=0.029), max 4 hours
+            // L1 Working: ~2.9%/hour decay (λ=0.029), max 48 hours
             (
                 L1_DECAY_PER_HOUR as f64,
                 (L1_MAX_AGE_HOURS as f64),
@@ -205,7 +205,7 @@ pub fn tier_decay_factor(hours_elapsed: f64, tier: u8, ltp_decay_factor: f32) ->
             )
         }
         1 => {
-            // L2 Episodic: ~3.1%/day decay (λ=0.031), max 14 days
+            // L2 Episodic: ~3.1%/day decay (λ=0.031), max 30 days
             let decay_per_hour = L2_DECAY_PER_DAY as f64 / 24.0;
             (
                 decay_per_hour,

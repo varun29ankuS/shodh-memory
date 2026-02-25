@@ -657,9 +657,9 @@ impl RelationshipEdge {
     /// Apply time-based decay to this synapse
     ///
     /// Uses tier-aware decay model (3-tier memory consolidation):
-    /// - L1 (Working): 15%/hour decay, max 4 hours before prune
-    /// - L2 (Episodic): 10%/day decay, max 14 days before prune
-    /// - L3 (Semantic): 2%/month decay, near-permanent
+    /// - L1 (Working): ~2.9%/hour decay (λ=0.029), max 48 hours before prune
+    /// - L2 (Episodic): ~3.1%/day decay (λ=0.031), max 30 days before prune
+    /// - L3 (Semantic): ~2%/month decay (λ=0.02/720h), near-permanent
     ///
     /// PIPE-4: Multi-scale LTP protection
     /// - Burst: 2x slower decay (temporary, 48h)
