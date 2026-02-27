@@ -1824,7 +1824,9 @@ impl MultiUserMemoryManager {
                     attributes: HashMap::new(),
                     name_embedding: None,
                     salience: ner_entity.confidence,
-                    is_proper_noun: true,
+                    // Only PER, ORG, LOC are proper nouns; MISC includes non-proper
+                    // nouns like nationalities, events, etc.
+                    is_proper_noun: !matches!(ner_entity.entity_type, NerEntityType::Misc),
                 };
                 (ner_entity.text, node)
             })

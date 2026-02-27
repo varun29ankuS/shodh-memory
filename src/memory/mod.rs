@@ -5481,7 +5481,11 @@ impl MemorySystem {
             // Potentiate working memory
             let working = self.working_memory.read();
             for memory in working.all_memories() {
-                if memory.access_count() >= POTENTIATION_ACCESS_THRESHOLD {
+                // Only boost if below saturation threshold (0.95) to prevent
+                // all frequently-accessed memories converging to importance=1.0
+                if memory.access_count() >= POTENTIATION_ACCESS_THRESHOLD
+                    && memory.importance() < 0.95
+                {
                     let activation_before = memory.importance();
                     memory.boost_importance(POTENTIATION_MAINTENANCE_BOOST);
                     potentiated_count += 1;
@@ -5501,7 +5505,9 @@ impl MemorySystem {
             // Potentiate session memory
             let session = self.session_memory.read();
             for memory in session.all_memories() {
-                if memory.access_count() >= POTENTIATION_ACCESS_THRESHOLD {
+                if memory.access_count() >= POTENTIATION_ACCESS_THRESHOLD
+                    && memory.importance() < 0.95
+                {
                     let activation_before = memory.importance();
                     memory.boost_importance(POTENTIATION_MAINTENANCE_BOOST);
                     potentiated_count += 1;

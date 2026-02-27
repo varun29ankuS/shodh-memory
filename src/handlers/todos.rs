@@ -1420,8 +1420,17 @@ pub async fn update_todo(
 
     todo.updated_at = chrono::Utc::now();
 
-    // Re-compute embedding if needed
+    // Re-compute embedding if needed.
+    // IMPORTANT: call update_todo() FIRST so remove_todo_indices() cleans up
+    // the OLD vector mapping. Then add the new embedding afterwards, so the
+    // new vector/mapping aren't immediately deleted by remove_todo_indices().
     let needs_reindex = req.content.is_some() || req.notes.is_some() || req.tags.is_some();
+
+    state
+        .todo_store
+        .update_todo(&todo)
+        .map_err(AppError::Internal)?;
+
     if needs_reindex {
         let embedding_text = format!(
             "{} {} {}",
@@ -1453,14 +1462,12 @@ pub async fn update_todo(
                             .todo_store
                             .store_vector_id_mapping(&req.user_id, vector_id, &todo.id);
                 }
+
+                // Persist the embedding field on the todo
+                let _ = state.todo_store.update_todo(&todo);
             }
         }
     }
-
-    state
-        .todo_store
-        .update_todo(&todo)
-        .map_err(AppError::Internal)?;
 
     let update_description = {
         let mut changes = Vec::new();

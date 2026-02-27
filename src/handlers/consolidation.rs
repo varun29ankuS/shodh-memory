@@ -502,7 +502,7 @@ pub async fn restore_backup(
 
     // Determine restore paths based on server's base path
     let memory_db_path = state.base_path().join(&user_id).join("memory.db");
-    let shared_db_path = state.base_path().join("shared_stores");
+    let shared_db_path = state.base_path().join("shared");
     let graph_path = state.base_path().join(&user_id).join("graph").join("graph");
 
     // Evict user from caches so DB handles are released

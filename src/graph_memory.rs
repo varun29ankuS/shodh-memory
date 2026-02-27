@@ -1484,6 +1484,13 @@ impl GraphMemory {
                 // Preserve the canonical name (first-seen name wins)
                 entity.name = existing.name.clone();
 
+                // Merge labels: preserve all observed entity types
+                for label in &existing.labels {
+                    if !entity.labels.contains(label) {
+                        entity.labels.push(label.clone());
+                    }
+                }
+
                 // Preserve existing embedding if the incoming one is None
                 if entity.name_embedding.is_none() {
                     entity.name_embedding = existing.name_embedding;
@@ -5390,7 +5397,9 @@ impl EntityExtractor {
                     entity_label = EntityLabel::Person;
                 }
 
-                // Check for multi-word capitalized sequences
+                // Check for multi-word capitalized sequences.
+                // Include capitalized stop words (Of, The, And) in entity names
+                // to preserve proper nouns like "Bank Of America", "University Of Delhi".
                 let mut j = i + 1;
                 while j < words.len()
                     && words[j]
@@ -5400,11 +5409,8 @@ impl EntityExtractor {
                         .unwrap_or(false)
                 {
                     let next_word = words[j].trim_matches(|c: char| !c.is_alphanumeric());
-                    // Skip stop words in multi-word sequences
-                    if !self.stop_words.contains(&next_word.to_lowercase()) {
-                        entity_name.push(' ');
-                        entity_name.push_str(next_word);
-                    }
+                    entity_name.push(' ');
+                    entity_name.push_str(next_word);
                     j += 1;
                 }
 
