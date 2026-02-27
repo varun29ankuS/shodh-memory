@@ -431,8 +431,17 @@ async function handlePostToolUseTask(input: HookInput): Promise<void> {
     user_id: SHODH_USER_ID,
   });
 
-  // 3. Unblock dependents
-  await unblockDependents(todoShortId);
+  // 3. Unblock dependents — retry once on failure to prevent orchestration deadlocks
+  try {
+    await unblockDependents(todoShortId);
+  } catch (e) {
+    console.error(`[shodh] unblockDependents failed for ${todoShortId}, retrying: ${e}`);
+    try {
+      await unblockDependents(todoShortId);
+    } catch (e2) {
+      console.error(`[shodh] unblockDependents retry failed for ${todoShortId}: ${e2}`);
+    }
+  }
 
   // 4. Store memory of orchestration completion
   await callBrain("/api/remember", {
