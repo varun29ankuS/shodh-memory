@@ -946,7 +946,10 @@ impl SemanticConsolidator {
 
     /// Extract a procedure from content (looks for action words)
     fn extract_procedure(&self, content: &str) -> Option<String> {
-        let lower = content.to_lowercase();
+        // Use to_ascii_lowercase() to preserve byte alignment with `content`.
+        // to_lowercase() can change byte lengths for non-ASCII chars (e.g. İ→i̇),
+        // making byte offsets from `lower.find()` invalid for indexing into `content`.
+        let lower = content.to_ascii_lowercase();
         let action_markers = [
             "to ",
             "run ",
@@ -984,7 +987,8 @@ impl SemanticConsolidator {
 
     /// Extract a definition from content
     fn extract_definition(&self, content: &str) -> Option<String> {
-        let lower = content.to_lowercase();
+        // Use to_ascii_lowercase() to preserve byte alignment with `content`.
+        let lower = content.to_ascii_lowercase();
         let def_markers = [
             " is ",
             " are ",
@@ -1027,7 +1031,8 @@ impl SemanticConsolidator {
 
     /// Extract a pattern from error content (returns the actual sentence)
     fn extract_pattern(&self, content: &str) -> Option<String> {
-        let lower = content.to_lowercase();
+        // Use to_ascii_lowercase() to preserve byte alignment with `content`.
+        let lower = content.to_ascii_lowercase();
         let pattern_markers = [
             "error",
             "failed",
@@ -1057,7 +1062,8 @@ impl SemanticConsolidator {
 
     /// Extract a preference from conversation content (returns the actual sentence)
     fn extract_preference(&self, content: &str) -> Option<String> {
-        let lower = content.to_lowercase();
+        // Use to_ascii_lowercase() to preserve byte alignment with `content`.
+        let lower = content.to_ascii_lowercase();
         let pref_markers = [
             "prefer",
             "like",
