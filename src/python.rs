@@ -402,10 +402,14 @@ impl PyMemorySystem {
             "task" => ExperienceType::Task,
             "discovery" => ExperienceType::Discovery,
             "error" => ExperienceType::Error,
-            "pattern" | "learning" => ExperienceType::Learning,
+            "pattern" => ExperienceType::Pattern,
+            "learning" => ExperienceType::Learning,
             "decision" => ExperienceType::Decision,
             "conversation" => ExperienceType::Conversation,
-            _ => ExperienceType::Context,
+            other => {
+                tracing::warn!("Unknown memory_type '{}', falling back to Context", other);
+                ExperienceType::Context
+            }
         };
 
         let experience = Experience {
@@ -1845,7 +1849,7 @@ impl PyMemorySystem {
                 let base_score = m.importance();
 
                 // Apply recency boost
-                let age_hours = (now - m.created_at).num_hours() as f32;
+                let age_hours = (now - m.created_at).num_hours().max(0) as f32;
                 let recency_factor = (-age_hours / recency_half_life_hours).exp();
                 let recency_boost = 1.0 + (recency_weight * recency_factor);
 

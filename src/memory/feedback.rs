@@ -499,7 +499,8 @@ impl FeedbackMomentum {
         self.ema = old_ema * (1.0 - alpha) + signal.value * alpha;
 
         // Update stability
-        let direction_matches = (signal.value > 0.0) == (old_ema > 0.0) || old_ema.abs() < 0.1;
+        let direction_matches =
+            (signal.value > 0.0) == (old_ema > 0.0) || old_ema.abs() < f32::EPSILON;
 
         if direction_matches {
             // Consistent feedback: increase stability
@@ -1252,9 +1253,22 @@ impl FeedbackStore {
         })
     }
 
-    /// Get momentum for a memory (if exists)
-    pub fn get_momentum(&self, memory_id: &MemoryId) -> Option<&FeedbackMomentum> {
-        self.momentum.get(memory_id)
+    /// Get momentum for a memory (if exists in-memory), with disk fallback.
+    /// Checks the in-memory HashMap first, then falls back to RocksDB.
+    pub fn get_momentum(&self, memory_id: &MemoryId) -> Option<FeedbackMomentum> {
+        if let Some(m) = self.momentum.get(memory_id) {
+            return Some(m.clone());
+        }
+        // Fall back to disk lookup
+        if let (Some(db), Some(cf)) = (&self.db, self.feedback_cf()) {
+            let key = format!("momentum:{}", memory_id.0);
+            if let Ok(Some(data)) = db.get_cf(cf, key.as_bytes()) {
+                if let Ok(m) = serde_json::from_slice::<FeedbackMomentum>(&data) {
+                    return Some(m);
+                }
+            }
+        }
+        None
     }
 
     /// Mark a memory as dirty (needs persistence)

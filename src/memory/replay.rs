@@ -213,7 +213,7 @@ impl ReplayManager {
         }
 
         self.last_replay = now;
-        self.total_replays += candidates.len();
+        self.total_replays += replayed.len();
 
         (memory_boosts, edge_boosts, events)
     }

@@ -422,7 +422,8 @@ impl LearnedWeights {
     /// - helpful: Increase weights for components that contributed to this memory
     /// - not_helpful: Decrease weights for components that led to this memory
     ///
-    /// Uses gradient descent with learning rate WEIGHT_LEARNING_RATE
+    /// Uses gradient descent with learning rate WEIGHT_LEARNING_RATE.
+    /// Updates all 7 weight dimensions including momentum, access_count, and graph_strength.
     pub fn apply_feedback(
         &mut self,
         semantic_contributed: bool,
@@ -449,6 +450,14 @@ impl LearnedWeights {
             // Memory was helpful but no clear signal - boost importance
             self.importance = (self.importance + delta).max(MIN_WEIGHT);
         }
+
+        // Also adjust momentum, access_count, and graph_strength dimensions.
+        // These are implicit signals: helpful memories get a small boost across
+        // all auxiliary dimensions so they contribute to future fused scores.
+        let aux_delta = WEIGHT_LEARNING_RATE * direction * 0.5;
+        self.momentum = (self.momentum + aux_delta).max(MIN_WEIGHT);
+        self.access_count = (self.access_count + aux_delta).max(MIN_WEIGHT);
+        self.graph_strength = (self.graph_strength + aux_delta).max(MIN_WEIGHT);
 
         self.normalize();
         self.update_count += 1;

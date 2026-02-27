@@ -2512,13 +2512,25 @@ impl MemoryStorage {
         let mut to_delete = Vec::new();
 
         // Known non-memory prefixes in the default CF that must be preserved.
-        // These are legitimate data entries, not corrupted memories.
+        // These are legitimate data entries stored by subsystems that share the
+        // default column family via storage.db(): SemanticFactStore, TemporalFactStore,
+        // LineageGraph, LearningHistoryStore, plus vector mappings and interference.
         let skip_prefixes: &[&[u8]] = &[
             b"stats:",
             b"vmapping:",
             b"interference:",
             b"interference_meta:",
             b"_watermark:",
+            b"facts:",
+            b"facts_by_entity:",
+            b"facts_by_type:",
+            b"facts_embedding:",
+            b"temporal_facts:",
+            b"temporal_by_time:",
+            b"temporal_by_entity:",
+            b"lineage:",
+            b"learning:",
+            b"geo:",
         ];
 
         let iter = self.db.iterator(IteratorMode::Start);

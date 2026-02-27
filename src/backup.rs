@@ -249,6 +249,11 @@ impl ShodhBackupEngine {
         // Step 3: Update metadata with secondary store info
         metadata.secondary_stores = backed_up_stores;
         metadata.secondary_size_bytes = total_secondary_bytes;
+
+        // Recompute checksum now that secondary stores are included.
+        // The initial checksum from create_backup() only covered the main DB.
+        let backup_dir = self.backup_path.join(user_id);
+        metadata.checksum = self.calculate_backup_checksum(&backup_dir, metadata.backup_id)?;
         self.save_metadata(&metadata)?;
 
         tracing::info!(
@@ -457,8 +462,15 @@ impl ShodhBackupEngine {
         Ok(restored_stores)
     }
 
-    /// Delete old backups, keeping only the most recent N backups
+    /// Delete old backups, keeping only the most recent N backups.
+    /// `keep_count` must be >= 1 to prevent accidental deletion of all backups.
     pub fn purge_old_backups(&self, user_id: &str, keep_count: usize) -> Result<usize> {
+        if keep_count == 0 {
+            return Err(anyhow!(
+                "keep_count must be >= 1 to prevent deleting all backups"
+            ));
+        }
+
         let backup_dir = self.backup_path.join(user_id);
 
         if !backup_dir.exists() {
@@ -561,7 +573,7 @@ impl ShodhBackupEngine {
         let mut hasher = Sha256::new();
 
         // Hash main backup directory (sorted by filename for deterministic ordering)
-        let backup_path = backup_dir.join(format!("{backup_id}"));
+        let backup_path = backup_dir.join(format!("private/{backup_id}"));
         self.hash_directory_sorted(&backup_path, &mut hasher)?;
 
         // Hash secondary store directory (B5: was previously excluded)
