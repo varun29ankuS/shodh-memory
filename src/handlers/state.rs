@@ -237,6 +237,12 @@ pub struct MultiUserMemoryManager {
     /// cycle 0 (mod 6) is heavyweight (graph decay, fact extraction, flush).
     /// At 300s intervals, heavy cycles fire every 30 minutes.
     maintenance_cycle: std::sync::atomic::AtomicU64,
+
+    /// Per-user creation locks to prevent TOCTOU races in get_user_memory/get_user_graph.
+    /// Without this, concurrent first-access requests for the same user_id can both
+    /// miss the cache check, both try to open RocksDB, and the second open fails
+    /// because RocksDB holds an exclusive file lock.
+    user_init_locks: DashMap<String, Arc<parking_lot::Mutex<()>>>,
 }
 
 impl MultiUserMemoryManager {
@@ -482,6 +488,7 @@ impl MultiUserMemoryManager {
             session_store: Arc::new(SessionStore::new()),
             relevance_engine,
             maintenance_cycle: std::sync::atomic::AtomicU64::new(0),
+            user_init_locks: DashMap::new(),
         };
 
         info!("Running initial audit log rotation...");
@@ -704,7 +711,25 @@ impl MultiUserMemoryManager {
     }
 
     /// Get or create memory system for a user
+    ///
+    /// Uses double-checked locking to prevent TOCTOU races where concurrent
+    /// first-access requests both miss the cache and try to open RocksDB.
+    /// RocksDB holds exclusive file locks, so the second open would fail.
     pub fn get_user_memory(&self, user_id: &str) -> Result<Arc<parking_lot::RwLock<MemorySystem>>> {
+        // Fast path: already cached
+        if let Some(memory) = self.user_memories.get(user_id) {
+            return Ok(memory);
+        }
+
+        // Acquire per-user creation lock to serialize initialization
+        let lock = self
+            .user_init_locks
+            .entry(user_id.to_string())
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
+
+        // Re-check after acquiring lock (another thread may have created it)
         if let Some(memory) = self.user_memories.get(user_id) {
             return Ok(memory);
         }
@@ -1149,7 +1174,24 @@ impl MultiUserMemoryManager {
     }
 
     /// Get or create graph memory for a user
+    ///
+    /// Uses the same per-user creation lock as get_user_memory to prevent
+    /// concurrent RocksDB open races on the graph directory.
     pub fn get_user_graph(&self, user_id: &str) -> Result<Arc<parking_lot::RwLock<GraphMemory>>> {
+        // Fast path: already cached
+        if let Some(graph) = self.graph_memories.get(user_id) {
+            return Ok(graph);
+        }
+
+        // Acquire per-user creation lock (shared with get_user_memory)
+        let lock = self
+            .user_init_locks
+            .entry(user_id.to_string())
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock();
+
+        // Re-check after acquiring lock
         if let Some(graph) = self.graph_memories.get(user_id) {
             return Ok(graph);
         }

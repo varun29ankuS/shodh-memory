@@ -5732,10 +5732,16 @@ impl MemorySystem {
                     }
                 }
 
-                // Advance watermark: all memories up to now have been processed.
-                // Next cycle will only see memories created after this point.
+                // Advance watermark to the LAST memory's created_at timestamp,
+                // NOT to now(). Using now() would skip memories created during the
+                // (potentially slow) fact extraction cycle — they'd have created_at
+                // < now() and never be processed for facts.
                 if !memories.is_empty() {
-                    let new_watermark = chrono::Utc::now().timestamp_millis();
+                    let new_watermark = memories
+                        .iter()
+                        .map(|m| m.created_at.timestamp_millis())
+                        .max()
+                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
                     self.fact_extraction_watermark
                         .store(new_watermark, std::sync::atomic::Ordering::Relaxed);
                     self.long_term_memory
