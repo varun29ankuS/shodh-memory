@@ -1357,10 +1357,31 @@ impl RetrievalEngine {
 
     /// Check if vector index needs rebuild and rebuild if necessary
     ///
-    /// Returns true if rebuild was performed
+    /// Returns true if rebuild was performed.
+    ///
+    /// IMPORTANT: We perform a full rebuild from RocksDB rather than using
+    /// Vamana's internal `auto_rebuild_if_needed()`. The internal rebuild
+    /// extracts live vectors and assigns new sequential IDs (0, 1, 2, ...),
+    /// but does NOT update the RetrievalEngine's id_mapping. This would
+    /// silently corrupt all search results after compaction — searches
+    /// would return wrong memories because old vector_id→memory_id mappings
+    /// no longer match the new vector IDs.
+    ///
+    /// By rebuilding from RocksDB (the single source of truth), both the
+    /// vector index and the id_mapping are rebuilt atomically.
     pub fn auto_rebuild_index_if_needed(&self) -> Result<bool> {
-        let index = self.vector_index.write();
-        index.auto_rebuild_if_needed()
+        // Check if rebuild is needed (read lock only)
+        {
+            let index = self.vector_index.read();
+            if !index.needs_rebuild() || index.is_rebuilding() {
+                return Ok(false);
+            }
+        }
+
+        // Full rebuild from RocksDB — rebuilds both vector index and id_mapping
+        info!("Index rebuild/compaction needed, performing full rebuild from RocksDB");
+        self.rebuild_from_rocksdb()?;
+        Ok(true)
     }
 
     /// Get vector index degradation info

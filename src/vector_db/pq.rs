@@ -273,8 +273,17 @@ impl ProductQuantizer {
         let mut vector = Vec::with_capacity(self.config.dimension);
 
         for (subvec_idx, &code) in codes.iter().enumerate() {
-            let centroid = &self.centroids[subvec_idx][code as usize];
-            vector.extend_from_slice(centroid);
+            let subspace = &self.centroids[subvec_idx];
+            let code_idx = code as usize;
+            if code_idx >= subspace.len() {
+                return Err(anyhow!(
+                    "PQ code {} out of bounds for subspace {} with {} centroids (data corruption?)",
+                    code_idx,
+                    subvec_idx,
+                    subspace.len()
+                ));
+            }
+            vector.extend_from_slice(&subspace[code_idx]);
         }
 
         Ok(vector)
@@ -296,9 +305,18 @@ impl ProductQuantizer {
             let start = subvec_idx * subvec_dim;
             let end = start + subvec_dim;
             let query_subvec = &query[start..end];
-            let centroid = &self.centroids[subvec_idx][code as usize];
+            let subspace = &self.centroids[subvec_idx];
+            let code_idx = code as usize;
+            if code_idx >= subspace.len() {
+                return Err(anyhow!(
+                    "PQ code {} out of bounds for subspace {} with {} centroids (data corruption?)",
+                    code_idx,
+                    subvec_idx,
+                    subspace.len()
+                ));
+            }
 
-            total_dist += squared_l2_distance_slice(query_subvec, centroid);
+            total_dist += squared_l2_distance_slice(query_subvec, &subspace[code_idx]);
         }
 
         Ok(total_dist)
@@ -333,11 +351,18 @@ impl ProductQuantizer {
     }
 
     /// Fast distance computation using pre-built lookup table
+    ///
+    /// Returns `f32::MAX` if a PQ code is out of bounds (corrupted data)
+    /// rather than panicking, since this is called in the hot search path.
     #[inline]
     pub fn distance_with_table(&self, table: &[Vec<f32>], codes: &[u8]) -> f32 {
         let mut total = 0.0f32;
         for (subvec_idx, &code) in codes.iter().enumerate() {
-            total += table[subvec_idx][code as usize];
+            let code_idx = code as usize;
+            if subvec_idx >= table.len() || code_idx >= table[subvec_idx].len() {
+                return f32::MAX; // Corrupted code — push to bottom of results
+            }
+            total += table[subvec_idx][code_idx];
         }
         total
     }

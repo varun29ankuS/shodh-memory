@@ -1500,6 +1500,10 @@ impl RelevanceEngine {
         boost_hours: u64,
         multiplier: f32,
     ) -> f32 {
+        if boost_hours == 0 {
+            return base_score;
+        }
+
         let now = Utc::now();
         let age = now.signed_duration_since(created_at);
         let age_hours = age.num_hours() as u64;
