@@ -659,11 +659,16 @@ impl StreamSession {
     }
 
     /// Add content hash to seen set
-    /// Clears when at capacity to prevent unbounded growth
+    /// Evicts oldest half at capacity to prevent unbounded growth while
+    /// retaining recent dedup history (full clear would allow recent duplicates)
     fn mark_seen(&mut self, content: &str) {
-        // Prevent unbounded growth - clear when full
         if self.seen_hashes.len() >= MAX_SEEN_HASHES {
-            self.seen_hashes.clear();
+            let target = MAX_SEEN_HASHES / 2;
+            let mut kept = 0usize;
+            self.seen_hashes.retain(|_| {
+                kept += 1;
+                kept <= target
+            });
         }
         let hash = Self::hash_content(content);
         self.seen_hashes.insert(hash);
