@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use super::state::MultiUserMemoryManager;
 use crate::errors::{AppError, ValidationErrorExt};
-use crate::validation;
 use crate::memory::MemoryStats;
+use crate::validation;
 use std::sync::Arc;
 
 type AppState = Arc<MultiUserMemoryManager>;
