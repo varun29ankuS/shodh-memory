@@ -278,7 +278,9 @@ impl ProductQuantizer {
             if code_idx >= subspace.len() {
                 return Err(anyhow!(
                     "PQ code {} out of bounds for subspace {} with {} centroids (data corruption?)",
-                    code_idx, subvec_idx, subspace.len()
+                    code_idx,
+                    subvec_idx,
+                    subspace.len()
                 ));
             }
             vector.extend_from_slice(&subspace[code_idx]);
@@ -308,7 +310,9 @@ impl ProductQuantizer {
             if code_idx >= subspace.len() {
                 return Err(anyhow!(
                     "PQ code {} out of bounds for subspace {} with {} centroids (data corruption?)",
-                    code_idx, subvec_idx, subspace.len()
+                    code_idx,
+                    subvec_idx,
+                    subspace.len()
                 ));
             }
 
