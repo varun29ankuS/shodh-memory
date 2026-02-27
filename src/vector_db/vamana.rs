@@ -935,7 +935,7 @@ impl VamanaIndex {
         self.num_vectors
             .fetch_add(1, std::sync::atomic::Ordering::Release);
         self.incremental_inserts
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         Ok(id)
     }
 
@@ -951,7 +951,7 @@ impl VamanaIndex {
     pub fn needs_rebuild(&self) -> bool {
         let needs_insert_rebuild = self
             .incremental_inserts
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .load(std::sync::atomic::Ordering::Acquire)
             >= REBUILD_THRESHOLD;
         let needs_compaction = self.needs_compaction();
 
@@ -961,13 +961,13 @@ impl VamanaIndex {
     /// Get the number of incremental inserts since last rebuild
     pub fn incremental_insert_count(&self) -> usize {
         self.incremental_inserts
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Reset incremental insert counter (call after rebuild)
     pub fn reset_incremental_counter(&self) {
         self.incremental_inserts
-            .store(0, std::sync::atomic::Ordering::Relaxed);
+            .store(0, std::sync::atomic::Ordering::Release);
     }
 
     /// Check if incremental repair is recommended
