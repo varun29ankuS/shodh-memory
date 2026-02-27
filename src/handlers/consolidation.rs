@@ -501,16 +501,16 @@ pub async fn restore_backup(
     let user_id = req.user_id.clone();
 
     // Determine restore paths based on server's base path
-    let memory_db_path = state.base_path().join(&user_id).join("memory.db");
-    let shared_db_path = state.base_path().join("shared_stores");
+    let memory_db_path = state.base_path().join(&user_id).join("storage");
     let graph_path = state.base_path().join(&user_id).join("graph").join("graph");
 
     // Evict user from caches so DB handles are released
     state.evict_user(&user_id);
 
-    // Build secondary restore paths
-    let secondary_restore_paths: Vec<(&str, &std::path::Path)> =
-        vec![("shared", shared_db_path.as_path())];
+    // Note: shared DB is NOT restored because it is a multi-user resource.
+    // Restoring it from one user's backup would destroy all other users'
+    // todos, reminders, audit logs, etc. Only per-user stores are restored.
+    let secondary_restore_paths: Vec<(&str, &std::path::Path)> = vec![];
 
     // Execute restore
     let restored_stores = state

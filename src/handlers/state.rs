@@ -1021,6 +1021,14 @@ impl MultiUserMemoryManager {
         users
     }
 
+    /// List users currently loaded in the Moka cache (no filesystem scan)
+    pub fn list_cached_users(&self) -> Vec<String> {
+        self.user_memories
+            .iter()
+            .map(|(id, _)| id.to_string())
+            .collect()
+    }
+
     /// Get audit logs for a user
     pub fn get_audit_logs(&self, user_id: &str, limit: usize) -> Vec<AuditEvent> {
         let mut events: Vec<AuditEvent> = Vec::new();
@@ -1449,6 +1457,16 @@ impl MultiUserMemoryManager {
             if let Err(e) = self.flush_all_databases() {
                 tracing::warn!("Periodic flush failed: {}", e);
             }
+
+            // Prune user_init_locks: remove entries for users no longer in cache.
+            // This prevents unbounded growth of the DashMap over time.
+            let active_users: std::collections::HashSet<String> = self
+                .user_memories
+                .iter()
+                .map(|(id, _)| id.to_string())
+                .collect();
+            self.user_init_locks
+                .retain(|user_id, _| active_users.contains(user_id));
         }
 
         tracing::info!(
@@ -1824,7 +1842,9 @@ impl MultiUserMemoryManager {
                     attributes: HashMap::new(),
                     name_embedding: None,
                     salience: ner_entity.confidence,
-                    is_proper_noun: true,
+                    // Only PER, ORG, LOC are proper nouns; MISC includes non-proper
+                    // nouns like nationalities, events, etc.
+                    is_proper_noun: !matches!(ner_entity.entity_type, NerEntityType::Misc),
                 };
                 (ner_entity.text, node)
             })

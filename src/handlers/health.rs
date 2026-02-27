@@ -79,11 +79,12 @@ pub async fn health_index(
     let user_id = match params.get("user_id") {
         Some(id) => id.clone(),
         None => {
-            // Return aggregate stats across all cached users
+            // Return aggregate stats across currently cached users only.
+            // list_users() returns filesystem directories; get_user_memory() would
+            // open RocksDB for every user on disk, wasting FDs and memory.
             let users: Vec<(String, crate::memory::retrieval::IndexHealth)> = {
                 let mut results = Vec::new();
-                // Access user_memories through the manager's public API
-                for user_id in state.list_users() {
+                for user_id in state.list_cached_users() {
                     if let Ok(memory) = state.get_user_memory(&user_id) {
                         let guard = memory.read();
                         results.push((user_id, guard.index_health()));

@@ -9,8 +9,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::state::MultiUserMemoryManager;
-use crate::errors::AppError;
+use crate::errors::{AppError, ValidationErrorExt};
 use crate::memory::MemoryStats;
+use crate::validation;
 use std::sync::Arc;
 
 type AppState = Arc<MultiUserMemoryManager>;
@@ -20,6 +21,7 @@ pub async fn get_user_stats(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> Result<Json<MemoryStats>, AppError> {
+    validation::validate_user_id(&user_id).map_validation_err("user_id")?;
     let stats = state.get_stats(&user_id).map_err(AppError::Internal)?;
     Ok(Json(stats))
 }
@@ -54,6 +56,7 @@ pub async fn delete_user(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> Result<Json<DeleteUserResponse>, AppError> {
+    validation::validate_user_id(&user_id).map_validation_err("user_id")?;
     state.forget_user(&user_id).map_err(AppError::Internal)?;
 
     Ok(Json(DeleteUserResponse {

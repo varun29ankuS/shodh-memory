@@ -394,5 +394,12 @@ pub async fn get_graph_data(
 /// Generate the HTML page for graph visualization (includes 2D/3D toggle)
 fn generate_graph_html(user_id: &str) -> String {
     let html = include_str!("graph_view.html");
-    html.replace("{{USER_ID}}", user_id)
+    // HTML-escape user_id to prevent reflected XSS via query parameter injection
+    let escaped = user_id
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;");
+    html.replace("{{USER_ID}}", &escaped)
 }

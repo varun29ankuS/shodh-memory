@@ -2071,7 +2071,7 @@ impl QueryAnalysis {
         let config = KeywordConfig {
             max_keywords: 5,
             ngrams: 2,
-            min_length: 3,
+            min_length: 2, // Allow short terms like "AI", "ML", "Go", etc.
             ..Default::default()
         };
         let extractor = KeywordExtractor::with_config(config);

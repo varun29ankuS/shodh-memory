@@ -741,6 +741,20 @@ pub async fn forget_by_pattern(
 ) -> Result<Json<serde_json::Value>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
+    // Validate regex pattern to prevent ReDoS attacks
+    if req.pattern.len() > 1000 {
+        return Err(AppError::InvalidInput {
+            field: "pattern".to_string(),
+            reason: "pattern too long (max 1000 chars)".to_string(),
+        });
+    }
+    if regex::Regex::new(&req.pattern).is_err() {
+        return Err(AppError::InvalidInput {
+            field: "pattern".to_string(),
+            reason: "invalid regex pattern".to_string(),
+        });
+    }
+
     let memory_sys = state
         .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;

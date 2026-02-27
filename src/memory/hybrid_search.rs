@@ -167,16 +167,16 @@ impl BM25Index {
         let mut schema_builder = Schema::builder();
 
         // Memory ID (stored, not tokenized)
-        let id_field = schema_builder.add_text_field("id", STRING | STORED);
+        schema_builder.add_text_field("id", STRING | STORED);
 
         // Main content (tokenized for BM25)
-        let content_field = schema_builder.add_text_field("content", TEXT | STORED);
+        schema_builder.add_text_field("content", TEXT | STORED);
 
         // Tags (tokenized)
-        let tags_field = schema_builder.add_text_field("tags", TEXT);
+        schema_builder.add_text_field("tags", TEXT);
 
         // Entities (tokenized)
-        let entities_field = schema_builder.add_text_field("entities", TEXT);
+        schema_builder.add_text_field("entities", TEXT);
 
         let schema = schema_builder.build();
 
@@ -188,8 +188,25 @@ impl BM25Index {
         let index = if Index::exists(&dir)? {
             Index::open(dir).context("Failed to open existing BM25 index")?
         } else {
-            Index::create_in_dir(path, schema.clone()).context("Failed to create BM25 index")?
+            Index::create_in_dir(path, schema).context("Failed to create BM25 index")?
         };
+
+        // Resolve field handles from the index's actual schema (which may have
+        // been loaded from disk). Using builder-created handles would be wrong
+        // if the on-disk schema has different field IDs due to schema evolution.
+        let actual_schema = index.schema();
+        let id_field = actual_schema
+            .get_field("id")
+            .context("BM25 schema missing 'id' field")?;
+        let content_field = actual_schema
+            .get_field("content")
+            .context("BM25 schema missing 'content' field")?;
+        let tags_field = actual_schema
+            .get_field("tags")
+            .context("BM25 schema missing 'tags' field")?;
+        let entities_field = actual_schema
+            .get_field("entities")
+            .context("BM25 schema missing 'entities' field")?;
 
         // 15MB writer heap — sufficient for edge workloads
         let writer = index
@@ -307,11 +324,15 @@ impl BM25Index {
         // Build boosted query with term weights
         let mut query_parts: Vec<String> = Vec::new();
 
-        // Add individual terms with IC weights
+        // Add individual terms with IC weights.
+        // Strip ALL non-alphanumeric characters (not just at boundaries) to prevent
+        // Tantivy query syntax injection (+, -, ^, ~, etc. have special meaning).
         if let Some(weights) = term_weights {
             for word in query.split_whitespace() {
-                let clean_word = word
-                    .trim_matches(|c: char| !c.is_alphanumeric())
+                let clean_word: String = word
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
                     .to_lowercase();
                 if clean_word.is_empty() {
                     continue;
@@ -326,8 +347,10 @@ impl BM25Index {
         } else {
             // No term weights - add words as-is
             for word in query.split_whitespace() {
-                let clean_word = word
-                    .trim_matches(|c: char| !c.is_alphanumeric())
+                let clean_word: String = word
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
                     .to_lowercase();
                 if !clean_word.is_empty() {
                     query_parts.push(clean_word);

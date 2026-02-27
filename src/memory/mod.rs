@@ -1299,8 +1299,10 @@ impl MemorySystem {
     ///
     /// Uses the limit+1 trick: requests one extra result to detect if there are more.
     pub fn paginated_recall(&self, query: &Query) -> Result<PaginatedResults<SharedMemory>> {
-        // Request limit+1 to detect if there are more results
-        let extra_limit = query.max_results + 1;
+        // Request offset+limit+1 to detect if there are more results.
+        // We must fetch enough to cover both the skipped offset portion AND the
+        // requested limit, plus 1 extra for has_more detection.
+        let extra_limit = query.offset + query.max_results + 1;
         let mut modified_query = query.clone();
         modified_query.max_results = extra_limit;
         modified_query.offset = 0; // We handle offset ourselves
@@ -5479,7 +5481,11 @@ impl MemorySystem {
             // Potentiate working memory
             let working = self.working_memory.read();
             for memory in working.all_memories() {
-                if memory.access_count() >= POTENTIATION_ACCESS_THRESHOLD {
+                // Only boost if below saturation threshold (0.95) to prevent
+                // all frequently-accessed memories converging to importance=1.0
+                if memory.access_count() >= POTENTIATION_ACCESS_THRESHOLD
+                    && memory.importance() < 0.95
+                {
                     let activation_before = memory.importance();
                     memory.boost_importance(POTENTIATION_MAINTENANCE_BOOST);
                     potentiated_count += 1;
@@ -5499,7 +5505,9 @@ impl MemorySystem {
             // Potentiate session memory
             let session = self.session_memory.read();
             for memory in session.all_memories() {
-                if memory.access_count() >= POTENTIATION_ACCESS_THRESHOLD {
+                if memory.access_count() >= POTENTIATION_ACCESS_THRESHOLD
+                    && memory.importance() < 0.95
+                {
                     let activation_before = memory.importance();
                     memory.boost_importance(POTENTIATION_MAINTENANCE_BOOST);
                     potentiated_count += 1;

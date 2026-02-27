@@ -3553,6 +3553,7 @@ impl Todo {
 
             let mut next = self.clone();
             next.id = TodoId::new();
+            next.seq_num = 0; // Reset so store_todo() assigns a fresh short ID
             next.status = TodoStatus::Todo;
             next.due_date = Some(next_due);
             next.completed_at = None;

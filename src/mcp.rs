@@ -1083,12 +1083,18 @@ async fn handle_claude_launch(port: u16, args: Vec<String>) -> Result<()> {
 
         // Wait for server to be ready
         eprintln!("   Waiting for server to be ready...");
+        let mut server_ready = false;
         for _ in 0..30 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if client.get(&health_url).send().await.is_ok() {
                 eprintln!("   ✓ Server ready");
+                server_ready = true;
                 break;
             }
+        }
+        if !server_ready {
+            eprintln!("   ✗ Server failed to start within 3 seconds on port {port}");
+            std::process::exit(1);
         }
     } else {
         eprintln!("🧠 Shodh-memory server already running on port {port}");

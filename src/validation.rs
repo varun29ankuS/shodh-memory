@@ -117,7 +117,7 @@ pub fn validate_content(content: &str, allow_empty: bool) -> Result<()> {
 
     if content.len() > MAX_CONTENT_LENGTH {
         return Err(anyhow!(
-            "content too long: {} chars (max: {})",
+            "content too long: {} bytes (max: {})",
             content.len(),
             MAX_CONTENT_LENGTH
         ));
