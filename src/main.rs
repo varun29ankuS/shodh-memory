@@ -325,16 +325,25 @@ async fn async_main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    // Spawn server in a task so we can abort it after timeout
+    // Use a notify to signal the server to stop accepting new connections
+    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    let shutdown_listener = shutdown_notify.clone();
+
     let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
-    );
+    )
+    .with_graceful_shutdown(async move {
+        shutdown_listener.notified().await;
+    });
 
-    let server_handle = tokio::spawn(async move { server.await });
+    let mut server_handle = tokio::spawn(async move { server.await });
 
-    // Wait for shutdown signal
+    // Wait for shutdown signal (Ctrl+C / SIGTERM)
     shutdown_signal_with_drain().await;
+
+    // Tell the server to stop accepting new connections
+    shutdown_notify.notify_one();
 
     // Give the server a brief moment to finish in-flight requests
     info!(
@@ -343,7 +352,7 @@ async fn async_main() -> Result<()> {
     );
     match tokio::time::timeout(
         std::time::Duration::from_secs(SERVER_DRAIN_TIMEOUT_SECS),
-        server_handle,
+        &mut server_handle,
     )
     .await
     {
@@ -352,10 +361,10 @@ async fn async_main() -> Result<()> {
         Ok(Err(e)) => tracing::error!("Server task panicked: {}", e),
         Err(_) => {
             info!(
-                "Server drain timed out after {}s, proceeding with cleanup",
+                "Server drain timed out after {}s, aborting server task",
                 SERVER_DRAIN_TIMEOUT_SECS
             );
-            // Server handle will be dropped, aborting the task
+            server_handle.abort();
         }
     }
 

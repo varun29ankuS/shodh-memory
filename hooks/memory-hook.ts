@@ -62,8 +62,12 @@ interface ProactiveContextResponse {
   detected_entities: { name: string; entity_type: string }[];
 }
 
+const HOOK_TIMEOUT_MS = 5000;
+
 async function callBrain(endpoint: string, body: Record<string, unknown>): Promise<unknown> {
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), HOOK_TIMEOUT_MS);
     const response = await fetch(`${SHODH_API_URL}${endpoint}`, {
       method: "POST",
       headers: {
@@ -71,7 +75,9 @@ async function callBrain(endpoint: string, body: Record<string, unknown>): Promi
         "X-API-Key": SHODH_API_KEY,
       },
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
 
     if (!response.ok) return null;
     return await response.json();
@@ -313,9 +319,13 @@ const ORCH_TAG_RE = /\[ORCH-TODO:([A-Z]+-\d+)\]/;
 
 async function callBrainGet(endpoint: string): Promise<unknown> {
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), HOOK_TIMEOUT_MS);
     const response = await fetch(`${SHODH_API_URL}${endpoint}`, {
       headers: { "X-API-Key": SHODH_API_KEY },
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
     if (!response.ok) return null;
     return await response.json();
   } catch {

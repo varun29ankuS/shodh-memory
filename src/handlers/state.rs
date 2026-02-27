@@ -238,11 +238,17 @@ pub struct MultiUserMemoryManager {
     /// At 300s intervals, heavy cycles fire every 30 minutes.
     maintenance_cycle: std::sync::atomic::AtomicU64,
 
-    /// Per-user creation locks to prevent TOCTOU races in get_user_memory/get_user_graph.
+    /// Per-user creation locks to prevent TOCTOU races in get_user_memory.
     /// Without this, concurrent first-access requests for the same user_id can both
     /// miss the cache check, both try to open RocksDB, and the second open fails
     /// because RocksDB holds an exclusive file lock.
-    user_init_locks: DashMap<String, Arc<parking_lot::Mutex<()>>>,
+    user_memory_init_locks: DashMap<String, Arc<parking_lot::Mutex<()>>>,
+
+    /// Separate per-user creation locks for graph memory.
+    /// Must be separate from user_memory_init_locks because get_user_memory()
+    /// calls get_user_graph() while holding its lock, and parking_lot::Mutex
+    /// is not re-entrant — sharing a single lock map would deadlock.
+    user_graph_init_locks: DashMap<String, Arc<parking_lot::Mutex<()>>>,
 }
 
 impl MultiUserMemoryManager {
@@ -488,7 +494,8 @@ impl MultiUserMemoryManager {
             session_store: Arc::new(SessionStore::new()),
             relevance_engine,
             maintenance_cycle: std::sync::atomic::AtomicU64::new(0),
-            user_init_locks: DashMap::new(),
+            user_memory_init_locks: DashMap::new(),
+            user_graph_init_locks: DashMap::new(),
         };
 
         info!("Running initial audit log rotation...");
@@ -723,7 +730,7 @@ impl MultiUserMemoryManager {
 
         // Acquire per-user creation lock to serialize initialization
         let lock = self
-            .user_init_locks
+            .user_memory_init_locks
             .entry(user_id.to_string())
             .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
             .clone();
@@ -1191,9 +1198,10 @@ impl MultiUserMemoryManager {
             return Ok(graph);
         }
 
-        // Acquire per-user creation lock (shared with get_user_memory)
+        // Acquire per-user graph creation lock (separate from memory lock
+        // to avoid deadlock when get_user_memory() calls get_user_graph())
         let lock = self
-            .user_init_locks
+            .user_graph_init_locks
             .entry(user_id.to_string())
             .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
             .clone();
@@ -1458,14 +1466,16 @@ impl MultiUserMemoryManager {
                 tracing::warn!("Periodic flush failed: {}", e);
             }
 
-            // Prune user_init_locks: remove entries for users no longer in cache.
-            // This prevents unbounded growth of the DashMap over time.
+            // Prune init locks: remove entries for users no longer in cache.
+            // This prevents unbounded growth of the DashMaps over time.
             let active_users: std::collections::HashSet<String> = self
                 .user_memories
                 .iter()
                 .map(|(id, _)| id.to_string())
                 .collect();
-            self.user_init_locks
+            self.user_memory_init_locks
+                .retain(|user_id, _| active_users.contains(user_id));
+            self.user_graph_init_locks
                 .retain(|user_id, _| active_users.contains(user_id));
         }
 
