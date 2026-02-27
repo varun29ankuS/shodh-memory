@@ -374,7 +374,7 @@ impl RetrievalEngine {
         }
 
         // Load the persisted index
-        let loaded_index = match VamanaIndex::load_from_file(vamana_path) {
+        let mut loaded_index = match VamanaIndex::load_from_file(vamana_path) {
             Ok(idx) => idx,
             Err(e) => {
                 warn!("Failed to load Vamana file: {}, will rebuild", e);
@@ -408,9 +408,12 @@ impl RetrievalEngine {
             return Ok(false);
         }
 
-        // Replace the vector index with the loaded one
+        // Replace the vector index with the loaded one.
+        // Restore search_list_size to our configured value since persistence
+        // uses a hardcoded default (75) that is lower than our runtime config (100).
         {
             let mut index = self.vector_index.write();
+            loaded_index.config.search_list_size = 100;
             *index = loaded_index;
         }
 
@@ -926,12 +929,18 @@ impl RetrievalEngine {
             .search(&query_embedding, limit * VECTOR_SEARCH_CANDIDATE_MULTIPLIER)
             .context("Vector search failed")?;
 
-        // Map vector IDs to memory IDs and fetch memories
+        // Map vector IDs to memory IDs and fetch memories.
+        // Deduplicate by MemoryId: chunked memories produce multiple vectors that
+        // all map to the same MemoryId; without dedup they consume multiple result slots.
         let id_mapping = self.id_mapping.read();
         let mut memories = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
 
         for (vector_id, _distance) in results {
             if let Some(memory_id) = id_mapping.get_memory_id(vector_id) {
+                if !seen_ids.insert(memory_id.clone()) {
+                    continue; // Already included this memory from a closer chunk
+                }
                 if let Ok(memory) = self.storage.get(memory_id) {
                     let shared_memory = Arc::new(memory);
                     if self.matches_filters(&shared_memory, query) {

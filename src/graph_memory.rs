@@ -2858,9 +2858,6 @@ impl GraphMemory {
                     continue;
                 }
 
-                // Track edge for Hebbian strengthening
-                edges_to_strengthen.push(edge.uuid);
-
                 let connected_uuid = if edge.from_entity == uuid {
                     edge.to_entity
                 } else {
@@ -2878,6 +2875,11 @@ impl GraphMemory {
                     continue;
                 }
 
+                // Track edge for Hebbian strengthening AFTER domination check
+                // so only edges on optimal paths are strengthened
+                edges_to_strengthen.push(edge.uuid);
+
+                let is_new_entity = !visited.contains_key(&connected_uuid);
                 visited.insert(connected_uuid, new_score);
 
                 // Add edge to results
@@ -2885,13 +2887,16 @@ impl GraphMemory {
                 edge_with_strength.strength = effective;
                 all_edges.push(edge_with_strength);
 
-                // Add entity to results
-                if let Some(entity) = self.get_entity(&connected_uuid)? {
-                    all_entities.push(TraversedEntity {
-                        entity,
-                        hop_distance: depth + 1,
-                        decay_factor: new_score,
-                    });
+                // Only add entity once (first discovery); better-path rediscovery
+                // updates visited score but doesn't duplicate the entity in results
+                if is_new_entity {
+                    if let Some(entity) = self.get_entity(&connected_uuid)? {
+                        all_entities.push(TraversedEntity {
+                            entity,
+                            hop_distance: depth + 1,
+                            decay_factor: new_score,
+                        });
+                    }
                 }
 
                 heap.push(PQEntry {

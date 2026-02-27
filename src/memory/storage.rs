@@ -1981,7 +1981,10 @@ impl MemoryStorage {
 
         // Scan only the relevant geohash cells (9 cells = center + 8 neighbors)
         for geohash_prefix in prefixes {
-            let prefix = format!("geo:{}:", geohash_prefix);
+            // Use prefix WITHOUT trailing colon so shorter search prefixes (e.g. precision 6)
+            // still match longer stored geohashes (precision 10).
+            // Stored keys: "geo:s02jksd91f:{uuid}", search prefix: "geo:s02jks"
+            let prefix = format!("geo:{}", geohash_prefix);
             let iter = self.db.iterator_cf(
                 self.index_cf(),
                 IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward),
@@ -2507,13 +2510,22 @@ impl MemoryStorage {
     /// - Stats entries (keys starting with "stats:")
     pub fn cleanup_corrupted(&self) -> Result<usize> {
         let mut to_delete = Vec::new();
-        let stats_prefix = b"stats:";
+
+        // Known non-memory prefixes in the default CF that must be preserved.
+        // These are legitimate data entries, not corrupted memories.
+        let skip_prefixes: &[&[u8]] = &[
+            b"stats:",
+            b"vmapping:",
+            b"interference:",
+            b"interference_meta:",
+            b"_watermark:",
+        ];
 
         let iter = self.db.iterator(IteratorMode::Start);
         for item in iter {
             if let Ok((key, value)) = item {
-                // Skip stats entries - they use a different format
-                if key.starts_with(stats_prefix) {
+                // Skip known non-memory prefixed entries
+                if skip_prefixes.iter().any(|p| key.starts_with(p)) {
                     continue;
                 }
 
