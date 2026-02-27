@@ -337,7 +337,7 @@ async fn async_main() -> Result<()> {
         shutdown_listener.notified().await;
     });
 
-    let server_handle = tokio::spawn(async move { server.await });
+    let mut server_handle = tokio::spawn(async move { server.await });
 
     // Wait for shutdown signal (Ctrl+C / SIGTERM)
     shutdown_signal_with_drain().await;
@@ -352,7 +352,7 @@ async fn async_main() -> Result<()> {
     );
     match tokio::time::timeout(
         std::time::Duration::from_secs(SERVER_DRAIN_TIMEOUT_SECS),
-        server_handle,
+        &mut server_handle,
     )
     .await
     {
@@ -361,9 +361,10 @@ async fn async_main() -> Result<()> {
         Ok(Err(e)) => tracing::error!("Server task panicked: {}", e),
         Err(_) => {
             info!(
-                "Server drain timed out after {}s, proceeding with cleanup",
+                "Server drain timed out after {}s, aborting server task",
                 SERVER_DRAIN_TIMEOUT_SECS
             );
+            server_handle.abort();
         }
     }
 
