@@ -3382,21 +3382,37 @@ impl GraphMemory {
         // Single lock acquisition for entire batch
         let _guard = self.synapse_update_lock.lock();
 
+        // Batch read all edges in a single RocksDB call (same pattern as get_entity_relationships_limited)
+        let keys: Vec<[u8; 16]> = edge_uuids.iter().map(|u| *u.as_bytes()).collect();
+        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let results = self
+            .db
+            .batched_multi_get_cf(self.relationships_cf(), &key_refs, false);
+
         let mut batch = WriteBatch::default();
         let mut strengthened = 0;
 
-        for edge_uuid in edge_uuids {
-            if let Some(mut edge) = self.get_relationship(edge_uuid)? {
-                let _ = edge.strengthen();
-
-                let key = edge.uuid.as_bytes();
-                match bincode::serde::encode_to_vec(&edge, bincode::config::standard()) {
-                    Ok(value) => {
-                        batch.put_cf(self.relationships_cf(), key, value);
-                        strengthened += 1;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to serialize edge {}: {}", edge_uuid, e);
+        for (i, result) in results.into_iter().enumerate() {
+            if let Ok(Some(value)) = result {
+                if let Ok((mut edge, _)) =
+                    bincode::serde::decode_from_slice::<RelationshipEdge, _>(
+                        &value,
+                        bincode::config::standard(),
+                    )
+                {
+                    let _ = edge.strengthen();
+                    match bincode::serde::encode_to_vec(&edge, bincode::config::standard()) {
+                        Ok(encoded) => {
+                            batch.put_cf(self.relationships_cf(), &keys[i], encoded);
+                            strengthened += 1;
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "Failed to serialize edge {}: {}",
+                                edge_uuids[i],
+                                e
+                            );
+                        }
                     }
                 }
             }
