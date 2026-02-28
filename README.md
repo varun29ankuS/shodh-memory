@@ -4,6 +4,8 @@
 
 <h1 align="center">Shodh-Memory</h1>
 
+<p align="center"><b>Your AI agent remembers what matters, forgets what doesn't, and gets smarter the more you use it.</b></p>
+
 <p align="center">
   <a href="https://github.com/varun29ankuS/shodh-memory/actions"><img src="https://github.com/varun29ankuS/shodh-memory/workflows/CI/badge.svg" alt="build"></a>
   <a href="https://registry.modelcontextprotocol.io/v0/servers?search=shodh"><img src="https://img.shields.io/badge/MCP-Registry-green" alt="MCP Registry"></a>
@@ -16,30 +18,133 @@
 
 ---
 
-<p align="center"><i>Persistent memory for AI agents. Single binary. Local-first. Runs offline.</i></p>
+AI agents forget everything between sessions. They repeat mistakes, lose context, and treat every conversation like the first one.
 
----
+Shodh-Memory fixes this. It's persistent memory that actually learns — memories you use often become easier to find, old irrelevant context fades automatically, and recalling one thing brings back related things. No API keys. No cloud. No external databases. One binary.
 
-> **For AI Agents** — Claude, Cursor, GPT, LangChain, AutoGPT, robotic systems, or your custom agents.
-> Give them memory that persists across sessions, learns from experience, and runs entirely on your hardware.
+## Why Not Just Use mem0 / Cognee / Zep?
 
----
+| | **Shodh** | **mem0** | **Cognee** | **Zep** |
+|---|---|---|---|---|
+| LLM calls to store a memory | **0** | 2+ per add | 3+ per cognify | 2+ per episode |
+| External services needed | **None** | OpenAI + vector DB | OpenAI + Neo4j + vector DB | OpenAI + Neo4j |
+| Time to store a memory | **55ms** | ~20 seconds | seconds | seconds |
+| Learns from usage | **Yes** (Hebbian) | No | No | No |
+| Forgets irrelevant data | **Yes** (decay) | No | No | Temporal only |
+| Runs fully offline | **Yes** | No | No | No |
+| Binary size | **~17MB** | pip install + API keys | pip install + API keys + Neo4j | Cloud only |
 
-We built this because AI agents forget everything between sessions. They make the same mistakes, ask the same questions, lose context constantly.
+Every other memory system delegates intelligence to LLM API calls — that's why they're slow, expensive, and can't work offline. Shodh uses algorithmic intelligence: local embeddings, mathematical decay, learned associations. No LLM in the loop.
 
-Shodh-Memory fixes that. It's a cognitive memory system—Hebbian learning, activation decay, semantic consolidation—packed into a single ~17MB binary that runs offline. Deploy on cloud, edge devices, or air-gapped systems.
+## Get Started
 
-## Quick Start
+### Claude Code / Cursor (MCP)
 
-Choose your platform:
+```bash
+# 1. Start the server
+docker run -d -p 3030:3030 -v shodh-data:/data varunshodh/shodh-memory
 
-| Platform | Install | Documentation |
-|----------|---------|---------------|
-| **Docker** | `docker run -d -p 3030:3030 -v shodh-data:/data varunshodh/shodh-memory` | [Docker Hub](https://hub.docker.com/r/varunshodh/shodh-memory) |
-| **Claude / Cursor** | `claude mcp add shodh-memory -- npx -y @shodh/memory-mcp` | [MCP Setup](#claude--cursor-mcp) |
-| **Python** | `pip install shodh-memory` | [Python Docs](https://pypi.org/project/shodh-memory/) |
-| **Rust** | `cargo add shodh-memory` | [Rust Docs](https://crates.io/crates/shodh-memory) |
-| **npm (MCP)** | `npx -y @shodh/memory-mcp` | [npm Docs](https://www.npmjs.com/package/@shodh/memory-mcp) |
+# 2. Add to Claude Code
+claude mcp add shodh-memory -- npx -y @shodh/memory-mcp
+```
+
+That's it. Claude now has persistent memory across sessions.
+
+<details>
+<summary>Or use a binary instead of Docker</summary>
+
+Download from [GitHub Releases](https://github.com/varun29ankuS/shodh-memory/releases):
+
+```bash
+curl -L https://github.com/varun29ankuS/shodh-memory/releases/latest/download/shodh-memory-linux-x64.tar.gz | tar -xz
+./shodh-memory
+```
+</details>
+
+<details>
+<summary>Cursor / Claude Desktop config</summary>
+
+```json
+{
+  "mcpServers": {
+    "shodh-memory": {
+      "command": "npx",
+      "args": ["-y", "@shodh/memory-mcp"],
+      "env": {
+        "SHODH_API_KEY": "your-key"
+      }
+    }
+  }
+}
+```
+
+Generate a key: `openssl rand -hex 32`, set it on the server via `SHODH_DEV_API_KEY` env var.
+</details>
+
+### Python
+
+```bash
+pip install shodh-memory
+```
+
+```python
+from shodh_memory import Memory
+
+memory = Memory(storage_path="./my_data")
+memory.remember("User prefers dark mode", memory_type="Decision")
+results = memory.recall("user preferences", limit=5)
+```
+
+### Rust
+
+```toml
+[dependencies]
+shodh-memory = "0.1"
+```
+
+```rust
+use shodh_memory::{MemorySystem, MemoryConfig};
+
+let memory = MemorySystem::new(MemoryConfig::default())?;
+memory.remember("user-1", "User prefers dark mode", MemoryType::Decision, vec![])?;
+let results = memory.recall("user-1", "user preferences", 5)?;
+```
+
+### Docker
+
+```bash
+docker run -d -p 3030:3030 -v shodh-data:/data varunshodh/shodh-memory
+```
+
+## What It Does
+
+```
+You use a memory often  →  it becomes easier to find (Hebbian learning)
+You stop using a memory →  it fades over time (activation decay)
+You recall one memory   →  related memories surface too (spreading activation)
+A connection is used    →  it becomes permanent (long-term potentiation)
+```
+
+Under the hood, memories flow through three tiers:
+
+```
+Working Memory ──overflow──▶ Session Memory ──importance──▶ Long-Term Memory
+   (100 items)                  (500 MB)                      (RocksDB)
+```
+
+This is based on [Cowan's working memory model](https://doi.org/10.1177/0963721409359277) and [Wixted's memory decay research](https://doi.org/10.1111/j.1467-9280.2004.00687.x). The neuroscience isn't a gimmick — it's why the system gets better with use instead of just accumulating data.
+
+## Performance
+
+| Operation | Latency |
+|-----------|---------|
+| Store memory | 55-60ms |
+| Semantic search | 34-58ms |
+| Tag search | ~1ms |
+| Entity lookup | 763ns |
+| Graph traversal (3-hop) | 30µs |
+
+Single 17MB binary. No GPU required. Runs on a $5 VPS.
 
 ## TUI Dashboard
 
@@ -57,351 +162,89 @@ shodh-tui
   <img src="https://raw.githubusercontent.com/varun29ankuS/shodh-memory/main/assets/graph-map.jpg" width="700" alt="Shodh Graph Map">
 </p>
 
-<p align="center"><i>Knowledge graph visualization — entity connections across memories</i></p>
+<p align="center"><i>Knowledge graph — entity connections strengthened through use</i></p>
 
-**Keyboard shortcuts:** `Tab` switch panels · `j/k` navigate · `Enter` select · `/` search · `q` quit
+## 47 MCP Tools
 
-## GTD Todo System
+Full list of tools available to Claude, Cursor, and other MCP clients:
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/varun29ankuS/shodh-memory/main/assets/projects-todos.jpg" width="700" alt="Shodh Projects & Todos">
-</p>
+<details>
+<summary>Memory</summary>
 
-<p align="center"><i>Projects and todos with GTD workflow — contexts, priorities, due dates</i></p>
+`remember` · `recall` · `proactive_context` · `context_summary` · `list_memories` · `read_memory` · `forget` · `reinforce`
+</details>
 
-Built-in task management following GTD (Getting Things Done) methodology:
+<details>
+<summary>Todos (GTD)</summary>
 
-```python
-# Add todos with context, projects, and priorities
-memory.add_todo("Fix authentication bug", project="Backend", priority="high", contexts=["@computer"])
+`add_todo` · `list_todos` · `update_todo` · `complete_todo` · `delete_todo` · `reorder_todo` · `list_subtasks` · `add_todo_comment` · `list_todo_comments` · `update_todo_comment` · `delete_todo_comment` · `todo_stats`
+</details>
 
-# List by project or context
-todos = memory.list_todos(project="Backend", status=["todo", "in_progress"])
+<details>
+<summary>Projects</summary>
 
-# Complete tasks (auto-creates next occurrence for recurring)
-memory.complete_todo("SHO-abc123")
-```
+`add_project` · `list_projects` · `archive_project` · `delete_project`
+</details>
 
-**MCP Tools for Claude/Cursor:**
-- `add_todo` — Create tasks with projects, contexts, priorities, due dates
-- `list_todos` — Filter by status, project, context, due date
-- `complete_todo` — Mark done, auto-advances recurring tasks
-- `add_project` / `list_projects` — Organize work into projects
+<details>
+<summary>Reminders</summary>
 
-## How It Works
+`set_reminder` · `list_reminders` · `dismiss_reminder`
+</details>
 
-Experiences flow through three tiers based on Cowan's working memory model:
+<details>
+<summary>System</summary>
 
-```
-Working Memory ──overflow──▶ Session Memory ──importance──▶ Long-Term Memory
-   (100 items)                  (500 MB)                      (RocksDB)
-```
-
-**Cognitive Processing:**
-- **Hebbian learning** — Co-retrieved memories form stronger connections
-- **Activation decay** — Unused memories fade: A(t) = A₀ · e^(-λt)
-- **Long-term potentiation** — Frequently-used connections become permanent
-- **Entity extraction** — TinyBERT NER identifies people, orgs, locations
-- **Spreading activation** — Queries activate related memories through the graph
-- **Memory replay** — Important memories replay during maintenance (like sleep)
-
-## Claude / Cursor (MCP)
-
-### Quick Start: Full Setup
-
-The MCP client connects to a shodh-memory server. Follow these steps:
-
-**Step 1: Start the server**
-
-Download from [GitHub Releases](https://github.com/varun29ankuS/shodh-memory/releases) or use Docker:
-
-```bash
-# Option A: Direct download (Linux/macOS)
-curl -L https://github.com/varun29ankuS/shodh-memory/releases/latest/download/shodh-memory-linux-x64.tar.gz | tar -xz
-./shodh-memory
-
-# Option B: Docker
-docker run -d -p 3030:3030 -e SHODH_HOST=0.0.0.0 -v shodh-data:/data varunshodh/shodh-memory
-```
-
-Wait for "Server ready!" message before proceeding.
-
-**Step 2: Generate an API key**
-
-The API key is **locally generated** — you create your own. This is for local client-server authentication, not a cloud service credential:
-
-```bash
-# Generate a random key
-openssl rand -hex 32
-# Example output: a1b2c3d4e5f6...
-```
-
-Set this key on your server via `SHODH_DEV_API_KEY` environment variable.
-
-**Step 3: Configure the MCP client**
-
-**Claude Code (CLI):**
-```bash
-claude mcp add shodh-memory -- npx -y @shodh/memory-mcp
-```
-
-**Claude Desktop / Cursor config:**
-```json
-{
-  "mcpServers": {
-    "shodh-memory": {
-      "command": "npx",
-      "args": ["-y", "@shodh/memory-mcp"],
-      "env": {
-        "SHODH_API_KEY": "your-generated-key-from-step-2"
-      }
-    }
-  }
-}
-```
-
-**Step 4: Verify connection**
-
-```bash
-curl http://localhost:3030/health
-# Should return: {"status":"ok"}
-```
-
-**Key MCP Tools:**
-- `remember` — Store memories with types (Observation, Decision, Learning, etc.)
-- `recall` — Semantic/associative/hybrid search across memories
-- `proactive_context` — Auto-surface relevant memories for current context
-- `add_todo` / `list_todos` — GTD task management
-- `context_summary` — Quick overview of recent learnings and decisions
-
-Config file locations:
-
-| Editor | Path |
-|--------|------|
-| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
-| Cursor | `~/.cursor/mcp.json` |
-
-## Python
-
-```bash
-pip install shodh-memory
-```
-
-```python
-from shodh_memory import Memory
-
-memory = Memory(storage_path="./my_data")
-memory.remember("User prefers dark mode", memory_type="Decision")
-results = memory.recall("user preferences", limit=5)
-```
-
-[Full Python documentation →](https://pypi.org/project/shodh-memory/)
-
-## Rust
-
-```toml
-[dependencies]
-shodh-memory = "0.1"
-```
-
-```rust
-use shodh_memory::{MemorySystem, MemoryConfig};
-
-let memory = MemorySystem::new(MemoryConfig::default())?;
-memory.remember("user-1", "User prefers dark mode", MemoryType::Decision, vec![])?;
-let results = memory.recall("user-1", "user preferences", 5)?;
-```
-
-[Full Rust documentation →](https://crates.io/crates/shodh-memory)
+`memory_stats` · `verify_index` · `repair_index` · `token_status` · `reset_token_session` · `consolidation_report` · `backup_create` · `backup_list` · `backup_verify` · `backup_restore` · `backup_purge`
+</details>
 
 ## REST API
 
-The server exposes a REST API on `http://localhost:3030`. All `/api/*` endpoints require the `X-API-Key` header.
+160+ endpoints on `http://localhost:3030`. All `/api/*` endpoints require `X-API-Key` header.
 
-### Core Memory
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/remember` | Store a memory |
-| POST | `/api/remember/batch` | Store multiple memories |
-| POST | `/api/recall` | Semantic search |
-| POST | `/api/recall/tags` | Search by tags |
-| POST | `/api/proactive_context` | Context-aware retrieval |
-| POST | `/api/context_summary` | Get condensed summary |
-| GET | `/api/memory/{id}` | Get memory by ID |
-| DELETE | `/api/memory/{id}` | Delete memory |
-| POST | `/api/memories` | List with filters |
-| POST | `/api/reinforce` | Hebbian feedback |
-
-### Todos
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/todos` | List todos |
-| POST | `/api/todos/add` | Create todo |
-| POST | `/api/todos/update` | Update todo |
-| POST | `/api/todos/complete` | Mark complete |
-| POST | `/api/todos/delete` | Delete todo |
-| GET | `/api/todos/{id}` | Get todo by ID |
-| GET | `/api/todos/{id}/subtasks` | List subtasks |
-| POST | `/api/todos/stats` | Get statistics |
-
-### Projects
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/projects` | List projects |
-| POST | `/api/projects/add` | Create project |
-| GET | `/api/projects/{id}` | Get project by ID |
-| POST | `/api/projects/delete` | Delete project |
-
-### Health
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health` | Health check |
-| GET | `/metrics` | Prometheus metrics |
-| GET | `/api/context/status` | Context window status |
+[Full API reference →](https://www.shodh-memory.com/docs/api)
 
 <details>
-<summary>Example: Store a memory</summary>
+<summary>Quick examples</summary>
 
 ```bash
+# Store a memory
 curl -X POST http://localhost:3030/api/remember \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your-api-key" \
-  -d '{
-    "user_id": "user-1",
-    "content": "User prefers dark mode",
-    "memory_type": "Decision",
-    "tags": ["preferences", "ui"]
-  }'
-```
-</details>
+  -H "X-API-Key: your-key" \
+  -d '{"user_id": "user-1", "content": "User prefers dark mode", "memory_type": "Decision"}'
 
-<details>
-<summary>Example: Semantic search</summary>
-
-```bash
+# Search memories
 curl -X POST http://localhost:3030/api/recall \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your-api-key" \
-  -d '{
-    "user_id": "user-1",
-    "query": "user preferences",
-    "limit": 5
-  }'
+  -H "X-API-Key: your-key" \
+  -d '{"user_id": "user-1", "query": "user preferences", "limit": 5}'
 ```
 </details>
-
-<details>
-<summary>Example: Create todo</summary>
-
-```bash
-curl -X POST http://localhost:3030/api/todos/add \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your-api-key" \
-  -d '{
-    "user_id": "user-1",
-    "content": "Fix authentication bug",
-    "project": "Backend",
-    "priority": "high",
-    "contexts": ["@computer"]
-  }'
-```
-</details>
-
-## Performance
-
-| Operation | Latency |
-|-----------|---------|
-| Store memory | 55-60ms |
-| Semantic search | 34-58ms |
-| Tag search | ~1ms |
-| Entity lookup | 763ns |
-| Graph traversal (3-hop) | 30µs |
-
-## Compared to Alternatives
-
-| | Shodh-Memory | Mem0 | Cognee |
-|---|---|---|---|
-| **Deployment** | Single 17MB binary | Cloud API | Neo4j + Vector DB |
-| **Offline** | 100% | No | Partial |
-| **Learning** | Hebbian + decay + LTP | Vector similarity | Knowledge graphs |
-| **Latency** | Sub-millisecond | Network-bound | Database-bound |
 
 ## Platform Support
 
-| Platform | Status |
-|----------|--------|
-| Linux x86_64 | Supported |
-| Linux ARM64 | Supported |
-| macOS ARM64 (Apple Silicon) | Supported |
-| macOS x86_64 (Intel) | Supported |
-| Windows x86_64 | Supported |
+Linux x86_64 · Linux ARM64 · macOS Apple Silicon · macOS Intel · Windows x86_64
 
 ## Production Deployment
 
-Shodh-Memory is designed for single-machine deployments where multiple AI agents share a common memory store. For production use:
-
-### Security Model
-
-```
-Internet → Reverse Proxy (TLS + Auth) → Shodh-Memory (localhost:3030)
-```
-
-**TLS/HTTPS**: The server does not handle TLS directly. For network deployments, place it behind a reverse proxy (Nginx, Caddy, Traefik, Cloudflare Tunnel) that handles TLS termination.
-
-**Authentication**: All data endpoints require API key authentication via `X-API-Key` header. Health and metrics endpoints are public for monitoring.
-
-**Network Binding**: By default, the server binds to `127.0.0.1` (localhost only). Set `SHODH_HOST=0.0.0.0` only when behind an authenticated reverse proxy.
-
-### Environment Variables
+<details>
+<summary>Environment variables</summary>
 
 ```bash
-# Required for production
-SHODH_ENV=production              # Enables production mode (stricter validation)
+SHODH_ENV=production              # Production mode
 SHODH_API_KEYS=key1,key2,key3     # Comma-separated API keys
-
-# Optional
 SHODH_HOST=127.0.0.1              # Bind address (default: localhost)
 SHODH_PORT=3030                   # Port (default: 3030)
 SHODH_MEMORY_PATH=/var/lib/shodh  # Data directory
 SHODH_REQUEST_TIMEOUT=60          # Request timeout in seconds
 SHODH_MAX_CONCURRENT=200          # Max concurrent requests
-SHODH_CORS_ORIGINS=https://app.example.com  # Allowed CORS origins
+SHODH_CORS_ORIGINS=https://app.example.com
 ```
+</details>
 
-### Example: Nginx Reverse Proxy
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name memory.example.com;
-
-    ssl_certificate /etc/letsencrypt/live/memory.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/memory.example.com/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:3030;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-### Example: Caddy (Auto-TLS)
-
-```caddyfile
-memory.example.com {
-    reverse_proxy localhost:3030
-}
-```
-
-### Docker Compose (Production)
+<details>
+<summary>Docker Compose with TLS</summary>
 
 ```yaml
 services:
@@ -431,22 +274,29 @@ volumes:
 networks:
   internal:
 ```
+</details>
 
-## Community Implementations
+<details>
+<summary>Reverse proxy (Nginx / Caddy)</summary>
+
+The server binds to `127.0.0.1` by default. For network deployments, place behind a reverse proxy:
+
+```caddyfile
+memory.example.com {
+    reverse_proxy localhost:3030
+}
+```
+</details>
+
+## Community
 
 | Project | Description | Author |
 |---------|-------------|--------|
-| [SHODH on Cloudflare](https://github.com/doobidoo/shodh-cloudflare) | Edge-native implementation on Cloudflare Workers with D1, Vectorize, and Workers AI | [@doobidoo](https://github.com/doobidoo) |
-
-Have an implementation? [Open a discussion](https://github.com/varun29ankuS/shodh-memory/discussions) to get it listed.
+| [SHODH on Cloudflare](https://github.com/doobidoo/shodh-cloudflare) | Edge-native implementation on Cloudflare Workers | [@doobidoo](https://github.com/doobidoo) |
 
 ## References
 
-[1] Cowan, N. (2010). The Magical Mystery Four: How is Working Memory Capacity Limited, and Why? *Current Directions in Psychological Science*.
-
-[2] Magee, J.C., & Grienberger, C. (2020). Synaptic Plasticity Forms and Functions. *Annual Review of Neuroscience*.
-
-[3] Subramanya, S.J., et al. (2019). DiskANN: Fast Accurate Billion-point Nearest Neighbor Search. *NeurIPS 2019*.
+[1] Cowan, N. (2010). The Magical Mystery Four. *Current Directions in Psychological Science*. [2] Magee & Grienberger (2020). Synaptic Plasticity Forms and Functions. *Annual Review of Neuroscience*. [3] Subramanya et al. (2019). DiskANN. *NeurIPS 2019*.
 
 ## License
 
@@ -454,4 +304,6 @@ Apache 2.0
 
 ---
 
-[MCP Registry](https://registry.modelcontextprotocol.io/v0/servers?search=shodh) · [Docker Hub](https://hub.docker.com/r/varunshodh/shodh-memory) · [PyPI](https://pypi.org/project/shodh-memory/) · [npm](https://www.npmjs.com/package/@shodh/memory-mcp) · [crates.io](https://crates.io/crates/shodh-memory) · [Docs](https://www.shodh-rag.com/memory)
+<p align="center">
+  <a href="https://registry.modelcontextprotocol.io/v0/servers?search=shodh">MCP Registry</a> · <a href="https://hub.docker.com/r/varunshodh/shodh-memory">Docker Hub</a> · <a href="https://pypi.org/project/shodh-memory/">PyPI</a> · <a href="https://www.npmjs.com/package/@shodh/memory-mcp">npm</a> · <a href="https://crates.io/crates/shodh-memory">crates.io</a> · <a href="https://www.shodh-memory.com">Docs</a>
+</p>
