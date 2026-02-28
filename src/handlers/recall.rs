@@ -836,19 +836,33 @@ pub async fn proactive_context(
         let followup = req.user_followup.clone();
         let memory_for_embed = memory_system.clone();
 
-        // Process feedback and collect memory IDs for reinforcement
+        // Process feedback and collect memory IDs for reinforcement.
+        // Split into 3 phases to minimize write-lock hold time on the shared FeedbackStore:
+        //   Phase 1: Take pending + detect context pattern (write lock, <1ms)
+        //   Phase 2: Compute embedding + signals (NO lock, 10-30ms)
+        //   Phase 3: Apply momentum updates + flush (write lock, <5ms)
         let (result, helpful_ids, misleading_ids) = tokio::task::spawn_blocking(move || {
-            let mut store = feedback_store.write();
+            // Phase 1: Extract pending data under brief write lock
+            let (pending, context_pattern) = {
+                let mut store = feedback_store.write();
+                let pending = store.take_pending(&user_id_for_feedback);
+                let context_pattern = pending.as_ref().and_then(|p| {
+                    if p.context_embedding.is_empty() {
+                        return None;
+                    }
+                    store.detect_context_pattern(&user_id_for_feedback, &p.context_embedding)
+                });
+                (pending, context_pattern)
+                // write lock released here
+            };
 
-            // Take pending feedback for this user
-            if let Some(pending) = store.take_pending(&user_id_for_feedback) {
-                // Compute response embedding for semantic similarity feedback
+            if let Some(pending) = pending {
+                // Phase 2: Pure computation — no lock held
                 let response_embedding: Option<Vec<f32>> = {
                     let memory_guard = memory_for_embed.read();
                     memory_guard.compute_embedding(&response_text).ok()
                 };
 
-                // Process the feedback with semantic similarity
                 let mut signals = feedback::process_implicit_feedback_with_semantics(
                     &pending,
                     &response_text,
@@ -856,86 +870,86 @@ pub async fn proactive_context(
                     response_embedding.as_deref(),
                 );
 
-                // Detect context patterns: repetition (user re-asking) or topic change
-                // Modifies signal values based on detected user behavior patterns
-                if !pending.context_embedding.is_empty() {
-                    if let Some((is_repetition, is_topic_change, similarity)) = store
-                        .detect_context_pattern(&user_id_for_feedback, &pending.context_embedding)
-                    {
-                        if is_repetition || is_topic_change {
-                            feedback::apply_context_pattern_signals(
-                                &mut signals,
-                                is_repetition,
-                                is_topic_change,
-                                similarity,
-                            );
-                            tracing::debug!(
-                                user_id = %user_id_for_feedback,
-                                is_repetition,
-                                is_topic_change,
-                                similarity,
-                                "Applied context pattern signals to feedback"
-                            );
-                        }
+                // Apply context pattern adjustments (computed in Phase 1)
+                if let Some((is_repetition, is_topic_change, similarity)) = context_pattern {
+                    if is_repetition || is_topic_change {
+                        feedback::apply_context_pattern_signals(
+                            &mut signals,
+                            is_repetition,
+                            is_topic_change,
+                            similarity,
+                        );
+                        tracing::debug!(
+                            user_id = %user_id_for_feedback,
+                            is_repetition,
+                            is_topic_change,
+                            similarity,
+                            "Applied context pattern signals to feedback"
+                        );
                     }
                 }
 
-                let mut reinforced = Vec::new();
-                let mut weakened = Vec::new();
-                let mut helpful_ids: Vec<MemoryId> = Vec::new();
-                let mut misleading_ids: Vec<MemoryId> = Vec::new();
-
-                // Extract entities from context for fingerprinting
                 let context_entities: Vec<String> =
                     feedback::extract_entities_simple(&pending.context)
                         .into_iter()
                         .collect();
                 let context_embedding = pending.context_embedding.clone();
 
-                for (memory_id, signal) in signals {
-                    // Determine if this memory was helpful or misleading
-                    let is_helpful = signal.value > 0.3;
-                    let is_misleading = signal.value < -0.3;
+                // Classify signals before acquiring lock
+                let mut reinforced = Vec::new();
+                let mut weakened = Vec::new();
+                let mut helpful_ids: Vec<MemoryId> = Vec::new();
+                let mut misleading_ids: Vec<MemoryId> = Vec::new();
 
-                    // Get or create momentum for this memory
-                    let momentum = store.get_or_create_momentum(
-                        memory_id.clone(),
-                        crate::memory::types::ExperienceType::Context,
-                    );
+                // Collect signal classifications for Phase 3
+                let classified: Vec<_> = signals
+                    .into_iter()
+                    .map(|(memory_id, signal)| {
+                        let is_helpful = signal.value > 0.3;
+                        let is_misleading = signal.value < -0.3;
+                        (memory_id, signal, is_helpful, is_misleading)
+                    })
+                    .collect();
 
-                    // Track reinforced/weakened
-                    let old_ema = momentum.ema;
-                    let new_ema = {
-                        momentum.update(signal.clone());
-                        momentum.ema
-                    };
-
-                    // Add context fingerprint for pattern learning
-                    if is_helpful || is_misleading {
-                        let fingerprint = feedback::ContextFingerprint::new(
-                            context_entities.clone(),
-                            &context_embedding,
-                            is_helpful,
+                // Phase 3: Apply momentum updates under brief write lock
+                {
+                    let mut store = feedback_store.write();
+                    for (memory_id, signal, is_helpful, is_misleading) in &classified {
+                        let momentum = store.get_or_create_momentum(
+                            memory_id.clone(),
+                            crate::memory::types::ExperienceType::Context,
                         );
-                        momentum.add_context(fingerprint);
+
+                        let old_ema = momentum.ema;
+                        let new_ema = {
+                            momentum.update(signal.clone());
+                            momentum.ema
+                        };
+
+                        if *is_helpful || *is_misleading {
+                            let fingerprint = feedback::ContextFingerprint::new(
+                                context_entities.clone(),
+                                &context_embedding,
+                                *is_helpful,
+                            );
+                            momentum.add_context(fingerprint);
+                        }
+
+                        if *is_helpful || new_ema > old_ema + 0.05 {
+                            reinforced.push(memory_id.0.to_string());
+                            helpful_ids.push(memory_id.clone());
+                        } else if *is_misleading || new_ema < old_ema - 0.05 {
+                            weakened.push(memory_id.0.to_string());
+                            misleading_ids.push(memory_id.clone());
+                        }
+
+                        store.mark_dirty(memory_id);
                     }
 
-                    // Determine outcome based on signal and EMA change
-                    if is_helpful || new_ema > old_ema + 0.05 {
-                        reinforced.push(memory_id.0.to_string());
-                        helpful_ids.push(memory_id.clone());
-                    } else if is_misleading || new_ema < old_ema - 0.05 {
-                        weakened.push(memory_id.0.to_string());
-                        misleading_ids.push(memory_id.clone());
+                    if let Err(e) = store.flush() {
+                        tracing::warn!("Failed to flush feedback store: {}", e);
                     }
-
-                    // Mark dirty after releasing the mutable borrow
-                    store.mark_dirty(&memory_id);
-                }
-
-                // Flush dirty entries to disk
-                if let Err(e) = store.flush() {
-                    tracing::warn!("Failed to flush feedback store: {}", e);
+                    // write lock released here
                 }
 
                 let result = FeedbackProcessed {
@@ -1207,22 +1221,22 @@ pub async fn proactive_context(
                     }
                     // Anti-echo: skip memories that are just our own context echoed back
                     // (auto-ingest stores context, which then gets retrieved for itself)
+                    // Uses inline comparison to avoid allocating a HashSet<String> per candidate
                     if !query_words.is_empty() {
-                        let mem_words: std::collections::HashSet<String> = content
-                            .split_whitespace()
-                            .map(|w| {
-                                w.trim_matches(|c: char| !c.is_alphanumeric())
-                                    .to_lowercase()
-                            })
-                            .filter(|w| w.len() >= 3)
-                            .collect();
-                        if !mem_words.is_empty() {
-                            let overlap = query_words.intersection(&mem_words).count();
-                            let smaller = query_words.len().min(mem_words.len());
-                            // If >70% of words overlap, it's an echo — skip it
-                            if overlap * 100 / smaller >= 70 {
-                                return false;
+                        let mut mem_word_count = 0usize;
+                        let mut overlap = 0usize;
+                        for w in content.split_whitespace() {
+                            let w = w.trim_matches(|c: char| !c.is_alphanumeric());
+                            if w.len() >= 3 {
+                                mem_word_count += 1;
+                                if query_words.iter().any(|qw| qw.eq_ignore_ascii_case(w)) {
+                                    overlap += 1;
+                                }
                             }
+                        }
+                        let smaller = query_words.len().min(mem_word_count);
+                        if smaller > 0 && overlap * 100 / smaller >= 70 {
+                            return false;
                         }
                     }
                     true
