@@ -3394,12 +3394,10 @@ impl GraphMemory {
 
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
-                if let Ok((mut edge, _)) =
-                    bincode::serde::decode_from_slice::<RelationshipEdge, _>(
-                        &value,
-                        bincode::config::standard(),
-                    )
-                {
+                if let Ok((mut edge, _)) = bincode::serde::decode_from_slice::<RelationshipEdge, _>(
+                    &value,
+                    bincode::config::standard(),
+                ) {
                     let _ = edge.strengthen();
                     match bincode::serde::encode_to_vec(&edge, bincode::config::standard()) {
                         Ok(encoded) => {
@@ -3407,11 +3405,7 @@ impl GraphMemory {
                             strengthened += 1;
                         }
                         Err(e) => {
-                            tracing::debug!(
-                                "Failed to serialize edge {}: {}",
-                                edge_uuids[i],
-                                e
-                            );
+                            tracing::debug!("Failed to serialize edge {}: {}", edge_uuids[i], e);
                         }
                     }
                 }
