@@ -493,6 +493,84 @@ pub async fn remember(
         })?;
     }
 
+    // Infer causal lineage: detect how this memory relates to recent memories
+    // sharing entities (Caused, ResolvedBy, InformedBy, SupersededBy, etc.)
+    // Runs AFTER graph processing so entity index is populated.
+    {
+        let memory_arc = memory.clone();
+        let graph_arc = state.get_user_graph(&req.user_id).ok();
+        let user_id = req.user_id.clone();
+        let memory_id_clone = memory_id.clone();
+        let entities: Vec<String> = experience
+            .entities
+            .iter()
+            .map(|e| e.to_lowercase())
+            .collect();
+
+        tokio::task::spawn_blocking(move || {
+            let Some(graph_arc) = graph_arc else {
+                return;
+            };
+            let graph = graph_arc.read();
+            let memory_guard = memory_arc.read();
+
+            // Collect candidate memory IDs from the graph entity index:
+            // for each entity in the new memory, find episodes (memories) that share it.
+            let mut candidate_ids = std::collections::HashSet::new();
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+
+            for entity_name in &entities {
+                if let Ok(Some(entity_node)) = graph.find_entity_by_name(entity_name) {
+                    if let Ok(episodes) = graph.get_episodes_by_entity(&entity_node.uuid) {
+                        for ep in &episodes {
+                            if ep.created_at >= cutoff {
+                                candidate_ids.insert(crate::memory::MemoryId(ep.uuid));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Remove self, cap candidates to avoid O(n) scanning
+            candidate_ids.remove(&memory_id_clone);
+            let candidate_ids: Vec<_> = candidate_ids.into_iter().take(20).collect();
+            if candidate_ids.is_empty() {
+                return;
+            }
+
+            // Fetch full Memory objects for type-based inference
+            let candidates: Vec<_> = candidate_ids
+                .iter()
+                .filter_map(|id| memory_guard.get_memory(id).ok())
+                .collect();
+
+            let Ok(new_memory) = memory_guard.get_memory(&memory_id_clone) else {
+                return;
+            };
+
+            match memory_guard.infer_lineage_for_memory(&user_id, &new_memory, &candidates) {
+                Ok(edges) if !edges.is_empty() => {
+                    tracing::info!(
+                        user_id = %user_id,
+                        memory_id = %memory_id_clone.0,
+                        edges = edges.len(),
+                        relations = ?edges.iter().map(|e| format!("{:?}", e.relation)).collect::<Vec<_>>(),
+                        "Lineage inference: {} causal edges detected",
+                        edges.len()
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!("Lineage inference failed (non-fatal): {}", e);
+                }
+            }
+        })
+        .await
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("Lineage inference panicked: {e}"))
+        })?;
+    }
+
     // Record metrics
     let duration = op_start.elapsed().as_secs_f64();
     metrics::MEMORY_STORE_DURATION.observe(duration);

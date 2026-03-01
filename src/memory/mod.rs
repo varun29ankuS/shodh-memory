@@ -1575,10 +1575,53 @@ impl MemorySystem {
             HashSet::new()
         };
 
+        // ===========================================================================
+        // LAYER 0.7: SEMANTIC FACT SOURCE LOOKUP
+        // ===========================================================================
+        // Pre-fetch facts by query entities to boost their source memories in Layer 4.8.
+        // Facts represent consolidated knowledge — their source memories contain the
+        // richest context for that knowledge and should rank higher.
+        let fact_source_boosts: std::collections::HashMap<MemoryId, f32> = {
+            let mut boosts: std::collections::HashMap<MemoryId, f32> =
+                std::collections::HashMap::new();
+
+            if let Some(user_id) = &query.user_id {
+                let entity_names: Vec<String> = query_analysis
+                    .focal_entities
+                    .iter()
+                    .map(|e| e.text.to_lowercase())
+                    .collect();
+
+                if !entity_names.is_empty() {
+                    if let Ok(facts) = self.get_facts_for_graph_entities(user_id, &entity_names, 5)
+                    {
+                        for fact in &facts {
+                            if fact.confidence < 0.5 || fact.support_count < 3 {
+                                continue;
+                            }
+                            let per_fact_boost = fact.confidence * 0.08;
+                            for src_id in &fact.source_memories {
+                                let entry = boosts.entry(src_id.clone()).or_insert(0.0);
+                                *entry = (*entry + per_fact_boost).min(0.3);
+                            }
+                        }
+                        if !boosts.is_empty() {
+                            tracing::debug!(
+                                "Layer 0.7: Pre-fetched {} fact-source boosts from {} facts",
+                                boosts.len(),
+                                facts.len()
+                            );
+                        }
+                    }
+                }
+            }
+            boosts
+        };
+
         let t_query_analysis = recall_start.elapsed();
         tracing::info!(
             query_analysis_ms = format!("{:.2}", t_query_analysis.as_secs_f64() * 1000.0),
-            "recall [layer:0.5-0.6] query analysis + attribute + temporal fact lookup"
+            "recall [layer:0.5-0.7] query analysis + attribute + temporal fact + fact source lookup"
         );
 
         // PERFORMANCE: Use pre-computed embedding if caller provided one,
@@ -2196,6 +2239,31 @@ impl MemorySystem {
                             );
                         }
                     }
+                }
+            }
+
+            // ===========================================================================
+            // LAYER 4.8: SEMANTIC FACT SOURCE BOOST
+            // ===========================================================================
+            // Consolidated facts represent stable knowledge. When query entities match
+            // fact entities, the source memories that generated those facts contain the
+            // richest context — they should rank higher.
+            //
+            // Conservative: only boosts memories already in fused set (does NOT inject
+            // new candidates). Facts validate existing retrieval signals, not override.
+            if !fact_source_boosts.is_empty() {
+                let mut boosted_count = 0;
+                for (id, boost) in &fact_source_boosts {
+                    if let Some(score) = fused.get_mut(id) {
+                        *score += boost;
+                        boosted_count += 1;
+                    }
+                }
+                if boosted_count > 0 {
+                    tracing::info!(
+                        "Layer 4.8: Boosted {} memories from semantic fact sources",
+                        boosted_count
+                    );
                 }
             }
 
@@ -6530,38 +6598,39 @@ impl MemorySystem {
     ///
     /// Returns (facts_decayed, facts_deleted)
     fn decay_facts_for_all_users(&self) -> Result<(usize, usize)> {
-        const DECAY_THRESHOLD_DAYS: i64 = 30; // Start decay after 30 days without reinforcement
-        const DELETE_CONFIDENCE: f32 = 0.1; // Delete facts below this confidence
-        const BASE_DECAY_RATE: f32 = 0.05; // 5% decay per maintenance cycle
+        use crate::constants::{
+            FACT_DECAY_GRACE_DAYS, FACT_DECAY_HALF_LIFE_BASE_DAYS,
+            FACT_DECAY_HALF_LIFE_PER_SUPPORT_DAYS,
+        };
+        const DELETE_CONFIDENCE: f32 = 0.1;
 
         let now = chrono::Utc::now();
         let mut total_decayed = 0;
         let mut total_deleted = 0;
 
-        // Get all users from fact store
         let user_ids = self.fact_store.list_users(100)?;
 
         for user_id in &user_ids {
-            // Get all facts for this user
             let facts = self.fact_store.list(user_id, 10000)?;
 
             for mut fact in facts {
                 let days_since_reinforcement = (now - fact.last_reinforced).num_days();
 
-                // Only decay facts that haven't been reinforced recently
-                if days_since_reinforcement < DECAY_THRESHOLD_DAYS {
+                // Grace period: no decay at all
+                if days_since_reinforcement <= FACT_DECAY_GRACE_DAYS {
                     continue;
                 }
 
                 let confidence_before = fact.confidence;
 
-                // Decay rate is reduced by support_count (log scale to prevent infinite protection)
-                // Formula: effective_decay = base_decay / (1 + ln(support_count))
-                let support_protection = 1.0 + (fact.support_count as f32).ln().max(0.0);
-                let effective_decay = BASE_DECAY_RATE / support_protection;
-
-                // Apply decay
-                fact.confidence = (fact.confidence - effective_decay).max(0.0);
+                // Exponential half-life decay: confidence × 0.5^(elapsed / half_life)
+                // Half-life grows linearly with support_count — each corroborating source
+                // is genuine evidence that the fact is stable knowledge.
+                let elapsed = (days_since_reinforcement - FACT_DECAY_GRACE_DAYS) as f64;
+                let half_life = FACT_DECAY_HALF_LIFE_BASE_DAYS
+                    + (fact.support_count as f64 * FACT_DECAY_HALF_LIFE_PER_SUPPORT_DAYS);
+                let decay_factor = (0.5_f64).powf(elapsed / half_life) as f32;
+                fact.confidence = (confidence_before * decay_factor).max(0.0);
 
                 // Delete if below threshold
                 if fact.confidence < DELETE_CONFIDENCE {
@@ -6580,7 +6649,7 @@ impl MemorySystem {
 
                     self.fact_store.delete(user_id, &fact.id)?;
                     total_deleted += 1;
-                } else if fact.confidence < confidence_before {
+                } else if (confidence_before - fact.confidence) > 0.001 {
                     // Record decay event (not significant - routine maintenance)
                     self.record_consolidation_event(ConsolidationEvent::FactDecayed {
                         fact_id: fact.id.clone(),

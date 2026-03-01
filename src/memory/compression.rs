@@ -12,8 +12,7 @@ use crate::constants::{
     COMPRESSION_ACCESS_THRESHOLD, COMPRESSION_AGE_DAYS, COMPRESSION_IMPORTANCE_HIGH,
     COMPRESSION_IMPORTANCE_LOW, CONSOLIDATION_JACCARD_THRESHOLD,
     CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY, CONSOLIDATION_MIN_AGE_DAYS, CONSOLIDATION_MIN_SUPPORT,
-    FACT_DECAY_BASE_DAYS, FACT_DECAY_PER_SUPPORT_DAYS, MAX_COMPRESSION_RATIO,
-    MAX_DECOMPRESSED_SIZE,
+    MAX_COMPRESSION_RATIO, MAX_DECOMPRESSED_SIZE,
 };
 
 /// Compression strategy for memories
@@ -1241,21 +1240,24 @@ impl SemanticConsolidator {
         }
     }
 
-    /// Check if a fact should decay (no reinforcement for too long)
+    /// Check if a fact would decay below deletion threshold (0.1 confidence)
     ///
-    /// Returns true if the fact should be removed.
-    /// Uses FACT_DECAY_BASE_DAYS (30) as base, extended by confidence and support count.
+    /// Uses exponential half-life model matching `decay_facts_for_all_users()`:
+    /// 90-day grace period, then half-life = 180 + (30 × support_count) days.
     pub fn should_decay_fact(&self, fact: &SemanticFact) -> bool {
-        let now = chrono::Utc::now();
-        let days_since_reinforcement = (now - fact.last_reinforced).num_days();
-
-        // Facts with high confidence and support decay slower
-        // Base: 30 days, + 7 days per support count, + confidence bonus
-        let decay_threshold = FACT_DECAY_BASE_DAYS
-            + (fact.confidence * 30.0) as i64
-            + fact.support_count as i64 * FACT_DECAY_PER_SUPPORT_DAYS;
-
-        days_since_reinforcement > decay_threshold
+        use crate::constants::{
+            FACT_DECAY_GRACE_DAYS, FACT_DECAY_HALF_LIFE_BASE_DAYS,
+            FACT_DECAY_HALF_LIFE_PER_SUPPORT_DAYS,
+        };
+        let days_since = (chrono::Utc::now() - fact.last_reinforced).num_days();
+        if days_since <= FACT_DECAY_GRACE_DAYS {
+            return false;
+        }
+        let elapsed = (days_since - FACT_DECAY_GRACE_DAYS) as f64;
+        let half_life = FACT_DECAY_HALF_LIFE_BASE_DAYS
+            + (fact.support_count as f64 * FACT_DECAY_HALF_LIFE_PER_SUPPORT_DAYS);
+        let projected = fact.confidence * (0.5_f64).powf(elapsed / half_life) as f32;
+        projected < 0.1
     }
 }
 
