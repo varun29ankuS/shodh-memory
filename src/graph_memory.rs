@@ -2205,6 +2205,18 @@ impl GraphMemory {
         if has_prunable {
             let mut prune_queue = self.pending_prune.lock();
             let mut orphan_queue = self.pending_orphan_checks.lock();
+            // Prevent unbounded growth — these queues are drained by maintenance,
+            // but if maintenance hasn't run, cap to avoid increasing lock contention.
+            if prune_queue.len() > 1000 {
+                tracing::debug!(
+                    "Prune queue overflow ({}) — clearing to prevent lock contention",
+                    prune_queue.len()
+                );
+                prune_queue.clear();
+            }
+            if orphan_queue.len() > 2000 {
+                orphan_queue.clear();
+            }
             edges.retain(|edge| {
                 if edge.effective_strength() < edge.tier.prune_threshold()
                     && !edge.ltp_status.is_potentiated()

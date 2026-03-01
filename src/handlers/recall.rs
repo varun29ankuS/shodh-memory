@@ -828,6 +828,13 @@ pub async fn proactive_context(
         .get_user_graph(&req.user_id)
         .map_err(AppError::Internal)?;
 
+    let t_init = op_start.elapsed();
+    tracing::info!(
+        user_id = %req.user_id,
+        init_ms = format!("{:.2}", t_init.as_secs_f64() * 1000.0),
+        "proactive_context [phase:init] user memory + graph acquired"
+    );
+
     // 0. Process pending feedback if previous_response is provided
     let feedback_processed = if let Some(ref prev_response) = req.previous_response {
         let feedback_store = state.feedback_store.clone();
@@ -1047,6 +1054,15 @@ pub async fn proactive_context(
         None
     };
 
+    let t_feedback = op_start.elapsed();
+    tracing::info!(
+        user_id = %req.user_id,
+        feedback_ms = format!("{:.2}", (t_feedback - t_init).as_secs_f64() * 1000.0),
+        cumulative_ms = format!("{:.2}", t_feedback.as_secs_f64() * 1000.0),
+        had_feedback = req.previous_response.is_some(),
+        "proactive_context [phase:feedback] feedback processing complete"
+    );
+
     // 1 + 1.5: Compute embedding and extract NER entities in parallel
     // Both are independent blocking tasks (~10ms + ~5ms → ~10ms parallel)
     let context_for_embedding = req.context.clone();
@@ -1122,6 +1138,16 @@ pub async fn proactive_context(
     let (detected_entities, context_entity_names): (Vec<DetectedEntityInfo>, Vec<String>) =
         ner_result.map_err(|e| AppError::Internal(anyhow::anyhow!("NER task panicked: {e}")))?;
 
+    let t_embed_ner = op_start.elapsed();
+    tracing::info!(
+        user_id = %req.user_id,
+        embed_ner_ms = format!("{:.2}", (t_embed_ner - t_feedback).as_secs_f64() * 1000.0),
+        cumulative_ms = format!("{:.2}", t_embed_ner.as_secs_f64() * 1000.0),
+        embedding_valid,
+        entity_count = detected_entities.len(),
+        "proactive_context [phase:embed+ner] embedding + NER complete"
+    );
+
     // 1.8: Check context-triggered prospective tasks — builds signals for recall boost
     // This runs before recall so that "future informs present" can influence retrieval.
     // Fast operation: scans pending tasks for this user (typically < 10 tasks).
@@ -1163,6 +1189,15 @@ pub async fn proactive_context(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Prospective check panicked: {e}")))?;
 
+    let t_prospective = op_start.elapsed();
+    tracing::info!(
+        user_id = %req.user_id,
+        prospective_ms = format!("{:.2}", (t_prospective - t_embed_ner).as_secs_f64() * 1000.0),
+        cumulative_ms = format!("{:.2}", t_prospective.as_secs_f64() * 1000.0),
+        triggers_found = cached_context_triggers.len(),
+        "proactive_context [phase:prospective] context trigger check complete"
+    );
+
     if !cached_context_triggers.is_empty() {
         tracing::debug!(
             user_id = %req.user_id,
@@ -1181,6 +1216,7 @@ pub async fn proactive_context(
     let entity_match_weight = req.entity_match_weight;
     let recency_weight = req.recency_weight;
     let semantic_threshold = req.semantic_threshold;
+    let embedding_for_query = context_embedding.clone();
     let memories: Vec<ProactiveSurfacedMemory> = {
         let memory = memory_system.clone();
         tokio::task::spawn_blocking(move || {
@@ -1199,6 +1235,11 @@ pub async fn proactive_context(
             let query = MemoryQuery {
                 user_id: Some(user_id_for_query),
                 query_text: Some(context_clone),
+                query_embedding: if embedding_valid {
+                    Some(embedding_for_query)
+                } else {
+                    None
+                },
                 max_results,
                 recency_weight: Some(recency_weight),
                 prospective_signals,
@@ -1356,6 +1397,15 @@ pub async fn proactive_context(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
     };
 
+    let t_recall = op_start.elapsed();
+    tracing::info!(
+        user_id = %req.user_id,
+        recall_ms = format!("{:.2}", (t_recall - t_prospective).as_secs_f64() * 1000.0),
+        cumulative_ms = format!("{:.2}", t_recall.as_secs_f64() * 1000.0),
+        memories_found = memories.len(),
+        "proactive_context [phase:recall] memory retrieval complete"
+    );
+
     // 2.5. Record coactivation - fire-and-forget (doesn't affect response)
     // When memories are retrieved together, their graph edges get stronger (Hebbian learning)
     if memories.len() >= 2 {
@@ -1416,6 +1466,14 @@ pub async fn proactive_context(
             );
         }
     }
+
+    let t_feedback_store = op_start.elapsed();
+    tracing::info!(
+        user_id = %req.user_id,
+        feedback_store_ms = format!("{:.2}", (t_feedback_store - t_recall).as_secs_f64() * 1000.0),
+        cumulative_ms = format!("{:.2}", t_feedback_store.as_secs_f64() * 1000.0),
+        "proactive_context [phase:coactivation+feedback_store] coactivation + feedback store complete"
+    );
 
     // 4. Auto-ingest previous assistant response — fire-and-forget
     if req.auto_ingest {
@@ -1528,6 +1586,15 @@ pub async fn proactive_context(
     } else {
         None
     };
+
+    let t_auto_ingest = op_start.elapsed();
+    tracing::info!(
+        user_id = %req.user_id,
+        auto_ingest_ms = format!("{:.2}", (t_auto_ingest - t_feedback_store).as_secs_f64() * 1000.0),
+        cumulative_ms = format!("{:.2}", t_auto_ingest.as_secs_f64() * 1000.0),
+        ingested = ingested_memory_id.is_some(),
+        "proactive_context [phase:auto_ingest] context + response ingest complete"
+    );
 
     // 6. Collect fact entities synchronously (fast iteration, needed before parallel block)
     let fact_entity_list: Vec<String> = {
@@ -1785,6 +1852,18 @@ pub async fn proactive_context(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Fact surfacing task panicked: {e}")))?;
     let todo_count = relevant_todos.len();
 
+    let t_parallel = op_start.elapsed();
+    tracing::info!(
+        user_id = %req.user_id,
+        parallel_ms = format!("{:.2}", (t_parallel - t_auto_ingest).as_secs_f64() * 1000.0),
+        cumulative_ms = format!("{:.2}", t_parallel.as_secs_f64() * 1000.0),
+        reminders = due_reminders.len(),
+        ctx_reminders = context_reminders.len(),
+        todos = todo_count,
+        facts = relevant_facts.len(),
+        "proactive_context [phase:parallel] reminders + todos + facts complete"
+    );
+
     let memory_count = memories.len();
     let reminder_count = due_reminders.len() + context_reminders.len();
 
@@ -1887,6 +1966,17 @@ pub async fn proactive_context(
     }
 
     let latency_ms = op_start.elapsed().as_secs_f64() * 1000.0;
+
+    tracing::info!(
+        user_id = %req.user_id,
+        response_assembly_ms = format!("{:.2}", (op_start.elapsed() - t_parallel).as_secs_f64() * 1000.0),
+        total_ms = format!("{:.2}", latency_ms),
+        memories = memory_count,
+        reminders = reminder_count,
+        todos = todo_count,
+        facts = relevant_facts.len(),
+        "proactive_context [phase:total] === COMPLETE ==="
+    );
 
     Ok(Json(ProactiveContextResponse {
         memories,
