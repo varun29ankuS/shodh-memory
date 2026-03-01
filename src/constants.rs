@@ -450,21 +450,36 @@ pub const CONSOLIDATION_JACCARD_THRESHOLD: f32 = 0.45;
 /// - Prevents one verbose memory from dominating the candidate pool
 pub const CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY: usize = 5;
 
-/// Base decay period for semantic facts (days)
+/// Grace period before any fact decay begins (days)
 ///
-/// Unreinforced facts start decaying after this period.
+/// Facts are immune to decay for this period after last reinforcement.
+/// Facts already survived 7-day aging + 2+ support + clustering + 4-gate dedup —
+/// they represent hard-won knowledge that deserves a long stability plateau.
 ///
-/// Justification:
-/// - 30 days base (one month without use)
-/// - Extended by confidence and support count
-pub const FACT_DECAY_BASE_DAYS: i64 = 30;
+/// Reference: Wixted (2004) — power-law forgetting with initial stability plateau
+pub const FACT_DECAY_GRACE_DAYS: i64 = 90;
 
-/// Days added to decay per support count
+/// Base half-life for fact confidence decay (days)
 ///
-/// Justification:
-/// - 7 days per supporting memory
-/// - Fact with 5 supporters: 30 + 35 = 65 days before decay
-pub const FACT_DECAY_PER_SUPPORT_DAYS: i64 = 7;
+/// After the grace period, confidence follows exponential decay:
+///   confidence = original × 0.5^(elapsed / half_life)
+///
+/// Extended by FACT_DECAY_HALF_LIFE_PER_SUPPORT_DAYS for well-corroborated facts.
+/// Total half-life = base + (support_count × per_support).
+///
+/// Reference: Wixted & Carpenter (2007) — spacing effect on long-term retention
+pub const FACT_DECAY_HALF_LIFE_BASE_DAYS: f64 = 180.0;
+
+/// Additional half-life per supporting memory (days)
+///
+/// Each independent source memory adds 30 days to the half-life.
+/// Linear scaling (not log) because each corroborating source is genuine evidence.
+///
+/// Concrete behavior:
+/// - support=2 (minimum): 240-day half-life
+/// - support=5: 330-day half-life
+/// - support=10: 480-day half-life (~16 months)
+pub const FACT_DECAY_HALF_LIFE_PER_SUPPORT_DAYS: f64 = 30.0;
 
 /// Cosine similarity threshold for hybrid fact deduplication
 ///
@@ -1848,8 +1863,9 @@ pub const TIER_LTP_THRESHOLD: f32 = 0.8;
 // | CONSOLIDATION_MIN_AGE_DAYS    | memory/compression.rs | consolidate_semantic_facts()      |
 // | CONSOLIDATION_JACCARD_THRESHOLD | memory/compression.rs | group_candidates_by_similarity()  |
 // | CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY | memory/compression.rs | extract_fact_candidates() |
-// | FACT_DECAY_BASE_DAYS          | memory/compression.rs | fact decay calculation            |
-// | FACT_DECAY_PER_SUPPORT_DAYS   | memory/compression.rs | fact decay per support            |
+// | FACT_DECAY_GRACE_DAYS              | memory/mod.rs, compression.rs | fact decay grace period     |
+// | FACT_DECAY_HALF_LIFE_BASE_DAYS     | memory/mod.rs, compression.rs | fact decay half-life base  |
+// | FACT_DECAY_HALF_LIFE_PER_SUPPORT_DAYS | memory/mod.rs, compression.rs | fact decay per support  |
 // | FACT_DEDUP_COSINE_THRESHOLD   | memory/facts.rs       | find_similar() hybrid dedup       |
 // | FACT_DEDUP_JACCARD_FLOOR      | memory/facts.rs       | find_similar() hybrid dedup       |
 // | FACT_DEDUP_JACCARD_FALLBACK   | memory/facts.rs       | find_similar() fallback mode      |

@@ -177,6 +177,21 @@ pub struct RecallResponse {
     /// Number of triggered reminders
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reminder_count: Option<usize>,
+    /// Causal lineage edges connecting recalled memories
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lineage: Vec<RecallLineageEdge>,
+    /// Number of lineage edges found
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lineage_count: Option<usize>,
+}
+
+/// Causal lineage edge returned in recall results
+#[derive(Serialize)]
+pub struct RecallLineageEdge {
+    pub from: String,
+    pub to: String,
+    pub relation: String,
+    pub confidence: f32,
 }
 
 /// Reminder/prospective task returned in recall results
@@ -922,6 +937,8 @@ mod tests {
             fact_count: None,
             triggered_reminders: vec![],
             reminder_count: None,
+            lineage: vec![],
+            lineage_count: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("memories"));
