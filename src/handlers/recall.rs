@@ -839,7 +839,7 @@ pub async fn proactive_context(
     let feedback_processed = if let Some(ref prev_response) = req.previous_response {
         let feedback_store = state.feedback_store.clone();
         let user_id_for_feedback = req.user_id.clone();
-        let response_text = prev_response.clone();
+        let response_text = super::utils::strip_mcp_response_noise(prev_response);
         let followup = req.user_followup.clone();
         let memory_for_embed = memory_system.clone();
 
