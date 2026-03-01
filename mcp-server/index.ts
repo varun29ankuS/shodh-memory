@@ -1432,12 +1432,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           created_at: string;
         }
 
+        interface RecallLineageEdge {
+          from: string;
+          to: string;
+          relation: string;
+          confidence: number;
+        }
+
         interface RecallResponse {
           memories: Memory[];
           count: number;
           retrieval_stats?: RetrievalStats;
           todos?: RecallTodo[];
           todo_count?: number;
+          lineage?: RecallLineageEdge[];
+          lineage_count?: number;
         }
 
         const result = await apiCall<RecallResponse>("/api/recall", "POST", {
@@ -1450,6 +1459,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const memories = result.memories || [];
         const todos = result.todos || [];
         const stats = result.retrieval_stats;
+        const lineage = result.lineage || [];
 
         if (memories.length === 0 && todos.length === 0) {
           return {
@@ -1540,6 +1550,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           response += `   Graph: ${graphPct}% │ Semantic: ${semPct}% │ Density: ${(stats.graph_density ?? 0).toFixed(2)}\n`;
           response += `   Candidates: ${stats.graph_candidates} graph + ${stats.semantic_candidates} semantic\n`;
           response += `   Entities: ${stats.entities_activated} │ Time: ${(stats.retrieval_time_us / 1000).toFixed(1)}ms`;
+        }
+
+        // Format lineage edges connecting recalled memories
+        if (lineage.length > 0) {
+          // Build short ID lookup from recalled memories
+          const idShort = (id: string) => id.slice(0, 8);
+          const idToContent = new Map<string, string>();
+          for (const m of memories) {
+            idToContent.set(m.id, getContent(m).slice(0, 40));
+          }
+
+          response += `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+          response += `🔗 LINEAGE (${lineage.length} causal edge${lineage.length > 1 ? 's' : ''})\n`;
+          for (const edge of lineage) {
+            const fromLabel = idToContent.get(edge.from) || idShort(edge.from);
+            const toLabel = idToContent.get(edge.to) || idShort(edge.to);
+            const conf = (edge.confidence * 100).toFixed(0);
+            response += `  ${idShort(edge.from)} ──${edge.relation}──▶ ${idShort(edge.to)}  (${conf}%)\n`;
+            response += `    "${fromLabel}..." → "${toLabel}..."\n`;
+          }
         }
 
         return {

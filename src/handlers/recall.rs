@@ -13,8 +13,8 @@ use tracing::info;
 
 use super::state::MultiUserMemoryManager;
 use super::types::{
-    MemoryEvent, RecallExperience, RecallFact, RecallMemory, RecallRequest, RecallResponse,
-    RecallTodo, ReinforceFeedbackRequest, RetrieveResponse, TrackedRetrieveRequest,
+    MemoryEvent, RecallExperience, RecallFact, RecallLineageEdge, RecallMemory, RecallRequest,
+    RecallResponse, RecallTodo, ReinforceFeedbackRequest, RetrieveResponse, TrackedRetrieveRequest,
     TrackedRetrieveResponse,
 };
 use super::utils::{is_bare_question, is_boilerplate_response, strip_system_noise};
@@ -559,6 +559,64 @@ pub async fn recall(
         Some(facts.len())
     };
 
+    // Fetch lineage edges connecting recalled memories
+    let lineage: Vec<RecallLineageEdge> = {
+        let recalled_ids: std::collections::HashSet<String> =
+            recall_memories.iter().map(|m| m.id.clone()).collect();
+        if recalled_ids.len() >= 2 {
+            let memory = memory.clone();
+            let user_id = req.user_id.clone();
+            let ids = recalled_ids.clone();
+            tokio::task::spawn_blocking(move || {
+                let memory_guard = memory.read();
+                let lineage_graph = memory_guard.lineage_graph();
+                let mut edges = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                for id in &ids {
+                    let mid = crate::memory::MemoryId(
+                        uuid::Uuid::parse_str(id).unwrap_or_default(),
+                    );
+                    if let Ok(from_edges) = lineage_graph.get_edges_from(&user_id, &mid) {
+                        for edge in from_edges {
+                            let to_str = edge.to.0.to_string();
+                            if ids.contains(&to_str) && seen.insert(edge.id.clone()) {
+                                edges.push(RecallLineageEdge {
+                                    from: edge.from.0.to_string(),
+                                    to: to_str,
+                                    relation: format!("{:?}", edge.relation),
+                                    confidence: edge.confidence,
+                                });
+                            }
+                        }
+                    }
+                    if let Ok(to_edges) = lineage_graph.get_edges_to(&user_id, &mid) {
+                        for edge in to_edges {
+                            let from_str = edge.from.0.to_string();
+                            if ids.contains(&from_str) && seen.insert(edge.id.clone()) {
+                                edges.push(RecallLineageEdge {
+                                    from: from_str,
+                                    to: edge.to.0.to_string(),
+                                    relation: format!("{:?}", edge.relation),
+                                    confidence: edge.confidence,
+                                });
+                            }
+                        }
+                    }
+                }
+                edges
+            })
+            .await
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    };
+    let lineage_count = if lineage.is_empty() {
+        None
+    } else {
+        Some(lineage.len())
+    };
+
     let count = recall_memories.len();
 
     // Note: Coactivation for Hebbian learning is already recorded inside recall()
@@ -613,6 +671,12 @@ pub async fn recall(
             "keywords": r.keywords,
             "priority": r.priority,
         })).collect::<Vec<_>>(),
+        "lineage": lineage.iter().map(|l| serde_json::json!({
+            "from": l.from,
+            "to": l.to,
+            "relation": l.relation,
+            "confidence": l.confidence,
+        })).collect::<Vec<_>>(),
     });
     state.emit_event(MemoryEvent {
         event_type: "RETRIEVE".to_string(),
@@ -664,6 +728,8 @@ pub async fn recall(
         fact_count,
         triggered_reminders,
         reminder_count,
+        lineage,
+        lineage_count,
     }))
 }
 
