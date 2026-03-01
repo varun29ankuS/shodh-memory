@@ -573,9 +573,8 @@ pub async fn recall(
                 let mut edges = Vec::new();
                 let mut seen = std::collections::HashSet::new();
                 for id in &ids {
-                    let mid = crate::memory::MemoryId(
-                        uuid::Uuid::parse_str(id).unwrap_or_default(),
-                    );
+                    let mid =
+                        crate::memory::MemoryId(uuid::Uuid::parse_str(id).unwrap_or_default());
                     if let Ok(from_edges) = lineage_graph.get_edges_from(&user_id, &mid) {
                         for edge in from_edges {
                             let to_str = edge.to.0.to_string();
