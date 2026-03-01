@@ -496,16 +496,14 @@ pub async fn remember(
     // Infer causal lineage: detect how this memory relates to recent memories
     // sharing entities (Caused, ResolvedBy, InformedBy, SupersededBy, etc.)
     // Runs AFTER graph processing so entity index is populated.
+    //
+    // Uses the episode's entity_refs (UUIDs) rather than raw text names, because
+    // graph entity names are merged/normalized by NER (e.g., "robot" → "robotics").
     {
         let memory_arc = memory.clone();
         let graph_arc = state.get_user_graph(&req.user_id).ok();
         let user_id = req.user_id.clone();
         let memory_id_clone = memory_id.clone();
-        let entities: Vec<String> = experience
-            .entities
-            .iter()
-            .map(|e| e.to_lowercase())
-            .collect();
 
         tokio::task::spawn_blocking(move || {
             let Some(graph_arc) = graph_arc else {
@@ -514,18 +512,27 @@ pub async fn remember(
             let graph = graph_arc.read();
             let memory_guard = memory_arc.read();
 
-            // Collect candidate memory IDs from the graph entity index:
-            // for each entity in the new memory, find episodes (memories) that share it.
+            // Get the episode we just created to access its entity_refs (UUIDs).
+            // These are the actual graph entity UUIDs, not raw text names.
+            let episode = match graph.get_episode(&memory_id_clone.0) {
+                Ok(Some(ep)) => ep,
+                _ => return,
+            };
+
+            if episode.entity_refs.is_empty() {
+                return;
+            }
+
+            // For each entity UUID linked to this episode, find other episodes
+            // that share the same entity (within the last 7 days).
             let mut candidate_ids = std::collections::HashSet::new();
             let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
 
-            for entity_name in &entities {
-                if let Ok(Some(entity_node)) = graph.find_entity_by_name(entity_name) {
-                    if let Ok(episodes) = graph.get_episodes_by_entity(&entity_node.uuid) {
-                        for ep in &episodes {
-                            if ep.created_at >= cutoff {
-                                candidate_ids.insert(crate::memory::MemoryId(ep.uuid));
-                            }
+            for entity_uuid in &episode.entity_refs {
+                if let Ok(episodes) = graph.get_episodes_by_entity(entity_uuid) {
+                    for ep in &episodes {
+                        if ep.created_at >= cutoff {
+                            candidate_ids.insert(crate::memory::MemoryId(ep.uuid));
                         }
                     }
                 }
@@ -559,7 +566,13 @@ pub async fn remember(
                         edges.len()
                     );
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    tracing::debug!(
+                        "Lineage inference: no causal edges for {} (checked {} candidates)",
+                        memory_id_clone.0,
+                        candidates.len()
+                    );
+                }
                 Err(e) => {
                     tracing::debug!("Lineage inference failed (non-fatal): {}", e);
                 }
