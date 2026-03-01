@@ -433,7 +433,11 @@ pub fn strip_mcp_response_noise(content: &str) -> String {
         let trimmed = line.trim();
 
         // Skip pure box-art lines (━━━, ┃ header ┃, ┣━━━┫, etc.)
-        if trimmed.chars().all(|c| is_box_drawing(c) || c.is_whitespace()) && !trimmed.is_empty() {
+        if trimmed
+            .chars()
+            .all(|c| is_box_drawing(c) || c.is_whitespace())
+            && !trimmed.is_empty()
+        {
             continue;
         }
 
@@ -487,20 +491,88 @@ pub fn strip_mcp_response_noise(content: &str) -> String {
 /// Box-drawing characters used in MCP response formatting.
 #[inline]
 fn is_box_drawing(c: char) -> bool {
-    matches!(c, '━' | '┃' | '┏' | '┓' | '┗' | '┛' | '┣' | '┫' | '┳' | '┻' | '╋'
-        | '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼'
-        | '╔' | '╗' | '╚' | '╝' | '║' | '═' | '╠' | '╣' | '╦' | '╩' | '╬')
+    matches!(
+        c,
+        '━' | '┃'
+            | '┏'
+            | '┓'
+            | '┗'
+            | '┛'
+            | '┣'
+            | '┫'
+            | '┳'
+            | '┻'
+            | '╋'
+            | '─'
+            | '│'
+            | '┌'
+            | '┐'
+            | '└'
+            | '┘'
+            | '├'
+            | '┤'
+            | '┬'
+            | '┴'
+            | '┼'
+            | '╔'
+            | '╗'
+            | '╚'
+            | '╝'
+            | '║'
+            | '═'
+            | '╠'
+            | '╣'
+            | '╦'
+            | '╩'
+            | '╬'
+    )
 }
 
 /// Emoji decorators commonly injected by MCP formatting.
 /// These are visual indicators (not content) — stripping them improves embedding quality.
 #[inline]
 fn is_mcp_decorator(c: char) -> bool {
-    matches!(c,
-        '🧠' | '📅' | '📋' | '📌' | '💡' | '🐘' | '⚡' | '🔍' | '✅' | '❌'
-        | '⏰' | '🎯' | '📊' | '🔗' | '💾' | '🏷' | '📝' | '🔔' | '⭐' | '🚀'
-        | '⚠' | '🔄' | '📦' | '🛠' | '💬' | '🗂' | '📂' | '🏗' | '✨' | '🪝'
-        | '▸' | '▹' | '▪' | '▫' | '◆' | '◇' | '●' | '○' | '◉' | '◎'
+    matches!(
+        c,
+        '🧠' | '📅'
+            | '📋'
+            | '📌'
+            | '💡'
+            | '🐘'
+            | '⚡'
+            | '🔍'
+            | '✅'
+            | '❌'
+            | '⏰'
+            | '🎯'
+            | '📊'
+            | '🔗'
+            | '💾'
+            | '🏷'
+            | '📝'
+            | '🔔'
+            | '⭐'
+            | '🚀'
+            | '⚠'
+            | '🔄'
+            | '📦'
+            | '🛠'
+            | '💬'
+            | '🗂'
+            | '📂'
+            | '🏗'
+            | '✨'
+            | '🪝'
+            | '▸'
+            | '▹'
+            | '▪'
+            | '▫'
+            | '◆'
+            | '◇'
+            | '●'
+            | '○'
+            | '◉'
+            | '◎'
     )
 }
 

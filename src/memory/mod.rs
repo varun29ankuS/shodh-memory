@@ -1585,7 +1585,9 @@ impl MemorySystem {
         // otherwise fall back to SHA256-keyed cache (80ms → <1μs for repeated queries)
         let query_embedding =
             if let Some(pre) = query.query_embedding.as_ref().filter(|e| !e.is_empty()) {
-                EMBEDDING_CACHE_QUERY.with_label_values(&["precomputed"]).inc();
+                EMBEDDING_CACHE_QUERY
+                    .with_label_values(&["precomputed"])
+                    .inc();
                 tracing::debug!("Query embedding PRECOMPUTED by caller — skipping encode");
                 pre.clone()
             } else {
@@ -1768,9 +1770,7 @@ impl MemorySystem {
                                 bidir_min_str,
                             ) {
                                 for tr in &path.entities {
-                                    if let Ok(mut eps) =
-                                        g.get_episodes_by_entity(&tr.entity.uuid)
-                                    {
+                                    if let Ok(mut eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
                                         // Keep most recent episodes — recency correlates
                                         // with relevance for graph-surfaced candidates.
                                         eps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
