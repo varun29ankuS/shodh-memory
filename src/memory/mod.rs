@@ -1368,6 +1368,8 @@ impl MemorySystem {
     /// 4. Only fetch from RocksDB storage as last resort
     /// 5. This eliminates deserialization overhead for cached memories
     fn semantic_retrieve(&self, query_text: &str, query: &Query) -> Result<Vec<SharedMemory>> {
+        let recall_start = std::time::Instant::now();
+
         // ===========================================================================
         // TEMPORAL EXTRACTION (TEMPR approach from Hindsight - 89.6% on LoCoMo)
         // ===========================================================================
@@ -1573,33 +1575,54 @@ impl MemorySystem {
             HashSet::new()
         };
 
-        // PERFORMANCE: Query embedding cache (80ms → <1μs for repeated queries)
-        // SHA256 hash for stable cache keys (survives restarts, unlike DefaultHasher)
-        let query_hash = Self::sha256_hash(query_text);
+        let t_query_analysis = recall_start.elapsed();
+        tracing::info!(
+            query_analysis_ms = format!("{:.2}", t_query_analysis.as_secs_f64() * 1000.0),
+            "recall [layer:0.5-0.6] query analysis + attribute + temporal fact lookup"
+        );
 
-        // Check cache first
-        let query_embedding = if let Some(cached_embedding) = self.query_cache.get(&query_hash) {
-            EMBEDDING_CACHE_QUERY.with_label_values(&["hit"]).inc();
-            tracing::debug!("Query embedding cache HIT for: {}", query_text);
-            cached_embedding.clone()
-        } else {
-            // Cache miss - generate embedding
-            EMBEDDING_CACHE_QUERY.with_label_values(&["miss"]).inc();
-            tracing::debug!(
-                "Query embedding cache MISS - generating for: {}",
-                query_text
-            );
-            let embedding = self
-                .embedder
-                .as_ref()
-                .encode(query_text)
-                .context("Failed to generate query embedding")?;
+        // PERFORMANCE: Use pre-computed embedding if caller provided one,
+        // otherwise fall back to SHA256-keyed cache (80ms → <1μs for repeated queries)
+        let query_embedding =
+            if let Some(pre) = query.query_embedding.as_ref().filter(|e| !e.is_empty()) {
+                EMBEDDING_CACHE_QUERY
+                    .with_label_values(&["precomputed"])
+                    .inc();
+                tracing::debug!("Query embedding PRECOMPUTED by caller — skipping encode");
+                pre.clone()
+            } else {
+                let query_hash = Self::sha256_hash(query_text);
+                if let Some(cached_embedding) = self.query_cache.get(&query_hash) {
+                    EMBEDDING_CACHE_QUERY.with_label_values(&["hit"]).inc();
+                    tracing::debug!("Query embedding cache HIT for: {}", query_text);
+                    cached_embedding.clone()
+                } else {
+                    EMBEDDING_CACHE_QUERY.with_label_values(&["miss"]).inc();
+                    tracing::debug!(
+                        "Query embedding cache MISS - generating for: {}",
+                        query_text
+                    );
+                    let embedding = self
+                        .embedder
+                        .as_ref()
+                        .encode(query_text)
+                        .context("Failed to generate query embedding")?;
 
-            // Store in cache for future use
-            self.query_cache.insert(query_hash, embedding.clone());
-            EMBEDDING_CACHE_QUERY_SIZE.set(self.query_cache.entry_count() as i64);
-            embedding
-        };
+                    self.query_cache.insert(query_hash, embedding.clone());
+                    EMBEDDING_CACHE_QUERY_SIZE.set(self.query_cache.entry_count() as i64);
+                    embedding
+                }
+            };
+
+        let t_embedding = recall_start.elapsed();
+        tracing::info!(
+            embedding_ms = format!(
+                "{:.2}",
+                (t_embedding - t_query_analysis).as_secs_f64() * 1000.0
+            ),
+            cumulative_ms = format!("{:.2}", t_embedding.as_secs_f64() * 1000.0),
+            "recall [layer:embedding] query embedding (cache miss logged above if any)"
+        );
 
         // ===========================================================================
         // LAYER 1: TEMPORAL PRE-FILTER (Episode Coherence)
@@ -1728,26 +1751,36 @@ impl MemorySystem {
                 }
 
                 // Multi-hop: Use bidirectional search between entity pairs
+                // Cap to top 3 pairs from first 4 entities to avoid O(n²) explosion.
+                // Entities are ordered by query analysis salience, so top pairs
+                // capture dominant relationships.
                 if query_entities.len() >= 2 {
-                    // Find paths between all pairs of query entities
-                    for i in 0..query_entities.len() {
-                        for j in (i + 1)..query_entities.len() {
+                    let max_pairs = 3usize;
+                    let max_ents = query_entities.len().min(4);
+                    let mut pair_count = 0usize;
+                    'bidir: for i in 0..max_ents {
+                        for j in (i + 1)..max_ents {
+                            if pair_count >= max_pairs {
+                                break 'bidir;
+                            }
                             if let Ok(path) = g.traverse_bidirectional(
                                 &query_entities[i],
                                 &query_entities[j],
                                 bidir_depth,
                                 bidir_min_str,
                             ) {
-                                // Path entities are highly relevant for multi-hop
                                 for tr in &path.entities {
-                                    if let Ok(eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
+                                    if let Ok(mut eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
+                                        // Keep most recent episodes — recency correlates
+                                        // with relevance for graph-surfaced candidates.
+                                        eps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                                        eps.truncate(50);
                                         for ep in eps {
                                             let mid = MemoryId(ep.uuid);
                                             if episode_candidates
                                                 .as_ref()
                                                 .map_or(true, |c| c.contains(&mid))
                                             {
-                                                // Boost path entities (connecting entities)
                                                 let path_boost = 1.5;
                                                 ids.push((
                                                     mid,
@@ -1761,6 +1794,7 @@ impl MemorySystem {
                                     }
                                 }
                             }
+                            pair_count += 1;
                         }
                     }
                 }
@@ -1771,7 +1805,9 @@ impl MemorySystem {
                         g.traverse_weighted(entity_uuid, weighted_depth, None, weighted_min_str)
                     {
                         for tr in &t.entities {
-                            if let Ok(eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
+                            if let Ok(mut eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
+                                eps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                                eps.truncate(50);
                                 for ep in eps {
                                     let mid = MemoryId(ep.uuid);
                                     if episode_candidates
@@ -1803,9 +1839,12 @@ impl MemorySystem {
                 let mut r: Vec<_> = seen.into_iter().map(|(id, (a, h))| (id, a, h)).collect();
                 // CRITICAL: Sort by activation score so RRF rank is meaningful
                 r.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let pre_cap = r.len();
+                // Cap total graph candidates to prevent flooding RRF fusion
+                r.truncate(200);
                 if !r.is_empty() {
-                    tracing::debug!("Layer 2: {} graph results, {} query entities, bidirectional={}, top_activation={:.3}",
-                        r.len(), entity_count, query_entities.len() >= 2, r.first().map(|x| x.1).unwrap_or(0.0));
+                    tracing::debug!("Layer 2: {} graph results (capped from {}), {} query entities, bidirectional={}, top_activation={:.3}",
+                        r.len(), pre_cap, entity_count, query_entities.len() >= 2, r.first().map(|x| x.1).unwrap_or(0.0));
                 }
                 (r, d, entity_count, weights, phrases, disc)
             } else {
@@ -1821,6 +1860,14 @@ impl MemorySystem {
                 )
             }
         };
+
+        let t_graph = recall_start.elapsed();
+        tracing::info!(
+            graph_ms = format!("{:.2}", (t_graph - t_embedding).as_secs_f64() * 1000.0),
+            cumulative_ms = format!("{:.2}", t_graph.as_secs_f64() * 1000.0),
+            graph_results = graph_results.len(),
+            "recall [layer:1-2] episode filter + graph expansion"
+        );
 
         // Create a modified query with the embedding for vector search
         let vector_query = Query {
@@ -1864,7 +1911,13 @@ impl MemorySystem {
         } else {
             vr
         };
-        tracing::debug!("Layer 3: {} vector results", vector_results.len());
+        let t_vector = recall_start.elapsed();
+        tracing::info!(
+            vector_ms = format!("{:.2}", (t_vector - t_graph).as_secs_f64() * 1000.0),
+            cumulative_ms = format!("{:.2}", t_vector.as_secs_f64() * 1000.0),
+            vector_results = vector_results.len(),
+            "recall [layer:3] Vamana vector search"
+        );
 
         // ===========================================================================
         // LAYER 4: BM25 + RRF FUSION
@@ -2153,6 +2206,14 @@ impl MemorySystem {
             (res, heb)
         };
 
+        let t_fusion = recall_start.elapsed();
+        tracing::info!(
+            fusion_ms = format!("{:.2}", (t_fusion - t_vector).as_secs_f64() * 1000.0),
+            cumulative_ms = format!("{:.2}", t_fusion.as_secs_f64() * 1000.0),
+            fused_results = memory_ids.len(),
+            "recall [layer:4] BM25 + RRF fusion + boosts + interference"
+        );
+
         // Fetch memories with cache-aware strategy
         // CRITICAL: Apply filters after fetching to ensure mission_id, robot_id etc. are respected
         let mut memories = Vec::new();
@@ -2341,6 +2402,17 @@ impl MemorySystem {
             "Cache-aware retrieval completed"
         );
 
+        let t_fetch = recall_start.elapsed();
+        tracing::info!(
+            fetch_ms = format!("{:.2}", (t_fetch - t_fusion).as_secs_f64() * 1000.0),
+            cumulative_ms = format!("{:.2}", t_fetch.as_secs_f64() * 1000.0),
+            memories = memories.len(),
+            cache_hits,
+            storage_fetches,
+            filtered_out,
+            "recall [layer:5] memory fetch + unified scoring"
+        );
+
         // Linguistic analysis: additive boost (5% of IC weight), not a full re-sort
         if !query_analysis.focal_entities.is_empty() {
             memories.sort_by(|a, b| {
@@ -2471,6 +2543,14 @@ impl MemorySystem {
         // This ensures semantic search also surfaces contextually related memories
         let mut seen_ids: HashSet<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
         self.expand_with_hierarchy(&mut memories, &mut seen_ids);
+
+        let t_total = recall_start.elapsed();
+        tracing::info!(
+            post_ms = format!("{:.2}", (t_total - t_fetch).as_secs_f64() * 1000.0),
+            total_ms = format!("{:.2}", t_total.as_secs_f64() * 1000.0),
+            final_count = memories.len(),
+            "recall [layer:post] linguistic + competition + coactivation + hierarchy === RECALL COMPLETE ==="
+        );
 
         Ok(memories)
     }

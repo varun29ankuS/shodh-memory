@@ -416,6 +416,166 @@ pub fn is_boilerplate_response(content: &str) -> bool {
     false
 }
 
+/// Strip MCP response formatting noise before embedding for feedback.
+///
+/// MCP tools (proactive_context, recall, etc.) wrap semantic content in
+/// box-drawing art, emoji decorators, progress bars, and latency annotations.
+/// This visual formatting is great for display but poisons the embedding —
+/// MiniLM tokenizes "━━━" and "🧠" into noise tokens that dilute cosine
+/// similarity, degrading Hebbian feedback signal quality.
+///
+/// This function strips the formatting layer while preserving all semantic
+/// content. It does NOT affect what the user sees — only what gets embedded.
+pub fn strip_mcp_response_noise(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Skip pure box-art lines (━━━, ┃ header ┃, ┣━━━┫, etc.)
+        if trimmed
+            .chars()
+            .all(|c| is_box_drawing(c) || c.is_whitespace())
+            && !trimmed.is_empty()
+        {
+            continue;
+        }
+
+        // Skip latency/diagnostic annotations
+        // e.g. "[Latency: 421ms | Threshold: 65%]", "[Feedback loop: ...]"
+        if trimmed.starts_with("[Latency:")
+            || trimmed.starts_with("[Feedback loop:")
+            || trimmed.starts_with("[Token budget:")
+        {
+            continue;
+        }
+
+        // Skip "Surfaced N facts" / "Surfaced N memories" headers
+        if trimmed.starts_with("Surfaced ") && trimmed.ends_with(" facts")
+            || trimmed.starts_with("Surfaced ") && trimmed.ends_with(" memories")
+        {
+            continue;
+        }
+
+        // Skip progress bar lines (█████░░░ patterns)
+        if trimmed.contains('█') || trimmed.contains('░') {
+            continue;
+        }
+
+        // Skip "semantic: -X%" annotations
+        if trimmed.starts_with("semantic:") {
+            continue;
+        }
+
+        // Strip box-drawing and emoji decorators from lines that have real content
+        let cleaned: String = trimmed
+            .chars()
+            .filter(|c| !is_box_drawing(*c) && !is_mcp_decorator(*c))
+            .collect();
+
+        let cleaned = cleaned.trim();
+        if !cleaned.is_empty() {
+            out.push_str(cleaned);
+            out.push('\n');
+        }
+    }
+
+    // Collapse multiple blank lines
+    while out.contains("\n\n\n") {
+        out = out.replace("\n\n\n", "\n\n");
+    }
+
+    out.trim().to_string()
+}
+
+/// Box-drawing characters used in MCP response formatting.
+#[inline]
+fn is_box_drawing(c: char) -> bool {
+    matches!(
+        c,
+        '━' | '┃'
+            | '┏'
+            | '┓'
+            | '┗'
+            | '┛'
+            | '┣'
+            | '┫'
+            | '┳'
+            | '┻'
+            | '╋'
+            | '─'
+            | '│'
+            | '┌'
+            | '┐'
+            | '└'
+            | '┘'
+            | '├'
+            | '┤'
+            | '┬'
+            | '┴'
+            | '┼'
+            | '╔'
+            | '╗'
+            | '╚'
+            | '╝'
+            | '║'
+            | '═'
+            | '╠'
+            | '╣'
+            | '╦'
+            | '╩'
+            | '╬'
+    )
+}
+
+/// Emoji decorators commonly injected by MCP formatting.
+/// These are visual indicators (not content) — stripping them improves embedding quality.
+#[inline]
+fn is_mcp_decorator(c: char) -> bool {
+    matches!(
+        c,
+        '🧠' | '📅'
+            | '📋'
+            | '📌'
+            | '💡'
+            | '🐘'
+            | '⚡'
+            | '🔍'
+            | '✅'
+            | '❌'
+            | '⏰'
+            | '🎯'
+            | '📊'
+            | '🔗'
+            | '💾'
+            | '🏷'
+            | '📝'
+            | '🔔'
+            | '⭐'
+            | '🚀'
+            | '⚠'
+            | '🔄'
+            | '📦'
+            | '🛠'
+            | '💬'
+            | '🗂'
+            | '📂'
+            | '🏗'
+            | '✨'
+            | '🪝'
+            | '▸'
+            | '▹'
+            | '▪'
+            | '▫'
+            | '◆'
+            | '◇'
+            | '●'
+            | '○'
+            | '◉'
+            | '◎'
+    )
+}
+
 /// Check if content is essentially empty or meaningless after preprocessing.
 pub fn is_empty_content(content: &str) -> bool {
     let trimmed = content.trim();
@@ -488,6 +648,26 @@ mod tests {
         assert!(!is_bare_question(
             "I learned that Rust is a systems programming language because it provides memory safety without garbage collection."
         ));
+    }
+
+    #[test]
+    fn test_strip_mcp_response_noise() {
+        let mcp_output = "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n┃ 🧠 SHODH MEMORY ┃\n┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\nSurfaced 3 facts\n📌 User prefers dark mode\n📋 Project uses Rust for backend\n💡 Authentication uses JWT\n█████████░ 90%\n[Latency: 421ms | Threshold: 65%]\nsemantic: -12%";
+        let cleaned = strip_mcp_response_noise(mcp_output);
+        assert!(cleaned.contains("User prefers dark mode"));
+        assert!(cleaned.contains("Project uses Rust for backend"));
+        assert!(cleaned.contains("Authentication uses JWT"));
+        assert!(!cleaned.contains("━━"));
+        assert!(!cleaned.contains("Latency:"));
+        assert!(!cleaned.contains("█"));
+        assert!(!cleaned.contains("Surfaced 3 facts"));
+    }
+
+    #[test]
+    fn test_strip_mcp_preserves_plain_text() {
+        let plain = "The user decided to use PostgreSQL for the database. This is a good choice because it supports JSON and full-text search.";
+        let cleaned = strip_mcp_response_noise(plain);
+        assert_eq!(cleaned, plain);
     }
 
     #[test]
