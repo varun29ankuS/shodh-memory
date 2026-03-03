@@ -36,6 +36,17 @@ const API_URL = process.env.SHODH_API_URL || "http://127.0.0.1:3030";
 const WS_URL = API_URL.replace(/^http/, "ws") + "/api/stream";
 const USER_ID = process.env.SHODH_USER_ID || "claude-code";
 
+// Detect whether the server is local (safe for auto-generated keys)
+function isLocalServer(): boolean {
+  try {
+    const url = new URL(API_URL);
+    const host = url.hostname;
+    return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "0.0.0.0";
+  } catch {
+    return false;
+  }
+}
+
 // Sandbox mode — used by Smithery to scan tools without a running backend
 const SANDBOX_MODE = process.env.SMITHERY_SANDBOX === "true";
 
