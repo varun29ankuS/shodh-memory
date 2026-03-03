@@ -161,9 +161,13 @@ async function connectStream(): Promise<void> {
   streamHandshakeComplete = false;
 
   try {
-    // Note: /api/stream is public (no auth required), so no headers needed
+    // Note: /api/stream requires X-API-Key header for authentication
     // Bun supports headers via: new WebSocket(url, { headers: {...} })
-    streamSocket = new WebSocket(WS_URL);
+    streamSocket = new WebSocket(WS_URL, {
+      headers: {
+        "X-API-Key": API_KEY
+      }
+    });
 
     streamSocket.onopen = () => {
       streamConnecting = false;
