@@ -26,6 +26,7 @@ import {
 import { spawn, ChildProcess } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
+import * as crypto from "crypto";
 import { fileURLToPath } from "url";
 
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
@@ -50,20 +51,24 @@ function isLocalServer(): boolean {
 // Sandbox mode — used by Smithery to scan tools without a running backend
 const SANDBOX_MODE = process.env.SMITHERY_SANDBOX === "true";
 
-// API Key - required for authentication
+// API Key - required for remote servers, auto-generated for local
 // Set via SHODH_API_KEY env var, or configure in MCP settings
-const API_KEY = process.env.SHODH_API_KEY || (SANDBOX_MODE ? "sandbox" : "");
+let API_KEY = process.env.SHODH_API_KEY || (SANDBOX_MODE ? "sandbox" : "");
 if (!API_KEY) {
-  console.error("ERROR: SHODH_API_KEY environment variable not set.");
-  console.error("");
-  console.error("To fix, add to your MCP config (claude_desktop_config.json or mcp.json):");
-  console.error(`  "env": { "SHODH_API_KEY": "your-api-key" }`);
-  console.error("");
-  console.error("Or set in your shell:");
-  console.error("  export SHODH_API_KEY=your-api-key");
-  console.error("");
-  console.error("For local development, use the same key set in SHODH_DEV_API_KEY on the server.");
-  process.exit(1);
+  if (isLocalServer()) {
+    // Auto-generate a random key for local development — zero config
+    API_KEY = crypto.randomBytes(32).toString("hex");
+    console.error("[shodh-memory] No API key set — auto-generated for local server.");
+  } else {
+    console.error("ERROR: SHODH_API_KEY is required for remote servers.");
+    console.error("");
+    console.error("To fix, add to your MCP config (claude_desktop_config.json or mcp.json):");
+    console.error(`  "env": { "SHODH_API_KEY": "your-api-key" }`);
+    console.error("");
+    console.error("Or set in your shell:");
+    console.error("  export SHODH_API_KEY=your-api-key");
+    process.exit(1);
+  }
 }
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1000;
