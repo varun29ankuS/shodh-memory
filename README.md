@@ -38,7 +38,16 @@ Every other memory system delegates intelligence to LLM API calls — that's why
 
 ## Get Started
 
-### Claude Code / Cursor (MCP)
+### Claude Code (one command)
+
+```bash
+claude mcp add shodh-memory -- npx -y @shodh/memory-mcp
+```
+
+That's it. The MCP server auto-downloads the backend binary and starts it. No Docker, no API keys, no configuration. Claude now has persistent memory across sessions.
+
+<details>
+<summary>Or with Docker (for production / shared servers)</summary>
 
 ```bash
 # 1. Start the server
@@ -46,18 +55,6 @@ docker run -d -p 3030:3030 -v shodh-data:/data varunshodh/shodh-memory
 
 # 2. Add to Claude Code
 claude mcp add shodh-memory -- npx -y @shodh/memory-mcp
-```
-
-That's it. Claude now has persistent memory across sessions.
-
-<details>
-<summary>Or use a binary instead of Docker</summary>
-
-Download from [GitHub Releases](https://github.com/varun29ankuS/shodh-memory/releases):
-
-```bash
-curl -L https://github.com/varun29ankuS/shodh-memory/releases/latest/download/shodh-memory-linux-x64.tar.gz | tar -xz
-./shodh-memory
 ```
 </details>
 
@@ -69,16 +66,13 @@ curl -L https://github.com/varun29ankuS/shodh-memory/releases/latest/download/sh
   "mcpServers": {
     "shodh-memory": {
       "command": "npx",
-      "args": ["-y", "@shodh/memory-mcp"],
-      "env": {
-        "SHODH_API_KEY": "your-key"
-      }
+      "args": ["-y", "@shodh/memory-mcp"]
     }
   }
 }
 ```
 
-Generate a key: `openssl rand -hex 32`, set it on the server via `SHODH_DEV_API_KEY` env var.
+For local use, no API key is needed — one is generated automatically. For remote servers, add `"env": { "SHODH_API_KEY": "your-key" }`.
 </details>
 
 ### Python
