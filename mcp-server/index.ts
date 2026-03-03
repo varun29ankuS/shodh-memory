@@ -3991,10 +3991,35 @@ async function waitForServer(maxAttempts: number = 30): Promise<boolean> {
   return false;
 }
 
+async function validateApiKey(): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const response = await fetch(`${API_URL}/api/health`, {
+      headers: { "X-API-Key": API_KEY },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function ensureServerRunning(): Promise<void> {
   // Check if already running
   if (await isServerRunning()) {
     console.error("[shodh-memory] Backend server already running at", API_URL);
+    // If we auto-generated a key, verify it works against the running server
+    if (!process.env.SHODH_API_KEY && isLocalServer()) {
+      const keyWorks = await validateApiKey();
+      if (!keyWorks) {
+        console.error("[shodh-memory] WARNING: Auto-generated key rejected by running server.");
+        console.error("[shodh-memory] The server was started with a different API key.");
+        console.error("[shodh-memory] Set SHODH_API_KEY to match the server's key, or restart");
+        console.error("[shodh-memory] the server without SHODH_DEV_API_KEY to use auto-generated keys.");
+      }
+    }
     return;
   }
 
