@@ -15,7 +15,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::constants::{ENTITY_CONCEPT_MERGE_THRESHOLD, LTP_MIN_STRENGTH, LTP_PRUNE_FLOOR};
+use crate::constants::{
+    ENTITY_CONCEPT_MERGE_THRESHOLD, ENTITY_EMBEDDING_CACHE_MAX, LTP_MIN_STRENGTH,
+    LTP_PRUNE_FLOOR,
+};
 
 // Column family names for the unified graph database
 const CF_ENTITIES: &str = "entities";
@@ -1395,7 +1398,7 @@ impl GraphMemory {
         entities_cf: &ColumnFamily,
         name_index: &HashMap<String, Uuid>,
     ) -> Vec<(Uuid, Vec<f32>)> {
-        let mut cache = Vec::new();
+        let mut cache = Vec::with_capacity(ENTITY_EMBEDDING_CACHE_MAX.min(name_index.len()));
         for uuid in name_index.values() {
             let key = uuid.as_bytes();
             if let Ok(Some(value)) = db.get_cf(entities_cf, key) {
@@ -1405,6 +1408,9 @@ impl GraphMemory {
                 ) {
                     if let Some(emb) = entity.name_embedding {
                         cache.push((*uuid, emb));
+                        if cache.len() >= ENTITY_EMBEDDING_CACHE_MAX {
+                            break;
+                        }
                     }
                 }
             }
@@ -1549,6 +1555,13 @@ impl GraphMemory {
             let mut cache = self.entity_embedding_cache.write();
             if is_new_entity {
                 cache.push((entity.uuid, emb.clone()));
+                // Evict oldest entries when cache exceeds the configured maximum.
+                // Oldest entries (index 0) are typically the least recently mentioned
+                // since they were loaded at startup or added earliest.
+                if cache.len() > ENTITY_EMBEDDING_CACHE_MAX {
+                    let excess = cache.len() - ENTITY_EMBEDDING_CACHE_MAX;
+                    cache.drain(..excess);
+                }
             } else {
                 // Update existing entry in cache (embedding may have changed)
                 if let Some(entry) = cache.iter_mut().find(|(uuid, _)| *uuid == entity.uuid) {
