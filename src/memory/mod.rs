@@ -2268,6 +2268,45 @@ impl MemorySystem {
                 }
             }
 
+            // ===========================================================================
+            // LAYER 4.9: PROJECT CONTEXT BOOST
+            // ===========================================================================
+            // When a project_id is specified in the query, memories from the same project
+            // get an additive boost. This is a soft preference — cross-project memories
+            // still appear if semantically relevant.
+            //
+            // Uses storage lookups on the fused candidate set (typically 30-60 entries).
+            // Conservative: only boosts existing candidates, does not inject new ones.
+            if let Some(ref query_project) = query.project_id {
+                const PROJECT_BOOST: f32 = 0.3;
+                let mut boosted_count = 0;
+                let fused_ids: Vec<_> = fused.keys().cloned().collect();
+                for id in fused_ids {
+                    if let Ok(mem) = self.long_term_memory.get(&id) {
+                        let matches = mem
+                            .experience
+                            .context
+                            .as_ref()
+                            .and_then(|c| c.project.project_id.as_ref())
+                            .map(|pid| pid == query_project)
+                            .unwrap_or(false);
+                        if matches {
+                            if let Some(score) = fused.get_mut(&id) {
+                                *score += PROJECT_BOOST;
+                                boosted_count += 1;
+                            }
+                        }
+                    }
+                }
+                if boosted_count > 0 {
+                    tracing::info!(
+                        "Layer 4.9: Boosted {} memories for project '{}'",
+                        boosted_count,
+                        query_project
+                    );
+                }
+            }
+
             let mut res: Vec<_> = fused.into_iter().collect();
             res.sort_by(|a, b| b.1.total_cmp(&a.1));
             res.truncate(query.max_results);
