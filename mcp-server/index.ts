@@ -37,6 +37,45 @@ const API_URL = process.env.SHODH_API_URL || "http://127.0.0.1:3030";
 const WS_URL = API_URL.replace(/^http/, "ws") + "/api/stream";
 const USER_ID = process.env.SHODH_USER_ID || "claude-code";
 
+// Project-aware memory scoping (opt-in via SHODH_PROJECT_SCOPING=true)
+const PROJECT_SCOPING = process.env.SHODH_PROJECT_SCOPING === "true";
+
+function detectProjectName(): string | undefined {
+  if (!PROJECT_SCOPING) return undefined;
+
+  // Priority 1: Explicit override
+  if (process.env.SHODH_PROJECT_ID) return process.env.SHODH_PROJECT_ID;
+
+  // Priority 2: Git remote origin (worktree-safe)
+  try {
+    const { execSync } = require("child_process");
+    const dir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    const remoteUrl = execSync("git config --get remote.origin.url", {
+      cwd: dir,
+      encoding: "utf-8",
+      timeout: 3000,
+    }).trim();
+    if (remoteUrl) {
+      // Extract repo name from URL:
+      // https://github.com/org/repo.git → repo
+      // git@github.com:org/repo.git → repo
+      const match = remoteUrl.match(/[/:]([^/:]+?)(?:\.git)?$/);
+      if (match) return match[1];
+    }
+  } catch {
+    // Not a git repo or git not available — fall through
+  }
+
+  // Priority 3: Directory basename
+  const dir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  return dir.split(/[/\\]/).pop() || undefined;
+}
+
+const PROJECT_NAME = detectProjectName();
+if (PROJECT_NAME) {
+  console.error(`[shodh-memory] Project scoping enabled: "${PROJECT_NAME}"`);
+}
+
 // Detect whether the server is local (safe for auto-generated keys)
 function isLocalServer(): boolean {
   try {
@@ -1396,6 +1435,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...(preceding_memory_id && { preceding_memory_id }),
           // Hierarchy
           ...(parent_id && { parent_id }),
+          // Project scoping
+          ...(PROJECT_NAME && { project: PROJECT_NAME }),
         });
 
         // Format response with branded display
@@ -1474,6 +1515,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           query,
           limit,
           mode,
+          ...(PROJECT_NAME && { project: PROJECT_NAME }),
         });
 
         const memories = result.memories || [];
@@ -2215,6 +2257,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Implicit feedback: send previous response so backend can evaluate which memories helped
           previous_response: lastProactiveResponse || undefined,
           user_followup: lastProactiveResponse ? cleanedContext : undefined,
+          // Project scoping
+          ...(PROJECT_NAME && { project: PROJECT_NAME }),
         });
 
         const memories = result.memories || [];
