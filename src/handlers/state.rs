@@ -1477,6 +1477,20 @@ impl MultiUserMemoryManager {
                 .retain(|user_id, _| active_users.contains(user_id));
             self.user_graph_init_locks
                 .retain(|user_id, _| active_users.contains(user_id));
+            // Prune audit logs for evicted users to prevent unbounded DashMap growth.
+            // Each user's log can hold up to audit_max_entries_per_user entries (~2-5MB),
+            // and without pruning, entries persist long after the user's memory/graph are evicted.
+            let pre_audit = self.audit_logs.len();
+            self.audit_logs
+                .retain(|user_id, _| active_users.contains(user_id));
+            let pruned_audit = pre_audit.saturating_sub(self.audit_logs.len());
+            if pruned_audit > 0 {
+                tracing::info!(
+                    "Pruned audit logs for {} evicted users ({} active)",
+                    pruned_audit,
+                    self.audit_logs.len()
+                );
+            }
         }
 
         tracing::info!(

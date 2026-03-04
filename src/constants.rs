@@ -115,6 +115,16 @@ pub const EDGE_HALF_LIFE_HOURS: f64 = 24.0;
 /// Reference: Reimers & Gurevych (2019) "Sentence-BERT"
 pub const ENTITY_CONCEPT_MERGE_THRESHOLD: f32 = 0.85;
 
+/// Maximum entries in the in-memory entity embedding cache.
+///
+/// The cache is used for Tier 4 concept merging (synonym detection via cosine
+/// similarity). When the cache exceeds this limit, the oldest entries (first
+/// added, typically least recently mentioned) are evicted to bound memory.
+///
+/// At 384 dimensions × 4 bytes × 10,000 entries ≈ 15MB — acceptable for edge
+/// deployment while covering the vast majority of active entity vocabularies.
+pub const ENTITY_EMBEDDING_CACHE_MAX: usize = 10_000;
+
 /// Floor multiplier for semantic edge weighting.
 ///
 /// Initial edge weight = L1_INITIAL_WEIGHT × (floor + (1 − floor) × cosine_sim).

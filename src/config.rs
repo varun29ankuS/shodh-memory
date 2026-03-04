@@ -7,6 +7,35 @@ use std::env;
 use std::path::PathBuf;
 use tracing::info;
 
+/// Legacy storage directory name used in versions <= 0.1.80.
+const LEGACY_STORAGE_DIR: &str = "shodh_memory_data";
+
+/// Returns the platform-appropriate default storage path.
+///
+/// Resolution order:
+/// 1. If `./shodh_memory_data` exists in the cwd (legacy location), use it and warn.
+///    This preserves data for users upgrading from <= 0.1.80.
+/// 2. Otherwise, use the platform data directory:
+///    - Linux: `~/.local/share/shodh-memory/`
+///    - macOS: `~/Library/Application Support/shodh-memory/`
+///    - Windows: `C:\Users\<user>\AppData\Roaming\shodh-memory\`
+/// 3. Falls back to `./shodh_memory_data` only if the home directory cannot be determined.
+pub fn default_storage_path() -> PathBuf {
+    let legacy_path = PathBuf::from(LEGACY_STORAGE_DIR);
+    if legacy_path.exists() && legacy_path.is_dir() {
+        eprintln!(
+            "[shodh-memory] Found legacy data at ./{LEGACY_STORAGE_DIR}/ in the current directory. \
+             Using it for backward compatibility. To migrate, move it to the platform default \
+             and unset SHODH_MEMORY_PATH. See: https://github.com/varun29ankuS/shodh-memory/issues/89"
+        );
+        return legacy_path;
+    }
+
+    dirs::data_dir()
+        .map(|p| p.join("shodh-memory"))
+        .unwrap_or_else(|| PathBuf::from(LEGACY_STORAGE_DIR))
+}
+
 /// CORS configuration
 #[derive(Debug, Clone)]
 pub struct CorsConfig {
@@ -204,7 +233,7 @@ pub struct ServerConfig {
     /// Server port (default: 3030)
     pub port: u16,
 
-    /// Storage path for RocksDB (default: ./shodh_memory_data)
+    /// Storage path for RocksDB (default: platform data dir, e.g. ~/.local/share/shodh-memory/)
     pub storage_path: PathBuf,
 
     /// Maximum users to keep in memory LRU cache (default: 1000)
@@ -269,7 +298,7 @@ impl Default for ServerConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 3030,
-            storage_path: PathBuf::from("./shodh_memory_data"),
+            storage_path: default_storage_path(),
             max_users_in_memory: 1000,
             audit_max_entries_per_user: 10_000,
             audit_rotation_check_interval: 100,
@@ -471,7 +500,7 @@ pub fn print_env_help() {
         "  SHODH_HOST             - Bind address (default: 127.0.0.1, use 0.0.0.0 for Docker)"
     );
     println!("  SHODH_PORT             - Server port (default: 3030)");
-    println!("  SHODH_MEMORY_PATH      - Storage directory (default: ./shodh_memory_data)");
+    println!("  SHODH_MEMORY_PATH      - Storage directory (default: platform data dir, e.g. ~/.local/share/shodh-memory/)");
     println!("  SHODH_API_KEYS         - Comma-separated API keys (required in production)");
     println!("  SHODH_DEV_API_KEY      - Development API key (required in dev if SHODH_API_KEYS not set)");
     println!("  SHODH_MAX_USERS        - Max users in memory LRU (default: 1000)");

@@ -5,7 +5,7 @@
     "cors_enabled": true
   },
   "storage": {
-    "base_path": "./shodh_memory_data",
+    "base_path": "~/.local/share/shodh-memory",
     "compression": {
       "enabled": true,
       "age_days": 7

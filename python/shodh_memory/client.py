@@ -21,6 +21,30 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
+_LEGACY_STORAGE_DIR = "shodh_memory_data"
+
+
+def _default_storage_path() -> str:
+    """Return platform-appropriate default storage path with legacy migration.
+
+    If ./shodh_memory_data exists in the cwd (legacy layout from <= 0.1.80),
+    use it for backward compatibility. Otherwise, use the platform data dir.
+    """
+    legacy = Path(_LEGACY_STORAGE_DIR)
+    if legacy.exists() and legacy.is_dir():
+        return str(legacy)
+
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        return os.path.join(base, "shodh-memory")
+    elif system == "Darwin":
+        return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "shodh-memory")
+    else:
+        base = os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share"))
+        return os.path.join(base, "shodh-memory")
+
+
 # ==============================================================================
 # Exception Hierarchy
 # ==============================================================================
@@ -172,7 +196,7 @@ class Memory:
         Args:
             user_id: Unique identifier for this user (enables multi-user isolation)
             port: Port for the memory server (default: 3030)
-            storage_path: Path to store memory data (default: ./shodh_memory_data)
+            storage_path: Path to store memory data (default: platform data dir)
             auto_start: Automatically start server if not running (default: True)
             api_key: API key for authentication (optional, uses env SHODH_API_KEY if not set)
             timeout: Request timeout in seconds (default: 30)
@@ -181,7 +205,7 @@ class Memory:
         self.user_id = user_id
         self.port = port
         self.base_url = f"http://localhost:{port}"
-        self.storage_path = storage_path or "./shodh_memory_data"
+        self.storage_path = storage_path or _default_storage_path()
         self.timeout = timeout
 
         # API Key - required for authentication

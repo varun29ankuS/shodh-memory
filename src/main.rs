@@ -9,7 +9,7 @@
 //! Options:
 //!   -H, --host <HOST>         Bind address [env: SHODH_HOST] [default: 127.0.0.1]
 //!   -p, --port <PORT>         Port number [env: SHODH_PORT] [default: 3030]
-//!   -s, --storage <PATH>      Storage directory [env: SHODH_MEMORY_PATH] [default: ./shodh_memory_data]
+//!   -s, --storage <PATH>      Storage directory [env: SHODH_MEMORY_PATH] [default: platform data dir]
 //!   -h, --help                Print help
 //!   -V, --version             Print version
 
@@ -110,7 +110,7 @@ struct Cli {
         short,
         long = "storage",
         env = "SHODH_MEMORY_PATH",
-        default_value = "./shodh_memory_data"
+        default_value_os_t = shodh_memory::config::default_storage_path()
     )]
     storage_path: PathBuf,
 
