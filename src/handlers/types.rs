@@ -140,6 +140,9 @@ pub struct RecallRequest {
     /// Retrieval mode: "semantic", "associative", or "hybrid" (default)
     #[serde(default = "default_recall_mode")]
     pub mode: String,
+    /// Project identifier for project-aware retrieval boosting
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 pub fn default_recall_limit() -> usize {
