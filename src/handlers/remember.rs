@@ -11,8 +11,8 @@ use super::types::MemoryEvent;
 use crate::errors::{AppError, ValidationErrorExt};
 use crate::memory::{
     types::{
-        ChangeType, ContextId, EmotionalContext, EpisodeContext, NerEntityRecord, RichContext,
-        SourceContext, SourceType,
+        ChangeType, ContextId, EmotionalContext, EpisodeContext, NerEntityRecord, ProjectContext,
+        RichContext, SourceContext, SourceType,
     },
     Experience, ExperienceType, SessionEvent,
 };
@@ -62,6 +62,9 @@ pub struct RememberRequest {
     /// Use this to create memory trees (e.g., "71-research" -> "algebraic" -> "21×27≡-1")
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Project identifier for project-aware memory scoping
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// Remember response
@@ -122,6 +125,9 @@ pub struct BatchMemoryItem {
     /// Parent memory ID for hierarchical organization
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Project identifier for project-aware memory scoping
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// Error detail for batch item
@@ -222,6 +228,7 @@ pub fn build_rich_context(
     episode_id: Option<String>,
     sequence_number: Option<u32>,
     preceding_memory_id: Option<String>,
+    project: Option<String>,
 ) -> Option<RichContext> {
     let has_context = emotional_valence.is_some()
         || emotional_arousal.is_some()
@@ -230,7 +237,8 @@ pub fn build_rich_context(
         || credibility.is_some()
         || episode_id.is_some()
         || sequence_number.is_some()
-        || preceding_memory_id.is_some();
+        || preceding_memory_id.is_some()
+        || project.is_some();
 
     if !has_context {
         return None;
@@ -270,7 +278,11 @@ pub fn build_rich_context(
         episode,
         conversation: Default::default(),
         user: Default::default(),
-        project: Default::default(),
+        project: ProjectContext {
+            project_id: project.clone(),
+            name: project,
+            ..Default::default()
+        },
         temporal: Default::default(),
         semantic: Default::default(),
         code: Default::default(),
@@ -389,6 +401,7 @@ pub async fn remember(
         req.episode_id.clone(),
         req.sequence_number,
         req.preceding_memory_id.clone(),
+        req.project.clone(),
     );
 
     let experience = Experience {
@@ -759,6 +772,7 @@ pub async fn batch_remember(
             item.episode_id.clone(),
             item.sequence_number,
             item.preceding_memory_id.clone(),
+            item.project.clone(),
         );
 
         let experience = Experience {
