@@ -24,7 +24,7 @@ use crate::memory::feedback;
 use crate::memory::segmentation::{InputSource, SegmentationEngine};
 use crate::memory::sessions::SessionEvent;
 use crate::memory::storage::SearchCriteria;
-use crate::memory::types::MemoryId;
+use crate::memory::types::{MemoryId, ProjectContext, RichContext};
 use crate::memory::{Experience, ExperienceType, Query as MemoryQuery, SharedMemory};
 use crate::memory::{ProspectiveTrigger, TodoStatus};
 use crate::metrics;
@@ -112,6 +112,9 @@ pub struct ProactiveContextRequest {
     /// User's followup message after agent response (for delayed signals)
     #[serde(default)]
     pub user_followup: Option<String>,
+    /// Project identifier for project-aware retrieval boosting
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 fn default_proactive_max_results() -> usize {
@@ -1279,6 +1282,7 @@ pub async fn proactive_context(
     let context_clone = req.context.clone();
     let max_results = req.max_results;
     let user_id_for_query = req.user_id.clone();
+    let project_for_query = req.project.clone();
     let entity_names_for_recall = context_entity_names.clone();
     let entity_match_weight = req.entity_match_weight;
     let recency_weight = req.recency_weight;
@@ -1310,6 +1314,7 @@ pub async fn proactive_context(
                 max_results,
                 recency_weight: Some(recency_weight),
                 prospective_signals,
+                project_id: project_for_query,
                 ..Default::default()
             };
             let results = memory_guard.recall(&query).unwrap_or_default();
@@ -1620,6 +1625,7 @@ pub async fn proactive_context(
     let ingested_memory_id = if should_ingest {
         let context = clean_context;
         let memory = memory_system.clone();
+        let project_for_ingest = req.project.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::task::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
@@ -1633,6 +1639,32 @@ pub async fn proactive_context(
                         experience_type: segment.experience_type,
                         entities: segment.entities,
                         tags: vec!["auto-captured".to_string()],
+                        context: project_for_ingest.as_ref().map(|p| {
+                            let now = chrono::Utc::now();
+                            RichContext {
+                                id: crate::memory::types::ContextId(uuid::Uuid::new_v4()),
+                                project: ProjectContext {
+                                    project_id: Some(p.clone()),
+                                    name: Some(p.clone()),
+                                    ..Default::default()
+                                },
+                                conversation: Default::default(),
+                                user: Default::default(),
+                                temporal: Default::default(),
+                                semantic: Default::default(),
+                                code: Default::default(),
+                                document: Default::default(),
+                                environment: Default::default(),
+                                emotional: Default::default(),
+                                source: Default::default(),
+                                episode: Default::default(),
+                                parent: None,
+                                embeddings: None,
+                                decay_rate: 1.0,
+                                created_at: now,
+                                updated_at: now,
+                            }
+                        }),
                         ..Default::default()
                     };
                     if let Ok(id) = memory_guard.remember(experience, None) {
