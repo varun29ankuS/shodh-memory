@@ -1978,6 +1978,11 @@ pub struct Query {
     /// This prevents episode bleeding where unrelated memories mix in results
     pub episode_id: Option<String>,
 
+    // === Project Context Scoping ===
+    /// Project identifier for project-aware retrieval boosting
+    /// When set, memories from the same project get a soft score boost
+    pub project_id: Option<String>,
+
     // === Scoring Parameters ===
     /// Weight for recency boost in unified scoring (0.0-1.0)
     /// When None, uses hardcoded default (0.1 = 10% contribution)
@@ -2066,6 +2071,7 @@ impl Default for Query {
             confidence_range: None,
             prospective_signals: None,
             episode_id: None,
+            project_id: None,
             recency_weight: None,
             max_results: DEFAULT_MAX_RESULTS,
             retrieval_mode: RetrievalMode::Hybrid,

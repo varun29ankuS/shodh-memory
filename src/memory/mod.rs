@@ -1939,6 +1939,7 @@ impl MemorySystem {
             confidence_range: query.confidence_range,
             offset: query.offset,
             episode_id: query.episode_id.clone(),
+            project_id: query.project_id.clone(),
             prospective_signals: query.prospective_signals.clone(),
             recency_weight: query.recency_weight,
         };
