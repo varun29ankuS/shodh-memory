@@ -3166,7 +3166,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "read_memory": {
-        const { memory_id } = args as { memory_id: string };
+        const memory_id = (args as any).memory_id || (args as any).id;
+
+        if (!memory_id || typeof memory_id !== 'string' || memory_id.trim().length === 0) {
+          return {
+            content: [{ type: "text", text: "Error: 'memory_id' is required. Pass the full UUID or 8+ character prefix from recall results." }],
+            isError: true,
+          };
+        }
 
         // Response includes hierarchy: parent_id in memory, children_ids/children_count
         interface MemoryWithHierarchy {
