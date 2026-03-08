@@ -1294,7 +1294,7 @@ pub async fn proactive_context(
     let entity_names_for_recall = context_entity_names.clone();
     let entity_match_weight = req.entity_match_weight;
     let recency_weight = req.recency_weight;
-    let _semantic_threshold = req.semantic_threshold;
+    let semantic_threshold = req.semantic_threshold;
     let embedding_for_query = context_embedding.clone();
     let memories: Vec<ProactiveSurfacedMemory> = {
         let memory = memory_system.clone();
@@ -1428,7 +1428,7 @@ pub async fn proactive_context(
             // Drop results below minimum absolute score — don't pad with irrelevant filler
             // Also drop results that are < 30% of the top score (too weak relative to best)
             let top_score = enriched.first().map(|(_, s, _)| *s).unwrap_or(0.0);
-            let abs_min = 0.05_f32;
+            let abs_min = semantic_threshold;
             let relative_min = top_score * 0.30;
             let effective_min = abs_min.max(relative_min);
             enriched.retain(|(_, s, _)| *s >= effective_min);
