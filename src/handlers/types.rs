@@ -412,6 +412,8 @@ pub struct TrackedRetrieveRequest {
     pub query: String,
     #[serde(default = "default_recall_limit")]
     pub limit: usize,
+    #[serde(default = "default_recall_mode")]
+    pub mode: String,
 }
 
 /// Response with tracking ID for feedback
