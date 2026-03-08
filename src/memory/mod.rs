@@ -1693,6 +1693,10 @@ impl MemorySystem {
         // ===========================================================================
         // LAYER 2: GRAPH EXPANSION (Knowledge Graph Traversal)
         // ===========================================================================
+        let use_graph = matches!(
+            query.retrieval_mode,
+            RetrievalMode::Hybrid | RetrievalMode::Associative | RetrievalMode::Causal
+        );
         let (
             graph_results,
             graph_density,
@@ -1708,7 +1712,7 @@ impl MemorySystem {
             Vec<(String, f32)>,
             f32, // Keyword discriminativeness for dynamic BM25/vector weight adjustment
         ) = {
-            if let Some(graph) = &self.graph_memory {
+            if let Some(graph) = self.graph_memory.as_ref().filter(|_| use_graph) {
                 let g = graph.read();
                 // Extract IC weights for BM25 term boosting
                 let weights = query_analysis.to_ic_weights();
@@ -1891,7 +1895,13 @@ impl MemorySystem {
                 }
                 (r, d, entity_count, weights, phrases, disc)
             } else {
-                // No graph memory - still analyze query for IC weights and phrase boosts
+                if !use_graph && self.graph_memory.is_some() {
+                    tracing::debug!(
+                        "Layer 2: SKIPPED (retrieval_mode={:?})",
+                        query.retrieval_mode
+                    );
+                }
+                // No graph traversal - still analyze query for IC weights and phrase boosts
                 let (disc, _) = query_analysis.keyword_discriminativeness();
                 (
                     Vec::new(),

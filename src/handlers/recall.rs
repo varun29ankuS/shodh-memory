@@ -25,7 +25,9 @@ use crate::memory::segmentation::{InputSource, SegmentationEngine};
 use crate::memory::sessions::SessionEvent;
 use crate::memory::storage::SearchCriteria;
 use crate::memory::types::MemoryId;
-use crate::memory::{Experience, ExperienceType, Query as MemoryQuery, SharedMemory};
+use crate::memory::{
+    Experience, ExperienceType, Query as MemoryQuery, RetrievalMode, SharedMemory,
+};
 use crate::memory::{ProspectiveTrigger, TodoStatus};
 use crate::metrics;
 use crate::relevance;
@@ -33,6 +35,18 @@ use crate::validation;
 
 /// Application state type alias
 pub type AppState = std::sync::Arc<MultiUserMemoryManager>;
+
+/// Map API mode string to RetrievalMode enum.
+/// Defaults to Hybrid for unknown values (backward compat).
+fn parse_retrieval_mode(mode: &str) -> RetrievalMode {
+    match mode {
+        "semantic" | "similarity" => RetrievalMode::Similarity,
+        "associative" => RetrievalMode::Associative,
+        "temporal" => RetrievalMode::Temporal,
+        "causal" => RetrievalMode::Causal,
+        _ => RetrievalMode::Hybrid,
+    }
+}
 
 // =============================================================================
 // CONTEXT SUMMARY TYPES
@@ -310,6 +324,7 @@ pub async fn recall(
 
     let limit = req.limit;
     let mode = req.mode.clone();
+    let retrieval_mode_for_recall = parse_retrieval_mode(&mode);
 
     // PROSPECTIVE MEMORY + RECALL: Run inside a single spawn_blocking to share
     // the computed query embedding between prospective semantic matching and recall.
@@ -391,6 +406,7 @@ pub async fn recall(
                 user_id: Some(user_id_for_recall),
                 query_text: Some(query_for_recall),
                 max_results: limit,
+                retrieval_mode: retrieval_mode_for_recall,
                 prospective_signals: prospective_signals.clone(),
                 ..Default::default()
             };
@@ -2145,6 +2161,7 @@ pub async fn recall_tracked(
     let query_text = req.query.clone();
     let limit = req.limit;
     let user_id = req.user_id.clone();
+    let retrieval_mode = parse_retrieval_mode(&req.mode);
 
     let memories = {
         let memory = memory.clone();
@@ -2154,6 +2171,7 @@ pub async fn recall_tracked(
                 user_id: Some(user_id),
                 query_text: Some(query_text),
                 max_results: limit,
+                retrieval_mode,
                 ..Default::default()
             };
             memory_guard.recall(&query).unwrap_or_default()
