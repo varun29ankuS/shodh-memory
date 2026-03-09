@@ -490,7 +490,7 @@ async function isServerAvailable(): Promise<boolean> {
 const server = new Server(
   {
     name: "shodh-memory",
-    version: "0.1.61",
+    version: "0.1.81",
   },
   {
     capabilities: {
@@ -1407,7 +1407,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (tags.length > 0) {
           response += ` │ Tags: ${tags.join(', ')}`;
         }
-        response += `\nID: ${result.id.slice(0, 8)}...`;
+        response += `\nID: ${result.id}`;
 
         return {
           content: [{ type: "text", text: response }],
@@ -1535,7 +1535,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             response += `• ${matchBar} ${score}% │ ${timeStr}\n`;
             response += `  ${content.slice(0, 200)}${content.length > 200 ? '...' : ''}\n`;
-            response += `  ┗━ ${getType(m)}${m.tier ? ` │ ${m.tier}` : ''} │ ${m.id.slice(0, 8)}...\n`;
+            response += `  ┗━ ${getType(m)}${m.tier ? ` │ ${m.tier}` : ''} │ ${m.id}\n`;
             if (i < memories.length - 1) response += `\n`;
           }
         }
@@ -1575,7 +1575,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Format lineage edges connecting recalled memories
         if (lineage.length > 0) {
           // Build short ID lookup from recalled memories
-          const idShort = (id: string) => id.slice(0, 8);
+          const idShort = (id: string) => id;
           const idToContent = new Map<string, string>();
           for (const m of memories) {
             idToContent.set(m.id, getContent(m).slice(0, 40));
@@ -1762,7 +1762,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }[getType(m)] || '📦';
 
           response += `${String(i + 1).padStart(2)}. ${typeIcon} ${content.slice(0, 150)}${content.length > 150 ? '...' : ''}\n`;
-          response += `    ┗━ ${getType(m)}${m.tier ? ` │ ${m.tier}` : ''} │ ${m.id.slice(0, 8)}...\n`;
+          response += `    ┗━ ${getType(m)}${m.tier ? ` │ ${m.tier}` : ''} │ ${m.id}\n`;
         }
 
         return {
@@ -1777,7 +1777,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         let response = `🐘 Memory Deleted\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-        response += `✓ Removed: ${id.slice(0, 8)}...`;
+        response += `✓ Removed: ${id}`;
 
         return {
           content: [{ type: "text", text: response }],
@@ -2259,7 +2259,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             for (const r of uniqueReminders) {
               const icon = r.overdue_seconds && r.overdue_seconds > 0 ? "⏰" : "📌";
               const contentText = r.content.slice(0, 38);
-              reminderBlock += `┃  ${icon} ${contentText.padEnd(44)} [${r.id.slice(0,8)}] ┃\n`;
+              reminderBlock += `┃  ${icon} ${contentText.padEnd(44)} [${r.id}] ┃\n`;
 
               if (r.overdue_seconds && r.overdue_seconds > 0) {
                 const mins = Math.round(r.overdue_seconds / 60);
@@ -2362,7 +2362,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Ingestion confirmation
         const ingestNote = result.ingested_memory_id
-          ? `\n[Context ingested: ${result.ingested_memory_id.slice(0, 8)}]`
+          ? `\n[Context ingested: ${result.ingested_memory_id}]`
           : '';
 
         // Summary counts
@@ -2639,7 +2639,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         let response = `🐘 Reminder Set\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-        response += `ID: ${result.id.slice(0, 8)}...\n`;
+        response += `ID: ${result.id}\n`;
         response += `Content: ${content}\n`;
         response += `Trigger: ${trigger_type}`;
         if (trigger_type === "time" && result.due_at) {
@@ -2697,7 +2697,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const icon = r.overdue_seconds && r.overdue_seconds > 0 ? "⏰" : "📌";
           const statusBadge = r.status === "triggered" ? " [TRIGGERED]" : "";
           response += `${icon} ${r.content.slice(0, 50)}${r.content.length > 50 ? "..." : ""}${statusBadge}\n`;
-          response += `   Type: ${r.trigger_type} | Priority: ${'★'.repeat(r.priority)} | ID: ${r.id.slice(0, 8)}...\n`;
+          response += `   Type: ${r.trigger_type} | Priority: ${'★'.repeat(r.priority)} | ID: ${r.id}\n`;
           if (r.due_at) {
             response += `   Due: ${new Date(r.due_at).toLocaleString()}\n`;
           }
@@ -2730,7 +2730,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: "text",
               text: result.success
-                ? `✓ Reminder dismissed: ${reminder_id.slice(0, 8)}...`
+                ? `✓ Reminder dismissed: ${reminder_id}`
                 : `⚠️ ${result.message}`,
             },
           ],
@@ -3220,10 +3220,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Hierarchy info
         if (memory.parent_id) {
-          response += `Parent: ${memory.parent_id.slice(0, 8)}...\n`;
+          response += `Parent: ${memory.parent_id}\n`;
         }
         if (memory.children_count > 0) {
-          response += `Children: ${memory.children_count} (${memory.children_ids.map(id => id.slice(0, 8)).join(", ")})\n`;
+          response += `Children: ${memory.children_count} (${memory.children_ids.join(", ")})\n`;
         }
 
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
@@ -3961,16 +3961,16 @@ function getBinaryPath(): string | null {
     fallbackName = "shodh-memory-server";
   }
 
-  // Try wrapper first (includes ONNX Runtime setup)
-  const wrapperPath = path.join(binDir, wrapperName);
-  if (fs.existsSync(wrapperPath)) {
-    return wrapperPath;
-  }
-
-  // Fallback to direct binary (requires system ONNX Runtime)
+  // Prefer direct binary (avoids spawn EINVAL with .bat + detached on Windows)
   const binaryPath = path.join(binDir, fallbackName);
   if (fs.existsSync(binaryPath)) {
     return binaryPath;
+  }
+
+  // Fallback to wrapper script (includes ONNX Runtime setup)
+  const wrapperPath = path.join(binDir, wrapperName);
+  if (fs.existsSync(wrapperPath)) {
+    return wrapperPath;
   }
 
   return null;
@@ -4082,11 +4082,13 @@ async function ensureServerRunning(): Promise<void> {
   // Always pass the API key for auth
   serverEnv["SHODH_DEV_API_KEY"] = API_KEY;
 
-  // Spawn the server process
+  // Spawn the server process (.bat files need shell: true on Windows)
+  const isBat = binaryPath.endsWith(".bat");
   serverProcess = spawn(binaryPath, [], {
     detached: true,
     stdio: "ignore",
     env: serverEnv,
+    ...(isBat && { shell: true }),
   });
 
   serverProcess.unref();
