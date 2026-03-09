@@ -978,7 +978,7 @@ impl MemoryStorage {
     /// the shared LRU cache (recommended for multi-tenant server mode). When
     /// `None`, a small per-instance cache is created (standalone / test use).
     pub fn new(path: &Path, shared_cache: Option<&rocksdb::Cache>) -> Result<Self> {
-        use crate::constants::{ROCKSDB_MEMORY_WRITE_BUFFER_BYTES};
+        use crate::constants::ROCKSDB_MEMORY_WRITE_BUFFER_BYTES;
 
         // Create directories if they don't exist
         let storage_path = path.join("storage");

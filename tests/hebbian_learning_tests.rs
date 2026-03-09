@@ -35,7 +35,8 @@ fn setup_memory_system() -> (MemorySystem, TempDir) {
         importance_threshold: 0.7,
     };
 
-    let mut memory_system = MemorySystem::new(config, None).expect("Failed to create memory system");
+    let mut memory_system =
+        MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Wire up GraphMemory for Hebbian association tests
     let graph_path = temp_dir.path().join("graph");

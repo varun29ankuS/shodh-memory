@@ -223,8 +223,8 @@ fn bench_graph_persistence(c: &mut Criterion) {
                             importance_threshold: 0.7,
                         };
 
-                        let mut memory =
-                            MemorySystem::new(config.clone(), None).expect("Failed to create system");
+                        let mut memory = MemorySystem::new(config.clone(), None)
+                            .expect("Failed to create system");
 
                         // Create edges
                         let memory_count = (edge_count as f64).sqrt().ceil() as usize * 2;

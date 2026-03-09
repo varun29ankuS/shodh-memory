@@ -147,7 +147,8 @@ fn setup_memory_system(working_size: usize) -> (MemorySystem, TempDir) {
         compression_age_days: 0,
         importance_threshold: 0.3,
     };
-    let mut memory_system = MemorySystem::new(config, None).expect("Failed to create memory system");
+    let mut memory_system =
+        MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Wire up GraphMemory for entity relationships and spreading activation
     let graph_path = temp_dir.path().join("graph");
