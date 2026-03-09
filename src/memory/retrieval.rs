@@ -162,12 +162,14 @@ impl RetrievalEngine {
             max_degree: 32,        // Increased for better recall at scale
             search_list_size: 100, // 2x for better accuracy with 10M vectors
             alpha: 1.2,
-            use_mmap: false, // Keep in memory for low-latency robotics
+            use_mmap: true, // Memory-mapped: OS manages paging, RSS stays low at scale
             ..Default::default()
         };
 
-        let vector_index =
-            VamanaIndex::new(vamana_config).context("Failed to initialize Vamana vector index")?;
+        let vamana_storage = storage_path.join("vector_index");
+        std::fs::create_dir_all(&vamana_storage)?;
+        let vector_index = VamanaIndex::with_storage_path(vamana_config, Some(vamana_storage))
+            .context("Failed to initialize Vamana vector index")?;
         let id_mapping = IdMapping::new();
 
         // NOTE: Memory graph (Hebbian associations) has been consolidated into GraphMemory

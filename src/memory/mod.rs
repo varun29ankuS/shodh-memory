@@ -49,8 +49,8 @@ use crate::metrics::{
 use crate::constants::{
     DEFAULT_COMPRESSION_AGE_DAYS, DEFAULT_IMPORTANCE_THRESHOLD, DEFAULT_MAX_HEAP_PER_USER_MB,
     DEFAULT_SESSION_MEMORY_SIZE_MB, DEFAULT_WORKING_MEMORY_SIZE, EDGE_SEMANTIC_WEIGHT_FLOOR,
-    ESTIMATED_BYTES_PER_MEMORY, HEBBIAN_BOOST_HELPFUL, HEBBIAN_DECAY_MISLEADING,
-    POTENTIATION_ACCESS_THRESHOLD, POTENTIATION_MAINTENANCE_BOOST, TIER_PROMOTION_SESSION_AGE_SECS,
+    HEBBIAN_BOOST_HELPFUL, HEBBIAN_DECAY_MISLEADING, POTENTIATION_ACCESS_THRESHOLD,
+    POTENTIATION_MAINTENANCE_BOOST, TIER_PROMOTION_SESSION_AGE_SECS,
     TIER_PROMOTION_SESSION_IMPORTANCE, TIER_PROMOTION_WORKING_AGE_SECS,
     TIER_PROMOTION_WORKING_IMPORTANCE,
 };
@@ -587,7 +587,6 @@ impl MemorySystem {
         mut experience: Experience,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<MemoryId> {
-        self.check_resource_limits()?;
         let importance = self.calculate_importance(&experience);
 
         // Generate embedding if not provided
@@ -633,9 +632,6 @@ impl MemorySystem {
         mut experience: Experience,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<MemoryId> {
-        // CRITICAL: Check resource limits before recording to prevent OOM
-        self.check_resource_limits()?;
-
         let memory_id = MemoryId(Uuid::new_v4());
 
         // Calculate importance
@@ -967,9 +963,6 @@ impl MemorySystem {
         agent_id: Option<String>,
         run_id: Option<String>,
     ) -> Result<MemoryId> {
-        // CRITICAL: Check resource limits before recording to prevent OOM
-        self.check_resource_limits()?;
-
         let memory_id = MemoryId(Uuid::new_v4());
 
         // Calculate importance
@@ -4796,30 +4789,6 @@ impl MemorySystem {
         }
     }
 
-    /// Check resource limits to prevent OOM from single user
-    ///
-    /// Uses ESTIMATED_BYTES_PER_MEMORY constant for size estimation.
-    /// See constants.rs for justification of the estimate.
-    pub fn check_resource_limits(&self) -> Result<(), crate::errors::AppError> {
-        // Get current memory counts from stats
-        let stats = self.stats.read();
-        let total_memories = stats.working_memory_count + stats.session_memory_count;
-
-        // Estimate size using documented constant (see constants.rs for breakdown)
-        let estimated_size_bytes = total_memories * ESTIMATED_BYTES_PER_MEMORY;
-        let estimated_size_mb = estimated_size_bytes / (1024 * 1024);
-
-        if estimated_size_mb > self.config.max_heap_per_user_mb {
-            return Err(crate::errors::AppError::ResourceLimit {
-                resource: "user_memory".to_string(),
-                current: estimated_size_mb,
-                limit: self.config.max_heap_per_user_mb,
-            });
-        }
-
-        Ok(())
-    }
-
     // =========================================================================
     // OUTCOME FEEDBACK SYSTEM - Hebbian "Fire Together, Wire Together"
     // =========================================================================
@@ -5212,9 +5181,6 @@ impl MemorySystem {
         changed_by: Option<String>,
         change_reason: Option<String>,
     ) -> Result<(MemoryId, bool)> {
-        // Check resource limits
-        self.check_resource_limits()?;
-
         // Try to find existing memory with this external_id
         if let Some(mut existing) = self.long_term_memory.find_by_external_id(&external_id)? {
             // === UPDATE PATH ===
