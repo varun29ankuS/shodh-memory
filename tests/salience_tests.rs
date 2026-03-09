@@ -39,7 +39,7 @@ fn ner_type_to_label(ner_type: &NerEntityType) -> EntityLabel {
 /// Create a test graph memory instance
 fn setup_graph_memory() -> (GraphMemory, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let graph = GraphMemory::new(temp_dir.path()).expect("Failed to create graph memory");
+    let graph = GraphMemory::new(temp_dir.path(), None).expect("Failed to create graph memory");
     (graph, temp_dir)
 }
 
@@ -447,7 +447,7 @@ fn test_salience_persisted_to_storage() {
 
     // Create graph, add entity, and close
     {
-        let graph = GraphMemory::new(&db_path).expect("Failed to create graph");
+        let graph = GraphMemory::new(&db_path, None).expect("Failed to create graph");
 
         let entity = create_entity(entity_name, Some(EntityLabel::Person), true, 0.7);
         let entity_id = graph.add_entity(entity).expect("Failed to add entity");
@@ -467,7 +467,7 @@ fn test_salience_persisted_to_storage() {
 
     // Reopen graph and verify salience persisted
     {
-        let graph = GraphMemory::new(&db_path).expect("Failed to reopen graph");
+        let graph = GraphMemory::new(&db_path, None).expect("Failed to reopen graph");
 
         let entity = graph
             .find_entity_by_name(entity_name)
@@ -782,7 +782,7 @@ fn test_ner_integration_with_salience_persistence() {
 
     // Extract and add entities
     {
-        let graph = GraphMemory::new(&db_path).expect("Failed to create graph");
+        let graph = GraphMemory::new(&db_path, None).expect("Failed to create graph");
         let entities = ner.extract(text).expect("NER extraction failed");
 
         for entity in entities {
@@ -794,7 +794,7 @@ fn test_ner_integration_with_salience_persistence() {
 
     // Reopen and verify persistence
     {
-        let graph = GraphMemory::new(&db_path).expect("Failed to reopen graph");
+        let graph = GraphMemory::new(&db_path, None).expect("Failed to reopen graph");
         let all_entities = graph.get_all_entities().expect("Failed to get entities");
 
         assert!(

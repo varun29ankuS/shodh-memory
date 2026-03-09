@@ -24,7 +24,7 @@ fn setup_memory_system() -> (MemorySystem, TempDir) {
         importance_threshold: 0.7,
     };
 
-    let memory_system = MemorySystem::new(config).expect("Failed to create memory system");
+    let memory_system = MemorySystem::new(config, None).expect("Failed to create memory system");
     (memory_system, temp_dir)
 }
 
@@ -224,7 +224,7 @@ fn bench_graph_persistence(c: &mut Criterion) {
                         };
 
                         let mut memory =
-                            MemorySystem::new(config.clone()).expect("Failed to create system");
+                            MemorySystem::new(config.clone(), None).expect("Failed to create system");
 
                         // Create edges
                         let memory_count = (edge_count as f64).sqrt().ceil() as usize * 2;
@@ -258,7 +258,7 @@ fn bench_graph_persistence(c: &mut Criterion) {
                         drop(memory);
 
                         // Recreate loads persisted graph
-                        let _reloaded = MemorySystem::new(config).expect("Failed to reload");
+                        let _reloaded = MemorySystem::new(config, None).expect("Failed to reload");
                         drop(temp_dir);
                     },
                     BatchSize::LargeInput,

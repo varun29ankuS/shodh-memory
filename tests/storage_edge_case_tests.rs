@@ -54,7 +54,7 @@ fn create_test_config(temp_dir: &TempDir) -> MemoryConfig {
 fn test_empty_content_handling() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let exp = Experience {
         content: "".to_string(),
@@ -75,7 +75,7 @@ fn test_empty_content_handling() {
 fn test_whitespace_only_content() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let exp = Experience {
         content: "   \t\n\r   ".to_string(),
@@ -91,7 +91,7 @@ fn test_whitespace_only_content() {
 fn test_very_long_content() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // 100KB of content
     let long_content = "x".repeat(100 * 1024);
@@ -113,7 +113,7 @@ fn test_very_long_content() {
 fn test_unicode_content() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let exp = Experience {
         content: "Unicode test: 你好世界 🤖 λ∑∏ العربية עברית".to_string(),
@@ -145,7 +145,7 @@ fn test_unicode_content() {
 fn test_special_characters_content() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let exp = Experience {
         content: r#"Special chars: <>&"' \n\t\r `~!@#$%^&*()[]{}|;:,.<>?"#.to_string(),
@@ -161,7 +161,7 @@ fn test_special_characters_content() {
 fn test_null_bytes_content() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let exp = Experience {
         content: "Content with\0null\0bytes".to_string(),
@@ -181,7 +181,7 @@ fn test_null_bytes_content() {
 fn test_many_entities() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // 100 entities
     let entities: Vec<String> = (0..100).map(|i| format!("entity_{}", i)).collect();
@@ -200,7 +200,7 @@ fn test_many_entities() {
 fn test_empty_entity_name() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let exp = Experience {
         content: "Memory with empty entity".to_string(),
@@ -217,7 +217,7 @@ fn test_empty_entity_name() {
 fn test_unicode_entity_names() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let exp = Experience {
         content: "Memory with unicode entities".to_string(),
@@ -248,7 +248,7 @@ fn test_unicode_entity_names() {
 fn test_geo_location_boundary_values() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Test boundary coordinates
     let boundary_locations = [
@@ -280,7 +280,7 @@ fn test_geo_location_boundary_values() {
 fn test_geo_location_invalid_coordinates() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Invalid coordinates (should be clamped/handled)
     let exp = Experience {
@@ -300,7 +300,7 @@ fn test_geo_location_invalid_coordinates() {
 fn test_geo_filter_zero_radius() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record a memory with location
     let exp = Experience {
@@ -331,7 +331,7 @@ fn test_geo_filter_zero_radius() {
 fn test_large_metadata() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Large metadata map
     let mut metadata = HashMap::new();
@@ -354,7 +354,7 @@ fn test_large_metadata() {
 fn test_unicode_metadata_keys_values() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let mut metadata = HashMap::new();
     metadata.insert("键".to_string(), "值".to_string());
@@ -379,7 +379,7 @@ fn test_unicode_metadata_keys_values() {
 fn test_sensor_data_extreme_values() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let mut sensor_data = HashMap::new();
     sensor_data.insert("normal".to_string(), 42.0);
@@ -403,7 +403,7 @@ fn test_sensor_data_extreme_values() {
 fn test_sensor_data_special_floats() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let mut sensor_data = HashMap::new();
     sensor_data.insert("infinity".to_string(), f64::INFINITY);
@@ -431,7 +431,7 @@ fn test_sensor_data_special_floats() {
 fn test_query_very_long_text() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record some memories
     for i in 0..5 {
@@ -459,7 +459,7 @@ fn test_query_very_long_text() {
 fn test_query_max_results_zero() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record a memory
     let exp = Experience {
@@ -485,7 +485,7 @@ fn test_query_max_results_zero() {
 fn test_query_max_results_very_large() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record a few memories
     for i in 0..5 {
@@ -517,7 +517,7 @@ fn test_query_max_results_very_large() {
 fn test_reward_boundary_values() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let rewards = [
         -1.0,
@@ -552,7 +552,7 @@ fn test_reward_boundary_values() {
 fn test_confidence_boundary_values() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let confidences = [0.0, 0.5, 1.0, -0.1, 1.1];
 
@@ -579,7 +579,7 @@ fn test_confidence_boundary_values() {
 fn test_rapid_sequential_operations() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Rapidly alternate between record and retrieve
     for i in 0..100 {
@@ -611,7 +611,7 @@ fn test_rapid_sequential_operations() {
 fn test_flush_under_load() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record memories and flush multiple times
     for batch in 0..5 {
@@ -654,7 +654,7 @@ fn test_data_survives_reopen() {
             compression_age_days: 30,
             importance_threshold: 0.3,
         };
-        let system = MemorySystem::new(config).expect("Failed to create memory system");
+        let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
         for i in 0..10 {
             let exp = Experience {
@@ -680,7 +680,7 @@ fn test_data_survives_reopen() {
             compression_age_days: 30,
             importance_threshold: 0.3,
         };
-        let system = MemorySystem::new(config).expect("Failed to reopen memory system");
+        let system = MemorySystem::new(config, None).expect("Failed to reopen memory system");
 
         let stats = system.stats();
         assert_eq!(

@@ -59,7 +59,7 @@ fn create_test_config(temp_dir: &TempDir) -> MemoryConfig {
 fn create_test_system() -> (MemorySystem, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
     (system, temp_dir)
 }
 
@@ -86,7 +86,7 @@ fn test_memory_survives_system_restart() {
 
     // Phase 1: Create memory and drop system
     {
-        let system = MemorySystem::new(config.clone()).expect("Failed to create system");
+        let system = MemorySystem::new(config.clone(), None).expect("Failed to create system");
         let exp = create_experience(original_content, vec!["persistence", "test"]);
         memory_id = system.remember(exp, None).expect("Failed to record");
     }
@@ -94,7 +94,7 @@ fn test_memory_survives_system_restart() {
 
     // Phase 2: Recreate system and verify memory exists
     {
-        let system = MemorySystem::new(config).expect("Failed to recreate system");
+        let system = MemorySystem::new(config, None).expect("Failed to recreate system");
         let query = Query {
             query_text: Some("survive restart".to_string()),
             max_results: 10,
@@ -126,7 +126,7 @@ fn test_importance_changes_survive_restart() {
 
     // Phase 1: Create memory, boost importance, drop system
     {
-        let system = MemorySystem::new(config.clone()).expect("Failed to create system");
+        let system = MemorySystem::new(config.clone(), None).expect("Failed to create system");
         let exp = create_experience("Important information for testing", vec!["importance"]);
         memory_id = system.remember(exp, None).expect("Failed to record");
 
@@ -151,7 +151,7 @@ fn test_importance_changes_survive_restart() {
 
     // Phase 2: Verify importance persisted
     {
-        let system = MemorySystem::new(config).expect("Failed to recreate system");
+        let system = MemorySystem::new(config, None).expect("Failed to recreate system");
 
         // First, get memory directly from storage to verify persistence
         let direct_memory = system
@@ -189,7 +189,7 @@ fn test_access_count_survives_restart() {
 
     // Phase 1: Create memory and access it multiple times
     {
-        let system = MemorySystem::new(config.clone()).expect("Failed to create system");
+        let system = MemorySystem::new(config.clone(), None).expect("Failed to create system");
         let exp = create_experience("Access count test memory", vec!["access"]);
         memory_id = system.remember(exp, None).expect("Failed to record");
 
@@ -203,7 +203,7 @@ fn test_access_count_survives_restart() {
 
     // Phase 2: Verify access count persisted
     {
-        let system = MemorySystem::new(config).expect("Failed to recreate system");
+        let system = MemorySystem::new(config, None).expect("Failed to recreate system");
         let query = Query {
             query_text: Some("access count test".to_string()),
             max_results: 1,
@@ -228,7 +228,7 @@ fn test_multiple_memories_survive_restart() {
 
     // Phase 1: Create multiple memories
     {
-        let system = MemorySystem::new(config.clone()).expect("Failed to create system");
+        let system = MemorySystem::new(config.clone(), None).expect("Failed to create system");
 
         for i in 0..20 {
             let exp = create_experience(
@@ -242,7 +242,7 @@ fn test_multiple_memories_survive_restart() {
 
     // Phase 2: Verify all memories exist
     {
-        let system = MemorySystem::new(config).expect("Failed to recreate system");
+        let system = MemorySystem::new(config, None).expect("Failed to recreate system");
         let query = Query {
             query_text: Some("batch persistence test".to_string()),
             max_results: 50,

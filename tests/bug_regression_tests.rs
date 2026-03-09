@@ -79,7 +79,7 @@ fn create_geo_experience(content: &str, lat: f64, lon: f64) -> Experience {
 fn test_bug001_multiple_memories_same_day_all_retrievable() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record 10 memories on the same day
     let mut memory_ids = Vec::new();
@@ -123,7 +123,7 @@ fn test_bug001_multiple_memories_same_day_all_retrievable() {
 fn test_bug001_date_search_returns_all_memories() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record 5 memories
     for i in 0..5 {
@@ -224,7 +224,7 @@ fn test_bug003_geohash_encode_decode_accuracy() {
 fn test_bug005_index_removal_is_fast() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record 100 memories to populate indices
     for i in 0..100 {
@@ -256,7 +256,7 @@ fn test_bug005_index_removal_is_fast() {
 fn test_bug007_combined_search_scales_linearly() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record 50 memories with various entities
     for i in 0..50 {
@@ -457,7 +457,7 @@ fn test_bug010_radius_normal_values() {
 fn test_algo004_importance_index_updates_after_change() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record a memory
     let exp = Experience {
@@ -520,7 +520,7 @@ fn test_algo004_importance_index_updates_after_change() {
 fn test_bug006_empty_query_returns_gracefully() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record some memories
     for i in 0..5 {
@@ -554,7 +554,7 @@ fn test_bug006_empty_query_returns_gracefully() {
 fn test_bug004_vamana_maintains_recall_after_inserts() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Insert a batch of semantically similar memories
     let topics = [
@@ -631,7 +631,7 @@ fn test_geohash_neighbors_returns_valid_hashes() {
 fn test_geo_filter_retrieval() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record memories at different locations
     let locations = [
@@ -674,7 +674,7 @@ fn test_geo_filter_retrieval() {
 fn test_sho48_forget_removes_from_semantic_search() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record a unique memory
     let exp = Experience {
@@ -720,7 +720,7 @@ fn test_sho48_forget_removes_from_semantic_search() {
 fn test_sho48_forget_updates_stats() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record a memory
     let exp = create_experience("Stats tracking test memory for SHO-48");
@@ -760,7 +760,7 @@ fn test_sho49_no_duplicates_in_retrieve() {
         compression_age_days: 30,
         importance_threshold: 0.0, // Low threshold so memories go to session too
     };
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record memories with high importance (will be in both working and session)
     let mut recorded_ids = std::collections::HashSet::new();
@@ -799,7 +799,7 @@ fn test_sho49_no_duplicates_in_retrieve() {
 fn test_sho49_retrieve_count_matches_unique() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record 5 unique memories
     for i in 0..5 {
@@ -840,7 +840,7 @@ fn test_sho49_retrieve_count_matches_unique() {
 fn test_sho50_stats_updated_on_add() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let stats_before = system.stats();
 
@@ -880,7 +880,7 @@ fn test_sho50_stats_updated_on_add() {
 fn test_sho50_stats_updated_on_forget() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Record a memory
     let exp = create_experience("Memory to forget for SHO-50 stats test");
@@ -919,7 +919,7 @@ fn test_sho50_high_importance_updates_session_count() {
         compression_age_days: 30,
         importance_threshold: 0.0, // Very low threshold - everything goes to session
     };
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let stats_before = system.stats();
 

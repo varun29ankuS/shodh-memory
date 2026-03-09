@@ -101,7 +101,7 @@ struct CrossDomainScenario {
 impl CrossDomainScenario {
     fn new() -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let graph = GraphMemory::new(temp_dir.path()).expect("Failed to create graph");
+        let graph = GraphMemory::new(temp_dir.path(), None).expect("Failed to create graph");
 
         // Create entities
         let coffee = create_entity("coffee", EntityLabel::Concept, 0.8);
@@ -212,7 +212,7 @@ struct TemporalChainScenario {
 impl TemporalChainScenario {
     fn new() -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let graph = GraphMemory::new(temp_dir.path()).expect("Failed to create graph");
+        let graph = GraphMemory::new(temp_dir.path(), None).expect("Failed to create graph");
 
         // Create entities for temporal events
         let standup = create_entity("morning standup", EntityLabel::Event, 0.6);
@@ -301,7 +301,7 @@ struct CooccurrenceScenario {
 impl CooccurrenceScenario {
     fn new() -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let graph = GraphMemory::new(temp_dir.path()).expect("Failed to create graph");
+        let graph = GraphMemory::new(temp_dir.path(), None).expect("Failed to create graph");
 
         // Create team members
         let alice = create_entity("Alice Chen", EntityLabel::Person, 0.9);
@@ -527,7 +527,7 @@ fn bench_density_dependent_weights(c: &mut Criterion) {
             &(entities, relationships),
             |b, &(e, r)| {
                 let temp_dir = TempDir::new().expect("Failed");
-                let graph = GraphMemory::new(temp_dir.path()).expect("Failed");
+                let graph = GraphMemory::new(temp_dir.path(), None).expect("Failed");
 
                 // Populate graph
                 let mut entity_ids = Vec::new();

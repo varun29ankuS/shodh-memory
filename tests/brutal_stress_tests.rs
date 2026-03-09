@@ -58,16 +58,16 @@ fn create_test_config(temp_dir: &TempDir) -> MemoryConfig {
 fn create_test_system() -> (MemorySystem, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
     (system, temp_dir)
 }
 
 fn create_test_system_with_graph() -> (MemorySystem, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let mut system = MemorySystem::new(config).expect("Failed to create memory system");
+    let mut system = MemorySystem::new(config, None).expect("Failed to create memory system");
     let graph_path = temp_dir.path().join("graph");
-    let graph_memory = GraphMemory::new(&graph_path).expect("Failed to create graph memory");
+    let graph_memory = GraphMemory::new(&graph_path, None).expect("Failed to create graph memory");
     system.set_graph_memory(Arc::new(shodh_memory::parking_lot::RwLock::new(
         graph_memory,
     )));
@@ -284,7 +284,7 @@ fn test_brutal_multiple_restart_cycles() {
 
     // Multiple restart cycles, each adding and modifying data
     for cycle in 0..5 {
-        let system = MemorySystem::new(config.clone()).expect("Failed to create system");
+        let system = MemorySystem::new(config.clone(), None).expect("Failed to create system");
 
         // Verify all previous memories exist
         for (i, id) in all_ids.iter().enumerate() {
@@ -320,7 +320,7 @@ fn test_brutal_multiple_restart_cycles() {
     }
 
     // Final verification - all 50 memories (5 cycles x 10 each) should exist
-    let system = MemorySystem::new(config).expect("Final load");
+    let system = MemorySystem::new(config, None).expect("Final load");
     for (i, id) in all_ids.iter().enumerate() {
         system
             .get_memory(id)
@@ -341,7 +341,7 @@ fn test_brutal_partial_write_recovery() {
 
     // Phase 1: Create memory and boost importance
     {
-        let system = MemorySystem::new(config.clone()).expect("Failed");
+        let system = MemorySystem::new(config.clone(), None).expect("Failed");
         // Long content for higher base importance calculation
         let exp = create_experience(
             "This is extremely important persistent data that must survive crashes and restarts. \
@@ -364,7 +364,7 @@ fn test_brutal_partial_write_recovery() {
 
     // Phase 2: Verify recovery
     {
-        let system = MemorySystem::new(config.clone()).expect("Failed to recover");
+        let system = MemorySystem::new(config.clone(), None).expect("Failed to recover");
         let memory = system
             .get_memory(&memory_id)
             .expect("Memory should survive");
@@ -406,7 +406,7 @@ fn test_brutal_exceed_working_memory() {
         compression_age_days: 7,
         importance_threshold: 0.3,
     };
-    let system = MemorySystem::new(config).expect("Failed");
+    let system = MemorySystem::new(config, None).expect("Failed");
 
     let mut all_ids = Vec::new();
 
@@ -823,7 +823,7 @@ fn test_brutal_data_integrity() {
 
     // Phase 1: Create memories with known content
     {
-        let system = MemorySystem::new(config.clone()).expect("Failed");
+        let system = MemorySystem::new(config.clone(), None).expect("Failed");
         for i in 0..50 {
             let content = format!("Integrity test {} - unique content {}", i, Uuid::new_v4());
             let exp = create_experience(&content, vec!["integrity"]);
@@ -834,7 +834,7 @@ fn test_brutal_data_integrity() {
 
     // Phase 2: Verify all content matches exactly
     {
-        let system = MemorySystem::new(config).expect("Failed");
+        let system = MemorySystem::new(config, None).expect("Failed");
         for (id, expected_content) in &expected_contents {
             let memory = system.get_memory(id).expect("Memory should exist");
             assert_eq!(
@@ -982,7 +982,7 @@ fn test_brutal_lock_order_safety() {
     let config = create_test_config(&temp_dir);
 
     // Create system
-    let system = MemorySystem::new(config.clone()).expect("Failed");
+    let system = MemorySystem::new(config.clone(), None).expect("Failed");
 
     // Record some memories
     let mut ids = Vec::new();
@@ -994,7 +994,7 @@ fn test_brutal_lock_order_safety() {
 
     // Rapid restart cycles - tests internal lock handling during initialization
     for cycle in 0..10 {
-        let system = MemorySystem::new(config.clone()).expect("Failed restart");
+        let system = MemorySystem::new(config.clone(), None).expect("Failed restart");
 
         // Verify all memories accessible (tests lock consistency)
         for id in &ids {
@@ -1027,7 +1027,7 @@ fn test_brutal_cache_eviction_integrity() {
         importance_threshold: 0.3,
     };
 
-    let system = MemorySystem::new(config).expect("Failed");
+    let system = MemorySystem::new(config, None).expect("Failed");
     let mut all_ids = Vec::new();
     let mut expected_contents: Vec<String> = Vec::new();
 
@@ -1119,8 +1119,8 @@ fn test_brutal_storage_isolation() {
     let config1 = create_test_config(&temp_dir1);
     let config2 = create_test_config(&temp_dir2);
 
-    let system1 = MemorySystem::new(config1.clone()).expect("Failed");
-    let system2 = MemorySystem::new(config2.clone()).expect("Failed");
+    let system1 = MemorySystem::new(config1.clone(), None).expect("Failed");
+    let system2 = MemorySystem::new(config2.clone(), None).expect("Failed");
 
     // Write to system1
     let exp1 = create_experience("System 1 only data", vec!["isolated"]);
@@ -1154,8 +1154,8 @@ fn test_brutal_storage_isolation() {
     drop(system1);
     drop(system2);
 
-    let system1 = MemorySystem::new(config1).expect("Failed");
-    let system2 = MemorySystem::new(config2).expect("Failed");
+    let system1 = MemorySystem::new(config1, None).expect("Failed");
+    let system2 = MemorySystem::new(config2, None).expect("Failed");
 
     assert!(
         system1.get_memory(&id1).is_ok(),

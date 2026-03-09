@@ -279,11 +279,15 @@ fn build_ner_lookup(
 }
 
 impl MemorySystem {
-    /// Create a new memory system
-    pub fn new(config: MemoryConfig) -> Result<Self> {
+    /// Create a new memory system.
+    ///
+    /// If `shared_cache` is provided, all per-user RocksDB instances share the
+    /// same LRU block cache (multi-tenant server mode). Pass `None` for
+    /// standalone / test use — each DB gets a small local cache.
+    pub fn new(config: MemoryConfig, shared_cache: Option<&rocksdb::Cache>) -> Result<Self> {
         let storage_path = config.storage_path.clone();
         let storage = Arc::new(
-            MemoryStorage::new(&storage_path)
+            MemoryStorage::new(&storage_path, shared_cache)
                 .with_context(|| format!("Failed to open storage at {:?}", storage_path))?,
         );
 

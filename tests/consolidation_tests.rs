@@ -48,9 +48,9 @@ fn setup_memory_system() -> (MemorySystem, TempDir) {
         importance_threshold: 0.7,
     };
 
-    let mut memory_system = MemorySystem::new(config).expect("Failed to create memory system");
+    let mut memory_system = MemorySystem::new(config, None).expect("Failed to create memory system");
     let graph_path = temp_dir.path().join("graph");
-    let graph = GraphMemory::new(&graph_path).expect("Failed to create graph memory");
+    let graph = GraphMemory::new(&graph_path, None).expect("Failed to create graph memory");
     memory_system.set_graph_memory(Arc::new(shodh_memory::parking_lot::RwLock::new(graph)));
     (memory_system, temp_dir)
 }
@@ -67,7 +67,7 @@ fn setup_auto_compress_system() -> (MemorySystem, TempDir) {
         importance_threshold: 0.5,
     };
 
-    let memory_system = MemorySystem::new(config).expect("Failed to create memory system");
+    let memory_system = MemorySystem::new(config, None).expect("Failed to create memory system");
     (memory_system, temp_dir)
 }
 

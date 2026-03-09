@@ -249,6 +249,12 @@ pub struct MultiUserMemoryManager {
     /// calls get_user_graph() while holding its lock, and parking_lot::Mutex
     /// is not re-entrant — sharing a single lock map would deadlock.
     user_graph_init_locks: DashMap<String, Arc<parking_lot::Mutex<()>>>,
+
+    /// Shared RocksDB block cache across all per-user DB instances.
+    /// Single LRU cache provides a hard memory ceiling regardless of user count.
+    /// Without this, each user's MemoryStorage + GraphMemory allocates ~96MB in
+    /// independent caches — 6 users = 576MB just in block caches alone.
+    shared_rocksdb_cache: rocksdb::Cache,
 }
 
 impl MultiUserMemoryManager {
@@ -327,9 +333,12 @@ impl MultiUserMemoryManager {
 
         let user_memories = moka::sync::Cache::builder()
             .max_capacity(server_config.max_users_in_memory as u64)
+            .time_to_idle(std::time::Duration::from_secs(1800))
             .eviction_listener(move |key: Arc<String>, value: Arc<parking_lot::RwLock<MemorySystem>>, cause| {
-                if cause == moka::notification::RemovalCause::Size {
+                if matches!(cause, moka::notification::RemovalCause::Size | moka::notification::RemovalCause::Expired) {
                     evictions_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    let cause_label = if cause == moka::notification::RemovalCause::Expired { "idle-timeout" } else { "LRU" };
 
                     // Spawn blocking task to persist vector index without holding the lock
                     // during I/O. The eviction listener runs synchronously inside moka,
@@ -341,21 +350,21 @@ impl MultiUserMemoryManager {
                             match guard.save_vector_index(&index_path) {
                                 Ok(()) => {
                                     info!(
-                                        "Evicted user '{}' from memory cache (LRU, cache_size={}) - vector index saved",
-                                        user_key, max_cache
+                                        "Evicted user '{}' from memory cache ({}, cache_size={}) - vector index saved",
+                                        user_key, cause_label, max_cache
                                     );
                                 }
                                 Err(e) => {
                                     tracing::warn!(
-                                        "Evicted user '{}' from memory cache (LRU) - failed to save vector index: {}",
-                                        user_key, e
+                                        "Evicted user '{}' from memory cache ({}) - failed to save vector index: {}",
+                                        user_key, cause_label, e
                                     );
                                 }
                             }
                         } else {
                             tracing::warn!(
-                                "Evicted user '{}' from memory cache (LRU) - could not acquire lock to save index",
-                                user_key
+                                "Evicted user '{}' from memory cache ({}) - could not acquire lock to save index",
+                                user_key, cause_label
                             );
                         }
                     });
@@ -365,15 +374,29 @@ impl MultiUserMemoryManager {
 
         let graph_memories = moka::sync::Cache::builder()
             .max_capacity(server_config.max_users_in_memory as u64)
-            .eviction_listener(move |key: Arc<String>, _value, _cause| {
-                info!("Evicted graph for user '{}' from memory cache (LRU)", key);
+            .time_to_idle(std::time::Duration::from_secs(1800))
+            .eviction_listener(move |key: Arc<String>, _value, cause| {
+                let cause_label = if cause == moka::notification::RemovalCause::Expired { "idle-timeout" } else { "LRU" };
+                info!("Evicted graph for user '{}' from memory cache ({})", key, cause_label);
             })
             .build();
+
+        // Single shared LRU block cache for ALL RocksDB instances (per-user memory DBs,
+        // per-user graph DBs, and the global shared DB). Provides a hard memory ceiling
+        // regardless of how many users are active. Without this, each user allocates
+        // ~96MB in independent caches — the shared cache collapses that to a single
+        // 256MB pool with LRU eviction of the coldest blocks across all users.
+        let shared_rocksdb_cache =
+            rocksdb::Cache::new_lru_cache(crate::constants::ROCKSDB_SHARED_CACHE_BYTES);
+        info!(
+            "Shared RocksDB block cache initialized ({}MB)",
+            crate::constants::ROCKSDB_SHARED_CACHE_BYTES / (1024 * 1024)
+        );
 
         // Open a single shared DB for all global stores (todos, reminders, files, feedback, audit).
         // This dramatically reduces file descriptor usage compared to separate DBs per store.
         let shared_db = {
-            use rocksdb::{ColumnFamilyDescriptor, Options as RocksOptions};
+            use rocksdb::{BlockBasedOptions, ColumnFamilyDescriptor, Options as RocksOptions};
             let shared_db_path = base_path.join("shared");
             std::fs::create_dir_all(&shared_db_path)?;
 
@@ -382,7 +405,13 @@ impl MultiUserMemoryManager {
             db_opts.create_missing_column_families(true);
             db_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
             db_opts.set_max_write_buffer_number(2);
-            db_opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB
+            db_opts.set_write_buffer_size(8 * 1024 * 1024); // 8MB (shared DB is low-throughput)
+
+            // Wire shared DB into the shared block cache
+            let mut block_opts = BlockBasedOptions::default();
+            block_opts.set_block_cache(&shared_rocksdb_cache);
+            block_opts.set_cache_index_and_filter_blocks(true);
+            db_opts.set_block_based_table_factory(&block_opts);
 
             // Collect CF descriptors from all stores + audit
             let mut cfs = vec![ColumnFamilyDescriptor::new("default", {
@@ -496,6 +525,7 @@ impl MultiUserMemoryManager {
             maintenance_cycle: std::sync::atomic::AtomicU64::new(0),
             user_memory_init_locks: DashMap::new(),
             user_graph_init_locks: DashMap::new(),
+            shared_rocksdb_cache,
         };
 
         info!("Running initial audit log rotation...");
@@ -747,8 +777,10 @@ impl MultiUserMemoryManager {
             ..self.default_config.clone()
         };
 
-        let mut memory_system = MemorySystem::new(config)
-            .with_context(|| format!("Failed to initialize memory system for user '{user_id}'"))?;
+        let mut memory_system =
+            MemorySystem::new(config, Some(&self.shared_rocksdb_cache)).with_context(|| {
+                format!("Failed to initialize memory system for user '{user_id}'")
+            })?;
         // Wire up GraphMemory for Layer 2 (spreading activation) and Layer 5 (Hebbian learning)
         let graph = self.get_user_graph(user_id)?;
         memory_system.set_graph_memory(graph);
@@ -1213,7 +1245,7 @@ impl MultiUserMemoryManager {
         }
 
         let graph_path = self.base_path.join(user_id).join("graph");
-        let graph_memory = GraphMemory::new(&graph_path)?;
+        let graph_memory = GraphMemory::new(&graph_path, Some(&self.shared_rocksdb_cache))?;
         let graph_arc = Arc::new(parking_lot::RwLock::new(graph_memory));
 
         self.graph_memories

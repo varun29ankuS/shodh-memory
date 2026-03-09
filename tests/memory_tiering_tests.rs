@@ -51,7 +51,7 @@ fn setup_memory_system(working_size: usize, session_mb: usize) -> (MemorySystem,
         importance_threshold: 0.7,
     };
 
-    let memory_system = MemorySystem::new(config).expect("Failed to create memory system");
+    let memory_system = MemorySystem::new(config, None).expect("Failed to create memory system");
     (memory_system, temp_dir)
 }
 
@@ -239,7 +239,7 @@ fn test_longterm_persistence() {
             importance_threshold: 0.3,
         };
 
-        let mut memory_system = MemorySystem::new(config).expect("Failed to create");
+        let mut memory_system = MemorySystem::new(config, None).expect("Failed to create");
 
         // Record important memory that should be persisted
         memory_system
@@ -293,7 +293,7 @@ fn test_longterm_persistence() {
             importance_threshold: 0.3,
         };
 
-        let memory_system = MemorySystem::new(config).expect("Failed to reopen");
+        let memory_system = MemorySystem::new(config, None).expect("Failed to reopen");
 
         // Check stats from the new instance
         let stats = memory_system.stats();

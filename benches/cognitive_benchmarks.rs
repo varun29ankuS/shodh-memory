@@ -30,7 +30,7 @@ fn setup_memory_system() -> (MemorySystem, TempDir) {
         importance_threshold: 0.7,
     };
 
-    let memory_system = MemorySystem::new(config).expect("Failed to create memory system");
+    let memory_system = MemorySystem::new(config, None).expect("Failed to create memory system");
     (memory_system, temp_dir)
 }
 

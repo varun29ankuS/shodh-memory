@@ -58,7 +58,7 @@ fn create_entity_from_ner(ner: &NeuralNer, text: &str) -> Vec<EntityNode> {
 /// Create a test graph memory instance
 fn setup_graph_memory() -> (GraphMemory, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let graph = GraphMemory::new(temp_dir.path()).expect("Failed to create graph memory");
+    let graph = GraphMemory::new(temp_dir.path(), None).expect("Failed to create graph memory");
     (graph, temp_dir)
 }
 
@@ -638,7 +638,7 @@ fn test_persistence_across_reopens() {
 
     // Create graph, add data, and close
     {
-        let graph = GraphMemory::new(&db_path).expect("Failed to create graph");
+        let graph = GraphMemory::new(&db_path, None).expect("Failed to create graph");
 
         let entity = create_entity(entity_name, Some(EntityLabel::Person), true, 0.6);
         graph.add_entity(entity).expect("Failed to add entity");
@@ -646,7 +646,7 @@ fn test_persistence_across_reopens() {
 
     // Reopen and verify persistence
     {
-        let graph = GraphMemory::new(&db_path).expect("Failed to reopen graph");
+        let graph = GraphMemory::new(&db_path, None).expect("Failed to reopen graph");
 
         let entity = graph
             .find_entity_by_name(entity_name)
@@ -664,7 +664,7 @@ fn test_relationship_persistence() {
 
     // Create graph with relationship
     {
-        let graph = GraphMemory::new(&db_path).expect("Failed");
+        let graph = GraphMemory::new(&db_path, None).expect("Failed");
 
         let entity1 = create_entity("PersistA", None, false, 0.5);
         let entity2 = create_entity("PersistB", None, false, 0.5);
@@ -679,7 +679,7 @@ fn test_relationship_persistence() {
 
     // Reopen and verify
     {
-        let graph = GraphMemory::new(&db_path).expect("Failed");
+        let graph = GraphMemory::new(&db_path, None).expect("Failed");
 
         let entity = graph
             .find_entity_by_name("PersistA")
@@ -1276,7 +1276,7 @@ fn test_hebbian_plasticity_fields_persist() {
 
     let edge_id;
     {
-        let graph = GraphMemory::new(&db_path).expect("Failed");
+        let graph = GraphMemory::new(&db_path, None).expect("Failed");
 
         let entity1 = create_entity("PersistA", None, false, 0.5);
         let entity2 = create_entity("PersistB", None, false, 0.5);
@@ -1295,7 +1295,7 @@ fn test_hebbian_plasticity_fields_persist() {
 
     // Reopen and verify plasticity fields persisted
     {
-        let graph = GraphMemory::new(&db_path).expect("Failed");
+        let graph = GraphMemory::new(&db_path, None).expect("Failed");
 
         let edge = graph
             .get_relationship(&edge_id)

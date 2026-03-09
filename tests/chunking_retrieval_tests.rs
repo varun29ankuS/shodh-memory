@@ -25,7 +25,7 @@ fn create_test_config(temp_dir: &TempDir) -> MemoryConfig {
 fn create_test_system() -> (MemorySystem, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
     (system, temp_dir)
 }
 

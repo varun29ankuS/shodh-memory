@@ -35,11 +35,11 @@ fn setup_memory_system() -> (MemorySystem, TempDir) {
         importance_threshold: 0.7,
     };
 
-    let mut memory_system = MemorySystem::new(config).expect("Failed to create memory system");
+    let mut memory_system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Wire up GraphMemory for Hebbian association tests
     let graph_path = temp_dir.path().join("graph");
-    let graph_memory = GraphMemory::new(&graph_path).expect("Failed to create graph memory");
+    let graph_memory = GraphMemory::new(&graph_path, None).expect("Failed to create graph memory");
     memory_system.set_graph_memory(Arc::new(shodh_memory::parking_lot::RwLock::new(
         graph_memory,
     )));
@@ -732,8 +732,8 @@ fn create_persistence_config(temp_dir: &tempfile::TempDir) -> MemoryConfig {
 /// Create a MemorySystem with GraphMemory wired up (for persistence tests)
 fn create_system_with_graph(config: MemoryConfig) -> MemorySystem {
     let graph_path = config.storage_path.join("graph");
-    let mut system = MemorySystem::new(config).expect("Failed to create memory system");
-    let graph_memory = GraphMemory::new(&graph_path).expect("Failed to create graph memory");
+    let mut system = MemorySystem::new(config, None).expect("Failed to create memory system");
+    let graph_memory = GraphMemory::new(&graph_path, None).expect("Failed to create graph memory");
     system.set_graph_memory(Arc::new(shodh_memory::parking_lot::RwLock::new(
         graph_memory,
     )));

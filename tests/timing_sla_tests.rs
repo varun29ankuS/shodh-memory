@@ -141,7 +141,7 @@ where
 fn test_sla_record_p50_latency() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Warm up
     for i in 0..5 {
@@ -175,7 +175,7 @@ fn test_sla_record_p50_latency() {
 fn test_sla_record_p99_latency() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Warm up
     for i in 0..5 {
@@ -213,7 +213,7 @@ fn test_sla_record_p99_latency() {
 fn test_sla_retrieve_p50_latency() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Populate with test data
     for i in 0..50 {
@@ -268,7 +268,7 @@ fn test_sla_retrieve_p50_latency() {
 fn test_sla_retrieve_p99_latency() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Populate with more data
     for i in 0..100 {
@@ -311,7 +311,7 @@ fn test_sla_retrieve_p99_latency() {
 fn test_sla_batch_100_records() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     let start = Instant::now();
     for i in 0..100 {
@@ -338,7 +338,7 @@ fn test_sla_batch_100_records() {
 fn test_sla_throughput_sustained() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Measure sustained throughput over 200 records
     let start = Instant::now();
@@ -375,7 +375,7 @@ fn test_sla_throughput_sustained() {
 fn test_sla_stats_latency() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Add some data
     for i in 0..50 {
@@ -415,7 +415,7 @@ fn test_sla_cold_start_latency() {
 
     // Measure cold start (system initialization)
     let start = Instant::now();
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
     let init_duration = start.elapsed().as_millis();
 
     // Cold start should be < 2s (debug mode)
@@ -452,7 +452,7 @@ fn test_sla_cold_start_latency() {
 fn test_sla_flush_latency() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Add data
     for i in 0..100 {
@@ -486,7 +486,7 @@ fn test_sla_concurrent_access_latency() {
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = Arc::new(MemorySystem::new(config).expect("Failed to create memory system"));
+    let system = Arc::new(MemorySystem::new(config, None).expect("Failed to create memory system"));
 
     // Pre-populate
     for i in 0..50 {
@@ -542,7 +542,7 @@ fn test_sla_concurrent_access_latency() {
 fn test_sla_geo_filter_latency() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Add geo-tagged memories
     for i in 0..30 {
@@ -596,7 +596,7 @@ fn test_sla_geo_filter_latency() {
 fn test_sla_maintenance_latency() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     // Add memories
     for i in 0..100 {
@@ -633,7 +633,7 @@ fn test_sla_maintenance_latency() {
 fn test_performance_summary() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     println!("\n=== Performance Summary ===\n");
 

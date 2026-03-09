@@ -1059,8 +1059,14 @@ impl GraphMemory {
             .expect("stemmed_index CF must exist")
     }
 
-    /// Create a new graph memory system
-    pub fn new(path: &Path) -> Result<Self> {
+    /// Create a new graph memory system.
+    ///
+    /// If `shared_cache` is provided, block-cache reads are charged against the
+    /// shared LRU cache (recommended for multi-tenant server mode). When `None`,
+    /// a small per-instance cache is created (standalone / test use).
+    pub fn new(path: &Path, shared_cache: Option<&rocksdb::Cache>) -> Result<Self> {
+        use crate::constants::ROCKSDB_GRAPH_WRITE_BUFFER_BYTES;
+
         let graph_path = path.join("graph");
         std::fs::create_dir_all(&graph_path)?;
 
@@ -1068,14 +1074,21 @@ impl GraphMemory {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
         opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16MB — graph entries are small KV pairs
+        opts.set_write_buffer_size(ROCKSDB_GRAPH_WRITE_BUFFER_BYTES);
         opts.set_max_write_buffer_number(2);
 
-        // Bounded block cache prevents unbounded C++ heap growth during full scans.
-        // 32MB is sufficient for the graph DB (entities + edges are small KV pairs).
+        // Shared block cache for multi-tenant, small local for standalone/tests.
         use rocksdb::{BlockBasedOptions, Cache};
         let mut block_opts = BlockBasedOptions::default();
-        block_opts.set_block_cache(&Cache::new_lru_cache(32 * 1024 * 1024));
+        let local_cache;
+        let cache = match shared_cache {
+            Some(c) => c,
+            None => {
+                local_cache = Cache::new_lru_cache(8 * 1024 * 1024); // 8MB standalone
+                &local_cache
+            }
+        };
+        block_opts.set_block_cache(cache);
         block_opts.set_cache_index_and_filter_blocks(true);
         opts.set_block_based_table_factory(&block_opts);
 
@@ -6287,7 +6300,7 @@ mod tests {
     fn test_hebbian_strength_no_episode() {
         // Create a temporary graph memory for testing
         let temp_dir = tempfile::tempdir().unwrap();
-        let graph = GraphMemory::new(temp_dir.path()).unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
 
         // Random memory ID with no associated episode should return 0.5 (neutral)
         let fake_memory_id = crate::memory::MemoryId(Uuid::new_v4());
@@ -6298,7 +6311,7 @@ mod tests {
     #[test]
     fn test_hebbian_strength_with_episode_no_edges() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let graph = GraphMemory::new(temp_dir.path()).unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
 
         // Create entities
         let entity1 = EntityNode {
@@ -6357,7 +6370,7 @@ mod tests {
     #[test]
     fn test_hebbian_strength_with_edges() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let graph = GraphMemory::new(temp_dir.path()).unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
 
         // Create entities
         let entity1_uuid = Uuid::new_v4();

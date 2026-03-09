@@ -321,7 +321,7 @@ impl PyMemorySystem {
             ..Default::default()
         };
 
-        let inner = MemorySystem::new(config).map_err(|e| {
+        let inner = MemorySystem::new(config, None).map_err(|e| {
             PyRuntimeError::new_err(format!("Failed to create memory system: {}", e))
         })?;
 

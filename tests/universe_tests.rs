@@ -57,7 +57,7 @@ fn create_entity_from_ner(
 /// Create a test graph memory instance
 fn setup_graph_memory() -> (GraphMemory, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let graph = GraphMemory::new(temp_dir.path()).expect("Failed to create graph memory");
+    let graph = GraphMemory::new(temp_dir.path(), None).expect("Failed to create graph memory");
     (graph, temp_dir)
 }
 

@@ -552,6 +552,35 @@ pub const FACT_NEGATION_MARKERS: &[&str] = &[
 // DEFAULT CONFIGURATION VALUES
 // =============================================================================
 
+/// Total RocksDB block cache capacity shared across ALL DB instances (bytes).
+///
+/// A single LRU cache is shared by every per-user MemoryStorage, per-user
+/// GraphMemory, and the shared global DB. Index blocks, filter blocks, data
+/// blocks, and memtable charges all draw from this pool.
+///
+/// Justification:
+/// - 256MB provides excellent hit rates for typical workloads (1-100 users)
+/// - Prevents unbounded C++ heap growth from per-user isolated caches
+/// - Follows industry standard: YugabyteDB, Apache Flink, Kafka Streams all
+///   share a single block cache across RocksDB instances
+///
+/// Reference: https://github.com/facebook/rocksdb/wiki/Block-Cache
+/// "Set the same Cache object on all the table_options for all the Column
+/// Families of all DB's managed by the process."
+pub const ROCKSDB_SHARED_CACHE_BYTES: usize = 256 * 1024 * 1024;
+
+/// Per-DB write buffer size for MemoryStorage (bytes).
+///
+/// Reduced from 32MB to 8MB because total memtable memory is now bounded
+/// by the shared cache. Smaller individual buffers means more users can
+/// coexist before triggering flushes.
+pub const ROCKSDB_MEMORY_WRITE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+
+/// Per-DB write buffer size for GraphMemory (bytes).
+///
+/// Graph entries are small KV pairs (entities, edges), so 4MB is sufficient.
+pub const ROCKSDB_GRAPH_WRITE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
 /// Default working memory capacity (entries)
 pub const DEFAULT_WORKING_MEMORY_SIZE: usize = 100;
 

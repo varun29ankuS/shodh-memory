@@ -972,7 +972,14 @@ impl MemoryStorage {
             .expect("memory_index CF must exist")
     }
 
-    pub fn new(path: &Path) -> Result<Self> {
+    /// Create a new memory storage.
+    ///
+    /// If `shared_cache` is provided, all block-cache reads are charged against
+    /// the shared LRU cache (recommended for multi-tenant server mode). When
+    /// `None`, a small per-instance cache is created (standalone / test use).
+    pub fn new(path: &Path, shared_cache: Option<&rocksdb::Cache>) -> Result<Self> {
+        use crate::constants::{ROCKSDB_MEMORY_WRITE_BUFFER_BYTES};
+
         // Create directories if they don't exist
         let storage_path = path.join("storage");
         std::fs::create_dir_all(&storage_path)?;
@@ -999,18 +1006,26 @@ impl MemoryStorage {
 
         // Write performance — sized for edge deployment (tune up via env for heavy workloads)
         opts.set_max_write_buffer_number(2);
-        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB write buffer
+        opts.set_write_buffer_size(ROCKSDB_MEMORY_WRITE_BUFFER_BYTES);
         opts.set_level_zero_file_num_compaction_trigger(4);
         opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB SST files
         opts.set_max_bytes_for_level_base(256 * 1024 * 1024); // 256MB L1
         opts.set_max_background_jobs(4);
         opts.set_level_compaction_dynamic_level_bytes(true);
 
-        // Read performance — 64MB block cache covers ~16K blocks, ample for edge use
+        // Read performance — shared block cache for multi-tenant, small local for standalone
         use rocksdb::{BlockBasedOptions, Cache};
         let mut block_opts = BlockBasedOptions::default();
         block_opts.set_bloom_filter(10.0, false); // 10 bits/key = ~1% FPR
-        block_opts.set_block_cache(&Cache::new_lru_cache(64 * 1024 * 1024)); // 64MB cache
+        let local_cache;
+        let cache = match shared_cache {
+            Some(c) => c,
+            None => {
+                local_cache = Cache::new_lru_cache(16 * 1024 * 1024); // 16MB standalone
+                &local_cache
+            }
+        };
+        block_opts.set_block_cache(cache);
         block_opts.set_cache_index_and_filter_blocks(true);
         block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true); // Pin L0 for fast reads
         opts.set_block_based_table_factory(&block_opts);
@@ -1025,7 +1040,7 @@ impl MemoryStorage {
                     idx_opts.create_if_missing(true);
                     idx_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
                     idx_opts.set_max_write_buffer_number(2);
-                    idx_opts.set_write_buffer_size(32 * 1024 * 1024);
+                    idx_opts.set_write_buffer_size(ROCKSDB_MEMORY_WRITE_BUFFER_BYTES);
                     idx_opts
                 }),
             ]

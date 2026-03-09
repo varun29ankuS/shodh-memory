@@ -64,7 +64,7 @@ fn create_test_system() -> (MemorySystem, TempDir) {
         compression_age_days: 7,
         importance_threshold: 0.3,
     };
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
     (system, temp_dir)
 }
 

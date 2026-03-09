@@ -193,7 +193,7 @@ fn test_core_memory_operations() {
 
     // Test 1: System initialization
     let start = Instant::now();
-    let system_result = MemorySystem::new(config);
+    let system_result = MemorySystem::new(config, None);
     let init_duration = start.elapsed().as_millis();
 
     let system = match system_result {
@@ -364,7 +364,7 @@ fn test_robotics_scenarios() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
 
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     reporter.section("Mission Memory Tracking");
 
@@ -605,7 +605,7 @@ fn test_drone_fleet_operations() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
 
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     reporter.section("Multi-Drone Coordination");
 
@@ -874,7 +874,7 @@ fn test_performance_benchmarks() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
 
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     reporter.section("Insertion Performance");
 
@@ -986,7 +986,7 @@ fn test_reliability_and_edge_cases() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
 
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     reporter.section("Input Validation");
 
@@ -1159,7 +1159,7 @@ fn test_stress_scenarios() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);
 
-    let system = MemorySystem::new(config).expect("Failed to create memory system");
+    let system = MemorySystem::new(config, None).expect("Failed to create memory system");
 
     reporter.section("High Volume Operations");
 
