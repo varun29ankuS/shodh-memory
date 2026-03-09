@@ -113,7 +113,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Storage
-rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }
 bincode = { version = "2.0.0-rc.3", features = ["serde"] }
 bincode1 = { package = "bincode", version = "1.3" }  # Legacy format support for pre-2.0 memories
 rmp-serde = "1.3"  # MessagePack - binary format that supports serde tagged enums
@@ -285,6 +284,18 @@ telemetry = [
     "opentelemetry_sdk"
 ]
 
+
+# jemalloc replaces the system C allocator inside RocksDB's C++ code (not just Rust).
+# Without it, glibc/CRT malloc fragments heavily and never returns memory to the OS.
+# Confirmed fix by rust-rocksdb maintainer (zaidoon1) in facebook/rocksdb#12364.
+# PRs #989 (ran-openai) and #1026 (timothyg-stripe) fixed jemalloc linking in v0.24.0.
+[target.'cfg(not(windows))'.dependencies]
+rocksdb = { version = "0.24", default-features = false, features = ["lz4", "jemalloc"] }
+
+# jemalloc doesn't compile with MSVC — Windows uses default CRT allocator.
+# Fundamental fix requires facebook/rocksdb#14403 (custom allocator C API for mimalloc).
+[target.'cfg(windows)'.dependencies]
+rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }
 
 [workspace]
 # Standalone workspace - not part of parent kalki-v2
