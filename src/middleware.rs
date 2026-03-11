@@ -65,7 +65,10 @@ pub async fn request_id(mut req: Request, next: Next) -> Response {
         .get(REQUEST_ID_HEADER)
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty() && s.len() <= 64)
-        .filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'))
+        .filter(|s| {
+            s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        })
         .map(|s| RequestId::from_string(s.to_string()))
         .unwrap_or_else(RequestId::new);
 
@@ -413,10 +416,7 @@ mod tests {
             resp.headers().get("Content-Security-Policy").unwrap(),
             "default-src 'none'"
         );
-        assert_eq!(
-            resp.headers().get("Cache-Control").unwrap(),
-            "no-store"
-        );
+        assert_eq!(resp.headers().get("Cache-Control").unwrap(), "no-store");
         // HSTS should NOT be present in dev mode
         assert!(
             resp.headers().get("Strict-Transport-Security").is_none(),

@@ -236,8 +236,7 @@ async fn async_main() -> Result<()> {
     let rate_limit_enabled = server_config.rate_limit_per_second > 0;
     let governor_layer = if rate_limit_enabled {
         let rps = server_config.rate_limit_per_second.max(1); // Guard against division by zero
-        let cell_interval =
-            std::time::Duration::from_nanos(1_000_000_000 / rps);
+        let cell_interval = std::time::Duration::from_nanos(1_000_000_000 / rps);
         let governor_conf = GovernorConfigBuilder::default()
             .period(cell_interval)
             .burst_size(server_config.rate_limit_burst)

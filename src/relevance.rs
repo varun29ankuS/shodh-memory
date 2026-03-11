@@ -585,7 +585,11 @@ impl LearnedWeights {
             + self.access_count * calibrated_access
             + self.graph_strength * calibrated_graph;
 
-        if result.is_finite() { result } else { 0.0 }
+        if result.is_finite() {
+            result
+        } else {
+            0.0
+        }
     }
 }
 
@@ -2040,7 +2044,10 @@ mod tests {
 
         // -Inf input
         let result = weights.fuse_scores_full(0.5, 0.5, f32::NEG_INFINITY, 0.5, 0.0, 1, 0.5);
-        assert!(result.is_finite(), "-Inf input should produce finite output");
+        assert!(
+            result.is_finite(),
+            "-Inf input should produce finite output"
+        );
 
         // Normal inputs still work
         let result = weights.fuse_scores_full(0.8, 0.5, 0.3, 0.6, 0.2, 3, 0.4);

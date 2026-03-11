@@ -8,13 +8,16 @@ Production-grade client with:
 """
 
 import atexit
+import logging
 import os
 import platform
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
+
+logger = logging.getLogger("shodh_memory")
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -22,6 +25,14 @@ from urllib3.util.retry import Retry
 
 
 _LEGACY_STORAGE_DIR = "shodh_memory_data"
+
+
+def _extract(data: Dict[str, Any], key: str, default: Any = None) -> Any:
+    """Extract key from API response dict, warning if absent."""
+    if key not in data:
+        logger.warning("Expected key '%s' missing from API response", key)
+        return default
+    return data[key]
 
 
 def _default_storage_path() -> str:
@@ -257,7 +268,7 @@ class Memory:
             pass
 
         # Start server
-        print("🧠 Starting Shodh-Memory server...")
+        logger.info("Starting Shodh-Memory server...")
         self._start_server()
 
         # Wait for server to be ready
@@ -266,7 +277,7 @@ class Memory:
             try:
                 response = requests.get(f"{self.base_url}/health", timeout=1)
                 if response.status_code == 200:
-                    print("✅ Shodh-Memory server ready")
+                    logger.info("Shodh-Memory server ready")
                     return
             except requests.exceptions.RequestException:
                 pass
@@ -458,7 +469,7 @@ class Memory:
             raise ShodhError(f"Request timed out: {e}") from e
 
         _handle_response_error(response, context="search")
-        return response.json().get("memories", [])
+        return _extract(response.json(), "memories", [])
 
     def stats(self) -> MemoryStats:
         """Get memory statistics
@@ -539,7 +550,7 @@ class Memory:
             raise ShodhConnectionError(f"Failed to connect to server: {e}") from e
 
         _handle_response_error(response, context="get all memories")
-        return response.json().get("memories", [])
+        return _extract(response.json(), "memories", [])
 
     def update(
         self,
@@ -615,7 +626,7 @@ class Memory:
             raise ShodhConnectionError(f"Failed to connect to server: {e}") from e
 
         _handle_response_error(response, context="history")
-        return response.json().get("events", [])
+        return _extract(response.json(), "events", [])
 
     def forget_me(self) -> None:
         """Delete all memories for this user (GDPR compliance)
@@ -632,7 +643,7 @@ class Memory:
             raise ShodhConnectionError(f"Failed to connect to server: {e}") from e
 
         _handle_response_error(response, context=f"delete user {self.user_id}")
-        print(f"All memories deleted for user: {self.user_id}")
+        logger.info("All memories deleted for user: %s", self.user_id)
 
     def forget_by_age(self, days: int) -> int:
         """Delete memories older than specified days
@@ -658,7 +669,7 @@ class Memory:
             raise ShodhConnectionError(f"Failed to connect to server: {e}") from e
 
         _handle_response_error(response, context="forget by age")
-        return response.json().get("forgotten_count", 0)
+        return _extract(response.json(), "forgotten_count", 0)
 
     def forget_by_importance(self, threshold: float) -> int:
         """Delete memories below importance threshold
@@ -687,7 +698,7 @@ class Memory:
             raise ShodhConnectionError(f"Failed to connect to server: {e}") from e
 
         _handle_response_error(response, context="forget by importance")
-        return response.json().get("forgotten_count", 0)
+        return _extract(response.json(), "forgotten_count", 0)
 
     def forget_by_pattern(self, pattern: str) -> int:
         """Delete memories matching a regex pattern
@@ -713,7 +724,7 @@ class Memory:
             raise ShodhConnectionError(f"Failed to connect to server: {e}") from e
 
         _handle_response_error(response, context="forget by pattern")
-        return response.json().get("forgotten_count", 0)
+        return _extract(response.json(), "forgotten_count", 0)
 
     def forget_by_tags(self, tags: List[str]) -> int:
         """Delete memories matching any of the specified tags
@@ -739,7 +750,7 @@ class Memory:
             raise ShodhConnectionError(f"Failed to connect to server: {e}") from e
 
         _handle_response_error(response, context="forget by tags")
-        return response.json().get("forgotten_count", 0)
+        return _extract(response.json(), "forgotten_count", 0)
 
     def forget_by_date(self, start: str, end: str) -> int:
         """Delete memories within a date range
@@ -768,7 +779,7 @@ class Memory:
             raise ShodhConnectionError(f"Failed to connect to server: {e}") from e
 
         _handle_response_error(response, context="forget by date")
-        return response.json().get("forgotten_count", 0)
+        return _extract(response.json(), "forgotten_count", 0)
 
     def batch_remember(
         self,
@@ -923,7 +934,7 @@ class Memory:
             raise ShodhError(f"Request timed out: {e}") from e
 
         _handle_response_error(response, context="recall")
-        return response.json().get("memories", [])
+        return _extract(response.json(), "memories", [])
 
     def remember(
         self,

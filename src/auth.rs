@@ -257,18 +257,23 @@ pub async fn auth_middleware(request: Request, next: Next) -> Response {
         })
         .or_else(|| {
             // WebSocket fallback: check query parameter for api_key
-            // Node.js WebSocket API doesn't support custom headers, so
-            // clients can pass ?api_key=... in the URL instead
-            request
-                .uri()
-                .query()
-                .and_then(|q| {
-                    q.split('&')
-                        .find_map(|pair| {
-                            pair.strip_prefix("api_key=")
-                                .map(|v| v.to_string())
-                        })
-                })
+            // Browser WebSocket API doesn't support custom headers, so
+            // clients can pass ?api_key=... in the URL instead.
+            // ONLY allow this for WebSocket upgrades to prevent API key
+            // leakage via URLs in server logs, browser history, and referrer headers.
+            let is_websocket = request
+                .headers()
+                .get("upgrade")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.eq_ignore_ascii_case("websocket"))
+                .unwrap_or(false);
+            if !is_websocket {
+                return None;
+            }
+            request.uri().query().and_then(|q| {
+                q.split('&')
+                    .find_map(|pair| pair.strip_prefix("api_key=").map(|v| v.to_string()))
+            })
         }) {
         Some(key) => key,
         None => return AuthError::MissingApiKey.into_response(),
@@ -694,7 +699,7 @@ mod tests {
     // ── Query parameter auth (WebSocket fallback) ──
 
     #[tokio::test]
-    async fn auth_middleware_accepts_query_param_api_key() {
+    async fn auth_middleware_accepts_query_param_for_websocket() {
         use axum::body::Body;
         use axum::http::Request as HttpRequest;
         use axum::middleware::from_fn;
@@ -710,23 +715,56 @@ mod tests {
             .route("/api/stream", get(|| async { "ok" }))
             .layer(from_fn(auth_middleware));
 
-        // Request with API key in query parameter (WebSocket fallback)
+        // WebSocket upgrade with API key in query parameter
         let req = HttpRequest::builder()
             .uri("/api/stream?api_key=test-ws-key")
+            .header("upgrade", "websocket")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "Should accept API key from query parameter"
+            "Should accept API key from query parameter on WebSocket upgrade"
         );
 
         clear_auth_env();
     }
 
     #[tokio::test]
-    async fn auth_middleware_rejects_invalid_query_param() {
+    async fn auth_middleware_ignores_query_param_without_websocket_upgrade() {
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::middleware::from_fn;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_auth_env();
+        env::set_var("SHODH_API_KEYS", "test-ws-key");
+
+        let app = Router::new()
+            .route("/api/remember", get(|| async { "ok" }))
+            .layer(from_fn(auth_middleware));
+
+        // Non-WebSocket request with API key in query parameter — should be ignored
+        let req = HttpRequest::builder()
+            .uri("/api/remember?api_key=test-ws-key")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Query param auth should be ignored for non-WebSocket requests"
+        );
+
+        clear_auth_env();
+    }
+
+    #[tokio::test]
+    async fn auth_middleware_rejects_invalid_websocket_query_param() {
         use axum::body::Body;
         use axum::http::Request as HttpRequest;
         use axum::middleware::from_fn;
@@ -744,13 +782,14 @@ mod tests {
 
         let req = HttpRequest::builder()
             .uri("/api/stream?api_key=wrong-key")
+            .header("upgrade", "websocket")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(
             resp.status(),
             StatusCode::UNAUTHORIZED,
-            "Should reject invalid query parameter API key"
+            "Should reject invalid query parameter API key on WebSocket"
         );
 
         clear_auth_env();
