@@ -428,7 +428,8 @@ impl RetrievalEngine {
                 if vector_ids.is_empty() {
                     return None;
                 }
-                let has_in_range_vector = vector_ids.iter().any(|&vid| (vid as usize) < loaded_count);
+                let has_in_range_vector =
+                    vector_ids.iter().any(|&vid| (vid as usize) < loaded_count);
                 if has_in_range_vector {
                     None
                 } else {
@@ -488,8 +489,7 @@ impl RetrievalEngine {
                                 Err(e) => {
                                     warn!(
                                         "Failed to recover missing vector for memory {}: {}",
-                                        memory_id.0,
-                                        e
+                                        memory_id.0, e
                                     );
                                     recovery_failed += 1;
                                 }
@@ -501,8 +501,7 @@ impl RetrievalEngine {
                     Err(e) => {
                         warn!(
                             "Failed to load memory {} for vector recovery: {}",
-                            memory_id.0,
-                            e
+                            memory_id.0, e
                         );
                         recovery_failed += 1;
                     }
@@ -512,8 +511,7 @@ impl RetrievalEngine {
             if recovered > 0 || recovery_failed > 0 {
                 info!(
                     "Recovered {} missing vectors from RocksDB mappings ({} failed)",
-                    recovered,
-                    recovery_failed
+                    recovered, recovery_failed
                 );
             }
         }

@@ -423,7 +423,11 @@ impl ServerConfig {
             if let Ok(n) = val.parse::<f32>() {
                 let clamped = n.clamp(0.5, 0.99);
                 if (clamped - n).abs() > f32::EPSILON {
-                    tracing::warn!("SHODH_ACTIVATION_DECAY={} clamped to {} (valid range: 0.5–0.99)", n, clamped);
+                    tracing::warn!(
+                        "SHODH_ACTIVATION_DECAY={} clamped to {} (valid range: 0.5–0.99)",
+                        n,
+                        clamped
+                    );
                 }
                 config.activation_decay_factor = clamped;
             }
@@ -433,7 +437,9 @@ impl ServerConfig {
         if let Ok(val) = env::var("SHODH_BACKUP_INTERVAL") {
             if let Ok(n) = val.parse::<u64>() {
                 if n == 0 {
-                    tracing::warn!("SHODH_BACKUP_INTERVAL=0 — backups will run every maintenance cycle");
+                    tracing::warn!(
+                        "SHODH_BACKUP_INTERVAL=0 — backups will run every maintenance cycle"
+                    );
                 }
                 config.backup_interval_secs = n;
             }
@@ -458,7 +464,11 @@ impl ServerConfig {
             if let Ok(n) = val.parse::<usize>() {
                 let clamped = n.clamp(1, 50);
                 if clamped != n {
-                    tracing::warn!("SHODH_MAX_ENTITIES={} clamped to {} (valid range: 1–50)", n, clamped);
+                    tracing::warn!(
+                        "SHODH_MAX_ENTITIES={} clamped to {} (valid range: 1–50)",
+                        n,
+                        clamped
+                    );
                 }
                 config.max_entities_per_memory = clamped;
             }

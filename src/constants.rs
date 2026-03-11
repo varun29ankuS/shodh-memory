@@ -1079,19 +1079,21 @@ pub const LTP_WEEKLY_DECAY_FACTOR: f32 = 0.3;
 ///
 /// L2 edges store this many recent activation timestamps.
 ///
-/// Justification:
-/// - 100 timestamps covers ~3 months of daily use
-/// - Sufficient for weekly and monthly pattern detection
-/// - Memory: 100 × 8 bytes = 800 bytes per L2 edge
-pub const ACTIVATION_HISTORY_L2_CAPACITY: usize = 100;
+/// Calibration:
+/// - 30 timestamps = 1 per day × 30-day episodic lifecycle (L2_MAX_AGE_DAYS)
+/// - Perfectly sized: no wasted capacity, full lifecycle coverage
+/// - Sufficient for weekly pattern detection within the episodic window
+/// - Memory: 30 × 8 bytes = 240 bytes per L2 edge
+pub const ACTIVATION_HISTORY_L2_CAPACITY: usize = 30;
 
 /// Activation history capacity for L3 (Semantic) tier edges
 ///
 /// L3 edges store this many recent activation timestamps.
 ///
-/// Justification:
-/// - 200 timestamps covers ~6 months of regular use
-/// - Sufficient for seasonal pattern detection and temporal queries
+/// Calibration:
+/// - 200 timestamps ≈ 15 months at 3×/week activation frequency
+/// - L3 edges are near-permanent (L3_DECAY_PER_MONTH = 0.02), so deep history is warranted
+/// - Sufficient for monthly and seasonal pattern detection on long-lived semantic edges
 /// - Memory: 200 × 8 bytes = 1600 bytes per L3 edge
 pub const ACTIVATION_HISTORY_L3_CAPACITY: usize = 200;
 

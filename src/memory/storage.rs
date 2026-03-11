@@ -3526,8 +3526,8 @@ mod tests {
         let memory = sample_memory(id.clone(), "current format memory");
         let bytes = bincode::serde::encode_to_vec(&memory, bincode::config::standard()).unwrap();
 
-        let counter = crate::metrics::LEGACY_FALLBACK_BRANCH_TOTAL
-            .with_label_values(&["bincode2_memory"]);
+        let counter =
+            crate::metrics::LEGACY_FALLBACK_BRANCH_TOTAL.with_label_values(&["bincode2_memory"]);
         let before = counter.get();
 
         let (decoded, is_legacy) = deserialize_with_fallback(&bytes).unwrap();
@@ -3548,8 +3548,8 @@ mod tests {
         };
         let bytes = bincode1::serialize(&fixture).unwrap();
 
-        let counter = crate::metrics::LEGACY_FALLBACK_BRANCH_TOTAL
-            .with_label_values(&["bincode1_minimal"]);
+        let counter =
+            crate::metrics::LEGACY_FALLBACK_BRANCH_TOTAL.with_label_values(&["bincode1_minimal"]);
         let before = counter.get();
 
         let (decoded, is_legacy) = deserialize_with_fallback(&bytes).unwrap();
@@ -3569,8 +3569,8 @@ mod tests {
         };
         let bytes = rmp_serde::to_vec(&fixture).unwrap();
 
-        let counter = crate::metrics::LEGACY_FALLBACK_BRANCH_TOTAL
-            .with_label_values(&["msgpack_minimal"]);
+        let counter =
+            crate::metrics::LEGACY_FALLBACK_BRANCH_TOTAL.with_label_values(&["msgpack_minimal"]);
         let before = counter.get();
 
         let (decoded, is_legacy) = deserialize_with_fallback(&bytes).unwrap();
