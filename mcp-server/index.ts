@@ -28,31 +28,11 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import { fileURLToPath } from "url";
-import {
-  isLocalHostFromUrl,
-  nextReconnectDelay,
-  serializeAndValidateBody,
-  shouldWarnInsecureApiUrl,
-} from "./security-utils";
-import {
-  stripSystemNoise as _stripSystemNoise,
-  getContent as _getContent,
-  getType as _getType,
-  formatSurfacedMemories as _formatSurfacedMemories,
-  formatToolCallContent,
-} from "./string-utils";
+import { nextReconnectDelay, serializeAndValidateBody, shouldWarnInsecureApiUrl } from "./security-utils";
+import { stripSystemNoise as _stripSystemNoise, getContent as _getContent, getType as _getType, formatSurfacedMemories as _formatSurfacedMemories, formatToolCallContent } from "./string-utils";
 import { TokenTracker } from "./token-tracking";
-import {
-  extractStringContextFromArgs,
-  formatResetTokenSessionText,
-  formatTokenStatusText,
-  shouldAppendProactiveContext,
-} from "./index-helpers";
 
-const __filename =
-  typeof import.meta !== "undefined" && import.meta.url
-    ? fileURLToPath(import.meta.url)
-    : "";
+const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
 
 // Configuration
@@ -62,7 +42,13 @@ const USER_ID = process.env.SHODH_USER_ID || "claude-code";
 
 // Detect whether the server is local (safe for auto-generated keys)
 function isLocalServer(): boolean {
-  return isLocalHostFromUrl(API_URL);
+  try {
+    const url = new URL(API_URL);
+    const host = url.hostname;
+    return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "0.0.0.0";
+  } catch {
+    return false;
+  }
 }
 
 // Sandbox mode — used by Smithery to scan tools without a running backend
@@ -75,15 +61,11 @@ if (!API_KEY) {
   if (isLocalServer()) {
     // Auto-generate a random key for local development — zero config
     API_KEY = crypto.randomBytes(32).toString("hex");
-    console.error(
-      "[shodh-memory] No API key set — auto-generated for local server.",
-    );
+    console.error("[shodh-memory] No API key set — auto-generated for local server.");
   } else {
     console.error("ERROR: SHODH_API_KEY is required for remote servers.");
     console.error("");
-    console.error(
-      "To fix, add to your MCP config (claude_desktop_config.json or mcp.json):",
-    );
+    console.error("To fix, add to your MCP config (claude_desktop_config.json or mcp.json):");
     console.error(`  "env": { "SHODH_API_KEY": "your-api-key" }`);
     console.error("");
     console.error("Or set in your shell:");
@@ -97,18 +79,14 @@ const REQUEST_TIMEOUT_MS = 10000;
 
 // Warn if non-localhost URL uses HTTP (security risk)
 if (shouldWarnInsecureApiUrl(API_URL, process.env.SHODH_ALLOW_HTTP)) {
-  console.error(
-    "[shodh-memory] WARNING: Using HTTP for a non-localhost server is insecure.",
-  );
-  console.error(
-    "[shodh-memory] Set SHODH_API_URL to an https:// URL, or set SHODH_ALLOW_HTTP=true to suppress this warning.",
-  );
+  console.error("[shodh-memory] WARNING: Using HTTP for a non-localhost server is insecure.");
+  console.error("[shodh-memory] Set SHODH_API_URL to an https:// URL, or set SHODH_ALLOW_HTTP=true to suppress this warning.");
 }
 
 // Input validation limits
 const MAX_CONTENT_LENGTH = 100_000; // 100KB max for content fields
-const MAX_QUERY_LENGTH = 10_000; // 10KB max for search queries
-const MAX_LIMIT = 250; // Max results per query
+const MAX_QUERY_LENGTH = 10_000;    // 10KB max for search queries
+const MAX_LIMIT = 250;              // Max results per query
 
 // =============================================================================
 // TOKEN TRACKING - Context window awareness (SHO-115)
@@ -117,7 +95,32 @@ const MAX_LIMIT = 250; // Max results per query
 // Token budget configuration (default 100k tokens, ~400k chars)
 const TOKEN_BUDGET = parseInt(process.env.SHODH_TOKEN_BUDGET || "100000", 10);
 const ALERT_THRESHOLD = parseFloat(process.env.SHODH_ALERT_THRESHOLD || "0.9");
-const tokenTracker = new TokenTracker(TOKEN_BUDGET, ALERT_THRESHOLD);
+
+// Session token tracking
+let sessionTokens = 0;
+let sessionStartTime = Date.now();
+
+// Simple token estimation: ~4 chars per token (rough approximation)
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+// Get current token status
+function getTokenStatus(): { tokens: number; budget: number; percent: number; alert: string | null } {
+  const percent = sessionTokens / TOKEN_BUDGET;
+  return {
+    tokens: sessionTokens,
+    budget: TOKEN_BUDGET,
+    percent: Math.round(percent * 100) / 100,
+    alert: percent >= ALERT_THRESHOLD ? `context_${Math.round(ALERT_THRESHOLD * 100)}_percent` : null,
+  };
+}
+
+// Reset session (call on new conversation or explicit clear)
+function resetTokenSession(): void {
+  sessionTokens = 0;
+  sessionStartTime = Date.now();
+}
 
 // Streaming ingestion settings
 const STREAM_ENABLED = process.env.SHODH_STREAM !== "false"; // enabled by default
@@ -177,11 +180,7 @@ let streamHandshakeComplete = false;
 
 // Connect to streaming endpoint
 async function connectStream(): Promise<void> {
-  if (
-    !STREAM_ENABLED ||
-    streamConnecting ||
-    streamSocket?.readyState === WebSocket.OPEN
-  ) {
+  if (!STREAM_ENABLED || streamConnecting || (streamSocket?.readyState === WebSocket.OPEN)) {
     return;
   }
 
@@ -192,17 +191,13 @@ async function connectStream(): Promise<void> {
     // Auth: Bun supports headers in WebSocket constructor, but Node.js does not.
     // Pass API key as query parameter for cross-runtime compatibility.
     // Server accepts both X-API-Key header and ?api_key= query parameter.
-    const wsUrlWithAuth =
-      WS_URL +
-      (WS_URL.includes("?") ? "&" : "?") +
-      "api_key=" +
-      encodeURIComponent(API_KEY);
+    const wsUrlWithAuth = WS_URL + (WS_URL.includes("?") ? "&" : "?") + "api_key=" + encodeURIComponent(API_KEY);
 
     // Also try passing header for Bun (ignored by Node.js WebSocket)
     streamSocket = new WebSocket(wsUrlWithAuth, {
       headers: {
-        "X-API-Key": API_KEY,
-      },
+        "X-API-Key": API_KEY
+      }
     } as any);
 
     streamSocket.onopen = () => {
@@ -240,9 +235,7 @@ async function connectStream(): Promise<void> {
             }
           }
           if (bufferedCount > 0) {
-            console.error(
-              `[Stream] Flushed ${bufferedCount} buffered messages`,
-            );
+            console.error(`[Stream] Flushed ${bufferedCount} buffered messages`);
           }
         }
       } catch (e) {
@@ -251,29 +244,18 @@ async function connectStream(): Promise<void> {
     };
 
     streamSocket.onclose = (event) => {
-      console.error(
-        "[Stream] WebSocket closed:",
-        event.code,
-        event.reason || "(no reason)",
-      );
+      console.error("[Stream] WebSocket closed:", event.code, event.reason || "(no reason)");
       streamSocket = null;
       streamConnecting = false;
       streamHandshakeComplete = false;
       // Reconnect after delay with exponential backoff
       if (STREAM_ENABLED && !streamReconnectTimer) {
         const delay = streamReconnectDelay;
-        streamReconnectDelay = nextReconnectDelay(
-          streamReconnectDelay,
-          STREAM_RECONNECT_MAX_DELAY,
-        );
+        streamReconnectDelay = nextReconnectDelay(streamReconnectDelay, STREAM_RECONNECT_MAX_DELAY);
         streamReconnectTimer = setTimeout(() => {
           streamReconnectTimer = null;
-          console.error(
-            `[Stream] Attempting reconnect (next delay: ${streamReconnectDelay}ms)...`,
-          );
-          connectStream().catch((e) =>
-            console.error("[Stream] Reconnect failed:", e),
-          );
+          console.error(`[Stream] Attempting reconnect (next delay: ${streamReconnectDelay}ms)...`);
+          connectStream().catch((e) => console.error("[Stream] Reconnect failed:", e));
         }, delay);
       }
     };
@@ -289,12 +271,7 @@ async function connectStream(): Promise<void> {
 }
 
 // Stream a memory to the server (non-blocking)
-function streamMemory(
-  content: string,
-  tags: string[] = [],
-  source: string = "assistant",
-  timestamp?: string,
-): void {
+function streamMemory(content: string, tags: string[] = [], source: string = "assistant", timestamp?: string): void {
   if (!STREAM_ENABLED || content.length < STREAM_MIN_CONTENT_LENGTH) return;
 
   // Server expects serde tag format: { "type": "content", ... }
@@ -309,25 +286,16 @@ function streamMemory(
 
   if (streamSocket?.readyState === WebSocket.OPEN && streamHandshakeComplete) {
     streamSocket.send(message);
-    console.error(
-      `[Stream] Sent memory (${content.length} chars) with tags:`,
-      tags,
-    );
+    console.error(`[Stream] Sent memory (${content.length} chars) with tags:`, tags);
   } else {
     // Buffer message with FIFO eviction and try to reconnect
     if (streamBuffer.length >= MAX_BUFFER_SIZE) {
       streamBuffer.shift();
-      console.error(
-        `[Stream] Buffer full, evicted oldest message (size: ${MAX_BUFFER_SIZE})`,
-      );
+      console.error(`[Stream] Buffer full, evicted oldest message (size: ${MAX_BUFFER_SIZE})`);
     }
     streamBuffer.push(message);
-    console.error(
-      `[Stream] Buffered memory (socket not ready, buffer size: ${streamBuffer.length})`,
-    );
-    connectStream().catch((e) =>
-      console.error("[Stream] Reconnect failed:", e),
-    );
+    console.error(`[Stream] Buffered memory (socket not ready, buffer size: ${streamBuffer.length})`);
+    connectStream().catch((e) => console.error("[Stream] Reconnect failed:", e));
   }
 }
 
@@ -373,22 +341,17 @@ interface ApiResponse<T> {
 
 // Helper: Get content from memory (handles nested and flat structure)
 function getContent(m: Memory): string {
-  return m.content || m.experience?.content || "";
+  return m.content || m.experience?.content || '';
 }
 
 // Helper: Get memory type from memory (handles both formats)
 function getType(m: Memory): string {
-  return (
-    m.memory_type ||
-    m.experience?.memory_type ||
-    m.experience?.experience_type ||
-    "Observation"
-  );
+  return m.memory_type || m.experience?.memory_type || m.experience?.experience_type || 'Observation';
 }
 
 // Helper: Sleep for retry delays
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // =============================================================================
@@ -402,10 +365,7 @@ interface SurfacedMemory {
 }
 
 // Surface relevant memories based on context (non-blocking, returns null on failure)
-async function surfaceRelevant(
-  context: string,
-  maxResults: number = 3,
-): Promise<SurfacedMemory[] | null> {
+async function surfaceRelevant(context: string, maxResults: number = 3): Promise<SurfacedMemory[] | null> {
   if (!PROACTIVE_SURFACING || context.length < PROACTIVE_MIN_CONTEXT_LENGTH) {
     return null;
   }
@@ -435,7 +395,7 @@ async function surfaceRelevant(
 
     if (!response.ok) return null;
 
-    const result = (await response.json()) as { memories?: SurfacedMemory[] };
+    const result = await response.json() as { memories?: SurfacedMemory[] };
     return result.memories || null;
   } catch (e) {
     console.error("[Proactive] Failed to surface memories:", e);
@@ -448,24 +408,16 @@ function formatSurfacedMemories(memories: SurfacedMemory[]): string {
   if (!memories || memories.length === 0) return "";
 
   const formatted = memories
-    .map(
-      (m, i) =>
-        `  ${i + 1}. [${((m.relevance_score ?? 0) * 100).toFixed(0)}%] ${m.content.slice(0, 80)}...`,
-    )
+    .map((m, i) => `  ${i + 1}. [${((m.relevance_score ?? 0) * 100).toFixed(0)}%] ${m.content.slice(0, 80)}...`)
     .join("\n");
 
   return `\n\n[Relevant memories surfaced]\n${formatted}`;
 }
 
 // Stream tool interactions automatically (non-blocking)
-function streamToolCall(
-  toolName: string,
-  args: Record<string, unknown>,
-  resultText: string,
-): void {
+function streamToolCall(toolName: string, args: Record<string, unknown>, resultText: string): void {
   // Skip ingesting memory management tools to avoid noise
-  if (["remember", "recall", "forget", "list_memories"].includes(toolName))
-    return;
+  if (["remember", "recall", "forget", "list_memories"].includes(toolName)) return;
 
   const argsStr = JSON.stringify(args, null, 2);
   const content = `Tool: ${toolName}\nInput: ${argsStr}\nResult: ${resultText.slice(0, 1000)}${resultText.length > 1000 ? "..." : ""}`;
@@ -477,17 +429,14 @@ function streamToolCall(
 async function apiCall<T>(
   endpoint: string,
   method: string = "GET",
-  body?: object,
+  body?: object
 ): Promise<T> {
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(
-        () => controller.abort(),
-        REQUEST_TIMEOUT_MS,
-      );
+      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
       const options: RequestInit = {
         method,
@@ -499,10 +448,7 @@ async function apiCall<T>(
       };
 
       if (body) {
-        const bodyValidation = serializeAndValidateBody(
-          body,
-          MAX_CONTENT_LENGTH,
-        );
+        const bodyValidation = serializeAndValidateBody(body, MAX_CONTENT_LENGTH);
         if (!bodyValidation.ok) {
           throw new Error(bodyValidation.error);
         }
@@ -513,35 +459,33 @@ async function apiCall<T>(
       clearTimeout(timeoutId);
 
       if (!response.ok) {
-        const errorText = await response.text().catch(() => "Unknown error");
+        const errorText = await response.text().catch(() => 'Unknown error');
         throw new Error(`API error ${response.status}: ${errorText}`);
       }
 
-      return (await response.json()) as T;
+      return await response.json() as T;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
 
       // Don't retry on client errors (4xx)
-      if (lastError.message.includes("API error 4")) {
+      if (lastError.message.includes('API error 4')) {
         throw lastError;
       }
 
       // Log retry attempt
       if (attempt < RETRY_ATTEMPTS) {
-        console.error(
-          `Attempt ${attempt} failed: ${lastError.message}. Retrying in ${RETRY_DELAY_MS}ms...`,
-        );
+        console.error(`Attempt ${attempt} failed: ${lastError.message}. Retrying in ${RETRY_DELAY_MS}ms...`);
         await sleep(RETRY_DELAY_MS * attempt); // Exponential backoff
       }
     }
   }
 
   // Provide helpful error message
-  const errMsg = lastError?.message || "Unknown error";
-  if (errMsg.includes("ECONNREFUSED") || errMsg.includes("fetch failed")) {
+  const errMsg = lastError?.message || 'Unknown error';
+  if (errMsg.includes('ECONNREFUSED') || errMsg.includes('fetch failed')) {
     throw new Error(
       `Cannot connect to shodh-memory server at ${API_URL}. ` +
-        `Start the server with: shodh-memory-server`,
+      `Start the server with: shodh-memory-server`
     );
   }
   throw new Error(`Failed after ${RETRY_ATTEMPTS} attempts: ${errMsg}`);
@@ -576,7 +520,7 @@ const server = new Server(
       resources: {},
       prompts: {},
     },
-  },
+  }
 );
 
 // List available tools
@@ -585,33 +529,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "remember",
-        description:
-          "Store a memory for future recall. Use this to remember important information, decisions, user preferences, project context, or anything you want to recall later.",
+        description: "Store a memory for future recall. Use this to remember important information, decisions, user preferences, project context, or anything you want to recall later.",
         inputSchema: {
           type: "object",
           properties: {
             content: {
               type: "string",
-              description:
-                "The content to remember (observation, decision, learning, etc.)",
+              description: "The content to remember (observation, decision, learning, etc.)",
             },
             type: {
               type: "string",
-              enum: [
-                "Observation",
-                "Decision",
-                "Learning",
-                "Error",
-                "Discovery",
-                "Pattern",
-                "Context",
-                "Task",
-                "CodeEdit",
-                "FileAccess",
-                "Search",
-                "Command",
-                "Conversation",
-              ],
+              enum: ["Observation", "Decision", "Learning", "Error", "Discovery", "Pattern", "Context", "Task", "CodeEdit", "FileAccess", "Search", "Command", "Conversation"],
               description: "Type of memory",
               default: "Observation",
             },
@@ -622,47 +550,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             created_at: {
               type: "string",
-              description:
-                "Optional ISO 8601 timestamp for the memory (e.g., '2025-12-15T06:30:00Z'). If not provided, uses current time.",
+              description: "Optional ISO 8601 timestamp for the memory (e.g., '2025-12-15T06:30:00Z'). If not provided, uses current time.",
             },
             // SHO-104: Richer context encoding
             emotional_valence: {
               type: "number",
-              description:
-                "Emotional valence: -1.0 (negative) to 1.0 (positive), 0.0 = neutral. E.g., bug found: -0.3, feature shipped: 0.7",
+              description: "Emotional valence: -1.0 (negative) to 1.0 (positive), 0.0 = neutral. E.g., bug found: -0.3, feature shipped: 0.7",
             },
             emotional_arousal: {
               type: "number",
-              description:
-                "Arousal level: 0.0 (calm) to 1.0 (highly aroused). E.g., routine task: 0.2, critical issue: 0.9",
+              description: "Arousal level: 0.0 (calm) to 1.0 (highly aroused). E.g., routine task: 0.2, critical issue: 0.9",
             },
             emotion: {
               type: "string",
-              description:
-                "Dominant emotion label (e.g., 'joy', 'frustration', 'surprise')",
+              description: "Dominant emotion label (e.g., 'joy', 'frustration', 'surprise')",
             },
             source_type: {
               type: "string",
-              enum: [
-                "user",
-                "system",
-                "api",
-                "file",
-                "web",
-                "ai_generated",
-                "inferred",
-              ],
+              enum: ["user", "system", "api", "file", "web", "ai_generated", "inferred"],
               description: "Source type: where the information came from",
             },
             credibility: {
               type: "number",
-              description:
-                "Credibility score: 0.0 to 1.0 (1.0 = verified facts, 0.3 = inferred)",
+              description: "Credibility score: 0.0 to 1.0 (1.0 = verified facts, 0.3 = inferred)",
             },
             episode_id: {
               type: "string",
-              description:
-                "Episode ID - groups memories into coherent episodes/conversations",
+              description: "Episode ID - groups memories into coherent episodes/conversations",
             },
             sequence_number: {
               type: "number",
@@ -674,8 +588,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             parent_id: {
               type: "string",
-              description:
-                "Parent memory ID for hierarchical organization. Creates memory trees (e.g., '71-research' -> 'algebraic' -> '21×27≡-1')",
+              description: "Parent memory ID for hierarchical organization. Creates memory trees (e.g., '71-research' -> 'algebraic' -> '21×27≡-1')",
             },
           },
           required: ["content"],
@@ -683,27 +596,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "recall",
-        description:
-          "Search memories AND todos using semantic similarity. Returns both relevant memories and matching todos. Use this to find past experiences, decisions, context, or pending work. Modes: 'semantic' (vector similarity), 'associative' (graph traversal), 'hybrid' (combined).",
+        description: "Search memories AND todos using semantic similarity. Returns both relevant memories and matching todos. Use this to find past experiences, decisions, context, or pending work. Modes: 'semantic' (vector similarity), 'associative' (graph traversal), 'hybrid' (combined).",
         inputSchema: {
           type: "object",
           properties: {
             query: {
               type: "string",
-              description:
-                "Natural language search query - searches both memories and todos",
+              description: "Natural language search query - searches both memories and todos",
             },
             limit: {
               type: "number",
-              description:
-                "Maximum number of memory results (default: 5). Todos limited to 5.",
+              description: "Maximum number of memory results (default: 5). Todos limited to 5.",
               default: 5,
             },
             mode: {
               type: "string",
               enum: ["semantic", "associative", "hybrid"],
-              description:
-                "Retrieval mode: 'semantic' for pure vector similarity, 'associative' for graph-based traversal (follows learned connections), 'hybrid' for density-dependent combination (default)",
+              description: "Retrieval mode: 'semantic' for pure vector similarity, 'associative' for graph-based traversal (follows learned connections), 'hybrid' for density-dependent combination (default)",
               default: "hybrid",
             },
           },
@@ -712,8 +621,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "context_summary",
-        description:
-          "Get a condensed summary of recent learnings, decisions, and context. Use this at the start of a session to quickly understand what you've learned before.",
+        description: "Get a condensed summary of recent learnings, decisions, and context. Use this at the start of a session to quickly understand what you've learned before.",
         inputSchema: {
           type: "object",
           properties: {
@@ -778,8 +686,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "verify_index",
-        description:
-          "Verify vector index integrity - diagnose orphaned memories that are stored but not searchable. Returns health status and count of orphaned memories.",
+        description: "Verify vector index integrity - diagnose orphaned memories that are stored but not searchable. Returns health status and count of orphaned memories.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -787,8 +694,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "repair_index",
-        description:
-          "Repair vector index by re-indexing orphaned memories. Use this when verify_index shows unhealthy status. Returns count of repaired memories.",
+        description: "Repair vector index by re-indexing orphaned memories. Use this when verify_index shows unhealthy status. Returns count of repaired memories.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -797,8 +703,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // Backup & Restore tools
       {
         name: "backup_create",
-        description:
-          "Create a backup of all memories. Returns backup metadata including ID, size, and checksum. Backups are stored locally and can be restored later.",
+        description: "Create a backup of all memories. Returns backup metadata including ID, size, and checksum. Backups are stored locally and can be restored later.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -806,8 +711,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "backup_list",
-        description:
-          "List all available backups for this user. Returns backup history with IDs, timestamps, and sizes.",
+        description: "List all available backups for this user. Returns backup history with IDs, timestamps, and sizes.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -815,8 +719,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "backup_verify",
-        description:
-          "Verify backup integrity using SHA-256 checksum. Use to check if a backup is corrupted before restoring.",
+        description: "Verify backup integrity using SHA-256 checksum. Use to check if a backup is corrupted before restoring.",
         inputSchema: {
           type: "object",
           properties: {
@@ -830,8 +733,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "backup_purge",
-        description:
-          "Purge old backups, keeping only the most recent N. Useful for managing disk space.",
+        description: "Purge old backups, keeping only the most recent N. Useful for managing disk space.",
         inputSchema: {
           type: "object",
           properties: {
@@ -845,8 +747,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "backup_restore",
-        description:
-          "Restore a previously created backup by ID. This replaces all current data for the user with the backup contents. Server restart is recommended after restore.",
+        description: "Restore a previously created backup by ID. This replaces all current data for the user with the backup contents. Server restart is recommended after restore.",
         inputSchema: {
           type: "object",
           properties: {
@@ -860,52 +761,44 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "consolidation_report",
-        description:
-          "Get a report of what the memory system has been learning. Shows memory strengthening/decay events, edge formation, fact extraction, and maintenance cycles. Use this to understand how your memories are evolving.",
+        description: "Get a report of what the memory system has been learning. Shows memory strengthening/decay events, edge formation, fact extraction, and maintenance cycles. Use this to understand how your memories are evolving.",
         inputSchema: {
           type: "object",
           properties: {
             since: {
               type: "string",
-              description:
-                "Start of report period (ISO 8601 format). Defaults to 24 hours ago.",
+              description: "Start of report period (ISO 8601 format). Defaults to 24 hours ago.",
             },
             until: {
               type: "string",
-              description:
-                "End of report period (ISO 8601 format). Defaults to now.",
+              description: "End of report period (ISO 8601 format). Defaults to now.",
             },
           },
         },
       },
       {
         name: "proactive_context",
-        description:
-          "REQUIRED: Call this tool with EVERY user message to surface relevant memories and build conversation history. Pass the user's message as context. This enables: (1) retrieving memories relevant to what the user is asking, (2) building persistent memory of the conversation for future sessions. The system analyzes entities, semantic similarity, and recency to find contextually appropriate memories. Auto-ingest stores the context automatically. USAGE: Always call this FIRST when you receive a user message, passing their message as the context parameter.",
+        description: "REQUIRED: Call this tool with EVERY user message to surface relevant memories and build conversation history. Pass the user's message as context. This enables: (1) retrieving memories relevant to what the user is asking, (2) building persistent memory of the conversation for future sessions. The system analyzes entities, semantic similarity, and recency to find contextually appropriate memories. Auto-ingest stores the context automatically. USAGE: Always call this FIRST when you receive a user message, passing their message as the context parameter.",
         inputSchema: {
           type: "object",
           properties: {
             context: {
               type: "string",
-              description:
-                "The current conversation context or topic (e.g., recent messages, current task description)",
+              description: "The current conversation context or topic (e.g., recent messages, current task description)",
             },
             semantic_threshold: {
               type: "number",
-              description:
-                "Minimum semantic similarity (0.0-1.0) for memories to be surfaced (default: 0.65)",
+              description: "Minimum semantic similarity (0.0-1.0) for memories to be surfaced (default: 0.65)",
               default: 0.65,
             },
             entity_match_weight: {
               type: "number",
-              description:
-                "Weight for entity matching in relevance scoring (0.0-1.0, default: 0.4)",
+              description: "Weight for entity matching in relevance scoring (0.0-1.0, default: 0.4)",
               default: 0.4,
             },
             recency_weight: {
               type: "number",
-              description:
-                "Weight for recency boost in relevance scoring (0.0-1.0, default: 0.2)",
+              description: "Weight for recency boost in relevance scoring (0.0-1.0, default: 0.2)",
               default: 0.2,
             },
             max_results: {
@@ -916,13 +809,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             memory_types: {
               type: "array",
               items: { type: "string" },
-              description:
-                "Filter to specific memory types (e.g., ['Decision', 'Learning', 'Context']). Empty means all types.",
+              description: "Filter to specific memory types (e.g., ['Decision', 'Learning', 'Context']). Empty means all types.",
             },
             auto_ingest: {
               type: "boolean",
-              description:
-                "Automatically store the context as a Conversation memory (default: true). Set to false to only surface memories without storing.",
+              description: "Automatically store the context as a Conversation memory (default: true). Set to false to only surface memories without storing.",
               default: true,
             },
           },
@@ -931,8 +822,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "token_status",
-        description:
-          "Get current token usage status for this session. Returns tokens used, budget remaining, and percentage consumed. Use this to check context window health.",
+        description: "Get current token usage status for this session. Returns tokens used, budget remaining, and percentage consumed. Use this to check context window health.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -940,8 +830,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "reset_token_session",
-        description:
-          "Reset the token counter for a new session. Call this when starting a new conversation or after context has been compressed/summarized.",
+        description: "Reset the token counter for a new session. Call this when starting a new conversation or after context has been compressed/summarized.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -950,8 +839,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // Prospective Memory / Reminders (SHO-116)
       {
         name: "set_reminder",
-        description:
-          "Set a reminder for the future. Triggers on time (at specific time or after duration) or context match (when keywords appear in conversation). Reminders will surface automatically when conditions are met.",
+        description: "Set a reminder for the future. Triggers on time (at specific time or after duration) or context match (when keywords appear in conversation). Reminders will surface automatically when conditions are met.",
         inputSchema: {
           type: "object",
           properties: {
@@ -962,13 +850,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             trigger_type: {
               type: "string",
               enum: ["time", "duration", "context"],
-              description:
-                "When to trigger: 'time' (at specific ISO timestamp), 'duration' (after N seconds), 'context' (when keywords match)",
+              description: "When to trigger: 'time' (at specific ISO timestamp), 'duration' (after N seconds), 'context' (when keywords match)",
             },
             trigger_at: {
               type: "string",
-              description:
-                "ISO 8601 timestamp for 'time' trigger (e.g., '2025-12-23T18:00:00Z')",
+              description: "ISO 8601 timestamp for 'time' trigger (e.g., '2025-12-23T18:00:00Z')",
             },
             after_seconds: {
               type: "number",
@@ -977,8 +863,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             keywords: {
               type: "array",
               items: { type: "string" },
-              description:
-                "Keywords for 'context' trigger - reminder surfaces when any keyword appears",
+              description: "Keywords for 'context' trigger - reminder surfaces when any keyword appears",
             },
             priority: {
               type: "number",
@@ -992,8 +877,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             threshold: {
               type: "number",
-              description:
-                "Semantic similarity threshold for 'context' trigger (0.0-1.0, default: 0.7). Lower values match more broadly, higher values require closer semantic match.",
+              description: "Semantic similarity threshold for 'context' trigger (0.0-1.0, default: 0.7). Lower values match more broadly, higher values require closer semantic match.",
             },
           },
           required: ["content", "trigger_type"],
@@ -1001,8 +885,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "list_reminders",
-        description:
-          "List all pending reminders. Use to check what reminders are scheduled.",
+        description: "List all pending reminders. Use to check what reminders are scheduled.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1017,8 +900,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "dismiss_reminder",
-        description:
-          "Dismiss/acknowledge a triggered reminder. Call this after you've handled a reminder.",
+        description: "Dismiss/acknowledge a triggered reminder. Call this after you've handled a reminder.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1035,8 +917,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       // =================================================================
       {
         name: "add_todo",
-        description:
-          "Add a task to your todo list. Supports GTD workflow with projects, contexts (@computer, @phone), priorities, due dates, and subtasks (via parent_id).",
+        description: "Add a task to your todo list. Supports GTD workflow with projects, contexts (@computer, @phone), priorities, due dates, and subtasks (via parent_id).",
         inputSchema: {
           type: "object",
           properties: {
@@ -1067,8 +948,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             due_date: {
               type: "string",
-              description:
-                "Due date - ISO format or 'today', 'tomorrow', 'monday', etc.",
+              description: "Due date - ISO format or 'today', 'tomorrow', 'monday', etc.",
             },
             tags: {
               type: "array",
@@ -1077,8 +957,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             blocked_on: {
               type: "string",
-              description:
-                "Who/what you're waiting on (sets status to blocked)",
+              description: "Who/what you're waiting on (sets status to blocked)",
             },
             notes: {
               type: "string",
@@ -1095,29 +974,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "list_todos",
-        description:
-          "List or search todos. Supports semantic search via query parameter, or GTD-style filtering. Returns Linear-style formatted output grouped by status.",
+        description: "List or search todos. Supports semantic search via query parameter, or GTD-style filtering. Returns Linear-style formatted output grouped by status.",
         inputSchema: {
           type: "object",
           properties: {
             query: {
               type: "string",
-              description:
-                "Semantic search query - when provided, uses vector similarity to find matching todos instead of listing all",
+              description: "Semantic search query - when provided, uses vector similarity to find matching todos instead of listing all",
             },
             status: {
               type: "array",
-              items: {
-                type: "string",
-                enum: [
-                  "backlog",
-                  "todo",
-                  "in_progress",
-                  "blocked",
-                  "done",
-                  "cancelled",
-                ],
-              },
+              items: { type: "string", enum: ["backlog", "todo", "in_progress", "blocked", "done", "cancelled"] },
               description: "Filter by status(es)",
             },
             project: {
@@ -1153,8 +1020,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "update_todo",
-        description:
-          "Update a todo's properties. Use short ID prefix (e.g., SHO-1a2b) or full ID.",
+        description: "Update a todo's properties. Use short ID prefix (e.g., SHO-1a2b) or full ID.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1168,14 +1034,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             status: {
               type: "string",
-              enum: [
-                "backlog",
-                "todo",
-                "in_progress",
-                "blocked",
-                "done",
-                "cancelled",
-              ],
+              enum: ["backlog", "todo", "in_progress", "blocked", "done", "cancelled"],
               description: "New status",
             },
             priority: {
@@ -1211,8 +1070,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             parent_id: {
               type: "string",
-              description:
-                "Parent todo ID or short prefix to make this a subtask. Pass empty string to remove parent.",
+              description: "Parent todo ID or short prefix to make this a subtask. Pass empty string to remove parent.",
             },
           },
           required: ["todo_id"],
@@ -1220,8 +1078,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "complete_todo",
-        description:
-          "Mark a todo as complete. For recurring tasks, automatically creates the next occurrence.",
+        description: "Mark a todo as complete. For recurring tasks, automatically creates the next occurrence.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1249,8 +1106,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "reorder_todo",
-        description:
-          "Move a todo up or down within its status group. Use to prioritize tasks manually.",
+        description: "Move a todo up or down within its status group. Use to prioritize tasks manually.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1269,8 +1125,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "add_project",
-        description:
-          "Create a new project to group todos. Use parent to create a sub-project under another project.",
+        description: "Create a new project to group todos. Use parent to create a sub-project under another project.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1280,8 +1135,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             prefix: {
               type: "string",
-              description:
-                "Custom prefix for todo IDs (e.g., 'BOLT', 'MEM'). Auto-derived from name if not provided.",
+              description: "Custom prefix for todo IDs (e.g., 'BOLT', 'MEM'). Auto-derived from name if not provided.",
             },
             description: {
               type: "string",
@@ -1331,8 +1185,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             delete_todos: {
               type: "boolean",
-              description:
-                "Also delete all todos in this project (default: false)",
+              description: "Also delete all todos in this project (default: false)",
             },
           },
           required: ["project"],
@@ -1340,8 +1193,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "todo_stats",
-        description:
-          "Get statistics about your todos - counts by status, overdue items, etc.",
+        description: "Get statistics about your todos - counts by status, overdue items, etc.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -1349,8 +1201,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "list_subtasks",
-        description:
-          "List subtasks of a parent todo. Use add_todo with parent_id to create subtasks.",
+        description: "List subtasks of a parent todo. Use add_todo with parent_id to create subtasks.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1364,8 +1215,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "add_todo_comment",
-        description:
-          "Add a comment to a todo. Use to track progress, notes, or resolution details.",
+        description: "Add a comment to a todo. Use to track progress, notes, or resolution details.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1380,8 +1230,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             comment_type: {
               type: "string",
               enum: ["comment", "progress", "resolution", "activity"],
-              description:
-                "Type of comment: comment (default), progress (updates), resolution (fix details), activity (system)",
+              description: "Type of comment: comment (default), progress (updates), resolution (fix details), activity (system)",
             },
           },
           required: ["todo_id", "content"],
@@ -1389,8 +1238,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "list_todo_comments",
-        description:
-          "List all comments and activity history for a specific todo.",
+        description: "List all comments and activity history for a specific todo.",
         inputSchema: {
           type: "object",
           properties: {
@@ -1444,15 +1292,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "read_memory",
-        description:
-          "Read the FULL content of a specific memory by ID. Use this when you need to see the complete text of a memory that was truncated in search results.",
+        description: "Read the FULL content of a specific memory by ID. Use this when you need to see the complete text of a memory that was truncated in search results.",
         inputSchema: {
           type: "object",
           properties: {
             memory_id: {
               type: "string",
-              description:
-                "The memory ID (full UUID or short prefix like '5581cd02')",
+              description: "The memory ID (full UUID or short prefix like '5581cd02')",
             },
           },
           required: ["memory_id"],
@@ -1463,20 +1309,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 // Auto-stream context from tool arguments (captures conversation intent)
-function autoStreamContext(
-  toolName: string,
-  args: Record<string, unknown>,
-): void {
+function autoStreamContext(toolName: string, args: Record<string, unknown>): void {
   // Skip tools that already handle their own streaming or are meta/diagnostic
-  if (
-    [
-      "proactive_context",
-      "streaming_status",
-      "token_status",
-      "reset_token_session",
-    ].includes(toolName)
-  )
-    return;
+  if (["proactive_context", "streaming_status", "token_status", "reset_token_session"].includes(toolName)) return;
 
   // Extract meaningful context from tool arguments
   let context = "";
@@ -1499,10 +1334,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   // Ensure streaming is connected (lazy reconnect on tool calls)
-  if (
-    STREAM_ENABLED &&
-    (!streamSocket || streamSocket.readyState !== WebSocket.OPEN)
-  ) {
+  if (STREAM_ENABLED && (!streamSocket || streamSocket.readyState !== WebSocket.OPEN)) {
     connectStream().catch(() => {});
   }
 
@@ -1524,10 +1356,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   // Result type for tool responses
-  type ToolResult = {
-    content: { type: string; text: string }[];
-    isError?: boolean;
-  };
+  type ToolResult = { content: { type: string; text: string }[]; isError?: boolean };
 
   // Inner function to execute tool logic - allows us to capture result for auto-ingest
   const executeTool = async (): Promise<ToolResult> => {
@@ -1566,26 +1395,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         if (!content || content.length === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Error: 'content' is required and cannot be empty",
-              },
-            ],
-            isError: true,
-          };
+          return { content: [{ type: "text", text: "Error: 'content' is required and cannot be empty" }], isError: true };
         }
         if (content.length > MAX_CONTENT_LENGTH) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Error: 'content' exceeds maximum length of ${MAX_CONTENT_LENGTH} characters`,
-              },
-            ],
-            isError: true,
-          };
+          return { content: [{ type: "text", text: `Error: 'content' exceeds maximum length of ${MAX_CONTENT_LENGTH} characters` }], isError: true };
         }
 
         const result = await apiCall<{ id: string }>("/api/remember", "POST", {
@@ -1610,11 +1423,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Format response with branded display
         let response = `🐘 Memory Stored\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-        response += `📝 ${content.slice(0, 60)}${content.length > 60 ? "..." : ""}\n`;
+        response += `📝 ${content.slice(0, 60)}${content.length > 60 ? '...' : ''}\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
         response += `Type: ${type}`;
         if (tags.length > 0) {
-          response += ` │ Tags: ${tags.join(", ")}`;
+          response += ` │ Tags: ${tags.join(', ')}`;
         }
         response += `\nID: ${result.id}`;
 
@@ -1624,45 +1437,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "recall": {
-        const {
-          query,
-          limit: rawLimit = 5,
-          mode = "hybrid",
-        } = args as { query: string; limit?: number; mode?: string };
+        const { query, limit: rawLimit = 5, mode = "hybrid" } = args as { query: string; limit?: number; mode?: string };
 
         if (!query || query.length === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Error: 'query' is required and cannot be empty",
-              },
-            ],
-            isError: true,
-          };
+          return { content: [{ type: "text", text: "Error: 'query' is required and cannot be empty" }], isError: true };
         }
         if (query.length > MAX_QUERY_LENGTH) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Error: 'query' exceeds maximum length of ${MAX_QUERY_LENGTH} characters`,
-              },
-            ],
-            isError: true,
-          };
+          return { content: [{ type: "text", text: `Error: 'query' exceeds maximum length of ${MAX_QUERY_LENGTH} characters` }], isError: true };
         }
         const validModes = ["semantic", "associative", "hybrid"];
         if (!validModes.includes(mode)) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Error: 'mode' must be one of: ${validModes.join(", ")}`,
-              },
-            ],
-            isError: true,
-          };
+          return { content: [{ type: "text", text: `Error: 'mode' must be one of: ${validModes.join(", ")}` }], isError: true };
         }
         const limit = Math.max(1, Math.min(Math.floor(rawLimit), MAX_LIMIT));
 
@@ -1737,28 +1522,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         response += `\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-        response += `Query: "${query.slice(0, 40)}${query.length > 40 ? "..." : ""}" │ Mode: ${mode}\n`;
+        response += `Query: "${query.slice(0, 40)}${query.length > 40 ? '...' : ''}" │ Mode: ${mode}\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
         // Helper to format timestamp
         const formatTime = (ts: string | undefined): string => {
-          if (!ts) return "";
+          if (!ts) return '';
           const d = new Date(ts);
           const now = new Date();
           const diffMs = now.getTime() - d.getTime();
           const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
 
           if (diffDays === 0) {
-            return d.toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            });
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
           } else if (diffDays === 1) {
-            return "Yesterday";
+            return 'Yesterday';
           } else if (diffDays < 7) {
             return `${diffDays}d ago`;
           } else {
-            return d.toLocaleDateString([], { month: "short", day: "numeric" });
+            return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
           }
         };
 
@@ -1769,16 +1551,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const m = memories[i];
             const content = getContent(m);
             const score = ((m.score || 0) * 100).toFixed(0);
-            const filled = Math.max(
-              0,
-              Math.min(10, Math.round((m.score || 0) * 10)),
-            );
-            const matchBar = "█".repeat(filled) + "░".repeat(10 - filled);
+            const filled = Math.max(0, Math.min(10, Math.round((m.score || 0) * 10)));
+            const matchBar = '█'.repeat(filled) + '░'.repeat(10 - filled);
             const timeStr = formatTime(m.created_at);
 
             response += `• ${matchBar} ${score}% │ ${timeStr}\n`;
-            response += `  ${content.slice(0, 200)}${content.length > 200 ? "..." : ""}\n`;
-            response += `  ┗━ ${getType(m)}${m.tier ? ` │ ${m.tier}` : ""} │ ${m.id}\n`;
+            response += `  ${content.slice(0, 200)}${content.length > 200 ? '...' : ''}\n`;
+            response += `  ┗━ ${getType(m)}${m.tier ? ` │ ${m.tier}` : ''} │ ${m.id}\n`;
             if (i < memories.length - 1) response += `\n`;
           }
         }
@@ -1790,23 +1569,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           for (let i = 0; i < todos.length; i++) {
             const t = todos[i];
             const score = ((t.score || 0) * 100).toFixed(0);
-            const filled = Math.max(
-              0,
-              Math.min(10, Math.round((t.score || 0) * 10)),
-            );
-            const matchBar = "█".repeat(filled) + "░".repeat(10 - filled);
-            const statusIcon =
-              t.status === "done"
-                ? "✓"
-                : t.status === "in_progress"
-                  ? "▶"
-                  : t.status === "blocked"
-                    ? "⊗"
-                    : "○";
+            const filled = Math.max(0, Math.min(10, Math.round((t.score || 0) * 10)));
+            const matchBar = '█'.repeat(filled) + '░'.repeat(10 - filled);
+            const statusIcon = t.status === 'done' ? '✓' : t.status === 'in_progress' ? '▶' : t.status === 'blocked' ? '⊗' : '○';
             const timeStr = formatTime(t.created_at);
 
             response += `• ${matchBar} ${score}% │ ${timeStr}\n`;
-            response += `  ${statusIcon} ${t.content.slice(0, 180)}${t.content.length > 180 ? "..." : ""}\n`;
+            response += `  ${statusIcon} ${t.content.slice(0, 180)}${t.content.length > 180 ? '...' : ''}\n`;
             response += `  ┗━ ${t.short_id} │ ${t.status} │ ${t.priority}`;
             if (t.project) response += ` │ ${t.project}`;
             response += `\n`;
@@ -1835,7 +1604,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           response += `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-          response += `🔗 LINEAGE (${lineage.length} causal edge${lineage.length > 1 ? "s" : ""})\n`;
+          response += `🔗 LINEAGE (${lineage.length} causal edge${lineage.length > 1 ? 's' : ''})\n`;
           for (const edge of lineage) {
             const fromLabel = idToContent.get(edge.from) || idShort(edge.from);
             const toLabel = idToContent.get(edge.to) || idShort(edge.to);
@@ -1864,13 +1633,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         // Fetch all memories
-        const result = await apiCall<{ memories: Memory[] }>(
-          "/api/memories",
-          "POST",
-          {
-            user_id: USER_ID,
-          },
-        );
+        const result = await apiCall<{ memories: Memory[] }>("/api/memories", "POST", {
+          user_id: USER_ID,
+        });
 
         const memories = result.memories || [];
 
@@ -1894,19 +1659,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         for (const m of memories) {
           const type = getType(m);
           switch (type) {
-            case "Decision":
+            case 'Decision':
               decisions.push(m);
               break;
-            case "Learning":
+            case 'Learning':
               learnings.push(m);
               break;
-            case "Context":
+            case 'Context':
               context.push(m);
               break;
-            case "Pattern":
+            case 'Pattern':
               patterns.push(m);
               break;
-            case "Error":
+            case 'Error':
               errors.push(m);
               break;
           }
@@ -1922,7 +1687,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (include_context && context.length > 0) {
           response += `📁 PROJECT CONTEXT\n`;
           for (const m of context.slice(0, max_items)) {
-            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? "..." : ""}\n`;
+            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? '...' : ''}\n`;
           }
           response += `\n`;
         }
@@ -1930,7 +1695,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (include_decisions && decisions.length > 0) {
           response += `📋 DECISIONS\n`;
           for (const m of decisions.slice(0, max_items)) {
-            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? "..." : ""}\n`;
+            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? '...' : ''}\n`;
           }
           response += `\n`;
         }
@@ -1938,7 +1703,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (include_learnings && learnings.length > 0) {
           response += `💡 LEARNINGS\n`;
           for (const m of learnings.slice(0, max_items)) {
-            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? "..." : ""}\n`;
+            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? '...' : ''}\n`;
           }
           response += `\n`;
         }
@@ -1946,7 +1711,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (patterns.length > 0) {
           response += `🔄 PATTERNS\n`;
           for (const m of patterns.slice(0, max_items)) {
-            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? "..." : ""}\n`;
+            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? '...' : ''}\n`;
           }
           response += `\n`;
         }
@@ -1954,15 +1719,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (errors.length > 0) {
           response += `⚠️ ERRORS TO AVOID\n`;
           for (const m of errors.slice(0, Math.min(3, max_items))) {
-            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? "..." : ""}\n`;
+            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? '...' : ''}\n`;
           }
         }
 
-        if (
-          decisions.length === 0 &&
-          learnings.length === 0 &&
-          context.length === 0
-        ) {
+        if (decisions.length === 0 && learnings.length === 0 && context.length === 0) {
           response += `ℹ️  Tip: Use types like Decision, Learning, Context when remembering\n`;
           response += `   to build richer context summaries.`;
         }
@@ -1975,13 +1736,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "list_memories": {
         const { limit = 20 } = args as { limit?: number };
 
-        const result = await apiCall<{ memories: Memory[] }>(
-          "/api/memories",
-          "POST",
-          {
-            user_id: USER_ID,
-          },
-        );
+        const result = await apiCall<{ memories: Memory[] }>("/api/memories", "POST", {
+          user_id: USER_ID,
+        });
 
         const memories = (result.memories || []).slice(0, limit);
 
@@ -2004,33 +1761,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let response = `🐘 Memory List\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
         response += `Showing ${memories.length} memories\n`;
-        response += `Types: ${Object.entries(typeCounts)
-          .map(([t, c]) => `${t}(${c})`)
-          .join(" │ ")}\n`;
+        response += `Types: ${Object.entries(typeCounts).map(([t, c]) => `${t}(${c})`).join(' │ ')}\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
         for (let i = 0; i < memories.length; i++) {
           const m = memories[i];
           const content = getContent(m);
-          const typeIcon =
-            {
-              Decision: "📋",
-              Learning: "💡",
-              Context: "📁",
-              Pattern: "🔄",
-              Error: "⚠️",
-              Observation: "👁️",
-              Discovery: "🔍",
-              Task: "✅",
-              CodeEdit: "📝",
-              FileAccess: "📄",
-              Search: "🔎",
-              Command: "⚡",
-              Conversation: "💬",
-            }[getType(m)] || "📦";
+          const typeIcon = {
+            'Decision': '📋',
+            'Learning': '💡',
+            'Context': '📁',
+            'Pattern': '🔄',
+            'Error': '⚠️',
+            'Observation': '👁️',
+            'Discovery': '🔍',
+            'Task': '✅',
+            'CodeEdit': '📝',
+            'FileAccess': '📄',
+            'Search': '🔎',
+            'Command': '⚡',
+            'Conversation': '💬',
+          }[getType(m)] || '📦';
 
-          response += `${String(i + 1).padStart(2)}. ${typeIcon} ${content.slice(0, 150)}${content.length > 150 ? "..." : ""}\n`;
-          response += `    ┗━ ${getType(m)}${m.tier ? ` │ ${m.tier}` : ""} │ ${m.id}\n`;
+          response += `${String(i + 1).padStart(2)}. ${typeIcon} ${content.slice(0, 150)}${content.length > 150 ? '...' : ''}\n`;
+          response += `    ┗━ ${getType(m)}${m.tier ? ` │ ${m.tier}` : ''} │ ${m.id}\n`;
         }
 
         return {
@@ -2065,16 +1819,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           vector_index_count: number; // API uses this name
         }
 
-        const result = await apiCall<MemoryStats>(
-          `/api/users/${USER_ID}/stats`,
-          "GET",
-        );
+        const result = await apiCall<MemoryStats>(`/api/users/${USER_ID}/stats`, "GET");
 
         // Handle both old and new field names for compatibility
-        const indexedCount =
-          result.vector_index_count ?? result.indexed_vectors ?? 0;
-        const avgImportance =
-          result.average_importance ?? result.avg_importance ?? 0;
+        const indexedCount = result.vector_index_count ?? result.indexed_vectors ?? 0;
+        const avgImportance = result.average_importance ?? result.avg_importance ?? 0;
 
         let response = `🐘 Memory Statistics\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -2084,36 +1833,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         response += `Avg Importance: ${avgImportance.toFixed(2)}\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
 
-        if (
-          result.memory_types &&
-          Object.keys(result.memory_types).length > 0
-        ) {
+        if (result.memory_types && Object.keys(result.memory_types).length > 0) {
           response += `\nBy Type:\n`;
           const typeIcons: Record<string, string> = {
-            Decision: "📋",
-            Learning: "💡",
-            Context: "📁",
-            Pattern: "🔄",
-            Error: "⚠️",
-            Observation: "👁️",
-            Discovery: "🔍",
-            Task: "✅",
-            CodeEdit: "📝",
-            FileAccess: "📄",
-            Search: "🔎",
-            Command: "⚡",
-            Conversation: "💬",
+            'Decision': '📋',
+            'Learning': '💡',
+            'Context': '📁',
+            'Pattern': '🔄',
+            'Error': '⚠️',
+            'Observation': '👁️',
+            'Discovery': '🔍',
+            'Task': '✅',
+            'CodeEdit': '📝',
+            'FileAccess': '📄',
+            'Search': '🔎',
+            'Command': '⚡',
+            'Conversation': '💬',
           };
           for (const [type, count] of Object.entries(result.memory_types)) {
-            const icon = typeIcons[type] || "📦";
-            const bar = "█".repeat(
-              Math.min(
-                20,
-                Math.round(
-                  ((count as number) / (result.total_memories || 1)) * 20,
-                ),
-              ),
-            );
+            const icon = typeIcons[type] || '📦';
+            const bar = '█'.repeat(Math.min(20, Math.round((count as number) / (result.total_memories || 1) * 20)));
             response += `   ${icon} ${type.padEnd(12)} ${bar} ${count}\n`;
           }
         }
@@ -2132,13 +1871,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           is_healthy: boolean;
         }
 
-        const result = await apiCall<IndexIntegrityReport>(
-          "/api/index/verify",
-          "POST",
-          {
-            user_id: USER_ID,
-          },
-        );
+        const result = await apiCall<IndexIntegrityReport>("/api/index/verify", "POST", {
+          user_id: USER_ID,
+        });
 
         const statusIcon = result.is_healthy ? "✓" : "⚠️";
         const healthText = result.is_healthy ? "HEALTHY" : "UNHEALTHY";
@@ -2171,13 +1906,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           is_healthy: boolean;
         }
 
-        const result = await apiCall<RepairIndexResponse>(
-          "/api/index/repair",
-          "POST",
-          {
-            user_id: USER_ID,
-          },
-        );
+        const result = await apiCall<RepairIndexResponse>("/api/index/repair", "POST", {
+          user_id: USER_ID,
+        });
 
         const statusIcon = result.is_healthy ? "✓" : "⚠️";
         const statusText = result.success ? "SUCCESS" : "PARTIAL";
@@ -2225,13 +1956,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           message: string;
         }
 
-        const result = await apiCall<BackupResponse>(
-          "/api/backup/create",
-          "POST",
-          {
-            user_id: USER_ID,
-          },
-        );
+        const result = await apiCall<BackupResponse>("/api/backup/create", "POST", {
+          user_id: USER_ID,
+        });
 
         let response = `🐘 Backup Created\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -2245,10 +1972,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           response += `Memories: ${b.memory_count}\n`;
           response += `Size: ${sizeMB} MB\n`;
           if (b.secondary_stores && b.secondary_stores.length > 0) {
-            const secSizeMB = (
-              (b.secondary_size_bytes || 0) /
-              (1024 * 1024)
-            ).toFixed(2);
+            const secSizeMB = ((b.secondary_size_bytes || 0) / (1024 * 1024)).toFixed(2);
             response += `Secondary stores: ${b.secondary_stores.length} (${secSizeMB} MB)\n`;
             response += `  Includes: ${b.secondary_stores.join(", ")}\n`;
           }
@@ -2281,13 +2005,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           count: number;
         }
 
-        const result = await apiCall<ListBackupsResponse>(
-          "/api/backups",
-          "POST",
-          {
-            user_id: USER_ID,
-          },
-        );
+        const result = await apiCall<ListBackupsResponse>("/api/backups", "POST", {
+          user_id: USER_ID,
+        });
 
         let response = `🐘 Available Backups\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -2322,14 +2042,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           message: string;
         }
 
-        const result = await apiCall<VerifyBackupResponse>(
-          "/api/backup/verify",
-          "POST",
-          {
-            user_id: USER_ID,
-            backup_id,
-          },
-        );
+        const result = await apiCall<VerifyBackupResponse>("/api/backup/verify", "POST", {
+          user_id: USER_ID,
+          backup_id,
+        });
 
         const statusIcon = result.is_valid ? "✓" : "✗";
         const statusText = result.is_valid ? "VALID" : "INVALID";
@@ -2353,14 +2069,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           purged_count: number;
         }
 
-        const result = await apiCall<PurgeBackupsResponse>(
-          "/api/backups/purge",
-          "POST",
-          {
-            user_id: USER_ID,
-            keep_count,
-          },
-        );
+        const result = await apiCall<PurgeBackupsResponse>("/api/backups/purge", "POST", {
+          user_id: USER_ID,
+          keep_count,
+        });
 
         let response = `🐘 Backup Purge\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -2386,14 +2098,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           restored_stores: string[];
         }
 
-        const result = await apiCall<RestoreBackupResponse>(
-          "/api/backup/restore",
-          "POST",
-          {
-            user_id: USER_ID,
-            backup_id,
-          },
-        );
+        const result = await apiCall<RestoreBackupResponse>("/api/backup/restore", "POST", {
+          user_id: USER_ID,
+          backup_id,
+        });
 
         let response = `🔄 Backup Restore\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -2508,58 +2216,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Clean system scaffolding from context — AI clients pass full conversation
         // including <task-notification> XML which overwhelms BM25 and embedding.
-        const cleanedContext = stripSystemNoise(context).slice(
-          0,
-          MAX_CONTEXT_LENGTH,
-        );
+        const cleanedContext = stripSystemNoise(context).slice(0, MAX_CONTEXT_LENGTH);
         if (cleanedContext.length < PROACTIVE_MIN_CONTEXT_LENGTH) {
           return {
-            content: [
-              {
-                type: "text",
-                text: "No relevant memories surfaced (context too short after cleaning).\n\n[Latency: 0.0ms]",
-              },
-            ],
+            content: [{ type: "text", text: "No relevant memories surfaced (context too short after cleaning).\n\n[Latency: 0.0ms]" }],
           };
         }
 
         // Single API call to the full proactive context pipeline:
         // feedback loop, coactivation, segmented ingest, semantic todos, context reminders
-        const result = await apiCall<ProactiveContextResponse>(
-          "/api/proactive_context",
-          "POST",
-          {
-            user_id: USER_ID,
-            context: cleanedContext,
-            max_results,
-            semantic_threshold,
-            entity_match_weight,
-            recency_weight,
-            memory_types,
-            auto_ingest,
-            // Implicit feedback: send previous response so backend can evaluate which memories helped
-            previous_response: lastProactiveResponse || undefined,
-            user_followup: lastProactiveResponse ? cleanedContext : undefined,
-          },
-        );
+        const result = await apiCall<ProactiveContextResponse>("/api/proactive_context", "POST", {
+          user_id: USER_ID,
+          context: cleanedContext,
+          max_results,
+          semantic_threshold,
+          entity_match_weight,
+          recency_weight,
+          memory_types,
+          auto_ingest,
+          // Implicit feedback: send previous response so backend can evaluate which memories helped
+          previous_response: lastProactiveResponse || undefined,
+          user_followup: lastProactiveResponse ? cleanedContext : undefined,
+        });
 
         const memories = result.memories || [];
         const entities = result.detected_entities || [];
 
         const facts = result.relevant_facts || [];
-        if (
-          memories.length === 0 &&
-          result.reminder_count === 0 &&
-          result.todo_count === 0 &&
-          facts.length === 0
-        ) {
-          const entityList =
-            entities.length > 0
-              ? `\n\nDetected entities: ${entities.map((e) => `"${e.name}" (${e.entity_type})`).join(", ")}`
-              : "";
+        if (memories.length === 0 && result.reminder_count === 0 && result.todo_count === 0 && facts.length === 0) {
+          const entityList = entities.length > 0
+            ? `\n\nDetected entities: ${entities.map(e => `"${e.name}" (${e.entity_type})`).join(', ')}`
+            : '';
           const feedbackNote = result.feedback_processed
             ? `\n[Feedback: ${result.feedback_processed.memories_evaluated} evaluated, ${result.feedback_processed.reinforced.length} reinforced, ${result.feedback_processed.weakened.length} weakened]`
-            : "";
+            : '';
 
           const emptyText = `No relevant memories surfaced for this context.${entityList}${feedbackNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms]`;
           lastProactiveResponse = emptyText;
@@ -2570,20 +2260,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Format detected entities summary
-        const entitySummary =
-          entities.length > 0
-            ? `\n\nDetected entities: ${entities.map((e) => `"${e.name}" (${e.entity_type})`).join(", ")}`
-            : "";
+        const entitySummary = entities.length > 0
+          ? `\n\nDetected entities: ${entities.map(e => `"${e.name}" (${e.entity_type})`).join(', ')}`
+          : '';
 
         // Format reminders from unified response (due + context-triggered)
         let reminderBlock = "";
         {
-          const allReminders = [
-            ...(result.due_reminders || []),
-            ...(result.context_reminders || []),
-          ];
-          const uniqueReminders = allReminders.filter(
-            (r, i, arr) => arr.findIndex((x) => x.id === r.id) === i,
+          const allReminders = [...(result.due_reminders || []), ...(result.context_reminders || [])];
+          const uniqueReminders = allReminders.filter((r, i, arr) =>
+            arr.findIndex(x => x.id === r.id) === i
           );
 
           if (uniqueReminders.length > 0) {
@@ -2593,17 +2279,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             reminderBlock += `┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\n`;
 
             for (const r of uniqueReminders) {
-              const icon =
-                r.overdue_seconds && r.overdue_seconds > 0 ? "⏰" : "📌";
+              const icon = r.overdue_seconds && r.overdue_seconds > 0 ? "⏰" : "📌";
               const contentText = r.content.slice(0, 38);
               reminderBlock += `┃  ${icon} ${contentText.padEnd(44)} [${r.id}] ┃\n`;
 
               if (r.overdue_seconds && r.overdue_seconds > 0) {
                 const mins = Math.round(r.overdue_seconds / 60);
-                const overdueText =
-                  mins > 60
-                    ? `⚠️  OVERDUE by ${Math.round(mins / 60)}h ${mins % 60}m`
-                    : `⚠️  OVERDUE by ${mins}m`;
+                const overdueText = mins > 60
+                  ? `⚠️  OVERDUE by ${Math.round(mins/60)}h ${mins % 60}m`
+                  : `⚠️  OVERDUE by ${mins}m`;
                 reminderBlock += `┃     ${overdueText.padEnd(47)} ┃\n`;
               } else if (r.due_at) {
                 const dueText = `Due: ${new Date(r.due_at).toLocaleString()}`;
@@ -2623,15 +2307,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (todos.length > 0) {
             todoBlock = "\n\n📋 Relevant Todos:\n";
             for (const t of todos) {
-              const statusIcon =
-                t.status === "in_progress"
-                  ? "🔄"
-                  : t.status === "blocked"
-                    ? "🚫"
-                    : "☐";
+              const statusIcon = t.status === "in_progress" ? "🔄" : t.status === "blocked" ? "🚫" : "☐";
               const proj = t.project ? ` [${t.project}]` : "";
               const due = t.due_date ? ` (due: ${t.due_date})` : "";
-              todoBlock += `  ${statusIcon} ${t.priority} ${t.short_id}: ${t.content.slice(0, 60)}${t.content.length > 60 ? "..." : ""}${proj}${due}\n`;
+              todoBlock += `  ${statusIcon} ${t.priority} ${t.short_id}: ${t.content.slice(0, 60)}${t.content.length > 60 ? '...' : ''}${proj}${due}\n`;
               todoBlock += `     ${t.relevance_reason}\n`;
             }
           }
@@ -2640,19 +2319,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Format consolidated facts from knowledge graph
         let factsBlock = "";
         {
-          const facts = (result.relevant_facts || []).filter(
-            (f: ProactiveFact) => f.confidence >= 0.4,
-          );
+          const facts = (result.relevant_facts || [])
+            .filter((f: ProactiveFact) => f.confidence >= 0.4);
           if (facts.length > 0) {
             factsBlock = "\n\n🧠 Known Facts:\n";
             for (const f of facts) {
               const conf = (f.confidence * 100).toFixed(0);
-              const entities =
-                f.related_entities.length > 0
-                  ? ` [${f.related_entities.slice(0, 3).join(", ")}]`
-                  : "";
-              const factText =
-                f.fact.length > 120 ? f.fact.slice(0, 120) + "..." : f.fact;
+              const entities = f.related_entities.length > 0 ? ` [${f.related_entities.slice(0, 3).join(', ')}]` : '';
+              const factText = f.fact.length > 120 ? f.fact.slice(0, 120) + '...' : f.fact;
               factsBlock += `  • (${conf}%) ${factText}${entities}\n`;
             }
           }
@@ -2660,99 +2334,66 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Add temporal framing - helps AI reason about time
         const now = new Date();
-        const dayNames = [
-          "Sunday",
-          "Monday",
-          "Tuesday",
-          "Wednesday",
-          "Thursday",
-          "Friday",
-          "Saturday",
-        ];
-        const monthNames = [
-          "Jan",
-          "Feb",
-          "Mar",
-          "Apr",
-          "May",
-          "Jun",
-          "Jul",
-          "Aug",
-          "Sep",
-          "Oct",
-          "Nov",
-          "Dec",
-        ];
-        const temporalHeader = `📅 ${dayNames[now.getDay()]}, ${monthNames[now.getMonth()]} ${now.getDate()}, ${now.getFullYear()} at ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}\n\n`;
+        const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const temporalHeader = `📅 ${dayNames[now.getDay()]}, ${monthNames[now.getMonth()]} ${now.getDate()}, ${now.getFullYear()} at ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}\n\n`;
 
         // Format memories with relative timestamps for temporal reasoning
         const formattedWithTime = memories
           .map((m, i) => {
             const score = (m.score * 100).toFixed(0);
-            const entityMatchStr =
-              m.matched_entities && m.matched_entities.length > 0
-                ? `\n   Matched: ${m.matched_entities.join(", ")}`
-                : "";
-            const tagsStr =
-              m.tags && m.tags.length > 0
-                ? `\n   Tags: ${m.tags.slice(0, 5).join(", ")}`
-                : "";
+            const entityMatchStr = (m.matched_entities && m.matched_entities.length > 0)
+              ? `\n   Matched: ${m.matched_entities.join(', ')}`
+              : '';
+            const tagsStr = (m.tags && m.tags.length > 0)
+              ? `\n   Tags: ${m.tags.slice(0, 5).join(', ')}`
+              : '';
 
             // Calculate relative time
-            let timeStr = "";
+            let timeStr = '';
             if (m.created_at) {
               const d = new Date(m.created_at);
               const diffMs = now.getTime() - d.getTime();
               const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
               if (diffDays === 0) {
-                timeStr = ` (today at ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})`;
+                timeStr = ` (today at ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`;
               } else if (diffDays === 1) {
                 timeStr = ` (yesterday)`;
               } else if (diffDays < 7) {
                 timeStr = ` (${diffDays}d ago)`;
               } else {
-                timeStr = ` (${d.toLocaleDateString([], { month: "short", day: "numeric" })})`;
+                timeStr = ` (${d.toLocaleDateString([], { month: 'short', day: 'numeric' })})`;
               }
             }
 
-            const importanceBar =
-              m.importance >= 0.8 ? "🔴" : m.importance >= 0.5 ? "🟡" : "⚪";
+            const importanceBar = m.importance >= 0.8 ? '🔴' : m.importance >= 0.5 ? '🟡' : '⚪';
             // Truncate at sentence boundary within 200 chars for cleaner display
             let preview = m.content;
             if (preview.length > 200) {
-              const sentenceEnd = preview.slice(0, 200).lastIndexOf(". ");
-              preview =
-                sentenceEnd > 80
-                  ? preview.slice(0, sentenceEnd + 1)
-                  : preview.slice(0, 200) + "...";
+              const sentenceEnd = preview.slice(0, 200).lastIndexOf('. ');
+              preview = sentenceEnd > 80 ? preview.slice(0, sentenceEnd + 1) : preview.slice(0, 200) + '...';
             }
-            return `${i + 1}. ${importanceBar} [${score}%]${timeStr} ${preview}\n   ${m.memory_type}${m.tier ? ` | ${m.tier}` : ""} | ${m.relevance_reason}${entityMatchStr}${tagsStr}`;
+            return `${i + 1}. ${importanceBar} [${score}%]${timeStr} ${preview}\n   ${m.memory_type}${m.tier ? ` | ${m.tier}` : ''} | ${m.relevance_reason}${entityMatchStr}${tagsStr}`;
           })
           .join("\n\n");
 
         // Feedback loop status
         const feedbackNote = result.feedback_processed
           ? `\n[Feedback loop: ${result.feedback_processed.memories_evaluated} evaluated, ${result.feedback_processed.reinforced.length} reinforced, ${result.feedback_processed.weakened.length} weakened]`
-          : "";
+          : '';
 
         // Ingestion confirmation
         const ingestNote = result.ingested_memory_id
           ? `\n[Context ingested: ${result.ingested_memory_id}]`
-          : "";
+          : '';
 
         // Summary counts
         const summaryParts: string[] = [];
-        if (memories.length > 0)
-          summaryParts.push(`${memories.length} memories`);
+        if (memories.length > 0) summaryParts.push(`${memories.length} memories`);
         if (facts.length > 0) summaryParts.push(`${facts.length} facts`);
-        if (result.todo_count > 0)
-          summaryParts.push(`${result.todo_count} todos`);
-        if (result.reminder_count > 0)
-          summaryParts.push(`${result.reminder_count} reminders`);
-        const summary =
-          summaryParts.length > 0
-            ? `Surfaced ${summaryParts.join(", ")}`
-            : "No relevant context found";
+        if (result.todo_count > 0) summaryParts.push(`${result.todo_count} todos`);
+        if (result.reminder_count > 0) summaryParts.push(`${result.reminder_count} reminders`);
+        const summary = summaryParts.length > 0 ? `Surfaced ${summaryParts.join(', ')}` : 'No relevant context found';
 
         const responseText = `${temporalHeader}${summary}:\n\n${formattedWithTime}${entitySummary}${factsBlock}${reminderBlock}${todoBlock}${feedbackNote}${ingestNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`;
 
@@ -2764,12 +2405,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+
       case "token_status": {
-        const status = tokenTracker.getStatus();
-        const sessionDuration = Math.round(
-          (Date.now() - tokenTracker.getSessionStartTime()) / 1000 / 60,
-        );
-        const response = formatTokenStatusText(status, sessionDuration);
+        const status = getTokenStatus();
+        const sessionDuration = Math.round((Date.now() - sessionStartTime) / 1000 / 60);
+        const remaining = status.budget - status.tokens;
+        const percentUsed = Math.round(status.percent * 100);
+
+        // Visual progress bar
+        const barLength = 20;
+        const filledLength = Math.round(percentUsed / 100 * barLength);
+        const bar = '█'.repeat(filledLength) + '░'.repeat(barLength - filledLength);
+
+        let response = `🐘 Token Status\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        response += `${bar} ${percentUsed}%\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        response += `Used: ${status.tokens.toLocaleString()} tokens\n`;
+        response += `Budget: ${status.budget.toLocaleString()} tokens\n`;
+        response += `Remaining: ${remaining.toLocaleString()} tokens\n`;
+        response += `Session: ${sessionDuration} min\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        response += status.alert
+          ? `⚠️ ALERT: ${percentUsed}% used - Consider new session`
+          : `✓ Context window healthy`;
 
         return {
           content: [{ type: "text", text: response }],
@@ -2777,12 +2436,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "reset_token_session": {
-        const previousTokens = tokenTracker.getSessionTokens();
-        tokenTracker.reset();
-        const response = formatResetTokenSessionText(
-          previousTokens,
-          TOKEN_BUDGET,
-        );
+        const previousTokens = sessionTokens;
+        resetTokenSession();
+
+        let response = `🐘 Token Session Reset\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        response += `Previous: ${previousTokens.toLocaleString()} tokens\n`;
+        response += `Current: 0 tokens\n`;
+        response += `Budget: ${TOKEN_BUDGET.toLocaleString()} tokens\n`;
+        response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        response += `✓ Counter cleared`;
 
         return {
           content: [{ type: "text", text: response }],
@@ -2843,15 +2506,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           statistics: ConsolidationStats;
         }
 
-        const result = await apiCall<ConsolidationReport>(
-          "/api/consolidation/report",
-          "POST",
-          {
-            user_id: USER_ID,
-            since,
-            until,
-          },
-        );
+        const result = await apiCall<ConsolidationReport>("/api/consolidation/report", "POST", {
+          user_id: USER_ID,
+          since,
+          until,
+        });
 
         const stats = result.statistics;
 
@@ -2877,55 +2536,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
         // Memory changes
-        if (
-          stats.memories_strengthened > 0 ||
-          stats.memories_decayed > 0 ||
-          stats.memories_at_risk > 0
-        ) {
+        if (stats.memories_strengthened > 0 || stats.memories_decayed > 0 || stats.memories_at_risk > 0) {
           response += `🧠 MEMORY DYNAMICS\n`;
-          if (stats.memories_strengthened > 0)
-            response += `   ↑ ${stats.memories_strengthened} strengthened\n`;
-          if (stats.memories_decayed > 0)
-            response += `   ↓ ${stats.memories_decayed} decayed\n`;
-          if (stats.memories_at_risk > 0)
-            response += `   ⚠️ ${stats.memories_at_risk} at risk\n`;
+          if (stats.memories_strengthened > 0) response += `   ↑ ${stats.memories_strengthened} strengthened\n`;
+          if (stats.memories_decayed > 0) response += `   ↓ ${stats.memories_decayed} decayed\n`;
+          if (stats.memories_at_risk > 0) response += `   ⚠️ ${stats.memories_at_risk} at risk\n`;
           response += `\n`;
         }
 
         // Edge changes (associations)
-        if (
-          stats.edges_formed > 0 ||
-          stats.edges_strengthened > 0 ||
-          stats.edges_potentiated > 0 ||
-          stats.edges_pruned > 0
-        ) {
+        if (stats.edges_formed > 0 || stats.edges_strengthened > 0 || stats.edges_potentiated > 0 || stats.edges_pruned > 0) {
           response += `🔗 ASSOCIATIONS (Hebbian)\n`;
-          if (stats.edges_formed > 0)
-            response += `   + ${stats.edges_formed} formed\n`;
-          if (stats.edges_strengthened > 0)
-            response += `   ↑ ${stats.edges_strengthened} strengthened\n`;
-          if (stats.edges_potentiated > 0)
-            response += `   ★ ${stats.edges_potentiated} permanent (LTP)\n`;
-          if (stats.edges_pruned > 0)
-            response += `   ✂ ${stats.edges_pruned} pruned\n`;
+          if (stats.edges_formed > 0) response += `   + ${stats.edges_formed} formed\n`;
+          if (stats.edges_strengthened > 0) response += `   ↑ ${stats.edges_strengthened} strengthened\n`;
+          if (stats.edges_potentiated > 0) response += `   ★ ${stats.edges_potentiated} permanent (LTP)\n`;
+          if (stats.edges_pruned > 0) response += `   ✂ ${stats.edges_pruned} pruned\n`;
           response += `\n`;
         }
 
         // Fact changes
         if (stats.facts_extracted > 0 || stats.facts_reinforced > 0) {
           response += `📚 FACTS\n`;
-          if (stats.facts_extracted > 0)
-            response += `   + ${stats.facts_extracted} extracted\n`;
-          if (stats.facts_reinforced > 0)
-            response += `   ↑ ${stats.facts_reinforced} reinforced\n`;
+          if (stats.facts_extracted > 0) response += `   + ${stats.facts_extracted} extracted\n`;
+          if (stats.facts_reinforced > 0) response += `   ↑ ${stats.facts_reinforced} reinforced\n`;
           response += `\n`;
         }
 
         // Maintenance cycles
         if (stats.maintenance_cycles > 0) {
-          const durationSec = (
-            stats.total_maintenance_duration_ms / 1000
-          ).toFixed(2);
+          const durationSec = (stats.total_maintenance_duration_ms / 1000).toFixed(2);
           response += `⚙️ MAINTENANCE: ${stats.maintenance_cycles} cycles (${durationSec}s)\n`;
         }
 
@@ -2945,16 +2584,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // =================================================================
 
       case "set_reminder": {
-        const {
-          content,
-          trigger_type,
-          trigger_at,
-          after_seconds,
-          keywords,
-          priority = 3,
-          tags = [],
-          threshold,
-        } = args as {
+        const { content, trigger_type, trigger_at, after_seconds, keywords, priority = 3, tags = [], threshold } = args as {
           content: string;
           trigger_type: "time" | "duration" | "context";
           trigger_at?: string;
@@ -2966,37 +2596,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         if (!content || content.length === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Error: 'content' is required and cannot be empty",
-              },
-            ],
-            isError: true,
-          };
+          return { content: [{ type: "text", text: "Error: 'content' is required and cannot be empty" }], isError: true };
         }
         if (content.length > MAX_CONTENT_LENGTH) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Error: 'content' exceeds maximum length of ${MAX_CONTENT_LENGTH} characters`,
-              },
-            ],
-            isError: true,
-          };
+          return { content: [{ type: "text", text: `Error: 'content' exceeds maximum length of ${MAX_CONTENT_LENGTH} characters` }], isError: true };
         }
         if (priority < 1 || priority > 5 || !Number.isFinite(priority)) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Error: 'priority' must be between 1 and 5",
-              },
-            ],
-            isError: true,
-          };
+          return { content: [{ type: "text", text: "Error: 'priority' must be between 1 and 5" }], isError: true };
         }
 
         // Build trigger object based on type
@@ -3005,12 +2611,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           case "time":
             if (!trigger_at) {
               return {
-                content: [
-                  {
-                    type: "text",
-                    text: "Error: 'trigger_at' is required for time-based reminders",
-                  },
-                ],
+                content: [{ type: "text", text: "Error: 'trigger_at' is required for time-based reminders" }],
                 isError: true,
               };
             }
@@ -3019,12 +2620,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           case "duration":
             if (!after_seconds || after_seconds <= 0) {
               return {
-                content: [
-                  {
-                    type: "text",
-                    text: "Error: 'after_seconds' must be positive for duration-based reminders",
-                  },
-                ],
+                content: [{ type: "text", text: "Error: 'after_seconds' must be positive for duration-based reminders" }],
                 isError: true,
               };
             }
@@ -3033,29 +2629,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           case "context":
             if (!keywords || keywords.length === 0) {
               return {
-                content: [
-                  {
-                    type: "text",
-                    text: "Error: 'keywords' is required for context-based reminders",
-                  },
-                ],
+                content: [{ type: "text", text: "Error: 'keywords' is required for context-based reminders" }],
                 isError: true,
               };
             }
-            const ctxThreshold =
-              threshold !== undefined && threshold >= 0.0 && threshold <= 1.0
-                ? threshold
-                : 0.7;
+            const ctxThreshold = (threshold !== undefined && threshold >= 0.0 && threshold <= 1.0) ? threshold : 0.7;
             trigger = { type: "context", keywords, threshold: ctxThreshold };
             break;
           default:
             return {
-              content: [
-                {
-                  type: "text",
-                  text: `Error: Invalid trigger_type: ${trigger_type}`,
-                },
-              ],
+              content: [{ type: "text", text: `Error: Invalid trigger_type: ${trigger_type}` }],
               isError: true,
             };
         }
@@ -3085,13 +2668,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           response += ` (${new Date(result.due_at).toLocaleString()})`;
         } else if (trigger_type === "duration" && after_seconds) {
           const mins = Math.round(after_seconds / 60);
-          response += ` (in ${mins > 60 ? Math.round(mins / 60) + "h" : mins + "m"})`;
+          response += ` (in ${mins > 60 ? Math.round(mins/60) + 'h' : mins + 'm'})`;
         } else if (trigger_type === "context" && keywords) {
           response += ` (keywords: ${keywords.join(", ")})`;
         }
         response += `\n`;
         if (priority !== 3) {
-          response += `Priority: ${"★".repeat(priority)}${"☆".repeat(5 - priority)}\n`;
+          response += `Priority: ${'★'.repeat(priority)}${'☆'.repeat(5-priority)}\n`;
         }
 
         return {
@@ -3118,23 +2701,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           count: number;
         }
 
-        const result = await apiCall<ListRemindersResponse>(
-          "/api/reminders",
-          "POST",
-          {
-            user_id: USER_ID,
-            status: status === "all" ? null : status,
-          },
-        );
+        const result = await apiCall<ListRemindersResponse>("/api/reminders", "POST", {
+          user_id: USER_ID,
+          status: status === "all" ? null : status,
+        });
 
         if (result.count === 0) {
           return {
-            content: [
-              {
-                type: "text",
-                text: `No ${status === "all" ? "" : status + " "}reminders found.`,
-              },
-            ],
+            content: [{ type: "text", text: `No ${status === "all" ? "" : status + " "}reminders found.` }],
           };
         }
 
@@ -3145,13 +2719,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const icon = r.overdue_seconds && r.overdue_seconds > 0 ? "⏰" : "📌";
           const statusBadge = r.status === "triggered" ? " [TRIGGERED]" : "";
           response += `${icon} ${r.content.slice(0, 50)}${r.content.length > 50 ? "..." : ""}${statusBadge}\n`;
-          response += `   Type: ${r.trigger_type} | Priority: ${"★".repeat(r.priority)} | ID: ${r.id}\n`;
+          response += `   Type: ${r.trigger_type} | Priority: ${'★'.repeat(r.priority)} | ID: ${r.id}\n`;
           if (r.due_at) {
             response += `   Due: ${new Date(r.due_at).toLocaleString()}\n`;
           }
           if (r.overdue_seconds && r.overdue_seconds > 0) {
             const mins = Math.round(r.overdue_seconds / 60);
-            response += `   ⚠️ Overdue by ${mins > 60 ? Math.round(mins / 60) + "h" : mins + "m"}\n`;
+            response += `   ⚠️ Overdue by ${mins > 60 ? Math.round(mins/60) + 'h' : mins + 'm'}\n`;
           }
           response += `\n`;
         }
@@ -3169,13 +2743,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           message: string;
         }
 
-        const result = await apiCall<ActionResponse>(
-          `/api/reminders/${reminder_id}/dismiss`,
-          "POST",
-          {
-            user_id: USER_ID,
-          },
-        );
+        const result = await apiCall<ActionResponse>(`/api/reminders/${reminder_id}/dismiss`, "POST", {
+          user_id: USER_ID,
+        });
 
         return {
           content: [
@@ -3219,26 +2789,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         if (!todoContent || todoContent.length === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Error: 'content' is required and cannot be empty",
-              },
-            ],
-            isError: true,
-          };
+          return { content: [{ type: "text", text: "Error: 'content' is required and cannot be empty" }], isError: true };
         }
         if (todoContent.length > MAX_CONTENT_LENGTH) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Error: 'content' exceeds maximum length of ${MAX_CONTENT_LENGTH} characters`,
-              },
-            ],
-            isError: true,
-          };
+          return { content: [{ type: "text", text: `Error: 'content' exceeds maximum length of ${MAX_CONTENT_LENGTH} characters` }], isError: true };
         }
 
         interface TodoResponse {
@@ -3294,10 +2848,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           offset?: number;
         };
 
-        const clampedLimit = Math.max(
-          1,
-          Math.min(Math.floor(limit), MAX_LIMIT),
-        );
+        const clampedLimit = Math.max(1, Math.min(Math.floor(limit), MAX_LIMIT));
         const clampedOffset = Math.max(0, Math.floor(offset));
 
         interface ListTodosResponse {
@@ -3308,21 +2859,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           count: number;
         }
 
-        const result = await apiCall<ListTodosResponse>(
-          "/api/todos/list",
-          "POST",
-          {
-            user_id: USER_ID,
-            query,
-            status: statusFilter,
-            project,
-            context,
-            priority,
-            due,
-            limit: clampedLimit,
-            offset: clampedOffset,
-          },
-        );
+        const result = await apiCall<ListTodosResponse>("/api/todos/list", "POST", {
+          user_id: USER_ID,
+          query,
+          status: statusFilter,
+          project,
+          context,
+          priority,
+          due,
+          limit: clampedLimit,
+          offset: clampedOffset,
+        });
 
         return {
           content: [{ type: "text", text: result.formatted }],
@@ -3362,23 +2909,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           formatted: string;
         }
 
-        const result = await apiCall<UpdateTodoResponse>(
-          `/api/todos/${todo_id}/update`,
-          "POST",
-          {
-            user_id: USER_ID,
-            content: newContent,
-            status,
-            priority,
-            project,
-            contexts,
-            due_date,
-            blocked_on,
-            notes,
-            tags,
-            parent_id,
-          },
-        );
+        const result = await apiCall<UpdateTodoResponse>(`/api/todos/${todo_id}/update`, "POST", {
+          user_id: USER_ID,
+          content: newContent,
+          status,
+          priority,
+          project,
+          contexts,
+          due_date,
+          blocked_on,
+          notes,
+          tags,
+          parent_id,
+        });
 
         return {
           content: [{ type: "text", text: result.formatted }],
@@ -3395,13 +2938,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           formatted: string;
         }
 
-        const result = await apiCall<CompleteTodoResponse>(
-          `/api/todos/${todo_id}/complete`,
-          "POST",
-          {
-            user_id: USER_ID,
-          },
-        );
+        const result = await apiCall<CompleteTodoResponse>(`/api/todos/${todo_id}/complete`, "POST", {
+          user_id: USER_ID,
+        });
 
         return {
           content: [{ type: "text", text: result.formatted }],
@@ -3416,10 +2955,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           formatted: string;
         }
 
-        const result = await apiCall<DeleteTodoResponse>(
-          `/api/todos/${todo_id}?user_id=${USER_ID}`,
-          "DELETE",
-        );
+        const result = await apiCall<DeleteTodoResponse>(`/api/todos/${todo_id}?user_id=${USER_ID}`, "DELETE");
 
         return {
           content: [{ type: "text", text: result.formatted }],
@@ -3427,10 +2963,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "reorder_todo": {
-        const { todo_id, direction } = args as {
-          todo_id: string;
-          direction: string;
-        };
+        const { todo_id, direction } = args as { todo_id: string; direction: string };
 
         interface ReorderTodoResponse {
           success: boolean;
@@ -3438,14 +2971,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           formatted: string;
         }
 
-        const result = await apiCall<ReorderTodoResponse>(
-          `/api/todos/${todo_id}/reorder`,
-          "POST",
-          {
-            user_id: USER_ID,
-            direction,
-          },
-        );
+        const result = await apiCall<ReorderTodoResponse>(`/api/todos/${todo_id}/reorder`, "POST", {
+          user_id: USER_ID,
+          direction,
+        });
 
         return {
           content: [{ type: "text", text: result.formatted }],
@@ -3453,12 +2982,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "add_project": {
-        const { name, prefix, description, parent } = args as {
-          name: string;
-          prefix?: string;
-          description?: string;
-          parent?: string;
-        };
+        const { name, prefix, description, parent } = args as { name: string; prefix?: string; description?: string; parent?: string };
 
         interface ProjectResponse {
           success: boolean;
@@ -3486,13 +3010,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           formatted: string;
         }
 
-        const result = await apiCall<ListProjectsResponse>(
-          "/api/projects/list",
-          "POST",
-          {
-            user_id: USER_ID,
-          },
-        );
+        const result = await apiCall<ListProjectsResponse>("/api/projects/list", "POST", {
+          user_id: USER_ID,
+        });
 
         return {
           content: [{ type: "text", text: result.formatted }],
@@ -3508,14 +3028,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           formatted: string;
         }
 
-        const result = await apiCall<ProjectResponse>(
-          `/api/projects/${encodeURIComponent(project)}/update`,
-          "POST",
-          {
-            user_id: USER_ID,
-            status: "archived",
-          },
-        );
+        const result = await apiCall<ProjectResponse>(`/api/projects/${encodeURIComponent(project)}/update`, "POST", {
+          user_id: USER_ID,
+          status: "archived",
+        });
 
         return {
           content: [{ type: "text", text: result.formatted }],
@@ -3523,10 +3039,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "delete_project": {
-        const { project, delete_todos } = args as {
-          project: string;
-          delete_todos?: boolean;
-        };
+        const { project, delete_todos } = args as { project: string; delete_todos?: boolean };
 
         interface ProjectResponse {
           success: boolean;
@@ -3534,14 +3047,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           formatted: string;
         }
 
-        const result = await apiCall<ProjectResponse>(
-          `/api/projects/${encodeURIComponent(project)}/delete`,
-          "POST",
-          {
-            user_id: USER_ID,
-            delete_todos: delete_todos ?? false,
-          },
-        );
+        const result = await apiCall<ProjectResponse>(`/api/projects/${encodeURIComponent(project)}/delete`, "POST", {
+          user_id: USER_ID,
+          delete_todos: delete_todos ?? false,
+        });
 
         return {
           content: [{ type: "text", text: result.formatted }],
@@ -3554,13 +3063,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           formatted: string;
         }
 
-        const result = await apiCall<TodoStatsResponse>(
-          "/api/todos/stats",
-          "POST",
-          {
-            user_id: USER_ID,
-          },
-        );
+        const result = await apiCall<TodoStatsResponse>("/api/todos/stats", "POST", {
+          user_id: USER_ID,
+        });
 
         return {
           content: [{ type: "text", text: result.formatted }],
@@ -3578,7 +3083,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const result = await apiCall<ListSubtasksResponse>(
           `/api/todos/${parent_id}/subtasks?user_id=${USER_ID}`,
-          "GET",
+          "GET"
         );
 
         return {
@@ -3606,7 +3111,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             user_id: USER_ID,
             content,
             comment_type,
-          },
+          }
         );
 
         return {
@@ -3626,7 +3131,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const result = await apiCall<CommentListResponse>(
           `/api/todos/${todo_id}/comments?user_id=${USER_ID}`,
-          "GET",
+          "GET"
         );
 
         return {
@@ -3653,7 +3158,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           {
             user_id: USER_ID,
             content,
-          },
+          }
         );
 
         return {
@@ -3674,7 +3179,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const result = await apiCall<CommentResponse>(
           `/api/todos/${todo_id}/comments/${comment_id}?user_id=${USER_ID}`,
-          "DELETE",
+          "DELETE"
         );
 
         return {
@@ -3685,18 +3190,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "read_memory": {
         const memory_id = (args as any).memory_id || (args as any).id;
 
-        if (
-          !memory_id ||
-          typeof memory_id !== "string" ||
-          memory_id.trim().length === 0
-        ) {
+        if (!memory_id || typeof memory_id !== 'string' || memory_id.trim().length === 0) {
           return {
-            content: [
-              {
-                type: "text",
-                text: "Error: 'memory_id' is required. Pass the full UUID or 8+ character prefix from recall results.",
-              },
-            ],
+            content: [{ type: "text", text: "Error: 'memory_id' is required. Pass the full UUID or 8+ character prefix from recall results." }],
             isError: true,
           };
         }
@@ -3723,7 +3219,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           memory = await apiCall<MemoryWithHierarchy>(
             `/api/memory/${memory_id}?user_id=${encodeURIComponent(USER_ID)}`,
-            "GET",
+            "GET"
           );
         } catch (e) {
           console.error(`[Memory] Failed to fetch memory ${memory_id}:`, e);
@@ -3742,7 +3238,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let response = `Memory: ${memory.id}\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
         response += `Type: ${memory.experience.experience_type} | Tags: ${tags}\n`;
-        response += `Tier: ${memory.tier || "Unknown"} | Created: ${created} | Importance: ${(memory.importance * 100).toFixed(0)}%\n`;
+        response += `Tier: ${memory.tier || 'Unknown'} | Created: ${created} | Importance: ${(memory.importance * 100).toFixed(0)}%\n`;
 
         // Hierarchy info
         if (memory.parent_id) {
@@ -3770,16 +3266,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const result = await executeTool();
 
     // Stream tool interaction to memory (non-blocking)
-    const resultText = result.content.map((c) => c.text).join("\n");
+    const resultText = result.content.map(c => c.text).join('\n');
     streamToolCall(name, args as Record<string, unknown>, resultText);
 
     // Token tracking: count tokens in response (SHO-115)
-    const responseTokens = tokenTracker.trackTokens(resultText);
-    const tokenStatus = tokenTracker.getStatus();
+    const responseTokens = estimateTokens(resultText);
+    sessionTokens += responseTokens;
+    const tokenStatus = getTokenStatus();
 
     // Proactive surfacing: append relevant memories to non-memory tool responses
-    if (PROACTIVE_SURFACING && shouldAppendProactiveContext(name)) {
-      const context = extractStringContextFromArgs(args, 10, 1000);
+    if (PROACTIVE_SURFACING && !["remember", "recall", "forget", "list_memories", "proactive_context", "context_summary", "memory_stats"].includes(name)) {
+      // Extract context from tool args
+      const contextParts: string[] = [];
+      if (args && typeof args === "object") {
+        for (const [key, value] of Object.entries(args)) {
+          if (typeof value === "string" && value.length > 10) {
+            contextParts.push(value);
+          }
+        }
+      }
+      const context = contextParts.join(" ").slice(0, 1000);
 
       if (context.length >= PROACTIVE_MIN_CONTEXT_LENGTH) {
         const surfaced = await surfaceRelevant(context, 3);
@@ -3809,15 +3315,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const message = error instanceof Error ? error.message : String(error);
 
     // Provide helpful error messages
-    let helpText = "";
-    if (message.includes("ECONNREFUSED") || message.includes("fetch failed")) {
-      helpText =
-        "\n\nThe memory server appears to be offline. Start it with:\n  cd shodh-memory && cargo run";
-    } else if (message.includes("API error 401")) {
-      helpText = "\n\nAuthentication failed. Check your SHODH_API_KEY.";
-    } else if (message.includes("API error 404")) {
-      helpText =
-        "\n\nEndpoint not found. The server may be running an older version.";
+    let helpText = '';
+    if (message.includes('ECONNREFUSED') || message.includes('fetch failed')) {
+      helpText = '\n\nThe memory server appears to be offline. Start it with:\n  cd shodh-memory && cargo run';
+    } else if (message.includes('API error 401')) {
+      helpText = '\n\nAuthentication failed. Check your SHODH_API_KEY.';
+    } else if (message.includes('API error 404')) {
+      helpText = '\n\nEndpoint not found. The server may be running an older version.';
     }
 
     return {
@@ -3863,13 +3367,9 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => {
   ];
 
   try {
-    const result = await apiCall<{ memories: Memory[] }>(
-      "/api/memories",
-      "POST",
-      {
-        user_id: USER_ID,
-      },
-    );
+    const result = await apiCall<{ memories: Memory[] }>("/api/memories", "POST", {
+      user_id: USER_ID,
+    });
 
     const memories = result.memories || [];
     const memoryResources = memories.slice(0, 30).map((m) => {
@@ -3978,14 +3478,11 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
           }
 
           return {
-            contents: [
-              {
-                uri,
-                mimeType: "text/plain",
-                text:
-                  parts.length > 1 ? parts.join("\n") : "No recent memories.",
-              },
-            ],
+            contents: [{
+              uri,
+              mimeType: "text/plain",
+              text: parts.length > 1 ? parts.join("\n") : "No recent memories.",
+            }],
           };
         }
 
@@ -4006,9 +3503,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
           const todos = result.todos || [];
           if (todos.length === 0) {
             return {
-              contents: [
-                { uri, mimeType: "text/plain", text: "No pending tasks." },
-              ],
+              contents: [{ uri, mimeType: "text/plain", text: "No pending tasks." }],
             };
           }
 
@@ -4023,11 +3518,8 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
             if (byStatus[status]?.length) {
               parts.push(`\n${status.replace("_", " ").toUpperCase()}:`);
               byStatus[status].forEach((t) => {
-                const priority =
-                  t.priority !== "medium" ? ` [${t.priority}]` : "";
-                const project = t.project_prefix
-                  ? ` (${t.project_prefix})`
-                  : "";
+                const priority = t.priority !== "medium" ? ` [${t.priority}]` : "";
+                const project = t.project_prefix ? ` (${t.project_prefix})` : "";
                 parts.push(`- ${t.content}${priority}${project}`);
               });
             }
@@ -4047,13 +3539,11 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
           }>(`/api/users/${USER_ID}/stats`, "GET");
 
           return {
-            contents: [
-              {
-                uri,
-                mimeType: "application/json",
-                text: JSON.stringify(stats, null, 2),
-              },
-            ],
+            contents: [{
+              uri,
+              mimeType: "application/json",
+              text: JSON.stringify(stats, null, 2),
+            }],
           };
         }
 
@@ -4064,13 +3554,9 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
     // Handle memory:// resources
     const memoryId = uri.replace("memory://", "");
-    const result = await apiCall<{ memories: Memory[] }>(
-      "/api/memories",
-      "POST",
-      {
-        user_id: USER_ID,
-      },
-    );
+    const result = await apiCall<{ memories: Memory[] }>("/api/memories", "POST", {
+      user_id: USER_ID,
+    });
 
     const memory = (result.memories || []).find((m) => m.id === memoryId);
 
@@ -4176,34 +3662,21 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
             messages: [
               {
                 role: "user",
-                content: {
-                  type: "text",
-                  text: "Please provide a search query.",
-                },
+                content: { type: "text", text: "Please provide a search query." },
               },
             ],
           };
         }
-        const result = await apiCall<{ memories: Memory[] }>(
-          "/api/recall",
-          "POST",
-          {
-            user_id: USER_ID,
-            query,
-            mode: "hybrid",
-            limit: 5,
-          },
-        );
+        const result = await apiCall<{ memories: Memory[] }>("/api/recall", "POST", {
+          user_id: USER_ID,
+          query,
+          mode: "hybrid",
+          limit: 5,
+        });
         const memories = result.memories || [];
-        const memoryText =
-          memories.length > 0
-            ? memories
-                .map(
-                  (m) =>
-                    `- ${getContent(m)} (${getType(m)}${m.tier ? ` | ${m.tier}` : ""})`,
-                )
-                .join("\n")
-            : "No memories found.";
+        const memoryText = memories.length > 0
+          ? memories.map((m) => `- ${getContent(m)} (${getType(m)}${m.tier ? ` | ${m.tier}` : ''})`).join("\n")
+          : "No memories found.";
         return {
           messages: [
             {
@@ -4244,16 +3717,12 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
           result.context.forEach((m) => parts.push(`- ${getContent(m)}`));
         }
 
-        const summaryText =
-          parts.length > 0 ? parts.join("\n") : "No recent memories.";
+        const summaryText = parts.length > 0 ? parts.join("\n") : "No recent memories.";
         return {
           messages: [
             {
               role: "user",
-              content: {
-                type: "text",
-                text: `Session Summary:\n\n${summaryText}`,
-              },
+              content: { type: "text", text: `Session Summary:\n\n${summaryText}` },
             },
           ],
         };
@@ -4266,24 +3735,17 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
             messages: [
               {
                 role: "user",
-                content: {
-                  type: "text",
-                  text: "Please specify a topic to explore.",
-                },
+                content: { type: "text", text: "Please specify a topic to explore." },
               },
             ],
           };
         }
-        const result = await apiCall<{ memories: Memory[] }>(
-          "/api/recall",
-          "POST",
-          {
-            user_id: USER_ID,
-            query: topic,
-            mode: "hybrid",
-            limit: 10,
-          },
-        );
+        const result = await apiCall<{ memories: Memory[] }>("/api/recall", "POST", {
+          user_id: USER_ID,
+          query: topic,
+          mode: "hybrid",
+          limit: 10,
+        });
         const memories = result.memories || [];
         const grouped: Record<string, Memory[]> = {};
         memories.forEach((m) => {
@@ -4304,10 +3766,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
               role: "user",
               content: {
                 type: "text",
-                text:
-                  memories.length > 0
-                    ? parts.join("\n")
-                    : `No memories found about "${topic}".`,
+                text: memories.length > 0 ? parts.join("\n") : `No memories found about "${topic}".`,
               },
             },
           ],
@@ -4333,10 +3792,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
             messages: [
               {
                 role: "user",
-                content: {
-                  type: "text",
-                  text: "No pending tasks. You're all caught up!",
-                },
+                content: { type: "text", text: "No pending tasks. You're all caught up!" },
               },
             ],
           };
@@ -4353,8 +3809,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
           if (byStatus[status]?.length) {
             parts.push(`\n*${status.replace("_", " ").toUpperCase()}:*`);
             byStatus[status].forEach((t) => {
-              const priority =
-                t.priority !== "medium" ? ` [${t.priority}]` : "";
+              const priority = t.priority !== "medium" ? ` [${t.priority}]` : "";
               const project = t.project_prefix ? ` (${t.project_prefix})` : "";
               parts.push(`- ${t.content}${priority}${project}`);
             });
@@ -4373,14 +3828,10 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
 
       case "recent_memories": {
         const count = parseInt((args.count as string) || "10", 10);
-        const result = await apiCall<{ memories: Memory[] }>(
-          "/api/memories",
-          "POST",
-          {
-            user_id: USER_ID,
-            limit: count,
-          },
-        );
+        const result = await apiCall<{ memories: Memory[] }>("/api/memories", "POST", {
+          user_id: USER_ID,
+          limit: count,
+        });
         const memories = result.memories || [];
         if (memories.length === 0) {
           return {
@@ -4397,8 +3848,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
         memories.forEach((m) => {
           const content = getContent(m);
           const type = getType(m);
-          const preview =
-            content.length > 100 ? content.slice(0, 100) + "..." : content;
+          const preview = content.length > 100 ? content.slice(0, 100) + "..." : content;
           parts.push(`- [${type}] ${preview}`);
         });
 
@@ -4429,20 +3879,16 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
         parts.push(`Total memories: ${statsResult.total_memories || 0}`);
         parts.push(`Last 24h: ${statsResult.memories_last_24h || 0}`);
         parts.push(`Last 7 days: ${statsResult.memories_last_7d || 0}`);
-        parts.push(
-          `\nIndex status: ${verifyResult.is_healthy ? "✓ Healthy" : "⚠ Needs repair"}`,
-        );
+        parts.push(`\nIndex status: ${verifyResult.is_healthy ? "✓ Healthy" : "⚠ Needs repair"}`);
         if (verifyResult.orphaned_count > 0) {
           parts.push(`Orphaned entries: ${verifyResult.orphaned_count}`);
         }
 
         if (statsResult.memories_by_type) {
           parts.push("\n**By Type:**");
-          Object.entries(statsResult.memories_by_type).forEach(
-            ([type, count]) => {
-              parts.push(`- ${type}: ${count}`);
-            },
-          );
+          Object.entries(statsResult.memories_by_type).forEach(([type, count]) => {
+            parts.push(`- ${type}: ${count}`);
+          });
         }
 
         return {
@@ -4601,18 +4047,10 @@ async function ensureServerRunning(): Promise<void> {
     if (!process.env.SHODH_API_KEY && isLocalServer()) {
       const keyWorks = await validateApiKey();
       if (!keyWorks) {
-        console.error(
-          "[shodh-memory] WARNING: Auto-generated key rejected by running server.",
-        );
-        console.error(
-          "[shodh-memory] The server was started with a different API key.",
-        );
-        console.error(
-          "[shodh-memory] Set SHODH_API_KEY to match the server's key, or restart",
-        );
-        console.error(
-          "[shodh-memory] the server without SHODH_DEV_API_KEY to use auto-generated keys.",
-        );
+        console.error("[shodh-memory] WARNING: Auto-generated key rejected by running server.");
+        console.error("[shodh-memory] The server was started with a different API key.");
+        console.error("[shodh-memory] Set SHODH_API_KEY to match the server's key, or restart");
+        console.error("[shodh-memory] the server without SHODH_DEV_API_KEY to use auto-generated keys.");
       }
     }
     return;
@@ -4620,39 +4058,26 @@ async function ensureServerRunning(): Promise<void> {
 
   if (!AUTO_SPAWN_ENABLED) {
     console.error("[shodh-memory] Server not running at", API_URL);
-    console.error(
-      "[shodh-memory] Auto-spawn disabled (SHODH_AUTO_SPAWN=false).",
-    );
+    console.error("[shodh-memory] Auto-spawn disabled (SHODH_AUTO_SPAWN=false).");
     console.error("[shodh-memory] Start the server manually:");
     console.error("[shodh-memory]   shodh-memory-server");
     console.error("[shodh-memory] Or with Docker:");
-    console.error(
-      "[shodh-memory]   docker run -d -p 3030:3030 roshera/shodh-memory",
-    );
+    console.error("[shodh-memory]   docker run -d -p 3030:3030 roshera/shodh-memory");
     return;
   }
 
   const binaryPath = getBinaryPath();
   if (!binaryPath) {
-    console.error(
-      "[shodh-memory] Server binary not found. Please run: npx @shodh/memory-mcp",
-    );
-    console.error(
-      "[shodh-memory] Or download from: https://github.com/varun29ankuS/shodh-memory/releases",
-    );
+    console.error("[shodh-memory] Server binary not found. Please run: npx @shodh/memory-mcp");
+    console.error("[shodh-memory] Or download from: https://github.com/varun29ankuS/shodh-memory/releases");
     return;
   }
 
   // Validate that the resolved binary is within the expected bin directory
   const expectedBinDir = fs.realpathSync(path.join(__dirname, "..", "bin"));
   const resolvedBinary = fs.realpathSync(binaryPath);
-  if (
-    !resolvedBinary.startsWith(expectedBinDir + path.sep) &&
-    resolvedBinary !== expectedBinDir
-  ) {
-    console.error(
-      `[shodh-memory] WARNING: Binary path resolves outside expected directory: ${resolvedBinary}`,
-    );
+  if (!resolvedBinary.startsWith(expectedBinDir + path.sep) && resolvedBinary !== expectedBinDir) {
+    console.error(`[shodh-memory] WARNING: Binary path resolves outside expected directory: ${resolvedBinary}`);
     console.error(`[shodh-memory] Expected: ${expectedBinDir}`);
     return;
   }
@@ -4665,25 +4090,12 @@ async function ensureServerRunning(): Promise<void> {
   // must NOT leak to the server — they have different semantics.
   const serverEnv: Record<string, string> = {};
   const SERVER_ENV_ALLOWLIST = new Set([
-    "SHODH_HOST",
-    "SHODH_PORT",
-    "SHODH_MEMORY_PATH",
-    "SHODH_ENV",
-    "SHODH_API_KEYS",
-    "SHODH_DEV_API_KEY",
-    "SHODH_MAX_USERS",
-    "SHODH_RATE_LIMIT",
-    "SHODH_RATE_BURST",
-    "SHODH_MAX_CONCURRENT",
-    "SHODH_REQUEST_TIMEOUT",
-    "SHODH_WRITE_MODE",
-    "SHODH_OFFLINE",
-    "SHODH_LAZY_LOAD",
-    "SHODH_ONNX_THREADS",
-    "SHODH_VECTOR_BACKEND",
-    "SHODH_CORS_ORIGINS",
-    "SHODH_CORS_MAX_AGE",
-    "SHODH_CORS_CREDENTIALS",
+    "SHODH_HOST", "SHODH_PORT", "SHODH_MEMORY_PATH", "SHODH_ENV",
+    "SHODH_API_KEYS", "SHODH_DEV_API_KEY", "SHODH_MAX_USERS",
+    "SHODH_RATE_LIMIT", "SHODH_RATE_BURST", "SHODH_MAX_CONCURRENT",
+    "SHODH_REQUEST_TIMEOUT", "SHODH_WRITE_MODE", "SHODH_OFFLINE",
+    "SHODH_LAZY_LOAD", "SHODH_ONNX_THREADS", "SHODH_VECTOR_BACKEND",
+    "SHODH_CORS_ORIGINS", "SHODH_CORS_MAX_AGE", "SHODH_CORS_CREDENTIALS",
     "RUST_LOG",
   ]);
   for (const [key, value] of Object.entries(process.env)) {
@@ -4719,9 +4131,7 @@ async function ensureServerRunning(): Promise<void> {
   if (started) {
     console.error("[shodh-memory] Backend server started successfully");
   } else {
-    console.error(
-      "[shodh-memory] Warning: Server may not have started properly",
-    );
+    console.error("[shodh-memory] Warning: Server may not have started properly");
   }
 }
 
@@ -4734,10 +4144,7 @@ function cleanupServer() {
         // Kill the process group (negative PID)
         process.kill(-serverProcess.pid, "SIGTERM");
       } catch (e) {
-        console.error(
-          "[Cleanup] Process group kill failed, falling back to direct kill:",
-          e,
-        );
+        console.error("[Cleanup] Process group kill failed, falling back to direct kill:", e);
         serverProcess.kill("SIGTERM");
       }
     } else {
@@ -4781,9 +4188,7 @@ async function main() {
   console.error(`Connecting to: ${API_URL}`);
   console.error(`User ID: ${USER_ID}`);
   console.error(`Streaming: ${STREAM_ENABLED ? "enabled" : "disabled"}`);
-  console.error(
-    `Proactive surfacing: ${PROACTIVE_SURFACING ? "enabled" : "disabled (SHODH_PROACTIVE=false)"}`,
-  );
+  console.error(`Proactive surfacing: ${PROACTIVE_SURFACING ? "enabled" : "disabled (SHODH_PROACTIVE=false)"}`);
 }
 
 main().catch(console.error);

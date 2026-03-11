@@ -12,14 +12,12 @@ import {
 // =============================================================================
 describe("stripSystemNoise", () => {
   it("removes <task-notification> blocks", () => {
-    const input =
-      "Hello <task-notification>ignore this</task-notification> world";
+    const input = "Hello <task-notification>ignore this</task-notification> world";
     expect(stripSystemNoise(input)).toBe("Hello  world");
   });
 
   it("removes <system-reminder> blocks", () => {
-    const input =
-      "Before <system-reminder>stuff\nmultiline</system-reminder> After";
+    const input = "Before <system-reminder>stuff\nmultiline</system-reminder> After";
     expect(stripSystemNoise(input)).toBe("Before  After");
   });
 
@@ -85,9 +83,7 @@ describe("getContent", () => {
   });
 
   it("prefers top-level content over experience.content", () => {
-    expect(
-      getContent({ content: "top", experience: { content: "nested" } }),
-    ).toBe("top");
+    expect(getContent({ content: "top", experience: { content: "nested" } })).toBe("top");
   });
 
   it("returns empty string when no content anywhere", () => {
@@ -112,9 +108,7 @@ describe("getType", () => {
   });
 
   it("returns experience.memory_type when top-level is missing", () => {
-    expect(getType({ experience: { memory_type: "Learning" } })).toBe(
-      "Learning",
-    );
+    expect(getType({ experience: { memory_type: "Learning" } })).toBe("Learning");
   });
 
   it("returns experience.experience_type as last fallback", () => {
@@ -126,9 +120,9 @@ describe("getType", () => {
   });
 
   it("prefers top-level over nested", () => {
-    expect(
-      getType({ memory_type: "Task", experience: { memory_type: "Decision" } }),
-    ).toBe("Task");
+    expect(getType({ memory_type: "Task", experience: { memory_type: "Decision" } })).toBe(
+      "Task"
+    );
   });
 
   it('returns "Observation" for undefined experience', () => {
@@ -203,11 +197,7 @@ describe("formatToolCallContent", () => {
   });
 
   it("formats non-memory tools", () => {
-    const result = formatToolCallContent(
-      "run_command",
-      { cmd: "ls" },
-      "file1 file2",
-    );
+    const result = formatToolCallContent("run_command", { cmd: "ls" }, "file1 file2");
     expect(result).toContain("Tool: run_command");
     expect(result).toContain("Input:");
     expect(result).toContain("Result: file1 file2");

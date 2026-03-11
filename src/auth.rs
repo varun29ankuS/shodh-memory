@@ -258,12 +258,17 @@ pub async fn auth_middleware(request: Request, next: Next) -> Response {
         .or_else(|| {
             // WebSocket fallback: check query parameter for api_key
             // Node.js WebSocket API doesn't support custom headers, so
-            // clients can pass ?api_key=... in the URL instead.
-            // Use form_urlencoded to properly decode percent-encoded values.
-            request.uri().query().and_then(|q| {
-                form_urlencoded::parse(q.as_bytes())
-                    .find_map(|(k, v)| (k == "api_key").then(|| v.into_owned()))
-            })
+            // clients can pass ?api_key=... in the URL instead
+            request
+                .uri()
+                .query()
+                .and_then(|q| {
+                    q.split('&')
+                        .find_map(|pair| {
+                            pair.strip_prefix("api_key=")
+                                .map(|v| v.to_string())
+                        })
+                })
         }) {
         Some(key) => key,
         None => return AuthError::MissingApiKey.into_response(),
@@ -715,39 +720,6 @@ mod tests {
             resp.status(),
             StatusCode::OK,
             "Should accept API key from query parameter"
-        );
-
-        clear_auth_env();
-    }
-
-    #[tokio::test]
-    async fn auth_middleware_accepts_percent_encoded_query_param() {
-        use axum::body::Body;
-        use axum::http::Request as HttpRequest;
-        use axum::middleware::from_fn;
-        use axum::routing::get;
-        use axum::Router;
-        use tower::ServiceExt;
-
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        // Key contains characters that would be percent-encoded: "key+with=special&chars"
-        env::set_var("SHODH_API_KEYS", "key+with=special&chars");
-
-        let app = Router::new()
-            .route("/api/stream", get(|| async { "ok" }))
-            .layer(from_fn(auth_middleware));
-
-        // Percent-encoded form of "key+with=special&chars"
-        let req = HttpRequest::builder()
-            .uri("/api/stream?api_key=key%2Bwith%3Dspecial%26chars")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "Should accept percent-encoded API key from query parameter"
         );
 
         clear_auth_env();

@@ -29,28 +29,6 @@ use crate::vector_db::vamana::{VamanaConfig, VamanaIndex};
 /// Filename for persisted Vamana index (instant startup)
 const VAMANA_INDEX_FILE: &str = "vamana.idx";
 
-/// Cross-platform atomic file replace.
-///
-/// On Unix `fs::rename` atomically replaces the destination. On Windows it
-/// fails when the destination already exists, so we remove the target first
-/// and then rename. The brief window between remove and rename is acceptable
-/// because the *tmp* file is still intact — the next startup will simply
-/// rebuild the index if `dst` is missing.
-fn atomic_replace_file(src: &Path, dst: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        fs::rename(src, dst)
-    }
-    #[cfg(not(unix))]
-    {
-        // Remove destination if it exists so rename succeeds on Windows.
-        if dst.exists() {
-            fs::remove_file(dst)?;
-        }
-        fs::rename(src, dst)
-    }
-}
-
 /// Multi-modal retrieval engine with production vector search
 ///
 /// # Lock Ordering (SHO-72)
@@ -450,8 +428,7 @@ impl RetrievalEngine {
                 if vector_ids.is_empty() {
                     return None;
                 }
-                let has_in_range_vector =
-                    vector_ids.iter().any(|&vid| (vid as usize) < loaded_count);
+                let has_in_range_vector = vector_ids.iter().any(|&vid| (vid as usize) < loaded_count);
                 if has_in_range_vector {
                     None
                 } else {
@@ -511,7 +488,8 @@ impl RetrievalEngine {
                                 Err(e) => {
                                     warn!(
                                         "Failed to recover missing vector for memory {}: {}",
-                                        memory_id.0, e
+                                        memory_id.0,
+                                        e
                                     );
                                     recovery_failed += 1;
                                 }
@@ -523,7 +501,8 @@ impl RetrievalEngine {
                     Err(e) => {
                         warn!(
                             "Failed to load memory {} for vector recovery: {}",
-                            memory_id.0, e
+                            memory_id.0,
+                            e
                         );
                         recovery_failed += 1;
                     }
@@ -533,7 +512,8 @@ impl RetrievalEngine {
             if recovered > 0 || recovery_failed > 0 {
                 info!(
                     "Recovered {} missing vectors from RocksDB mappings ({} failed)",
-                    recovered, recovery_failed
+                    recovered,
+                    recovery_failed
                 );
             }
         }
@@ -572,17 +552,13 @@ impl RetrievalEngine {
         let vector_count = id_mapping.len();
         if vector_count > 0 {
             // Atomic save: write to .tmp file then rename to avoid partial writes
-            let mut tmp_path = vamana_path.as_os_str().to_os_string();
-            tmp_path.push(".tmp");
-            let tmp_path = PathBuf::from(tmp_path);
+            let tmp_path = vamana_path.with_extension("vamana.tmp");
             match vector_index.save_to_file(&tmp_path) {
                 Ok(()) => {
-                    // Atomic replace — on crash, either the old or new file survives
-                    if let Err(e) = atomic_replace_file(&tmp_path, &vamana_path) {
+                    // Atomic rename — on crash, either the old or new file survives
+                    if let Err(e) = fs::rename(&tmp_path, &vamana_path) {
                         warn!(
-                            "Failed to rename {}.tmp to {}: {} (removing tmp)",
-                            vamana_path.display(),
-                            vamana_path.display(),
+                            "Failed to rename .vamana.tmp to .vamana: {} (removing tmp)",
                             e
                         );
                         let _ = fs::remove_file(&tmp_path);

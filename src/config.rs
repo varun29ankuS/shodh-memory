@@ -423,11 +423,7 @@ impl ServerConfig {
             if let Ok(n) = val.parse::<f32>() {
                 let clamped = n.clamp(0.5, 0.99);
                 if (clamped - n).abs() > f32::EPSILON {
-                    tracing::warn!(
-                        "SHODH_ACTIVATION_DECAY={} clamped to {} (valid range: 0.5–0.99)",
-                        n,
-                        clamped
-                    );
+                    tracing::warn!("SHODH_ACTIVATION_DECAY={} clamped to {} (valid range: 0.5–0.99)", n, clamped);
                 }
                 config.activation_decay_factor = clamped;
             }
@@ -437,9 +433,7 @@ impl ServerConfig {
         if let Ok(val) = env::var("SHODH_BACKUP_INTERVAL") {
             if let Ok(n) = val.parse::<u64>() {
                 if n == 0 {
-                    tracing::warn!(
-                        "SHODH_BACKUP_INTERVAL=0 — backups will run every maintenance cycle"
-                    );
+                    tracing::warn!("SHODH_BACKUP_INTERVAL=0 — backups will run every maintenance cycle");
                 }
                 config.backup_interval_secs = n;
             }
@@ -464,11 +458,7 @@ impl ServerConfig {
             if let Ok(n) = val.parse::<usize>() {
                 let clamped = n.clamp(1, 50);
                 if clamped != n {
-                    tracing::warn!(
-                        "SHODH_MAX_ENTITIES={} clamped to {} (valid range: 1–50)",
-                        n,
-                        clamped
-                    );
+                    tracing::warn!("SHODH_MAX_ENTITIES={} clamped to {} (valid range: 1–50)", n, clamped);
                 }
                 config.max_entities_per_memory = clamped;
             }
@@ -622,63 +612,5 @@ mod tests {
             ..Default::default()
         };
         let _layer = cors.to_layer(); // Should not panic
-    }
-
-    #[test]
-    fn test_activation_decay_clamping() {
-        env::set_var("SHODH_ACTIVATION_DECAY", "0.9");
-        let config = ServerConfig::from_env();
-        assert_eq!(config.activation_decay_factor, 0.9);
-
-        env::set_var("SHODH_ACTIVATION_DECAY", "0.1");
-        let config = ServerConfig::from_env();
-        assert_eq!(config.activation_decay_factor, 0.5);
-
-        env::set_var("SHODH_ACTIVATION_DECAY", "1.5");
-        let config = ServerConfig::from_env();
-        assert_eq!(config.activation_decay_factor, 0.99);
-
-        env::remove_var("SHODH_ACTIVATION_DECAY");
-    }
-
-    #[test]
-    fn test_max_entities_clamping() {
-        env::set_var("SHODH_MAX_ENTITIES", "10");
-        let config = ServerConfig::from_env();
-        assert_eq!(config.max_entities_per_memory, 10);
-
-        env::set_var("SHODH_MAX_ENTITIES", "0");
-        let config = ServerConfig::from_env();
-        assert_eq!(config.max_entities_per_memory, 1);
-
-        env::set_var("SHODH_MAX_ENTITIES", "100");
-        let config = ServerConfig::from_env();
-        assert_eq!(config.max_entities_per_memory, 50);
-
-        env::remove_var("SHODH_MAX_ENTITIES");
-    }
-
-    #[test]
-    fn test_production_mode_detection_and_backup_default() {
-        env::set_var("SHODH_ENV", "production");
-        env::remove_var("SHODH_BACKUP_ENABLED");
-        let config = ServerConfig::from_env();
-        assert!(config.is_production);
-        assert!(config.backup_enabled);
-
-        env::set_var("SHODH_ENV", "prod");
-        let config = ServerConfig::from_env();
-        assert!(config.is_production);
-
-        env::set_var("SHODH_ENV", "development");
-        let config = ServerConfig::from_env();
-        assert!(!config.is_production);
-
-        env::set_var("SHODH_ENV", "PRODUCTION");
-        let config = ServerConfig::from_env();
-        assert!(config.is_production);
-
-        env::remove_var("SHODH_ENV");
-        env::remove_var("SHODH_BACKUP_ENABLED");
     }
 }

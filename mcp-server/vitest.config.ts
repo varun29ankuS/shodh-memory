@@ -5,7 +5,7 @@ export default defineConfig({
     include: ["tests/**/*.test.ts"],
     coverage: {
       provider: "v8",
-      include: ["security-utils.ts", "string-utils.ts", "token-tracking.ts", "memory-format.ts", "index-helpers.ts"],
+      include: ["security-utils.ts", "string-utils.ts", "token-tracking.ts", "memory-format.ts"],
       reporter: ["text", "lcov"],
       thresholds: {
         statements: 100,

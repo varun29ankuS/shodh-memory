@@ -1198,10 +1198,9 @@ impl GraphMemory {
             {
                 // CF already has data — just rename the old dir
                 let renamed = base_path.join(format!("{}.pre_cf_migration", old_name));
-                if renamed.exists() {
-                    let _ = std::fs::remove_dir_all(&renamed);
+                if !renamed.exists() {
+                    let _ = std::fs::rename(&old_path, &renamed);
                 }
-                let _ = std::fs::rename(&old_path, &renamed);
                 continue;
             }
 
@@ -1238,9 +1237,6 @@ impl GraphMemory {
 
                     // Rename old directory for rollback safety
                     let renamed = base_path.join(format!("{}.pre_cf_migration", old_name));
-                    if renamed.exists() {
-                        let _ = std::fs::remove_dir_all(&renamed);
-                    }
                     if let Err(e) = std::fs::rename(&old_path, &renamed) {
                         tracing::warn!(
                             "Migrated {} entries from {} but failed to rename: {}",
@@ -3379,12 +3375,8 @@ impl GraphMemory {
     ///
     /// Guarded by synapse_update_lock to prevent race with strengthen/decay.
     pub fn invalidate_relationship(&self, edge_uuid: &Uuid) -> Result<()> {
-        let _guard = self
-            .synapse_update_lock
-            .try_lock_for(std::time::Duration::from_secs(5))
-            .ok_or_else(|| {
-                anyhow::anyhow!("synapse_update_lock timeout in invalidate_relationship")
-            })?;
+        let _guard = self.synapse_update_lock.try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| anyhow::anyhow!("synapse_update_lock timeout in invalidate_relationship"))?;
 
         if let Some(mut edge) = self.get_relationship(edge_uuid)? {
             edge.invalidated_at = Some(Utc::now());
@@ -3405,9 +3397,7 @@ impl GraphMemory {
     /// Uses a mutex to prevent race conditions during concurrent updates (SHO-64).
     pub fn strengthen_synapse(&self, edge_uuid: &Uuid) -> Result<()> {
         // Lock with timeout to prevent deadlock on panic
-        let _guard = self
-            .synapse_update_lock
-            .try_lock_for(std::time::Duration::from_secs(5))
+        let _guard = self.synapse_update_lock.try_lock_for(std::time::Duration::from_secs(5))
             .ok_or_else(|| anyhow::anyhow!("synapse_update_lock timeout in strengthen_synapse"))?;
 
         if let Some(mut edge) = self.get_relationship(edge_uuid)? {
@@ -3433,12 +3423,8 @@ impl GraphMemory {
         }
 
         // Single lock acquisition for entire batch, with timeout
-        let _guard = self
-            .synapse_update_lock
-            .try_lock_for(std::time::Duration::from_secs(5))
-            .ok_or_else(|| {
-                anyhow::anyhow!("synapse_update_lock timeout in batch_strengthen_synapses")
-            })?;
+        let _guard = self.synapse_update_lock.try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| anyhow::anyhow!("synapse_update_lock timeout in batch_strengthen_synapses"))?;
 
         // Batch read all edges in a single RocksDB call (same pattern as get_entity_relationships_limited)
         let keys: Vec<[u8; 16]> = edge_uuids.iter().map(|u| *u.as_bytes()).collect();
@@ -3499,12 +3485,8 @@ impl GraphMemory {
             return Ok(0);
         }
 
-        let _guard = self
-            .synapse_update_lock
-            .try_lock_for(std::time::Duration::from_secs(5))
-            .ok_or_else(|| {
-                anyhow::anyhow!("synapse_update_lock timeout in record_memory_coactivation")
-            })?;
+        let _guard = self.synapse_update_lock.try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| anyhow::anyhow!("synapse_update_lock timeout in record_memory_coactivation"))?;
         let mut batch = WriteBatch::default();
         let mut edges_updated = 0;
         let mut new_edges = 0;
@@ -3640,12 +3622,8 @@ impl GraphMemory {
             return Ok((0, Vec::new()));
         }
 
-        let _guard = self
-            .synapse_update_lock
-            .try_lock_for(std::time::Duration::from_secs(5))
-            .ok_or_else(|| {
-                anyhow::anyhow!("synapse_update_lock timeout in strengthen_edges_from_boosts")
-            })?;
+        let _guard = self.synapse_update_lock.try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| anyhow::anyhow!("synapse_update_lock timeout in strengthen_edges_from_boosts"))?;
         let mut batch = WriteBatch::default();
         let mut strengthened = 0;
         let mut promotion_boosts = Vec::new();
@@ -3877,12 +3855,8 @@ impl GraphMemory {
             return Ok(0);
         }
 
-        let _guard = self
-            .synapse_update_lock
-            .try_lock_for(std::time::Duration::from_secs(5))
-            .ok_or_else(|| {
-                anyhow::anyhow!("synapse_update_lock timeout in strengthen_episode_entity_edges")
-            })?;
+        let _guard = self.synapse_update_lock.try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| anyhow::anyhow!("synapse_update_lock timeout in strengthen_episode_entity_edges"))?;
         let mut batch = WriteBatch::default();
         let mut strengthened = 0;
 
@@ -4001,9 +3975,7 @@ impl GraphMemory {
     /// Uses a mutex to prevent race conditions during concurrent updates (SHO-64).
     pub fn decay_synapse(&self, edge_uuid: &Uuid) -> Result<bool> {
         // Lock to prevent concurrent read-modify-write race conditions
-        let _guard = self
-            .synapse_update_lock
-            .try_lock_for(std::time::Duration::from_secs(5))
+        let _guard = self.synapse_update_lock.try_lock_for(std::time::Duration::from_secs(5))
             .ok_or_else(|| anyhow::anyhow!("synapse_update_lock timeout in decay_synapse"))?;
 
         if let Some(mut edge) = self.get_relationship(edge_uuid)? {
@@ -4028,12 +4000,8 @@ impl GraphMemory {
         }
 
         // Single lock acquisition for entire batch, with timeout
-        let _guard = self
-            .synapse_update_lock
-            .try_lock_for(std::time::Duration::from_secs(5))
-            .ok_or_else(|| {
-                anyhow::anyhow!("synapse_update_lock timeout in batch_decay_synapses")
-            })?;
+        let _guard = self.synapse_update_lock.try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| anyhow::anyhow!("synapse_update_lock timeout in batch_decay_synapses"))?;
 
         let mut batch = WriteBatch::default();
         let mut to_prune = Vec::new();
@@ -4073,12 +4041,8 @@ impl GraphMemory {
             return Ok(Vec::new());
         }
 
-        let _guard = self
-            .synapse_update_lock
-            .try_lock_for(std::time::Duration::from_secs(5))
-            .ok_or_else(|| {
-                anyhow::anyhow!("synapse_update_lock timeout in batch_decay_edges_in_place")
-            })?;
+        let _guard = self.synapse_update_lock.try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| anyhow::anyhow!("synapse_update_lock timeout in batch_decay_edges_in_place"))?;
         let mut batch = WriteBatch::default();
         let mut to_prune = Vec::new();
 
