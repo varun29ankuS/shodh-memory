@@ -59,11 +59,13 @@ pub const REQUEST_ID_HEADER: &str = "X-Request-ID";
 /// - Store in request extensions for downstream handlers
 pub async fn request_id(mut req: Request, next: Next) -> Response {
     // Extract or generate request ID
+    // Sanitize: only allow [a-zA-Z0-9\-_.] to prevent log injection
     let request_id = req
         .headers()
         .get(REQUEST_ID_HEADER)
         .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty() && s.len() <= 64) // Validate length
+        .filter(|s| !s.is_empty() && s.len() <= 64)
+        .filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'))
         .map(|s| RequestId::from_string(s.to_string()))
         .unwrap_or_else(RequestId::new);
 
@@ -86,6 +88,40 @@ pub async fn request_id(mut req: Request, next: Next) -> Response {
         response
             .headers_mut()
             .insert(REQUEST_ID_HEADER, header_value);
+    }
+
+    response
+}
+
+/// Middleware to add security response headers
+///
+/// Adds:
+/// - X-Content-Type-Options: nosniff (prevent MIME-type sniffing)
+/// - X-Frame-Options: DENY (prevent clickjacking)
+/// - Content-Security-Policy: default-src 'none' (restrict resource loading)
+/// - Cache-Control: no-store (prevent caching of API responses)
+/// - Strict-Transport-Security (HSTS) in production mode only
+pub async fn security_headers(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+
+    headers.insert(
+        "X-Content-Type-Options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
+    headers.insert(
+        "Content-Security-Policy",
+        HeaderValue::from_static("default-src 'none'"),
+    );
+    headers.insert("Cache-Control", HeaderValue::from_static("no-store"));
+
+    // HSTS in production only (requires HTTPS to be meaningful)
+    if crate::auth::is_production_mode() {
+        headers.insert(
+            "Strict-Transport-Security",
+            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        );
     }
 
     response
@@ -294,6 +330,10 @@ fn is_id(segment: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Process-global lock for tests that manipulate environment variables.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_normalize_path() {
@@ -337,5 +377,87 @@ mod tests {
         assert!(is_id("550e8400-e29b-41d4-a716-446655440000"));
         // Invalid UUID-like strings should not match
         assert!(!is_id("not-a-valid-uuid-at-all"));
+    }
+
+    // ── security_headers ──
+
+    #[tokio::test]
+    async fn security_headers_present_in_dev_mode() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        use axum::body::Body;
+        use axum::http::{Request as HttpRequest, StatusCode};
+        use axum::middleware::from_fn;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        std::env::remove_var("SHODH_ENV");
+
+        let app = Router::new()
+            .route("/test", get(|| async { "ok" }))
+            .layer(from_fn(security_headers));
+
+        let req = HttpRequest::builder()
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("X-Content-Type-Options").unwrap(),
+            "nosniff"
+        );
+        assert_eq!(resp.headers().get("X-Frame-Options").unwrap(), "DENY");
+        assert_eq!(
+            resp.headers().get("Content-Security-Policy").unwrap(),
+            "default-src 'none'"
+        );
+        assert_eq!(
+            resp.headers().get("Cache-Control").unwrap(),
+            "no-store"
+        );
+        // HSTS should NOT be present in dev mode
+        assert!(
+            resp.headers().get("Strict-Transport-Security").is_none(),
+            "HSTS should only be set in production"
+        );
+    }
+
+    #[tokio::test]
+    async fn security_headers_hsts_in_production() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::middleware::from_fn;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        std::env::set_var("SHODH_ENV", "production");
+
+        let app = Router::new()
+            .route("/test", get(|| async { "ok" }))
+            .layer(from_fn(security_headers));
+
+        let req = HttpRequest::builder()
+            .uri("/test")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert!(
+            resp.headers().get("Strict-Transport-Security").is_some(),
+            "HSTS should be set in production"
+        );
+        let hsts = resp
+            .headers()
+            .get("Strict-Transport-Security")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(hsts.contains("max-age="));
+
+        std::env::remove_var("SHODH_ENV");
     }
 }

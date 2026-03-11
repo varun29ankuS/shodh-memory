@@ -1080,20 +1080,20 @@ pub const LTP_WEEKLY_DECAY_FACTOR: f32 = 0.3;
 /// L2 edges store this many recent activation timestamps.
 ///
 /// Justification:
-/// - 20 timestamps covers ~2 weeks of daily use
-/// - Sufficient for weekly pattern detection
-/// - Memory: 20 × 8 bytes = 160 bytes per L2 edge
-pub const ACTIVATION_HISTORY_L2_CAPACITY: usize = 20;
+/// - 100 timestamps covers ~3 months of daily use
+/// - Sufficient for weekly and monthly pattern detection
+/// - Memory: 100 × 8 bytes = 800 bytes per L2 edge
+pub const ACTIVATION_HISTORY_L2_CAPACITY: usize = 100;
 
 /// Activation history capacity for L3 (Semantic) tier edges
 ///
 /// L3 edges store this many recent activation timestamps.
 ///
 /// Justification:
-/// - 50 timestamps covers ~2 months of regular use
-/// - Sufficient for monthly pattern detection and temporal queries
-/// - Memory: 50 × 8 bytes = 400 bytes per L3 edge
-pub const ACTIVATION_HISTORY_L3_CAPACITY: usize = 50;
+/// - 200 timestamps covers ~6 months of regular use
+/// - Sufficient for seasonal pattern detection and temporal queries
+/// - Memory: 200 × 8 bytes = 1600 bytes per L3 edge
+pub const ACTIVATION_HISTORY_L3_CAPACITY: usize = 200;
 
 // =============================================================================
 // UNIFIED LTP READINESS MODEL (PIPE-5)

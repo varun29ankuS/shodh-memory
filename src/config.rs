@@ -115,7 +115,8 @@ impl CorsConfig {
             }
         }
 
-        // Production safety check: warn if CORS is permissive in production
+        // Safety check: warn if CORS origins are not configured
+        // Warns in ALL modes unless suppressed with SHODH_CORS_WARN=false
         let is_production = env::var("SHODH_ENV")
             .map(|v| {
                 let v = v.to_lowercase();
@@ -123,10 +124,21 @@ impl CorsConfig {
             })
             .unwrap_or(false);
 
-        if is_production && config.allowed_origins.is_empty() {
-            tracing::warn!(
-                "⚠️  PRODUCTION WARNING: CORS allows all origins. Set SHODH_CORS_ORIGINS for security."
-            );
+        let cors_warn_suppressed = env::var("SHODH_CORS_WARN")
+            .map(|v| v.to_lowercase() == "false" || v == "0")
+            .unwrap_or(false);
+
+        if config.allowed_origins.is_empty() && !cors_warn_suppressed {
+            if is_production {
+                tracing::warn!(
+                    "⚠️  PRODUCTION WARNING: CORS allows all origins. Set SHODH_CORS_ORIGINS for security."
+                );
+            } else {
+                tracing::warn!(
+                    "CORS allows all origins (no SHODH_CORS_ORIGINS set). \
+                     Set SHODH_CORS_WARN=false to suppress this warning."
+                );
+            }
         }
 
         config
@@ -409,13 +421,20 @@ impl ServerConfig {
 
         if let Ok(val) = env::var("SHODH_ACTIVATION_DECAY") {
             if let Ok(n) = val.parse::<f32>() {
-                config.activation_decay_factor = n.clamp(0.5, 0.99);
+                let clamped = n.clamp(0.5, 0.99);
+                if (clamped - n).abs() > f32::EPSILON {
+                    tracing::warn!("SHODH_ACTIVATION_DECAY={} clamped to {} (valid range: 0.5–0.99)", n, clamped);
+                }
+                config.activation_decay_factor = clamped;
             }
         }
 
         // Backup configuration
         if let Ok(val) = env::var("SHODH_BACKUP_INTERVAL") {
-            if let Ok(n) = val.parse() {
+            if let Ok(n) = val.parse::<u64>() {
+                if n == 0 {
+                    tracing::warn!("SHODH_BACKUP_INTERVAL=0 — backups will run every maintenance cycle");
+                }
                 config.backup_interval_secs = n;
             }
         }
@@ -437,7 +456,11 @@ impl ServerConfig {
         // Entity extraction cap
         if let Ok(val) = env::var("SHODH_MAX_ENTITIES") {
             if let Ok(n) = val.parse::<usize>() {
-                config.max_entities_per_memory = n.clamp(1, 50);
+                let clamped = n.clamp(1, 50);
+                if clamped != n {
+                    tracing::warn!("SHODH_MAX_ENTITIES={} clamped to {} (valid range: 1–50)", n, clamped);
+                }
+                config.max_entities_per_memory = clamped;
             }
         }
 

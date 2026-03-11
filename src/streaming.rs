@@ -603,18 +603,6 @@ impl StreamSession {
         }
     }
 
-    /// Check if a memory is on injection cooldown
-    fn is_on_injection_cooldown(&self, memory_id: &str) -> bool {
-        if let Some(last_injected) = self.injection_cooldowns.get(memory_id) {
-            let elapsed = Utc::now()
-                .signed_duration_since(*last_injected)
-                .num_seconds() as u64;
-            elapsed < self.config.injection_cooldown_secs
-        } else {
-            false
-        }
-    }
-
     /// Mark a memory as recently injected
     fn mark_injected(&mut self, memory_id: &str) {
         self.injection_cooldowns

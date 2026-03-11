@@ -77,6 +77,12 @@ bun.lock
 package-lock.json
 yarn.lock
 
+# Coverage
+coverage/
+.coverage
+*.lcov
+htmlcov/
+
 # Temp/test directories
 .venv/
 test_*/

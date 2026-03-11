@@ -83,23 +83,35 @@ impl IdMapping {
     }
 
     /// Insert a single vector for a memory (legacy/simple case)
+    ///
+    /// Idempotent: removes any existing mappings for this memory first
+    /// to prevent orphaned vector IDs from accumulating.
     fn insert(&mut self, memory_id: MemoryId, vector_id: u32) {
-        self.memory_to_vectors
-            .entry(memory_id.clone())
-            .or_default()
-            .push(vector_id);
-        self.vector_to_memory.insert(vector_id, memory_id);
+        // Remove stale mappings to prevent orphans on re-index
+        if let Some(old_ids) = self.memory_to_vectors.remove(&memory_id) {
+            for old_id in old_ids {
+                self.vector_to_memory.remove(&old_id);
+            }
+        }
+        self.vector_to_memory.insert(vector_id, memory_id.clone());
+        self.memory_to_vectors.insert(memory_id, vec![vector_id]);
     }
 
     /// Insert multiple vectors for a memory (chunked embedding case)
+    ///
+    /// Idempotent: removes any existing mappings for this memory first
+    /// to prevent orphaned vector IDs from accumulating.
     fn insert_chunks(&mut self, memory_id: MemoryId, vector_ids: Vec<u32>) {
+        // Remove stale mappings to prevent orphans on re-index
+        if let Some(old_ids) = self.memory_to_vectors.remove(&memory_id) {
+            for old_id in old_ids {
+                self.vector_to_memory.remove(&old_id);
+            }
+        }
         for &vid in &vector_ids {
             self.vector_to_memory.insert(vid, memory_id.clone());
         }
-        self.memory_to_vectors
-            .entry(memory_id)
-            .or_default()
-            .extend(vector_ids);
+        self.memory_to_vectors.insert(memory_id, vector_ids);
     }
 
     fn get_memory_id(&self, vector_id: u32) -> Option<&MemoryId> {
@@ -232,14 +244,10 @@ impl RetrievalEngine {
                 mappings.len()
             );
 
-            // Build IdMapping from RocksDB data
+            // LOCK ORDERING: Always acquire vector_index (1) before id_mapping (2)
+            let mut vector_index = self.vector_index.write();
             let mut id_mapping = self.id_mapping.write();
             id_mapping.clear();
-
-            // Rebuild Vamana from actual embeddings
-            // The stored vector_ids are from a previous Vamana session and may not match
-            // So we re-insert embeddings to get fresh vector IDs
-            let mut vector_index = self.vector_index.write();
             let mut indexed = 0;
             let mut failed = 0;
 
@@ -306,8 +314,9 @@ impl RetrievalEngine {
 
         info!("Migrating {} memories to atomic storage...", total);
 
-        let mut id_mapping = self.id_mapping.write();
+        // LOCK ORDERING: Always acquire vector_index (1) before id_mapping (2)
         let mut vector_index = self.vector_index.write();
+        let mut id_mapping = self.id_mapping.write();
         let mut migrated = 0;
         let mut skipped = 0;
         let mut failed = 0;
@@ -410,6 +419,24 @@ impl RetrievalEngine {
             return Ok(false);
         }
 
+        // Identify mappings that point to vectors missing from persisted Vamana.
+        // We can recover these without a full rebuild when drift is small.
+        let missing_vector_mappings: Vec<MemoryId> = mappings
+            .iter()
+            .filter_map(|(memory_id, entry)| {
+                let vector_ids = entry.text_vectors()?;
+                if vector_ids.is_empty() {
+                    return None;
+                }
+                let has_in_range_vector = vector_ids.iter().any(|&vid| (vid as usize) < loaded_count);
+                if has_in_range_vector {
+                    None
+                } else {
+                    Some(memory_id.clone())
+                }
+            })
+            .collect();
+
         // Replace the vector index with the loaded one.
         // Restore search_list_size to our configured value since persistence
         // uses a hardcoded default (75) that is lower than our runtime config (100).
@@ -436,11 +463,65 @@ impl RetrievalEngine {
                 }
             }
         }
+        drop(id_mapping);
+
+        // Recover memories whose mapped vectors are missing from loaded Vamana.
+        // This prevents permanently losing searchable vectors when persisted index
+        // has minor drift but not enough to trigger full rebuild.
+        if !missing_vector_mappings.is_empty() {
+            // LOCK ORDERING: vector_index (1) before id_mapping (2)
+            let mut index = self.vector_index.write();
+            let mut id_mapping = self.id_mapping.write();
+            let mut recovered = 0usize;
+            let mut recovery_failed = 0usize;
+
+            for memory_id in &missing_vector_mappings {
+                match self.storage.get(memory_id) {
+                    Ok(memory) => {
+                        if let Some(ref embedding) = memory.experience.embeddings {
+                            match index.add_vector(embedding.clone()) {
+                                Ok(new_vector_id) => {
+                                    id_mapping.remove_all(memory_id);
+                                    id_mapping.insert(memory_id.clone(), new_vector_id);
+                                    recovered += 1;
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to recover missing vector for memory {}: {}",
+                                        memory_id.0,
+                                        e
+                                    );
+                                    recovery_failed += 1;
+                                }
+                            }
+                        } else {
+                            recovery_failed += 1;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to load memory {} for vector recovery: {}",
+                            memory_id.0,
+                            e
+                        );
+                        recovery_failed += 1;
+                    }
+                }
+            }
+
+            if recovered > 0 || recovery_failed > 0 {
+                info!(
+                    "Recovered {} missing vectors from RocksDB mappings ({} failed)",
+                    recovered,
+                    recovery_failed
+                );
+            }
+        }
 
         info!(
             "Loaded {} vectors from .vamana, {} mappings from RocksDB",
             self.vector_index.read().len(),
-            id_mapping.len()
+            self.id_mapping.read().len()
         );
 
         Ok(true)
@@ -464,25 +545,37 @@ impl RetrievalEngine {
         fs::create_dir_all(&index_path)?;
 
         let vamana_path = index_path.join(VAMANA_INDEX_FILE);
+
+        // LOCK ORDERING: Always acquire vector_index (1) before id_mapping (2)
+        let vector_index = self.vector_index.read();
         let id_mapping = self.id_mapping.read();
         let vector_count = id_mapping.len();
-
-        // Persist Vamana index for instant startup
-        let vector_index = self.vector_index.read();
         if vector_count > 0 {
-            match vector_index.save_to_file(&vamana_path) {
+            // Atomic save: write to .tmp file then rename to avoid partial writes
+            let tmp_path = vamana_path.with_extension("vamana.tmp");
+            match vector_index.save_to_file(&tmp_path) {
                 Ok(()) => {
-                    info!(
-                        "Saved Vamana index: {} vectors to {} (instant startup enabled)",
-                        vector_count,
-                        vamana_path.display()
-                    );
+                    // Atomic rename — on crash, either the old or new file survives
+                    if let Err(e) = fs::rename(&tmp_path, &vamana_path) {
+                        warn!(
+                            "Failed to rename .vamana.tmp to .vamana: {} (removing tmp)",
+                            e
+                        );
+                        let _ = fs::remove_file(&tmp_path);
+                    } else {
+                        info!(
+                            "Saved Vamana index: {} vectors to {} (instant startup enabled)",
+                            vector_count,
+                            vamana_path.display()
+                        );
+                    }
                 }
                 Err(e) => {
                     warn!(
                         "Failed to save Vamana index (will rebuild on restart): {}",
                         e
                     );
+                    let _ = fs::remove_file(&tmp_path);
                 }
             }
         } else {
@@ -2196,5 +2289,69 @@ mod tests {
 
         assert_eq!(health.total_vectors, 1000);
         assert!(!health.needs_rebuild);
+    }
+
+    #[test]
+    fn test_id_mapping_insert_is_idempotent() {
+        let mut mapping = IdMapping::new();
+        let memory_id = MemoryId(uuid::Uuid::new_v4());
+
+        // First insert
+        mapping.insert(memory_id.clone(), 10);
+        assert_eq!(mapping.len(), 1);
+        assert_eq!(mapping.get_memory_id(10), Some(&memory_id));
+
+        // Second insert for same memory with different vector_id (simulates re-index)
+        mapping.insert(memory_id.clone(), 20);
+        assert_eq!(mapping.len(), 1);
+        assert_eq!(mapping.get_memory_id(20), Some(&memory_id));
+        // Old vector_id should be cleaned up (no orphan)
+        assert!(
+            mapping.get_memory_id(10).is_none(),
+            "old vector_id should be removed to prevent orphan"
+        );
+        assert_eq!(mapping.memory_to_vectors[&memory_id], vec![20]);
+    }
+
+    #[test]
+    fn test_id_mapping_insert_chunks_is_idempotent() {
+        let mut mapping = IdMapping::new();
+        let memory_id = MemoryId(uuid::Uuid::new_v4());
+
+        // First insert: 3 chunks
+        mapping.insert_chunks(memory_id.clone(), vec![1, 2, 3]);
+        assert_eq!(mapping.len(), 1);
+        assert_eq!(mapping.memory_to_vectors[&memory_id], vec![1, 2, 3]);
+
+        // Second insert: 2 different chunks (simulates re-index after content change)
+        mapping.insert_chunks(memory_id.clone(), vec![10, 11]);
+        assert_eq!(mapping.len(), 1);
+        assert_eq!(mapping.memory_to_vectors[&memory_id], vec![10, 11]);
+        // Old vector_ids should be cleaned up
+        assert!(mapping.get_memory_id(1).is_none(), "old chunk 1 orphaned");
+        assert!(mapping.get_memory_id(2).is_none(), "old chunk 2 orphaned");
+        assert!(mapping.get_memory_id(3).is_none(), "old chunk 3 orphaned");
+        // New ones should be present
+        assert_eq!(mapping.get_memory_id(10), Some(&memory_id));
+        assert_eq!(mapping.get_memory_id(11), Some(&memory_id));
+    }
+
+    #[test]
+    fn test_id_mapping_vector_count_stable_after_reinsert() {
+        let mut mapping = IdMapping::new();
+        let m1 = MemoryId(uuid::Uuid::new_v4());
+        let m2 = MemoryId(uuid::Uuid::new_v4());
+
+        mapping.insert(m1.clone(), 1);
+        mapping.insert(m2.clone(), 2);
+        assert_eq!(mapping.vector_to_memory.len(), 2);
+
+        // Re-insert m1 with new vector - total vector count should stay at 2
+        mapping.insert(m1.clone(), 3);
+        assert_eq!(
+            mapping.vector_to_memory.len(),
+            2,
+            "vector_to_memory should not grow on re-insert"
+        );
     }
 }

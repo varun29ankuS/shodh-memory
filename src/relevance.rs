@@ -577,13 +577,15 @@ impl LearnedWeights {
         let calibrated_graph = calibrate_score(graph_strength);
 
         // Weighted sum
-        self.semantic * calibrated_semantic
+        let result = self.semantic * calibrated_semantic
             + self.entity * calibrated_entity
             + self.tag * calibrated_tag
             + self.importance * calibrated_importance
             + self.momentum * calibrated_momentum
             + self.access_count * calibrated_access
-            + self.graph_strength * calibrated_graph
+            + self.graph_strength * calibrated_graph;
+
+        if result.is_finite() { result } else { 0.0 }
     }
 }
 
@@ -592,6 +594,9 @@ impl LearnedWeights {
 /// Maps scores to a 0-1 range with smooth cutoff around SIGMOID_MIDPOINT.
 /// Scores near 1.0 stay near 1.0, scores near 0 are penalized more.
 fn calibrate_score(score: f32) -> f32 {
+    if !score.is_finite() {
+        return 0.0;
+    }
     1.0 / (1.0 + (-SIGMOID_STEEPNESS * (score - SIGMOID_MIDPOINT)).exp())
 }
 
@@ -2019,5 +2024,27 @@ mod tests {
             + weights.access_count
             + weights.graph_strength;
         assert!((sum - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_fuse_scores_nan_inf_guard() {
+        let weights = LearnedWeights::default();
+
+        // NaN input
+        let result = weights.fuse_scores_full(f32::NAN, 0.5, 0.5, 0.5, 0.0, 1, 0.5);
+        assert!(result.is_finite(), "NaN input should produce finite output");
+
+        // Inf input
+        let result = weights.fuse_scores_full(0.5, f32::INFINITY, 0.5, 0.5, 0.0, 1, 0.5);
+        assert!(result.is_finite(), "Inf input should produce finite output");
+
+        // -Inf input
+        let result = weights.fuse_scores_full(0.5, 0.5, f32::NEG_INFINITY, 0.5, 0.0, 1, 0.5);
+        assert!(result.is_finite(), "-Inf input should produce finite output");
+
+        // Normal inputs still work
+        let result = weights.fuse_scores_full(0.8, 0.5, 0.3, 0.6, 0.2, 3, 0.4);
+        assert!(result.is_finite());
+        assert!(result > 0.0);
     }
 }

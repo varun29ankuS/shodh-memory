@@ -177,12 +177,12 @@ pub fn validate_max_results(max_results: usize) -> Result<()> {
 
 /// Validate and compile a regex pattern with ReDoS protection
 ///
-/// Prevents regex denial-of-service attacks by:
-/// 1. Limiting pattern length
-/// 2. Detecting potentially catastrophic backtracking patterns
-/// 3. Using regex crate which has built-in protections
+/// Validates and compiles a regex pattern safely.
+///
+/// The `regex` crate guarantees linear-time matching by construction
+/// (no backtracking engine), so ReDoS is not a concern. We only enforce
+/// length limits and delegate to the crate's built-in size/complexity limits.
 pub fn validate_and_compile_pattern(pattern: &str) -> Result<Regex> {
-    // Length check
     if pattern.is_empty() {
         return Err(anyhow!("Pattern cannot be empty"));
     }
@@ -195,53 +195,7 @@ pub fn validate_and_compile_pattern(pattern: &str) -> Result<Regex> {
         ));
     }
 
-    // Detect potentially dangerous patterns using state machine approach
-    // Track groups and quantifiers to detect nested quantifier patterns like (a+)+
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-
-    // Stack to track if each group level has a quantifier inside
-    let mut group_has_quantifier: Vec<bool> = Vec::new();
-
-    while i < chars.len() {
-        // Skip escaped characters
-        if chars[i] == '\\' && i + 1 < chars.len() {
-            i += 2;
-            continue;
-        }
-
-        match chars[i] {
-            '(' => {
-                // Starting a new group
-                group_has_quantifier.push(false);
-            }
-            ')' => {
-                // Closing a group - check if next char is a quantifier
-                let group_had_quantifier = group_has_quantifier.pop().unwrap_or(false);
-
-                // Look ahead for quantifier after the closing paren
-                if i + 1 < chars.len() {
-                    let next = chars[i + 1];
-                    if (next == '+' || next == '*') && group_had_quantifier {
-                        // Nested quantifier detected: (something+)+ or (something*)*
-                        return Err(anyhow!(
-                            "Pattern contains nested quantifiers (e.g., (a+)+) which may cause catastrophic backtracking"
-                        ));
-                    }
-                }
-            }
-            '+' | '*' => {
-                // Mark current group (if any) as having a quantifier
-                if let Some(last) = group_has_quantifier.last_mut() {
-                    *last = true;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-
-    // Compile with default limits (regex crate has built-in size limits)
+    // regex crate has built-in size/complexity limits and guarantees linear-time matching
     Regex::new(pattern).map_err(|e| anyhow!("Invalid regex pattern: {e}"))
 }
 
@@ -427,11 +381,11 @@ mod tests {
     }
 
     #[test]
-    fn test_redos_patterns_rejected() {
-        // These patterns could cause catastrophic backtracking
-        assert!(validate_and_compile_pattern("(a+)+").is_err());
-        assert!(validate_and_compile_pattern("(.*)*").is_err());
-        assert!(validate_and_compile_pattern("(.+)+").is_err());
+    fn test_regex_edge_cases() {
+        // regex crate handles these safely (linear-time, no backtracking)
+        assert!(validate_and_compile_pattern("(a+)+").is_ok());
+        assert!(validate_and_compile_pattern("(.*)*").is_ok());
+        assert!(validate_and_compile_pattern("(.+)+").is_ok());
         // Pattern too long
         assert!(validate_and_compile_pattern(&"a".repeat(300)).is_err());
         // Empty pattern
