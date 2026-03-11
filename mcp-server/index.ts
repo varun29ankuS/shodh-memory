@@ -28,6 +28,7 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import { fileURLToPath } from "url";
+import { nextReconnectDelay, serializeAndValidateBody, shouldWarnInsecureApiUrl } from "./security-utils";
 
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
@@ -73,6 +74,12 @@ if (!API_KEY) {
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1000;
 const REQUEST_TIMEOUT_MS = 10000;
+
+// Warn if non-localhost URL uses HTTP (security risk)
+if (shouldWarnInsecureApiUrl(API_URL, process.env.SHODH_ALLOW_HTTP)) {
+  console.error("[shodh-memory] WARNING: Using HTTP for a non-localhost server is insecure.");
+  console.error("[shodh-memory] Set SHODH_API_URL to an https:// URL, or set SHODH_ALLOW_HTTP=true to suppress this warning.");
+}
 
 // Input validation limits
 const MAX_CONTENT_LENGTH = 100_000; // 100KB max for content fields
@@ -161,6 +168,8 @@ let lastProactiveResponse: string = "";
 let streamSocket: WebSocket | null = null;
 let streamConnecting = false;
 let streamReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let streamReconnectDelay = 1000; // Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 60s
+const STREAM_RECONNECT_MAX_DELAY = 60_000;
 
 // Buffer for messages while reconnecting
 const streamBuffer: string[] = [];
@@ -177,16 +186,21 @@ async function connectStream(): Promise<void> {
   streamHandshakeComplete = false;
 
   try {
-    // Note: /api/stream requires X-API-Key header for authentication
-    // Bun supports headers via: new WebSocket(url, { headers: {...} })
-    streamSocket = new WebSocket(WS_URL, {
+    // Auth: Bun supports headers in WebSocket constructor, but Node.js does not.
+    // Pass API key as query parameter for cross-runtime compatibility.
+    // Server accepts both X-API-Key header and ?api_key= query parameter.
+    const wsUrlWithAuth = WS_URL + (WS_URL.includes("?") ? "&" : "?") + "api_key=" + encodeURIComponent(API_KEY);
+
+    // Also try passing header for Bun (ignored by Node.js WebSocket)
+    streamSocket = new WebSocket(wsUrlWithAuth, {
       headers: {
         "X-API-Key": API_KEY
       }
-    });
+    } as any);
 
     streamSocket.onopen = () => {
       streamConnecting = false;
+      streamReconnectDelay = 1000; // Reset backoff on successful connection
       console.error("[Stream] WebSocket connected to", WS_URL);
       // Send handshake first - server expects StreamHandshake as first message
       const handshake = JSON.stringify({
@@ -232,13 +246,15 @@ async function connectStream(): Promise<void> {
       streamSocket = null;
       streamConnecting = false;
       streamHandshakeComplete = false;
-      // Reconnect after delay
+      // Reconnect after delay with exponential backoff
       if (STREAM_ENABLED && !streamReconnectTimer) {
+        const delay = streamReconnectDelay;
+        streamReconnectDelay = nextReconnectDelay(streamReconnectDelay, STREAM_RECONNECT_MAX_DELAY);
         streamReconnectTimer = setTimeout(() => {
           streamReconnectTimer = null;
-          console.error("[Stream] Attempting reconnect...");
+          console.error(`[Stream] Attempting reconnect (next delay: ${streamReconnectDelay}ms)...`);
           connectStream().catch((e) => console.error("[Stream] Reconnect failed:", e));
-        }, 5000);
+        }, delay);
       }
     };
 
@@ -430,7 +446,11 @@ async function apiCall<T>(
       };
 
       if (body) {
-        options.body = JSON.stringify(body);
+        const bodyValidation = serializeAndValidateBody(body, MAX_CONTENT_LENGTH);
+        if (!bodyValidation.ok) {
+          throw new Error(bodyValidation.error);
+        }
+        options.body = bodyValidation.serialized;
       }
 
       const response = await fetch(`${API_URL}${endpoint}`, options);
@@ -1957,7 +1977,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           response += `Checksum: ${b.checksum.slice(0, 16)}...\n`;
           response += `Created: ${new Date(b.created_at).toLocaleString()}\n`;
         } else {
-          response += `✗ Failed: ${result.message}\n`;
+          response += `✗ Failed: ${result.message || "Unknown backup creation error"}\n`;
         }
 
         return {
@@ -2032,7 +2052,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
         response += `${statusIcon} Backup #${backup_id}: ${statusText}\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-        response += result.message;
+        response += result.message || "No verification details provided";
 
         return {
           content: [{ type: "text", text: response }],
@@ -2089,9 +2109,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (result.restored_stores.length > 0) {
             response += `Restored stores: ${result.restored_stores.join(", ")}\n`;
           }
-          response += `\n⚠️ ${result.message}`;
+          response += `\n⚠️ ${result.message || "Restore completed with no additional details"}`;
         } else {
-          response += `✗ Restore failed: ${result.message}`;
+          response += `✗ Restore failed: ${result.message || "Unknown restore error"}`;
         }
 
         return {
@@ -2731,7 +2751,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               type: "text",
               text: result.success
                 ? `✓ Reminder dismissed: ${reminder_id}`
-                : `⚠️ ${result.message}`,
+                : `⚠️ ${result.message || "No message returned"}`,
             },
           ],
         };
@@ -4048,6 +4068,15 @@ async function ensureServerRunning(): Promise<void> {
   if (!binaryPath) {
     console.error("[shodh-memory] Server binary not found. Please run: npx @shodh/memory-mcp");
     console.error("[shodh-memory] Or download from: https://github.com/varun29ankuS/shodh-memory/releases");
+    return;
+  }
+
+  // Validate that the resolved binary is within the expected bin directory
+  const expectedBinDir = fs.realpathSync(path.join(__dirname, "..", "bin"));
+  const resolvedBinary = fs.realpathSync(binaryPath);
+  if (!resolvedBinary.startsWith(expectedBinDir + path.sep) && resolvedBinary !== expectedBinDir) {
+    console.error(`[shodh-memory] WARNING: Binary path resolves outside expected directory: ${resolvedBinary}`);
+    console.error(`[shodh-memory] Expected: ${expectedBinDir}`);
     return;
   }
 

@@ -36,7 +36,7 @@ from typing import Any, List, Optional
 try:
     from agents import FunctionTool
     from agents.tool import ToolContext
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel, Field, ValidationError
 except ImportError:
     raise ImportError(
         "OpenAI Agents SDK is required for this integration. "
@@ -239,7 +239,10 @@ class ShodhTools(_ShodhHTTPClient):
         parent = self
 
         async def invoke(ctx: ToolContext, args: str) -> str:
-            parsed = RememberArgs.model_validate_json(args)
+            try:
+                parsed = RememberArgs.model_validate_json(args)
+            except ValidationError as e:
+                return json.dumps({"error": f"Invalid arguments: {e}"})
             result = parent._post("/api/remember", {
                 "user_id": parent.user_id,
                 "content": parsed.content,
@@ -259,7 +262,10 @@ class ShodhTools(_ShodhHTTPClient):
         parent = self
 
         async def invoke(ctx: ToolContext, args: str) -> str:
-            parsed = RecallArgs.model_validate_json(args)
+            try:
+                parsed = RecallArgs.model_validate_json(args)
+            except ValidationError as e:
+                return json.dumps({"error": f"Invalid arguments: {e}"})
             result = parent._post("/api/recall", {
                 "user_id": parent.user_id,
                 "query": parsed.query,
@@ -279,7 +285,10 @@ class ShodhTools(_ShodhHTTPClient):
         parent = self
 
         async def invoke(ctx: ToolContext, args: str) -> str:
-            parsed = ForgetArgs.model_validate_json(args)
+            try:
+                parsed = ForgetArgs.model_validate_json(args)
+            except ValidationError as e:
+                return json.dumps({"error": f"Invalid arguments: {e}"})
             result = parent._delete(f"/api/memory/{parsed.memory_id}")
             return json.dumps(result)
 
@@ -294,7 +303,10 @@ class ShodhTools(_ShodhHTTPClient):
         parent = self
 
         async def invoke(ctx: ToolContext, args: str) -> str:
-            parsed = ContextSummaryArgs.model_validate_json(args)
+            try:
+                parsed = ContextSummaryArgs.model_validate_json(args)
+            except ValidationError as e:
+                return json.dumps({"error": f"Invalid arguments: {e}"})
             result = parent._post("/api/context_summary", {
                 "user_id": parent.user_id,
                 "max_items": parsed.max_items,
@@ -315,7 +327,10 @@ class ShodhTools(_ShodhHTTPClient):
         parent = self
 
         async def invoke(ctx: ToolContext, args: str) -> str:
-            parsed = ProactiveContextArgs.model_validate_json(args)
+            try:
+                parsed = ProactiveContextArgs.model_validate_json(args)
+            except ValidationError as e:
+                return json.dumps({"error": f"Invalid arguments: {e}"})
             result = parent._post("/api/relevant", {
                 "user_id": parent.user_id,
                 "context": parsed.context,
@@ -335,7 +350,10 @@ class ShodhTools(_ShodhHTTPClient):
         parent = self
 
         async def invoke(ctx: ToolContext, args: str) -> str:
-            parsed = AddTodoArgs.model_validate_json(args)
+            try:
+                parsed = AddTodoArgs.model_validate_json(args)
+            except ValidationError as e:
+                return json.dumps({"error": f"Invalid arguments: {e}"})
             payload: dict[str, Any] = {
                 "user_id": parent.user_id,
                 "content": parsed.content,
@@ -361,7 +379,10 @@ class ShodhTools(_ShodhHTTPClient):
         parent = self
 
         async def invoke(ctx: ToolContext, args: str) -> str:
-            parsed = ListTodosArgs.model_validate_json(args)
+            try:
+                parsed = ListTodosArgs.model_validate_json(args)
+            except ValidationError as e:
+                return json.dumps({"error": f"Invalid arguments: {e}"})
             payload: dict[str, Any] = {
                 "user_id": parent.user_id,
                 "status": parsed.status,
@@ -383,7 +404,10 @@ class ShodhTools(_ShodhHTTPClient):
         parent = self
 
         async def invoke(ctx: ToolContext, args: str) -> str:
-            parsed = CompleteTodoArgs.model_validate_json(args)
+            try:
+                parsed = CompleteTodoArgs.model_validate_json(args)
+            except ValidationError as e:
+                return json.dumps({"error": f"Invalid arguments: {e}"})
             result = parent._post("/api/todos/complete", {
                 "user_id": parent.user_id,
                 "todo_id": parsed.todo_id,

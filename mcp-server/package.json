@@ -11,6 +11,8 @@
   "scripts": {
     "start": "bun run index.ts",
     "build": "bun build index.ts --outdir dist --target node",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "postinstall": "node scripts/postinstall.cjs",
     "prepublishOnly": "npm run build"
   },
@@ -21,6 +23,9 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.24.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
   },
   "keywords": [
     "mcp",
