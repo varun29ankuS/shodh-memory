@@ -474,37 +474,35 @@ pub async fn remember(
 
         tokio::spawn(async move {
             // Task 1: Build episodic graph (entities + episode + relationships)
-            if let Err(e) =
-                state.process_experience_into_graph(&user_id, &experience, &memory_id)
-            {
+            if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id) {
                 tracing::debug!("Graph processing failed (non-fatal): {}", e);
             }
 
             // Task 2: Set parent_id for hierarchical organization
             if let Some(ref parent_id_str) = parent_id {
-                let resolved_parent =
-                    if let Ok(parent_uuid) = uuid::Uuid::parse_str(parent_id_str) {
-                        Some(crate::memory::MemoryId(parent_uuid))
-                    } else {
-                        let mem = memory.clone();
-                        let prefix = parent_id_str.clone();
-                        match tokio::task::spawn_blocking(move || {
-                            let guard = mem.read();
-                            guard
-                                .find_memory_by_prefix(&prefix)
-                                .ok()
-                                .flatten()
-                                .map(|m| m.id.clone())
-                        })
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(e) => {
-                                tracing::debug!("Parent resolve panicked (non-fatal): {e}");
-                                None
-                            }
+                let resolved_parent = if let Ok(parent_uuid) = uuid::Uuid::parse_str(parent_id_str)
+                {
+                    Some(crate::memory::MemoryId(parent_uuid))
+                } else {
+                    let mem = memory.clone();
+                    let prefix = parent_id_str.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        let guard = mem.read();
+                        guard
+                            .find_memory_by_prefix(&prefix)
+                            .ok()
+                            .flatten()
+                            .map(|m| m.id.clone())
+                    })
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(e) => {
+                            tracing::debug!("Parent resolve panicked (non-fatal): {e}");
+                            None
                         }
-                    };
+                    }
+                };
 
                 if let Some(resolved) = resolved_parent {
                     let mem = memory.clone();
