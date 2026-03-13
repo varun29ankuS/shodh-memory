@@ -425,173 +425,13 @@ pub async fn remember(
         .map_err(AppError::Internal)?
     };
 
-    // Build episodic graph: entities + episode + relationships for multi-hop retrieval
-    if let Err(e) = state.process_experience_into_graph(&req.user_id, &experience, &memory_id) {
-        tracing::debug!("Graph processing failed (non-fatal): {}", e);
-    }
-
-    // Set parent_id for hierarchical organization (accepts full UUID or 8+ char prefix)
-    if let Some(ref parent_id_str) = req.parent_id {
-        let resolved_parent = if let Ok(parent_uuid) = uuid::Uuid::parse_str(parent_id_str) {
-            Some(crate::memory::MemoryId(parent_uuid))
-        } else {
-            let mem = memory.clone();
-            let prefix = parent_id_str.clone();
-            tokio::task::spawn_blocking(move || {
-                let guard = mem.read();
-                guard
-                    .find_memory_by_prefix(&prefix)
-                    .ok()
-                    .flatten()
-                    .map(|m| m.id.clone())
-            })
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Parent resolve panicked: {e}")))?
-        };
-
-        if let Some(parent_id) = resolved_parent {
-            let memory = memory.clone();
-            let memory_id_clone = memory_id.clone();
-            tokio::task::spawn_blocking(move || {
-                let memory_guard = memory.read();
-                if let Err(e) = memory_guard.set_memory_parent(&memory_id_clone, Some(parent_id)) {
-                    tracing::warn!("Failed to set parent_id: {}", e);
-                }
-            })
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Parent set task panicked: {e}")))?;
-        } else {
-            tracing::warn!("Could not resolve parent_id: {}", parent_id_str);
-        }
-    }
-
-    // Extract and store temporal facts for multi-hop temporal reasoning
-    // E.g., "planning camping next month" → resolves "next month" to absolute date
-    {
-        let memory = memory.clone();
-        let user_id = req.user_id.clone();
-        let content = req.content.clone();
-        let entities = experience.entities.clone();
-        let created_at = req.created_at.unwrap_or_else(chrono::Utc::now);
-        let memory_id_clone = memory_id.clone(); // Clone before moving into closure
-
-        tokio::task::spawn_blocking(move || {
-            let memory_guard = memory.read();
-            if let Err(e) = memory_guard.store_temporal_facts_for_memory(
-                &user_id,
-                &memory_id_clone,
-                &content,
-                &entities,
-                created_at,
-            ) {
-                tracing::debug!("Temporal fact extraction failed (non-fatal): {}", e);
-            }
-        })
-        .await
-        .map_err(|e| {
-            AppError::Internal(anyhow::anyhow!("Temporal fact extraction panicked: {e}"))
-        })?;
-    }
-
-    // Infer causal lineage: detect how this memory relates to recent memories
-    // sharing entities (Caused, ResolvedBy, InformedBy, SupersededBy, etc.)
-    // Runs AFTER graph processing so entity index is populated.
-    //
-    // Uses the episode's entity_refs (UUIDs) rather than raw text names, because
-    // graph entity names are merged/normalized by NER (e.g., "robot" → "robotics").
-    {
-        let memory_arc = memory.clone();
-        let graph_arc = state.get_user_graph(&req.user_id).ok();
-        let user_id = req.user_id.clone();
-        let memory_id_clone = memory_id.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let Some(graph_arc) = graph_arc else {
-                return;
-            };
-            let graph = graph_arc.read();
-            let memory_guard = memory_arc.read();
-
-            // Get the episode we just created to access its entity_refs (UUIDs).
-            // These are the actual graph entity UUIDs, not raw text names.
-            let episode = match graph.get_episode(&memory_id_clone.0) {
-                Ok(Some(ep)) => ep,
-                _ => return,
-            };
-
-            if episode.entity_refs.is_empty() {
-                return;
-            }
-
-            // For each entity UUID linked to this episode, find other episodes
-            // that share the same entity (within the last 7 days).
-            let mut candidate_ids = std::collections::HashSet::new();
-            let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
-
-            for entity_uuid in &episode.entity_refs {
-                if let Ok(episodes) = graph.get_episodes_by_entity(entity_uuid) {
-                    for ep in &episodes {
-                        if ep.created_at >= cutoff {
-                            candidate_ids.insert(crate::memory::MemoryId(ep.uuid));
-                        }
-                    }
-                }
-            }
-
-            // Remove self, cap candidates to avoid O(n) scanning
-            candidate_ids.remove(&memory_id_clone);
-            let candidate_ids: Vec<_> = candidate_ids.into_iter().take(20).collect();
-            if candidate_ids.is_empty() {
-                return;
-            }
-
-            // Fetch full Memory objects for type-based inference
-            let candidates: Vec<_> = candidate_ids
-                .iter()
-                .filter_map(|id| memory_guard.get_memory(id).ok())
-                .collect();
-
-            let Ok(new_memory) = memory_guard.get_memory(&memory_id_clone) else {
-                return;
-            };
-
-            match memory_guard.infer_lineage_for_memory(&user_id, &new_memory, &candidates) {
-                Ok(edges) if !edges.is_empty() => {
-                    tracing::info!(
-                        user_id = %user_id,
-                        memory_id = %memory_id_clone.0,
-                        edges = edges.len(),
-                        relations = ?edges.iter().map(|e| format!("{:?}", e.relation)).collect::<Vec<_>>(),
-                        "Lineage inference: {} causal edges detected",
-                        edges.len()
-                    );
-                }
-                Ok(_) => {
-                    tracing::debug!(
-                        "Lineage inference: no causal edges for {} (checked {} candidates)",
-                        memory_id_clone.0,
-                        candidates.len()
-                    );
-                }
-                Err(e) => {
-                    tracing::debug!("Lineage inference failed (non-fatal): {}", e);
-                }
-            }
-        })
-        .await
-        .map_err(|e| {
-            AppError::Internal(anyhow::anyhow!("Lineage inference panicked: {e}"))
-        })?;
-    }
-
-    // Record metrics
+    // Record metrics + session + broadcast BEFORE returning response (fast, <1ms)
     let duration = op_start.elapsed().as_secs_f64();
     metrics::MEMORY_STORE_DURATION.observe(duration);
     metrics::MEMORY_STORE_TOTAL
         .with_label_values(&["success"])
         .inc();
 
-    // Track session event
     let session_id = state.session_store().get_or_create_session(&req.user_id);
     state.session_store().add_event(
         &session_id,
@@ -604,7 +444,6 @@ pub async fn remember(
         },
     );
 
-    // Broadcast CREATE event
     state.emit_event(MemoryEvent {
         event_type: "CREATE".to_string(),
         timestamp: chrono::Utc::now(),
@@ -617,8 +456,175 @@ pub async fn remember(
         results: None,
     });
 
+    // IDEMPOTENCY FIX (issue #109): Return response IMMEDIATELY after persist.
+    // The 4 post-processing tasks below are all non-fatal (log errors and continue)
+    // and their results are never included in the response. Running them synchronously
+    // caused 5-15s handler latency, exceeding the MCP client's 10s timeout and
+    // triggering retries that created duplicate memories (31% duplication rate).
+    // Now fire-and-forget: response returns in <200ms, post-tasks run in background.
+    let response_id = memory_id.0.to_string();
+    {
+        let state = state.clone();
+        let memory = memory.clone();
+        let user_id = req.user_id.clone();
+        let content = req.content.clone();
+        let experience = experience.clone();
+        let parent_id = req.parent_id.clone();
+        let created_at = req.created_at;
+
+        tokio::spawn(async move {
+            // Task 1: Build episodic graph (entities + episode + relationships)
+            if let Err(e) =
+                state.process_experience_into_graph(&user_id, &experience, &memory_id)
+            {
+                tracing::debug!("Graph processing failed (non-fatal): {}", e);
+            }
+
+            // Task 2: Set parent_id for hierarchical organization
+            if let Some(ref parent_id_str) = parent_id {
+                let resolved_parent =
+                    if let Ok(parent_uuid) = uuid::Uuid::parse_str(parent_id_str) {
+                        Some(crate::memory::MemoryId(parent_uuid))
+                    } else {
+                        let mem = memory.clone();
+                        let prefix = parent_id_str.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            let guard = mem.read();
+                            guard
+                                .find_memory_by_prefix(&prefix)
+                                .ok()
+                                .flatten()
+                                .map(|m| m.id.clone())
+                        })
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(e) => {
+                                tracing::debug!("Parent resolve panicked (non-fatal): {e}");
+                                None
+                            }
+                        }
+                    };
+
+                if let Some(resolved) = resolved_parent {
+                    let mem = memory.clone();
+                    let mid = memory_id.clone();
+                    if let Err(e) = tokio::task::spawn_blocking(move || {
+                        let guard = mem.read();
+                        guard.set_memory_parent(&mid, Some(resolved))
+                    })
+                    .await
+                    {
+                        tracing::debug!("Parent set task panicked (non-fatal): {e}");
+                    }
+                } else {
+                    tracing::warn!("Could not resolve parent_id: {}", parent_id_str);
+                }
+            }
+
+            // Task 3: Extract and store temporal facts
+            {
+                let mem = memory.clone();
+                let uid = user_id.clone();
+                let cnt = content.clone();
+                let ents = experience.entities.clone();
+                let ts = created_at.unwrap_or_else(chrono::Utc::now);
+                let mid = memory_id.clone();
+
+                if let Err(e) = tokio::task::spawn_blocking(move || {
+                    let guard = mem.read();
+                    guard.store_temporal_facts_for_memory(&uid, &mid, &cnt, &ents, ts)
+                })
+                .await
+                {
+                    tracing::debug!("Temporal fact extraction panicked (non-fatal): {e}");
+                }
+            }
+
+            // Task 4: Infer causal lineage (runs after graph processing)
+            {
+                let graph_arc = state.get_user_graph(&user_id).ok();
+                let memory_arc = memory.clone();
+                let uid = user_id.clone();
+                let mid = memory_id.clone();
+
+                if let Err(e) = tokio::task::spawn_blocking(move || {
+                    let Some(graph_arc) = graph_arc else {
+                        return;
+                    };
+                    let graph = graph_arc.read();
+                    let memory_guard = memory_arc.read();
+
+                    let episode = match graph.get_episode(&mid.0) {
+                        Ok(Some(ep)) => ep,
+                        _ => return,
+                    };
+
+                    if episode.entity_refs.is_empty() {
+                        return;
+                    }
+
+                    let mut candidate_ids = std::collections::HashSet::new();
+                    let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+
+                    for entity_uuid in &episode.entity_refs {
+                        if let Ok(episodes) = graph.get_episodes_by_entity(entity_uuid) {
+                            for ep in &episodes {
+                                if ep.created_at >= cutoff {
+                                    candidate_ids.insert(crate::memory::MemoryId(ep.uuid));
+                                }
+                            }
+                        }
+                    }
+
+                    candidate_ids.remove(&mid);
+                    let candidate_ids: Vec<_> = candidate_ids.into_iter().take(20).collect();
+                    if candidate_ids.is_empty() {
+                        return;
+                    }
+
+                    let candidates: Vec<_> = candidate_ids
+                        .iter()
+                        .filter_map(|id| memory_guard.get_memory(id).ok())
+                        .collect();
+
+                    let Ok(new_memory) = memory_guard.get_memory(&mid) else {
+                        return;
+                    };
+
+                    match memory_guard.infer_lineage_for_memory(&uid, &new_memory, &candidates) {
+                        Ok(edges) if !edges.is_empty() => {
+                            tracing::info!(
+                                user_id = %uid,
+                                memory_id = %mid.0,
+                                edges = edges.len(),
+                                relations = ?edges.iter().map(|e| format!("{:?}", e.relation)).collect::<Vec<_>>(),
+                                "Lineage inference: {} causal edges detected",
+                                edges.len()
+                            );
+                        }
+                        Ok(_) => {
+                            tracing::debug!(
+                                "Lineage inference: no causal edges for {} (checked {} candidates)",
+                                mid.0,
+                                candidates.len()
+                            );
+                        }
+                        Err(e) => {
+                            tracing::debug!("Lineage inference failed (non-fatal): {}", e);
+                        }
+                    }
+                })
+                .await
+                {
+                    tracing::debug!("Lineage inference panicked (non-fatal): {e}");
+                }
+            }
+        });
+    }
+
     Ok(Json(RememberResponse {
-        id: memory_id.0.to_string(),
+        id: response_id,
         success: true,
     }))
 }
