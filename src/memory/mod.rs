@@ -632,6 +632,21 @@ impl MemorySystem {
         mut experience: Experience,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<MemoryId> {
+        // IDEMPOTENCY (issue #109): Check content hash index before creating a new memory.
+        // If identical content already exists, return the existing MemoryId instead of
+        // creating a duplicate. Catches all duplication paths: timeout retries, auto_ingest,
+        // and manual re-remembers. O(1) RocksDB index lookup.
+        if let Some(existing_id) = self
+            .long_term_memory
+            .get_by_content_hash(&experience.content)
+        {
+            tracing::debug!(
+                existing_id = %existing_id.0,
+                "Content dedup: returning existing memory (identical content already stored)"
+            );
+            return Ok(existing_id);
+        }
+
         let memory_id = MemoryId(Uuid::new_v4());
 
         // Calculate importance
@@ -963,6 +978,18 @@ impl MemorySystem {
         agent_id: Option<String>,
         run_id: Option<String>,
     ) -> Result<MemoryId> {
+        // IDEMPOTENCY (issue #109): Content hash dedup (same as remember())
+        if let Some(existing_id) = self
+            .long_term_memory
+            .get_by_content_hash(&experience.content)
+        {
+            tracing::debug!(
+                existing_id = %existing_id.0,
+                "Content dedup: returning existing memory (identical content already stored)"
+            );
+            return Ok(existing_id);
+        }
+
         let memory_id = MemoryId(Uuid::new_v4());
 
         // Calculate importance

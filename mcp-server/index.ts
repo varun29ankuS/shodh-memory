@@ -76,6 +76,10 @@ if (!API_KEY) {
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1000;
 const REQUEST_TIMEOUT_MS = 10000;
+// Write operations (POST/PUT/DELETE) get a longer timeout because the server
+// persists data before post-processing (graph, lineage, temporal facts).
+// Issue #109: 10s was too short, causing retries that created duplicate memories.
+const WRITE_TIMEOUT_MS = 30000;
 
 // Warn if non-localhost URL uses HTTP (security risk)
 if (shouldWarnInsecureApiUrl(API_URL, process.env.SHODH_ALLOW_HTTP)) {
@@ -436,7 +440,8 @@ async function apiCall<T>(
   for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      const timeout = method === "GET" ? REQUEST_TIMEOUT_MS : WRITE_TIMEOUT_MS;
+      const timeoutId = setTimeout(() => controller.abort(), timeout);
 
       const options: RequestInit = {
         method,

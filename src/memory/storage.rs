@@ -1410,6 +1410,16 @@ impl MemoryStorage {
             batch.put_cf(idx, reward_key.as_bytes(), b"1");
         }
 
+        // === Content Hash Index (idempotency) ===
+        // Index by SHA256 content hash for dedup (issue #109)
+        // Key format: content_hash:{hex} -> memory_id (16 bytes UUID)
+        // Enables O(1) duplicate detection on remember()
+        {
+            let content_hash = Self::sha256_content_hash(&memory.experience.content);
+            let hash_key = format!("content_hash:{}", content_hash);
+            batch.put_cf(idx, hash_key.as_bytes(), memory.id.0.as_bytes());
+        }
+
         // === External Linking Index ===
         // Index by external_id for upsert operations (Linear, GitHub, etc.)
         // Key format: external:{source}:{id}:{memory_id} -> memory_id
@@ -1434,6 +1444,38 @@ impl MemoryStorage {
         write_opts.set_sync(self.write_mode == WriteMode::Sync);
         self.db.write_opt(batch, &write_opts)?;
         Ok(())
+    }
+
+    /// Compute SHA256 hex digest for content dedup indexing (issue #109)
+    fn sha256_content_hash(content: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    /// Look up an existing memory by content hash (idempotency dedup, issue #109).
+    /// Returns the MemoryId if identical content was already stored.
+    pub fn get_by_content_hash(&self, content: &str) -> Option<MemoryId> {
+        let content_hash = Self::sha256_content_hash(content);
+        let hash_key = format!("content_hash:{}", content_hash);
+        let idx = self.index_cf();
+        match self.db.get_cf(idx, hash_key.as_bytes()) {
+            Ok(Some(value)) if value.len() == 16 => {
+                let uuid = uuid::Uuid::from_slice(&value).ok()?;
+                // Verify the memory still exists (might have been deleted)
+                let memory_id = MemoryId(uuid);
+                match self.get(&memory_id) {
+                    Ok(_) => Some(memory_id),
+                    Err(_) => {
+                        // Stale index entry — memory was deleted, clean up
+                        let _ = self.db.delete_cf(idx, hash_key.as_bytes());
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Retrieve a memory by ID
@@ -1630,6 +1672,13 @@ impl MemoryStorage {
             let reward_bucket = ((clamped_reward + 1.0) * 10.0) as i32;
             let reward_key = format!("reward:{}:{}", reward_bucket, id.0);
             batch.delete_cf(idx, reward_key.as_bytes());
+        }
+
+        // Content hash index (idempotency dedup)
+        {
+            let content_hash = Self::sha256_content_hash(&memory.experience.content);
+            let hash_key = format!("content_hash:{}", content_hash);
+            batch.delete_cf(idx, hash_key.as_bytes());
         }
 
         // External linking index
