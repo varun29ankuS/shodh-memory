@@ -636,7 +636,10 @@ impl MemorySystem {
         // If identical content already exists, return the existing MemoryId instead of
         // creating a duplicate. Catches all duplication paths: timeout retries, auto_ingest,
         // and manual re-remembers. O(1) RocksDB index lookup.
-        if let Some(existing_id) = self.long_term_memory.get_by_content_hash(&experience.content) {
+        if let Some(existing_id) = self
+            .long_term_memory
+            .get_by_content_hash(&experience.content)
+        {
             tracing::debug!(
                 existing_id = %existing_id.0,
                 "Content dedup: returning existing memory (identical content already stored)"
@@ -976,7 +979,10 @@ impl MemorySystem {
         run_id: Option<String>,
     ) -> Result<MemoryId> {
         // IDEMPOTENCY (issue #109): Content hash dedup (same as remember())
-        if let Some(existing_id) = self.long_term_memory.get_by_content_hash(&experience.content) {
+        if let Some(existing_id) = self
+            .long_term_memory
+            .get_by_content_hash(&experience.content)
+        {
             tracing::debug!(
                 existing_id = %existing_id.0,
                 "Content dedup: returning existing memory (identical content already stored)"
