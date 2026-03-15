@@ -3467,7 +3467,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shodh-memory"
-version = "0.1.81"
+version = "0.1.90"
 dependencies = [
  "aes-gcm",
  "anyhow",

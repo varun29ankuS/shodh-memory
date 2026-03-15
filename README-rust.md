@@ -278,6 +278,8 @@ Measured on Intel i7-1355U (10 cores, 1.7GHz):
 | Hebbian strengthen | 5.7µs |
 | Graph traversal (3-hop) | 30µs |
 
+Content-hash dedup (SHA-256) ensures identical content is never stored twice.
+
 ## Platform Support
 
 | Platform | Status |

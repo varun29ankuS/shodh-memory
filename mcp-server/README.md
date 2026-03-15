@@ -5,7 +5,7 @@
 <h1 align="center">Shodh-Memory MCP Server</h1>
 
 <p align="center">
-  <strong>v0.1.70</strong> | Persistent cognitive memory for AI agents
+  <strong>v0.1.90</strong> | Persistent cognitive memory for AI agents
 </p>
 
 <p align="center">
@@ -29,9 +29,11 @@
 - **Semantic Search**: Find memories by meaning using MiniLM-L6 embeddings
 - **Knowledge Graph**: Entity extraction and relationship tracking
 - **Memory Consolidation**: Automatic decay, replay, and strengthening
+- **Idempotent**: Content-hash dedup — identical memories are never stored twice
 - **1-Click Install**: Auto-downloads native server binary for your platform
 - **Offline-First**: All models auto-downloaded on first run (~38MB total), no internet required after
-- **Fast**: Sub-millisecond graph lookup, 30-50ms semantic search
+- **Fast**: <200ms API response, sub-millisecond graph lookup, 30-50ms semantic search
+- **GTD Task Management**: Full todo system with projects, subtasks, comments, and reminders
 
 ## Installation
 
@@ -81,25 +83,80 @@ env = { SHODH_API_KEY = "your-api-key-here" }
 | `SHODH_STREAM` | Enable/disable streaming ingestion | `true` |
 | `SHODH_PROACTIVE` | Enable/disable proactive memory surfacing | `true` |
 
-## MCP Tools (15 total)
+## MCP Tools (47 total)
+
+<details>
+<summary><b>Memory</b> — Store, search, and manage memories</summary>
 
 | Tool | Description |
 |------|-------------|
-| `remember` | Store a memory with optional type and tags |
+| `remember` | Store a memory with optional type, tags, and metadata |
 | `recall` | Semantic search to find relevant memories |
 | `proactive_context` | Auto-surface relevant memories for current context |
 | `context_summary` | Get categorized context for session bootstrap |
 | `list_memories` | List all stored memories |
+| `read_memory` | Read full content of a specific memory by ID |
 | `forget` | Delete a specific memory by ID |
-| `forget_by_tags` | Delete memories matching any of the specified tags |
-| `forget_by_date` | Delete memories within a date range |
+| `reinforce` | Reinforce a memory (boost importance) |
+</details>
+
+<details>
+<summary><b>Todos (GTD)</b> — Task management with projects and subtasks</summary>
+
+| Tool | Description |
+|------|-------------|
+| `add_todo` | Create a task with priority, due date, project, contexts |
+| `list_todos` | List/search todos with semantic or GTD-style filtering |
+| `update_todo` | Update task properties (status, priority, notes) |
+| `complete_todo` | Mark a task as done (auto-creates next for recurring) |
+| `delete_todo` | Permanently delete a task |
+| `reorder_todo` | Move a task up or down within its status group |
+| `list_subtasks` | List subtasks of a parent todo |
+| `add_todo_comment` | Add a comment to a task (progress, resolution) |
+| `list_todo_comments` | List all comments on a task |
+| `update_todo_comment` | Edit an existing comment |
+| `delete_todo_comment` | Delete a comment |
+| `todo_stats` | Get todo statistics by status, overdue items |
+</details>
+
+<details>
+<summary><b>Projects</b> — Organize todos into groups</summary>
+
+| Tool | Description |
+|------|-------------|
+| `add_project` | Create a project with optional parent (sub-projects) |
+| `list_projects` | List all projects with todo counts |
+| `archive_project` | Archive a project (hidden but restorable) |
+| `delete_project` | Permanently delete a project |
+</details>
+
+<details>
+<summary><b>Reminders</b> — Time, duration, and context-triggered reminders</summary>
+
+| Tool | Description |
+|------|-------------|
+| `set_reminder` | Set a reminder (time, duration, or keyword trigger) |
+| `list_reminders` | List pending/triggered/dismissed reminders |
+| `dismiss_reminder` | Acknowledge a triggered reminder |
+</details>
+
+<details>
+<summary><b>System</b> — Health, backups, and diagnostics</summary>
+
+| Tool | Description |
+|------|-------------|
 | `memory_stats` | Get statistics about stored memories |
-| `recall_by_tags` | Find memories by tag |
-| `recall_by_date` | Find memories within a date range |
-| `verify_index` | Check vector index health |
-| `repair_index` | Repair orphaned memories |
+| `verify_index` | Check vector index integrity |
+| `repair_index` | Re-index orphaned memories |
+| `token_status` | Get current session token usage |
+| `reset_token_session` | Reset token counter for new session |
 | `consolidation_report` | View memory consolidation activity |
-| `streaming_status` | Check WebSocket streaming connection status |
+| `backup_create` | Create a backup of all memories |
+| `backup_list` | List available backups |
+| `backup_verify` | Verify backup integrity (SHA-256) |
+| `backup_restore` | Restore from a backup |
+| `backup_purge` | Purge old backups, keep most recent N |
+</details>
 
 ## REST API (for Developers)
 

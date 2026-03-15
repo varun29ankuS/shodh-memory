@@ -48,6 +48,7 @@ print(summary["learnings"])  # Recent learnings
 - **Semantic search** — MiniLM embeddings for meaning-based retrieval
 - **Hebbian learning** — Connections strengthen when memories are used together
 - **Activation decay** — Unused memories fade naturally
+- **Idempotent** — Content-hash dedup prevents duplicate memories
 - **Entity extraction** — TinyBERT NER extracts people, orgs, locations
 - **100% offline** — Works on air-gapped systems
 

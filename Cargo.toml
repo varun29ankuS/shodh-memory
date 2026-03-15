@@ -1,6 +1,6 @@
 [package]
 name = "shodh-memory"
-version = "0.1.81"
+version = "0.1.90"
 edition = "2021"
 authors = ["Shodh Team <29.varuns@gmail.com>"]
 description = "Persistent memory for AI agents and edge devices - 3-tier memory, Hebbian learning, knowledge graph. Single binary, runs offline."
@@ -69,7 +69,14 @@ exclude = [
     "start_server.bat",
     "*.ts",
     "*.patch",
+    "*.diff",
+    "*.png",
+    "!src/**",
     "scripts/",
+    "clippy_output.txt",
+    "C*clippy_out.txt",
+    ".smithery/",
+    "drafts/",
 ]
 
 [lib]

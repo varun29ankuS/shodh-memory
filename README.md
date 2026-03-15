@@ -132,13 +132,14 @@ This is based on [Cowan's working memory model](https://doi.org/10.1177/09637214
 
 | Operation | Latency |
 |-----------|---------|
-| Store memory | 55-60ms |
+| Store memory (API response) | <200ms |
+| Store memory (core) | 55-60ms |
 | Semantic search | 34-58ms |
 | Tag search | ~1ms |
 | Entity lookup | 763ns |
 | Graph traversal (3-hop) | 30µs |
 
-Single 17MB binary. No GPU required. Runs on a $5 VPS.
+Single binary. No GPU required. Content-hash dedup ensures identical memories are never stored twice.
 
 ## TUI Dashboard
 

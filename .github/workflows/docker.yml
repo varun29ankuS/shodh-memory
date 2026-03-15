@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g. 0.1.81)'
+        description: 'Version tag (e.g. 0.1.90)'
         required: true
 
 permissions:

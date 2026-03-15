@@ -19,12 +19,12 @@
     "source": "github",
     "subfolder": "mcp-server"
   },
-  "version": "0.1.81",
+  "version": "0.1.90",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@shodh/memory-mcp",
-      "version": "0.1.81",
+      "version": "0.1.90",
       "transport": {
         "type": "stdio"
       },
