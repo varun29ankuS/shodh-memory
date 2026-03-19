@@ -18,20 +18,20 @@ class ShodhMemory < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/varun29ankuS/shodh-memory/releases/download/v#{version}/shodh-memory-macos-arm64.tar.gz"
-      sha256 "PLACEHOLDER_ARM64_SHA256"
+      sha256 "15baa1cb6546fbd50e7e31d3865caf6b8a7d8188813179fbafe6707d839cd419"
     else
       url "https://github.com/varun29ankuS/shodh-memory/releases/download/v#{version}/shodh-memory-macos-x64.tar.gz"
-      sha256 "PLACEHOLDER_X64_SHA256"
+      sha256 "6e4068f77f7abb5dc2cc3dd7ce56a276bf0a359b51e2ed04b923f6acdad6fad1"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
       url "https://github.com/varun29ankuS/shodh-memory/releases/download/v#{version}/shodh-memory-linux-arm64.tar.gz"
-      sha256 "PLACEHOLDER_LINUX_ARM64_SHA256"
+      sha256 "d3a3dc2aedd853cebbbf82106e1d0039f071cfcfedfc84f6419577dc3d578ee3"
     else
       url "https://github.com/varun29ankuS/shodh-memory/releases/download/v#{version}/shodh-memory-linux-x64.tar.gz"
-      sha256 "PLACEHOLDER_LINUX_X64_SHA256"
+      sha256 "c07692e8f53d5b1515ae25e0035bc2db55ebf039e7051d3e877720b98b9718d9"
     end
   end
 
