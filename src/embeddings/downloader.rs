@@ -567,10 +567,7 @@ fn extract_onnx_runtime(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                         .output()
                     {
                         Ok(output) if output.status.success() => {
-                            tracing::info!(
-                                "Ad-hoc signed {} for macOS Gatekeeper",
-                                lib_name
-                            );
+                            tracing::info!("Ad-hoc signed {} for macOS Gatekeeper", lib_name);
                         }
                         Ok(output) => {
                             tracing::warn!(
