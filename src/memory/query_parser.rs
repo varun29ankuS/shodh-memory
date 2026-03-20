@@ -3392,6 +3392,152 @@ fn is_stop_word(word: &str) -> bool {
     STOP_WORDS.contains(&word)
 }
 
+// =============================================================================
+// ONTOLOGICAL INTENT INFERENCE
+// =============================================================================
+// Infers expected entity types and relation types from query structure.
+// Zero-config: types come from existing EntityLabel and RelationType enums
+// already stored on every graph node/edge.
+//
+// Reference: Collins & Quillian (1969), Anderson (1983) selective spreading
+
+use crate::graph_memory::{EntityLabel, RelationType};
+
+/// Ontological intent inferred from query structure.
+///
+/// Determines expected entity types and relation types based on question words
+/// and verb stems. Used by Layer 2 (Graph Expansion) to apply soft type penalties
+/// during spreading activation and Layer 4.9 for post-RRF re-ranking.
+///
+/// Zero-config: no user-defined ontology needed. Types come from the existing
+/// EntityLabel and RelationType enums already stored in the knowledge graph.
+#[derive(Debug, Clone)]
+pub struct OntologicalIntent {
+    /// Expected entity types in the answer (e.g., Person for "who" queries).
+    /// Empty = no type constraint.
+    pub expected_labels: Vec<EntityLabel>,
+    /// Preferred relation types for graph traversal (e.g., WorksWith for "work" verbs).
+    /// Empty = no relation constraint.
+    pub relation_types: Vec<RelationType>,
+    /// Confidence in the inferred intent (0.0-1.0).
+    /// Below ONTOLOGICAL_MIN_CONFIDENCE, intent is ignored.
+    pub confidence: f32,
+}
+
+/// Map verb stems to relation types.
+///
+/// Uses Porter2-stemmed forms for matching against `Relation.stem` from query analysis.
+/// Returns empty vec for unrecognized verbs (no penalty applied).
+fn verb_stem_to_relation_types(stem: &str) -> Vec<RelationType> {
+    match stem {
+        "work" | "collabor" => vec![
+            RelationType::WorksWith,
+            RelationType::WorksAt,
+            RelationType::EmployedBy,
+        ],
+        "employ" | "hire" => vec![RelationType::EmployedBy, RelationType::WorksAt],
+        "locat" | "live" | "base" | "resid" | "situat" => {
+            vec![RelationType::LocatedIn, RelationType::LocatedAt]
+        }
+        "learn" | "studi" | "discover" => vec![RelationType::Learned, RelationType::Knows],
+        "teach" | "mentor" | "instruct" => vec![RelationType::Teaches],
+        "use" | "util" | "adopt" | "leverag" => vec![RelationType::Uses],
+        "creat" | "build" | "develop" | "design" | "implement" => {
+            vec![RelationType::CreatedBy, RelationType::DevelopedBy]
+        }
+        "caus" | "result" | "lead" | "trigger" => {
+            vec![RelationType::Causes, RelationType::ResultsIn]
+        }
+        "own" | "belong" | "possess" => vec![RelationType::OwnedBy, RelationType::PartOf],
+        "contain" | "includ" | "consist" => vec![RelationType::Contains, RelationType::PartOf],
+        "know" | "familiar" => vec![RelationType::Knows],
+        _ => vec![],
+    }
+}
+
+/// Map question word patterns to expected entity labels.
+///
+/// Checks the first few tokens of the query for WH-words and maps them
+/// to the entity types most likely to appear in the answer.
+fn question_word_to_labels(query_text: &str) -> Vec<EntityLabel> {
+    let lower = query_text.to_lowercase();
+    let trimmed = lower.trim_start();
+
+    if trimmed.starts_with("who ") || trimmed.starts_with("whom ") {
+        vec![EntityLabel::Person, EntityLabel::Organization]
+    } else if trimmed.starts_with("where ") {
+        vec![EntityLabel::Location]
+    } else if trimmed.starts_with("when ") {
+        vec![EntityLabel::Date, EntityLabel::Event]
+    } else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        && (trimmed.contains(" tool")
+            || trimmed.contains(" tech")
+            || trimmed.contains(" framework")
+            || trimmed.contains(" language")
+            || trimmed.contains(" library")
+            || trimmed.contains(" stack"))
+    {
+        vec![EntityLabel::Technology, EntityLabel::Product]
+    } else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        && (trimmed.contains(" skill")
+            || trimmed.contains(" abilit")
+            || trimmed.contains(" competenc"))
+    {
+        vec![EntityLabel::Skill]
+    } else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        && (trimmed.contains(" compan")
+            || trimmed.contains(" organiz")
+            || trimmed.contains(" team"))
+    {
+        vec![EntityLabel::Organization]
+    } else {
+        vec![]
+    }
+}
+
+/// Infer ontological intent from query analysis.
+///
+/// Combines question word patterns (for expected entity types) and verb stems
+/// (for preferred relation types) to produce a type-aware intent signal.
+///
+/// Called once per query in `semantic_retrieve()`. Zero cost for queries
+/// with no type signal (returns confidence=0.0, empty vecs).
+pub fn infer_ontological_intent(query_text: &str, analysis: &QueryAnalysis) -> OntologicalIntent {
+    let mut confidence = 0.0_f32;
+
+    // 1. Question word → expected entity labels
+    let expected_labels = question_word_to_labels(query_text);
+    if !expected_labels.is_empty() {
+        confidence += 0.4;
+    }
+
+    // 2. Verb stems → preferred relation types
+    let mut relation_types = Vec::new();
+    let mut seen_relations = std::collections::HashSet::new();
+    for relation in &analysis.relational_context {
+        for rt in verb_stem_to_relation_types(&relation.stem) {
+            let key = rt.as_str().to_string();
+            if seen_relations.insert(key) {
+                relation_types.push(rt);
+            }
+        }
+    }
+    if !relation_types.is_empty() {
+        confidence += 0.4;
+    }
+
+    // 3. Multiple signals bonus (both question word AND verb match)
+    if !expected_labels.is_empty() && !relation_types.is_empty() {
+        confidence += 0.2;
+    }
+
+    OntologicalIntent {
+        expected_labels,
+        relation_types,
+        confidence: confidence.min(1.0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -39,13 +39,16 @@ use crate::constants::{
     EDGE_TIER_TRUST_LTP, HYBRID_GRAPH_WEIGHT, HYBRID_LINGUISTIC_WEIGHT, HYBRID_SEMANTIC_WEIGHT,
     IMPORTANCE_DECAY_MAX, IMPORTANCE_DECAY_MIN, MEMORY_TIER_GRAPH_MULT_ARCHIVE,
     MEMORY_TIER_GRAPH_MULT_LONGTERM, MEMORY_TIER_GRAPH_MULT_SESSION,
-    MEMORY_TIER_GRAPH_MULT_WORKING, SALIENCE_BOOST_FACTOR, SPREADING_ACTIVATION_THRESHOLD,
-    SPREADING_DEGREE_NORMALIZATION, SPREADING_EARLY_TERMINATION_CANDIDATES,
-    SPREADING_EARLY_TERMINATION_RATIO, SPREADING_MAX_HOPS, SPREADING_MIN_CANDIDATES,
-    SPREADING_MIN_HOPS, SPREADING_NORMALIZATION_FACTOR, SPREADING_RELAXED_THRESHOLD,
+    MEMORY_TIER_GRAPH_MULT_WORKING, ONTOLOGICAL_DENSITY_THRESHOLD, ONTOLOGICAL_ENTITY_PENALTY,
+    ONTOLOGICAL_MIN_CONFIDENCE, ONTOLOGICAL_RELATION_PENALTY, SALIENCE_BOOST_FACTOR,
+    SPREADING_ACTIVATION_THRESHOLD, SPREADING_DEGREE_NORMALIZATION,
+    SPREADING_EARLY_TERMINATION_CANDIDATES, SPREADING_EARLY_TERMINATION_RATIO,
+    SPREADING_MAX_HOPS, SPREADING_MIN_CANDIDATES, SPREADING_MIN_HOPS,
+    SPREADING_NORMALIZATION_FACTOR, SPREADING_RELAXED_THRESHOLD,
 };
 use crate::embeddings::Embedder;
-use crate::graph_memory::{EdgeTier, EpisodicNode, GraphMemory};
+use crate::graph_memory::{EdgeTier, EpisodicNode, GraphMemory, RelationType};
+use crate::memory::query_parser::{infer_ontological_intent, OntologicalIntent};
 use crate::memory::types::MemoryTier;
 // Note: compute_relevance removed - using unified density-weighted scoring directly
 use crate::memory::query_parser::{analyze_query, QueryAnalysis};
@@ -165,6 +168,7 @@ fn spread_single_direction(
     graph: &GraphMemory,
     max_hops: usize,
     threshold: f32,
+    ontological_intent: Option<&OntologicalIntent>,
 ) -> Result<(HashMap<Uuid, f32>, Vec<Uuid>)> {
     let mut activation_map: HashMap<Uuid, f32> = seeds.iter().cloned().collect();
     let mut traversed_edges: Vec<Uuid> = Vec::new();
@@ -210,8 +214,44 @@ fn spread_single_direction(
                 let decay_rate = calculate_importance_weighted_decay(effective);
                 let decay = (-decay_rate * hop as f32).exp();
 
-                let spread_amount =
+                let base_spread =
                     source_activation * decay * effective * tier_trust * degree_norm;
+
+                // Ontological type penalty: dampen activation through wrong-type edges/entities.
+                // CoOccurs, RelatedTo, CoRetrieved are generic bridges — never penalized.
+                let spread_amount = if let Some(intent) = ontological_intent {
+                    let mut penalty = 1.0_f32;
+
+                    // Relation type penalty
+                    if !intent.relation_types.is_empty()
+                        && !matches!(
+                            edge.relation_type,
+                            RelationType::CoOccurs
+                                | RelationType::RelatedTo
+                                | RelationType::CoRetrieved
+                        )
+                        && !intent.relation_types.contains(&edge.relation_type)
+                    {
+                        penalty *= ONTOLOGICAL_RELATION_PENALTY;
+                    }
+
+                    // Entity type penalty (target entity label mismatch)
+                    if !intent.expected_labels.is_empty() {
+                        if let Ok(Some(target_entity)) = graph.get_entity(&target_uuid) {
+                            let type_match = target_entity
+                                .labels
+                                .iter()
+                                .any(|l| intent.expected_labels.contains(l));
+                            if !type_match {
+                                penalty *= ONTOLOGICAL_ENTITY_PENALTY;
+                            }
+                        }
+                    }
+
+                    base_spread * penalty
+                } else {
+                    base_spread
+                };
 
                 let new_activation = activation_map.entry(target_uuid).or_insert(0.0);
                 *new_activation += spread_amount;
@@ -260,6 +300,7 @@ fn bidirectional_spread(
     graph: &GraphMemory,
     total_salience: f32,
     hops_per_direction: usize,
+    ontological_intent: Option<&OntologicalIntent>,
 ) -> Result<(HashMap<Uuid, f32>, Vec<Uuid>, usize)> {
     // Split entities into forward/backward sets (alternating assignment)
     // This distributes entities evenly regardless of count
@@ -291,11 +332,21 @@ fn bidirectional_spread(
 
     // Spread from both directions with density-adaptive hops
     let threshold = SPREADING_ACTIVATION_THRESHOLD;
-    let (forward_map, forward_edges) =
-        spread_single_direction(&forward_seeds, graph, hops_per_direction, threshold)?;
+    let (forward_map, forward_edges) = spread_single_direction(
+        &forward_seeds,
+        graph,
+        hops_per_direction,
+        threshold,
+        ontological_intent,
+    )?;
 
-    let (backward_map, backward_edges) =
-        spread_single_direction(&backward_seeds, graph, hops_per_direction, threshold)?;
+    let (backward_map, backward_edges) = spread_single_direction(
+        &backward_seeds,
+        graph,
+        hops_per_direction,
+        threshold,
+        ontological_intent,
+    )?;
 
     // Combine maps with intersection boost
     let mut combined_map: HashMap<Uuid, f32> = HashMap::new();
@@ -417,6 +468,29 @@ pub fn spreading_activation_retrieve_with_stats(
     // Step 1: Linguistic query analysis (Lioma & Ounis 2006)
     let analysis = analyze_query(query_text);
 
+    // Ontological intent: infer expected entity types and relation types from query structure
+    let ontological_intent = infer_ontological_intent(query_text, &analysis);
+    let use_ontology = ontological_intent.confidence >= ONTOLOGICAL_MIN_CONFIDENCE
+        && !graph_density.is_some_and(|d| d >= ONTOLOGICAL_DENSITY_THRESHOLD);
+    let intent_ref = if use_ontology {
+        Some(&ontological_intent)
+    } else {
+        None
+    };
+
+    if use_ontology {
+        tracing::info!(
+            "Ontological intent: labels={:?}, relations={:?}, confidence={:.2}",
+            ontological_intent.expected_labels,
+            ontological_intent
+                .relation_types
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>(),
+            ontological_intent.confidence
+        );
+    }
+
     tracing::info!("🔍 Query Analysis:");
     tracing::info!(
         "  Focal Entities: {:?}",
@@ -530,7 +604,7 @@ pub fn spreading_activation_retrieve_with_stats(
         );
 
         let (bidirectional_map, edges, intersection_count) =
-            bidirectional_spread(&entity_data, graph, total_salience, adaptive_hops)?;
+            bidirectional_spread(&entity_data, graph, total_salience, adaptive_hops, intent_ref)?;
 
         activation_map = bidirectional_map;
         traversed_edges = edges;
@@ -599,7 +673,37 @@ pub fn spreading_activation_retrieve_with_stats(
                     let decay_rate = calculate_importance_weighted_decay(effective);
                     let decay = (-decay_rate * hop as f32).exp();
 
-                    let spread_amount = source_activation * decay * effective * tier_trust;
+                    let base_spread = source_activation * decay * effective * tier_trust;
+
+                    // Ontological type penalty (same as bidirectional path)
+                    let spread_amount = if let Some(intent) = intent_ref {
+                        let mut penalty = 1.0_f32;
+                        if !intent.relation_types.is_empty()
+                            && !matches!(
+                                edge.relation_type,
+                                RelationType::CoOccurs
+                                    | RelationType::RelatedTo
+                                    | RelationType::CoRetrieved
+                            )
+                            && !intent.relation_types.contains(&edge.relation_type)
+                        {
+                            penalty *= ONTOLOGICAL_RELATION_PENALTY;
+                        }
+                        if !intent.expected_labels.is_empty() {
+                            if let Ok(Some(target_entity)) = graph.get_entity(&target_uuid) {
+                                if !target_entity
+                                    .labels
+                                    .iter()
+                                    .any(|l| intent.expected_labels.contains(l))
+                                {
+                                    penalty *= ONTOLOGICAL_ENTITY_PENALTY;
+                                }
+                            }
+                        }
+                        base_spread * penalty
+                    } else {
+                        base_spread
+                    };
 
                     let new_activation = activation_map.entry(target_uuid).or_insert(0.0);
                     *new_activation += spread_amount;

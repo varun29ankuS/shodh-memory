@@ -1425,6 +1425,13 @@ impl MemorySystem {
         let query_type = query_parser::classify_query(query_text);
         // Single parse for all layers (was called 3x: temporal facts, graph expansion, linguistic boost)
         let query_analysis = query_parser::analyze_query(query_text);
+
+        // Ontological intent: infer expected entity types and relation types from query structure.
+        // Used by Layer 2 (filtered traversal) and Layer 4.9 (type-aware re-ranking).
+        let onto_intent = query_parser::infer_ontological_intent(query_text, &query_analysis);
+        let use_ontology_rerank =
+            onto_intent.confidence >= crate::constants::ONTOLOGICAL_MIN_CONFIDENCE;
+
         let attribute_boost_ids: HashSet<MemoryId> = match &query_type {
             query_parser::QueryType::Attribute(attr_query) => {
                 tracing::debug!(
@@ -1870,11 +1877,26 @@ impl MemorySystem {
                     }
                 }
 
-                // Single-hop or supplement multi-hop: Weighted traversal from each entity
+                // Single-hop or supplement multi-hop: Weighted traversal from each entity.
+                // When ontological intent has sufficient confidence, pass relation types
+                // as a filter to traverse_weighted for type-aware graph expansion.
+                let use_onto_filter = onto_intent.confidence
+                    >= crate::constants::ONTOLOGICAL_MIN_CONFIDENCE
+                    && !onto_intent.relation_types.is_empty();
+                let relation_filter: Option<Vec<crate::graph_memory::RelationType>> =
+                    if use_onto_filter {
+                        Some(onto_intent.relation_types.clone())
+                    } else {
+                        None
+                    };
+
                 for entity_uuid in &query_entities {
-                    if let Ok(t) =
-                        g.traverse_weighted(entity_uuid, weighted_depth, None, weighted_min_str)
-                    {
+                    if let Ok(t) = g.traverse_weighted(
+                        entity_uuid,
+                        weighted_depth,
+                        relation_filter.as_deref(),
+                        weighted_min_str,
+                    ) {
                         for tr in &t.entities {
                             if let Ok(mut eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
                                 eps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -1890,6 +1912,41 @@ impl MemorySystem {
                                             tr.entity.salience * tr.decay_factor,
                                             tr.decay_factor,
                                         ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: if ontology-filtered traversal returned too few results, retry unfiltered
+                if use_onto_filter && ids.len() < 3 {
+                    tracing::debug!(
+                        "Layer 2: Ontology-filtered traversal returned {} results, falling back to unfiltered",
+                        ids.len()
+                    );
+                    for entity_uuid in &query_entities {
+                        if let Ok(t) =
+                            g.traverse_weighted(entity_uuid, weighted_depth, None, weighted_min_str)
+                        {
+                            for tr in &t.entities {
+                                if let Ok(mut eps) =
+                                    g.get_episodes_by_entity(&tr.entity.uuid)
+                                {
+                                    eps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                                    eps.truncate(50);
+                                    for ep in eps {
+                                        let mid = MemoryId(ep.uuid);
+                                        if episode_candidates
+                                            .as_ref()
+                                            .map_or(true, |c| c.contains(&mid))
+                                        {
+                                            ids.push((
+                                                mid,
+                                                tr.entity.salience * tr.decay_factor,
+                                                tr.decay_factor,
+                                            ));
+                                        }
                                     }
                                 }
                             }
@@ -2298,6 +2355,54 @@ impl MemorySystem {
                         "Layer 4.8: Boosted {} memories from semantic fact sources",
                         boosted_count
                     );
+                }
+            }
+
+            // ===========================================================================
+            // LAYER 4.9: ONTOLOGICAL RE-RANKING
+            // ===========================================================================
+            // Boost memories connected to type-matching entities. Conservative additive
+            // boost on top of the fused score. Only active when ontological intent has
+            // sufficient confidence.
+            //
+            // Reference: Collins & Quillian (1969) — type-plausible paths retrieved faster
+            if use_ontology_rerank && !onto_intent.expected_labels.is_empty() {
+                if let Some(graph) = self.graph_memory.as_ref() {
+                    let g = graph.read();
+                    let mut boosted_count = 0usize;
+                    for (_mem_id, fused_score) in fused.iter_mut() {
+                        if let Ok(Some(episode)) = g.get_episode(&_mem_id.0) {
+                            let type_matches = episode
+                                .entity_refs
+                                .iter()
+                                .filter(|uuid| {
+                                    g.get_entity(uuid)
+                                        .ok()
+                                        .flatten()
+                                        .map(|e| {
+                                            e.labels
+                                                .iter()
+                                                .any(|l| onto_intent.expected_labels.contains(l))
+                                        })
+                                        .unwrap_or(false)
+                                })
+                                .count();
+                            if type_matches > 0 {
+                                let boost = (type_matches as f32
+                                    * crate::constants::ONTOLOGICAL_RERANK_BOOST)
+                                    .min(crate::constants::ONTOLOGICAL_RERANK_MAX);
+                                *fused_score += boost;
+                                boosted_count += 1;
+                            }
+                        }
+                    }
+                    if boosted_count > 0 {
+                        tracing::debug!(
+                            "Layer 4.9: Ontological re-rank boosted {} memories (labels={:?})",
+                            boosted_count,
+                            onto_intent.expected_labels
+                        );
+                    }
                 }
             }
 

@@ -832,6 +832,42 @@ pub const SPREADING_NORMALIZATION_FACTOR: f32 = 2.0;
 pub const SALIENCE_BOOST_FACTOR: f32 = 1.0;
 
 // =============================================================================
+// ONTOLOGICAL RETRIEVAL CONSTANTS
+// =============================================================================
+// Emergent ontology: entity labels and relation types are already stored on every
+// graph node/edge. These constants control how that dormant type information is
+// activated during retrieval when query signals indicate type-constrained intent.
+//
+// Reference: Collins & Quillian (1969) "Retrieval time from semantic memory"
+
+/// Minimum ontological intent confidence to activate type-aware retrieval.
+/// Below this, retrieval proceeds unfiltered (backward compatible).
+/// 0.3 = requires at least a question word OR a matching verb.
+pub const ONTOLOGICAL_MIN_CONFIDENCE: f32 = 0.3;
+
+/// Penalty multiplier for edges whose RelationType doesn't match the inferred intent.
+/// 0.4 = wrong-type edges carry 40% of normal activation. Not zero — preserves
+/// serendipitous discovery through unexpected paths.
+/// Reference: Selective spreading (Anderson 1983) — attention gates activation paths.
+pub const ONTOLOGICAL_RELATION_PENALTY: f32 = 0.4;
+
+/// Penalty multiplier for target entities whose EntityLabel doesn't match expected types.
+/// 0.5 = more generous than relation penalty because NER labels are noisier.
+pub const ONTOLOGICAL_ENTITY_PENALTY: f32 = 0.5;
+
+/// Graph density threshold above which ontological filtering is disabled.
+/// Dense/young graphs have too many noisy L1 edges for type filtering to help.
+/// Uses same scale as entities_average_density() (edges per entity).
+pub const ONTOLOGICAL_DENSITY_THRESHOLD: f32 = 8.0;
+
+/// Post-RRF boost per type-matching entity connected to a memory (Layer 4.9).
+/// Additive on fused score. 0.08 per match, max 0.25.
+pub const ONTOLOGICAL_RERANK_BOOST: f32 = 0.08;
+
+/// Maximum ontological re-rank boost per memory.
+pub const ONTOLOGICAL_RERANK_MAX: f32 = 0.25;
+
+// =============================================================================
 // EDGE-TIER TRUST WEIGHTS FOR SPREADING ACTIVATION
 // Based on hippocampal-cortical consolidation: edges that survive decay are
 // more reliable for graph traversal. Dense graphs (L1) are noisy for search,
@@ -1959,5 +1995,15 @@ pub const TIER_LTP_THRESHOLD: f32 = 0.8;
 // | PREFETCH_RECENCY_PARTIAL_HOURS| memory/retrieval.rs | AnticipatoryPrefetch::relevance()   |
 // | PREFETCH_RECENCY_FULL_BOOST   | memory/retrieval.rs | AnticipatoryPrefetch::relevance()   |
 // | PREFETCH_RECENCY_PARTIAL_BOOST| memory/retrieval.rs | AnticipatoryPrefetch::relevance()   |
+//
+// ## Ontological Retrieval Constants (Collins & Quillian 1969)
+// | Constant                      | File                      | Function/Context                    |
+// |-------------------------------|---------------------------|-------------------------------------|
+// | ONTOLOGICAL_MIN_CONFIDENCE    | memory/graph_retrieval.rs | spreading_activation_retrieve()     |
+// | ONTOLOGICAL_RELATION_PENALTY  | memory/graph_retrieval.rs | spread_single_direction()           |
+// | ONTOLOGICAL_ENTITY_PENALTY    | memory/graph_retrieval.rs | spread_single_direction()           |
+// | ONTOLOGICAL_DENSITY_THRESHOLD | memory/graph_retrieval.rs | spreading_activation_retrieve()     |
+// | ONTOLOGICAL_RERANK_BOOST      | memory/mod.rs             | semantic_retrieve() Layer 4.9       |
+// | ONTOLOGICAL_RERANK_MAX        | memory/mod.rs             | semantic_retrieve() Layer 4.9       |
 //
 // =============================================================================
