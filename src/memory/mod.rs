@@ -1930,9 +1930,7 @@ impl MemorySystem {
                             g.traverse_weighted(entity_uuid, weighted_depth, None, weighted_min_str)
                         {
                             for tr in &t.entities {
-                                if let Ok(mut eps) =
-                                    g.get_episodes_by_entity(&tr.entity.uuid)
-                                {
+                                if let Ok(mut eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
                                     eps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
                                     eps.truncate(50);
                                     for ep in eps {

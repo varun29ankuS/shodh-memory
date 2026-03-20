@@ -42,9 +42,9 @@ use crate::constants::{
     MEMORY_TIER_GRAPH_MULT_WORKING, ONTOLOGICAL_DENSITY_THRESHOLD, ONTOLOGICAL_ENTITY_PENALTY,
     ONTOLOGICAL_MIN_CONFIDENCE, ONTOLOGICAL_RELATION_PENALTY, SALIENCE_BOOST_FACTOR,
     SPREADING_ACTIVATION_THRESHOLD, SPREADING_DEGREE_NORMALIZATION,
-    SPREADING_EARLY_TERMINATION_CANDIDATES, SPREADING_EARLY_TERMINATION_RATIO,
-    SPREADING_MAX_HOPS, SPREADING_MIN_CANDIDATES, SPREADING_MIN_HOPS,
-    SPREADING_NORMALIZATION_FACTOR, SPREADING_RELAXED_THRESHOLD,
+    SPREADING_EARLY_TERMINATION_CANDIDATES, SPREADING_EARLY_TERMINATION_RATIO, SPREADING_MAX_HOPS,
+    SPREADING_MIN_CANDIDATES, SPREADING_MIN_HOPS, SPREADING_NORMALIZATION_FACTOR,
+    SPREADING_RELAXED_THRESHOLD,
 };
 use crate::embeddings::Embedder;
 use crate::graph_memory::{EdgeTier, EpisodicNode, GraphMemory, RelationType};
@@ -214,8 +214,7 @@ fn spread_single_direction(
                 let decay_rate = calculate_importance_weighted_decay(effective);
                 let decay = (-decay_rate * hop as f32).exp();
 
-                let base_spread =
-                    source_activation * decay * effective * tier_trust * degree_norm;
+                let base_spread = source_activation * decay * effective * tier_trust * degree_norm;
 
                 // Ontological type penalty: dampen activation through wrong-type edges/entities.
                 // CoOccurs, RelatedTo, CoRetrieved are generic bridges — never penalized.
@@ -603,8 +602,13 @@ pub fn spreading_activation_retrieve_with_stats(
             graph_density.unwrap_or(0.0)
         );
 
-        let (bidirectional_map, edges, intersection_count) =
-            bidirectional_spread(&entity_data, graph, total_salience, adaptive_hops, intent_ref)?;
+        let (bidirectional_map, edges, intersection_count) = bidirectional_spread(
+            &entity_data,
+            graph,
+            total_salience,
+            adaptive_hops,
+            intent_ref,
+        )?;
 
         activation_map = bidirectional_map;
         traversed_edges = edges;
