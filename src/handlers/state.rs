@@ -343,29 +343,45 @@ impl MultiUserMemoryManager {
                     // Spawn blocking task to persist vector index without holding the lock
                     // during I/O. The eviction listener runs synchronously inside moka,
                     // so we must not block here for disk writes.
+                    //
+                    // CRITICAL: We must drop the Arc<RwLock<MemorySystem>> as soon as
+                    // possible after saving, otherwise the RocksDB file lock is held
+                    // until the thread exits. If a new request arrives for the same user
+                    // while the lock is held, MemorySystem::new() fails with a lock error.
                     let index_path = eviction_base_path.join(key.as_str()).join("vector_index");
                     let user_key = key.clone();
                     std::thread::spawn(move || {
-                        if let Some(guard) = value.try_read() {
-                            match guard.save_vector_index(&index_path) {
-                                Ok(()) => {
-                                    info!(
-                                        "Evicted user '{}' from memory cache ({}, cache_size={}) - vector index saved",
-                                        user_key, cause_label, max_cache
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Evicted user '{}' from memory cache ({}) - failed to save vector index: {}",
-                                        user_key, cause_label, e
-                                    );
-                                }
+                        // Scope the read guard so it drops before we drop the Arc.
+                        // This ensures the RocksDB file lock is released promptly.
+                        let save_result = {
+                            if let Some(guard) = value.try_read() {
+                                let result = guard.save_vector_index(&index_path);
+                                Some(result)
+                            } else {
+                                None
                             }
-                        } else {
-                            tracing::warn!(
-                                "Evicted user '{}' from memory cache ({}) - could not acquire lock to save index",
-                                user_key, cause_label
-                            );
+                        };
+                        // Arc dropped here — releases MemorySystem and RocksDB handle
+                        drop(value);
+                        match save_result {
+                            Some(Ok(())) => {
+                                info!(
+                                    "Evicted user '{}' from memory cache ({}, cache_size={}) - vector index saved",
+                                    user_key, cause_label, max_cache
+                                );
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!(
+                                    "Evicted user '{}' from memory cache ({}) - failed to save vector index: {}",
+                                    user_key, cause_label, e
+                                );
+                            }
+                            None => {
+                                tracing::warn!(
+                                    "Evicted user '{}' from memory cache ({}) - could not acquire lock to save index",
+                                    user_key, cause_label
+                                );
+                            }
                         }
                     });
                 }
@@ -787,8 +803,55 @@ impl MultiUserMemoryManager {
             ..self.default_config.clone()
         };
 
-        let mut memory_system = MemorySystem::new(config, Some(&self.shared_rocksdb_cache))
-            .with_context(|| format!("Failed to initialize memory system for user '{user_id}'"))?;
+        // Retry with backoff for RocksDB lock contention. This can happen when a
+        // moka eviction thread is still saving the vector index for this user (the
+        // old MemorySystem holds the DB lock until the save thread drops its Arc).
+        let mut memory_system = {
+            let mut last_err = None;
+            let mut created = None;
+            for attempt in 0..4u32 {
+                match MemorySystem::new(config.clone(), Some(&self.shared_rocksdb_cache)) {
+                    Ok(ms) => {
+                        if attempt > 0 {
+                            info!(
+                                "Memory system for user '{}' created after {} retries (lock contention resolved)",
+                                user_id, attempt
+                            );
+                        }
+                        created = Some(ms);
+                        break;
+                    }
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        if err_str.contains("lock") || err_str.contains("LOCK") {
+                            let delay = std::time::Duration::from_millis(50 * 2u64.pow(attempt));
+                            tracing::warn!(
+                                "RocksDB lock contention for user '{}' (attempt {}/4), retrying in {:?}",
+                                user_id, attempt + 1, delay
+                            );
+                            std::thread::sleep(delay);
+                            last_err = Some(e);
+                        } else {
+                            // Non-lock error, fail immediately
+                            return Err(e).with_context(|| {
+                                format!("Failed to initialize memory system for user '{user_id}'")
+                            });
+                        }
+                    }
+                }
+            }
+            match created {
+                Some(ms) => ms,
+                None => {
+                    return Err(last_err.unwrap()).with_context(|| {
+                        format!(
+                            "Failed to initialize memory system for user '{}' after 4 attempts (RocksDB lock held by eviction thread)",
+                            user_id
+                        )
+                    });
+                }
+            }
+        };
         // Wire up GraphMemory for Layer 2 (spreading activation) and Layer 5 (Hebbian learning)
         let graph = self.get_user_graph(user_id)?;
         memory_system.set_graph_memory(graph);
@@ -1253,7 +1316,54 @@ impl MultiUserMemoryManager {
         }
 
         let graph_path = self.base_path.join(user_id).join("graph");
-        let graph_memory = GraphMemory::new(&graph_path, Some(&self.shared_rocksdb_cache))?;
+        // Retry with backoff for RocksDB lock contention (same pattern as get_user_memory).
+        // Graph eviction drops synchronously so contention is rare, but possible on Windows
+        // where file handle release can lag.
+        let graph_memory = {
+            let mut last_err = None;
+            let mut created = None;
+            for attempt in 0..4u32 {
+                match GraphMemory::new(&graph_path, Some(&self.shared_rocksdb_cache)) {
+                    Ok(gm) => {
+                        if attempt > 0 {
+                            info!(
+                                "Graph memory for user '{}' created after {} retries",
+                                user_id, attempt
+                            );
+                        }
+                        created = Some(gm);
+                        break;
+                    }
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        if err_str.contains("lock") || err_str.contains("LOCK") {
+                            let delay = std::time::Duration::from_millis(50 * 2u64.pow(attempt));
+                            tracing::warn!(
+                                "RocksDB lock contention on graph for user '{}' (attempt {}/4), retrying in {:?}",
+                                user_id, attempt + 1, delay
+                            );
+                            std::thread::sleep(delay);
+                            last_err = Some(e);
+                        } else {
+                            return Err(e).with_context(|| {
+                                format!("Failed to initialize graph memory for user '{user_id}'")
+                            });
+                        }
+                    }
+                }
+            }
+            match created {
+                Some(gm) => gm,
+                None => {
+                    return Err(last_err.unwrap()).with_context(|| {
+                        format!(
+                            "Failed to initialize graph memory for user '{}' after 4 attempts (RocksDB lock contention)",
+                            user_id
+                        )
+                    });
+                }
+            }
+        };
         let graph_arc = Arc::new(parking_lot::RwLock::new(graph_memory));
 
         self.graph_memories
