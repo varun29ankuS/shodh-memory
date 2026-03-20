@@ -36,6 +36,7 @@ fn should_hide_dev_key() -> bool {
 /// Log security warnings at startup based on environment configuration
 pub fn log_security_status() {
     let has_api_keys = env::var("SHODH_API_KEYS")
+        .or_else(|_| env::var("SHODH_API_KEY"))
         .map(|k| !k.trim().is_empty())
         .unwrap_or(false);
     let has_dev_key = env::var("SHODH_DEV_API_KEY")
@@ -177,35 +178,42 @@ fn constant_time_compare(a: &str, b: &str) -> bool {
 
 /// Validate API key against configured keys using constant-time comparison
 pub fn validate_api_key(provided_key: &str) -> Result<(), AuthError> {
-    // Get API keys from environment (comma-separated for multiple keys)
+    // Get API keys from environment.
+    // Resolution order: SHODH_API_KEYS (plural, comma-separated) → SHODH_API_KEY (singular)
+    //                 → SHODH_DEV_API_KEY (dev mode) → built-in default (dev mode only)
     let valid_keys = match env::var("SHODH_API_KEYS") {
         Ok(keys) if !keys.trim().is_empty() => keys,
-        _ => {
-            // In production, refuse to start without API keys
-            let is_production = env::var("SHODH_ENV")
-                .map(|v| v.to_lowercase() == "production" || v.to_lowercase() == "prod")
-                .unwrap_or(false);
+        _ => match env::var("SHODH_API_KEY") {
+            Ok(key) if !key.trim().is_empty() => key,
+            _ => {
+                // In production, refuse to start without API keys
+                let is_production = env::var("SHODH_ENV")
+                    .map(|v| v.to_lowercase() == "production" || v.to_lowercase() == "prod")
+                    .unwrap_or(false);
 
-            if is_production {
-                tracing::error!("SHODH_API_KEYS not set in production mode");
-                return Err(AuthError::NotConfigured);
-            }
+                if is_production {
+                    tracing::error!("SHODH_API_KEYS not set in production mode");
+                    return Err(AuthError::NotConfigured);
+                }
 
-            // Development mode: use SHODH_DEV_API_KEY, or fall back to built-in default
-            match env::var("SHODH_DEV_API_KEY") {
-                Ok(key) if !key.trim().is_empty() => {
-                    tracing::warn!("Using SHODH_DEV_API_KEY for development (not for production!)");
-                    key
-                }
-                _ => {
-                    tracing::warn!(
-                        "No API key configured. Falling back to default dev key. \
-                         Set SHODH_DEV_API_KEY to override."
-                    );
-                    DEFAULT_DEV_API_KEY.to_string()
+                // Development mode: use SHODH_DEV_API_KEY, or fall back to built-in default
+                match env::var("SHODH_DEV_API_KEY") {
+                    Ok(key) if !key.trim().is_empty() => {
+                        tracing::warn!(
+                            "Using SHODH_DEV_API_KEY for development (not for production!)"
+                        );
+                        key
+                    }
+                    _ => {
+                        tracing::warn!(
+                            "No API key configured. Falling back to default dev key. \
+                             Set SHODH_DEV_API_KEY to override."
+                        );
+                        DEFAULT_DEV_API_KEY.to_string()
+                    }
                 }
             }
-        }
+        },
     };
 
     let keys: Vec<&str> = valid_keys.split(',').map(|k| k.trim()).collect();

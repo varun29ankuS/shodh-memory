@@ -54,9 +54,16 @@ function isLocalServer(): boolean {
 // Sandbox mode — used by Smithery to scan tools without a running backend
 const SANDBOX_MODE = process.env.SMITHERY_SANDBOX === "true";
 
-// API Key - required for remote servers, auto-generated for local
-// Set via SHODH_API_KEY env var, or configure in MCP settings
-let API_KEY = process.env.SHODH_API_KEY || (SANDBOX_MODE ? "sandbox" : "");
+// API Key resolution order:
+//   1. SHODH_API_KEY (explicit, preferred)
+//   2. SHODH_DEV_API_KEY (matches what the server accepts in dev mode)
+//   3. First key from SHODH_API_KEYS (matches server production config)
+//   4. Auto-generate for local servers (passed to server as SHODH_DEV_API_KEY)
+//   5. Error for remote servers
+let API_KEY = process.env.SHODH_API_KEY
+  || process.env.SHODH_DEV_API_KEY
+  || (process.env.SHODH_API_KEYS?.split(",")[0]?.trim())
+  || (SANDBOX_MODE ? "sandbox" : "");
 if (!API_KEY) {
   if (isLocalServer()) {
     // Auto-generate a random key for local development — zero config
