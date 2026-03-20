@@ -549,6 +549,45 @@ fn extract_onnx_runtime(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                 let dest_path = dest_dir.join(lib_name);
                 entry.unpack(&dest_path)?;
                 tracing::info!("Extracted {}", lib_name);
+
+                // macOS Gatekeeper blocks unsigned dylibs downloaded from the internet.
+                // Remove the quarantine xattr and ad-hoc sign so dlopen succeeds.
+                #[cfg(target_os = "macos")]
+                {
+                    // Remove com.apple.quarantine attribute (silent fail if not present)
+                    let _ = std::process::Command::new("xattr")
+                        .args(["-d", "com.apple.quarantine"])
+                        .arg(&dest_path)
+                        .output();
+
+                    // Ad-hoc code sign (no identity needed, just removes the unsigned flag)
+                    match std::process::Command::new("codesign")
+                        .args(["--force", "--deep", "-s", "-"])
+                        .arg(&dest_path)
+                        .output()
+                    {
+                        Ok(output) if output.status.success() => {
+                            tracing::info!(
+                                "Ad-hoc signed {} for macOS Gatekeeper",
+                                lib_name
+                            );
+                        }
+                        Ok(output) => {
+                            tracing::warn!(
+                                "codesign returned non-zero for {}: {}",
+                                lib_name,
+                                String::from_utf8_lossy(&output.stderr)
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "codesign not available ({}), dlopen may fail on macOS",
+                                e
+                            );
+                        }
+                    }
+                }
+
                 return Ok(());
             }
         }
