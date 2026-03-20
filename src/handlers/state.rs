@@ -333,7 +333,7 @@ impl MultiUserMemoryManager {
 
         let user_memories = moka::sync::Cache::builder()
             .max_capacity(server_config.max_users_in_memory as u64)
-            .time_to_idle(std::time::Duration::from_secs(1800))
+            .time_to_idle(std::time::Duration::from_secs(3600))
             .eviction_listener(move |key: Arc<String>, value: Arc<parking_lot::RwLock<MemorySystem>>, cause| {
                 if matches!(cause, moka::notification::RemovalCause::Size | moka::notification::RemovalCause::Expired) {
                     evictions_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -390,7 +390,7 @@ impl MultiUserMemoryManager {
 
         let graph_memories = moka::sync::Cache::builder()
             .max_capacity(server_config.max_users_in_memory as u64)
-            .time_to_idle(std::time::Duration::from_secs(1800))
+            .time_to_idle(std::time::Duration::from_secs(3600))
             .eviction_listener(move |key: Arc<String>, _value, cause| {
                 let cause_label = if cause == moka::notification::RemovalCause::Expired {
                     "idle-timeout"
