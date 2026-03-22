@@ -1,0 +1,2 @@
+shodh-memory>=0.1.90
+# bosdyn-client>=4.0.0  # Optional — only needed for real Spot hardware
