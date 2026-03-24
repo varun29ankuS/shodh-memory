@@ -146,6 +146,27 @@ async fn async_main() -> Result<()> {
         );
     }
 
+    // Start Zenoh transport if feature-enabled and configured
+    #[cfg(feature = "zenoh")]
+    let zenoh_handle = {
+        let zenoh_config = crate::zenoh_transport::ZenohConfig::from_env();
+        if zenoh_config.enabled {
+            match crate::zenoh_transport::start(Arc::clone(&manager), zenoh_config).await {
+                Ok(handle) => {
+                    info!("Zenoh transport started successfully");
+                    Some(handle)
+                }
+                Err(e) => {
+                    error!("Failed to start Zenoh transport: {}. HTTP server will continue without Zenoh.", e);
+                    None
+                }
+            }
+        } else {
+            info!("Zenoh transport: disabled (set SHODH_ZENOH_ENABLED=true to enable)");
+            None
+        }
+    };
+
     // Configure rate limiting (0 = disabled, for localhost/embedded use)
     let rate_limit_enabled = server_config.rate_limit_per_second > 0;
     let governor_layer = if rate_limit_enabled {
@@ -280,6 +301,12 @@ async fn async_main() -> Result<()> {
             );
             server_handle.abort();
         }
+    }
+
+    // Shut down Zenoh transport before flushing databases
+    #[cfg(feature = "zenoh")]
+    if let Some(handle) = zenoh_handle {
+        handle.shutdown().await;
     }
 
     // Graceful shutdown with cleanup (flush databases, save indices)
@@ -547,6 +574,21 @@ fn print_ready_message(addr: SocketAddr) {
     eprintln!("     API:       http://{}", addr);
     eprintln!("     Health:    http://{}/health", addr);
     eprintln!("     Stream:    ws://{}/api/stream", addr);
+    #[cfg(feature = "zenoh")]
+    {
+        let zenoh_enabled = std::env::var("SHODH_ZENOH_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        if zenoh_enabled {
+            let prefix =
+                std::env::var("SHODH_ZENOH_PREFIX").unwrap_or_else(|_| "shodh".to_string());
+            eprintln!(
+                "     Zenoh:     {}/*/{{remember,recall,forget,stream,mission}}",
+                prefix
+            );
+            eprintln!("     Fleet:     {}/fleet/*", prefix);
+        }
+    }
     eprintln!();
     eprintln!("  Press Ctrl+C to stop");
     eprintln!();
