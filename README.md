@@ -20,6 +20,10 @@
 
 ---
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/varun29ankuS/shodh-memory/main/assets/Shodh_preview.gif" width="800" alt="Shodh-Memory Demo — Claude Code with persistent memory and TUI dashboard">
+</p>
+
 AI agents forget everything between sessions. Robots lose context between missions. They repeat mistakes, miss patterns, and treat every interaction like the first one.
 
 Shodh-Memory fixes this. It's persistent memory that actually learns — memories you use often become easier to find, old irrelevant context fades automatically, and recalling one thing brings back related things. Works for chat agents (MCP/HTTP), robots (Zenoh/ROS2), and edge devices. No API keys. No cloud. No external databases. One binary.
