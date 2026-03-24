@@ -3430,27 +3430,85 @@ pub struct OntologicalIntent {
 /// Returns empty vec for unrecognized verbs (no penalty applied).
 fn verb_stem_to_relation_types(stem: &str) -> Vec<RelationType> {
     match stem {
+        // Work relationships
         "work" | "collabor" => vec![
             RelationType::WorksWith,
             RelationType::WorksAt,
             RelationType::EmployedBy,
         ],
         "employ" | "hire" => vec![RelationType::EmployedBy, RelationType::WorksAt],
+
+        // Location relationships
         "locat" | "live" | "base" | "resid" | "situat" => {
             vec![RelationType::LocatedIn, RelationType::LocatedAt]
         }
+
+        // Learning relationships
         "learn" | "studi" | "discover" => vec![RelationType::Learned, RelationType::Knows],
         "teach" | "mentor" | "instruct" => vec![RelationType::Teaches],
+        "know" | "familiar" => vec![RelationType::Knows],
+
+        // Usage relationships
         "use" | "util" | "adopt" | "leverag" => vec![RelationType::Uses],
-        "creat" | "build" | "develop" | "design" | "implement" => {
+        "read" | "consult" | "refer" => vec![RelationType::Uses],
+
+        // Creation relationships
+        "creat" | "build" | "develop" | "design" => {
             vec![RelationType::CreatedBy, RelationType::DevelopedBy]
         }
-        "caus" | "result" | "lead" | "trigger" => {
-            vec![RelationType::Causes, RelationType::ResultsIn]
-        }
+
+        // Causal relationships
+        "caus" | "result" | "lead" => vec![RelationType::Causes, RelationType::ResultsIn],
+
+        // Ownership / structural
         "own" | "belong" | "possess" => vec![RelationType::OwnedBy, RelationType::PartOf],
         "contain" | "includ" | "consist" => vec![RelationType::Contains, RelationType::PartOf],
-        "know" | "familiar" => vec![RelationType::Knows],
+
+        // Management / governance
+        "manag" | "supervis" | "oversee" | "direct" | "coordin" => vec![RelationType::Manages],
+        "assign" | "deleg" | "allocat" => vec![RelationType::AssignedTo],
+        "approv" | "reject" | "review" | "sign" => vec![RelationType::Approves],
+
+        // Dependency / requirement
+        "depend" | "requir" | "need" | "reliant" => {
+            vec![RelationType::DependsOn, RelationType::Requires]
+        }
+
+        // Preference / recommendation
+        "prefer" | "like" | "favor" | "favour" | "chose" | "choos" | "select" => {
+            vec![RelationType::Prefers]
+        }
+        "recommend" | "suggest" | "advis" | "propos" => vec![RelationType::Recommends],
+
+        // Documentation / knowledge
+        "write" | "document" | "author" | "draft" | "compil" => {
+            vec![RelationType::Documents, RelationType::CreatedBy]
+        }
+        "implement" | "realiz" | "fulfill" => vec![RelationType::Implements],
+
+        // Operational / execution
+        "run" | "execut" | "launch" | "start" | "invok" => {
+            vec![RelationType::Uses, RelationType::Triggers]
+        }
+        "deploy" | "releas" | "ship" | "promot" => vec![RelationType::DeploysTo],
+        "monitor" | "track" | "observ" | "watch" | "alert" => vec![RelationType::Monitors],
+        "trigger" | "fire" | "emit" => vec![RelationType::Triggers],
+        "schedul" | "plan" | "arrang" | "organiz" => vec![RelationType::Manages],
+        "configur" | "tune" | "adjust" => vec![RelationType::Configures],
+
+        // Evolution / comparison
+        "migrat" | "upgrad" | "patch" | "updat" => vec![RelationType::SupersededBy],
+        "replac" | "supersed" | "obsolet" | "deprec" => vec![RelationType::SupersededBy],
+        "compar" | "differ" | "contrast" | "benchmark" => vec![RelationType::AlternativeTo],
+
+        // Problem solving
+        "fix" | "solv" | "resolv" | "debug" | "repair" => vec![RelationType::ResultsIn],
+
+        // Integration / connection
+        "connect" | "integr" | "link" | "bridg" | "coupl" => {
+            vec![RelationType::DependsOn, RelationType::Uses]
+        }
+
         _ => vec![],
     }
 }
@@ -3463,13 +3521,57 @@ fn question_word_to_labels(query_text: &str) -> Vec<EntityLabel> {
     let lower = query_text.to_lowercase();
     let trimmed = lower.trim_start();
 
+    // "who" / "whom" queries → people and organizational entities
     if trimmed.starts_with("who ") || trimmed.starts_with("whom ") {
-        vec![EntityLabel::Person, EntityLabel::Organization]
-    } else if trimmed.starts_with("where ") {
-        vec![EntityLabel::Location]
-    } else if trimmed.starts_with("when ") {
+        vec![
+            EntityLabel::Person,
+            EntityLabel::Organization,
+            EntityLabel::Team,
+        ]
+    }
+    // "where" queries → location and environment
+    else if trimmed.starts_with("where ") {
+        vec![EntityLabel::Location, EntityLabel::Environment]
+    }
+    // "when" queries → temporal entities
+    else if trimmed.starts_with("when ") {
         vec![EntityLabel::Date, EntityLabel::Event]
-    } else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+    }
+    // "how" queries → methodology, technology, operational
+    else if trimmed.starts_with("how ") {
+        if trimmed.contains(" deploy")
+            || trimmed.contains(" ci")
+            || trimmed.contains(" cd")
+            || trimmed.contains(" pipeline")
+            || trimmed.contains(" build")
+            || trimmed.contains(" releas")
+        {
+            vec![
+                EntityLabel::Pipeline,
+                EntityLabel::Technology,
+                EntityLabel::Configuration,
+            ]
+        } else if trimmed.contains(" monitor")
+            || trimmed.contains(" metric")
+            || trimmed.contains(" alert")
+            || trimmed.contains(" observ")
+        {
+            vec![EntityLabel::Metric, EntityLabel::Service]
+        } else if trimmed.contains(" configur")
+            || trimmed.contains(" set up")
+            || trimmed.contains(" setup")
+        {
+            vec![EntityLabel::Configuration, EntityLabel::Technology]
+        } else {
+            vec![EntityLabel::Concept, EntityLabel::Technology]
+        }
+    }
+    // "why" queries → causal reasoning, events, decisions
+    else if trimmed.starts_with("why ") {
+        vec![EntityLabel::Event, EntityLabel::Concept]
+    }
+    // "what/which" + technology context
+    else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
         && (trimmed.contains(" tool")
             || trimmed.contains(" tech")
             || trimmed.contains(" framework")
@@ -3477,19 +3579,168 @@ fn question_word_to_labels(query_text: &str) -> Vec<EntityLabel> {
             || trimmed.contains(" library")
             || trimmed.contains(" stack"))
     {
-        vec![EntityLabel::Technology, EntityLabel::Product]
-    } else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        vec![
+            EntityLabel::Technology,
+            EntityLabel::Product,
+            EntityLabel::Module,
+        ]
+    }
+    // "what/which" + service/api context
+    else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        && (trimmed.contains(" service")
+            || trimmed.contains(" api")
+            || trimmed.contains(" endpoint")
+            || trimmed.contains(" microservice"))
+    {
+        vec![EntityLabel::Service, EntityLabel::Technology]
+    }
+    // "what/which" + project/repo context
+    else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        && (trimmed.contains(" project")
+            || trimmed.contains(" repo")
+            || trimmed.contains(" repositor")
+            || trimmed.contains(" codebase"))
+    {
+        vec![EntityLabel::Project, EntityLabel::Repository]
+    }
+    // "what/which" + database context
+    else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        && (trimmed.contains(" databas")
+            || trimmed.contains(" db")
+            || trimmed.contains(" store")
+            || trimmed.contains(" cache"))
+    {
+        vec![EntityLabel::Database, EntityLabel::Technology]
+    }
+    // "what/which" + environment context
+    else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        && (trimmed.contains(" environ")
+            || trimmed.contains(" stage")
+            || trimmed.contains(" prod")
+            || trimmed.contains(" cluster"))
+    {
+        vec![EntityLabel::Environment]
+    }
+    // "what/which" + task/ticket context
+    else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        && (trimmed.contains(" task")
+            || trimmed.contains(" ticket")
+            || trimmed.contains(" issue")
+            || trimmed.contains(" bug"))
+    {
+        vec![EntityLabel::Task]
+    }
+    // "what/which" + metric/SLO context
+    else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        && (trimmed.contains(" metric")
+            || trimmed.contains(" slo")
+            || trimmed.contains(" latenc")
+            || trimmed.contains(" error rate"))
+    {
+        vec![EntityLabel::Metric]
+    }
+    // "what/which" + config context
+    else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        && (trimmed.contains(" config")
+            || trimmed.contains(" flag")
+            || trimmed.contains(" setting")
+            || trimmed.contains(" param"))
+    {
+        vec![EntityLabel::Configuration]
+    }
+    // "what/which" + document context
+    else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        && (trimmed.contains(" doc")
+            || trimmed.contains(" rfc")
+            || trimmed.contains(" spec")
+            || trimmed.contains(" readme")
+            || trimmed.contains(" runbook"))
+    {
+        vec![EntityLabel::Document]
+    }
+    // "what/which" + skill context
+    else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
         && (trimmed.contains(" skill")
             || trimmed.contains(" abilit")
             || trimmed.contains(" competenc"))
     {
         vec![EntityLabel::Skill]
-    } else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+    }
+    // "what/which" + organization/team context
+    else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
         && (trimmed.contains(" compan")
             || trimmed.contains(" organiz")
-            || trimmed.contains(" team"))
+            || trimmed.contains(" team")
+            || trimmed.contains(" squad"))
     {
-        vec![EntityLabel::Organization]
+        vec![EntityLabel::Organization, EntityLabel::Team]
+    }
+    // "what/which" + pipeline context
+    else if (trimmed.starts_with("what ") || trimmed.starts_with("which "))
+        && (trimmed.contains(" pipeline")
+            || trimmed.contains(" workflow")
+            || trimmed.contains(" ci")
+            || trimmed.contains(" cd"))
+    {
+        vec![EntityLabel::Pipeline]
+    }
+    // Imperative patterns: "list all...", "show me...", "find..."
+    else if trimmed.starts_with("list ")
+        || trimmed.starts_with("show ")
+        || trimmed.starts_with("find ")
+        || trimmed.starts_with("get ")
+        || trimmed.starts_with("fetch ")
+        || trimmed.starts_with("search ")
+    {
+        imperative_object_to_labels(trimmed)
+    }
+    // Comparative patterns
+    else if trimmed.starts_with("compar")
+        || trimmed.contains(" vs ")
+        || trimmed.contains(" versus ")
+        || trimmed.contains(" better than ")
+        || trimmed.contains(" differ")
+        || trimmed.contains(" alternative")
+    {
+        vec![EntityLabel::Technology, EntityLabel::Product]
+    } else {
+        vec![]
+    }
+}
+
+/// Extract entity labels from the object of an imperative query.
+///
+/// Parses the noun object in commands like "list all services" or
+/// "find the database config" to infer expected entity types.
+fn imperative_object_to_labels(query: &str) -> Vec<EntityLabel> {
+    if query.contains("service") || query.contains("api") || query.contains("endpoint") {
+        vec![EntityLabel::Service]
+    } else if query.contains("project") || query.contains("repo") {
+        vec![EntityLabel::Project, EntityLabel::Repository]
+    } else if query.contains("team") || query.contains("squad") || query.contains("group") {
+        vec![EntityLabel::Team, EntityLabel::Organization]
+    } else if query.contains("person") || query.contains("people") || query.contains("member") {
+        vec![EntityLabel::Person]
+    } else if query.contains("task") || query.contains("ticket") || query.contains("issue") {
+        vec![EntityLabel::Task]
+    } else if query.contains("config") || query.contains("flag") || query.contains("setting") {
+        vec![EntityLabel::Configuration]
+    } else if query.contains("doc") || query.contains("spec") || query.contains("rfc") {
+        vec![EntityLabel::Document]
+    } else if query.contains("pipeline") || query.contains("workflow") || query.contains("ci") {
+        vec![EntityLabel::Pipeline]
+    } else if query.contains("metric") || query.contains("slo") || query.contains("alert") {
+        vec![EntityLabel::Metric]
+    } else if query.contains("environ") || query.contains("cluster") || query.contains("stage") {
+        vec![EntityLabel::Environment]
+    } else if query.contains("databas") || query.contains("db") || query.contains("store") {
+        vec![EntityLabel::Database]
+    } else if query.contains("skill") || query.contains("competenc") {
+        vec![EntityLabel::Skill]
+    } else if query.contains("technolog") || query.contains("tool") || query.contains("framework") {
+        vec![EntityLabel::Technology]
+    } else if query.contains("module") || query.contains("package") || query.contains("crate") {
+        vec![EntityLabel::Module]
     } else {
         vec![]
     }

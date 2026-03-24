@@ -2003,6 +2003,8 @@ pub const TIER_LTP_THRESHOLD: f32 = 0.8;
 // | ONTOLOGICAL_RELATION_PENALTY  | memory/graph_retrieval.rs | spread_single_direction()           |
 // | ONTOLOGICAL_ENTITY_PENALTY    | memory/graph_retrieval.rs | spread_single_direction()           |
 // | ONTOLOGICAL_DENSITY_THRESHOLD | memory/graph_retrieval.rs | spreading_activation_retrieve()     |
+// | ONTOLOGICAL_DENSITY_THRESHOLD | memory/mod.rs             | semantic_retrieve() density gating  |
+// | ONTOLOGICAL_MIN_CONFIDENCE    | memory/mod.rs             | semantic_retrieve() density gating  |
 // | ONTOLOGICAL_RERANK_BOOST      | memory/mod.rs             | semantic_retrieve() Layer 4.9       |
 // | ONTOLOGICAL_RERANK_MAX        | memory/mod.rs             | semantic_retrieve() Layer 4.9       |
 //

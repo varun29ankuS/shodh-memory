@@ -88,7 +88,14 @@ fn default_salience() -> f32 {
     0.5 // Default middle salience
 }
 
-/// Entity labels following Graphiti's categorization
+/// Entity labels for ontological classification of graph nodes.
+///
+/// Extends Graphiti's base categorization with DevOps, software engineering,
+/// and robotics domain types. Used by spreading activation (Layer 2) and
+/// post-RRF re-ranking (Layer 4.9) for type-aware retrieval.
+///
+/// New variants are additive only — never remove existing variants to
+/// maintain backward compatibility with MessagePack-serialized data.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum EntityLabel {
     Person,
@@ -103,6 +110,32 @@ pub enum EntityLabel {
     /// YAKE-extracted discriminative keyword (not a named entity)
     /// Used for graph-based retrieval of rare/important terms like "sunrise"
     Keyword,
+    /// Git repos, Jira projects, feature work, mission plans
+    Project,
+    /// Issues, tickets, work items, action items
+    Task,
+    /// READMEs, specs, design docs, RFCs, runbooks
+    Document,
+    /// Git repositories, container registries
+    Repository,
+    /// Microservices, APIs, daemons, ROS2 nodes
+    Service,
+    /// PostgreSQL, Redis, RocksDB, DynamoDB instances
+    Database,
+    /// Latency p99, error rate, SLOs, telemetry signals
+    Metric,
+    /// Env vars, feature flags, config files, parameters
+    Configuration,
+    /// staging, production, dev, CI, robot deployment zones
+    Environment,
+    /// CI/CD pipelines, data pipelines, ETL, mission workflows
+    Pipeline,
+    /// Engineering squads, SRE teams, robot fleet groups
+    Team,
+    /// SRE, tech lead, PM, architect, operator
+    Role,
+    /// Code modules, packages, crates, libraries, ROS2 packages
+    Module,
     Other(String),
 }
 
@@ -121,8 +154,68 @@ impl EntityLabel {
             Self::Product => "Product",
             Self::Skill => "Skill",
             Self::Keyword => "Keyword",
+            Self::Project => "Project",
+            Self::Task => "Task",
+            Self::Document => "Document",
+            Self::Repository => "Repository",
+            Self::Service => "Service",
+            Self::Database => "Database",
+            Self::Metric => "Metric",
+            Self::Configuration => "Configuration",
+            Self::Environment => "Environment",
+            Self::Pipeline => "Pipeline",
+            Self::Team => "Team",
+            Self::Role => "Role",
+            Self::Module => "Module",
             Self::Other(s) => s.as_str(),
         }
+    }
+
+    /// Static type hierarchy: returns parent labels for ontological matching.
+    ///
+    /// Enables hierarchical type matching so "who manages" can match Team
+    /// (because Team is_a Organization-like group entity) and "what technology"
+    /// can match Service (because Service is_a Technology subtype).
+    ///
+    /// Hierarchy is shallow (max depth 1) and fixed at compile time.
+    /// No graph storage, no runtime cost beyond a match.
+    ///
+    /// Reference: Collins & Quillian (1969) "Retrieval time from semantic memory"
+    /// — type hierarchies reduce retrieval time for plausible paths.
+    pub fn parent_labels(&self) -> &'static [EntityLabel] {
+        match self {
+            // Organizational subtypes
+            Self::Team => &[EntityLabel::Organization],
+            Self::Role => &[EntityLabel::Concept],
+            // Technical subtypes
+            Self::Service | Self::Database | Self::Repository | Self::Module | Self::Pipeline => {
+                &[EntityLabel::Technology]
+            }
+            // Work / knowledge subtypes
+            Self::Task => &[EntityLabel::Event],
+            Self::Document
+            | Self::Configuration
+            | Self::Metric
+            | Self::Environment
+            | Self::Project => &[EntityLabel::Concept],
+            // Base types and Other have no parents
+            _ => &[],
+        }
+    }
+
+    /// Check if this label matches the expected label, considering type hierarchy.
+    ///
+    /// Returns true if:
+    /// - Direct match (self == expected)
+    /// - Self's parent matches expected (Team matches Organization)
+    ///
+    /// Used by spreading activation (Layer 2 entity penalty) and
+    /// Layer 4.9 (ontological re-ranking) for hierarchical type matching.
+    pub fn matches_with_hierarchy(&self, expected: &EntityLabel) -> bool {
+        if self == expected {
+            return true;
+        }
+        self.parent_labels().contains(expected)
     }
 }
 
@@ -845,7 +938,13 @@ impl RelationshipEdge {
     }
 }
 
-/// Relationship types following Graphiti's semantic model
+/// Relationship types for ontological edge classification.
+///
+/// Extends Graphiti's semantic model with management, operational, and
+/// evolution relationships for DevOps, software engineering, and robotics.
+///
+/// New variants are additive only — never remove existing variants to
+/// maintain backward compatibility with MessagePack-serialized data.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RelationType {
     /// Work relationships
@@ -876,7 +975,7 @@ pub enum RelationType {
     Knows,
     Teaches,
 
-    /// Generic relationships
+    /// Generic relationships (never penalized by ontological filtering)
     RelatedTo,
     AssociatedWith,
 
@@ -886,6 +985,51 @@ pub enum RelationType {
     /// Sentence co-occurrence (entities appearing in same sentence)
     /// Key for multi-hop: "Melanie" <-> "sunrise" when "Melanie painted a sunrise"
     CoOccurs,
+
+    // =========================================================================
+    // Extended ontological relations (added 2026-03)
+    // =========================================================================
+    /// Management / Governance
+    /// Person/Team manages Project/Service/Team
+    Manages,
+    /// Service/Module depends on Service/Module
+    DependsOn,
+    /// Task requires Skill/Technology
+    Requires,
+    /// Configuration configures Service/Environment
+    Configures,
+
+    /// Preference / Recommendation
+    /// Person prefers Technology/Configuration/Approach
+    Prefers,
+    /// Person/Role recommends Technology/Approach
+    Recommends,
+
+    /// Document / Knowledge
+    /// Document documents Service/API/Project
+    Documents,
+    /// Module/Service implements Concept/Spec
+    Implements,
+
+    /// Operational
+    /// Pipeline deploys Service to Environment
+    DeploysTo,
+    /// Metric/Service monitors Service/Pipeline
+    Monitors,
+    /// Event/Pipeline triggers Pipeline/Task
+    Triggers,
+
+    /// Comparison / Evolution
+    /// Technology/Config superseded by newer version
+    SupersededBy,
+    /// Technology is alternative to Technology
+    AlternativeTo,
+
+    /// Assignment
+    /// Task assigned to Person/Team
+    AssignedTo,
+    /// Person/Role approves Task/Document
+    Approves,
 
     /// Custom relationship
     Custom(String),
@@ -916,6 +1060,21 @@ impl RelationType {
             Self::AssociatedWith => "AssociatedWith",
             Self::CoRetrieved => "CoRetrieved",
             Self::CoOccurs => "CoOccurs",
+            Self::Manages => "Manages",
+            Self::DependsOn => "DependsOn",
+            Self::Requires => "Requires",
+            Self::Configures => "Configures",
+            Self::Prefers => "Prefers",
+            Self::Recommends => "Recommends",
+            Self::Documents => "Documents",
+            Self::Implements => "Implements",
+            Self::DeploysTo => "DeploysTo",
+            Self::Monitors => "Monitors",
+            Self::Triggers => "Triggers",
+            Self::SupersededBy => "SupersededBy",
+            Self::AlternativeTo => "AlternativeTo",
+            Self::AssignedTo => "AssignedTo",
+            Self::Approves => "Approves",
             Self::Custom(s) => s.as_str(),
         }
     }
@@ -4441,6 +4600,19 @@ fn entity_type_color(label: Option<&EntityLabel>) -> String {
         Some(EntityLabel::Concept) => "#F7DC6F".to_string(), // Gold
         Some(EntityLabel::Date) => "#BB8FCE".to_string(),   // Light purple
         Some(EntityLabel::Keyword) => "#FF9F43".to_string(), // Orange for YAKE keywords
+        Some(EntityLabel::Project) => "#E74C3C".to_string(), // Red — project anchors
+        Some(EntityLabel::Task) => "#F39C12".to_string(),   // Amber — work items
+        Some(EntityLabel::Document) => "#1ABC9C".to_string(), // Turquoise — knowledge
+        Some(EntityLabel::Repository) => "#2ECC71".to_string(), // Emerald — code entities
+        Some(EntityLabel::Service) => "#3498DB".to_string(), // Blue — architectural
+        Some(EntityLabel::Database) => "#9B59B6".to_string(), // Purple — data stores
+        Some(EntityLabel::Metric) => "#E67E22".to_string(), // Dark orange — telemetry
+        Some(EntityLabel::Configuration) => "#95A5A6".to_string(), // Silver — config
+        Some(EntityLabel::Environment) => "#16A085".to_string(), // Dark teal — infra
+        Some(EntityLabel::Pipeline) => "#2980B9".to_string(), // Dark blue — CI/CD
+        Some(EntityLabel::Team) => "#27AE60".to_string(),   // Green — organizational
+        Some(EntityLabel::Role) => "#8E44AD".to_string(),   // Dark purple — roles
+        Some(EntityLabel::Module) => "#D35400".to_string(), // Pumpkin — code modules
         Some(EntityLabel::Other(_)) => "#AEB6BF".to_string(), // Gray
         None => "#AEB6BF".to_string(),                      // Gray default
     }
@@ -4551,6 +4723,18 @@ pub struct EntityExtractor {
     /// Common words that should NOT be extracted as entities
     /// (stop words that start with capitals at sentence beginning)
     stop_words: HashSet<String>,
+
+    // Extended ontological keyword dictionaries (2026-03)
+    /// Service/infrastructure keywords (microservices, daemons, proxies)
+    service_keywords: HashSet<String>,
+    /// Database system keywords
+    database_keywords: HashSet<String>,
+    /// CI/CD and data pipeline keywords
+    pipeline_keywords: HashSet<String>,
+    /// Deployment environment keywords
+    environment_keywords: HashSet<String>,
+    /// Observability and metric keywords
+    metric_keywords: HashSet<String>,
 }
 
 impl EntityExtractor {
@@ -5331,6 +5515,143 @@ impl EntityExtractor {
         .map(String::from)
         .collect();
 
+        // Service/infrastructure keywords
+        let service_keywords: HashSet<String> = vec![
+            "microservice",
+            "daemon",
+            "worker",
+            "cron",
+            "lambda",
+            "serverless",
+            "gateway",
+            "proxy",
+            "nginx",
+            "envoy",
+            "istio",
+            "grpc",
+            "graphql",
+            "webhook",
+            "middleware",
+            "sidecar",
+            "ingress",
+            "loadbalancer",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        // Database system keywords
+        let database_keywords: HashSet<String> = vec![
+            "postgresql",
+            "postgres",
+            "mysql",
+            "mariadb",
+            "sqlite",
+            "dynamodb",
+            "cassandra",
+            "elasticsearch",
+            "opensearch",
+            "clickhouse",
+            "timescaledb",
+            "cockroachdb",
+            "neo4j",
+            "arangodb",
+            "rocksdb",
+            "leveldb",
+            "badger",
+            "redb",
+            "sled",
+            "foundationdb",
+            "vitess",
+            "couchbase",
+            "couchdb",
+            "influxdb",
+            "questdb",
+            "duckdb",
+            "dragonfly",
+            "valkey",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        // CI/CD and pipeline keywords
+        let pipeline_keywords: HashSet<String> = vec![
+            "jenkins",
+            "circleci",
+            "travis",
+            "argo",
+            "tekton",
+            "spinnaker",
+            "buildkite",
+            "drone",
+            "concourse",
+            "woodpecker",
+            "flux",
+            "argocd",
+            "terraform",
+            "pulumi",
+            "ansible",
+            "airflow",
+            "dagster",
+            "prefect",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        // Deployment environment keywords
+        let environment_keywords: HashSet<String> = vec![
+            "staging",
+            "production",
+            "prod",
+            "dev",
+            "development",
+            "sandbox",
+            "canary",
+            "preview",
+            "qa",
+            "uat",
+            "integration",
+            "preprod",
+            "hotfix",
+            "nightly",
+            "edge",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        // Observability and metric keywords
+        let metric_keywords: HashSet<String> = vec![
+            "latency",
+            "throughput",
+            "p99",
+            "p95",
+            "p50",
+            "slo",
+            "sla",
+            "sli",
+            "uptime",
+            "availability",
+            "mttr",
+            "mttf",
+            "error rate",
+            "saturation",
+            "prometheus",
+            "grafana",
+            "datadog",
+            "newrelic",
+            "jaeger",
+            "tempo",
+            "loki",
+            "opentelemetry",
+            "otel",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
         Self {
             person_indicators,
             org_indicators,
@@ -5338,6 +5659,11 @@ impl EntityExtractor {
             location_keywords,
             tech_keywords,
             stop_words,
+            service_keywords,
+            database_keywords,
+            pipeline_keywords,
+            environment_keywords,
+            metric_keywords,
         }
     }
 
@@ -5354,17 +5680,30 @@ impl EntityExtractor {
     /// Proper nouns receive a 20% boost (capped at 1.0).
     pub fn calculate_base_salience(label: &EntityLabel, is_proper_noun: bool) -> f32 {
         let type_salience = match label {
-            EntityLabel::Person => 0.8,       // People are highly salient
-            EntityLabel::Organization => 0.7, // Organizations are important
-            EntityLabel::Location => 0.6,     // Locations matter for context
-            EntityLabel::Technology => 0.6,   // Tech keywords matter for dev context
-            EntityLabel::Product => 0.7,      // Products are specific entities
-            EntityLabel::Event => 0.6,        // Events are temporal anchors
-            EntityLabel::Skill => 0.5,        // Skills are somewhat important
-            EntityLabel::Keyword => 0.55,     // YAKE keywords - discriminative terms
-            EntityLabel::Concept => 0.4,      // Concepts are more generic
-            EntityLabel::Date => 0.3,         // Dates are structural, not salient
-            EntityLabel::Other(_) => 0.3,     // Unknown types get low salience
+            EntityLabel::Person => 0.8,         // People are highly salient
+            EntityLabel::Organization => 0.7,   // Organizations are important
+            EntityLabel::Location => 0.6,       // Locations matter for context
+            EntityLabel::Technology => 0.6,     // Tech keywords matter for dev context
+            EntityLabel::Product => 0.7,        // Products are specific entities
+            EntityLabel::Event => 0.6,          // Events are temporal anchors
+            EntityLabel::Skill => 0.5,          // Skills are somewhat important
+            EntityLabel::Keyword => 0.55,       // YAKE keywords - discriminative terms
+            EntityLabel::Concept => 0.4,        // Concepts are more generic
+            EntityLabel::Date => 0.3,           // Dates are structural, not salient
+            EntityLabel::Project => 0.7,        // Projects are specific, high-salience anchors
+            EntityLabel::Task => 0.55,          // Tasks are common but specific work items
+            EntityLabel::Document => 0.5,       // Documents provide contextual reference
+            EntityLabel::Repository => 0.65,    // Repos are identifiable code entities
+            EntityLabel::Service => 0.65,       // Services are architectural anchors
+            EntityLabel::Database => 0.6,       // Databases are infrastructure anchors
+            EntityLabel::Metric => 0.5,         // Metrics are precise but numerous
+            EntityLabel::Configuration => 0.45, // Config is low-salience, high-frequency
+            EntityLabel::Environment => 0.5,    // Environments are contextual
+            EntityLabel::Pipeline => 0.6,       // Pipelines are operational entities
+            EntityLabel::Team => 0.7,           // Teams are organizational anchors
+            EntityLabel::Role => 0.55,          // Roles are semi-generic
+            EntityLabel::Module => 0.55,        // Modules are code-level entities
+            EntityLabel::Other(_) => 0.3,       // Unknown types get low salience
         };
 
         // Proper nouns get a 20% boost
@@ -5450,6 +5789,58 @@ impl EntityExtractor {
             }
 
             // Check for technology keywords (always proper nouns in tech context)
+            // Check extended ontological keyword dictionaries (more specific before generic)
+            if self.database_keywords.contains(&lower) && !seen.contains(&lower) {
+                entities.push(ExtractedEntity {
+                    name: clean_word.to_string(),
+                    label: EntityLabel::Database,
+                    base_salience: Self::calculate_base_salience(&EntityLabel::Database, true),
+                });
+                seen.insert(lower.clone());
+                continue;
+            }
+
+            if self.pipeline_keywords.contains(&lower) && !seen.contains(&lower) {
+                entities.push(ExtractedEntity {
+                    name: clean_word.to_string(),
+                    label: EntityLabel::Pipeline,
+                    base_salience: Self::calculate_base_salience(&EntityLabel::Pipeline, true),
+                });
+                seen.insert(lower.clone());
+                continue;
+            }
+
+            if self.service_keywords.contains(&lower) && !seen.contains(&lower) {
+                entities.push(ExtractedEntity {
+                    name: clean_word.to_string(),
+                    label: EntityLabel::Service,
+                    base_salience: Self::calculate_base_salience(&EntityLabel::Service, true),
+                });
+                seen.insert(lower.clone());
+                continue;
+            }
+
+            if self.environment_keywords.contains(&lower) && !seen.contains(&lower) {
+                entities.push(ExtractedEntity {
+                    name: clean_word.to_string(),
+                    label: EntityLabel::Environment,
+                    base_salience: Self::calculate_base_salience(&EntityLabel::Environment, false),
+                });
+                seen.insert(lower.clone());
+                continue;
+            }
+
+            if self.metric_keywords.contains(&lower) && !seen.contains(&lower) {
+                entities.push(ExtractedEntity {
+                    name: clean_word.to_string(),
+                    label: EntityLabel::Metric,
+                    base_salience: Self::calculate_base_salience(&EntityLabel::Metric, false),
+                });
+                seen.insert(lower.clone());
+                continue;
+            }
+
+            // Generic technology keywords (catch-all for tech not matched above)
             if self.tech_keywords.contains(&lower) && !seen.contains(&lower) {
                 let entity = ExtractedEntity {
                     name: clean_word.to_string(),

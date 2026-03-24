@@ -235,12 +235,15 @@ fn spread_single_direction(
                     }
 
                     // Entity type penalty (target entity label mismatch)
+                    // Uses hierarchical matching: Team matches Organization, Service matches Technology
                     if !intent.expected_labels.is_empty() {
                         if let Ok(Some(target_entity)) = graph.get_entity(&target_uuid) {
-                            let type_match = target_entity
-                                .labels
-                                .iter()
-                                .any(|l| intent.expected_labels.contains(l));
+                            let type_match = target_entity.labels.iter().any(|l| {
+                                intent
+                                    .expected_labels
+                                    .iter()
+                                    .any(|exp| l.matches_with_hierarchy(exp))
+                            });
                             if !type_match {
                                 penalty *= ONTOLOGICAL_ENTITY_PENALTY;
                             }

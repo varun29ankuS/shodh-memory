@@ -139,6 +139,52 @@ pub static MEMORY_RETRIEVE_RESULTS: LazyLock<HistogramVec> = LazyLock::new(|| {
 });
 
 // ============================================================================
+// Ontological Retrieval Metrics
+// ============================================================================
+
+/// Ontological intent confidence distribution per query
+pub static ONTOLOGICAL_INTENT_CONFIDENCE: LazyLock<Histogram> = LazyLock::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            "shodh_ontological_intent_confidence",
+            "Distribution of inferred ontological intent confidence scores",
+        )
+        .buckets(vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]),
+    )
+    .expect("ONTOLOGICAL_INTENT_CONFIDENCE metric must be valid at compile time")
+});
+
+/// Ontological re-rank boost applied to individual memories (Layer 4.9)
+pub static ONTOLOGICAL_RERANK_BOOST_APPLIED: LazyLock<Histogram> = LazyLock::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            "shodh_ontological_rerank_boost",
+            "Distribution of ontological re-rank boost values applied to memories",
+        )
+        .buckets(vec![0.0, 0.02, 0.04, 0.08, 0.12, 0.16, 0.20, 0.25]),
+    )
+    .expect("ONTOLOGICAL_RERANK_BOOST_APPLIED metric must be valid at compile time")
+});
+
+/// Queries where ontological intent was below confidence threshold (fallback to unfiltered)
+pub static ONTOLOGICAL_FALLBACK_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    IntCounter::new(
+        "shodh_ontological_fallback_total",
+        "Queries where ontological intent was below confidence threshold",
+    )
+    .expect("ONTOLOGICAL_FALLBACK_TOTAL metric must be valid at compile time")
+});
+
+/// Queries where ontological filtering was disabled due to high graph density
+pub static ONTOLOGICAL_DENSITY_SKIP_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    IntCounter::new(
+        "shodh_ontological_density_skip_total",
+        "Queries where ontological filtering was disabled due to high graph density",
+    )
+    .expect("ONTOLOGICAL_DENSITY_SKIP_TOTAL metric must be valid at compile time")
+});
+
+// ============================================================================
 // Embedding Metrics (P1.2: Instrument embed operations)
 // ============================================================================
 
@@ -509,6 +555,21 @@ fn do_register_metrics() -> Result<(), MetricsError> {
     register!(MEMORY_RETRIEVE_TOTAL, "MEMORY_RETRIEVE_TOTAL");
     register!(MEMORY_RETRIEVE_DURATION, "MEMORY_RETRIEVE_DURATION");
     register!(MEMORY_RETRIEVE_RESULTS, "MEMORY_RETRIEVE_RESULTS");
+
+    // Ontological retrieval metrics
+    register!(
+        ONTOLOGICAL_INTENT_CONFIDENCE,
+        "ONTOLOGICAL_INTENT_CONFIDENCE"
+    );
+    register!(
+        ONTOLOGICAL_RERANK_BOOST_APPLIED,
+        "ONTOLOGICAL_RERANK_BOOST_APPLIED"
+    );
+    register!(ONTOLOGICAL_FALLBACK_TOTAL, "ONTOLOGICAL_FALLBACK_TOTAL");
+    register!(
+        ONTOLOGICAL_DENSITY_SKIP_TOTAL,
+        "ONTOLOGICAL_DENSITY_SKIP_TOTAL"
+    );
 
     // Embedding metrics
     register!(EMBEDDING_GENERATE_TOTAL, "EMBEDDING_GENERATE_TOTAL");
