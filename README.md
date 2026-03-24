@@ -139,7 +139,7 @@ Under the hood, memories flow through three tiers:
 
 ```
 Working Memory ──overflow──▶ Session Memory ──importance──▶ Long-Term Memory
-   (100 items)                  (500 MB)                      (RocksDB)
+   (100 items)                  (100 MB)                      (RocksDB)
 ```
 
 This is based on [Cowan's working memory model](https://doi.org/10.1177/0963721409359277) and [Wixted's memory decay research](https://doi.org/10.1111/j.1467-9280.2004.00687.x). The neuroscience isn't a gimmick — it's why the system gets better with use instead of just accumulating data.
@@ -175,14 +175,14 @@ shodh tui
 
 <p align="center"><i>GTD task management — projects, todos, comments, and causal lineage</i></p>
 
-## 47 MCP Tools
+## 37 MCP Tools
 
 Full list of tools available to Claude, Cursor, and other MCP clients:
 
 <details>
 <summary>Memory</summary>
 
-`remember` · `recall` · `proactive_context` · `context_summary` · `list_memories` · `read_memory` · `forget` · `reinforce`
+`remember` · `recall` · `proactive_context` · `context_summary` · `list_memories` · `read_memory` · `forget`
 </details>
 
 <details>

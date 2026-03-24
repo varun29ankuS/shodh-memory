@@ -580,8 +580,12 @@ fn print_ready_message(addr: SocketAddr) {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
         if zenoh_enabled {
-            let prefix = std::env::var("SHODH_ZENOH_PREFIX").unwrap_or_else(|_| "shodh".to_string());
-            eprintln!("     Zenoh:     {}/*/{{remember,recall,forget,stream,mission}}", prefix);
+            let prefix =
+                std::env::var("SHODH_ZENOH_PREFIX").unwrap_or_else(|_| "shodh".to_string());
+            eprintln!(
+                "     Zenoh:     {}/*/{{remember,recall,forget,stream,mission}}",
+                prefix
+            );
             eprintln!("     Fleet:     {}/fleet/*", prefix);
         }
     }

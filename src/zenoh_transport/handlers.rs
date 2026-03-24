@@ -689,7 +689,11 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
                 }
             }
             // Dedup by fact ID
-            found.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+            found.sort_by(|a, b| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             found.dedup_by(|a, b| a.id == b.id);
             found.truncate(10);
             found
@@ -844,9 +848,7 @@ pub async fn create_stream_session(
                 m.insert(
                     "auto_tags".to_string(),
                     serde_json::Value::Array(
-                        tags.into_iter()
-                            .map(serde_json::Value::String)
-                            .collect(),
+                        tags.into_iter().map(serde_json::Value::String).collect(),
                     ),
                 );
             }
@@ -854,7 +856,10 @@ pub async fn create_stream_session(
         },
     };
 
-    manager.streaming_extractor().create_session(handshake).await
+    manager
+        .streaming_extractor()
+        .create_session(handshake)
+        .await
 }
 
 /// Handle an incoming stream message from a Zenoh subscriber.
@@ -1272,14 +1277,35 @@ mod tests {
 
     #[test]
     fn test_parse_retrieval_mode() {
-        assert!(matches!(parse_retrieval_mode("semantic"), RetrievalMode::Similarity));
-        assert!(matches!(parse_retrieval_mode("associative"), RetrievalMode::Associative));
-        assert!(matches!(parse_retrieval_mode("temporal"), RetrievalMode::Temporal));
-        assert!(matches!(parse_retrieval_mode("hybrid"), RetrievalMode::Hybrid));
-        assert!(matches!(parse_retrieval_mode("unknown"), RetrievalMode::Hybrid));
+        assert!(matches!(
+            parse_retrieval_mode("semantic"),
+            RetrievalMode::Similarity
+        ));
+        assert!(matches!(
+            parse_retrieval_mode("associative"),
+            RetrievalMode::Associative
+        ));
+        assert!(matches!(
+            parse_retrieval_mode("temporal"),
+            RetrievalMode::Temporal
+        ));
+        assert!(matches!(
+            parse_retrieval_mode("hybrid"),
+            RetrievalMode::Hybrid
+        ));
+        assert!(matches!(
+            parse_retrieval_mode("unknown"),
+            RetrievalMode::Hybrid
+        ));
         // Robotics modes
-        assert!(matches!(parse_retrieval_mode("spatial"), RetrievalMode::Spatial));
-        assert!(matches!(parse_retrieval_mode("mission"), RetrievalMode::Mission));
+        assert!(matches!(
+            parse_retrieval_mode("spatial"),
+            RetrievalMode::Spatial
+        ));
+        assert!(matches!(
+            parse_retrieval_mode("mission"),
+            RetrievalMode::Mission
+        ));
         assert!(matches!(
             parse_retrieval_mode("action_outcome"),
             RetrievalMode::ActionOutcome
