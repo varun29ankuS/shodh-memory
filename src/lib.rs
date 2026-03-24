@@ -46,3 +46,6 @@ pub use uuid;
 
 #[cfg(feature = "python")]
 pub mod python;
+
+#[cfg(feature = "zenoh")]
+pub mod zenoh_transport;
