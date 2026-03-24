@@ -1429,8 +1429,48 @@ impl MemorySystem {
         // Ontological intent: infer expected entity types and relation types from query structure.
         // Used by Layer 2 (filtered traversal) and Layer 4.9 (type-aware re-ranking).
         let onto_intent = query_parser::infer_ontological_intent(query_text, &query_analysis);
-        let use_ontology_rerank =
-            onto_intent.confidence >= crate::constants::ONTOLOGICAL_MIN_CONFIDENCE;
+
+        // Compute graph density for ontological gating (consistent with Layer 2 in graph_retrieval.rs).
+        // Dense/young graphs have too many noisy L1 edges for type filtering to help.
+        let graph_density_for_rerank: Option<f32> = if let Some(graph) = self.graph_memory.as_ref()
+        {
+            let g = graph.read();
+            let seed_uuids: Vec<uuid::Uuid> = query_analysis
+                .focal_entities
+                .iter()
+                .filter_map(|e| {
+                    g.find_entity_by_name(&e.text)
+                        .ok()
+                        .flatten()
+                        .map(|n| n.uuid)
+                })
+                .collect();
+            if seed_uuids.is_empty() {
+                None
+            } else {
+                g.entities_average_density(&seed_uuids).ok().flatten()
+            }
+        } else {
+            None
+        };
+
+        let use_ontology_rerank = onto_intent.confidence
+            >= crate::constants::ONTOLOGICAL_MIN_CONFIDENCE
+            && !graph_density_for_rerank
+                .is_some_and(|d| d >= crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD);
+
+        // Ontology telemetry
+        crate::metrics::ONTOLOGICAL_INTENT_CONFIDENCE.observe(onto_intent.confidence as f64);
+        if onto_intent.confidence > 0.0
+            && onto_intent.confidence < crate::constants::ONTOLOGICAL_MIN_CONFIDENCE
+        {
+            crate::metrics::ONTOLOGICAL_FALLBACK_TOTAL.inc();
+        }
+        if graph_density_for_rerank
+            .is_some_and(|d| d >= crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD)
+        {
+            crate::metrics::ONTOLOGICAL_DENSITY_SKIP_TOTAL.inc();
+        }
 
         let attribute_boost_ids: HashSet<MemoryId> = match &query_type {
             query_parser::QueryType::Attribute(attr_query) => {
@@ -2378,9 +2418,12 @@ impl MemorySystem {
                                         .ok()
                                         .flatten()
                                         .map(|e| {
-                                            e.labels
-                                                .iter()
-                                                .any(|l| onto_intent.expected_labels.contains(l))
+                                            e.labels.iter().any(|l| {
+                                                onto_intent
+                                                    .expected_labels
+                                                    .iter()
+                                                    .any(|exp| l.matches_with_hierarchy(exp))
+                                            })
                                         })
                                         .unwrap_or(false)
                                 })
@@ -2391,6 +2434,8 @@ impl MemorySystem {
                                     .min(crate::constants::ONTOLOGICAL_RERANK_MAX);
                                 *fused_score += boost;
                                 boosted_count += 1;
+                                crate::metrics::ONTOLOGICAL_RERANK_BOOST_APPLIED
+                                    .observe(boost as f64);
                             }
                         }
                     }

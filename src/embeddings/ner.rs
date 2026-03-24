@@ -872,8 +872,8 @@ impl NeuralNer {
             .map(|e| {
                 let entity_type = match e.label {
                     EntityLabel::Person => NerEntityType::Person,
-                    EntityLabel::Organization => NerEntityType::Organization,
-                    EntityLabel::Location => NerEntityType::Location,
+                    EntityLabel::Organization | EntityLabel::Team => NerEntityType::Organization,
+                    EntityLabel::Location | EntityLabel::Environment => NerEntityType::Location,
                     EntityLabel::Technology
                     | EntityLabel::Concept
                     | EntityLabel::Event
@@ -881,6 +881,17 @@ impl NeuralNer {
                     | EntityLabel::Product
                     | EntityLabel::Skill
                     | EntityLabel::Keyword
+                    | EntityLabel::Project
+                    | EntityLabel::Task
+                    | EntityLabel::Document
+                    | EntityLabel::Repository
+                    | EntityLabel::Service
+                    | EntityLabel::Database
+                    | EntityLabel::Metric
+                    | EntityLabel::Configuration
+                    | EntityLabel::Pipeline
+                    | EntityLabel::Role
+                    | EntityLabel::Module
                     | EntityLabel::Other(_) => NerEntityType::Misc,
                 };
 
