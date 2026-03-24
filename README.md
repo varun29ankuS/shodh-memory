@@ -250,7 +250,7 @@ ros2 run zenoh_bridge_ros2dds zenoh_bridge_ros2dds
 | Operation | Key Expression | Description |
 |-----------|---------------|-------------|
 | Remember | `shodh/{user_id}/remember` | Store with GPS, local position, heading, sensor data, mission context |
-| Recall | `shodh/{user_id}/recall` | Spatial search (haversine), mission replay, RL reward-based retrieval |
+| Recall | `shodh/{user_id}/recall` | Spatial search (haversine), mission replay, action-outcome filtering |
 | Stream | `shodh/{user_id}/stream/sensor` | Auto-remember high-frequency sensor data via extraction pipeline |
 | Mission | `shodh/{user_id}/mission/start` | Track mission boundaries, searchable across missions |
 | Fleet | `shodh/fleet/**` | Automatic peer discovery via Zenoh liveliness tokens |
