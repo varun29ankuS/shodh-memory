@@ -828,6 +828,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Automatically store the context as a Conversation memory (default: true). Set to false to only surface memories without storing.",
               default: true,
             },
+            tool_actions: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  tool_name: { type: "string", description: "Tool or actuator name (e.g., 'Edit', 'Bash', 'navigate', 'grasp')" },
+                  inputs: { type: "object", additionalProperties: { type: "string" }, description: "Key-value input parameters" },
+                  success: { type: "boolean", description: "Whether the action succeeded" },
+                  output_snippet: { type: "string", description: "First 200 chars of output" },
+                  reward: { type: "number", description: "Reward signal for robotics (-1.0 to 1.0)" },
+                },
+                required: ["tool_name", "success"],
+              },
+              description: "Tool/actuator actions performed since last proactive_context call. Used for causal feedback attribution.",
+            },
           },
           required: ["context"],
         },
@@ -2142,6 +2157,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           max_results = 5,
           memory_types = [],
           auto_ingest = true,
+          tool_actions = [],
         } = args as {
           context: string;
           semantic_threshold?: number;
@@ -2150,6 +2166,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           max_results?: number;
           memory_types?: string[];
           auto_ingest?: boolean;
+          tool_actions?: { tool_name: string; inputs?: Record<string, string>; success: boolean; output_snippet?: string; reward?: number }[];
         };
 
         // --- Response types matching ProactiveContextResponse (Rust backend) ---
@@ -2249,6 +2266,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Implicit feedback: send previous response so backend can evaluate which memories helped
           previous_response: lastProactiveResponse || undefined,
           user_followup: lastProactiveResponse ? cleanedContext : undefined,
+          // Tool-aware feedback attribution: causal signal from tool/actuator actions
+          ...(tool_actions.length > 0 ? { tool_actions } : {}),
         });
 
         const memories = result.memories || [];

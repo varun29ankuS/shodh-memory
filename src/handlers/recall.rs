@@ -126,6 +126,13 @@ pub struct ProactiveContextRequest {
     /// User's followup message after agent response (for delayed signals)
     #[serde(default)]
     pub user_followup: Option<String>,
+    /// Tool/actuator actions performed since last proactive_context call.
+    /// Used for tool-aware feedback attribution: matches actions against
+    /// previously surfaced memories to detect concrete usage.
+    /// Claude Code: collected by hooks (Read, Edit, Bash calls).
+    /// Robotics: constructed from action-outcome Experience fields.
+    #[serde(default)]
+    pub tool_actions: Vec<crate::memory::feedback::ToolAction>,
 }
 
 fn default_proactive_max_results() -> usize {
@@ -923,6 +930,7 @@ pub async fn proactive_context(
         let response_text = super::utils::strip_mcp_response_noise(prev_response);
         let followup = req.user_followup.clone();
         let memory_for_embed = memory_system.clone();
+        let tool_actions_for_feedback = std::mem::take(&mut req.tool_actions);
 
         // Process feedback and collect memory IDs for reinforcement.
         // Split into 3 phases to minimize write-lock hold time on the shared FeedbackStore:
@@ -933,7 +941,15 @@ pub async fn proactive_context(
             // Phase 1: Extract pending data under brief write lock
             let (pending, context_pattern) = {
                 let mut store = feedback_store.write();
-                let pending = store.take_pending(&user_id_for_feedback);
+                let pending = store.take_pending(&user_id_for_feedback).map(|mut p| {
+                    // Attach tool actions from current request to previous pending.
+                    // These actions happened AFTER memories were surfaced (previous call)
+                    // and BEFORE this call — exactly the attribution window.
+                    if !tool_actions_for_feedback.is_empty() {
+                        p.tool_actions = tool_actions_for_feedback;
+                    }
+                    p
+                });
                 let context_pattern = pending.as_ref().and_then(|p| {
                     if p.context_embedding.is_empty() {
                         return None;

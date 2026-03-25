@@ -24,6 +24,7 @@ use crate::handlers::state::MultiUserMemoryManager;
 use crate::handlers::types::{
     MemoryEvent, RecallExperience, RecallFact, RecallMemory, RecallResponse, RecallTodo,
 };
+use crate::memory::feedback::{self, PendingFeedback, SurfacedMemoryInfo, ToolAction};
 use crate::memory::types::{ForgetCriteria, GeoFilter, MemoryId};
 use crate::memory::{
     Experience, MemorySystem, Query as MemoryQuery, RetrievalMode, SessionEvent, TodoStatus,
@@ -389,6 +390,74 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
         }
     };
 
+    // Tool-aware feedback attribution for robotics:
+    // If this remember() carries an action+reward, attribute it to the most recent recall.
+    // Pattern: robot recalls memories → acts → remembers outcome with action_type+reward.
+    // We take the PendingFeedback from the prior recall, attach the action as a ToolAction,
+    // then run the same signal processing + momentum update pipeline as HTTP proactive_context.
+    if req.action_type.is_some() && req.reward.is_some() {
+        let feedback_store = manager.feedback_store().clone();
+        let user_id_for_attr = req.user_id.clone();
+        let action_type = req.action_type.clone().unwrap_or_default();
+        let action_params = req.action_params.clone().unwrap_or_default();
+        let outcome_type = req.outcome_type.clone().unwrap_or_default();
+        let outcome_details = req.outcome_details.clone();
+        let reward = req.reward;
+
+        tokio::spawn(async move {
+            // Build ToolAction from robotics experience fields
+            let tool_action = ToolAction {
+                tool_name: action_type,
+                inputs: action_params,
+                success: matches!(outcome_type.as_str(), "success" | "partial"),
+                output_snippet: outcome_details.map(|s| s.chars().take(200).collect()),
+                reward,
+            };
+
+            // Phase 1: Take pending feedback under brief write lock
+            let pending = {
+                let mut store = feedback_store.write();
+                store.take_pending(&user_id_for_attr).map(|mut p| {
+                    p.tool_actions = vec![tool_action];
+                    p
+                })
+            };
+
+            if let Some(pending) = pending {
+                // Phase 2: Compute signals — no lock held
+                // For robotics, there's no "response text" — the tool action IS the response.
+                // Pass empty response so entity/semantic signals are minimal; tool signal dominates.
+                let signals =
+                    feedback::process_implicit_feedback_with_semantics(&pending, "", None, None);
+
+                if !signals.is_empty() {
+                    // Phase 3: Apply momentum updates under brief write lock
+                    let mut store = feedback_store.write();
+                    for (memory_id, signal) in &signals {
+                        let momentum = store.get_or_create_momentum(
+                            memory_id.clone(),
+                            crate::memory::types::ExperienceType::Context,
+                        );
+                        momentum.update(signal.clone());
+                        store.mark_dirty(memory_id);
+                    }
+                    if let Err(e) = store.flush() {
+                        debug!(
+                            "Failed to flush feedback store after robot attribution: {}",
+                            e
+                        );
+                    }
+
+                    debug!(
+                        user_id = %user_id_for_attr,
+                        signals = signals.len(),
+                        "Robotics tool-aware feedback attribution completed"
+                    );
+                }
+            }
+        });
+    }
+
     // Record metrics
     let duration = op_start.elapsed().as_secs_f64();
     metrics::MEMORY_STORE_DURATION.observe(duration);
@@ -737,6 +806,49 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
             error!("Failed to serialize recall response: {}", e);
             reply_error(&query, "Serialization error").await;
         }
+    }
+
+    // Store PendingFeedback so subsequent remember() calls with action+reward
+    // can attribute outcomes to the memories we just surfaced.
+    if !recall_memories.is_empty() {
+        let memory_for_embed = memory.clone();
+        let query_for_embed = query_text.clone();
+        let user_id_for_fb = user_id.clone();
+        let feedback_store = manager.feedback_store().clone();
+
+        // Build surfaced memory info from recall results
+        let surfaced_infos: Vec<SurfacedMemoryInfo> = memories
+            .iter()
+            .map(|m| SurfacedMemoryInfo {
+                id: m.id.clone(),
+                entities: m.experience.entities.iter().cloned().collect(),
+                content_preview: m.experience.content.chars().take(200).collect(),
+                score: m.salience_score_with_access(),
+                embedding: Vec::new(), // Filled below if embedding succeeds
+            })
+            .collect();
+
+        // Compute context embedding in background for semantic feedback later
+        let context_for_pending = query_for_embed.clone();
+        tokio::spawn(async move {
+            let embedding = tokio::task::spawn_blocking(move || {
+                let guard = memory_for_embed.read();
+                guard
+                    .compute_embedding(&query_for_embed)
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+
+            let pending = PendingFeedback::new(
+                user_id_for_fb,
+                context_for_pending,
+                embedding,
+                surfaced_infos,
+            );
+            let mut store = feedback_store.write();
+            store.set_pending(pending);
+        });
     }
 
     debug!(
