@@ -69,6 +69,28 @@ const TOOL_USAGE_FAILURE_SIGNAL: f32 = -0.4;
 /// When a tool action matches, 35% of final signal comes from tool attribution.
 const TOOL_USAGE_WEIGHT: f32 = 0.35;
 
+/// Information-theoretic attribution constants
+/// Uses vector projection to factor out query-shared information from memory↔response
+/// similarity, isolating the memory's unique causal contribution.
+/// Minimum residual-cosine score to count as a positive signal.
+/// Below this, memory's unique content wasn't reflected in the response.
+const INFO_ATTRIBUTION_MIN: f32 = 0.05;
+/// Strong attribution — memory clearly influenced the response beyond query overlap.
+const INFO_ATTRIBUTION_STRONG: f32 = 0.25;
+/// Signal value for strong attribution (scaled by score).
+const INFO_ATTRIBUTION_STRONG_SIGNAL: f32 = 0.85;
+/// Signal value for weak-but-present attribution (scaled by score).
+const INFO_ATTRIBUTION_WEAK_SIGNAL: f32 = 0.3;
+/// Penalty when memory was surfaced but its unique content is absent from response.
+const INFO_ATTRIBUTION_NO_SIGNAL: f32 = -0.15;
+/// Weight in combined signal when info attribution is available.
+/// Takes 35% from the combination, reducing semantic from 60% to 35%.
+const INFO_ATTRIBUTION_WEIGHT: f32 = 0.35;
+/// Adjusted entity weight when info attribution available (was 0.4).
+const ENTITY_WEIGHT_WITH_INFO: f32 = 0.30;
+/// Adjusted semantic weight when info attribution available (was 0.6).
+const SEMANTIC_WEIGHT_WITH_INFO: f32 = 0.35;
+
 /// Stability adjustment rates
 const STABILITY_INCREMENT: f32 = 0.05;
 const STABILITY_DECREMENT_MULTIPLIER: f32 = 0.1;
@@ -170,6 +192,16 @@ pub enum SignalTrigger {
         tool_name: String,
         /// Whether the tool action succeeded
         success: bool,
+    },
+
+    /// Information-theoretic attribution: measures unique information
+    /// the memory contributed beyond what the query already provided.
+    /// Uses vector projection to factor out query-shared components.
+    InformationAttribution {
+        /// Cosine similarity between memory and response residuals (query projected out)
+        attribution_score: f32,
+        /// Raw cosine similarity before projection (for comparison/diagnostics)
+        raw_similarity: f32,
     },
 }
 
@@ -747,6 +779,57 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
 }
 
+/// Compute information-theoretic attribution using vector projection.
+///
+/// Projects out the query component from both memory and response embeddings,
+/// then measures cosine similarity of the residuals. This isolates what the
+/// memory uniquely contributed vs what was already in the query.
+///
+/// Returns `(attribution_score, raw_similarity)` or None if embeddings are
+/// empty or have mismatched dimensions.
+fn compute_information_attribution(
+    query_emb: &[f32],
+    memory_emb: &[f32],
+    response_emb: &[f32],
+) -> Option<(f32, f32)> {
+    if query_emb.is_empty()
+        || memory_emb.len() != query_emb.len()
+        || response_emb.len() != query_emb.len()
+    {
+        return None;
+    }
+
+    // query · query (projection denominator)
+    let query_dot_query: f32 = query_emb.iter().map(|x| x * x).sum();
+    if query_dot_query < 1e-10 {
+        return None; // degenerate query embedding
+    }
+
+    // Scalar projections onto query direction
+    let mem_dot_query: f32 = memory_emb.iter().zip(query_emb).map(|(m, q)| m * q).sum();
+    let resp_dot_query: f32 = response_emb.iter().zip(query_emb).map(|(r, q)| r * q).sum();
+
+    let mem_proj_scale = mem_dot_query / query_dot_query;
+    let resp_proj_scale = resp_dot_query / query_dot_query;
+
+    // Residuals: original vector minus its projection onto query
+    let mem_residual: Vec<f32> = memory_emb
+        .iter()
+        .zip(query_emb)
+        .map(|(m, q)| m - mem_proj_scale * q)
+        .collect();
+    let resp_residual: Vec<f32> = response_emb
+        .iter()
+        .zip(query_emb)
+        .map(|(r, q)| r - resp_proj_scale * q)
+        .collect();
+
+    let attribution = cosine_similarity(&mem_residual, &resp_residual).max(0.0);
+    let raw_similarity = cosine_similarity(memory_emb, response_emb);
+
+    Some((attribution, raw_similarity))
+}
+
 /// Create signal from semantic similarity
 fn signal_from_semantic_similarity(similarity: f32) -> (f32, f32) {
     if similarity >= SEMANTIC_STRONG_THRESHOLD {
@@ -899,23 +982,56 @@ pub fn process_implicit_feedback_with_semantics(
             };
 
         // Combine signals with weights
+        // When info-theoretic attribution is available (all 3 embeddings present),
+        // use 3-signal combination that isolates the memory's unique causal contribution.
+        // Otherwise fall back to entity+semantic weighted sum.
         let (combined_value, combined_confidence, trigger) = if has_semantic {
-            let value = (ENTITY_WEIGHT * entity_value) + (SEMANTIC_WEIGHT * semantic_value);
-            let confidence = (ENTITY_WEIGHT * entity_conf) + (SEMANTIC_WEIGHT * semantic_conf);
+            if let Some((attr_score, raw_sim)) = response_embedding.and_then(|resp_emb| {
+                compute_information_attribution(
+                    &pending.context_embedding,
+                    &memory.embedding,
+                    resp_emb,
+                )
+            }) {
+                // Three-signal combination: entity + semantic + info attribution
+                let (info_value, info_conf) = if attr_score >= INFO_ATTRIBUTION_STRONG {
+                    (INFO_ATTRIBUTION_STRONG_SIGNAL * attr_score.min(1.0), 0.9)
+                } else if attr_score >= INFO_ATTRIBUTION_MIN {
+                    (INFO_ATTRIBUTION_WEAK_SIGNAL * attr_score, 0.65)
+                } else {
+                    (INFO_ATTRIBUTION_NO_SIGNAL, 0.5)
+                };
 
-            // Use semantic similarity as trigger since it's the primary signal
-            let similarity = if let Some(resp_emb) = response_embedding {
-                cosine_similarity(&memory.embedding, resp_emb)
+                let value = (ENTITY_WEIGHT_WITH_INFO * entity_value)
+                    + (SEMANTIC_WEIGHT_WITH_INFO * semantic_value)
+                    + (INFO_ATTRIBUTION_WEIGHT * info_value);
+                let confidence = (ENTITY_WEIGHT_WITH_INFO * entity_conf)
+                    + (SEMANTIC_WEIGHT_WITH_INFO * semantic_conf)
+                    + (INFO_ATTRIBUTION_WEIGHT * info_conf);
+
+                (
+                    value,
+                    confidence,
+                    SignalTrigger::InformationAttribution {
+                        attribution_score: attr_score,
+                        raw_similarity: raw_sim,
+                    },
+                )
             } else {
-                0.0
-            };
-            (
-                value,
-                confidence,
-                SignalTrigger::SemanticSimilarity { similarity },
-            )
+                // Fallback: entity + semantic only (context_embedding empty or dim mismatch)
+                let value = (ENTITY_WEIGHT * entity_value) + (SEMANTIC_WEIGHT * semantic_value);
+                let confidence = (ENTITY_WEIGHT * entity_conf) + (SEMANTIC_WEIGHT * semantic_conf);
+                let similarity = response_embedding
+                    .map(|resp_emb| cosine_similarity(&memory.embedding, resp_emb))
+                    .unwrap_or(0.0);
+                (
+                    value,
+                    confidence,
+                    SignalTrigger::SemanticSimilarity { similarity },
+                )
+            }
         } else {
-            // Fallback to entity-only signal
+            // No embeddings at all — entity-only
             (
                 entity_value,
                 entity_conf,
@@ -2016,22 +2132,36 @@ mod tests {
         let (_, sig1_semantic) = &signals_with_semantic[0];
         assert_eq!(id1, &memory_id1);
 
-        // Semantic signal should use SemanticSimilarity trigger
+        // With context_embedding available, should use InformationAttribution trigger
+        // (projects out query component to isolate memory's unique contribution)
         match &sig1_semantic.trigger {
-            SignalTrigger::SemanticSimilarity { similarity } => {
-                assert!(*similarity > 0.9); // High similarity since embeddings are same
+            SignalTrigger::InformationAttribution {
+                attribution_score,
+                raw_similarity,
+            } => {
+                // Raw similarity is high (response_emb == memory_emb)
+                assert!(*raw_similarity > 0.9);
+                // Attribution score measures residual after projecting out query
+                assert!(*attribution_score >= 0.0);
             }
-            _ => panic!("Expected SemanticSimilarity trigger"),
+            SignalTrigger::SemanticSimilarity { similarity } => {
+                // Fallback if context_embedding is degenerate
+                assert!(*similarity > 0.9);
+            }
+            _ => panic!("Expected InformationAttribution or SemanticSimilarity trigger"),
         }
 
-        // Second memory (python) should have low semantic score since embedding is different
+        // Second memory (python) should have low score since embedding is different
         let (id2, sig2_semantic) = &signals_with_semantic[1];
         assert_eq!(id2, &memory_id2);
         match &sig2_semantic.trigger {
-            SignalTrigger::SemanticSimilarity { similarity } => {
-                assert!(*similarity < 0.5); // Low similarity - different embeddings
+            SignalTrigger::InformationAttribution { raw_similarity, .. } => {
+                assert!(*raw_similarity < 0.5); // Different embeddings
             }
-            _ => panic!("Expected SemanticSimilarity trigger"),
+            SignalTrigger::SemanticSimilarity { similarity } => {
+                assert!(*similarity < 0.5);
+            }
+            _ => panic!("Expected InformationAttribution or SemanticSimilarity trigger"),
         }
     }
 
