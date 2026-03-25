@@ -17,12 +17,12 @@ info:
     1. Store a memory: `POST /api/remember`
     2. Recall memories: `POST /api/recall`
     3. Get context summary: `POST /api/context_summary`
-  version: 0.1.5
+  version: 0.1.91
   contact:
     name: Shodh Memory
     url: https://github.com/varun29ankuS/shodh-memory
   license:
-    name: MIT
+    name: Apache-2.0
     url: https://opensource.org/licenses/MIT
 
 servers:
