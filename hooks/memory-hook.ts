@@ -64,6 +64,9 @@ interface ProactiveContextResponse {
 
 const HOOK_TIMEOUT_MS = 5000;
 
+/** Tool actions collected since last proactive_context call for feedback attribution */
+const pendingToolActions: { tool_name: string; inputs: Record<string, string>; success: boolean; output_snippet?: string }[] = [];
+
 async function callBrain(endpoint: string, body: Record<string, unknown>): Promise<unknown> {
   try {
     const controller = new AbortController();
@@ -136,6 +139,9 @@ export function buildPreToolContext(toolName: string, toolInput: Record<string, 
 }
 
 async function surfaceProactiveContext(context: string, maxResults = 3, autoIngest = false): Promise<string | null> {
+  // Drain pending tool actions for feedback attribution
+  const toolActions = pendingToolActions.splice(0, pendingToolActions.length);
+
   const response = (await callBrain("/api/proactive_context", {
     user_id: SHODH_USER_ID,
     context,
@@ -144,6 +150,7 @@ async function surfaceProactiveContext(context: string, maxResults = 3, autoInge
     entity_match_weight: 0.3,
     recency_weight: 0.2,
     auto_ingest: autoIngest,
+    ...(toolActions.length > 0 ? { tool_actions: toolActions } : {}),
   })) as ProactiveContextResponse | null;
 
   if (!response) return null;
@@ -252,6 +259,30 @@ async function handlePostToolUse(input: HookInput): Promise<void> {
   const toolOutput = input.tool_output;
 
   if (!toolName) return;
+
+  // Record tool action for feedback attribution (before any early returns)
+  if (toolName !== "Task") {
+    const actionRecord: (typeof pendingToolActions)[number] = {
+      tool_name: toolName,
+      inputs: {},
+      success: true,
+    };
+    if (toolInput) {
+      for (const [k, v] of Object.entries(toolInput)) {
+        if (typeof v === "string") {
+          actionRecord.inputs[k] = v.slice(0, 500);
+        }
+      }
+    }
+    if (toolOutput) {
+      actionRecord.success = !isErrorOutput(toolOutput);
+      actionRecord.output_snippet = toolOutput.slice(0, 200);
+    }
+    pendingToolActions.push(actionRecord);
+    if (pendingToolActions.length > 50) {
+      pendingToolActions.splice(0, pendingToolActions.length - 50);
+    }
+  }
 
   // Orchestration: handle Task tool completions
   if (toolName === "Task") {

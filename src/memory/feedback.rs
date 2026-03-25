@@ -52,6 +52,23 @@ const SIGNAL_IGNORED_PENALTY: f32 = -0.2; // Memory shown but completely unused
 const ENTITY_WEIGHT: f32 = 0.4;
 const SEMANTIC_WEIGHT: f32 = 0.6;
 
+/// Tool-usage attribution constants
+/// Minimum Jaccard token overlap between memory content and tool action inputs.
+/// Lower than entity overlap (0.1) because tool inputs are short with high
+/// information density per token (file paths, commands, coordinates).
+const TOOL_USAGE_MIN_OVERLAP: f32 = 0.08;
+/// Above this Jaccard overlap, signal gets high confidence (0.9).
+const TOOL_USAGE_STRONG_THRESHOLD: f32 = 0.25;
+/// Positive signal when tool action matches memory and succeeds.
+/// Stronger than SIGNAL_STRONG_MULTIPLIER (0.8) because tool usage is
+/// a concrete behavioral signal, not just word overlap.
+const TOOL_USAGE_SUCCESS_SIGNAL: f32 = 0.7;
+/// Negative signal when tool action matches memory but fails.
+const TOOL_USAGE_FAILURE_SIGNAL: f32 = -0.4;
+/// Blend weight for tool signal vs entity+semantic.
+/// When a tool action matches, 35% of final signal comes from tool attribution.
+const TOOL_USAGE_WEIGHT: f32 = 0.35;
+
 /// Stability adjustment rates
 const STABILITY_INCREMENT: f32 = 0.05;
 const STABILITY_DECREMENT_MULTIPLIER: f32 = 0.1;
@@ -141,6 +158,53 @@ pub enum SignalTrigger {
         memory_entities_used: usize,
         response_entities_total: usize,
     },
+
+    /// Tool/actuator action matched surfaced memory content.
+    /// The agent performed a concrete action aligned with the memory's guidance.
+    /// Covers both Claude Code tools (Read, Edit, Bash) and robot actuators
+    /// (navigate, grasp, sense).
+    ToolUsage {
+        /// Jaccard token overlap between memory content and tool inputs (0.0-1.0)
+        content_overlap: f32,
+        /// Tool or actuator name
+        tool_name: String,
+        /// Whether the tool action succeeded
+        success: bool,
+    },
+}
+
+/// A tool or actuator action performed between feedback cycles.
+///
+/// Unified abstraction covering Claude Code tools (Read, Edit, Write, Bash)
+/// and robot actuator commands (navigate, grasp, sense). The feedback system
+/// matches action inputs/outputs against surfaced memory content to determine
+/// whether a memory influenced a concrete action.
+///
+/// For Claude Code: collected by hooks between proactive_context calls.
+/// For robotics: constructed from Experience fields when remember() follows recall().
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolAction {
+    /// Tool or actuator name: "Edit", "Bash", "navigate", "grasp"
+    pub tool_name: String,
+
+    /// Key-value inputs.
+    /// Claude Code: {"file_path": "/src/main.rs", "command": "cargo build"}.
+    /// Robotics: {"target": "waypoint_7", "speed": "0.5"}.
+    #[serde(default)]
+    pub inputs: HashMap<String, String>,
+
+    /// Whether the action succeeded.
+    /// Claude Code: true unless tool_output contains error markers.
+    /// Robotics: derived from outcome_type (success/partial = true).
+    pub success: bool,
+
+    /// First 200 chars of output. Used for content matching.
+    #[serde(default)]
+    pub output_snippet: Option<String>,
+
+    /// Reward signal (robotics only, -1.0 to 1.0). None for Claude Code tools.
+    #[serde(default)]
+    pub reward: Option<f32>,
 }
 
 /// A single feedback signal
@@ -609,6 +673,11 @@ pub struct PendingFeedback {
     pub surfaced_memories: Vec<SurfacedMemoryInfo>,
     pub context: String,
     pub context_embedding: Vec<f32>,
+    /// Tool/actuator actions performed after memories were surfaced.
+    /// Claude Code: collected by hooks between proactive_context calls.
+    /// Robotics: populated from action-outcome Experience fields.
+    #[serde(default)]
+    pub tool_actions: Vec<ToolAction>,
 }
 
 impl PendingFeedback {
@@ -624,6 +693,7 @@ impl PendingFeedback {
             surfaced_memories: memories,
             context,
             context_embedding,
+            tool_actions: Vec::new(),
         }
     }
 
@@ -855,6 +925,27 @@ pub fn process_implicit_feedback_with_semantics(
             )
         };
 
+        // Tool-usage attribution: blend if tool actions matched this memory
+        let (combined_value, combined_confidence, trigger) =
+            if let Some((tool_val, tool_conf, tool_name, tool_overlap)) =
+                compute_tool_usage_signal(memory, &pending.tool_actions)
+            {
+                let blended_value =
+                    (TOOL_USAGE_WEIGHT * tool_val) + ((1.0 - TOOL_USAGE_WEIGHT) * combined_value);
+                let blended_conf = tool_conf.max(combined_confidence);
+                (
+                    blended_value,
+                    blended_conf,
+                    SignalTrigger::ToolUsage {
+                        content_overlap: tool_overlap,
+                        tool_name,
+                        success: tool_val > 0.0,
+                    },
+                )
+            } else {
+                (combined_value, combined_confidence, trigger)
+            };
+
         let mut signal = SignalRecord::new(combined_value, combined_confidence, trigger);
 
         // Apply negative keyword penalty if detected in followup
@@ -871,6 +962,96 @@ pub fn process_implicit_feedback_with_semantics(
     }
 
     signals
+}
+
+/// Compute tool-usage attribution signal for a single memory.
+///
+/// Checks whether any tool action's inputs or output contain content
+/// from the surfaced memory. Uses normalized Jaccard token overlap
+/// because tool inputs are short and keyword-heavy (file paths, commands,
+/// coordinates, waypoints).
+///
+/// Returns `(signal_value, confidence, tool_name, overlap)` for the best
+/// matching tool action, or None if no match above threshold.
+pub fn compute_tool_usage_signal(
+    memory: &SurfacedMemoryInfo,
+    tool_actions: &[ToolAction],
+) -> Option<(f32, f32, String, f32)> {
+    if tool_actions.is_empty() {
+        return None;
+    }
+
+    let memory_tokens: HashSet<&str> = memory
+        .content_preview
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '.' && c != '/')
+        .filter(|w| w.len() >= 3)
+        .collect();
+
+    if memory_tokens.is_empty() {
+        return None;
+    }
+
+    let mut best_overlap = 0.0f32;
+    let mut best_tool = String::new();
+    let mut best_success = false;
+    let mut best_reward: Option<f32> = None;
+
+    for action in tool_actions {
+        let mut action_text = String::new();
+        for value in action.inputs.values() {
+            action_text.push(' ');
+            action_text.push_str(value);
+        }
+        if let Some(ref snippet) = action.output_snippet {
+            action_text.push(' ');
+            action_text.push_str(snippet);
+        }
+
+        let action_tokens: HashSet<&str> = action_text
+            .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '.' && c != '/')
+            .filter(|w| w.len() >= 3)
+            .collect();
+
+        if action_tokens.is_empty() {
+            continue;
+        }
+
+        let intersection = memory_tokens.intersection(&action_tokens).count() as f32;
+        let union = memory_tokens.union(&action_tokens).count() as f32;
+        let overlap = if union > 0.0 {
+            intersection / union
+        } else {
+            0.0
+        };
+
+        if overlap > best_overlap {
+            best_overlap = overlap;
+            best_tool = action.tool_name.clone();
+            best_success = action.success;
+            best_reward = action.reward;
+        }
+    }
+
+    if best_overlap < TOOL_USAGE_MIN_OVERLAP {
+        return None;
+    }
+
+    // For robotics actions with explicit reward, use the reward directly
+    let base_value = if let Some(reward) = best_reward {
+        reward * best_overlap
+    } else if best_success {
+        TOOL_USAGE_SUCCESS_SIGNAL * best_overlap
+    } else {
+        TOOL_USAGE_FAILURE_SIGNAL * best_overlap
+    };
+
+    let confidence = if best_overlap >= TOOL_USAGE_STRONG_THRESHOLD {
+        0.9
+    } else {
+        0.65
+    };
+
+    Some((base_value, confidence, best_tool, best_overlap))
 }
 
 /// Apply context pattern signals (repetition/topic change) to existing signals
