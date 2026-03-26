@@ -210,6 +210,7 @@ pub async fn clear_user_graph(
         memory_type: Some("graph".to_string()),
         importance: None,
         count: Some(entities + relationships + episodes),
+        entities: None,
         results: None,
     });
 
@@ -286,6 +287,7 @@ pub async fn rebuild_user_graph(
         memory_type: Some("graph".to_string()),
         importance: None,
         count: Some(entities_created + relationships_created),
+        entities: None,
         results: None,
     });
 
@@ -337,6 +339,7 @@ pub async fn invalidate_relationship(
         memory_type: Some("graph".to_string()),
         importance: None,
         count: None,
+        entities: None,
         results: None,
     });
 

@@ -4466,7 +4466,7 @@ fn render_activity_feed(f: &mut Frame, area: Rect, state: &AppState) {
         if has_rich_selected {
             (inner.height * 3 / 4).max(15)
         } else {
-            12u16
+            (inner.height / 2).max(14)
         }
     } else {
         0u16
@@ -4854,32 +4854,7 @@ fn render_event_detail(f: &mut Frame, area: Rect, event: &DisplayEvent, state: &
     }
     lines.push(Line::from(header));
 
-    // Full content - word wrapped across multiple lines
-    if let Some(content) = &event.event.content_preview {
-        lines.push(Line::from(""));
-        let max_width = inner.width.saturating_sub(2) as usize;
-        let mut remaining = content.as_str();
-        let mut content_lines = 0;
-        while !remaining.is_empty() && content_lines < 6 {
-            let take = remaining.chars().take(max_width).collect::<String>();
-            let actual_len = take.len();
-            lines.push(Line::from(Span::styled(
-                take,
-                Style::default().fg(state.theme.fg()),
-            )));
-            remaining = &remaining[actual_len.min(remaining.len())..];
-            content_lines += 1;
-        }
-        if !remaining.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "...(more)",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-    }
-
     // ID and timestamp
-    lines.push(Line::from(""));
     let mut id_line = Vec::new();
     if let Some(id) = &event.event.memory_id {
         id_line.push(Span::styled("ID: ", Style::default().fg(Color::DarkGray)));
@@ -4896,7 +4871,7 @@ fn render_event_detail(f: &mut Frame, area: Rect, event: &DisplayEvent, state: &
     ));
     lines.push(Line::from(id_line));
 
-    // Entities
+    // Tags (before content so they're always visible)
     if let Some(entities) = &event.event.entities {
         if !entities.is_empty() {
             let es = entities.join(", ");
@@ -4907,7 +4882,28 @@ fn render_event_detail(f: &mut Frame, area: Rect, event: &DisplayEvent, state: &
         }
     }
 
-    f.render_widget(Paragraph::new(lines), inner);
+    // Full content - word wrapped
+    if let Some(content) = &event.event.content_preview {
+        lines.push(Line::from(""));
+        let content_width = inner.width.saturating_sub(2) as usize;
+        let mut remaining = content.as_str();
+        while !remaining.is_empty() {
+            let take_len = remaining
+                .char_indices()
+                .take(content_width)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(remaining.len());
+            let line_content = &remaining[..take_len];
+            lines.push(Line::from(Span::styled(
+                line_content,
+                Style::default().fg(state.theme.fg()),
+            )));
+            remaining = &remaining[take_len..];
+        }
+    }
+
+    f.render_widget(Paragraph::new(lines).scroll((0, 0)), inner);
 }
 
 /// Render rich results panel for RETRIEVE / PROACTIVE_CONTEXT events
@@ -5228,7 +5224,7 @@ fn render_activity_logs(f: &mut Frame, area: Rect, state: &AppState) {
         if has_rich_selected_logs {
             (inner.height * 3 / 4).max(15)
         } else {
-            12u16
+            (inner.height / 2).max(14)
         }
     } else {
         0u16
