@@ -5224,7 +5224,7 @@ fn render_activity_logs(f: &mut Frame, area: Rect, state: &AppState) {
         if has_rich_selected_logs {
             (inner.height * 3 / 4).max(15)
         } else {
-            12u16
+            (inner.height / 2).max(14)
         }
     } else {
         0u16
