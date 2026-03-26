@@ -1960,39 +1960,6 @@ impl MemorySystem {
                     }
                 }
 
-                // Fallback: if ontology-filtered traversal returned too few results, retry unfiltered
-                if use_onto_filter && ids.len() < 3 {
-                    tracing::debug!(
-                        "Layer 2: Ontology-filtered traversal returned {} results, falling back to unfiltered",
-                        ids.len()
-                    );
-                    for entity_uuid in &query_entities {
-                        if let Ok(t) =
-                            g.traverse_weighted(entity_uuid, weighted_depth, None, weighted_min_str)
-                        {
-                            for tr in &t.entities {
-                                if let Ok(mut eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
-                                    eps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                                    eps.truncate(50);
-                                    for ep in eps {
-                                        let mid = MemoryId(ep.uuid);
-                                        if episode_candidates
-                                            .as_ref()
-                                            .map_or(true, |c| c.contains(&mid))
-                                        {
-                                            ids.push((
-                                                mid,
-                                                tr.entity.salience * tr.decay_factor,
-                                                tr.decay_factor,
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
                 let mut seen: std::collections::HashMap<MemoryId, (f32, f32)> =
                     std::collections::HashMap::new();
                 for (id, act, heb) in ids {

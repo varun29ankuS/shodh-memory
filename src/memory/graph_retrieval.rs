@@ -47,7 +47,7 @@ use crate::constants::{
     SPREADING_RELAXED_THRESHOLD,
 };
 use crate::embeddings::Embedder;
-use crate::graph_memory::{EdgeTier, EpisodicNode, GraphMemory, RelationType};
+use crate::graph_memory::{EdgeTier, EntityLabel, EpisodicNode, GraphMemory, RelationType};
 use crate::memory::query_parser::{infer_ontological_intent, OntologicalIntent};
 use crate::memory::types::MemoryTier;
 // Note: compute_relevance removed - using unified density-weighted scoring directly
@@ -169,6 +169,7 @@ fn spread_single_direction(
     max_hops: usize,
     threshold: f32,
     ontological_intent: Option<&OntologicalIntent>,
+    entity_label_cache: &mut HashMap<Uuid, Option<Vec<EntityLabel>>>,
 ) -> Result<(HashMap<Uuid, f32>, Vec<Uuid>)> {
     let mut activation_map: HashMap<Uuid, f32> = seeds.iter().cloned().collect();
     let mut traversed_edges: Vec<Uuid> = Vec::new();
@@ -236,9 +237,19 @@ fn spread_single_direction(
 
                     // Entity type penalty (target entity label mismatch)
                     // Uses hierarchical matching: Team matches Organization, Service matches Technology
+                    // Cached: each entity is read from RocksDB at most once across all hops.
                     if !intent.expected_labels.is_empty() {
-                        if let Ok(Some(target_entity)) = graph.get_entity(&target_uuid) {
-                            let type_match = target_entity.labels.iter().any(|l| {
+                        let cached_labels = entity_label_cache
+                            .entry(target_uuid)
+                            .or_insert_with(|| {
+                                graph
+                                    .get_entity(&target_uuid)
+                                    .ok()
+                                    .flatten()
+                                    .map(|e| e.labels)
+                            });
+                        if let Some(labels) = cached_labels {
+                            let type_match = labels.iter().any(|l| {
                                 intent
                                     .expected_labels
                                     .iter()
@@ -333,6 +344,9 @@ fn bidirectional_spread(
     );
 
     // Spread from both directions with density-adaptive hops
+    // Shared entity label cache: each entity is read from RocksDB at most once
+    // across both forward and backward passes.
+    let mut entity_label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
     let threshold = SPREADING_ACTIVATION_THRESHOLD;
     let (forward_map, forward_edges) = spread_single_direction(
         &forward_seeds,
@@ -340,6 +354,7 @@ fn bidirectional_spread(
         hops_per_direction,
         threshold,
         ontological_intent,
+        &mut entity_label_cache,
     )?;
 
     let (backward_map, backward_edges) = spread_single_direction(
@@ -348,6 +363,7 @@ fn bidirectional_spread(
         hops_per_direction,
         threshold,
         ontological_intent,
+        &mut entity_label_cache,
     )?;
 
     // Combine maps with intersection boost
@@ -415,6 +431,7 @@ pub fn spreading_activation_retrieve(
         graph,
         embedder,
         None, // No density = use legacy fixed weights
+        None, // No pre-computed intent = compute internally
         episode_to_memory_fn,
     )?;
     Ok(memories)
@@ -433,6 +450,7 @@ pub fn spreading_activation_retrieve(
 /// - `graph`: The knowledge graph for spreading activation
 /// - `embedder`: Embedding model for semantic scoring
 /// - `graph_density`: Optional density (edges/memories). If None, uses fixed weights.
+/// - `ontological_intent`: Pre-computed ontological intent. When `Some`, avoids recomputing.
 /// - `episode_to_memory_fn`: Function to convert episodes to memories
 ///
 /// # Returns
@@ -443,6 +461,7 @@ pub fn spreading_activation_retrieve_with_stats(
     graph: &GraphMemory,
     embedder: &dyn Embedder,
     graph_density: Option<f32>,
+    ontological_intent: Option<&OntologicalIntent>,
     episode_to_memory_fn: impl Fn(&EpisodicNode) -> Result<Option<SharedMemory>>,
 ) -> Result<(Vec<ActivatedMemory>, RetrievalStats)> {
     let start_time = Instant::now();
@@ -470,12 +489,19 @@ pub fn spreading_activation_retrieve_with_stats(
     // Step 1: Linguistic query analysis (Lioma & Ounis 2006)
     let analysis = analyze_query(query_text);
 
-    // Ontological intent: infer expected entity types and relation types from query structure
-    let ontological_intent = infer_ontological_intent(query_text, &analysis);
-    let use_ontology = ontological_intent.confidence >= ONTOLOGICAL_MIN_CONFIDENCE
+    // Ontological intent: use pre-computed if provided, otherwise infer from query structure
+    let computed_intent;
+    let ontological_intent_resolved = match ontological_intent {
+        Some(intent) => intent,
+        None => {
+            computed_intent = infer_ontological_intent(query_text, &analysis);
+            &computed_intent
+        }
+    };
+    let use_ontology = ontological_intent_resolved.confidence >= ONTOLOGICAL_MIN_CONFIDENCE
         && !graph_density.is_some_and(|d| d >= ONTOLOGICAL_DENSITY_THRESHOLD);
     let intent_ref = if use_ontology {
-        Some(&ontological_intent)
+        Some(ontological_intent_resolved)
     } else {
         None
     };
@@ -483,13 +509,13 @@ pub fn spreading_activation_retrieve_with_stats(
     if use_ontology {
         tracing::info!(
             "Ontological intent: labels={:?}, relations={:?}, confidence={:.2}",
-            ontological_intent.expected_labels,
-            ontological_intent
+            ontological_intent_resolved.expected_labels,
+            ontological_intent_resolved
                 .relation_types
                 .iter()
                 .map(|r| r.as_str())
                 .collect::<Vec<_>>(),
-            ontological_intent.confidence
+            ontological_intent_resolved.confidence
         );
     }
 
@@ -633,6 +659,8 @@ pub fn spreading_activation_retrieve_with_stats(
 
         let mut edges_collected: Vec<Uuid> = Vec::new();
         let mut current_threshold = SPREADING_ACTIVATION_THRESHOLD;
+        // Entity label cache: each entity is read from RocksDB at most once across all hops.
+        let mut entity_label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
 
         for hop in 1..=SPREADING_MAX_HOPS {
             stats.graph_hops = hop;
@@ -697,9 +725,17 @@ pub fn spreading_activation_retrieve_with_stats(
                             penalty *= ONTOLOGICAL_RELATION_PENALTY;
                         }
                         if !intent.expected_labels.is_empty() {
-                            if let Ok(Some(target_entity)) = graph.get_entity(&target_uuid) {
-                                if !target_entity
-                                    .labels
+                            let cached_labels = entity_label_cache
+                                .entry(target_uuid)
+                                .or_insert_with(|| {
+                                    graph
+                                        .get_entity(&target_uuid)
+                                        .ok()
+                                        .flatten()
+                                        .map(|e| e.labels)
+                                });
+                            if let Some(labels) = cached_labels {
+                                if !labels
                                     .iter()
                                     .any(|l| intent.expected_labels.contains(l))
                                 {
