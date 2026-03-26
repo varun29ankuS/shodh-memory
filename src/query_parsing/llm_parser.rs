@@ -147,13 +147,15 @@ impl LlmParser {
             .map(|d| format!("Today's date: {}", d.format("%B %d, %Y")))
             .unwrap_or_else(|| "Today's date: unknown".to_string());
 
+        let safe_query = query.replace('"', "\\\"").replace('\n', " ");
+
         format!(
             r#"You are a query parser. Extract structured information from the query.
 Output ONLY valid JSON, no explanation or markdown.
 
 {date_context}
 
-Parse this query: "{query}"
+Parse this query: "{safe_query}"
 
 Output this exact JSON structure:
 {{"entities":[{{"text":"name","type":"person|place|thing|event|time","negated":false}}],"events":["verb"],"modifiers":["adjective"],"temporal":{{"has_temporal_intent":true,"intent":"when_question|specific_time|ordering|duration|none","relative_refs":[{{"text":"last year","resolved_date":"2024-01-01","direction":"past"}}],"resolved_dates":["2024-01-01"]}},"is_attribute_query":false,"attribute_entity":null,"attribute_name":null,"confidence":0.9}}"#
