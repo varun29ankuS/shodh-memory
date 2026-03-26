@@ -60,14 +60,26 @@ const SANDBOX_MODE = process.env.SMITHERY_SANDBOX === "true";
 //   3. First key from SHODH_API_KEYS (matches server production config)
 //   4. Auto-generate for local servers (passed to server as SHODH_DEV_API_KEY)
 //   5. Error for remote servers
-let API_KEY = process.env.SHODH_API_KEY
-  || process.env.SHODH_DEV_API_KEY
-  || (process.env.SHODH_API_KEYS?.split(",")[0]?.trim())
-  || (SANDBOX_MODE ? "sandbox" : "");
+let API_KEY = "";
+let apiKeySource = "";
+if (process.env.SHODH_API_KEY) {
+  API_KEY = process.env.SHODH_API_KEY;
+  apiKeySource = "SHODH_API_KEY";
+} else if (process.env.SHODH_DEV_API_KEY) {
+  API_KEY = process.env.SHODH_DEV_API_KEY;
+  apiKeySource = "SHODH_DEV_API_KEY";
+} else if (process.env.SHODH_API_KEYS?.split(",")[0]?.trim()) {
+  API_KEY = process.env.SHODH_API_KEYS!.split(",")[0]!.trim();
+  apiKeySource = "SHODH_API_KEYS";
+} else if (SANDBOX_MODE) {
+  API_KEY = "sandbox";
+  apiKeySource = "sandbox";
+}
 if (!API_KEY) {
   if (isLocalServer()) {
     // Auto-generate a random key for local development — zero config
     API_KEY = crypto.randomBytes(32).toString("hex");
+    apiKeySource = "auto-generated";
     console.error("[shodh-memory] No API key set — auto-generated for local server.");
   } else {
     console.error("ERROR: SHODH_API_KEY is required for remote servers.");
@@ -79,6 +91,12 @@ if (!API_KEY) {
     console.error("  export SHODH_API_KEY=your-api-key");
     process.exit(1);
   }
+}
+// Log which source was used (without revealing the key itself)
+if (apiKeySource === "SHODH_DEV_API_KEY") {
+  console.error("[shodh-memory] WARNING: API key loaded from SHODH_DEV_API_KEY — this is a development key. Use SHODH_API_KEY for production.");
+} else if (apiKeySource && apiKeySource !== "auto-generated" && apiKeySource !== "sandbox") {
+  console.error(`[shodh-memory] API key loaded from ${apiKeySource}.`);
 }
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1000;

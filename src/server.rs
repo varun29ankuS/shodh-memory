@@ -55,26 +55,33 @@ pub struct ServerRunConfig {
 /// Environment variables are set **before** the tokio runtime is created, so no
 /// threads exist yet. This avoids the `set_var` unsoundness on multi-threaded runtimes.
 pub fn run(config: ServerRunConfig) -> Result<()> {
-    // Set environment variables from config so ServerConfig::from_env() picks them up.
-    // Safe: no threads exist yet — we haven't built the tokio runtime.
-    std::env::set_var("SHODH_HOST", &config.host);
-    std::env::set_var("SHODH_PORT", config.port.to_string());
-    std::env::set_var(
-        "SHODH_MEMORY_PATH",
-        config.storage_path.to_string_lossy().to_string(),
-    );
-    if config.production {
-        std::env::set_var("SHODH_ENV", "production");
+    // SAFETY: These set_var calls run before any threads are spawned — the tokio
+    // runtime is not yet built, and pre_init_ort_runtime (below) is also single-threaded.
+    // `std::env::set_var` is marked unsafe starting in Rust 2024 edition because it is
+    // unsound to call concurrently with `std::env::var` in other threads. Here, this
+    // process is single-threaded, so the invariant holds.
+    unsafe {
+        std::env::set_var("SHODH_HOST", &config.host);
+        std::env::set_var("SHODH_PORT", config.port.to_string());
+        std::env::set_var(
+            "SHODH_MEMORY_PATH",
+            config.storage_path.to_string_lossy().to_string(),
+        );
+        if config.production {
+            std::env::set_var("SHODH_ENV", "production");
+        }
+        std::env::set_var("SHODH_RATE_LIMIT", config.rate_limit.to_string());
+        std::env::set_var("SHODH_MAX_CONCURRENT", config.max_concurrent.to_string());
     }
-    std::env::set_var("SHODH_RATE_LIMIT", config.rate_limit.to_string());
-    std::env::set_var("SHODH_MAX_CONCURRENT", config.max_concurrent.to_string());
 
     // Pre-initialize ORT_DYLIB_PATH before any threads are spawned.
     pre_init_ort_runtime(false);
 
-    // Set default log level if not configured
+    // SAFETY: Still single-threaded — setting default log level before runtime construction.
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "shodh_memory=info,tower_http=warn");
+        unsafe {
+            std::env::set_var("RUST_LOG", "shodh_memory=info,tower_http=warn");
+        }
     }
 
     // Load .env file if present (won't override CLI-set vars)
