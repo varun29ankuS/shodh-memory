@@ -2480,3 +2480,114 @@ pub async fn recall_by_date(
 
     Ok(Json(RetrieveResponse { memories, count }))
 }
+
+// =============================================================================
+// COMPILE CONTEXT (Pipeline-time memory priming)
+// =============================================================================
+
+/// POST /api/compile_context - Pipeline-time context compilation
+///
+/// Takes structured metadata about what an autonomite is about to do,
+/// retrieves relevant memories via hybrid search, and returns pre-formatted
+/// text ready for prompt injection. The agent never sees a "memory block" —
+/// it just gets a richer context.
+pub async fn compile_context(
+    State(state): State<AppState>,
+    Json(req): Json<super::types::CompileContextRequest>,
+) -> Result<Json<super::types::CompileContextResponse>, AppError> {
+    let op_start = std::time::Instant::now();
+
+    crate::validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    // Build a rich query from structured metadata
+    let mut query_parts: Vec<String> = Vec::new();
+    if let Some(ref autonomite) = req.autonomite {
+        query_parts.push(format!("autonomite: {}", autonomite));
+    }
+    query_parts.push(req.task_description.clone());
+    if let Some(ref workspace) = req.workspace_context {
+        query_parts.push(workspace.clone());
+    }
+    let query_text = query_parts.join(". ");
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let limit = req.limit;
+    let max_chars = req.max_chars;
+
+    // Use existing hybrid retrieval (BM25 + vector + spreading activation)
+    let results = tokio::task::spawn_blocking(move || {
+        let guard = memory.read();
+        let query = crate::memory::types::Query {
+            user_id: None,
+            query_text: Some(query_text),
+            max_results: limit,
+            retrieval_mode: crate::memory::RetrievalMode::Hybrid,
+            ..Default::default()
+        };
+        guard.recall(&query).unwrap_or_default()
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?;
+
+    // Format results as text, not JSON — ready for prompt splicing
+    let mut context_parts: Vec<String> = Vec::new();
+    let mut memory_ids: Vec<String> = Vec::new();
+    let mut char_count = 0;
+
+    for m in &results {
+        let content = &m.experience.content;
+        if char_count + content.len() > max_chars {
+            let remaining = max_chars.saturating_sub(char_count);
+            if remaining > 100 {
+                let truncated: String = content.chars().take(remaining).collect();
+                context_parts.push(truncated);
+                memory_ids.push(m.id.0.to_string());
+            }
+            break;
+        }
+        context_parts.push(content.clone());
+        memory_ids.push(m.id.0.to_string());
+        char_count += content.len();
+    }
+
+    let context = if context_parts.is_empty() {
+        String::new()
+    } else {
+        context_parts.join("\n\n---\n\n")
+    };
+
+    let memory_count = memory_ids.len();
+
+    // Record co-activation for memories surfaced together — this builds the
+    // co-retrieval graph that replaces NER-based entity edges
+    if memory_ids.len() > 1 {
+        if let Ok(graph) = state.get_user_graph(&req.user_id) {
+            let uuids: Vec<uuid::Uuid> = memory_ids
+                .iter()
+                .filter_map(|id| uuid::Uuid::parse_str(id).ok())
+                .collect();
+            let graph_guard = graph.read();
+            let _ = graph_guard.record_memory_coactivation(&uuids);
+        }
+    }
+
+    let latency_ms = op_start.elapsed().as_secs_f64() * 1000.0;
+
+    info!(
+        user_id = %req.user_id,
+        autonomite = ?req.autonomite,
+        memory_count,
+        latency_ms = format!("{:.1}", latency_ms),
+        "compile_context completed"
+    );
+
+    Ok(Json(super::types::CompileContextResponse {
+        context,
+        memory_ids,
+        memory_count,
+        latency_ms,
+    }))
+}

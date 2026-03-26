@@ -88,6 +88,7 @@ pub fn build_protected_routes(state: AppState) -> Router {
         .route("/api/context_summary", post(recall::context_summary))
         .route("/api/proactive_context", post(recall::proactive_context))
         .route("/api/context", post(recall::proactive_context)) // OpenAPI alias
+        .route("/api/compile_context", post(recall::compile_context))
         .route("/api/relevant", post(recall::surface_relevant))
         .route("/api/reinforce", post(recall::reinforce_feedback))
         // =================================================================

@@ -825,6 +825,51 @@ pub struct BuildVisualizationRequest {
     pub user_id: String,
 }
 
+// =============================================================================
+// COMPILE CONTEXT (Pipeline-time memory priming)
+// =============================================================================
+
+/// Request for pipeline-time context compilation.
+/// Returns pre-formatted text ready for prompt injection — the agent never
+/// sees a "memory block", just a richer context.
+#[derive(Debug, Deserialize)]
+pub struct CompileContextRequest {
+    pub user_id: String,
+    /// Name of the autonomite requesting context
+    #[serde(default)]
+    pub autonomite: Option<String>,
+    /// What the autonomite is about to do
+    pub task_description: String,
+    /// Recent workspace state for additional retrieval signal
+    #[serde(default)]
+    pub workspace_context: Option<String>,
+    /// Max approximate characters in returned context (default 4000)
+    #[serde(default = "compile_ctx_default_max_chars")]
+    pub max_chars: usize,
+    /// Number of memories to retrieve before formatting (default 10)
+    #[serde(default = "compile_ctx_default_limit")]
+    pub limit: usize,
+}
+
+fn compile_ctx_default_max_chars() -> usize {
+    4000
+}
+fn compile_ctx_default_limit() -> usize {
+    10
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompileContextResponse {
+    /// Pre-formatted context text, ready for prompt injection
+    pub context: String,
+    /// Memory IDs used (for feedback attribution)
+    pub memory_ids: Vec<String>,
+    /// How many memories contributed
+    pub memory_count: usize,
+    /// Processing time in ms
+    pub latency_ms: f64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
