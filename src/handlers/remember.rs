@@ -301,50 +301,17 @@ pub async fn remember(
 
     let experience_type = parse_experience_type(req.memory_type.as_ref());
 
-    // PERF: Run NER and YAKE extraction in parallel using spawn_blocking
-    // Both are CPU-bound and independent - parallelization reduces latency by ~40%
-    let ner = state.get_neural_ner();
+    // YAKE keyword extraction only — NER removed per ambient-memory-priming spec.
+    // NER classified 100% of ISAP domain data as Other:MISC, producing a noise graph.
+    // Co-retrieval graph (built during recall) replaces NER-based entity graph.
+    // YAKE keywords feed BM25 index for precise term matching.
     let yake = state.get_keyword_extractor();
-    let content_for_ner = req.content.clone();
     let content_for_yake = req.content.clone();
 
-    let (ner_result, yake_result) = tokio::join!(
-        // NER extraction (named entities: Person, Org, Location, Misc)
-        // Preserve full entity records for downstream graph insertion with proper labels
-        tokio::task::spawn_blocking(move || {
-            match ner.extract(&content_for_ner) {
-                Ok(entities) => entities
-                    .into_iter()
-                    .map(|e| NerEntityRecord {
-                        text: e.text,
-                        entity_type: e.entity_type.as_str().to_string(),
-                        confidence: e.confidence,
-                        start_char: Some(e.start),
-                        end_char: Some(e.end),
-                    })
-                    .collect::<Vec<NerEntityRecord>>(),
-                Err(e) => {
-                    tracing::debug!("NER extraction failed: {}", e);
-                    Vec::new()
-                }
-            }
-        }),
-        // YAKE extraction (keywords: common nouns, verbs, etc.)
-        // Captures important terms like "sunrise", "painting", "lake"
-        tokio::task::spawn_blocking(move || yake.extract_texts(&content_for_yake))
-    );
+    let yake_result =
+        tokio::task::spawn_blocking(move || yake.extract_texts(&content_for_yake)).await;
 
-    let ner_entities = match ner_result {
-        Ok(entities) => entities,
-        Err(e) => {
-            if e.is_panic() {
-                tracing::error!("NER extraction task panicked: {:?}", e);
-            } else {
-                tracing::debug!("NER extraction task cancelled: {:?}", e);
-            }
-            Vec::new()
-        }
-    };
+    let ner_entities: Vec<NerEntityRecord> = Vec::new();
     let extracted_keywords = match yake_result {
         Ok(keywords) => keywords,
         Err(e) => {
