@@ -27,8 +27,12 @@
 //!
 //! # Example
 //! ```bash
-//! # Enable Zenoh transport
-//! SHODH_ZENOH_ENABLED=true SHODH_ZENOH_LISTEN=tcp/0.0.0.0:7447 shodh server
+//! # Enable Zenoh transport (local-only)
+//! SHODH_ZENOH_ENABLED=true SHODH_ZENOH_LISTEN=tcp/127.0.0.1:7447 shodh server
+//!
+//! # Enable Zenoh transport (network-accessible, with authentication)
+//! SHODH_ZENOH_ENABLED=true SHODH_ZENOH_LISTEN=tcp/0.0.0.0:7447 \
+//!   SHODH_ZENOH_API_KEY=my-secret shodh server
 //! ```
 
 pub mod config;
@@ -129,16 +133,28 @@ pub async fn start(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let prefix = &config.prefix;
+    let api_key = &config.api_key;
 
     // Register core subscribers and queryables
-    register_remember_subscriber(&session, prefix, &manager, shutdown_rx.clone()).await?;
-    register_recall_queryable(&session, prefix, &manager, shutdown_rx.clone()).await?;
-    register_forget_subscriber(&session, prefix, &manager, shutdown_rx.clone()).await?;
-    register_stream_subscribers(&session, prefix, &manager, shutdown_rx.clone()).await?;
+    register_remember_subscriber(&session, prefix, &manager, api_key.clone(), shutdown_rx.clone())
+        .await?;
+    register_recall_queryable(&session, prefix, &manager, api_key.clone(), shutdown_rx.clone())
+        .await?;
+    register_forget_subscriber(&session, prefix, &manager, api_key.clone(), shutdown_rx.clone())
+        .await?;
+    register_stream_subscribers(&session, prefix, &manager, api_key.clone(), shutdown_rx.clone())
+        .await?;
     register_health_queryable(&session, prefix, shutdown_rx.clone()).await?;
 
     // Register robotics-specific subscribers
-    register_mission_subscribers(&session, prefix, &manager, shutdown_rx.clone()).await?;
+    register_mission_subscribers(
+        &session,
+        prefix,
+        &manager,
+        api_key.clone(),
+        shutdown_rx.clone(),
+    )
+    .await?;
     register_fleet_discovery(&session, prefix, shutdown_rx.clone()).await?;
 
     // Register auto-topic subscribers
@@ -182,6 +198,7 @@ async fn register_remember_subscriber(
     session: &Session,
     prefix: &str,
     manager: &Arc<MultiUserMemoryManager>,
+    api_key: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let key_expr = format!("{}/*/remember", prefix);
@@ -198,6 +215,9 @@ async fn register_remember_subscriber(
                 sample = subscriber.recv_async() => {
                     match sample {
                         Ok(sample) => {
+                            if !handlers::authenticate_payload(sample.payload(), api_key.as_deref()) {
+                                continue;
+                            }
                             let mgr = Arc::clone(&mgr);
                             tokio::spawn(async move {
                                 handlers::handle_remember(sample, mgr).await;
@@ -226,6 +246,7 @@ async fn register_forget_subscriber(
     session: &Session,
     prefix: &str,
     manager: &Arc<MultiUserMemoryManager>,
+    api_key: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let key_expr = format!("{}/*/forget", prefix);
@@ -242,6 +263,9 @@ async fn register_forget_subscriber(
                 sample = subscriber.recv_async() => {
                     match sample {
                         Ok(sample) => {
+                            if !handlers::authenticate_payload(sample.payload(), api_key.as_deref()) {
+                                continue;
+                            }
                             let mgr = Arc::clone(&mgr);
                             tokio::spawn(async move {
                                 handlers::handle_forget(sample, mgr).await;
@@ -273,6 +297,7 @@ async fn register_stream_subscribers(
     session: &Session,
     prefix: &str,
     manager: &Arc<MultiUserMemoryManager>,
+    api_key: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let key_expr = format!("{}/*/stream/**", prefix);
@@ -294,6 +319,9 @@ async fn register_stream_subscribers(
                 sample = subscriber.recv_async() => {
                     match sample {
                         Ok(sample) => {
+                            if !handlers::authenticate_payload(sample.payload(), api_key.as_deref()) {
+                                continue;
+                            }
                             let key = sample.key_expr().as_str();
                             let user_id = match handlers::extract_user_id(key, &pfx) {
                                 Some(uid) => uid.to_string(),
@@ -408,6 +436,7 @@ async fn register_recall_queryable(
     session: &Session,
     prefix: &str,
     manager: &Arc<MultiUserMemoryManager>,
+    api_key: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let key_expr = format!("{}/*/recall", prefix);
@@ -424,6 +453,15 @@ async fn register_recall_queryable(
                 query = queryable.recv_async() => {
                     match query {
                         Ok(query) => {
+                            if let Some(payload) = query.payload() {
+                                if !handlers::authenticate_payload(payload, api_key.as_deref()) {
+                                    let err = serde_json::json!({"error": "Unauthorized", "success": false});
+                                    if let Ok(bytes) = serde_json::to_vec(&err) {
+                                        let _ = query.reply(query.key_expr(), bytes).await;
+                                    }
+                                    continue;
+                                }
+                            }
                             let mgr = Arc::clone(&mgr);
                             tokio::spawn(async move {
                                 handlers::handle_recall(query, mgr).await;
@@ -504,6 +542,7 @@ async fn register_mission_subscribers(
     session: &Session,
     prefix: &str,
     manager: &Arc<MultiUserMemoryManager>,
+    api_key: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     // Mission start subscriber
@@ -515,6 +554,7 @@ async fn register_mission_subscribers(
 
     let mgr_start = Arc::clone(manager);
     let mut shutdown_start = shutdown_rx.clone();
+    let api_key_start = api_key.clone();
 
     tokio::spawn(async move {
         loop {
@@ -522,6 +562,9 @@ async fn register_mission_subscribers(
                 sample = start_sub.recv_async() => {
                     match sample {
                         Ok(sample) => {
+                            if !handlers::authenticate_payload(sample.payload(), api_key_start.as_deref()) {
+                                continue;
+                            }
                             let mgr = Arc::clone(&mgr_start);
                             tokio::spawn(async move {
                                 handlers::handle_mission_start(sample, mgr).await;
@@ -558,6 +601,9 @@ async fn register_mission_subscribers(
                 sample = end_sub.recv_async() => {
                     match sample {
                         Ok(sample) => {
+                            if !handlers::authenticate_payload(sample.payload(), api_key.as_deref()) {
+                                continue;
+                            }
                             let mgr = Arc::clone(&mgr_end);
                             tokio::spawn(async move {
                                 handlers::handle_mission_end(sample, mgr).await;

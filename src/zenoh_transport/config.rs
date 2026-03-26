@@ -8,8 +8,9 @@
 //! SHODH_ZENOH_ENABLED=true           # Enable Zenoh transport (default: false)
 //! SHODH_ZENOH_MODE=peer              # peer | client | router (default: peer)
 //! SHODH_ZENOH_CONNECT=tcp/1.2.3.4:7447  # Connect endpoints (comma-separated)
-//! SHODH_ZENOH_LISTEN=tcp/0.0.0.0:7447   # Listen endpoints (comma-separated)
+//! SHODH_ZENOH_LISTEN=tcp/127.0.0.1:7447 # Listen endpoints (comma-separated)
 //! SHODH_ZENOH_PREFIX=shodh           # Key expression prefix (default: shodh)
+//! SHODH_ZENOH_API_KEY=<secret>       # Shared-secret auth for Zenoh payloads
 //! SHODH_ZENOH_AUTO_TOPICS=[...]      # JSON array of AutoTopic configs
 //! ```
 
@@ -38,7 +39,7 @@ pub struct ZenohConfig {
     /// Empty = rely on multicast peer discovery (default for local networks).
     pub connect: Vec<String>,
 
-    /// Endpoints to listen on (e.g., `["tcp/0.0.0.0:7447"]`).
+    /// Endpoints to listen on (e.g., `["tcp/127.0.0.1:7447"]`).
     /// Empty = Zenoh picks an ephemeral port (fine for client/peer mode).
     pub listen: Vec<String>,
 
@@ -52,6 +53,14 @@ pub struct ZenohConfig {
     /// Auto-subscribe topics — automatically remember data from external Zenoh sources.
     /// Useful for ingesting ROS2 topics via zenoh-bridge-ros2dds without writing code.
     pub auto_topics: Vec<AutoTopic>,
+
+    /// Shared-secret API key for authenticating Zenoh payloads.
+    /// When set, every incoming Zenoh payload must include an `"api_key"` field matching
+    /// this value. When `None`, authentication is skipped (suitable for local-only deployments).
+    ///
+    /// Loaded from `SHODH_ZENOH_API_KEY` environment variable.
+    #[serde(skip_serializing)]
+    pub api_key: Option<String>,
 }
 
 /// Zenoh session mode.
@@ -152,6 +161,7 @@ impl Default for ZenohConfig {
             listen: Vec::new(),
             prefix: "shodh".to_string(),
             auto_topics: Vec::new(),
+            api_key: None,
         }
     }
 }
@@ -215,6 +225,13 @@ impl ZenohConfig {
             }
         }
 
+        if let Ok(val) = std::env::var("SHODH_ZENOH_API_KEY") {
+            let trimmed = val.trim().to_string();
+            if !trimmed.is_empty() {
+                config.api_key = Some(trimmed);
+            }
+        }
+
         config
     }
 
@@ -238,6 +255,19 @@ impl ZenohConfig {
         if !self.connect.is_empty() && self.mode == ZenohMode::Router {
             tracing::warn!(
                 "Zenoh mode is 'router' but connect endpoints are set — routers typically only listen"
+            );
+        }
+
+        // Warn when listening on all interfaces without authentication
+        let binds_all_interfaces = self
+            .listen
+            .iter()
+            .any(|ep| ep.contains("0.0.0.0") || ep.contains("[::]"));
+        if binds_all_interfaces && self.api_key.is_none() {
+            tracing::warn!(
+                "Zenoh listen endpoints include 0.0.0.0 but no SHODH_ZENOH_API_KEY is set — \
+                 any network peer can invoke memory operations. Set SHODH_ZENOH_API_KEY or \
+                 bind to 127.0.0.1 for local-only deployments."
             );
         }
     }
