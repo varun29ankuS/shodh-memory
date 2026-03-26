@@ -206,7 +206,6 @@ numpy = { version = "0.24", optional = true }
 
 # Zenoh transport for robotics (optional — pure Rust, zero C deps)
 # Enables pub/sub + request/reply integration with ROS2 via rmw_zenoh or zenoh-bridge-ros2dds
-zenoh = { version = "1.1", default-features = false, features = ["transport_tcp", "transport_udp"], optional = true }
 
 # LLM-based query parsing (optional - heavy dependency)
 
@@ -289,7 +288,6 @@ python = ["pyo3", "numpy"]
 llm-parser = []
 
 # Optional: Zenoh transport for robotics/ROS2 (pure Rust, cross-platform)
-zenoh = ["dep:zenoh"]
 
 # Optional: Distributed tracing for cloud/multi-node deployments (~200 extra packages)
 telemetry = [

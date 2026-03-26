@@ -192,9 +192,26 @@ pub async fn scan_project_codebase(
         });
     }
 
+    let canonical_path = codebase_path.canonicalize().map_err(|e| AppError::InvalidInput {
+        field: "codebase_path".to_string(),
+        reason: format!("Invalid path: {}", e),
+    })?;
+
+    let path_str = canonical_path.to_string_lossy().replace('\\', "/");
+    let blocked_prefixes = [
+        "/etc", "/bin", "/usr", "/sys", "/proc", "/dev", "/boot", "/lib", "/opt", "/sbin", "/root", "C:/Windows", "C:/Program Files"
+    ];
+
+    if path_str == "/" || path_str == "C:/" || blocked_prefixes.iter().any(|&prefix| path_str.starts_with(prefix)) {
+        return Err(AppError::InvalidInput {
+            field: "codebase_path".to_string(),
+            reason: "Access to system directories is blocked for security reasons".to_string(),
+        });
+    }
+
     let scan_result = state
         .file_store
-        .scan_codebase(codebase_path, None)
+        .scan_codebase(&canonical_path, None)
         .map_err(AppError::Internal)?;
 
     let message = if scan_result.limit_reached {
@@ -264,6 +281,29 @@ pub async fn index_project_codebase(
             reason: format!("Path does not exist: {}", req.codebase_path),
         });
     }
+    if !codebase_path.is_dir() {
+        return Err(AppError::InvalidInput {
+            field: "codebase_path".to_string(),
+            reason: format!("Path is not a directory: {}", req.codebase_path),
+        });
+    }
+
+    let canonical_path = codebase_path.canonicalize().map_err(|e| AppError::InvalidInput {
+        field: "codebase_path".to_string(),
+        reason: format!("Invalid path: {}", e),
+    })?;
+
+    let path_str = canonical_path.to_string_lossy().replace('\\', "/");
+    let blocked_prefixes = [
+        "/etc", "/bin", "/usr", "/sys", "/proc", "/dev", "/boot", "/lib", "/opt", "/sbin", "/root", "C:/Windows", "C:/Program Files"
+    ];
+
+    if path_str == "/" || path_str == "C:/" || blocked_prefixes.iter().any(|&prefix| path_str.starts_with(prefix)) {
+        return Err(AppError::InvalidInput {
+            field: "codebase_path".to_string(),
+            reason: "Access to system directories is blocked for security reasons".to_string(),
+        });
+    }
 
     if req.force && project.codebase_indexed {
         state
@@ -274,7 +314,7 @@ pub async fn index_project_codebase(
 
     let result = state
         .file_store
-        .index_codebase(codebase_path, &project.id, &req.user_id, None)
+        .index_codebase(&canonical_path, &project.id, &req.user_id, None)
         .map_err(AppError::Internal)?;
 
     project.codebase_path = Some(req.codebase_path.clone());

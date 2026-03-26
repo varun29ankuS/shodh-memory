@@ -9,9 +9,6 @@ use std::env;
 
 use crate::errors::ErrorResponse;
 
-/// Default API key for development when no key env vars are configured.
-/// Visibility is crate-only — not exposed in the public API surface.
-pub(crate) const DEFAULT_DEV_API_KEY: &str = "sk-shodh-dev-default";
 
 /// Check if running in production mode
 pub fn is_production_mode() -> bool {
@@ -60,10 +57,8 @@ pub fn log_security_status() {
             tracing::warn!("║  Using SHODH_DEV_API_KEY for authentication.                  ║");
             tracing::warn!("║  DO NOT use this configuration in production!                 ║");
         } else if !has_api_keys {
-            tracing::warn!("║  No API keys configured. Using default dev key.              ║");
-            tracing::warn!("║  DEPRECATION: Default dev key will be removed in v0.2.0.     ║");
-            tracing::warn!("║  Set SHODH_DEV_API_KEY or SHODH_API_KEYS to override.        ║");
-            tracing::warn!("║  Set SHODH_HIDE_DEV_KEY=true to hide key from error msgs.    ║");
+            tracing::error!("║  No API keys configured. You must set SHODH_API_KEYS.        ║");
+            tracing::error!("║  Server will reject all authenticated requests.              ║");
         }
         tracing::warn!("║                                                                ║");
         tracing::warn!("║  For production, set:                                          ║");
@@ -107,30 +102,15 @@ impl IntoResponse for AuthError {
             AuthError::MissingApiKey => {
                 if is_prod {
                     "Missing X-API-Key header".to_string()
-                } else if should_hide_dev_key() {
-                    "Missing X-API-Key header. Set SHODH_DEV_API_KEY or SHODH_API_KEYS. \
-                     See docs for setup."
-                        .to_string()
                 } else {
-                    format!(
-                        "Missing X-API-Key header. Set the header in your request. \
-                         The server accepts keys from SHODH_API_KEYS (comma-separated) \
-                         or SHODH_DEV_API_KEY. Default dev key: '{}'",
-                        DEFAULT_DEV_API_KEY
-                    )
+                    "Missing X-API-Key header. Set SHODH_DEV_API_KEY or SHODH_API_KEYS.".to_string()
                 }
             }
             AuthError::InvalidApiKey => {
                 if is_prod {
                     "Invalid API key".to_string()
-                } else if should_hide_dev_key() {
-                    "Invalid API key. Check SHODH_DEV_API_KEY or SHODH_API_KEYS.".to_string()
                 } else {
-                    format!(
-                        "Invalid API key. Expected a key from SHODH_API_KEYS or \
-                         SHODH_DEV_API_KEY. Default dev key: '{}'",
-                        DEFAULT_DEV_API_KEY
-                    )
+                    "Invalid API key. Check SHODH_DEV_API_KEY or SHODH_API_KEYS.".to_string()
                 }
             }
             AuthError::NotConfigured => {
@@ -205,11 +185,8 @@ pub fn validate_api_key(provided_key: &str) -> Result<(), AuthError> {
                         key
                     }
                     _ => {
-                        tracing::warn!(
-                            "No API key configured. Falling back to default dev key. \
-                             Set SHODH_DEV_API_KEY to override."
-                        );
-                        DEFAULT_DEV_API_KEY.to_string()
+                        tracing::error!("SHODH_API_KEYS or SHODH_DEV_API_KEY not set");
+                        return Err(AuthError::NotConfigured);
                     }
                 }
             }
@@ -431,16 +408,6 @@ mod tests {
         clear_auth_env();
     }
 
-    // ── validate_api_key: default dev key ──
-
-    #[test]
-    fn validate_with_default_dev_key_when_no_env_set() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        assert!(validate_api_key(DEFAULT_DEV_API_KEY).is_ok());
-        assert!(validate_api_key("wrong-key").is_err());
-        clear_auth_env();
-    }
 
     // ── validate_api_key: production mode ──
 
@@ -476,19 +443,10 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_auth_env();
         env::set_var("SHODH_API_KEYS", "  ");
-        // Empty SHODH_API_KEYS falls through to dev key / default
-        assert!(validate_api_key(DEFAULT_DEV_API_KEY).is_ok());
+        assert!(validate_api_key("anything").is_err());
         clear_auth_env();
     }
 
-    #[test]
-    fn validate_empty_dev_key_uses_default() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_DEV_API_KEY", "  ");
-        assert!(validate_api_key(DEFAULT_DEV_API_KEY).is_ok());
-        clear_auth_env();
-    }
 
     #[test]
     fn api_keys_takes_priority_over_dev_key() {
@@ -559,10 +517,7 @@ mod tests {
             parsed.message.contains("SHODH_DEV_API_KEY"),
             "Should mention SHODH_DEV_API_KEY"
         );
-        assert!(
-            parsed.message.contains(DEFAULT_DEV_API_KEY),
-            "Should show the default dev key"
-        );
+
         clear_auth_env();
     }
 
@@ -577,10 +532,7 @@ mod tests {
             parsed.message.contains("SHODH_API_KEYS"),
             "Should mention SHODH_API_KEYS"
         );
-        assert!(
-            parsed.message.contains(DEFAULT_DEV_API_KEY),
-            "Should show the default dev key"
-        );
+
         clear_auth_env();
     }
 
@@ -609,10 +561,7 @@ mod tests {
         let body = to_bytes(resp.into_body(), 2048).await.unwrap();
         let parsed: ErrorResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.message, "Invalid API key");
-        assert!(
-            !parsed.message.contains(DEFAULT_DEV_API_KEY),
-            "Prod must not leak default key"
-        );
+
         clear_auth_env();
     }
 
@@ -638,11 +587,7 @@ mod tests {
         let body = to_bytes(resp.into_body(), 2048).await.unwrap();
         let parsed: ErrorResponse = serde_json::from_slice(&body).unwrap();
 
-        assert!(
-            !parsed.message.contains(DEFAULT_DEV_API_KEY),
-            "SHODH_HIDE_DEV_KEY=true should suppress key in error: {}",
-            parsed.message
-        );
+
         assert!(
             parsed.message.contains("SHODH_DEV_API_KEY"),
             "Should still mention env var name: {}",
@@ -661,11 +606,7 @@ mod tests {
         let body = to_bytes(resp.into_body(), 2048).await.unwrap();
         let parsed: ErrorResponse = serde_json::from_slice(&body).unwrap();
 
-        assert!(
-            !parsed.message.contains(DEFAULT_DEV_API_KEY),
-            "SHODH_HIDE_DEV_KEY=true should suppress key in error: {}",
-            parsed.message
-        );
+
         clear_auth_env();
     }
 
