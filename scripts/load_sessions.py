@@ -87,8 +87,73 @@ def extract_from_jsonl(path: str) -> list[dict]:
     return memories
 
 
+def _is_process_noise(text: str) -> bool:
+    """Detect agent process noise — tool mechanics, schema debugging, git ops.
+
+    Returns True if the text is primarily about HOW the agent is working
+    rather than WHAT it found. We want findings, not plumbing.
+    """
+    noise_signals = [
+        # Tool/schema debugging
+        "schema mismatch", "schema expects", "script processed 0",
+        "script reports 0", "rewriting scratch", "let me check the script",
+        "let me read the", "let me fix", "let me update",
+        # Git mechanics
+        "git commit", "git add", "git diff", "let me commit",
+        "commit just my fixes", "commit the",
+        # Playbook/meta process
+        "updating the playbook", "update the playbook",
+        "playbook updated", "mark these items as resolved",
+        "now i need to", "now let me", "i'll start by reading",
+        "let me analyze the", "let me look at the code",
+        # Tool environment issues
+        "sandbox blocked", "can't run selenium", "write tool seems restricted",
+        "onnx runtime", "cargo check", "cargo test",
+        # Autonomite design discussions (meta, not findings)
+        "should graph-builder be", "approach a:", "approach b:",
+        "i'd lean (a)", "premature abstraction",
+    ]
+    lower = text.lower()
+    matches = sum(1 for s in noise_signals if s in lower)
+    # If 2+ noise signals, it's process noise
+    return matches >= 2
+
+
+def _is_high_signal(text: str) -> bool:
+    """Detect high-signal content — findings, observations, patterns.
+
+    Returns True if the text contains domain-specific intelligence
+    that would be useful for priming future autonomite runs.
+    """
+    signal_indicators = [
+        # Domain findings
+        "compromised", "injection", "redirect", "malicious",
+        "gambling", "casino", "slot", "betting", "seo spam",
+        # Infrastructure observations
+        ".ac.th", ".ac.id", ".edu.", ".gov.",
+        "wordpress", "liferay", "moodle", "ojs",
+        "operator", "campaign", "cluster",
+        # Analysis language
+        "pattern", "finding", "discovered", "confirmed",
+        "active", "cleaned", "dormant", "remediated",
+        "critical", "high value", "productive",
+        # Specific intelligence
+        "whois", "registrar", "asn", "nameserver",
+        "webshell", "cloaking", "waf", "cloudflare",
+        "redirect chain", "hop", "final destination",
+    ]
+    lower = text.lower()
+    matches = sum(1 for s in signal_indicators if s in lower)
+    # 2+ signal indicators = likely high signal content
+    return matches >= 2
+
+
 def _extract_content_blocks(blocks: list, timestamp: str | None, session_id: str, memories: list):
-    """Extract memories from content blocks (shared between formats)."""
+    """Extract memories from content blocks (shared between formats).
+
+    Filters for signal over noise: keeps findings, observations, and analysis.
+    Skips tool debugging, schema fixes, git mechanics, and meta-process content.
+    """
     text_parts = []
 
     for block in blocks:
@@ -99,17 +164,16 @@ def _extract_content_blocks(blocks: list, timestamp: str | None, session_id: str
 
         if block_type == "text":
             text = block.get("text", "").strip()
-            if text:
+            if text and not _is_process_noise(text):
                 text_parts.append(text)
 
         elif block_type == "thinking":
             thinking = block.get("thinking", "").strip()
-            if len(thinking) > 100:
-                # Thinking blocks are the richest signal — agent reasoning.
-                # Chunk long thinking into ~1500 char segments.
+            if len(thinking) > 100 and not _is_process_noise(thinking):
+                # Chunk long thinking, but only keep signal-rich chunks
                 for i in range(0, len(thinking), 1500):
                     chunk = thinking[i:i + 1500].strip()
-                    if len(chunk) > 100:
+                    if len(chunk) > 100 and (_is_high_signal(chunk) or not _is_process_noise(chunk)):
                         memories.append({
                             "content": chunk,
                             "created_at": timestamp,
@@ -117,8 +181,9 @@ def _extract_content_blocks(blocks: list, timestamp: str | None, session_id: str
                             "tags": ["thinking", session_id],
                         })
 
+    # For text responses, keep summaries and findings, skip tool output narration
     combined = "\n".join(text_parts)
-    if len(combined) > 50:
+    if len(combined) > 50 and (_is_high_signal(combined) or len(combined) > 200):
         memories.append({
             "content": combined,
             "created_at": timestamp,
