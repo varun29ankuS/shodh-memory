@@ -486,10 +486,11 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
         timestamp: chrono::Utc::now(),
         user_id: req.user_id.clone(),
         memory_id: Some(memory_id.0.to_string()),
-        content_preview: Some(req.content.chars().take(100).collect()),
+        content_preview: Some(req.content.chars().take(500).collect()),
         memory_type: Some(experience_type_str),
         importance: None,
         count: None,
+        entities: if req.tags.is_empty() { None } else { Some(req.tags.clone()) },
         results: None,
     });
 
@@ -1134,6 +1135,7 @@ pub async fn handle_mission_start(sample: Sample, manager: Arc<MultiUserMemoryMa
         memory_type: Some("mission".to_string()),
         importance: None,
         count: None,
+        entities: None,
         results: None,
     });
 
@@ -1234,6 +1236,7 @@ pub async fn handle_mission_end(sample: Sample, manager: Arc<MultiUserMemoryMana
         memory_type: Some("mission".to_string()),
         importance: None,
         count: None,
+        entities: None,
         results: None,
     });
 

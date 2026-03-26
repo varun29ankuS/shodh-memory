@@ -518,6 +518,7 @@ pub async fn delete_memory(
         memory_type: None,
         importance: None,
         count: None,
+        entities: None,
         results: None,
     });
 
@@ -568,6 +569,7 @@ pub async fn forget_by_id(
         memory_type: None,
         importance: None,
         count: None,
+        entities: None,
         results: None,
     });
 
@@ -821,6 +823,7 @@ pub async fn forget_by_tags(
         memory_type: None,
         importance: None,
         count: Some(deleted_count),
+        entities: None,
         results: None,
     });
 
@@ -881,6 +884,7 @@ pub async fn forget_by_date(
         memory_type: None,
         importance: None,
         count: Some(deleted_count),
+        entities: None,
         results: None,
     });
 

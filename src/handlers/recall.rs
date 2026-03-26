@@ -709,6 +709,7 @@ pub async fn recall(
         memory_type: Some(mode),
         importance: None,
         count: Some(count),
+        entities: None,
         results: Some(results_json),
     });
 
@@ -1141,6 +1142,7 @@ pub async fn proactive_context(
                     memory_type: Some("feedback".to_string()),
                     importance: None,
                     count: Some(feedback.memories_evaluated),
+                    entities: None,
                     results: None,
                 });
             }
@@ -2023,6 +2025,7 @@ pub async fn proactive_context(
         memory_type: Some("proactive".to_string()),
         importance: None,
         count: Some(memory_count + reminder_count),
+        entities: None,
         results: Some(proactive_results),
     });
 
@@ -2147,6 +2150,7 @@ pub async fn surface_relevant(
         memory_type: Some("proactive".to_string()),
         importance: None,
         count: Some(response.memories.len()),
+        entities: None,
         results: None,
     });
 
@@ -2400,6 +2404,7 @@ pub async fn recall_by_tags(
         memory_type: Some("by_tags".to_string()),
         importance: None,
         count: Some(count),
+        entities: None,
         results: None,
     });
 
@@ -2469,6 +2474,7 @@ pub async fn recall_by_date(
         memory_type: Some("by_date".to_string()),
         importance: None,
         count: Some(count),
+        entities: None,
         results: None,
     });
 
