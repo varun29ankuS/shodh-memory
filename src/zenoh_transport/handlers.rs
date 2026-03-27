@@ -553,7 +553,11 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
         memory_type: Some(experience_type_str),
         importance: None,
         count: None,
-        entities: if req.tags.is_empty() { None } else { Some(req.tags.clone()) },
+        entities: if req.tags.is_empty() {
+            None
+        } else {
+            Some(req.tags.clone())
+        },
         results: None,
     });
 

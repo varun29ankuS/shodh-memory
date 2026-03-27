@@ -239,9 +239,8 @@ fn spread_single_direction(
                     // Uses hierarchical matching: Team matches Organization, Service matches Technology
                     // Cached: each entity is read from RocksDB at most once across all hops.
                     if !intent.expected_labels.is_empty() {
-                        let cached_labels = entity_label_cache
-                            .entry(target_uuid)
-                            .or_insert_with(|| {
+                        let cached_labels =
+                            entity_label_cache.entry(target_uuid).or_insert_with(|| {
                                 graph
                                     .get_entity(&target_uuid)
                                     .ok()
@@ -725,9 +724,8 @@ pub fn spreading_activation_retrieve_with_stats(
                             penalty *= ONTOLOGICAL_RELATION_PENALTY;
                         }
                         if !intent.expected_labels.is_empty() {
-                            let cached_labels = entity_label_cache
-                                .entry(target_uuid)
-                                .or_insert_with(|| {
+                            let cached_labels =
+                                entity_label_cache.entry(target_uuid).or_insert_with(|| {
                                     graph
                                         .get_entity(&target_uuid)
                                         .ok()
@@ -735,10 +733,7 @@ pub fn spreading_activation_retrieve_with_stats(
                                         .map(|e| e.labels)
                                 });
                             if let Some(labels) = cached_labels {
-                                if !labels
-                                    .iter()
-                                    .any(|l| intent.expected_labels.contains(l))
-                                {
+                                if !labels.iter().any(|l| intent.expected_labels.contains(l)) {
                                     penalty *= ONTOLOGICAL_ENTITY_PENALTY;
                                 }
                             }

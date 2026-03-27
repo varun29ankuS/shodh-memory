@@ -136,14 +136,38 @@ pub async fn start(
     let api_key = &config.api_key;
 
     // Register core subscribers and queryables
-    register_remember_subscriber(&session, prefix, &manager, api_key.clone(), shutdown_rx.clone())
-        .await?;
-    register_recall_queryable(&session, prefix, &manager, api_key.clone(), shutdown_rx.clone())
-        .await?;
-    register_forget_subscriber(&session, prefix, &manager, api_key.clone(), shutdown_rx.clone())
-        .await?;
-    register_stream_subscribers(&session, prefix, &manager, api_key.clone(), shutdown_rx.clone())
-        .await?;
+    register_remember_subscriber(
+        &session,
+        prefix,
+        &manager,
+        api_key.clone(),
+        shutdown_rx.clone(),
+    )
+    .await?;
+    register_recall_queryable(
+        &session,
+        prefix,
+        &manager,
+        api_key.clone(),
+        shutdown_rx.clone(),
+    )
+    .await?;
+    register_forget_subscriber(
+        &session,
+        prefix,
+        &manager,
+        api_key.clone(),
+        shutdown_rx.clone(),
+    )
+    .await?;
+    register_stream_subscribers(
+        &session,
+        prefix,
+        &manager,
+        api_key.clone(),
+        shutdown_rx.clone(),
+    )
+    .await?;
     register_health_queryable(&session, prefix, shutdown_rx.clone()).await?;
 
     // Register robotics-specific subscribers

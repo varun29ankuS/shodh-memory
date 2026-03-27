@@ -1453,8 +1453,8 @@ impl MemorySystem {
                 } else {
                     g.entities_average_density(&seed_uuids).ok().flatten()
                 };
-                let use_rerank = !density
-                    .is_some_and(|d| d >= crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD);
+                let use_rerank =
+                    !density.is_some_and(|d| d >= crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD);
                 (density, use_rerank)
             } else {
                 (None, false)

@@ -453,7 +453,11 @@ pub async fn remember(
         memory_type: Some(experience_type_str),
         importance: None,
         count: None,
-        entities: if req.tags.is_empty() { None } else { Some(req.tags.clone()) },
+        entities: if req.tags.is_empty() {
+            None
+        } else {
+            Some(req.tags.clone())
+        },
         results: None,
     });
 
@@ -1018,7 +1022,11 @@ pub async fn upsert_memory(
         memory_type: req.memory_type.clone(),
         importance: None,
         count: None,
-        entities: if req.tags.is_empty() { None } else { Some(req.tags.clone()) },
+        entities: if req.tags.is_empty() {
+            None
+        } else {
+            Some(req.tags.clone())
+        },
         results: None,
     });
 
