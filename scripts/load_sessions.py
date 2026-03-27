@@ -199,28 +199,34 @@ def _extract_content_blocks(blocks: list, timestamp: str | None, session_id: str
                 text_parts.append(text)
 
         elif block_type == "thinking":
-            thinking = block.get("thinking", "").strip()
-            if len(thinking) > 100 and not _is_process_noise(thinking):
-                # Chunk long thinking, but only keep signal-rich chunks
-                for i in range(0, len(thinking), 1500):
-                    chunk = thinking[i:i + 1500].strip()
-                    if len(chunk) > 100 and (_is_high_signal(chunk) or not _is_process_noise(chunk)):
-                        memories.append({
-                            "content": chunk,
-                            "created_at": timestamp,
-                            "memory_type": "observation",
-                            "tags": ["thinking", session_id],
-                        })
+            # Skip thinking blocks — they are stream-of-consciousness reasoning
+            # that pollutes retrieval with process noise. The text responses
+            # contain the distilled findings worth keeping.
+            pass
 
-    # For text responses, keep summaries and findings, skip tool output narration
+    # For text responses, chunk by paragraph for retrieval precision.
+    # One embedding per focused paragraph beats one diluted embedding per wall of text.
     combined = "\n".join(text_parts)
-    if len(combined) > 50 and (_is_high_signal(combined) or len(combined) > 200):
-        memories.append({
-            "content": combined,
-            "created_at": timestamp,
-            "memory_type": "observation",
-            "tags": ["response", session_id],
-        })
+    if len(combined) < 50:
+        return
+
+    paragraphs = [p.strip() for p in combined.split("\n\n") if p.strip()]
+    # Merge tiny fragments into predecessor
+    chunks = []
+    for p in paragraphs:
+        if chunks and len(chunks[-1]) < 100:
+            chunks[-1] += "\n\n" + p
+        else:
+            chunks.append(p)
+
+    for chunk in chunks:
+        if len(chunk) >= 50 and (_is_high_signal(chunk) or len(chunk) > 200):
+            memories.append({
+                "content": chunk,
+                "created_at": timestamp,
+                "memory_type": "observation",
+                "tags": ["response", session_id],
+            })
 
 
 def load_memories(memories: list[dict], api_url: str, api_key: str, user_id: str, dry_run: bool = False):
