@@ -5,9 +5,11 @@
 //! and implements the GET /api/graph/{user_id}/export endpoint.
 
 use axum::extract::{Path, Query, State};
+use axum::response::IntoResponse;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
 
 use super::state::MultiUserMemoryManager;
@@ -248,6 +250,168 @@ pub fn episode_refs_to_edges(
 }
 
 // ---------------------------------------------------------------------------
+// GEXF serialization
+// ---------------------------------------------------------------------------
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Serialize a [`GraphExportResponse`] to a GEXF 1.3 XML string.
+///
+/// Uses manual string building (no external XML library) since the schema is fixed.
+pub fn to_gexf(export: &GraphExportResponse) -> String {
+    let date = export.metadata.exported_at.format("%Y-%m-%d").to_string();
+    let mut out = String::new();
+
+    writeln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#).unwrap();
+    writeln!(
+        out,
+        r#"<gexf xmlns="http://gexf.net/1.3" version="1.3">"#
+    )
+    .unwrap();
+    writeln!(out, r#"  <meta lastmodifieddate="{date}">"#).unwrap();
+    writeln!(out, r#"    <creator>shodh-memory</creator>"#).unwrap();
+    writeln!(out, r#"  </meta>"#).unwrap();
+    writeln!(
+        out,
+        r#"  <graph defaultedgetype="directed" mode="static">"#
+    )
+    .unwrap();
+
+    // Node attribute declarations
+    writeln!(out, r#"    <attributes class="node">"#).unwrap();
+    writeln!(out, r#"      <attribute id="0" title="type" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="1" title="importance" type="float"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="2" title="salience" type="float"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="3" title="tier" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="4" title="access_count" type="integer"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="5" title="activation" type="float"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="6" title="mention_count" type="integer"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="7" title="experience_type" type="string"/>"#).unwrap();
+    writeln!(out, r#"    </attributes>"#).unwrap();
+
+    // Edge attribute declarations
+    writeln!(out, r#"    <attributes class="edge">"#).unwrap();
+    writeln!(out, r#"      <attribute id="0" title="type" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="1" title="ltp_status" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="2" title="tier" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="3" title="activation_count" type="integer"/>"#).unwrap();
+    writeln!(out, r#"    </attributes>"#).unwrap();
+
+    // Nodes
+    writeln!(out, r#"    <nodes>"#).unwrap();
+    for node in &export.nodes {
+        let id = xml_escape(&node.id);
+        let label = xml_escape(&node.label);
+        writeln!(out, r#"      <node id="{id}" label="{label}">"#).unwrap();
+        writeln!(out, r#"        <attvalues>"#).unwrap();
+
+        // for="0" type — always emitted
+        let node_type = xml_escape(&node.node_type);
+        writeln!(out, r#"          <attvalue for="0" value="{node_type}"/>"#).unwrap();
+
+        // for="1" importance
+        if let Some(v) = node.attributes.get("importance").and_then(|v| v.as_f64()) {
+            writeln!(out, r#"          <attvalue for="1" value="{v}"/>"#).unwrap();
+        }
+        // for="2" salience
+        if let Some(v) = node.attributes.get("salience").and_then(|v| v.as_f64()) {
+            writeln!(out, r#"          <attvalue for="2" value="{v}"/>"#).unwrap();
+        }
+        // for="3" tier
+        if let Some(v) = node.attributes.get("tier").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="3" value="{v}"/>"#).unwrap();
+        }
+        // for="4" access_count
+        if let Some(v) = node.attributes.get("access_count").and_then(|v| v.as_u64()) {
+            writeln!(out, r#"          <attvalue for="4" value="{v}"/>"#).unwrap();
+        }
+        // for="5" activation
+        if let Some(v) = node.attributes.get("activation").and_then(|v| v.as_f64()) {
+            writeln!(out, r#"          <attvalue for="5" value="{v}"/>"#).unwrap();
+        }
+        // for="6" mention_count
+        if let Some(v) = node.attributes.get("mention_count").and_then(|v| v.as_u64()) {
+            writeln!(out, r#"          <attvalue for="6" value="{v}"/>"#).unwrap();
+        }
+        // for="7" experience_type
+        if let Some(v) = node
+            .attributes
+            .get("experience_type")
+            .and_then(|v| v.as_str())
+        {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="7" value="{v}"/>"#).unwrap();
+        }
+
+        writeln!(out, r#"        </attvalues>"#).unwrap();
+        writeln!(out, r#"      </node>"#).unwrap();
+    }
+    writeln!(out, r#"    </nodes>"#).unwrap();
+
+    // Edges
+    writeln!(out, r#"    <edges>"#).unwrap();
+    for edge in &export.edges {
+        let id = xml_escape(&edge.id);
+        let source = xml_escape(&edge.source);
+        let target = xml_escape(&edge.target);
+        let weight = edge
+            .attributes
+            .get("strength")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0);
+        let label_attr = match &edge.label {
+            Some(l) => format!(r#" label="{}""#, xml_escape(l)),
+            None => String::new(),
+        };
+        writeln!(
+            out,
+            r#"      <edge id="{id}" source="{source}" target="{target}" weight="{weight}"{label_attr}>"#
+        )
+        .unwrap();
+        writeln!(out, r#"        <attvalues>"#).unwrap();
+
+        // for="0" type — always emitted
+        let edge_type = xml_escape(&edge.edge_type);
+        writeln!(out, r#"          <attvalue for="0" value="{edge_type}"/>"#).unwrap();
+
+        // for="1" ltp_status
+        if let Some(v) = edge.attributes.get("ltp_status").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="1" value="{v}"/>"#).unwrap();
+        }
+        // for="2" tier
+        if let Some(v) = edge.attributes.get("tier").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="2" value="{v}"/>"#).unwrap();
+        }
+        // for="3" activation_count
+        if let Some(v) = edge
+            .attributes
+            .get("activation_count")
+            .and_then(|v| v.as_u64())
+        {
+            writeln!(out, r#"          <attvalue for="3" value="{v}"/>"#).unwrap();
+        }
+
+        writeln!(out, r#"        </attvalues>"#).unwrap();
+        writeln!(out, r#"      </edge>"#).unwrap();
+    }
+    writeln!(out, r#"    </edges>"#).unwrap();
+
+    writeln!(out, r#"  </graph>"#).unwrap();
+    write!(out, r#"</gexf>"#).unwrap();
+
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Query params and handler
 // ---------------------------------------------------------------------------
 
@@ -281,12 +445,12 @@ fn parse_include(include: &str) -> (bool, bool, bool) {
     )
 }
 
-/// GET /api/graph/{user_id}/export - Export the full knowledge graph as JSON
+/// GET /api/graph/{user_id}/export - Export the full knowledge graph as JSON or GEXF
 pub async fn export_graph(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
     Query(params): Query<ExportParams>,
-) -> Result<axum::response::Json<GraphExportResponse>, AppError> {
+) -> Result<axum::response::Response, AppError> {
     validation::validate_user_id(&user_id).map_validation_err("user_id")?;
 
     let (inc_entities, inc_memories, inc_episodes) = parse_include(&params.include);
@@ -368,11 +532,23 @@ pub async fn export_graph(
         edge_counts_by_type,
     };
 
-    Ok(axum::response::Json(GraphExportResponse {
+    let response = GraphExportResponse {
         metadata,
         nodes,
         edges,
-    }))
+    };
+
+    match params.format.as_str() {
+        "gexf" => {
+            let gexf = to_gexf(&response);
+            Ok((
+                [(axum::http::header::CONTENT_TYPE, "application/gexf+xml")],
+                gexf,
+            )
+                .into_response())
+        }
+        _ => Ok(axum::response::Json(response).into_response()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -680,6 +856,51 @@ mod integration_tests {
             memory_nodes.is_empty(),
             "expected no memory nodes with min_importance=0.99, got {}",
             memory_nodes.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_export_gexf_format() {
+        let harness = TestHarness::new();
+
+        // Store a memory
+        {
+            let mem_sys = harness.manager.get_user_memory("test-user").unwrap();
+            let mem_guard = mem_sys.read();
+            let experience = crate::memory::Experience {
+                content: "GEXF format test memory".to_string(),
+                ..Default::default()
+            };
+            mem_guard.remember(experience, None).unwrap();
+        }
+
+        let app = harness.router();
+        let req = test_helpers::get("/api/graph/test-user/export?format=gexf");
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Check Content-Type header
+        let content_type = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .expect("missing content-type header")
+            .to_str()
+            .unwrap();
+        assert_eq!(content_type, "application/gexf+xml");
+
+        let body = axum::body::to_bytes(resp.into_body(), 10_000_000)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&body).expect("body is not valid UTF-8");
+
+        assert!(text.contains("<?xml"), "missing XML declaration");
+        assert!(text.contains("<gexf"), "missing <gexf> element");
+        assert!(text.contains("<nodes>"), "missing <nodes> element");
+        assert!(text.contains("<edges>"), "missing <edges> element");
+        assert!(
+            text.contains("GEXF format test memory"),
+            "memory content not present in GEXF output"
         );
     }
 
