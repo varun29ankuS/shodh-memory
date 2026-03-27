@@ -52,6 +52,37 @@ def extract_from_session_json(path: str) -> list[dict]:
     return memories
 
 
+def _is_autonomite_session(path: str) -> bool:
+    """Check if a JSONL file is an autonomite session (not a regular Claude Code session).
+
+    Autonomite sessions start with:
+    - Pipeline run prompts: {"target_commit": ...}
+    - Think phase: "You are in THINK MODE"
+    - Subagent tasks: "<task-notification>"
+    - Operator broadcasts: "## Operator Message"
+    """
+    with open(path) as f:
+        for line in f:
+            try:
+                d = json.loads(line.strip())
+                if d.get("type") == "queue-operation" and d.get("operation") == "enqueue":
+                    content = d.get("content", "")[:300]
+                    if not content:
+                        return False
+                    if content.strip().startswith("{") and "target_commit" in content:
+                        return True
+                    if "THINK MODE" in content:
+                        return True
+                    if "<task-notification>" in content:
+                        return True
+                    if "## Operator Message" in content:
+                        return True
+                    return False
+            except json.JSONDecodeError:
+                continue
+    return False
+
+
 def extract_from_jsonl(path: str) -> list[dict]:
     """Extract memories from JSONL stream (Claude Code session format)."""
     memories = []
@@ -261,25 +292,37 @@ def main():
         sys.exit(1)
 
     # Collect session files
-    session_files = []
+    all_files = []
     for path in args.sessions:
         p = Path(path)
         if p.is_dir():
-            session_files.extend(sorted(p.glob("session-*.json")))
-            session_files.extend(sorted(p.glob("*.jsonl")))
+            all_files.extend(sorted(p.glob("session-*.json")))
+            all_files.extend(sorted(p.glob("*.jsonl")))
         elif p.exists():
-            session_files.append(p)
+            all_files.append(p)
         else:
             print(f"Warning: {path} not found", file=sys.stderr)
 
-    if not session_files:
+    if not all_files:
         print("No session files found", file=sys.stderr)
         sys.exit(1)
+
+    # Filter JSONL files to autonomite sessions only (skip regular Claude Code sessions)
+    session_files = []
+    skipped = 0
+    for f in all_files:
+        if f.name.endswith(".jsonl"):
+            if _is_autonomite_session(str(f)):
+                session_files.append(f)
+            else:
+                skipped += 1
+        else:
+            session_files.append(f)
 
     if args.limit > 0:
         session_files = session_files[:args.limit]
 
-    print(f"Found {len(session_files)} session files")
+    print(f"Found {len(session_files)} autonomite sessions ({skipped} non-autonomite skipped)")
 
     total_loaded = 0
     total_failed = 0
