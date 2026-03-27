@@ -170,15 +170,88 @@ pub fn episode_to_node(episode: &crate::graph_memory::EpisodicNode) -> ExportNod
 }
 
 // ---------------------------------------------------------------------------
+// Edge builder functions
+// ---------------------------------------------------------------------------
+
+/// Convert a [`RelationshipEdge`] to an [`ExportEdge`].
+pub fn relationship_to_edge(edge: &crate::graph_memory::RelationshipEdge) -> ExportEdge {
+    let attrs = serde_json::json!({
+        "strength": edge.strength,
+        "relation_type": format!("{:?}", edge.relation_type),
+        "ltp_status": format!("{:?}", edge.ltp_status),
+        "tier": format!("{:?}", edge.tier),
+        "activation_count": edge.activation_count,
+        "last_activated": edge.last_activated,
+        "created_at": edge.created_at,
+        "valid_at": edge.valid_at,
+        "entity_confidence": edge.entity_confidence,
+    });
+
+    ExportEdge {
+        id: edge.uuid.to_string(),
+        source: edge.from_entity.to_string(),
+        target: edge.to_entity.to_string(),
+        edge_type: "relationship".to_owned(),
+        label: Some(format!("{:?}", edge.relation_type)),
+        attributes: attrs,
+    }
+}
+
+/// Synthesize `entity_ref` edges from a [`Memory`]'s entity references.
+///
+/// Each [`EntityRef`] becomes a directed edge from the memory node to the
+/// referenced entity node, with the `relation` field preserved as an attribute.
+pub fn entity_refs_to_edges(
+    source_id: &uuid::Uuid,
+    refs: &[crate::memory::EntityRef],
+) -> Vec<ExportEdge> {
+    refs.iter()
+        .map(|r| ExportEdge {
+            id: format!("{}-{}", source_id, r.entity_id),
+            source: source_id.to_string(),
+            target: r.entity_id.to_string(),
+            edge_type: "entity_ref".to_owned(),
+            label: None,
+            attributes: serde_json::json!({ "relation": r.relation }),
+        })
+        .collect()
+}
+
+/// Synthesize `entity_ref` edges from an [`EpisodicNode`]'s entity UUID list.
+///
+/// Each entity UUID becomes a directed edge from the episode node to the entity
+/// node, with a static `"referenced"` relation attribute.
+pub fn episode_refs_to_edges(
+    episode_id: &uuid::Uuid,
+    entity_ids: &[uuid::Uuid],
+) -> Vec<ExportEdge> {
+    entity_ids
+        .iter()
+        .map(|entity_id| ExportEdge {
+            id: format!("{}-{}", episode_id, entity_id),
+            source: episode_id.to_string(),
+            target: entity_id.to_string(),
+            edge_type: "entity_ref".to_owned(),
+            label: None,
+            attributes: serde_json::json!({ "relation": "referenced" }),
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph_memory::{EntityLabel, EntityNode, EpisodicNode, EpisodeSource};
+    use crate::graph_memory::{
+        EdgeTier, EntityLabel, EntityNode, EpisodicNode, EpisodeSource, LtpStatus,
+        RelationshipEdge, RelationType,
+    };
+    use crate::memory::EntityRef;
     use chrono::Utc;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use uuid::Uuid;
 
     fn make_entity() -> EntityNode {
@@ -271,5 +344,94 @@ mod tests {
         assert_eq!(attrs["source"], "Message");
         assert!(attrs["valid_at"].is_string());
         assert!(attrs["created_at"].is_string());
+    }
+
+    fn make_relationship_edge() -> RelationshipEdge {
+        RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::WorksWith,
+            strength: 0.75,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: "test context".to_owned(),
+            last_activated: Utc::now(),
+            activation_count: 5,
+            ltp_status: LtpStatus::None,
+            tier: EdgeTier::L1Working,
+            activation_timestamps: Some(VecDeque::new()),
+            entity_confidence: Some(0.9),
+        }
+    }
+
+    #[test]
+    fn test_relationship_to_edge() {
+        let rel = make_relationship_edge();
+        let edge = relationship_to_edge(&rel);
+
+        assert_eq!(edge.id, rel.uuid.to_string());
+        assert_eq!(edge.source, rel.from_entity.to_string());
+        assert_eq!(edge.target, rel.to_entity.to_string());
+        assert_eq!(edge.edge_type, "relationship");
+        assert_eq!(edge.label.as_deref(), Some("WorksWith"));
+
+        let attrs = &edge.attributes;
+        let strength = attrs["strength"].as_f64().unwrap();
+        assert!((strength - 0.75_f64).abs() < 1e-5, "strength {strength} not ~0.75");
+        assert_eq!(attrs["relation_type"], "WorksWith");
+        assert_eq!(attrs["ltp_status"], "None");
+        assert_eq!(attrs["tier"], "L1Working");
+        assert_eq!(attrs["activation_count"], 5_u64);
+        assert!(attrs["last_activated"].is_string());
+        assert!(attrs["created_at"].is_string());
+        assert!(attrs["valid_at"].is_string());
+        let confidence = attrs["entity_confidence"].as_f64().unwrap();
+        assert!((confidence - 0.9_f64).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_entity_ref_edges() {
+        let source_id = Uuid::new_v4();
+        let entity_a = Uuid::new_v4();
+        let entity_b = Uuid::new_v4();
+        let refs = vec![
+            EntityRef { entity_id: entity_a, name: "Alice".to_owned(), relation: "subject".to_owned() },
+            EntityRef { entity_id: entity_b, name: "Rust".to_owned(), relation: "mentioned".to_owned() },
+        ];
+
+        let edges = entity_refs_to_edges(&source_id, &refs);
+
+        assert_eq!(edges.len(), 2);
+        for (edge, r) in edges.iter().zip(refs.iter()) {
+            assert_eq!(edge.id, format!("{}-{}", source_id, r.entity_id));
+            assert_eq!(edge.source, source_id.to_string());
+            assert_eq!(edge.target, r.entity_id.to_string());
+            assert_eq!(edge.edge_type, "entity_ref");
+            assert!(edge.label.is_none());
+            assert_eq!(edge.attributes["relation"], r.relation.as_str());
+        }
+    }
+
+    #[test]
+    fn test_episode_entity_ref_edges() {
+        let episode_id = Uuid::new_v4();
+        let entity_a = Uuid::new_v4();
+        let entity_b = Uuid::new_v4();
+        let entity_ids = vec![entity_a, entity_b];
+
+        let edges = episode_refs_to_edges(&episode_id, &entity_ids);
+
+        assert_eq!(edges.len(), 2);
+        for (edge, entity_id) in edges.iter().zip(entity_ids.iter()) {
+            assert_eq!(edge.id, format!("{}-{}", episode_id, entity_id));
+            assert_eq!(edge.source, episode_id.to_string());
+            assert_eq!(edge.target, entity_id.to_string());
+            assert_eq!(edge.edge_type, "entity_ref");
+            assert!(edge.label.is_none());
+            assert_eq!(edge.attributes["relation"], "referenced");
+        }
     }
 }
