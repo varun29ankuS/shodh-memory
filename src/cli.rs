@@ -381,21 +381,23 @@ async fn main() -> Result<()> {
                 api_url, user_id, format, include, min_importance, include_embeddings
             );
 
-            let client = reqwest::blocking::Client::new();
+            let client = reqwest::Client::new();
             let resp = client
                 .get(&url)
                 .header("x-api-key", &api_key)
                 .send()
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to connect to shodh server: {e}"))?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let body = resp.text().unwrap_or_default();
+                let body = resp.text().await.unwrap_or_default();
                 anyhow::bail!("Export failed (HTTP {status}): {body}");
             }
 
             let body = resp
                 .text()
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to read response: {e}"))?;
 
             match output {
