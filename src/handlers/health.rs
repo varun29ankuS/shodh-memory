@@ -250,6 +250,7 @@ pub async fn update_context_status(
         memory_type: Some("Context".to_string()),
         importance: None,
         count: None,
+        entities: None,
         results: None,
     });
 

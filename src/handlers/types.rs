@@ -42,6 +42,9 @@ pub struct MemoryEvent {
     pub memory_type: Option<String>,
     pub importance: Option<f32>,
     pub count: Option<usize>,
+    /// Tags/entities for TUI display
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entities: Option<Vec<String>>,
     /// Full command results for rich TUI display (recall, proactive_context)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub results: Option<serde_json::Value>,
@@ -1036,6 +1039,7 @@ mod tests {
             memory_type: Some("Observation".to_string()),
             importance: Some(0.8),
             count: None,
+            entities: None,
             results: None,
         };
         let json = serde_json::to_string(&event).unwrap();

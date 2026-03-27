@@ -1067,6 +1067,7 @@ pub async fn create_todo(
         memory_type: Some(format!("{:?}", todo.status)),
         importance: None,
         count: None,
+        entities: None,
         results: None,
     });
 
@@ -1569,6 +1570,7 @@ pub async fn update_todo(
         memory_type: Some(format!("{:?}", todo.status)),
         importance: None,
         count: None,
+        entities: None,
         results: None,
     });
 
@@ -1694,6 +1696,7 @@ pub async fn complete_todo(
                 memory_type: Some("Done".to_string()),
                 importance: None,
                 count: None,
+                entities: None,
                 results: None,
             });
 
@@ -1771,6 +1774,7 @@ pub async fn delete_todo(
             memory_type: None,
             importance: None,
             count: None,
+            entities: None,
             results: None,
         });
 
@@ -1825,6 +1829,7 @@ pub async fn reorder_todo(
                 memory_type: Some(format!("{:?}", updated.status)),
                 importance: None,
                 count: None,
+                entities: None,
                 results: None,
             });
 
@@ -2056,6 +2061,7 @@ pub async fn add_todo_comment(
         memory_type: Some(format!("{:?}", comment.comment_type)),
         importance: None,
         count: None,
+        entities: None,
         results: None,
     });
 
@@ -2236,6 +2242,7 @@ pub async fn delete_todo_comment(
             memory_type: None,
             importance: None,
             count: None,
+            entities: None,
             results: None,
         });
     }
@@ -2321,6 +2328,7 @@ pub async fn create_project(
         memory_type: Some("Project".to_string()),
         importance: None,
         count: None,
+        entities: None,
         results: None,
     });
 
@@ -2462,6 +2470,7 @@ pub async fn update_project(
         memory_type: Some("Project".to_string()),
         importance: None,
         count: None,
+        entities: None,
         results: None,
     });
 
@@ -2533,6 +2542,7 @@ pub async fn delete_project(
         memory_type: Some("Project".to_string()),
         importance: None,
         count: Some(todos_count),
+        entities: None,
         results: None,
     });
 

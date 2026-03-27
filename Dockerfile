@@ -27,12 +27,7 @@ WORKDIR /app
 # Copy manifests first for Docker layer caching
 COPY Cargo.toml Cargo.lock ./
 
-# Copy source and all paths referenced by Cargo.toml (benches, tests)
-COPY src ./src
-COPY benches ./benches
-COPY tests ./tests
-
-# Download ONNX Runtime for embedding model inference
+# Download ONNX Runtime for embedding model inference (cacheable independent of source)
 ARG ORT_VERSION=1.23.2
 RUN curl -L -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
     && tar -xzf ort.tgz \
@@ -41,6 +36,24 @@ RUN curl -L -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/downlo
     && rm -rf ort.tgz onnxruntime-linux-x64-${ORT_VERSION}
 
 ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+
+# Create dummy sources to build and cache dependencies
+RUN mkdir -p src benches tests \
+    && echo "fn main() {}" > src/main.rs \
+    && echo "fn main() {}" > src/cli.rs \
+    && touch src/lib.rs \
+    && awk -F '"' '/name = ".*benchmarks"/ {print "echo \"fn main() {}\" > benches/" $2 ".rs"}' Cargo.toml | sh \
+    && touch tests/dummy.rs \
+    && cargo build --release \
+    && rm -rf src benches tests
+
+# Copy source and all paths referenced by Cargo.toml (benches, tests)
+COPY src ./src
+COPY benches ./benches
+COPY tests ./tests
+
+# Update modification time to ensure Cargo rebuilds the application
+RUN touch src/main.rs src/cli.rs src/lib.rs
 
 # Build release binary
 RUN cargo build --release
