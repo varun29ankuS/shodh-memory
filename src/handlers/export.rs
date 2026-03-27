@@ -1,11 +1,20 @@
-//! Graph export types and node/edge builder functions.
+//! Graph export types, node/edge builder functions, and the export handler.
 //!
-//! Defines the serializable types for the graph snapshot export API and
-//! provides conversion functions from internal types to the export format.
+//! Defines the serializable types for the graph snapshot export API,
+//! provides conversion functions from internal types to the export format,
+//! and implements the GET /api/graph/{user_id}/export endpoint.
 
+use axum::extract::{Path, Query, State};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use super::state::MultiUserMemoryManager;
+use crate::errors::{AppError, ValidationErrorExt};
+use crate::validation;
+
+type AppState = Arc<MultiUserMemoryManager>;
 
 // ---------------------------------------------------------------------------
 // Export types
@@ -239,6 +248,134 @@ pub fn episode_refs_to_edges(
 }
 
 // ---------------------------------------------------------------------------
+// Query params and handler
+// ---------------------------------------------------------------------------
+
+/// Query parameters for the graph export endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct ExportParams {
+    #[serde(default = "default_format")]
+    pub format: String,
+    #[serde(default = "default_include")]
+    pub include: String,
+    #[serde(default)]
+    pub min_importance: f32,
+    #[serde(default)]
+    pub include_embeddings: bool,
+}
+
+fn default_format() -> String {
+    "json".to_string()
+}
+fn default_include() -> String {
+    "entities,memories,episodes".to_string()
+}
+
+/// Parse the comma-separated `include` param into (entities, memories, episodes) flags.
+fn parse_include(include: &str) -> (bool, bool, bool) {
+    let parts: Vec<&str> = include.split(',').map(|s| s.trim()).collect();
+    (
+        parts.contains(&"entities"),
+        parts.contains(&"memories"),
+        parts.contains(&"episodes"),
+    )
+}
+
+/// GET /api/graph/{user_id}/export - Export the full knowledge graph as JSON
+pub async fn export_graph(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Query(params): Query<ExportParams>,
+) -> Result<axum::response::Json<GraphExportResponse>, AppError> {
+    validation::validate_user_id(&user_id).map_validation_err("user_id")?;
+
+    let (inc_entities, inc_memories, inc_episodes) = parse_include(&params.include);
+
+    let mut nodes: Vec<ExportNode> = Vec::new();
+    let mut edges: Vec<ExportEdge> = Vec::new();
+
+    // --- Graph data: entities, relationships, episodes ---
+    if inc_entities || inc_episodes {
+        if let Ok(graph) = state.get_user_graph(&user_id) {
+            let graph_guard = graph.read();
+
+            if inc_entities {
+                if let Ok(entities) = graph_guard.get_all_entities() {
+                    for entity in &entities {
+                        nodes.push(entity_to_node(entity, params.include_embeddings));
+                    }
+                }
+                if let Ok(relationships) = graph_guard.get_all_relationships() {
+                    for rel in &relationships {
+                        edges.push(relationship_to_edge(rel));
+                    }
+                }
+            }
+
+            if inc_episodes {
+                if let Ok(episodes) = graph_guard.get_all_episodes() {
+                    for episode in &episodes {
+                        nodes.push(episode_to_node(episode));
+                        if inc_entities {
+                            edges.extend(episode_refs_to_edges(
+                                &episode.uuid,
+                                &episode.entity_refs,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Memory data ---
+    if inc_memories {
+        if let Ok(mem_sys) = state.get_user_memory(&user_id) {
+            let mem_guard = mem_sys.read();
+            if let Ok(memories) = mem_guard.get_all_memories() {
+                for memory in &memories {
+                    if memory.importance() < params.min_importance {
+                        continue;
+                    }
+                    if inc_entities {
+                        edges.extend(entity_refs_to_edges(
+                            &memory.id.0,
+                            &memory.entity_refs,
+                        ));
+                    }
+                    nodes.push(memory_to_node(memory, params.include_embeddings));
+                }
+            }
+        }
+    }
+
+    // --- Build metadata ---
+    let mut node_counts_by_type: HashMap<String, usize> = HashMap::new();
+    for node in &nodes {
+        *node_counts_by_type.entry(node.node_type.clone()).or_insert(0) += 1;
+    }
+    let mut edge_counts_by_type: HashMap<String, usize> = HashMap::new();
+    for edge in &edges {
+        *edge_counts_by_type.entry(edge.edge_type.clone()).or_insert(0) += 1;
+    }
+
+    let metadata = ExportMetadata {
+        exported_at: chrono::Utc::now(),
+        user_id,
+        node_count: nodes.len(),
+        edge_count: edges.len(),
+        node_counts_by_type,
+        edge_counts_by_type,
+    };
+
+    Ok(axum::response::Json(GraphExportResponse {
+        metadata,
+        nodes,
+        edges,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -433,5 +570,156 @@ mod tests {
             assert!(edge.label.is_none());
             assert_eq!(edge.attributes["relation"], "referenced");
         }
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use crate::handlers::test_helpers::{self, TestHarness};
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn test_export_empty_graph() {
+        let harness = TestHarness::new();
+        let app = harness.router();
+
+        let req = test_helpers::get("/api/graph/test-user/export");
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 10_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["metadata"]["node_count"], 0);
+        assert_eq!(json["metadata"]["edge_count"], 0);
+        assert_eq!(json["metadata"]["user_id"], "test-user");
+        assert!(json["nodes"].as_array().unwrap().is_empty());
+        assert!(json["edges"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_export_with_data() {
+        let harness = TestHarness::new();
+
+        // Store a memory
+        {
+            let mem_sys = harness.manager.get_user_memory("test-user").unwrap();
+            let mem_guard = mem_sys.read();
+            let experience = crate::memory::Experience {
+                content: "Rust is a systems programming language".to_string(),
+                ..Default::default()
+            };
+            mem_guard.remember(experience, None).unwrap();
+        }
+
+        let app = harness.router();
+        let req = test_helpers::get("/api/graph/test-user/export");
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 10_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // At least one memory node should exist
+        let nodes = json["nodes"].as_array().unwrap();
+        let memory_nodes: Vec<_> = nodes
+            .iter()
+            .filter(|n| n["type"] == "memory")
+            .collect();
+        assert!(
+            !memory_nodes.is_empty(),
+            "expected at least one memory node, got none"
+        );
+        assert_eq!(
+            memory_nodes[0]["attributes"]["content"],
+            "Rust is a systems programming language"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_export_min_importance_filter() {
+        let harness = TestHarness::new();
+
+        // Store a memory (default importance is typically low)
+        {
+            let mem_sys = harness.manager.get_user_memory("test-user").unwrap();
+            let mem_guard = mem_sys.read();
+            let experience = crate::memory::Experience {
+                content: "Ephemeral test content".to_string(),
+                ..Default::default()
+            };
+            mem_guard.remember(experience, None).unwrap();
+        }
+
+        let app = harness.router();
+        // Request with very high min_importance filter
+        let req = test_helpers::get("/api/graph/test-user/export?min_importance=0.99");
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 10_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Memory should be filtered out by the high importance threshold
+        let nodes = json["nodes"].as_array().unwrap();
+        let memory_nodes: Vec<_> = nodes
+            .iter()
+            .filter(|n| n["type"] == "memory")
+            .collect();
+        assert!(
+            memory_nodes.is_empty(),
+            "expected no memory nodes with min_importance=0.99, got {}",
+            memory_nodes.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_export_include_filter() {
+        let harness = TestHarness::new();
+
+        // Store a memory
+        {
+            let mem_sys = harness.manager.get_user_memory("test-user").unwrap();
+            let mem_guard = mem_sys.read();
+            let experience = crate::memory::Experience {
+                content: "Include filter test".to_string(),
+                ..Default::default()
+            };
+            mem_guard.remember(experience, None).unwrap();
+        }
+
+        let app = harness.router();
+        // Request only entities (no memories, no episodes)
+        let req = test_helpers::get("/api/graph/test-user/export?include=entities");
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 10_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // No memory nodes should appear since we only requested entities
+        let nodes = json["nodes"].as_array().unwrap();
+        let memory_nodes: Vec<_> = nodes
+            .iter()
+            .filter(|n| n["type"] == "memory")
+            .collect();
+        assert!(
+            memory_nodes.is_empty(),
+            "expected no memory nodes when include=entities, got {}",
+            memory_nodes.len()
+        );
     }
 }
