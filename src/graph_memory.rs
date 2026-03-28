@@ -3113,7 +3113,9 @@ impl GraphMemory {
         // Sort entities by path score (decay_factor) descending
         all_entities.sort_by(|a, b| b.decay_factor.total_cmp(&a.decay_factor));
 
-        // Hebbian strengthening
+        // Hebbian strengthening (deduplicate: same edge may appear on multiple paths)
+        edges_to_strengthen.sort();
+        edges_to_strengthen.dedup();
         if !edges_to_strengthen.is_empty() {
             if let Err(e) = self.batch_strengthen_synapses(&edges_to_strengthen) {
                 tracing::debug!("Failed to strengthen synapses: {}", e);

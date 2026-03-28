@@ -278,6 +278,17 @@ fn build_ner_lookup(
         .collect()
 }
 
+/// Tokenize text into word-level tokens for boundary-safe matching.
+///
+/// Splits on non-alphanumeric characters (preserving apostrophes for contractions),
+/// filters tokens shorter than 3 characters. Returns borrowed slices to avoid allocation.
+/// Caller should lowercase the input first for case-insensitive matching.
+fn tokenize_words(text: &str) -> HashSet<&str> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| w.len() >= 3)
+        .collect()
+}
+
 impl MemorySystem {
     /// Create a new memory system.
     ///
@@ -1520,15 +1531,21 @@ impl MemorySystem {
                         });
 
                     if let Some(content) = content {
-                        // Must contain entity
-                        if !content.contains(&entity_lower) {
+                        let content_words = tokenize_words(&content);
+                        // Must contain all entity words (word-boundary safe)
+                        if !entity_lower
+                            .split_whitespace()
+                            .all(|w| content_words.contains(w))
+                        {
                             continue;
                         }
-                        // Must contain at least one attribute synonym
-                        let has_synonym = attr_query
-                            .attribute_synonyms
-                            .iter()
-                            .any(|syn| content.contains(&syn.to_lowercase()));
+                        // Must contain at least one attribute synonym (word-level)
+                        let has_synonym = attr_query.attribute_synonyms.iter().any(|syn| {
+                            let syn_lower = syn.to_lowercase();
+                            syn_lower
+                                .split_whitespace()
+                                .all(|w| content_words.contains(w))
+                        });
                         if has_synonym {
                             boosted_ids.insert(mem_id);
                         }
@@ -2312,9 +2329,10 @@ impl MemorySystem {
                         for id in &ids {
                             if let Some(content) = get_content(id) {
                                 let content_lower = content.to_lowercase();
+                                let content_words = tokenize_words(&content_lower);
                                 let match_count = signal_terms
                                     .iter()
-                                    .filter(|term| content_lower.contains(term.as_str()))
+                                    .filter(|term| content_words.contains(term.as_str()))
                                     .count();
 
                                 if match_count > 0 {

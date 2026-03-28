@@ -687,6 +687,14 @@ pub fn spreading_activation_retrieve_with_stats(
                 let edges = graph
                     .get_entity_relationships_limited(&entity_uuid, Some(MAX_EDGES_PER_SPREAD))?;
 
+                // Degree normalization: prevent hub nodes from flooding the network.
+                // Matches bidirectional path (Anderson & Reder 1999 ACT-R).
+                let degree_norm = if SPREADING_DEGREE_NORMALIZATION {
+                    1.0 / (1.0 + edges.len() as f32).sqrt()
+                } else {
+                    1.0
+                };
+
                 for edge in edges {
                     // Spread activation to connected entity
                     let target_uuid = edge.to_entity;
@@ -707,7 +715,8 @@ pub fn spreading_activation_retrieve_with_stats(
                     let decay_rate = calculate_importance_weighted_decay(effective);
                     let decay = (-decay_rate * hop as f32).exp();
 
-                    let base_spread = source_activation * decay * effective * tier_trust;
+                    let base_spread =
+                        source_activation * decay * effective * tier_trust * degree_norm;
 
                     // Ontological type penalty (same as bidirectional path)
                     let spread_amount = if let Some(intent) = intent_ref {
@@ -733,7 +742,13 @@ pub fn spreading_activation_retrieve_with_stats(
                                         .map(|e| e.labels)
                                 });
                             if let Some(labels) = cached_labels {
-                                if !labels.iter().any(|l| intent.expected_labels.contains(l)) {
+                                let type_match = labels.iter().any(|l| {
+                                    intent
+                                        .expected_labels
+                                        .iter()
+                                        .any(|exp| l.matches_with_hierarchy(exp))
+                                });
+                                if !type_match {
                                     penalty *= ONTOLOGICAL_ENTITY_PENALTY;
                                 }
                             }
