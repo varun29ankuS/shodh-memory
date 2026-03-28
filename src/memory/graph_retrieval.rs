@@ -960,6 +960,15 @@ pub fn spreading_activation_retrieve_with_stats(
     traversed_edges.dedup();
     stats.traversed_edges = traversed_edges;
 
+    // Hebbian reinforcement: strengthen edges traversed during spreading activation
+    // Other traversal methods (traverse_from_entity, traverse_weighted, traverse_bidirectional)
+    // all call batch_strengthen_synapses — spreading activation should too
+    if !stats.traversed_edges.is_empty() {
+        if let Err(e) = graph.batch_strengthen_synapses(&stats.traversed_edges) {
+            tracing::debug!("Spreading activation edge strengthening failed: {}", e);
+        }
+    }
+
     tracing::info!(
         "🎯 Returning {} memories (top scores: {:?}), {} edges traversed",
         scored_memories.len(),
