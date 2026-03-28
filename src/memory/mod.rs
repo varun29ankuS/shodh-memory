@@ -2542,18 +2542,15 @@ impl MemorySystem {
 
                 // FEEDBACK MOMENTUM (PIPE-9)
                 // Apply momentum from past feedback to consistently boost/suppress memories
-                // - Positive momentum (proven helpful) → boost score
-                // - Negative momentum (frequently ignored) → suppress up to 20%
+                // Symmetric 15% range: helpful memories boosted, misleading ones suppressed equally
                 // This ensures consistent feedback integration across ALL retrieval paths
                 let feedback_multiplier = if let Some(ref guard) = feedback_guard {
                     if let Some(fm) = guard.get_momentum(&mem.id) {
                         let momentum = fm.ema_with_decay();
                         if momentum < 0.0 {
-                            // Suppress: up to 20% penalty for highly negative momentum
-                            1.0 + (momentum * 0.2).max(-0.2)
+                            1.0 + (momentum * 0.15).max(-0.15)
                         } else {
-                            // Boost: up to 10% bonus for positive momentum
-                            1.0 + (momentum * 0.1).min(0.1)
+                            1.0 + (momentum * 0.15).min(0.15)
                         }
                     } else {
                         1.0 // No feedback history
@@ -2562,9 +2559,16 @@ impl MemorySystem {
                     1.0 // No feedback store configured
                 };
 
-                let final_score =
-                    (base + recency_boost + arousal_boost + credibility_boost + temporal_boost)
-                        * feedback_multiplier;
+                // Importance weighting: scale base score by learned importance (7 factors)
+                // Range 0.7-1.0: low-importance memories lose up to 30% of base score
+                let importance_factor = 0.7 + mem.importance() * 0.3;
+
+                let final_score = (base * importance_factor
+                    + recency_boost
+                    + arousal_boost
+                    + credibility_boost
+                    + temporal_boost)
+                    * feedback_multiplier;
 
                 let mut cloned: Memory = mem.as_ref().clone();
                 cloned.set_score(final_score);
