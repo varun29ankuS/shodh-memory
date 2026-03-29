@@ -436,16 +436,14 @@ pub async fn recall(
         );
     }
 
-    // Convert to response format
-    let total = memories.len();
+    // Convert to response format — preserve pipeline scores
+    // The retrieval pipeline (semantic_retrieve Layer 5) computes a unified score
+    // incorporating RRF fusion, graph associations, recency, arousal, credibility,
+    // temporal matching, and feedback momentum. Use it directly.
     let recall_memories: Vec<RecallMemory> = memories
         .iter()
-        .enumerate()
-        .map(|(rank, m)| {
-            // Score based on rank position and salience
-            let rank_score = 1.0 - (rank as f32 / total.max(1) as f32);
-            let salience = m.salience_score_with_access();
-            let score = rank_score * 0.7 + salience * 0.3;
+        .map(|m| {
+            let score = m.score.unwrap_or_else(|| m.salience_score_with_access());
             RecallMemory {
                 id: m.id.0.to_string(),
                 experience: RecallExperience {
@@ -2346,16 +2344,11 @@ pub async fn recall_tracked(
     // Generate tracking ID (could be stored for audit, but for now just a UUID)
     let tracking_id = uuid::Uuid::new_v4().to_string();
 
-    // Convert to response format
-    let total = memories.len();
+    // Convert to response format — preserve pipeline scores (same as recall handler)
     let recall_memories: Vec<RecallMemory> = memories
         .into_iter()
-        .enumerate()
-        .map(|(rank, m)| {
-            // Score based on rank position and salience
-            let rank_score = 1.0 - (rank as f32 / total.max(1) as f32);
-            let salience = m.salience_score_with_access();
-            let score = rank_score * 0.7 + salience * 0.3;
+        .map(|m| {
+            let score = m.score.unwrap_or_else(|| m.salience_score_with_access());
             RecallMemory {
                 id: m.id.0.to_string(),
                 experience: RecallExperience {
