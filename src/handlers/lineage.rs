@@ -191,9 +191,7 @@ pub async fn lineage_confirm_edge(
         let memory_guard = memory.read();
 
         // Get the edge before confirming so we can read from/to memory IDs
-        let edge_before = memory_guard
-            .lineage_graph()
-            .get_edge(&user_id, &edge_id)?;
+        let edge_before = memory_guard.lineage_graph().get_edge(&user_id, &edge_id)?;
 
         let confirmed = memory_guard
             .lineage_graph()
@@ -208,7 +206,8 @@ pub async fn lineage_confirm_edge(
                 match graph_guard.strengthen_lineage_connection(&edge.from.0, &edge.to.0, boost) {
                     Ok(n) => graph_strengthened = n,
                     Err(e) => tracing::debug!(
-                        "Lineage confirm→graph strengthening failed (non-fatal): {}", e
+                        "Lineage confirm→graph strengthening failed (non-fatal): {}",
+                        e
                     ),
                 }
             }

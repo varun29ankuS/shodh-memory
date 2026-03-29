@@ -761,13 +761,7 @@ impl LineageGraph {
         ];
 
         // Weak signals: common words that only indicate a pivot when combined
-        let weak_signals = [
-            "instead",
-            "new approach",
-            "rethink",
-            "rewrite",
-            "pivot",
-        ];
+        let weak_signals = ["instead", "new approach", "rethink", "rewrite", "pivot"];
 
         let strong_count = strong_signals
             .iter()

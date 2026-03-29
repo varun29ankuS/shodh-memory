@@ -3997,11 +3997,7 @@ impl GraphMemory {
         for from_entity in from_capped {
             for to_entity in to_capped {
                 if from_entity != to_entity {
-                    edge_boosts.push((
-                        from_entity.to_string(),
-                        to_entity.to_string(),
-                        boost,
-                    ));
+                    edge_boosts.push((from_entity.to_string(), to_entity.to_string(), boost));
                 }
             }
         }

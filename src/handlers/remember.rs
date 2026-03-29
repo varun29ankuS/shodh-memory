@@ -970,11 +970,7 @@ pub async fn upsert_memory(
 
     // Fire-and-forget lineage inference (only for new memories, not updates)
     if !was_update {
-        spawn_lineage_inference(
-            state.clone(),
-            req.user_id.clone(),
-            memory_id.clone(),
-        );
+        spawn_lineage_inference(state.clone(), req.user_id.clone(), memory_id.clone());
     }
 
     Ok(Json(UpsertResponse {
@@ -990,11 +986,7 @@ pub async fn upsert_memory(
 /// Resolves the memory's entity graph, finds temporal candidates, infers causal
 /// edges, and strengthens corresponding knowledge graph connections. All failures
 /// are logged but never propagate — lineage is best-effort.
-fn spawn_lineage_inference(
-    state: AppState,
-    user_id: String,
-    memory_id: crate::memory::MemoryId,
-) {
+fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::memory::MemoryId) {
     tokio::spawn(async move {
         let graph_arc = match state.get_user_graph(&user_id) {
             Ok(g) => g,
