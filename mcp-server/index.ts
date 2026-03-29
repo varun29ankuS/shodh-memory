@@ -191,6 +191,9 @@ function stripSystemNoise(text: string): string {
 // Track last proactive_context response for implicit feedback loop
 // The backend uses this to evaluate whether surfaced memories were helpful
 let lastProactiveResponse: string = "";
+// Track previous user context — the user's message that *followed* the last surfaced memories.
+// This is the true user_followup signal (their reaction to what we surfaced last time).
+let lastUserContext: string = "";
 
 // =============================================================================
 // STREAMING MEMORY INGESTION - Continuous background memory capture
@@ -2270,6 +2273,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
+        // Capture current context as the user_followup for NEXT call
+        // (this message is the user's reaction to whatever we surfaced last time)
+        const previousUserContext = lastUserContext;
+        lastUserContext = cleanedContext;
+
         // Single API call to the full proactive context pipeline:
         // feedback loop, coactivation, segmented ingest, semantic todos, context reminders
         const result = await apiCall<ProactiveContextResponse>("/api/proactive_context", "POST", {
@@ -2283,7 +2291,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           auto_ingest,
           // Implicit feedback: send previous response so backend can evaluate which memories helped
           previous_response: lastProactiveResponse || undefined,
-          user_followup: lastProactiveResponse ? cleanedContext : undefined,
+          // user_followup is the PREVIOUS user message (their reaction to prior surfaced memories),
+          // not the current one. This avoids the self-referential signal bug where the same text
+          // that triggers recall is evaluated as feedback on the previous response.
+          user_followup: lastProactiveResponse ? (previousUserContext || undefined) : undefined,
           // Tool-aware feedback attribution: causal signal from tool/actuator actions
           ...(tool_actions.length > 0 ? { tool_actions } : {}),
         });
@@ -2446,8 +2457,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const responseText = `${temporalHeader}${summary}:\n\n${formattedWithTime}${entitySummary}${factsBlock}${reminderBlock}${todoBlock}${feedbackNote}${ingestNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`;
 
-        // Store for implicit feedback on next call
-        lastProactiveResponse = responseText;
+        // Store clean semantic content for implicit feedback on next call.
+        // Strip display formatting (emoji borders, latency markers, entity summaries)
+        // that would add embedding noise and dilute the semantic signal.
+        const cleanContent = memories
+          .map((m: { content?: string }) => m.content || "")
+          .filter((c: string) => c.length > 0)
+          .join("\n");
+        lastProactiveResponse = cleanContent || responseText;
 
         return {
           content: [{ type: "text", text: responseText }],

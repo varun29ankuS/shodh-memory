@@ -3807,7 +3807,7 @@ impl GraphMemory {
         let mut strengthened = 0;
         let mut promotion_boosts = Vec::new();
 
-        for (from_id_str, to_id_str, _boost) in edge_boosts {
+        for (from_id_str, to_id_str, boost) in edge_boosts {
             // Parse UUIDs
             let from_uuid = match Uuid::parse_str(from_id_str) {
                 Ok(u) => u,
@@ -3867,13 +3867,15 @@ impl GraphMemory {
                 }
             } else {
                 // Create new ReplayStrengthened edge
-                // Replay edges start in L2 (episodic) since they represent consolidated associations
+                // Replay edges start in L2 (episodic) with replay boost applied to initial strength.
+                // Without this, the computed replay priority score was discarded and all new edges
+                // started at identical strength regardless of their consolidation importance.
                 let edge = RelationshipEdge {
                     uuid: Uuid::new_v4(),
                     from_entity: from_uuid,
                     to_entity: to_uuid,
                     relation_type: RelationType::CoRetrieved,
-                    strength: EdgeTier::L2Episodic.initial_weight(),
+                    strength: EdgeTier::L2Episodic.initial_weight() + boost,
                     created_at: Utc::now(),
                     valid_at: Utc::now(),
                     invalidated_at: None,
