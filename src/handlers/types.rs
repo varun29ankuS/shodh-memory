@@ -702,10 +702,8 @@ pub struct BuildVisualizationRequest {
 
 #[cfg(test)]
 mod tests {
+    use super::super::remember::{BatchRememberOptions, BatchRememberRequest, RememberRequest};
     use super::*;
-    use super::super::remember::{
-        BatchRememberOptions, BatchRememberRequest, RememberRequest,
-    };
     use serde_json::json;
 
     #[test]
