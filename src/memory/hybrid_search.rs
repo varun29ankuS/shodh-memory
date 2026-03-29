@@ -82,7 +82,7 @@ fn default_graph_weight() -> f32 {
     0.25 // Graph spreading activation for associative retrieval (SHO-D4)
 }
 fn default_rrf_k() -> f32 {
-    45.0 // Lower k = more emphasis on top-ranked results
+    crate::constants::RRF_K_HYBRID_FUSION
 }
 fn default_candidate_count() -> usize {
     100 // Increased for better recall; slight latency tradeoff acceptable

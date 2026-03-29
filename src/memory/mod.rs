@@ -760,7 +760,7 @@ impl MemorySystem {
                 .context
                 .as_ref()
                 .map(|c| c.emotional.arousal)
-                .unwrap_or(0.3);
+                .unwrap_or(0.0);
 
             let pattern_memory = pattern_detection::PatternMemory {
                 id: memory.id.0.to_string(),
@@ -2147,7 +2147,9 @@ impl MemorySystem {
             //
             // The density weights directly control the balance - no extra multipliers.
             // This follows ACT-R's additive activation model.
-            const K: f32 = 30.0;
+            // K value from constants.rs — see Cormack et al. (2009), Anderson & Lebiere (1998)
+            use crate::constants::RRF_K_GRAPH_FUSION;
+            let k = RRF_K_GRAPH_FUSION;
             let mut fused: std::collections::HashMap<MemoryId, f32> =
                 std::collections::HashMap::new();
             let mut heb: std::collections::HashMap<MemoryId, f32> =
@@ -2173,8 +2175,8 @@ impl MemorySystem {
 
             // Graph results: pure RRF with density weight
             for (r, (id, activation, h)) in graph_results.iter().enumerate() {
-                // Standard RRF: weight / (K + rank), rank is 1-indexed
-                let rrf_score = graph_w / (K + (r + 1) as f32);
+                // Standard RRF: weight / (k + rank), rank is 1-indexed
+                let rrf_score = graph_w / (k + (r + 1) as f32);
                 *fused.entry(id.clone()).or_insert(0.0) += rrf_score;
                 heb.insert(id.clone(), *h);
 
@@ -2186,7 +2188,7 @@ impl MemorySystem {
 
             // Hybrid (BM25+vector) results: pure RRF with density weight
             for (r, (id, _)) in hybrid_ids.iter().enumerate() {
-                *fused.entry(id.clone()).or_insert(0.0) += hybrid_w / (K + (r + 1) as f32);
+                *fused.entry(id.clone()).or_insert(0.0) += hybrid_w / (k + (r + 1) as f32);
             }
 
             // ===========================================================================

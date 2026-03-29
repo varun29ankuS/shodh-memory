@@ -2043,8 +2043,8 @@ impl AnticipatoryPrefetch {
         // SHO-104: Emotional arousal boost - high-arousal memories are more salient
         // Research: Emotionally arousing events are better remembered (LaBar & Cabeza, 2006)
         if let Some(ctx) = &memory.experience.context {
-            // High arousal memories get a relevance boost
-            if ctx.emotional.arousal > 0.6 {
+            // High arousal memories get a relevance boost (two-tier: prefetch uses lower bar)
+            if ctx.emotional.arousal > crate::constants::PREFETCH_AROUSAL_THRESHOLD {
                 score += 0.1 * ctx.emotional.arousal;
             }
 
@@ -2061,7 +2061,9 @@ impl AnticipatoryPrefetch {
             }
 
             // Mood-congruent retrieval: similar emotional valence boosts relevance
-            // Research: We recall happy memories when happy, sad when sad
+            // Research: Bower (1981) mood-congruent memory effect
+            // NOTE: Currently inert — Query struct has no emotional_valence field.
+            // Requires hook enrichment (#143) to populate emotional context on queries.
             if let Some(current_valence) = context.emotional_valence {
                 let valence_diff = (ctx.emotional.valence - current_valence).abs();
                 if valence_diff < 0.3 {

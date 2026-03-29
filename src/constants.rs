@@ -868,6 +868,36 @@ pub const ONTOLOGICAL_RERANK_BOOST: f32 = 0.08;
 pub const ONTOLOGICAL_RERANK_MAX: f32 = 0.25;
 
 // =============================================================================
+// RECIPROCAL RANK FUSION (RRF) CONSTANTS
+// Based on Cormack, Clarke & Büttcher (2009) — "Reciprocal Rank Fusion
+// outperforms Condorcet and individual Rank Learning Methods"
+// Standard RRF uses K=60. Lower K gives more weight to top-ranked results.
+// Two-stage fusion: inner pass (BM25+vector) and outer pass (graph+hybrid)
+// use different K values reflecting different rank distribution properties.
+// =============================================================================
+
+/// RRF K for inner BM25+vector fusion in HybridSearchEngine
+///
+/// Used in `hybrid_search.rs::search_with_dynamic_weights()` to fuse BM25
+/// keyword scores with vector similarity scores.
+///
+/// K=45 (vs standard K=60) slightly emphasizes top-ranked results from each
+/// signal. Both BM25 and vector produce well-calibrated rank orderings,
+/// so moderate top-weighting is appropriate.
+pub const RRF_K_HYBRID_FUSION: f32 = 45.0;
+
+/// RRF K for outer graph+hybrid fusion in Layer 4 of semantic_retrieve()
+///
+/// Used in `mod.rs::semantic_retrieve()` to fuse graph spreading activation
+/// results with the already-fused hybrid (BM25+vector) results.
+///
+/// K=30 (more aggressive than inner K=45) because graph results are pre-sorted
+/// by activation strength and the top graph results carry high signal — justified
+/// by ACT-R's spreading activation model where top-activated items have
+/// disproportionately stronger evidence (Anderson & Lebiere, 1998).
+pub const RRF_K_GRAPH_FUSION: f32 = 30.0;
+
+// =============================================================================
 // EDGE-TIER TRUST WEIGHTS FOR SPREADING ACTIVATION
 // Based on hippocampal-cortical consolidation: edges that survive decay are
 // more reliable for graph traversal. Dense graphs (L1) are noisy for search,
@@ -1722,6 +1752,18 @@ pub const HIGH_IMPORTANCE_THRESHOLD: f32 = 0.7;
 /// - Error/surprise events typically exceed this
 pub const HIGH_AROUSAL_THRESHOLD: f32 = 0.7;
 
+/// Lower arousal threshold for anticipatory prefetch relevance boosting
+///
+/// Two-tier arousal gating: prefetch uses a lower bar than salience spike detection.
+/// Prefetch asks "is this worth surfacing proactively?" while salience spike asks
+/// "is this exceptional enough to trigger replay?"
+///
+/// Justification:
+/// - 0.6 captures moderately arousing memories for prefetch (LaBar & Cabeza, 2006)
+/// - Distinct from HIGH_AROUSAL_THRESHOLD (0.7) which gates replay/salience spikes
+/// - Memories in [0.6, 0.7) get prefetch boost but don't trigger salience replay
+pub const PREFETCH_AROUSAL_THRESHOLD: f32 = 0.6;
+
 /// Surprise factor threshold for salience-triggered replay
 ///
 /// Deviation from running importance average that triggers surprise detection.
@@ -2007,5 +2049,17 @@ pub const TIER_LTP_THRESHOLD: f32 = 0.8;
 // | ONTOLOGICAL_MIN_CONFIDENCE    | memory/mod.rs             | semantic_retrieve() density gating  |
 // | ONTOLOGICAL_RERANK_BOOST      | memory/mod.rs             | semantic_retrieve() Layer 4.9       |
 // | ONTOLOGICAL_RERANK_MAX        | memory/mod.rs             | semantic_retrieve() Layer 4.9       |
+//
+// ## RRF Fusion Constants (Cormack et al. 2009, Anderson & Lebiere 1998)
+// | Constant                      | File                      | Function/Context                    |
+// |-------------------------------|---------------------------|-------------------------------------|
+// | RRF_K_HYBRID_FUSION           | memory/hybrid_search.rs   | search_with_dynamic_weights()       |
+// | RRF_K_GRAPH_FUSION            | memory/mod.rs             | semantic_retrieve() Layer 4         |
+//
+// ## Emotional Arousal Constants (LaBar & Cabeza 2006)
+// | Constant                      | File                      | Function/Context                    |
+// |-------------------------------|---------------------------|-------------------------------------|
+// | HIGH_AROUSAL_THRESHOLD        | memory/pattern_detection.rs| check_salience_spike()             |
+// | PREFETCH_AROUSAL_THRESHOLD    | memory/retrieval.rs       | PrefetchContext::relevance_score() |
 //
 // =============================================================================
