@@ -258,18 +258,26 @@ pub struct InferenceConfig {
 
 impl Default for InferenceConfig {
     fn default() -> Self {
+        use crate::constants::*;
+
         let mut relation_confidence = HashMap::new();
-        relation_confidence.insert(CausalRelation::Caused, 0.8);
-        relation_confidence.insert(CausalRelation::ResolvedBy, 0.85);
-        relation_confidence.insert(CausalRelation::InformedBy, 0.7);
-        relation_confidence.insert(CausalRelation::SupersededBy, 0.6);
-        relation_confidence.insert(CausalRelation::TriggeredBy, 0.75);
-        relation_confidence.insert(CausalRelation::BranchedFrom, 0.9);
-        relation_confidence.insert(CausalRelation::RelatedTo, 0.5);
+        relation_confidence.insert(CausalRelation::Caused, LINEAGE_CONFIDENCE_CAUSED);
+        relation_confidence.insert(CausalRelation::ResolvedBy, LINEAGE_CONFIDENCE_RESOLVED_BY);
+        relation_confidence.insert(CausalRelation::InformedBy, LINEAGE_CONFIDENCE_INFORMED_BY);
+        relation_confidence.insert(
+            CausalRelation::SupersededBy,
+            LINEAGE_CONFIDENCE_SUPERSEDED_BY,
+        );
+        relation_confidence.insert(CausalRelation::TriggeredBy, LINEAGE_CONFIDENCE_TRIGGERED_BY);
+        relation_confidence.insert(
+            CausalRelation::BranchedFrom,
+            LINEAGE_CONFIDENCE_BRANCHED_FROM,
+        );
+        relation_confidence.insert(CausalRelation::RelatedTo, LINEAGE_CONFIDENCE_RELATED_TO);
 
         Self {
-            max_temporal_gap_days: 7,
-            min_entity_overlap: 0.3,
+            max_temporal_gap_days: LINEAGE_MAX_TEMPORAL_GAP_DAYS,
+            min_entity_overlap: LINEAGE_MIN_ENTITY_OVERLAP,
             relation_confidence,
         }
     }
@@ -896,128 +904,6 @@ impl LineageGraph {
         }
 
         Ok(stats)
-    }
-}
-
-// =========================================================================
-// POST-MORTEM GENERATION
-// =========================================================================
-
-/// Summary of learnings from a completed task
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PostMortem {
-    /// The completed task/todo memory ID
-    pub task_id: MemoryId,
-    /// Summary of what was accomplished
-    pub summary: String,
-    /// Learnings extracted from the task chain
-    pub learnings: Vec<String>,
-    /// Decisions made during this task
-    pub decisions: Vec<String>,
-    /// Errors encountered and resolved
-    pub errors_resolved: Vec<String>,
-    /// Patterns discovered
-    pub patterns: Vec<String>,
-    /// Related memory IDs in the lineage
-    pub related_memories: Vec<MemoryId>,
-    /// When the post-mortem was generated
-    pub generated_at: DateTime<Utc>,
-}
-
-impl PostMortem {
-    /// Create a new post-mortem from a lineage trace
-    pub fn from_trace(
-        task_id: MemoryId,
-        task_content: &str,
-        trace: &LineageTrace,
-        memories: &HashMap<MemoryId, Memory>,
-    ) -> Self {
-        let mut learnings = Vec::new();
-        let mut decisions = Vec::new();
-        let mut errors_resolved = Vec::new();
-        let mut patterns = Vec::new();
-
-        for mem_id in &trace.path {
-            if let Some(memory) = memories.get(mem_id) {
-                match memory.experience.experience_type {
-                    ExperienceType::Learning => {
-                        learnings.push(memory.experience.content.clone());
-                    }
-                    ExperienceType::Decision => {
-                        decisions.push(memory.experience.content.clone());
-                    }
-                    ExperienceType::Error => {
-                        errors_resolved.push(memory.experience.content.clone());
-                    }
-                    ExperienceType::Pattern => {
-                        patterns.push(memory.experience.content.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        PostMortem {
-            task_id,
-            summary: format!("Completed: {}", task_content),
-            learnings,
-            decisions,
-            errors_resolved,
-            patterns,
-            related_memories: trace.path.clone(),
-            generated_at: Utc::now(),
-        }
-    }
-
-    /// Format as markdown summary
-    pub fn to_markdown(&self) -> String {
-        let mut md = String::new();
-
-        md.push_str("# Project Growth Summary\n\n");
-        md.push_str(&format!("**{}**\n\n", self.summary));
-        md.push_str(&format!(
-            "Generated: {}\n\n",
-            self.generated_at.format("%Y-%m-%d %H:%M UTC")
-        ));
-
-        if !self.learnings.is_empty() {
-            md.push_str("## Learnings\n");
-            for learning in &self.learnings {
-                md.push_str(&format!("- {}\n", learning));
-            }
-            md.push('\n');
-        }
-
-        if !self.decisions.is_empty() {
-            md.push_str("## Decisions Made\n");
-            for decision in &self.decisions {
-                md.push_str(&format!("- {}\n", decision));
-            }
-            md.push('\n');
-        }
-
-        if !self.errors_resolved.is_empty() {
-            md.push_str("## Errors Resolved\n");
-            for error in &self.errors_resolved {
-                md.push_str(&format!("- {}\n", error));
-            }
-            md.push('\n');
-        }
-
-        if !self.patterns.is_empty() {
-            md.push_str("## Patterns Discovered\n");
-            for pattern in &self.patterns {
-                md.push_str(&format!("- {}\n", pattern));
-            }
-            md.push('\n');
-        }
-
-        md.push_str(&format!(
-            "---\n*Related memories: {}*\n",
-            self.related_memories.len()
-        ));
-
-        md
     }
 }
 

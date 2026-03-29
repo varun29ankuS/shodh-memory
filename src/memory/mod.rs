@@ -88,7 +88,7 @@ pub use crate::memory::learning_history::{
 };
 pub use crate::memory::lineage::{
     CausalRelation, InferenceConfig, LineageBranch, LineageEdge, LineageGraph, LineageSource,
-    LineageStats, LineageTrace, PostMortem, TraceDirection,
+    LineageStats, LineageTrace, TraceDirection,
 };
 pub use crate::memory::prospective::ProspectiveStore;
 pub use crate::memory::replay::{
@@ -6652,11 +6652,10 @@ impl MemorySystem {
         let mut inferred_edges = Vec::new();
 
         for candidate in candidate_memories {
-            // Try inferring from candidate to new memory (candidate caused new)
+            // Backward pass: candidate → new_memory (what caused this memory?)
             if let Some((relation, confidence)) =
                 self.lineage_graph.infer_relation(candidate, new_memory)
             {
-                // Check if edge already exists
                 if !self
                     .lineage_graph
                     .edge_exists(user_id, &candidate.id, &new_memory.id)?
@@ -6671,12 +6670,63 @@ impl MemorySystem {
                     inferred_edges.push(edge);
                 }
             }
+
+            // Forward pass: new_memory → candidate (what did this memory cause?)
+            // This catches retroactive causality: when an earlier memory is stored
+            // after a later one (out-of-order ingestion), or when a new memory's
+            // type makes it a cause of existing memories (e.g., Learning stored
+            // before the Decision it informed).
+            if let Some((relation, confidence)) =
+                self.lineage_graph.infer_relation(new_memory, candidate)
+            {
+                if !self
+                    .lineage_graph
+                    .edge_exists(user_id, &new_memory.id, &candidate.id)?
+                {
+                    let edge = LineageEdge::inferred(
+                        new_memory.id.clone(),
+                        candidate.id.clone(),
+                        relation,
+                        confidence,
+                    );
+                    self.lineage_graph.store_edge(user_id, &edge)?;
+                    inferred_edges.push(edge);
+                }
+            }
         }
 
         // Check for branch signal in memory content
         if lineage::LineageGraph::detect_branch_signal(&new_memory.experience.content) {
-            // Ensure main branch exists
             self.lineage_graph.ensure_main_branch(user_id)?;
+            // Auto-create branch for the pivot
+            let branch_name = format!("pivot-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+            match self.lineage_graph.create_branch(
+                user_id,
+                &branch_name,
+                "main",
+                new_memory.id.clone(),
+                Some(&format!(
+                    "Auto-detected pivot: {}",
+                    &new_memory
+                        .experience
+                        .content
+                        .chars()
+                        .take(80)
+                        .collect::<String>()
+                )),
+            ) {
+                Ok(branch) => {
+                    tracing::info!(
+                        user_id = %user_id,
+                        branch = %branch.name,
+                        memory_id = %new_memory.id.0,
+                        "Auto-created lineage branch from pivot signal"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!("Auto-branch creation failed (non-fatal): {}", e);
+                }
+            }
         }
 
         Ok(inferred_edges)

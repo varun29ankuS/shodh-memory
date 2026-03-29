@@ -557,7 +557,18 @@ pub async fn remember(
 
             // Task 4: Infer causal lineage (runs after graph processing)
             {
-                let graph_arc = state.get_user_graph(&user_id).ok();
+                let graph_arc = match state.get_user_graph(&user_id) {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        tracing::warn!(
+                            user_id = %user_id,
+                            memory_id = %memory_id.0,
+                            error = %e,
+                            "Lineage inference skipped: graph initialization failed"
+                        );
+                        None
+                    }
+                };
                 let memory_arc = memory.clone();
                 let uid = user_id.clone();
                 let mid = memory_id.clone();
@@ -579,7 +590,8 @@ pub async fn remember(
                     }
 
                     let mut candidate_ids = std::collections::HashSet::new();
-                    let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+                    let cutoff = chrono::Utc::now()
+                        - chrono::Duration::days(crate::constants::LINEAGE_LOOKBACK_DAYS);
 
                     for entity_uuid in &episode.entity_refs {
                         if let Ok(episodes) = graph.get_episodes_by_entity(entity_uuid) {
@@ -592,7 +604,10 @@ pub async fn remember(
                     }
 
                     candidate_ids.remove(&mid);
-                    let candidate_ids: Vec<_> = candidate_ids.into_iter().take(20).collect();
+                    let candidate_ids: Vec<_> = candidate_ids
+                        .into_iter()
+                        .take(crate::constants::LINEAGE_MAX_CANDIDATES)
+                        .collect();
                     if candidate_ids.is_empty() {
                         return;
                     }
