@@ -20,6 +20,8 @@ use super::types::{
 use super::utils::{is_bare_question, is_boilerplate_response, strip_system_noise};
 use crate::errors::{AppError, ValidationErrorExt};
 use crate::memory::feedback;
+use crate::similarity::cosine_similarity;
+use dashmap::DashMap;
 // Note: compute_relevance removed - using unified 5-layer pipeline scoring instead
 use crate::memory::segmentation::{InputSource, SegmentationEngine};
 use crate::memory::sessions::SessionEvent;
@@ -1145,6 +1147,21 @@ pub async fn proactive_context(
                     entities: None,
                     results: None,
                 });
+
+                // Dishabituation: reset habituation counters for memories that received
+                // positive feedback. This models the biological dishabituation response —
+                // when a habituated stimulus produces a novel outcome, the response recovers.
+                if !feedback.reinforced.is_empty() {
+                    if let Some(user_map) = state.habituation_tracker.get(&req.user_id) {
+                        let now = chrono::Utc::now();
+                        for mem_id_str in &feedback.reinforced {
+                            if let Some(mut entry) = user_map.get_mut(mem_id_str) {
+                                entry.surfacings_without_utility = 0;
+                                entry.last_utility = Some(now);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1308,6 +1325,9 @@ pub async fn proactive_context(
     // 2. Retrieve memories using unified 5-layer pipeline
     // The pipeline already applies: RRF fusion + hebbian + recency + feedback (PIPE-9)
     // No double-scoring needed - just use the scores from recall() directly
+    //
+    // Post-pipeline: adaptive involuntary memory constraints (Berntsen 2009)
+    // Applied here (not in semantic_retrieve) to keep voluntary recall untouched.
     let context_clone = req.context.clone();
     let max_results = req.max_results;
     let user_id_for_query = req.user_id.clone();
@@ -1316,6 +1336,13 @@ pub async fn proactive_context(
     let recency_weight = req.recency_weight;
     let semantic_threshold = req.semantic_threshold;
     let embedding_for_query = context_embedding.clone();
+    let habituation_tracker = state.habituation_tracker.clone();
+    let user_id_for_habituation = req.user_id.clone();
+    let memory_type_filter: Vec<ExperienceType> = req
+        .memory_types
+        .iter()
+        .map(|s| super::remember::parse_experience_type(Some(s)))
+        .collect();
     let memories: Vec<ProactiveSurfacedMemory> = {
         let memory = memory_system.clone();
         tokio::task::spawn_blocking(move || {
@@ -1342,6 +1369,11 @@ pub async fn proactive_context(
                 max_results,
                 recency_weight: Some(recency_weight),
                 prospective_signals,
+                experience_types: if memory_type_filter.is_empty() {
+                    None
+                } else {
+                    Some(memory_type_filter)
+                },
                 ..Default::default()
             };
             let results = memory_guard.recall(&query).unwrap_or_default();
@@ -1445,6 +1477,104 @@ pub async fn proactive_context(
             // Sort by boosted score (highest first)
             enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
 
+            // --- Adaptive involuntary memory constraints (Berntsen 2009) ---
+            // These operate ONLY on proactive_context, not voluntary recall.
+
+            // (A) Elaboration quality gate — rich memories outrank fragments.
+            // Quality factor: content_len/200 scaled by structural richness.
+            // Multiplicative so fragments score lower, not zero.
+            {
+                use crate::constants::ELABORATION_QUALITY_MIN;
+                for (m, score, _) in enriched.iter_mut() {
+                    let content_len = m.experience.content.len() as f32;
+                    let length_factor = (content_len / 200.0).min(1.0);
+                    let has_entities = if m.experience.entities.is_empty() {
+                        0.0
+                    } else {
+                        0.1
+                    };
+                    let has_context = if m.experience.context.is_some() {
+                        0.1
+                    } else {
+                        0.0
+                    };
+                    let quality = (length_factor * (1.0 + has_entities + has_context))
+                        .max(ELABORATION_QUALITY_MIN);
+                    *score *= quality;
+                }
+                enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+            }
+
+            // (B) Steeper proactive recency — involuntary memories favor recent events.
+            // Applies an additional recency adjustment on top of Layer 5's recency boost.
+            // Uses PROACTIVE_RECENCY_DECAY_RATE (0.03/h) vs voluntary's 0.01/h.
+            {
+                use crate::constants::PROACTIVE_RECENCY_DECAY_RATE;
+                let now = chrono::Utc::now();
+                // Layer 5 already applied exp(-0.01*h)*recency_weight.
+                // We apply the *differential*: exp(-(0.03-0.01)*h) = exp(-0.02*h)
+                let differential_rate = PROACTIVE_RECENCY_DECAY_RATE - 0.01;
+                for (m, score, _) in enriched.iter_mut() {
+                    let hours_old = (now - m.created_at).num_hours().max(0) as f32;
+                    let proactive_recency_factor = (-differential_rate * hours_old).exp();
+                    *score *= proactive_recency_factor;
+                }
+                enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+            }
+
+            // (C) Habituation — penalize memories surfaced repeatedly without utility.
+            // Thompson & Spencer (1966): repeated stimulation without reinforcement
+            // diminishes response. Logarithmic decay prevents permanent suppression.
+            {
+                use crate::constants::{HABITUATION_DECAY_FACTOR, HABITUATION_MAX_PENALTY};
+                let user_map = habituation_tracker
+                    .entry(user_id_for_habituation.clone())
+                    .or_insert_with(DashMap::new);
+                for (m, score, _) in enriched.iter_mut() {
+                    let mem_id = m.id.0.to_string();
+                    if let Some(entry) = user_map.get(&mem_id) {
+                        if entry.surfacings_without_utility > 0 {
+                            let penalty = (HABITUATION_DECAY_FACTOR
+                                * (1.0 + entry.surfacings_without_utility as f32).ln())
+                            .min(HABITUATION_MAX_PENALTY);
+                            *score *= 1.0 - penalty;
+                        }
+                    }
+                }
+                enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+            }
+
+            // (D) Lateral inhibition — similar candidates suppress each other.
+            // O'Reilly & McClelland (1994): pattern separation via competition.
+            // Greedy top-down: each selected memory inhibits similar remaining candidates.
+            {
+                use crate::constants::{LATERAL_INHIBITION_STRENGTH, LATERAL_INHIBITION_THRESHOLD};
+                let mut selected_embeddings: Vec<Vec<f32>> = Vec::new();
+                for (m, score, _) in enriched.iter_mut() {
+                    if let Some(ref emb) = m.experience.embeddings {
+                        if !emb.is_empty() {
+                            // Check against all already-selected memories
+                            let mut max_sim: f32 = 0.0;
+                            for sel_emb in &selected_embeddings {
+                                if sel_emb.len() == emb.len() {
+                                    let sim = cosine_similarity(emb, sel_emb);
+                                    if sim > max_sim {
+                                        max_sim = sim;
+                                    }
+                                }
+                            }
+                            if max_sim > LATERAL_INHIBITION_THRESHOLD {
+                                // Suppress: the more similar, the stronger the inhibition
+                                *score *= 1.0 - LATERAL_INHIBITION_STRENGTH * max_sim;
+                            }
+                            selected_embeddings.push(emb.clone());
+                        }
+                    }
+                }
+                // Final sort after all biological constraints applied
+                enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
+            }
+
             // Drop results below minimum absolute score — don't pad with irrelevant filler
             // Also drop results that are < 30% of the top score (too weak relative to best)
             let top_score = enriched.first().map(|(_, s, _)| *s).unwrap_or(0.0);
@@ -1457,6 +1587,29 @@ pub async fn proactive_context(
             if top_score > 0.0 {
                 for (_, score, _) in enriched.iter_mut() {
                     *score = (*score / top_score) * 0.95;
+                }
+            }
+
+            // (E) Update habituation state — record that these memories were surfaced.
+            // Positive feedback resets count in Phase 0 of the next call.
+            {
+                let user_map = habituation_tracker
+                    .entry(user_id_for_habituation)
+                    .or_insert_with(DashMap::new);
+                let now = chrono::Utc::now();
+                for (m, score, _) in enriched.iter() {
+                    if *score >= effective_min {
+                        let mem_id = m.id.0.to_string();
+                        let mut entry = user_map.entry(mem_id).or_insert_with(|| {
+                            super::state::HabituationEntry {
+                                surfacings_without_utility: 0,
+                                last_surfaced: now,
+                                last_utility: None,
+                            }
+                        });
+                        entry.surfacings_without_utility += 1;
+                        entry.last_surfaced = now;
+                    }
                 }
             }
 
@@ -1505,22 +1658,9 @@ pub async fn proactive_context(
         "proactive_context [phase:recall] memory retrieval complete"
     );
 
-    // 2.5. Record coactivation - fire-and-forget (doesn't affect response)
-    // When memories are retrieved together, their graph edges get stronger (Hebbian learning)
-    if memories.len() >= 2 {
-        let graph = graph_memory.clone();
-        let memory_ids: Vec<uuid::Uuid> = memories
-            .iter()
-            .filter_map(|m| uuid::Uuid::parse_str(&m.id).ok())
-            .collect();
-        tokio::task::spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || {
-                let graph_guard = graph.write();
-                let _ = graph_guard.record_memory_coactivation(&memory_ids);
-            })
-            .await;
-        });
-    }
+    // 2.5. Coactivation already recorded inside semantic_retrieve() — no duplicate call.
+    // Previously this fired a second record_memory_coactivation() on the filtered subset,
+    // inflating Hebbian edge weights 2x per proactive_context call.
 
     // 3. Store pending feedback (fast, in-memory — do before parallel block)
     if embedding_valid {
