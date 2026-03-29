@@ -176,6 +176,31 @@ function buildEnrichmentFields(
 }
 
 /**
+ * Default importance by memory type. Bypasses server-side auto-calculation
+ * which lacks hook context (e.g., whether this was a user decision vs routine log).
+ * Scale: 0.0 (ephemeral) to 1.0 (critical). Values chosen to match
+ * Tulving's (1972) encoding specificity — decisions/errors encode deeper.
+ */
+function importanceForType(memoryType: string): number {
+  switch (memoryType) {
+    case "Decision":    return 0.8;
+    case "Error":       return 0.75;
+    case "Learning":    return 0.7;
+    case "Discovery":   return 0.65;
+    case "Pattern":     return 0.6;
+    case "Task":        return 0.55;
+    case "CodeEdit":    return 0.4;
+    case "Command":     return 0.35;
+    case "FileAccess":  return 0.3;
+    case "Search":      return 0.3;
+    case "Context":     return 0.3;
+    case "Conversation": return 0.25;
+    case "Observation": return 0.25;
+    default:            return 0.3;
+  }
+}
+
+/**
  * Store a memory with full enrichment. Wraps callBrain("/api/remember") and
  * tracks the returned memory ID for episode chaining.
  */
@@ -193,6 +218,7 @@ async function rememberEnriched(
     content,
     memory_type: memoryType,
     tags,
+    importance: importanceForType(memoryType),
     ...enrichment,
     ...(extra || {}),
   })) as RememberResponse | null;

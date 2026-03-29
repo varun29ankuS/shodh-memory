@@ -62,6 +62,11 @@ pub struct RememberRequest {
     /// Use this to create memory trees (e.g., "71-research" -> "algebraic" -> "21×27≡-1")
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Optional importance override (0.0-1.0). When provided, bypasses auto-calculation.
+    /// Use for hook-generated memories where importance is known from context:
+    /// Decision=0.8, Learning=0.7, Error=0.7, Discovery=0.6, Observation=0.3
+    #[serde(default)]
+    pub importance: Option<f32>,
 }
 
 /// Remember response
@@ -122,6 +127,9 @@ pub struct BatchMemoryItem {
     /// Parent memory ID for hierarchical organization
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Optional importance override (0.0-1.0)
+    #[serde(default)]
+    pub importance: Option<f32>,
 }
 
 /// Error detail for batch item
@@ -156,6 +164,9 @@ pub struct UpsertRequest {
     pub changed_by: Option<String>,
     #[serde(default)]
     pub change_reason: Option<String>,
+    /// Optional importance override (0.0-1.0). When provided, bypasses auto-calculation.
+    #[serde(default)]
+    pub importance: Option<f32>,
 }
 
 fn default_change_type() -> String {
@@ -398,6 +409,7 @@ pub async fn remember(
         tags: merged_entities,
         context,
         ner_entities,
+        importance_override: req.importance.map(|v| v.clamp(0.0, 1.0)),
         ..Default::default()
     };
 
@@ -777,6 +789,7 @@ pub async fn batch_remember(
             tags: merged_entities,
             context,
             ner_entities: ner_records,
+            importance_override: item.importance.map(|v| v.clamp(0.0, 1.0)),
             ..Default::default()
         };
 
@@ -932,6 +945,7 @@ pub async fn upsert_memory(
         entities: merged_entities.clone(),
         tags: merged_entities,
         ner_entities,
+        importance_override: req.importance.map(|v| v.clamp(0.0, 1.0)),
         ..Default::default()
     };
 

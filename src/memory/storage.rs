@@ -483,6 +483,7 @@ impl LegacyExperienceV1 {
             temporal_refs: Vec::new(),
             ner_entities: Vec::new(),
             cooccurrence_pairs: Vec::new(),
+            importance_override: None,
         }
     }
 }

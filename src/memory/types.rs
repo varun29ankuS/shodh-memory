@@ -794,6 +794,11 @@ pub struct Experience {
     /// Pre-computed by handler to avoid redundant content parsing in downstream passes
     #[serde(default)]
     pub cooccurrence_pairs: Vec<(String, String)>,
+
+    /// Optional importance override (0.0-1.0). When set, bypasses calculate_importance().
+    /// Used by hooks and auto-ingest where importance is known from caller context.
+    #[serde(default)]
+    pub importance_override: Option<f32>,
 }
 
 impl Default for Experience {
@@ -842,6 +847,7 @@ impl Default for Experience {
             temporal_refs: Vec::new(),
             ner_entities: Vec::new(),
             cooccurrence_pairs: Vec::new(),
+            importance_override: None,
         }
     }
 }
