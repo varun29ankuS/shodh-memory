@@ -64,6 +64,182 @@ interface ProactiveContextResponse {
 
 const HOOK_TIMEOUT_MS = 5000;
 
+// ---------------------------------------------------------------------------
+// Enrichment: Emotional classification, episode threading, source typing
+// ---------------------------------------------------------------------------
+
+interface EmotionalSignature {
+  valence: number;   // -1.0 (negative) to 1.0 (positive)
+  arousal: number;   // 0.0 (calm) to 1.0 (highly aroused)
+  emotion: string | null;
+}
+
+interface SourceSignature {
+  source_type: string;
+  credibility: number; // 0.0 to 1.0
+}
+
+/**
+ * Classify emotional signature by event type.
+ *
+ * Errors get high arousal (0.7) to cross PREFETCH_AROUSAL_THRESHOLD (0.6)
+ * in the Rust retrieval pipeline, ensuring they surface in future recalls.
+ * Based on the emotional salience effect — LaBar & Cabeza (2006).
+ */
+function classifyEmotion(eventType: "edit" | "write" | "error" | "bash_ok" | "subagent" | "task"): EmotionalSignature {
+  switch (eventType) {
+    case "edit":
+      return { valence: 0.3, arousal: 0.3, emotion: "satisfaction" };
+    case "write":
+      return { valence: 0.3, arousal: 0.3, emotion: "satisfaction" };
+    case "error":
+      return { valence: -0.5, arousal: 0.7, emotion: "frustration" };
+    case "bash_ok":
+      return { valence: 0.1, arousal: 0.2, emotion: null };
+    case "subagent":
+      return { valence: 0.2, arousal: 0.3, emotion: "satisfaction" };
+    case "task":
+      return { valence: 0.4, arousal: 0.4, emotion: "satisfaction" };
+  }
+}
+
+/**
+ * Determine source type and credibility per event.
+ *
+ * Tool outputs are deterministic system events (high credibility).
+ * AI-generated summaries from subagents are less reliable.
+ */
+function classifySource(eventType: "file" | "error" | "command" | "subagent" | "task"): SourceSignature {
+  switch (eventType) {
+    case "file":
+      return { source_type: "system", credibility: 0.9 };
+    case "error":
+      return { source_type: "system", credibility: 0.95 };
+    case "command":
+      return { source_type: "system", credibility: 0.8 };
+    case "subagent":
+      return { source_type: "ai_generated", credibility: 0.6 };
+    case "task":
+      return { source_type: "ai_generated", credibility: 0.6 };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Episode threading — chains memories within a session
+// ---------------------------------------------------------------------------
+
+/** Current session_id from Claude Code, used as episode_id */
+let currentEpisodeId: string | null = null;
+
+/** Monotonically increasing sequence within the session */
+let episodeSequenceNumber = 0;
+
+/** ID of the last memory stored in this session, for preceding_memory_id chaining */
+let lastStoredMemoryId: string | null = null;
+
+interface RememberResponse {
+  id?: string;
+  memory_id?: string;
+}
+
+/**
+ * Build the enrichment fields for a callBrain("/api/remember") payload.
+ * Returns a flat object to spread into the request body.
+ */
+function buildEnrichmentFields(
+  emotionType: Parameters<typeof classifyEmotion>[0],
+  sourceType: Parameters<typeof classifySource>[0],
+): Record<string, unknown> {
+  const emo = classifyEmotion(emotionType);
+  const src = classifySource(sourceType);
+  episodeSequenceNumber++;
+
+  const fields: Record<string, unknown> = {
+    emotional_valence: emo.valence,
+    emotional_arousal: emo.arousal,
+    source_type: src.source_type,
+    credibility: src.credibility,
+    sequence_number: episodeSequenceNumber,
+  };
+
+  if (emo.emotion) {
+    fields.emotion = emo.emotion;
+  }
+  if (currentEpisodeId) {
+    fields.episode_id = currentEpisodeId;
+  }
+  if (lastStoredMemoryId) {
+    fields.preceding_memory_id = lastStoredMemoryId;
+  }
+
+  return fields;
+}
+
+/**
+ * Store a memory with full enrichment. Wraps callBrain("/api/remember") and
+ * tracks the returned memory ID for episode chaining.
+ */
+async function rememberEnriched(
+  content: string,
+  memoryType: string,
+  tags: string[],
+  emotionType: Parameters<typeof classifyEmotion>[0],
+  sourceType: Parameters<typeof classifySource>[0],
+  extra?: Record<string, unknown>,
+): Promise<void> {
+  const enrichment = buildEnrichmentFields(emotionType, sourceType);
+  const resp = (await callBrain("/api/remember", {
+    user_id: SHODH_USER_ID,
+    content,
+    memory_type: memoryType,
+    tags,
+    ...enrichment,
+    ...(extra || {}),
+  })) as RememberResponse | null;
+
+  // Chain: capture returned memory ID for preceding_memory_id
+  const memId = resp?.id || resp?.memory_id;
+  if (memId) {
+    lastStoredMemoryId = memId;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Structured capture helpers
+// ---------------------------------------------------------------------------
+
+/** Summarize an Edit tool's diff from tool_input */
+function summarizeEditDiff(toolInput: Record<string, unknown>): string {
+  const filePath = toolInput.file_path as string;
+  const oldStr = toolInput.old_string as string | undefined;
+  const newStr = toolInput.new_string as string | undefined;
+
+  let summary = `Modified file: ${filePath}`;
+  if (oldStr && newStr) {
+    const oldLines = oldStr.split("\n").length;
+    const newLines = newStr.split("\n").length;
+    summary += ` (${oldLines}→${newLines} lines)`;
+    // Include a compact diff snippet for semantic embedding
+    const oldSnippet = oldStr.slice(0, 80).replace(/\n/g, "↵");
+    const newSnippet = newStr.slice(0, 80).replace(/\n/g, "↵");
+    summary += `\n- ${oldSnippet}\n+ ${newSnippet}`;
+  }
+  return summary;
+}
+
+/** Summarize a Write tool's output from tool_input */
+function summarizeWrite(toolInput: Record<string, unknown>): string {
+  const filePath = toolInput.file_path as string;
+  const content = toolInput.content as string | undefined;
+  let summary = `Wrote file: ${filePath}`;
+  if (content) {
+    const lines = content.split("\n").length;
+    const bytes = new TextEncoder().encode(content).length;
+    summary += ` (${lines} lines, ${bytes} bytes)`;
+  }
+  return summary;
+}
+
 /** Tool actions collected since last proactive_context call for feedback attribution */
 const pendingToolActions: { tool_name: string; inputs: Record<string, string>; success: boolean; output_snippet?: string }[] = [];
 
@@ -290,28 +466,49 @@ async function handlePostToolUse(input: HookInput): Promise<void> {
     return;
   }
 
-  // Store significant tool uses
-  if (toolName === "Edit" || toolName === "Write") {
-    const filePath = toolInput?.file_path as string;
-    if (filePath) {
-      await callBrain("/api/remember", {
-        user_id: SHODH_USER_ID,
-        content: `Modified file: ${filePath}`,
-        memory_type: "FileAccess",
-        tags: [`tool:${toolName}`, `file:${filePath.split(/[/\\]/).pop()}`],
-      });
+  // Store significant tool uses with full enrichment
+  if (toolName === "Edit") {
+    if (toolInput) {
+      const filePath = toolInput.file_path as string;
+      if (filePath) {
+        const content = summarizeEditDiff(toolInput);
+        const fileName = filePath.split(/[/\\]/).pop() || filePath;
+        await rememberEnriched(
+          content,
+          "CodeEdit",
+          [`tool:Edit`, `file:${fileName}`],
+          "edit",
+          "file",
+        );
+      }
+    }
+  } else if (toolName === "Write") {
+    if (toolInput) {
+      const filePath = toolInput.file_path as string;
+      if (filePath) {
+        const content = summarizeWrite(toolInput);
+        const fileName = filePath.split(/[/\\]/).pop() || filePath;
+        await rememberEnriched(
+          content,
+          "FileAccess",
+          [`tool:Write`, `file:${fileName}`],
+          "write",
+          "file",
+        );
+      }
     }
   } else if (toolName === "Bash" && toolOutput) {
     const command = toolInput?.command as string;
 
-    // Store errors/failures for learning
     if (isErrorOutput(toolOutput)) {
-      await callBrain("/api/remember", {
-        user_id: SHODH_USER_ID,
-        content: `Command failed: ${command?.slice(0, 100)} → ${toolOutput.slice(0, 200)}`,
-        memory_type: "Error",
-        tags: ["tool:Bash", "error"],
-      });
+      // Store errors with high arousal for future surfacing
+      await rememberEnriched(
+        `Command failed: ${command?.slice(0, 100)} → ${toolOutput.slice(0, 200)}`,
+        "Error",
+        ["tool:Bash", "error"],
+        "error",
+        "error",
+      );
 
       // Surface past errors for this type of command
       const memoryContext = await surfaceProactiveContext(
@@ -453,12 +650,13 @@ async function handlePostToolUseTask(input: HookInput): Promise<void> {
   if (!tagMatch) {
     // Not an orchestration task — store as generic memory
     if (resultText) {
-      await callBrain("/api/remember", {
-        user_id: SHODH_USER_ID,
-        content: `Task agent completed: ${resultText.slice(0, 300)}`,
-        memory_type: "Task",
-        tags: ["subagent:task", "source:hook"],
-      });
+      await rememberEnriched(
+        `Task agent completed: ${resultText.slice(0, 300)}`,
+        "Task",
+        ["subagent:task", "source:hook"],
+        "task",
+        "task",
+      );
     }
     return;
   }
@@ -492,12 +690,13 @@ async function handlePostToolUseTask(input: HookInput): Promise<void> {
   }
 
   // 4. Store memory of orchestration completion
-  await callBrain("/api/remember", {
-    user_id: SHODH_USER_ID,
-    content: `Orchestration task ${todoShortId} completed: ${resultText.slice(0, 200)}`,
-    memory_type: "Task",
-    tags: ["orchestration", `todo:${todoShortId}`, "source:hook"],
-  });
+  await rememberEnriched(
+    `Orchestration task ${todoShortId} completed: ${resultText.slice(0, 200)}`,
+    "Task",
+    ["orchestration", `todo:${todoShortId}`, "source:hook"],
+    "task",
+    "task",
+  );
 
   // 5. Surface orchestration status
   const memoryContext = await surfaceProactiveContext(
@@ -527,12 +726,13 @@ async function handleSubagentStop(input: HookInput): Promise<void> {
     ? `${agentType} agent completed: ${result.slice(0, 300)}`
     : `${agentType} agent (${agentId || "unknown"}) completed`;
 
-  await callBrain("/api/remember", {
-    user_id: SHODH_USER_ID,
+  await rememberEnriched(
     content,
-    memory_type: "Task",
-    tags: [`subagent:${agentType}`, "source:hook"],
-  });
+    "Task",
+    [`subagent:${agentType}`, "source:hook"],
+    "subagent",
+    "subagent",
+  );
 }
 
 async function handleStop(_input: HookInput): Promise<void> {
@@ -550,6 +750,11 @@ async function main(): Promise<void> {
   } catch {
     const eventType = process.argv[2];
     input = { hook_event_name: eventType || "SessionStart" };
+  }
+
+  // Initialize episode threading from Claude Code's session_id
+  if (input.session_id && !currentEpisodeId) {
+    currentEpisodeId = input.session_id;
   }
 
   const eventName = input.hook_event_name;
