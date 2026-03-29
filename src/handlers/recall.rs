@@ -1462,10 +1462,15 @@ pub async fn proactive_context(
                         .cloned()
                         .collect();
 
-                    // Apply entity match boost: weight * (matched / total context entities)
+                    // Apply entity match boost with diminishing returns (log scaling).
+                    // Linear scaling over-rewards memories with many entity matches;
+                    // log scaling reflects cue distinctiveness (Berntsen 2009).
                     if !matched.is_empty() {
-                        score += entity_match_weight
-                            * (matched.len() as f32 / context_entity_count as f32);
+                        let match_ratio =
+                            (matched.len() as f32 / context_entity_count as f32).min(1.0);
+                        let diminishing = (1.0 + matched.len() as f32).ln() / (1.0_f32 + 3.0).ln();
+                        let entity_boost = entity_match_weight * match_ratio * diminishing.min(1.0);
+                        score *= 1.0 + entity_boost;
                     }
 
                     (m, score, matched)

@@ -1827,6 +1827,52 @@ pub const INTERFERENCE_VULNERABILITY_HOURS: i64 = 24;
 /// - Limits memory overhead
 pub const INTERFERENCE_MAX_TRACKED: usize = 10;
 
+/// Competition close-competitor threshold — ratio above which suppression fires
+///
+/// When two memories compete, suppression is applied only if the loser's score
+/// is within this ratio of the winner's score. Below this ratio, the memory
+/// is clearly weaker and passes through without suppression.
+///
+/// Justification:
+/// - 0.9 means only the top 10% competitive band triggers suppression
+/// - Below 0.9, the score gap is large enough that interference is minimal
+///
+/// Reference: Anderson & Bjork (1994) — retrieval-induced forgetting operates
+/// primarily on strong competitors, not weak ones
+pub const COMPETITION_CLOSE_RATIO: f32 = 0.9;
+
+/// Competition suppression multiplier — scales the suppression penalty
+///
+/// Formula: suppression = INTERFERENCE_COMPETITION_FACTOR × (1 - ratio) × COMPETITION_SUPPRESSION_SCALE
+///
+/// Justification:
+/// - 10.0 maps the tiny ratio gap (0.01-0.10) to meaningful suppression
+/// - With INTERFERENCE_COMPETITION_FACTOR=0.15: max suppression = 0.15 × 0.1 × 10 = 0.15
+pub const COMPETITION_SUPPRESSION_SCALE: f32 = 10.0;
+
+/// Minimum score for a suppressed memory to survive competition
+///
+/// If a memory's score falls below this after suppression, it is fully removed.
+/// Above this, it survives with a reduced score.
+pub const COMPETITION_SURVIVAL_FLOOR: f32 = 0.1;
+
+/// Interference damage scaling for close survivors vs fully suppressed
+///
+/// Close survivors (score > COMPETITION_SURVIVAL_FLOOR) record mild interference
+/// at this fraction of the full suppression amount. Fully suppressed memories
+/// record the full amount.
+pub const COMPETITION_SURVIVOR_DAMAGE_RATIO: f32 = 0.3;
+
+/// Connectivity factor divisor for replay candidate prioritization
+///
+/// Higher connectivity = more important for consolidation.
+/// Formula: 1.0 + (connections / divisor).min(max_boost)
+pub const REPLAY_CONNECTIVITY_DIVISOR: f32 = 10.0;
+pub const REPLAY_CONNECTIVITY_MAX_BOOST: f32 = 0.5;
+
+/// Minimum activation floor after interference decay
+pub const INTERFERENCE_ACTIVATION_FLOOR: f32 = 0.05;
+
 // =============================================================================
 // PATTERN-TRIGGERED REPLAY CONSTANTS (PIPE-2)
 // Based on hippocampal sharp-wave ripple research (Rasch & Born 2013)

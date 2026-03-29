@@ -2658,6 +2658,25 @@ impl MemorySystem {
             "recall [layer:5] memory fetch + unified scoring"
         );
 
+        // Quality gate: multiplicative factor based on content richness.
+        // Prevents empty/trivial memories from surfacing on recency or graph boost alone.
+        // Same formula as proactive_context (Berntsen elaboration quality).
+        for mem in &mut memories {
+            let content_len = mem.experience.content.len() as f32;
+            let has_entities = !mem.experience.entities.is_empty();
+            let has_context = mem.experience.context.is_some();
+            let quality = (content_len / 200.0).min(1.0)
+                * (1.0
+                    + if has_entities { 0.1 } else { 0.0 }
+                    + if has_context { 0.1 } else { 0.0 });
+            let quality_factor = quality.max(crate::constants::ELABORATION_QUALITY_MIN);
+            if let Some(score) = mem.score {
+                let mut cloned: Memory = mem.as_ref().clone();
+                cloned.set_score(score * quality_factor);
+                *mem = Arc::new(cloned);
+            }
+        }
+
         // Linguistic analysis: additive boost (5% of IC weight), not a full re-sort
         if !query_analysis.focal_entities.is_empty() {
             memories.sort_by(|a, b| {
@@ -2679,14 +2698,14 @@ impl MemorySystem {
         // strengthen associations between memories that "won" the competition.
         // Suppressed memories should not be coactivated (Hebbian "losers don't learn").
         if memories.len() >= 2 {
-            // Calculate similarity scores for competition analysis
+            // Use actual pipeline scores for competition, not position-based proxies.
+            // Previously used 1.0 - (i/n)*0.3 which compressed all scores to [0.7, 1.0],
+            // making suppression (ratio > 0.9) almost impossible.
             let candidates: Vec<(String, f32, f32)> = memories
                 .iter()
-                .enumerate()
-                .map(|(i, m)| {
-                    let relevance = 1.0 - (i as f32 / memories.len() as f32) * 0.3; // Position-based score
-                    let similarity = m.score.unwrap_or(0.5); // Use computed retrieval score
-                    (m.id.0.to_string(), relevance, similarity)
+                .map(|m| {
+                    let pipeline_score = m.score.unwrap_or(0.0);
+                    (m.id.0.to_string(), pipeline_score, pipeline_score)
                 })
                 .collect();
 
@@ -2789,6 +2808,13 @@ impl MemorySystem {
         let mut seen_ids: HashSet<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
         self.expand_with_hierarchy(&mut memories, &mut seen_ids);
 
+        // Re-sort by score and trim to max_results after expansion.
+        // Expanded memories must compete on score, not get a free pass.
+        if memories.len() > query.max_results {
+            memories.sort_by(|a, b| b.score.unwrap_or(0.0).total_cmp(&a.score.unwrap_or(0.0)));
+            memories.truncate(query.max_results);
+        }
+
         let t_total = recall_start.elapsed();
         tracing::info!(
             post_ms = format!("{:.2}", (t_total - t_fetch).as_secs_f64() * 1000.0),
@@ -2798,75 +2824,6 @@ impl MemorySystem {
         );
 
         Ok(memories)
-    }
-
-    /// Apply learning velocity boost to retrieved memories
-    ///
-    /// This method should be called after `recall()` when user_id is known.
-    /// It boosts memories that have been recently learned/reinforced, implementing
-    /// the principle that "learning should improve retrieval over time".
-    ///
-    /// Boost factors:
-    /// - Base boost for any learning activity (5%)
-    /// - Velocity boost for rapid learning (up to 15%)
-    /// - Potentiation bonus for LTP'd edges (10%)
-    /// - Total max boost: 30%
-    ///
-    /// The memories are re-sorted by adjusted score after boosting.
-    pub fn apply_learning_boost(
-        &self,
-        user_id: &str,
-        mut memories: Vec<SharedMemory>,
-    ) -> Vec<SharedMemory> {
-        if memories.is_empty() {
-            return memories;
-        }
-
-        // Calculate boosts for all memories
-        let mut boosted: Vec<(SharedMemory, f32)> = memories
-            .drain(..)
-            .map(|mem| {
-                let base_score = mem.score.unwrap_or(0.5);
-                let boost = self
-                    .learning_history
-                    .recency_boost(user_id, &mem.id.0.to_string())
-                    .unwrap_or(1.0);
-                let adjusted_score = base_score * boost;
-                (mem, adjusted_score)
-            })
-            .collect();
-
-        // Log if any memories got significant boosts
-        let boosted_count = boosted.iter().filter(|(_, s)| *s > 0.5).count();
-        if boosted_count > 0 {
-            tracing::debug!(
-                user_id = %user_id,
-                boosted_count = boosted_count,
-                "Applied learning velocity boost to retrieved memories"
-            );
-        }
-
-        // Sort by adjusted score (descending)
-        boosted.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-        // Rebuild memories with updated scores
-        boosted
-            .into_iter()
-            .map(|(mem, score)| {
-                let mut cloned: Memory = mem.as_ref().clone();
-                cloned.set_score(score);
-                Arc::new(cloned)
-            })
-            .collect()
-    }
-
-    /// Recall with learning boost applied
-    ///
-    /// Convenience method that combines `recall()` with `apply_learning_boost()`.
-    /// Use this when you have the user_id available at recall time.
-    pub fn recall_for_user(&self, user_id: &str, query: &Query) -> Result<Vec<SharedMemory>> {
-        let memories = self.recall(query)?;
-        Ok(self.apply_learning_boost(user_id, memories))
     }
 
     /// Get learning velocity statistics for a memory

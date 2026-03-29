@@ -15,8 +15,9 @@
 //! - Similar memories compete during retrieval
 
 use crate::constants::{
-    INTERFERENCE_COMPETITION_FACTOR, INTERFERENCE_MAX_TRACKED, INTERFERENCE_PROACTIVE_DECAY,
-    INTERFERENCE_PROACTIVE_THRESHOLD, INTERFERENCE_RETROACTIVE_DECAY,
+    COMPETITION_CLOSE_RATIO, COMPETITION_SUPPRESSION_SCALE, COMPETITION_SURVIVAL_FLOOR,
+    COMPETITION_SURVIVOR_DAMAGE_RATIO, INTERFERENCE_COMPETITION_FACTOR, INTERFERENCE_MAX_TRACKED,
+    INTERFERENCE_PROACTIVE_DECAY, INTERFERENCE_PROACTIVE_THRESHOLD, INTERFERENCE_RETROACTIVE_DECAY,
     INTERFERENCE_SEVERE_THRESHOLD, INTERFERENCE_SIMILARITY_THRESHOLD,
     INTERFERENCE_VULNERABILITY_HOURS, REPLAY_AROUSAL_THRESHOLD, REPLAY_BATCH_SIZE,
     REPLAY_EDGE_BOOST, REPLAY_IMPORTANCE_THRESHOLD, REPLAY_MAX_AGE_DAYS, REPLAY_STRENGTH_BOOST,
@@ -126,7 +127,10 @@ impl ReplayManager {
                     } else {
                         0.0
                     };
-                    let connectivity_factor = 1.0 + (connections.len() as f32 / 10.0).min(0.5); // Max 50% boost
+                    let connectivity_factor = 1.0
+                        + (connections.len() as f32
+                            / crate::constants::REPLAY_CONNECTIVITY_DIVISOR)
+                            .min(crate::constants::REPLAY_CONNECTIVITY_MAX_BOOST);
 
                     let priority =
                         importance * recency_factor * (1.0 + arousal_boost) * connectivity_factor;
@@ -348,7 +352,8 @@ impl InterferenceDetector {
                     memory_id: old_id.clone(),
                     content_preview: old_preview.clone(),
                     activation_before: *old_importance,
-                    activation_after: (*old_importance - decay).max(0.05),
+                    activation_after: (*old_importance - decay)
+                        .max(crate::constants::INTERFERENCE_ACTIVATION_FLOOR),
                     interfering_memory_id: new_memory_id.to_string(),
                     interference_type: InterferenceType::Retroactive,
                     timestamp: now,
@@ -448,12 +453,13 @@ impl InterferenceDetector {
                     let score_ratio = score / winner_score;
 
                     // Strong suppression for very close competitors
-                    if score_ratio > 0.9 {
-                        let suppression =
-                            INTERFERENCE_COMPETITION_FACTOR * (1.0 - score_ratio) * 10.0;
+                    if score_ratio > COMPETITION_CLOSE_RATIO {
+                        let suppression = INTERFERENCE_COMPETITION_FACTOR
+                            * (1.0 - score_ratio)
+                            * COMPETITION_SUPPRESSION_SCALE;
                         let new_score = (score - suppression).max(0.0);
 
-                        if new_score > 0.1 {
+                        if new_score > COMPETITION_SURVIVAL_FLOOR {
                             winners.push((id.clone(), new_score));
                             // Mild interference record for close survivors ("battle-tested")
                             self.record_interference(
@@ -461,7 +467,7 @@ impl InterferenceDetector {
                                 winner_id,
                                 score_ratio,
                                 InterferenceType::RetrievalCompetition,
-                                suppression * 0.3,
+                                suppression * COMPETITION_SURVIVOR_DAMAGE_RATIO,
                             );
                         } else {
                             suppressed.push(id.clone());
