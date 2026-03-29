@@ -1070,11 +1070,14 @@ pub async fn proactive_context(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Feedback task panicked: {e}")))?;
 
-        // Apply reinforcement to memory system and graph based on feedback
+        // Apply reinforcement to memory system, graph, AND retrieval weights
         if !helpful_ids.is_empty() || !misleading_ids.is_empty() {
             let memory_sys_for_reinforce = memory_system.clone();
             let graph_for_reinforce = graph_memory.clone();
             let helpful_ids_for_graph = helpful_ids.clone();
+            let relevance_engine = state.relevance_engine.clone();
+            let helpful_count = helpful_ids.len();
+            let misleading_count = misleading_ids.len();
             tokio::task::spawn_blocking(move || {
                 let memory_guard = memory_sys_for_reinforce.read();
 
@@ -1121,6 +1124,18 @@ pub async fn proactive_context(
                             _ => {}
                         }
                     }
+                }
+
+                // Update adaptive retrieval weights via gradient descent (Rescorla-Wagner, 1972).
+                // proactive_context always uses semantic retrieval; entity matching contributes
+                // when entities were extracted. This closes the loop: feedback now adjusts
+                // how much weight semantic vs entity vs tag signals get in future retrievals.
+                let entity_contributed = helpful_count > 0; // entities always extracted in proactive_context
+                for _ in 0..helpful_count {
+                    relevance_engine.apply_feedback(true, entity_contributed, false, true);
+                }
+                for _ in 0..misleading_count {
+                    relevance_engine.apply_feedback(true, entity_contributed, false, false);
                 }
             })
             .await
