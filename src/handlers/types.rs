@@ -82,53 +82,6 @@ pub struct RecordResponse {
     pub created_at: String,
 }
 
-/// Simplified remember request - just content, auto-creates Experience
-#[derive(Deserialize)]
-pub struct RememberRequest {
-    pub user_id: String,
-    pub content: String,
-    /// Optional memory type (default: auto-classified)
-    #[serde(default)]
-    pub memory_type: Option<String>,
-    /// Optional tags/entities
-    #[serde(default)]
-    pub tags: Vec<String>,
-    /// Optional override timestamp (ISO 8601)
-    #[serde(default)]
-    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Optional emotional valence (-1.0 to 1.0)
-    #[serde(default)]
-    pub emotional_valence: Option<f32>,
-    /// Optional emotional arousal (0.0 to 1.0)
-    #[serde(default)]
-    pub emotional_arousal: Option<f32>,
-    /// Optional dominant emotion label
-    #[serde(default)]
-    pub emotion: Option<String>,
-    /// Optional source type
-    #[serde(default)]
-    pub source_type: Option<String>,
-    /// Optional credibility score (0.0 to 1.0)
-    #[serde(default)]
-    pub credibility: Option<f32>,
-    /// Optional episode ID for grouping related memories
-    #[serde(default)]
-    pub episode_id: Option<String>,
-    /// Optional sequence number within episode
-    #[serde(default)]
-    pub sequence_number: Option<u32>,
-    /// Optional preceding memory ID (for temporal chains)
-    #[serde(default)]
-    pub preceding_memory_id: Option<String>,
-}
-
-/// Simplified remember response
-#[derive(Serialize)]
-pub struct RememberResponse {
-    pub id: String,
-    pub stored: bool,
-}
-
 // =============================================================================
 // RECALL API
 // =============================================================================
@@ -248,84 +201,6 @@ pub struct RecallExperience {
     pub content: String,
     pub memory_type: Option<String>,
     pub tags: Vec<String>,
-}
-
-// =============================================================================
-// BATCH REMEMBER API
-// =============================================================================
-
-/// Batch remember request for bulk inserts
-#[derive(Deserialize)]
-pub struct BatchRememberRequest {
-    pub user_id: String,
-    pub memories: Vec<BatchMemoryItem>,
-    #[serde(default)]
-    pub options: BatchRememberOptions,
-}
-
-/// Options for batch remember operation
-#[derive(Deserialize)]
-pub struct BatchRememberOptions {
-    #[serde(default = "default_true")]
-    pub extract_entities: bool,
-    #[serde(default = "default_true")]
-    pub create_edges: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-impl Default for BatchRememberOptions {
-    fn default() -> Self {
-        Self {
-            extract_entities: true,
-            create_edges: true,
-        }
-    }
-}
-
-#[derive(Deserialize, Clone)]
-pub struct BatchMemoryItem {
-    pub content: String,
-    #[serde(default)]
-    pub memory_type: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(default)]
-    pub emotional_valence: Option<f32>,
-    #[serde(default)]
-    pub emotional_arousal: Option<f32>,
-    #[serde(default)]
-    pub emotion: Option<String>,
-    #[serde(default)]
-    pub source_type: Option<String>,
-    #[serde(default)]
-    pub credibility: Option<f32>,
-    #[serde(default)]
-    pub episode_id: Option<String>,
-    #[serde(default)]
-    pub sequence_number: Option<u32>,
-    #[serde(default)]
-    pub preceding_memory_id: Option<String>,
-}
-
-/// Error detail for a single item in batch
-#[derive(Serialize)]
-pub struct BatchErrorItem {
-    pub index: usize,
-    pub error: String,
-}
-
-#[derive(Serialize)]
-pub struct BatchRememberResponse {
-    pub created: usize,
-    pub failed: usize,
-    pub memory_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub errors: Vec<BatchErrorItem>,
 }
 
 // =============================================================================
@@ -828,6 +703,9 @@ pub struct BuildVisualizationRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::remember::{
+        BatchRememberOptions, BatchRememberRequest, RememberRequest,
+    };
     use serde_json::json;
 
     #[test]
