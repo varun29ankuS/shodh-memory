@@ -999,12 +999,23 @@ const CF_INDEX: &str = "memory_index";
 /// Uses a single RocksDB instance with 2 column families:
 /// - default: main memory data (also shared by LearningHistoryStore, TemporalFactStore, etc. via key prefixes)
 /// - `memory_index`: secondary indices for tag/type/timestamp queries
+/// Maximum number of failed writes to buffer for retry.
+/// Small enough to bound memory usage (~100 memories × ~2KB ≈ 200KB)
+/// but large enough to absorb transient RocksDB contention bursts.
+const WRITE_RETRY_BUFFER_CAPACITY: usize = 100;
+
 pub struct MemoryStorage {
     db: Arc<DB>,
     /// Base storage path for all memory data
     storage_path: PathBuf,
     /// Write mode (sync vs async) - affects latency vs durability tradeoff
     write_mode: WriteMode,
+    /// Bounded retry buffer for failed writes.
+    /// Memories that fail to store (transient RocksDB lock contention, disk pressure)
+    /// are queued here and retried on the next maintenance tick or successful store.
+    write_retry_buffer: parking_lot::Mutex<std::collections::VecDeque<Memory>>,
+    /// Counter of total write failures (for /api/health metrics)
+    write_failure_count: std::sync::atomic::AtomicU64,
 }
 
 impl MemoryStorage {
@@ -1107,6 +1118,8 @@ impl MemoryStorage {
             db,
             storage_path: path.to_path_buf(),
             write_mode,
+            write_retry_buffer: parking_lot::Mutex::new(std::collections::VecDeque::new()),
+            write_failure_count: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -1278,6 +1291,47 @@ impl MemoryStorage {
     /// For robotics/edge: Use async mode + periodic flush() calls for best latency.
     /// For compliance/critical: Set SHODH_WRITE_MODE=sync for full durability.
     pub fn store(&self, memory: &Memory) -> Result<()> {
+        // Opportunistically drain retry buffer on successful writes
+        self.drain_retry_buffer();
+
+        match self.store_inner(memory) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let err_str = e.to_string();
+                // Buffer transient failures (lock contention, disk pressure)
+                // but not serialization errors (those are permanent)
+                if err_str.contains("lock")
+                    || err_str.contains("LOCK")
+                    || err_str.contains("disk")
+                    || err_str.contains("space")
+                    || err_str.contains("I/O")
+                {
+                    self.write_failure_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let mut buffer = self.write_retry_buffer.lock();
+                    if buffer.len() < WRITE_RETRY_BUFFER_CAPACITY {
+                        tracing::warn!(
+                            memory_id = %memory.id.0,
+                            buffer_len = buffer.len() + 1,
+                            error = %e,
+                            "Write failed, buffered for retry"
+                        );
+                        buffer.push_back(memory.clone());
+                    } else {
+                        tracing::error!(
+                            memory_id = %memory.id.0,
+                            error = %e,
+                            "Write failed and retry buffer full — memory dropped"
+                        );
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Internal store implementation (two-phase commit with rollback)
+    fn store_inner(&self, memory: &Memory) -> Result<()> {
         let key = memory.id.0.as_bytes();
 
         // Serialize memory
@@ -1309,6 +1363,66 @@ impl MemoryStorage {
         }
 
         Ok(())
+    }
+
+    /// Drain the retry buffer, re-attempting failed writes.
+    /// Called opportunistically on every successful store() and explicitly
+    /// from the maintenance cycle.
+    pub fn drain_retry_buffer(&self) -> usize {
+        let mut buffer = self.write_retry_buffer.lock();
+        if buffer.is_empty() {
+            return 0;
+        }
+
+        let count = buffer.len();
+        let mut succeeded = 0;
+        let mut still_failing = std::collections::VecDeque::new();
+
+        for memory in buffer.drain(..) {
+            match self.store_inner(&memory) {
+                Ok(()) => {
+                    succeeded += 1;
+                    tracing::info!(
+                        memory_id = %memory.id.0,
+                        "Retried write succeeded"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        memory_id = %memory.id.0,
+                        error = %e,
+                        "Retry write still failing"
+                    );
+                    if still_failing.len() < WRITE_RETRY_BUFFER_CAPACITY {
+                        still_failing.push_back(memory);
+                    }
+                }
+            }
+        }
+
+        *buffer = still_failing;
+
+        if succeeded > 0 || !buffer.is_empty() {
+            tracing::info!(
+                "Write retry drain: {}/{} succeeded, {} still pending",
+                succeeded,
+                count,
+                buffer.len()
+            );
+        }
+
+        succeeded
+    }
+
+    /// Number of writes currently buffered for retry
+    pub fn pending_retry_count(&self) -> usize {
+        self.write_retry_buffer.lock().len()
+    }
+
+    /// Total number of write failures since server start
+    pub fn total_write_failures(&self) -> u64 {
+        self.write_failure_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Update secondary indices for efficient retrieval

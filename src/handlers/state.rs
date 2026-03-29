@@ -357,9 +357,29 @@ impl MultiUserMemoryManager {
         let max_cache = server_config.max_users_in_memory;
         let eviction_base_path = base_path.clone();
 
-        let user_memories = moka::sync::Cache::builder()
-            .max_capacity(server_config.max_users_in_memory as u64)
-            .time_to_idle(std::time::Duration::from_secs(3600))
+        // Configurable idle eviction timeout. Default: 0 (disabled).
+        // Single-user deployments (local Claude Code) should keep 0 — idle eviction
+        // causes persistent RocksDB lock contention when background tasks hold Arc
+        // references past the eviction point. Multi-user shared servers can set
+        // SHODH_CACHE_IDLE_SECS=3600 to reclaim memory from idle users.
+        let cache_idle_secs: u64 = std::env::var("SHODH_CACHE_IDLE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
+        let mut user_memories_builder =
+            moka::sync::Cache::builder().max_capacity(server_config.max_users_in_memory as u64);
+        if cache_idle_secs > 0 {
+            user_memories_builder =
+                user_memories_builder.time_to_idle(std::time::Duration::from_secs(cache_idle_secs));
+            info!(
+                "Cache idle eviction enabled: {}s (multi-user mode)",
+                cache_idle_secs
+            );
+        } else {
+            info!("Cache idle eviction disabled (single-user mode). Set SHODH_CACHE_IDLE_SECS to enable.");
+        }
+        let user_memories = user_memories_builder
             .eviction_listener(move |key: Arc<String>, value: Arc<parking_lot::RwLock<MemorySystem>>, cause| {
                 if matches!(cause, moka::notification::RemovalCause::Size | moka::notification::RemovalCause::Expired) {
                     evictions_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -414,9 +434,13 @@ impl MultiUserMemoryManager {
             })
             .build();
 
-        let graph_memories = moka::sync::Cache::builder()
-            .max_capacity(server_config.max_users_in_memory as u64)
-            .time_to_idle(std::time::Duration::from_secs(3600))
+        let mut graph_memories_builder =
+            moka::sync::Cache::builder().max_capacity(server_config.max_users_in_memory as u64);
+        if cache_idle_secs > 0 {
+            graph_memories_builder = graph_memories_builder
+                .time_to_idle(std::time::Duration::from_secs(cache_idle_secs));
+        }
+        let graph_memories = graph_memories_builder
             .eviction_listener(move |key: Arc<String>, _value, cause| {
                 let cause_label = if cause == moka::notification::RemovalCause::Expired {
                     "idle-timeout"
@@ -1534,6 +1558,20 @@ impl MultiUserMemoryManager {
                 }
             }
 
+            // Drain write retry buffer — re-attempt any failed writes from transient errors.
+            // Runs every cycle (not just heavy) since buffered memories are at risk of loss.
+            if let Ok(memory_lock) = self.get_user_memory(&user_id) {
+                let memory = memory_lock.read();
+                let retried = memory.drain_write_retries();
+                if retried > 0 {
+                    tracing::info!(
+                        user_id = %user_id,
+                        retried,
+                        "Drained write retry buffer"
+                    );
+                }
+            }
+
             // Direction 2: Lazy decay — flush opportunistic pruning queue
             // Instead of scanning all 34k+ edges (apply_decay), we queue edges found
             // below threshold during normal reads and batch-delete them here.
@@ -1633,6 +1671,36 @@ impl MultiUserMemoryManager {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // BM25 segment merge on heavy cycles — removes ghost state from upsert
+        // tombstones and reclaims disk space. Tantivy segments accumulate from
+        // per-memory commits; without periodic merging, search quality degrades
+        // and disk usage grows unboundedly.
+        if is_heavy {
+            let mut total_bm25_merged = 0usize;
+            for (user_id_arc, _) in self.user_memories.iter() {
+                let user_id = user_id_arc.as_ref();
+                if let Ok(memory_lock) = self.get_user_memory(user_id) {
+                    let memory = memory_lock.read();
+                    match memory.optimize_bm25() {
+                        Ok(merged) => total_bm25_merged += merged,
+                        Err(e) => {
+                            tracing::debug!(
+                                user_id = %user_id,
+                                error = %e,
+                                "BM25 optimize failed"
+                            );
+                        }
+                    }
+                }
+            }
+            if total_bm25_merged > 0 {
+                tracing::info!(
+                    "BM25 optimization: merged {} total segments across users",
+                    total_bm25_merged
+                );
             }
         }
 
@@ -1760,6 +1828,21 @@ impl MultiUserMemoryManager {
     /// Get users in cache count
     pub fn users_in_cache(&self) -> usize {
         self.user_memories.entry_count() as usize
+    }
+
+    /// Aggregate write failure metrics across all cached users.
+    /// Returns (total_failures, pending_retries).
+    pub fn write_failure_metrics(&self) -> (u64, usize) {
+        let mut total_failures = 0u64;
+        let mut total_pending = 0usize;
+        for (user_id, _) in self.user_memories.iter() {
+            if let Ok(memory_lock) = self.get_user_memory(user_id.as_ref()) {
+                let memory = memory_lock.read();
+                total_failures += memory.total_write_failures();
+                total_pending += memory.pending_write_retries();
+            }
+        }
+        (total_failures, total_pending)
     }
 
     /// Active reminder check: scan all users for due reminders, mark them triggered,

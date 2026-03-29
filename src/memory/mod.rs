@@ -4843,6 +4843,35 @@ impl MemorySystem {
     pub fn save_vector_index(&self, _path: &Path) -> Result<()> {
         self.retriever.save()
     }
+
+    /// Merge BM25 index segments to remove ghost state from overwrites.
+    /// Should be called during heavy maintenance cycles only (expensive operation).
+    /// Returns the number of segments merged (0 if already optimal).
+    pub fn optimize_bm25(&self) -> Result<usize> {
+        self.hybrid_search.optimize_bm25()
+    }
+
+    /// Drain the write retry buffer, re-attempting any failed stores.
+    /// Returns the number of successfully retried writes.
+    pub fn drain_write_retries(&self) -> usize {
+        self.long_term_memory.drain_retry_buffer()
+    }
+
+    /// Number of writes pending retry
+    pub fn pending_write_retries(&self) -> usize {
+        self.long_term_memory.pending_retry_count()
+    }
+
+    /// Total write failures since server start
+    pub fn total_write_failures(&self) -> u64 {
+        self.long_term_memory.total_write_failures()
+    }
+
+    /// Get BM25 segment count for health metrics
+    pub fn bm25_segment_count(&self) -> usize {
+        self.hybrid_search.bm25_segment_count()
+    }
+
     /// Get vector index health information
     ///
     /// Returns metrics about the Vamana index including total vectors,

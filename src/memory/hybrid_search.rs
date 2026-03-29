@@ -410,6 +410,61 @@ impl BM25Index {
         self.reader.reload()?;
         Ok(())
     }
+
+    /// Merge all segments into a single segment.
+    ///
+    /// Tantivy accumulates segments from commits. Deleted documents (from upserts)
+    /// remain as tombstones until segments are merged. Without periodic merging:
+    /// - Ghost state from overwrites pollutes BM25 scoring
+    /// - Disk usage grows unboundedly
+    /// - Search latency increases with segment count
+    ///
+    /// This is expensive (rewrites entire index) so should only run on heavy
+    /// maintenance cycles, not per-request.
+    pub fn optimize(&self) -> Result<usize> {
+        let segment_count = {
+            let searcher = self.reader.searcher();
+            searcher.segment_readers().len()
+        };
+
+        if segment_count <= 1 {
+            return Ok(0);
+        }
+
+        let mut writer = self.writer.write();
+
+        // Collect all segment IDs for merging
+        let segment_ids: Vec<_> = self
+            .index
+            .searchable_segment_ids()
+            .context("Failed to get segment IDs")?;
+
+        if segment_ids.len() <= 1 {
+            return Ok(0);
+        }
+
+        let merged = segment_ids.len();
+        writer
+            .merge(&segment_ids)
+            .wait()
+            .context("Failed to merge BM25 segments")?;
+        writer
+            .commit()
+            .context("Failed to commit after BM25 merge")?;
+        drop(writer);
+
+        self.reader.reload()?;
+
+        tracing::info!("BM25 index optimized: merged {} segments into 1", merged);
+
+        Ok(merged)
+    }
+
+    /// Get the current number of segments (for health/metrics)
+    pub fn segment_count(&self) -> usize {
+        let searcher = self.reader.searcher();
+        searcher.segment_readers().len()
+    }
 }
 
 /// Reciprocal Rank Fusion (RRF) implementation
@@ -529,6 +584,17 @@ impl HybridSearchEngine {
     pub fn commit_and_reload(&self) -> Result<()> {
         self.bm25_index.commit()?;
         self.bm25_index.reload()
+    }
+
+    /// Merge BM25 segments to remove ghost state and reclaim space.
+    /// Returns the number of segments merged (0 if already optimal).
+    pub fn optimize_bm25(&self) -> Result<usize> {
+        self.bm25_index.optimize()
+    }
+
+    /// Get BM25 segment count for health metrics
+    pub fn bm25_segment_count(&self) -> usize {
+        self.bm25_index.segment_count()
     }
 
     /// Get BM25 index reference for direct searches
