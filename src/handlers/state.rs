@@ -45,6 +45,26 @@ use super::types::{AuditEvent, ContextStatus, MemoryEvent};
 /// Type alias for context sessions map
 pub type ContextSessions = DashMap<String, ContextStatus>;
 
+/// Tracks habituation state for a single memory in proactive surfacing.
+///
+/// When a memory is surfaced by proactive_context but receives no positive
+/// feedback (the agent never references it), its surfacing count increases
+/// and a logarithmic penalty is applied. Positive feedback resets the count.
+/// This models neural habituation (Thompson & Spencer 1966).
+#[derive(Debug, Clone)]
+pub struct HabituationEntry {
+    /// Number of times surfaced without subsequent positive feedback
+    pub surfacings_without_utility: u32,
+    /// Last time this memory was surfaced
+    pub last_surfaced: chrono::DateTime<chrono::Utc>,
+    /// Last time positive feedback was received for this memory
+    pub last_utility: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Per-user habituation tracker for proactive_context.
+/// Outer key: user_id, inner key: memory UUID string.
+pub type HabituationTracker = DashMap<String, DashMap<String, HabituationEntry>>;
+
 /// Helper struct for audit log rotation (allows spawn_blocking with minimal clone)
 struct MultiUserMemoryManagerRotationHelper {
     shared_db: Arc<rocksdb::DB>,
@@ -255,6 +275,12 @@ pub struct MultiUserMemoryManager {
     /// Without this, each user's MemoryStorage + GraphMemory allocates ~96MB in
     /// independent caches — 6 users = 576MB just in block caches alone.
     shared_rocksdb_cache: rocksdb::Cache,
+
+    /// Per-user, per-memory habituation tracker for proactive_context.
+    /// Tracks how many times a memory was surfaced without positive feedback,
+    /// applying logarithmic decay to prevent pathological repeated intrusions.
+    /// See: Berntsen (2009), Thompson & Spencer (1966).
+    pub habituation_tracker: Arc<HabituationTracker>,
 }
 
 impl MultiUserMemoryManager {
@@ -549,6 +575,7 @@ impl MultiUserMemoryManager {
             user_memory_init_locks: DashMap::new(),
             user_graph_init_locks: DashMap::new(),
             shared_rocksdb_cache,
+            habituation_tracker: Arc::new(DashMap::new()),
         };
 
         info!("Running initial audit log rotation...");

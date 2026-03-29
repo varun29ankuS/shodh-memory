@@ -1920,6 +1920,78 @@ pub const TIER_RETRIEVAL_SUCCESS_BOOST: f32 = 0.25;
 /// Edges above 0.8 weight are considered "potentiated" and decay even slower.
 pub const TIER_LTP_THRESHOLD: f32 = 0.8;
 
+// === ADAPTIVE INVOLUNTARY MEMORY (Berntsen 2009) ===
+// Constraints that keep proactive_context adaptive rather than pathological.
+// proactive_context is an involuntary memory system — cue-driven surfacing
+// without explicit search. Without biological constraints, it degrades into
+// pathological intrusions (Ehlers & Clark 2000). These constants implement
+// the adaptive mechanisms from Berntsen's involuntary autobiographical memory
+// model: habituation, lateral inhibition, elaboration gating, and steep
+// recency gradients.
+
+/// Habituation decay factor for repeated surfacing without utility.
+///
+/// When a memory surfaces via proactive_context and receives no positive
+/// feedback (the agent never references it), its proactive retrieval weight
+/// decays logarithmically: penalty = factor * ln(1 + surfacings_without_utility).
+/// This mirrors neural habituation — repeated stimulation without reinforcement
+/// diminishes the response (Thompson & Spencer 1966).
+///
+/// 0.08 gives: 1 miss → -0.055, 3 misses → -0.111, 10 misses → -0.192
+///
+/// Reference: Thompson & Spencer (1966) "Habituation: A model phenomenon
+/// for the study of neuronal substrates of behavior"
+pub const HABITUATION_DECAY_FACTOR: f32 = 0.08;
+
+/// Maximum habituation penalty — prevents permanent suppression.
+///
+/// Biological habituation is never permanent; dishabituation occurs when
+/// context changes. The cap ensures memories can recover when context shifts.
+pub const HABITUATION_MAX_PENALTY: f32 = 0.4;
+
+/// Cosine similarity threshold for lateral inhibition between candidates.
+///
+/// When two surfaced memories are more similar than this threshold, the
+/// weaker one is suppressed — modeling lateral inhibition in neural
+/// pattern separation. Only the most distinctive match for each "region"
+/// of memory space survives.
+///
+/// 0.75 is high enough that genuinely different memories about the same
+/// topic survive, while near-duplicates and paraphrases suppress each other.
+///
+/// Reference: O'Reilly & McClelland (1994) "Hippocampal conjunctive encoding,
+/// storage, and recall: avoiding a trade-off"
+pub const LATERAL_INHIBITION_THRESHOLD: f32 = 0.75;
+
+/// Strength of lateral inhibition suppression.
+///
+/// When two candidates exceed the similarity threshold, the weaker one's
+/// score is reduced by: strength * similarity * (winner_score / loser_score).
+/// Higher values create more aggressive winner-take-all dynamics.
+pub const LATERAL_INHIBITION_STRENGTH: f32 = 0.3;
+
+/// Recency decay rate for proactive (involuntary) retrieval.
+///
+/// Involuntary memories show a steeper recency gradient than voluntary recall
+/// (Berntsen 2009, Ch. 6). proactive_context uses 0.03/hour vs the default
+/// 0.01/hour in semantic_retrieve, giving:
+///   - 50% boost remaining at ~23 hours (vs ~69 hours for voluntary)
+///   - 10% remaining at ~77 hours (vs ~230 hours for voluntary)
+///
+/// This ensures proactive surfacing strongly favors recent context while
+/// voluntary recall can still reach older memories when explicitly requested.
+///
+/// Reference: Berntsen (2009) "Involuntary Autobiographical Memories:
+/// An Introduction to the Unbidden Past", Ch. 6 (recency gradient)
+pub const PROACTIVE_RECENCY_DECAY_RATE: f32 = 0.03;
+
+/// Minimum elaboration quality factor for proactive surfacing.
+///
+/// Prevents zero-quality memories from being completely suppressed.
+/// Floor of 0.3 means even the shortest valid memories retain 30% of
+/// their score, while rich elaborated memories get full weight.
+pub const ELABORATION_QUALITY_MIN: f32 = 0.3;
+
 // =============================================================================
 // CONSTANTS USAGE DOCUMENTATION
 // =============================================================================
@@ -2061,5 +2133,15 @@ pub const TIER_LTP_THRESHOLD: f32 = 0.8;
 // |-------------------------------|---------------------------|-------------------------------------|
 // | HIGH_AROUSAL_THRESHOLD        | memory/pattern_detection.rs| check_salience_spike()             |
 // | PREFETCH_AROUSAL_THRESHOLD    | memory/retrieval.rs       | PrefetchContext::relevance_score() |
+//
+// ## Adaptive Involuntary Memory Constants (Berntsen 2009)
+// | Constant                      | File                      | Function/Context                    |
+// |-------------------------------|---------------------------|-------------------------------------|
+// | HABITUATION_DECAY_FACTOR      | handlers/recall.rs        | proactive_context() habituation     |
+// | HABITUATION_MAX_PENALTY       | handlers/recall.rs        | proactive_context() habituation cap |
+// | LATERAL_INHIBITION_THRESHOLD  | handlers/recall.rs        | proactive_context() pattern sep.    |
+// | LATERAL_INHIBITION_STRENGTH   | handlers/recall.rs        | proactive_context() inhibition      |
+// | PROACTIVE_RECENCY_DECAY_RATE  | handlers/recall.rs        | proactive_context() recency curve   |
+// | ELABORATION_QUALITY_MIN       | handlers/recall.rs        | proactive_context() quality gate    |
 //
 // =============================================================================
