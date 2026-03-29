@@ -2056,7 +2056,7 @@ impl AnticipatoryPrefetch {
             // Episode context: same episode = highly relevant
             if let Some(current_episode) = &context.episode_id {
                 if ctx.episode.episode_id.as_ref() == Some(current_episode) {
-                    score += 0.3; // Strong boost for same-episode memories
+                    score += crate::constants::SAME_EPISODE_BOOST;
                 }
             }
 

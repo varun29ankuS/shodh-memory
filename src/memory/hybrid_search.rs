@@ -29,7 +29,6 @@ use tracing::{debug, info};
 
 use super::types::MemoryId;
 use crate::embeddings::minilm::MiniLMEmbedder;
-use crate::embeddings::Embedder;
 
 /// Configuration for hybrid search
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,14 +55,6 @@ pub struct HybridSearchConfig {
     #[serde(default = "default_candidate_count")]
     pub candidate_count: usize,
 
-    /// Number of top results to rerank with cross-encoder
-    #[serde(default = "default_rerank_count")]
-    pub rerank_count: usize,
-
-    /// Whether to use cross-encoder reranking
-    #[serde(default = "default_use_reranking")]
-    pub use_reranking: bool,
-
     /// Minimum BM25 score to consider (filters noise)
     #[serde(default = "default_min_bm25_score")]
     pub min_bm25_score: f32,
@@ -88,12 +79,6 @@ fn default_rrf_k() -> f32 {
 fn default_candidate_count() -> usize {
     100 // Increased for better recall; slight latency tradeoff acceptable
 }
-fn default_rerank_count() -> usize {
-    20
-}
-fn default_use_reranking() -> bool {
-    false // Disabled: current implementation is bi-encoder, not true cross-encoder
-}
 fn default_min_bm25_score() -> f32 {
     0.01 // Lower threshold to capture more keyword matches
 }
@@ -109,8 +94,6 @@ impl Default for HybridSearchConfig {
             graph_weight: default_graph_weight(),
             rrf_k: default_rrf_k(),
             candidate_count: default_candidate_count(),
-            rerank_count: default_rerank_count(),
-            use_reranking: default_use_reranking(),
             min_bm25_score: default_min_bm25_score(),
             min_graph_score: default_min_graph_score(),
         }
@@ -135,11 +118,8 @@ pub struct HybridSearchResult {
     /// Graph activation score from spreading activation (if matched) (SHO-D4)
     pub graph_score: Option<f32>,
 
-    /// RRF score before reranking
+    /// RRF score before post-processing
     pub rrf_score: f32,
-
-    /// Cross-encoder score (if reranked)
-    pub rerank_score: Option<f32>,
 
     /// Rank from BM25 (if matched)
     pub bm25_rank: Option<usize>,
@@ -499,108 +479,24 @@ impl RRFusion {
     }
 }
 
-/// Cross-encoder reranker using the same MiniLM model
-///
-/// For true cross-encoder reranking, you'd use a model trained for
-/// query-document scoring (e.g., cross-encoder/ms-marco-MiniLM-L-6-v2).
-/// This implementation uses cosine similarity as a proxy, which works
-/// but isn't as accurate as a dedicated cross-encoder.
-///
-/// Future: Replace with actual cross-encoder model for better accuracy.
-pub struct CrossEncoderReranker {
-    embedder: Arc<MiniLMEmbedder>,
-}
-
-impl CrossEncoderReranker {
-    /// Create reranker with shared embedder
-    pub fn new(embedder: Arc<MiniLMEmbedder>) -> Self {
-        Self { embedder }
-    }
-
-    /// Rerank candidates based on query-document similarity
-    ///
-    /// Takes (memory_id, content, current_score) and returns reranked scores.
-    ///
-    /// Note: This uses bi-encoder (separate query/doc embeddings) not true
-    /// cross-encoder (joint query+doc encoding). True cross-encoders are
-    /// more accurate but slower. This is a reasonable approximation.
-    pub fn rerank(
-        &self,
-        query: &str,
-        candidates: Vec<(MemoryId, String, f32)>,
-    ) -> Result<Vec<(MemoryId, f32)>> {
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Encode query
-        let query_embedding = self.embedder.encode(query)?;
-
-        let mut results: Vec<(MemoryId, f32)> = Vec::with_capacity(candidates.len());
-
-        for (memory_id, content, _original_score) in candidates {
-            // Encode document
-            let doc_embedding = self.embedder.encode(&content)?;
-
-            // Cosine similarity
-            let similarity = cosine_similarity(&query_embedding, &doc_embedding);
-
-            results.push((memory_id, similarity));
-        }
-
-        // Sort by reranked score descending
-        results.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-        Ok(results)
-    }
-}
-
-/// Compute cosine similarity between two vectors
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-
-    dot / (norm_a * norm_b)
-}
-
 /// Unified hybrid search engine
 ///
-/// Combines BM25 + Vector + RRF + Cross-encoder + Cognitive signals
+/// Combines BM25 + Vector + RRF fusion + cognitive post-processing
 pub struct HybridSearchEngine {
     bm25_index: BM25Index,
     config: HybridSearchConfig,
-    reranker: Option<CrossEncoderReranker>,
 }
 
 impl HybridSearchEngine {
     /// Create hybrid search engine
     pub fn new(
         bm25_path: &Path,
-        embedder: Arc<MiniLMEmbedder>,
+        _embedder: Arc<MiniLMEmbedder>,
         config: HybridSearchConfig,
     ) -> Result<Self> {
         let bm25_index = BM25Index::new(bm25_path)?;
 
-        let reranker = if config.use_reranking {
-            Some(CrossEncoderReranker::new(embedder))
-        } else {
-            None
-        };
-
-        Ok(Self {
-            bm25_index,
-            config,
-            reranker,
-        })
+        Ok(Self { bm25_index, config })
     }
 
     /// Index a memory for BM25 search
@@ -733,7 +629,7 @@ impl HybridSearchEngine {
         &self,
         query: &str,
         vector_results: Vec<(MemoryId, f32)>,
-        get_content: F,
+        _get_content: F,
         term_weights: Option<&HashMap<String, f32>>,
         phrase_boosts: Option<&[(String, f32)]>,
         keyword_discriminativeness: Option<f32>,
@@ -811,113 +707,26 @@ impl HybridSearchEngine {
             .map(|(rank, (id, score))| (id.clone(), (*score, rank)))
             .collect();
 
-        // 3. Optional cross-encoder reranking
-        let final_results = if let Some(ref reranker) = self.reranker {
-            // Take top-k for reranking
-            let to_rerank: Vec<_> = fused
-                .iter()
-                .take(self.config.rerank_count)
-                .filter_map(|(id, _score)| {
-                    get_content(id).map(|content| (id.clone(), content, *_score))
-                })
-                .collect();
+        // 3. Build final results from RRF-fused scores
+        let final_results: Vec<HybridSearchResult> = fused
+            .into_iter()
+            .map(|(memory_id, rrf_score)| {
+                let bm25_info = bm25_map.get(&memory_id);
+                let vector_info = vector_map.get(&memory_id);
 
-            if !to_rerank.is_empty() {
-                let reranked = reranker.rerank(query, to_rerank)?;
-
-                // Build rerank map with cosine similarities (range [-1, 1])
-                let rerank_map: HashMap<MemoryId, f32> = reranked.into_iter().collect();
-
-                // Normalize rerank scores to [0, 1] for scale-compatible blending
-                // Cosine similarity ∈ [-1, 1] → shift to [0, 1]
-                let rerank_normalized: HashMap<MemoryId, f32> = rerank_map
-                    .iter()
-                    .map(|(id, s)| (id.clone(), (s + 1.0) / 2.0))
-                    .collect();
-
-                // Combine reranked results with non-reranked
-                // Blend: 0.6 * RRF + 0.4 * normalized_rerank (preserves RRF scale)
-                const RERANK_BLEND: f32 = 0.4;
-                let mut results: Vec<HybridSearchResult> = Vec::new();
-
-                for (memory_id, rrf_score) in fused {
-                    let bm25_info = bm25_map.get(&memory_id);
-                    let vector_info = vector_map.get(&memory_id);
-                    let rerank_score = rerank_map.get(&memory_id).copied();
-
-                    // Blend rerank with RRF to preserve score scale
-                    let final_score = if let Some(norm_rerank) =
-                        rerank_normalized.get(&memory_id).copied()
-                    {
-                        (1.0 - RERANK_BLEND) * rrf_score + RERANK_BLEND * norm_rerank * rrf_score
-                    } else {
-                        rrf_score
-                    };
-
-                    results.push(HybridSearchResult {
-                        memory_id,
-                        score: final_score,
-                        bm25_score: bm25_info.map(|(s, _)| *s),
-                        vector_score: vector_info.map(|(s, _)| *s),
-                        graph_score: None,
-                        rrf_score,
-                        rerank_score,
-                        bm25_rank: bm25_info.map(|(_, r)| *r),
-                        vector_rank: vector_info.map(|(_, r)| *r),
-                        graph_rank: None,
-                    });
+                HybridSearchResult {
+                    memory_id,
+                    score: rrf_score,
+                    bm25_score: bm25_info.map(|(s, _)| *s),
+                    vector_score: vector_info.map(|(s, _)| *s),
+                    graph_score: None,
+                    rrf_score,
+                    bm25_rank: bm25_info.map(|(_, r)| *r),
+                    vector_rank: vector_info.map(|(_, r)| *r),
+                    graph_rank: None,
                 }
-
-                // Re-sort by final score
-                results.sort_by(|a, b| b.score.total_cmp(&a.score));
-
-                results
-            } else {
-                // No content available for reranking, use RRF scores
-                fused
-                    .into_iter()
-                    .map(|(memory_id, rrf_score)| {
-                        let bm25_info = bm25_map.get(&memory_id);
-                        let vector_info = vector_map.get(&memory_id);
-
-                        HybridSearchResult {
-                            memory_id,
-                            score: rrf_score,
-                            bm25_score: bm25_info.map(|(s, _)| *s),
-                            vector_score: vector_info.map(|(s, _)| *s),
-                            graph_score: None,
-                            rrf_score,
-                            rerank_score: None,
-                            bm25_rank: bm25_info.map(|(_, r)| *r),
-                            vector_rank: vector_info.map(|(_, r)| *r),
-                            graph_rank: None,
-                        }
-                    })
-                    .collect()
-            }
-        } else {
-            // No reranking, use RRF scores directly
-            fused
-                .into_iter()
-                .map(|(memory_id, rrf_score)| {
-                    let bm25_info = bm25_map.get(&memory_id);
-                    let vector_info = vector_map.get(&memory_id);
-
-                    HybridSearchResult {
-                        memory_id,
-                        score: rrf_score,
-                        bm25_score: bm25_info.map(|(s, _)| *s),
-                        vector_score: vector_info.map(|(s, _)| *s),
-                        graph_score: None,
-                        rrf_score,
-                        rerank_score: None,
-                        bm25_rank: bm25_info.map(|(_, r)| *r),
-                        vector_rank: vector_info.map(|(_, r)| *r),
-                        graph_rank: None,
-                    }
-                })
-                .collect()
-        };
+            })
+            .collect();
 
         Ok(final_results)
     }
@@ -1044,19 +853,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cosine_similarity() {
-        let a = vec![1.0, 0.0, 0.0];
-        let b = vec![1.0, 0.0, 0.0];
-        assert!((cosine_similarity(&a, &b) - 1.0).abs() < 0.001);
-
-        let c = vec![0.0, 1.0, 0.0];
-        assert!((cosine_similarity(&a, &c) - 0.0).abs() < 0.001);
-
-        let d = vec![-1.0, 0.0, 0.0];
-        assert!((cosine_similarity(&a, &d) - (-1.0)).abs() < 0.001);
-    }
-
-    #[test]
     fn test_hybrid_config_defaults() {
         let config = HybridSearchConfig::default();
         assert_eq!(config.bm25_weight, 0.35); // BM25 for keyword matching
@@ -1064,8 +860,6 @@ mod tests {
         assert_eq!(config.graph_weight, 0.25); // Graph for associative retrieval (SHO-D4)
         assert_eq!(config.rrf_k, 45.0); // Lower k for top-rank emphasis
         assert_eq!(config.candidate_count, 100); // Increased for better recall
-        assert_eq!(config.rerank_count, 20);
-        assert!(!config.use_reranking); // Disabled: bi-encoder, not cross-encoder
         assert_eq!(config.min_graph_score, 0.01); // Graph score threshold (SHO-D4)
     }
 

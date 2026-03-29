@@ -987,6 +987,21 @@ pub const AROUSAL_BOOST_SCALE: f32 = 0.15;
 /// - Previously hardcoded as additive (credibility - 0.5) * 0.1
 pub const CREDIBILITY_BOOST_SCALE: f32 = 0.2;
 
+/// Same-episode boost — additive score for memories sharing the current episode
+///
+/// When the query specifies an episode_id and a candidate belongs to the same
+/// episode, this boost surfaces co-occurring memories from the same work session.
+///
+/// Justification:
+/// - 0.3 is an additive constant in the contextual scoring layer (not the RRF
+///   multiplicative pipeline), matching the scale of other additive adjustments
+///   in `apply_context_scoring` (credibility +0.05, mood congruence +0.1)
+/// - Episode membership is a strong relevance signal — co-occurring memories
+///   share causal/temporal context that semantic similarity alone cannot capture
+///
+/// Reference: Tulving (1983) "Elements of Episodic Memory" — encoding specificity
+pub const SAME_EPISODE_BOOST: f32 = 0.3;
+
 /// Temporal match boost — maximum multiplicative boost for temporal date matching
 ///
 /// Three tiers:
