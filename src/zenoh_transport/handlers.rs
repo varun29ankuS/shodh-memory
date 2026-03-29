@@ -716,15 +716,11 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
         }
     };
 
-    // Convert to response format
-    let total = memories.len();
+    // Convert to response format — preserve pipeline scores
     let recall_memories: Vec<RecallMemory> = memories
         .iter()
-        .enumerate()
-        .map(|(rank, m)| {
-            let rank_score = 1.0 - (rank as f32 / total.max(1) as f32);
-            let salience = m.salience_score_with_access();
-            let score = rank_score * 0.7 + salience * 0.3;
+        .map(|m| {
+            let score = m.score.unwrap_or_else(|| m.salience_score_with_access());
             RecallMemory {
                 id: m.id.0.to_string(),
                 experience: RecallExperience {

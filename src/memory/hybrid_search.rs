@@ -42,8 +42,9 @@ pub struct HybridSearchConfig {
     #[serde(default = "default_vector_weight")]
     pub vector_weight: f32,
 
-    /// Weight for graph (spreading activation) scores in RRF (0.0-1.0) (SHO-D4)
-    /// Graph weight is dynamic based on graph density and memory tier
+    /// DEPRECATED: Graph fusion happens in mod.rs Layer 4 (not in hybrid_search).
+    /// This field is kept for deserialization compatibility but is not used.
+    /// Actual graph weight is computed dynamically by graph_retrieval.rs based on density.
     #[serde(default = "default_graph_weight")]
     pub graph_weight: f32,
 

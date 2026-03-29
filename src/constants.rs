@@ -898,6 +898,157 @@ pub const RRF_K_HYBRID_FUSION: f32 = 45.0;
 pub const RRF_K_GRAPH_FUSION: f32 = 30.0;
 
 // =============================================================================
+// RETRIEVAL PIPELINE BOOST CONSTANTS
+// All boosts are multiplicative factors applied to the RRF-fused base score.
+// Multiplicative (not additive) prevents boosts from dwarfing the semantic
+// relevance signal computed by RRF fusion.
+//
+// Design: base_score × (1 + Σ boost_i) × feedback_multiplier
+// Each boost_i is small enough that the base score remains the dominant signal.
+// =============================================================================
+
+/// Attribute query boost — multiplicative factor for attribute-matching memories
+///
+/// When a memory matches both entity AND attribute synonyms for an attribute
+/// query (e.g., "What is Caroline's relationship status?"), multiply its score.
+///
+/// Justification:
+/// - Attribute matches are strong relevance signals (user is asking about a
+///   specific property), so we use a significant boost
+/// - 2.5x multiplier (1.0 + 1.5) keeps the base semantic score dominant while
+///   giving clear priority to attribute-matching memories
+/// - Previously hardcoded as additive 0.5 (31x RRF scale — overwhelming)
+///
+/// Reference: Attribute-value pair retrieval in knowledge-grounded QA systems
+pub const ATTRIBUTE_QUERY_BOOST: f32 = 1.5;
+
+/// Temporal fact boost — multiplicative factor for temporal fact source memories
+///
+/// When a temporal query matches a fact's temporal references, boost the
+/// source memory (e.g., "When did Melanie paint a sunrise?" boosts the memory
+/// that recorded the painting event).
+///
+/// Justification:
+/// - Temporal fact matches are high-confidence relevance signals
+/// - 2.0x multiplier (1.0 + 1.0) is strong but doesn't override semantic ranking
+/// - Previously hardcoded as additive 0.4 (25x RRF scale — overwhelming)
+///
+/// Reference: TEMPR temporal retrieval approach (multi-hop temporal reasoning)
+pub const TEMPORAL_FACT_BOOST: f32 = 1.0;
+
+/// Activation bonus scale — maximum contribution of graph spreading activation
+///
+/// ACT-R spreading activation provides a relevance signal from the knowledge
+/// graph topology. This constant scales the activation value (0-1) into a
+/// multiplicative boost on the base score.
+///
+/// Justification:
+/// - Graph activation is a complementary signal, not a primary one
+/// - 0.3 means a fully-activated memory gets 1.3x its base score
+/// - Scaled further by graph_w (density weight), so effective range is 0.03-0.15
+/// - Previously hardcoded as additive 0.2 * graph_w (up to 6x RRF scale)
+///
+/// Reference: Anderson & Lebiere (1998) ACT-R spreading activation theory
+pub const ACTIVATION_BONUS_SCALE: f32 = 0.3;
+
+/// Recency boost scale — maximum multiplicative boost for recent memories
+///
+/// Applied as: recency_boost = exp(-RECENCY_DECAY_RATE × hours) × scale
+/// This modulates base score rather than adding to it.
+///
+/// Justification:
+/// - 0.5 means a just-created memory gets up to 1.5x its base score
+/// - Decays exponentially: 24h ≈ 1.37x, 72h ≈ 1.24x, 168h ≈ 1.09x
+/// - Previously hardcoded as additive 0.1 (5x RRF scale — dominant signal)
+///
+/// Reference: Wixted (2004) exponential-power law forgetting curves
+pub const RECENCY_BOOST_SCALE: f32 = 0.5;
+
+/// Arousal boost scale — multiplicative weight for emotional arousal signal
+///
+/// High-arousal memories (errors, breakthroughs, critical decisions) should
+/// be more easily retrieved. Arousal is in [0, 1].
+///
+/// Justification:
+/// - 0.15 means max arousal gives 1.15x boost (modest but meaningful)
+/// - Previously hardcoded as additive 0.05 (3x RRF scale)
+///
+/// Reference: LaBar & Cabeza (2006) emotional arousal enhances memory retrieval
+pub const AROUSAL_BOOST_SCALE: f32 = 0.15;
+
+/// Credibility boost scale — multiplicative weight for source credibility
+///
+/// Applied only when credibility > 0.5 (above-average sources).
+/// Formula: (credibility - 0.5) × scale
+///
+/// Justification:
+/// - 0.2 means credibility=1.0 gives (0.5 × 0.2) = 0.1 → 1.1x boost
+/// - Modest: source credibility is a tiebreaker, not a ranking signal
+/// - Previously hardcoded as additive (credibility - 0.5) * 0.1
+pub const CREDIBILITY_BOOST_SCALE: f32 = 0.2;
+
+/// Temporal match boost — maximum multiplicative boost for temporal date matching
+///
+/// Three tiers:
+/// - Exact date match: TEMPORAL_MATCH_BOOST_EXACT
+/// - Within 7 days: linearly scaled
+/// - Within 30 days: smaller linearly scaled boost
+///
+/// Justification:
+/// - Exact temporal match is a very strong relevance signal for temporal queries
+/// - 1.5x for exact, decaying to 1.0x at 30 days
+/// - Previously hardcoded as additive 0.25/0.15/0.05 (16x/10x/3x RRF scale)
+///
+/// Reference: TEMPR multi-hop temporal retrieval
+pub const TEMPORAL_MATCH_BOOST_EXACT: f32 = 0.5;
+pub const TEMPORAL_MATCH_BOOST_WEEK: f32 = 0.3;
+pub const TEMPORAL_MATCH_BOOST_MONTH: f32 = 0.1;
+
+/// Prospective signal boost — per-match multiplicative factor for goal-relevant memories
+///
+/// Memories matching active goals/reminders get boosted to surface proactively.
+///
+/// Justification:
+/// - 0.25 per match, max 0.75 total → up to 1.75x boost
+/// - Previously hardcoded as additive 0.15 per match, max 0.5
+pub const PROSPECTIVE_BOOST_PER_MATCH: f32 = 0.25;
+pub const PROSPECTIVE_BOOST_MAX: f32 = 0.75;
+
+/// Hebbian association weight — contribution of learned graph associations
+///
+/// Scales the Hebbian boost from strengthened graph edges into the base score.
+///
+/// Justification:
+/// - 0.1 (10%) means graph associations are a modest supplement to RRF
+/// - Previously hardcoded as 0.1 (additive, but magnitude was correct given
+///   Hebbian scores are already in a small range)
+pub const HEBBIAN_ASSOCIATION_WEIGHT: f32 = 0.1;
+
+/// Importance scoring factor — how much importance modulates the retrieval score
+///
+/// Formula: importance_factor = SCORING_IMPORTANCE_FLOOR + importance × SCORING_IMPORTANCE_RANGE
+/// Range [0.7, 1.0]: low-importance memories lose up to 30% of base score.
+///
+/// Reference: Importance as a modulator of encoding strength (Craik & Lockhart 1972)
+pub const SCORING_IMPORTANCE_FLOOR: f32 = 0.7;
+pub const SCORING_IMPORTANCE_RANGE: f32 = 0.3;
+
+/// Feedback momentum range — symmetric ±15% multiplicative adjustment
+///
+/// Positive momentum (helpful) boosts up to 15%, negative (misleading) suppresses up to 15%.
+///
+/// Reference: Reinforcement learning in memory retrieval (Anderson & Bjork 1994)
+pub const FEEDBACK_MOMENTUM_SCALE: f32 = 0.15;
+
+/// Recency decay rate — exponential time constant for recency scoring
+///
+/// Formula: exp(-RECENCY_DECAY_RATE × hours_old)
+/// λ = 0.01 means ~50% at 70 hours, ~25% at 140 hours
+///
+/// Reference: Wixted (2004) time-based forgetting curves
+pub const RECENCY_DECAY_RATE: f32 = 0.01;
+
+// =============================================================================
 // EDGE-TIER TRUST WEIGHTS FOR SPREADING ACTIVATION
 // Based on hippocampal-cortical consolidation: edges that survive decay are
 // more reliable for graph traversal. Dense graphs (L1) are noisy for search,
@@ -1676,6 +1827,52 @@ pub const INTERFERENCE_VULNERABILITY_HOURS: i64 = 24;
 /// - Limits memory overhead
 pub const INTERFERENCE_MAX_TRACKED: usize = 10;
 
+/// Competition close-competitor threshold — ratio above which suppression fires
+///
+/// When two memories compete, suppression is applied only if the loser's score
+/// is within this ratio of the winner's score. Below this ratio, the memory
+/// is clearly weaker and passes through without suppression.
+///
+/// Justification:
+/// - 0.9 means only the top 10% competitive band triggers suppression
+/// - Below 0.9, the score gap is large enough that interference is minimal
+///
+/// Reference: Anderson & Bjork (1994) — retrieval-induced forgetting operates
+/// primarily on strong competitors, not weak ones
+pub const COMPETITION_CLOSE_RATIO: f32 = 0.9;
+
+/// Competition suppression multiplier — scales the suppression penalty
+///
+/// Formula: suppression = INTERFERENCE_COMPETITION_FACTOR × (1 - ratio) × COMPETITION_SUPPRESSION_SCALE
+///
+/// Justification:
+/// - 10.0 maps the tiny ratio gap (0.01-0.10) to meaningful suppression
+/// - With INTERFERENCE_COMPETITION_FACTOR=0.15: max suppression = 0.15 × 0.1 × 10 = 0.15
+pub const COMPETITION_SUPPRESSION_SCALE: f32 = 10.0;
+
+/// Minimum score for a suppressed memory to survive competition
+///
+/// If a memory's score falls below this after suppression, it is fully removed.
+/// Above this, it survives with a reduced score.
+pub const COMPETITION_SURVIVAL_FLOOR: f32 = 0.1;
+
+/// Interference damage scaling for close survivors vs fully suppressed
+///
+/// Close survivors (score > COMPETITION_SURVIVAL_FLOOR) record mild interference
+/// at this fraction of the full suppression amount. Fully suppressed memories
+/// record the full amount.
+pub const COMPETITION_SURVIVOR_DAMAGE_RATIO: f32 = 0.3;
+
+/// Connectivity factor divisor for replay candidate prioritization
+///
+/// Higher connectivity = more important for consolidation.
+/// Formula: 1.0 + (connections / divisor).min(max_boost)
+pub const REPLAY_CONNECTIVITY_DIVISOR: f32 = 10.0;
+pub const REPLAY_CONNECTIVITY_MAX_BOOST: f32 = 0.5;
+
+/// Minimum activation floor after interference decay
+pub const INTERFERENCE_ACTIVATION_FLOOR: f32 = 0.05;
+
 // =============================================================================
 // PATTERN-TRIGGERED REPLAY CONSTANTS (PIPE-2)
 // Based on hippocampal sharp-wave ripple research (Rasch & Born 2013)
@@ -2127,6 +2324,22 @@ pub const ELABORATION_QUALITY_MIN: f32 = 0.3;
 // |-------------------------------|---------------------------|-------------------------------------|
 // | RRF_K_HYBRID_FUSION           | memory/hybrid_search.rs   | search_with_dynamic_weights()       |
 // | RRF_K_GRAPH_FUSION            | memory/mod.rs             | semantic_retrieve() Layer 4         |
+// | ATTRIBUTE_QUERY_BOOST         | memory/mod.rs             | semantic_retrieve() Layer 4.5       |
+// | TEMPORAL_FACT_BOOST           | memory/mod.rs             | semantic_retrieve() Layer 4.55      |
+// | ACTIVATION_BONUS_SCALE        | memory/mod.rs             | semantic_retrieve() Layer 4 graph   |
+// | PROSPECTIVE_BOOST_PER_MATCH   | memory/mod.rs             | semantic_retrieve() Layer 4.7       |
+// | PROSPECTIVE_BOOST_MAX         | memory/mod.rs             | semantic_retrieve() Layer 4.7       |
+// | RECENCY_BOOST_SCALE           | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | RECENCY_DECAY_RATE            | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | AROUSAL_BOOST_SCALE           | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | CREDIBILITY_BOOST_SCALE       | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | TEMPORAL_MATCH_BOOST_EXACT    | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | TEMPORAL_MATCH_BOOST_WEEK     | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | TEMPORAL_MATCH_BOOST_MONTH    | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | HEBBIAN_ASSOCIATION_WEIGHT    | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | SCORING_IMPORTANCE_FLOOR      | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | SCORING_IMPORTANCE_RANGE      | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | FEEDBACK_MOMENTUM_SCALE       | memory/mod.rs             | semantic_retrieve() Layer 5         |
 //
 // ## Emotional Arousal Constants (LaBar & Cabeza 2006)
 // | Constant                      | File                      | Function/Context                    |
