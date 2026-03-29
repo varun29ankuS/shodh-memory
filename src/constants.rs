@@ -2261,6 +2261,28 @@ pub const LINEAGE_CONFIDENCE_BRANCHED_FROM: f32 = 0.9;
 /// Base confidence for RelatedTo relation (same-group fallback).
 pub const LINEAGE_CONFIDENCE_RELATED_TO: f32 = 0.5;
 
+/// Scale factor for propagating lineage confidence into graph edge weights.
+///
+/// When a causal lineage edge is inferred between two memories with confidence C,
+/// the corresponding graph edges between their entities are strengthened by
+/// C * LINEAGE_GRAPH_BOOST_SCALE. This bidirectionally couples the lineage system
+/// (explicit causal chains) with the knowledge graph (spreading activation), so
+/// causally-linked memories naturally co-activate during retrieval.
+///
+/// Conservative value: lineage inferences are probabilistic, so we attenuate the
+/// boost to prevent false causal links from dominating the graph topology.
+///
+/// Reference: Anderson (1983) "The Architecture of Cognition" — spreading activation
+/// strength should reflect the reliability of the association source.
+pub const LINEAGE_GRAPH_BOOST_SCALE: f32 = 0.15;
+
+/// Boost applied when a user explicitly confirms a lineage edge.
+///
+/// Confirmation is a strong signal — the user validated the causal relationship.
+/// This uses a higher boost than automatic inference to reward human-in-the-loop
+/// validation and make confirmed causal paths more prominent in retrieval.
+pub const LINEAGE_CONFIRM_GRAPH_BOOST: f32 = 0.3;
+
 // =============================================================================
 // CONSTANTS USAGE DOCUMENTATION
 // =============================================================================

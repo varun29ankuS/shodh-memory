@@ -3960,6 +3960,63 @@ impl GraphMemory {
         Ok((strengthened, promotion_boosts))
     }
 
+    /// Strengthen graph edges between two causally-linked memories.
+    ///
+    /// Resolves memory UUIDs to their entity_refs via EpisodicNodes, then strengthens
+    /// the cross-product of entity pairs. This couples the lineage system (explicit
+    /// causal chains) with the knowledge graph (spreading activation), so causally-linked
+    /// memories naturally co-activate during retrieval.
+    ///
+    /// Returns the number of entity-pair edges strengthened.
+    pub fn strengthen_lineage_connection(
+        &self,
+        from_memory_uuid: &Uuid,
+        to_memory_uuid: &Uuid,
+        boost: f32,
+    ) -> Result<usize> {
+        // Resolve entity_refs for both memories
+        let from_episode = self.get_episode(from_memory_uuid)?;
+        let to_episode = self.get_episode(to_memory_uuid)?;
+
+        let (from_entities, to_entities) = match (from_episode, to_episode) {
+            (Some(fe), Some(te)) if !fe.entity_refs.is_empty() && !te.entity_refs.is_empty() => {
+                (fe.entity_refs, te.entity_refs)
+            }
+            _ => return Ok(0),
+        };
+
+        // Build cross-product of entity pairs with lineage boost
+        let mut edge_boosts: Vec<(String, String, f32)> = Vec::new();
+        for from_entity in &from_entities {
+            for to_entity in &to_entities {
+                if from_entity != to_entity {
+                    edge_boosts.push((
+                        from_entity.to_string(),
+                        to_entity.to_string(),
+                        boost,
+                    ));
+                }
+            }
+        }
+
+        if edge_boosts.is_empty() {
+            return Ok(0);
+        }
+
+        let (strengthened, _promotions) = self.strengthen_memory_edges(&edge_boosts)?;
+
+        tracing::debug!(
+            from_memory = %&from_memory_uuid.to_string()[..8],
+            to_memory = %&to_memory_uuid.to_string()[..8],
+            entity_pairs = edge_boosts.len(),
+            strengthened,
+            boost,
+            "Lineage→graph edge strengthening"
+        );
+
+        Ok(strengthened)
+    }
+
     /// Find memories associated with a given memory through co-retrieval
     ///
     /// Uses weighted graph traversal prioritizing stronger associations.

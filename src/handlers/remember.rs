@@ -631,6 +631,33 @@ pub async fn remember(
                                 "Lineage inference: {} causal edges detected",
                                 edges.len()
                             );
+
+                            // Propagate lineage confidence into graph edge weights.
+                            // This couples causal chains with spreading activation so
+                            // causally-linked memories naturally co-activate in retrieval.
+                            let boost_scale = crate::constants::LINEAGE_GRAPH_BOOST_SCALE;
+                            let mut total_strengthened = 0usize;
+                            for edge in &edges {
+                                let boost = edge.confidence * boost_scale;
+                                match graph.strengthen_lineage_connection(
+                                    &edge.from.0,
+                                    &edge.to.0,
+                                    boost,
+                                ) {
+                                    Ok(n) => total_strengthened += n,
+                                    Err(e) => tracing::debug!(
+                                        "Lineage→graph strengthening failed (non-fatal): {}", e
+                                    ),
+                                }
+                            }
+                            if total_strengthened > 0 {
+                                tracing::debug!(
+                                    user_id = %uid,
+                                    lineage_edges = edges.len(),
+                                    graph_edges_strengthened = total_strengthened,
+                                    "Lineage→graph integration complete"
+                                );
+                            }
                         }
                         Ok(_) => {
                             tracing::debug!(
