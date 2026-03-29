@@ -12,7 +12,6 @@
 //! - `lineage:by_from:{user_id}:{from_id}:{edge_id}` - Index by source memory
 //! - `lineage:by_to:{user_id}:{to_id}:{edge_id}` - Index by target memory
 //! - `lineage:branches:{user_id}:{branch_id}` - Branch metadata
-//! - `lineage:branch_members:{user_id}:{branch_id}:{memory_id}` - Memories in branch
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -44,14 +43,19 @@ pub enum CausalRelation {
 }
 
 impl CausalRelation {
-    /// Get the inverse relation for bidirectional traversal
+    /// Get the inverse relation for bidirectional traversal.
+    ///
+    /// When edge A→B has relation R, traversing B→A should show R.inverse().
+    /// True pairs: Caused↔ResolvedBy. Directional relations (InformedBy,
+    /// TriggeredBy) are self-inverse because the from/to already encodes
+    /// directionality — "A informed-by B" reversed is "B informed A".
     pub fn inverse(&self) -> Self {
         match self {
             CausalRelation::Caused => CausalRelation::ResolvedBy,
             CausalRelation::ResolvedBy => CausalRelation::Caused,
-            CausalRelation::InformedBy => CausalRelation::TriggeredBy,
-            CausalRelation::SupersededBy => CausalRelation::SupersededBy, // symmetric conceptually
-            CausalRelation::TriggeredBy => CausalRelation::InformedBy,
+            CausalRelation::InformedBy => CausalRelation::InformedBy,
+            CausalRelation::TriggeredBy => CausalRelation::TriggeredBy,
+            CausalRelation::SupersededBy => CausalRelation::SupersededBy,
             CausalRelation::BranchedFrom => CausalRelation::BranchedFrom,
             CausalRelation::RelatedTo => CausalRelation::RelatedTo,
         }
@@ -545,7 +549,13 @@ impl LineageGraph {
         // Calculate entity overlap using experience.entities (tags)
         let overlap =
             Self::calculate_entity_overlap(&from.experience.entities, &to.experience.entities);
-        if overlap < self.config.min_entity_overlap {
+
+        // When both memories have entities, require minimum overlap.
+        // When either memory has no entities (NER failed or content too short),
+        // allow inference to proceed at reduced confidence via the overlap factor.
+        let has_entities =
+            !from.experience.entities.is_empty() && !to.experience.entities.is_empty();
+        if has_entities && overlap < self.config.min_entity_overlap {
             return None;
         }
 
@@ -555,10 +565,12 @@ impl LineageGraph {
             &to.experience.experience_type,
         )?;
 
-        // Adjust confidence based on entity overlap and temporal proximity
+        // Adjust confidence based on entity overlap and temporal proximity.
+        // When entities are absent, use a floor of 0.3 to avoid zeroing out confidence.
+        let effective_overlap = if has_entities { overlap } else { 0.3 };
         let temporal_factor =
             1.0 - (gap.num_days() as f32 / self.config.max_temporal_gap_days as f32);
-        let confidence = base_confidence * overlap * (0.5 + 0.5 * temporal_factor);
+        let confidence = base_confidence * effective_overlap * (0.5 + 0.5 * temporal_factor);
 
         Some((relation, confidence))
     }
@@ -726,23 +738,47 @@ impl LineageGraph {
         }
     }
 
-    /// Detect branch point from memory content (pivot language)
+    /// Detect branch point from memory content (pivot language).
+    ///
+    /// Uses strong phrase-level signals to avoid false positives from common words
+    /// like "actually" or "instead" which appear in normal discourse.
+    /// Requires either one strong signal or two weak signals to trigger.
     pub fn detect_branch_signal(content: &str) -> bool {
-        let pivot_signals = [
-            "actually",
-            "instead",
-            "pivot",
+        let content_lower = content.to_lowercase();
+
+        // Strong signals: unambiguous pivot language
+        let strong_signals = [
+            "pivot to",
             "change direction",
-            "new approach",
-            "scrap",
             "start fresh",
-            "rewrite",
-            "rethink",
+            "start over",
+            "complete rewrite",
+            "scrap this",
+            "scrap the",
             "different strategy",
+            "new strategy",
+            "abandon",
         ];
 
-        let content_lower = content.to_lowercase();
-        pivot_signals.iter().any(|s| content_lower.contains(s))
+        // Weak signals: common words that only indicate a pivot when combined
+        let weak_signals = [
+            "instead",
+            "new approach",
+            "rethink",
+            "rewrite",
+            "pivot",
+        ];
+
+        let strong_count = strong_signals
+            .iter()
+            .filter(|s| content_lower.contains(*s))
+            .count();
+        let weak_count = weak_signals
+            .iter()
+            .filter(|s| content_lower.contains(*s))
+            .count();
+
+        strong_count >= 1 || weak_count >= 2
     }
 
     // =========================================================================
@@ -813,12 +849,21 @@ impl LineageGraph {
     }
 
     /// Find the root cause of a memory (trace all the way back)
+    ///
+    /// Returns `None` if the memory has no ancestors (is itself a root).
     pub fn find_root_cause(&self, user_id: &str, memory_id: &MemoryId) -> Result<Option<MemoryId>> {
         let trace = self.trace(user_id, memory_id, TraceDirection::Backward, 100)?;
-        Ok(trace.path.last().cloned())
+        // path[0] is the starting memory — only return a root if we found ancestors
+        if trace.path.len() <= 1 {
+            Ok(None)
+        } else {
+            Ok(trace.path.last().cloned())
+        }
     }
 
     /// Find all effects of a memory (trace all the way forward)
+    ///
+    /// Returns effects only (excludes the starting memory itself).
     pub fn find_effects(
         &self,
         user_id: &str,
@@ -826,7 +871,8 @@ impl LineageGraph {
         max_depth: usize,
     ) -> Result<Vec<MemoryId>> {
         let trace = self.trace(user_id, memory_id, TraceDirection::Forward, max_depth)?;
-        Ok(trace.path)
+        // Skip the first element (the starting memory itself)
+        Ok(trace.path.into_iter().skip(1).collect())
     }
 
     // =========================================================================
@@ -872,9 +918,13 @@ impl LineageGraph {
     // STATISTICS
     // =========================================================================
 
-    /// Get lineage statistics for a user
+    /// Get lineage statistics for a user.
+    ///
+    /// Caps the scan at 10,000 edges. For users with more edges, the stats
+    /// will be approximate (counts capped, averages computed over the sample).
     pub fn stats(&self, user_id: &str) -> Result<LineageStats> {
-        let edges = self.list_edges(user_id, 10000)?;
+        const STATS_SCAN_LIMIT: usize = 10_000;
+        let edges = self.list_edges(user_id, STATS_SCAN_LIMIT)?;
         let branches = self.list_branches(user_id)?;
 
         let mut stats = LineageStats {

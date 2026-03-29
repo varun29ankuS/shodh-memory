@@ -3985,10 +3985,17 @@ impl GraphMemory {
             _ => return Ok(0),
         };
 
+        // Cap entity lists to prevent O(N^2) explosion on heavily-tagged memories.
+        // 8 × 8 = 64 pairs max, which is reasonable for a single lineage edge.
+        const MAX_ENTITIES_PER_SIDE: usize = 8;
+        let from_capped = &from_entities[..from_entities.len().min(MAX_ENTITIES_PER_SIDE)];
+        let to_capped = &to_entities[..to_entities.len().min(MAX_ENTITIES_PER_SIDE)];
+
         // Build cross-product of entity pairs with lineage boost
-        let mut edge_boosts: Vec<(String, String, f32)> = Vec::new();
-        for from_entity in &from_entities {
-            for to_entity in &to_entities {
+        let mut edge_boosts: Vec<(String, String, f32)> =
+            Vec::with_capacity(from_capped.len() * to_capped.len());
+        for from_entity in from_capped {
+            for to_entity in to_capped {
                 if from_entity != to_entity {
                     edge_boosts.push((
                         from_entity.to_string(),

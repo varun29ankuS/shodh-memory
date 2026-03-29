@@ -111,7 +111,7 @@ pub async fn lineage_trace(
     let user_id = req.user_id.clone();
     let memory_id_str = req.memory_id.clone();
     let direction = req.direction.clone();
-    let max_depth = req.max_depth;
+    let max_depth = req.max_depth.min(100);
 
     let trace = tokio::task::spawn_blocking(move || {
         let memory_guard = memory.read();
@@ -286,7 +286,13 @@ pub async fn lineage_add_edge(
             "SupersededBy" => CausalRelation::SupersededBy,
             "TriggeredBy" => CausalRelation::TriggeredBy,
             "BranchedFrom" => CausalRelation::BranchedFrom,
-            _ => CausalRelation::RelatedTo,
+            "RelatedTo" => CausalRelation::RelatedTo,
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Unknown relation type: '{}'. Valid: Caused, ResolvedBy, InformedBy, SupersededBy, TriggeredBy, BranchedFrom, RelatedTo",
+                    other
+                ));
+            }
         };
         memory_guard
             .lineage_graph()
