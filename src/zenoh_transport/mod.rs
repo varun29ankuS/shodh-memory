@@ -280,6 +280,7 @@ async fn register_forget_subscriber(
         .map_err(|e| anyhow::anyhow!("Failed to declare forget subscriber: {e}"))?;
 
     let mgr = Arc::clone(manager);
+    let prefix_owned = prefix.to_string();
 
     tokio::spawn(async move {
         loop {
@@ -291,8 +292,9 @@ async fn register_forget_subscriber(
                                 continue;
                             }
                             let mgr = Arc::clone(&mgr);
+                            let pfx = prefix_owned.clone();
                             tokio::spawn(async move {
-                                handlers::handle_forget(sample, mgr).await;
+                                handlers::handle_forget(sample, mgr, &pfx).await;
                             });
                         }
                         Err(e) => {
@@ -477,14 +479,24 @@ async fn register_recall_queryable(
                 query = queryable.recv_async() => {
                     match query {
                         Ok(query) => {
-                            if let Some(payload) = query.payload() {
-                                if !handlers::authenticate_payload(payload, api_key.as_deref()) {
-                                    let err = serde_json::json!({"error": "Unauthorized", "success": false});
+                            match query.payload() {
+                                Some(payload) => {
+                                    if !handlers::authenticate_payload(payload, api_key.as_deref()) {
+                                        let err = serde_json::json!({"error": "Unauthorized", "success": false});
+                                        if let Ok(bytes) = serde_json::to_vec(&err) {
+                                            let _ = query.reply(query.key_expr(), bytes).await;
+                                        }
+                                        continue;
+                                    }
+                                }
+                                None if api_key.is_some() => {
+                                    let err = serde_json::json!({"error": "Unauthorized: payload required when API key is configured", "success": false});
                                     if let Ok(bytes) = serde_json::to_vec(&err) {
                                         let _ = query.reply(query.key_expr(), bytes).await;
                                     }
                                     continue;
                                 }
+                                None => {} // No auth configured, pass through
                             }
                             let mgr = Arc::clone(&mgr);
                             tokio::spawn(async move {

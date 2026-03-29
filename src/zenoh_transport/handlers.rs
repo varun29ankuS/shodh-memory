@@ -431,6 +431,7 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
     let agent_id = req.agent_id.clone();
     let run_id = req.run_id.clone();
     let created_at = req.created_at;
+    let created_at_for_facts = created_at.unwrap_or_else(chrono::Utc::now);
 
     let memory_id = match tokio::task::spawn_blocking(move || {
         let guard = memory_clone.read();
@@ -593,7 +594,7 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
             let uid = user_id.clone();
             let content = experience.content.clone();
             let entities = experience.entities.clone();
-            let created_at = chrono::Utc::now();
+            let created_at = created_at_for_facts;
             let _ = tokio::task::spawn_blocking(move || {
                 let guard = mem.read();
                 guard.store_temporal_facts_for_memory(&uid, &mid, &content, &entities, created_at)
@@ -850,6 +851,8 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
         Some(facts.len())
     };
 
+    let has_recall_memories = !recall_memories.is_empty();
+
     let response = RecallResponse {
         memories: recall_memories,
         count: total,
@@ -878,7 +881,7 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
 
     // Store PendingFeedback so subsequent remember() calls with action+reward
     // can attribute outcomes to the memories we just surfaced.
-    if !recall_memories.is_empty() {
+    if has_recall_memories {
         let memory_for_embed = memory.clone();
         let query_for_embed = query_text.clone();
         let user_id_for_fb = user_id.clone();
@@ -933,7 +936,7 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
 /// Handle a Zenoh DELETE/PUT on `{prefix}/{user_id}/forget`.
 ///
 /// Payload: `{ "memory_id": "uuid-string" }` or `{ "id": "uuid-string" }`
-pub async fn handle_forget(sample: Sample, manager: Arc<MultiUserMemoryManager>) {
+pub async fn handle_forget(sample: Sample, manager: Arc<MultiUserMemoryManager>, prefix: &str) {
     #[derive(serde::Deserialize)]
     struct ForgetRequest {
         #[serde(default)]
@@ -952,11 +955,11 @@ pub async fn handle_forget(sample: Sample, manager: Arc<MultiUserMemoryManager>)
         }
     };
 
-    // Extract user_id from key expression or payload
+    // Extract user_id from payload, falling back to key expression: {prefix}/{user_id}/forget
     let user_id = req.user_id.unwrap_or_else(|| {
-        // Try to extract from key expr: shodh/{user_id}/forget
-        // This will be the fallback since we parsed from payload first
-        String::new()
+        extract_user_id(&key, prefix)
+            .map(|s| s.to_string())
+            .unwrap_or_default()
     });
 
     if user_id.is_empty() {
