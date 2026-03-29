@@ -2182,8 +2182,10 @@ impl MemorySystem {
 
                 // Multiplicative activation bonus (ACT-R style spreading activation)
                 // Scaled by graph_w: trust activation more when graph is sparse/mature
-                let activation_factor =
-                    1.0 + graph_w * crate::constants::ACTIVATION_BONUS_SCALE * activation.clamp(0.0, 1.0);
+                let activation_factor = 1.0
+                    + graph_w
+                        * crate::constants::ACTIVATION_BONUS_SCALE
+                        * activation.clamp(0.0, 1.0);
                 *fused.get_mut(id).unwrap() *= activation_factor;
             }
 
@@ -2477,7 +2479,8 @@ impl MemorySystem {
         for (memory_id, score) in memory_ids {
             // Hebbian boost from learned graph weights (multiplicative)
             let hebbian_boost = hebbian_scores.get(&memory_id).copied().unwrap_or(0.0);
-            let base_score = score * (1.0 + hebbian_boost * crate::constants::HEBBIAN_ASSOCIATION_WEIGHT);
+            let base_score =
+                score * (1.0 + hebbian_boost * crate::constants::HEBBIAN_ASSOCIATION_WEIGHT);
 
             // Helper to apply unified scoring (all multiplicative on base score)
             let recency_scale_override = query.recency_weight;
@@ -2507,34 +2510,33 @@ impl MemorySystem {
                     .unwrap_or(0.0);
 
                 // TEMPORAL MATCH (TEMPR approach for multi-hop temporal retrieval)
-                let temporal_factor = if has_temporal_query
-                    && !mem.experience.temporal_refs.is_empty()
-                {
-                    let mut best_match = 0.0_f32;
-                    for mem_ref in &mem.experience.temporal_refs {
-                        for query_ref in &query_temporal.refs {
-                            if mem_ref == &query_ref.date.to_string() {
-                                best_match = best_match.max(TEMPORAL_MATCH_BOOST_EXACT);
-                            } else if let Ok(mem_date) =
-                                chrono::NaiveDate::parse_from_str(mem_ref, "%Y-%m-%d")
-                            {
-                                let days_diff = (mem_date - query_ref.date).num_days().abs();
-                                if days_diff <= 7 {
-                                    let proximity =
-                                        TEMPORAL_MATCH_BOOST_WEEK * (1.0 - days_diff as f32 / 7.0);
-                                    best_match = best_match.max(proximity);
-                                } else if days_diff <= 30 {
-                                    let proximity =
-                                        TEMPORAL_MATCH_BOOST_MONTH * (1.0 - days_diff as f32 / 30.0);
-                                    best_match = best_match.max(proximity);
+                let temporal_factor =
+                    if has_temporal_query && !mem.experience.temporal_refs.is_empty() {
+                        let mut best_match = 0.0_f32;
+                        for mem_ref in &mem.experience.temporal_refs {
+                            for query_ref in &query_temporal.refs {
+                                if mem_ref == &query_ref.date.to_string() {
+                                    best_match = best_match.max(TEMPORAL_MATCH_BOOST_EXACT);
+                                } else if let Ok(mem_date) =
+                                    chrono::NaiveDate::parse_from_str(mem_ref, "%Y-%m-%d")
+                                {
+                                    let days_diff = (mem_date - query_ref.date).num_days().abs();
+                                    if days_diff <= 7 {
+                                        let proximity = TEMPORAL_MATCH_BOOST_WEEK
+                                            * (1.0 - days_diff as f32 / 7.0);
+                                        best_match = best_match.max(proximity);
+                                    } else if days_diff <= 30 {
+                                        let proximity = TEMPORAL_MATCH_BOOST_MONTH
+                                            * (1.0 - days_diff as f32 / 30.0);
+                                        best_match = best_match.max(proximity);
+                                    }
                                 }
                             }
                         }
-                    }
-                    best_match
-                } else {
-                    0.0
-                };
+                        best_match
+                    } else {
+                        0.0
+                    };
 
                 // FEEDBACK MOMENTUM (PIPE-9)
                 // Symmetric ±15% multiplicative adjustment
@@ -2554,13 +2556,15 @@ impl MemorySystem {
                 };
 
                 // Importance: scale base score by learned importance (7 factors)
-                let importance_factor = SCORING_IMPORTANCE_FLOOR + mem.importance() * SCORING_IMPORTANCE_RANGE;
+                let importance_factor =
+                    SCORING_IMPORTANCE_FLOOR + mem.importance() * SCORING_IMPORTANCE_RANGE;
 
                 // Unified multiplicative scoring:
                 // base × importance × (1 + recency + arousal + credibility + temporal) × feedback
                 // All boost factors are additive within the parenthetical, then multiplicative
                 // on the base. This preserves RRF ranking while allowing signals to modulate.
-                let combined_boost = 1.0 + recency_factor + arousal_factor + credibility_factor + temporal_factor;
+                let combined_boost =
+                    1.0 + recency_factor + arousal_factor + credibility_factor + temporal_factor;
                 let final_score = base * importance_factor * combined_boost * feedback_multiplier;
 
                 let mut cloned: Memory = mem.as_ref().clone();
