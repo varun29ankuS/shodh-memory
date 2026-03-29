@@ -223,6 +223,9 @@ pub struct UpsertRequest {
     pub changed_by: Option<String>,
     #[serde(default)]
     pub change_reason: Option<String>,
+    /// Optional importance override (0.0-1.0). When provided, bypasses auto-calculation.
+    #[serde(default)]
+    pub importance: Option<f32>,
 }
 
 fn default_change_type() -> String {

@@ -1748,6 +1748,16 @@ pub async fn proactive_context(
                                     "assistant-response".to_string(),
                                     "auto-captured".to_string(),
                                 ],
+                                context: super::remember::build_rich_context(
+                                    None,
+                                    None,
+                                    None,
+                                    Some("ai_generated".to_string()),
+                                    Some(0.6),
+                                    None,
+                                    None,
+                                    None,
+                                ),
                                 ..Default::default()
                             };
                             let _ = memory_guard.remember(experience, None);
@@ -1808,6 +1818,16 @@ pub async fn proactive_context(
                         experience_type: segment.experience_type,
                         entities: segment.entities,
                         tags: vec!["auto-captured".to_string()],
+                        context: super::remember::build_rich_context(
+                            None,
+                            None,
+                            None,
+                            Some("user".to_string()),
+                            Some(0.9),
+                            None,
+                            None,
+                            None,
+                        ),
                         ..Default::default()
                     };
                     if let Ok(id) = memory_guard.remember(experience, None) {

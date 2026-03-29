@@ -598,7 +598,9 @@ impl MemorySystem {
         mut experience: Experience,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<MemoryId> {
-        let importance = self.calculate_importance(&experience);
+        let importance = experience
+            .importance_override
+            .unwrap_or_else(|| self.calculate_importance(&experience));
 
         // Generate embedding if not provided
         if experience.embeddings.is_none() {
@@ -661,7 +663,9 @@ impl MemorySystem {
         let memory_id = MemoryId(Uuid::new_v4());
 
         // Calculate importance
-        let importance = self.calculate_importance(&experience);
+        let importance = experience
+            .importance_override
+            .unwrap_or_else(|| self.calculate_importance(&experience));
 
         // PERFORMANCE: Content embedding cache (80ms → <1μs for repeated content)
         // If experience doesn't have embeddings, check cache or generate
@@ -1004,7 +1008,9 @@ impl MemorySystem {
         let memory_id = MemoryId(Uuid::new_v4());
 
         // Calculate importance
-        let importance = self.calculate_importance(&experience);
+        let importance = experience
+            .importance_override
+            .unwrap_or_else(|| self.calculate_importance(&experience));
 
         // PERFORMANCE: Content embedding cache
         if experience.embeddings.is_none() {
@@ -5410,7 +5416,9 @@ impl MemorySystem {
         } else {
             // === CREATE PATH ===
             let memory_id = MemoryId(Uuid::new_v4());
-            let importance = self.calculate_importance(&experience);
+            let importance = experience
+                .importance_override
+                .unwrap_or_else(|| self.calculate_importance(&experience));
 
             // Generate embeddings if not provided
             if experience.embeddings.is_none() {

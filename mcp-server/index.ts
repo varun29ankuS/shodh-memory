@@ -620,6 +620,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Parent memory ID for hierarchical organization. Creates memory trees (e.g., '71-research' -> 'algebraic' -> '21×27≡-1')",
             },
+            importance: {
+              type: "number",
+              description: "Optional importance override (0.0-1.0). Bypasses auto-calculation. Use for memories where importance is known: Decision=0.8, Learning=0.7, Error=0.7, Discovery=0.6, Observation=0.3",
+            },
           },
           required: ["content"],
         },
@@ -1423,6 +1427,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           preceding_memory_id,
           // Hierarchy
           parent_id,
+          // Importance override
+          importance,
         } = args as {
           content: string;
           type?: string;
@@ -1437,6 +1443,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sequence_number?: number;
           preceding_memory_id?: string;
           parent_id?: string;
+          importance?: number;
         };
 
         if (!content || content.length === 0) {
@@ -1463,6 +1470,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...(preceding_memory_id && { preceding_memory_id }),
           // Hierarchy
           ...(parent_id && { parent_id }),
+          // Importance override
+          ...(importance !== undefined && { importance }),
         });
 
         // Format response with branded display
