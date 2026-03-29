@@ -269,7 +269,6 @@ pub fn build_rich_context(
         episode_id,
         sequence_number,
         preceding_memory_id,
-        is_episode_start: sequence_number == Some(1),
         ..Default::default()
     };
 

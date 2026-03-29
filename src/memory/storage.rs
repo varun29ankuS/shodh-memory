@@ -1364,7 +1364,9 @@ impl MemoryStorage {
 
                 // Also index by sequence within episode for temporal ordering
                 if let Some(seq) = ctx.episode.sequence_number {
-                    let seq_key = format!("episode_seq:{}:{}:{}", episode_id, seq, memory.id.0);
+                    // Zero-pad sequence number for correct lexicographic ordering in RocksDB
+                    // Without padding: 1, 10, 100, 2, 20... With {:010}: 0000000001, 0000000002...
+                    let seq_key = format!("episode_seq:{}:{:010}:{}", episode_id, seq, memory.id.0);
                     batch.put_cf(idx, seq_key.as_bytes(), b"1");
                 }
             }
@@ -1636,7 +1638,7 @@ impl MemoryStorage {
                 batch.delete_cf(idx, episode_key.as_bytes());
 
                 if let Some(seq) = ctx.episode.sequence_number {
-                    let seq_key = format!("episode_seq:{}:{}:{}", episode_id, seq, id.0);
+                    let seq_key = format!("episode_seq:{}:{:010}:{}", episode_id, seq, id.0);
                     batch.delete_cf(idx, seq_key.as_bytes());
                 }
             }

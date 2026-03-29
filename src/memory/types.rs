@@ -510,14 +510,6 @@ pub struct EpisodeContext {
     #[serde(default)]
     pub episode_start: Option<DateTime<Utc>>,
 
-    /// Is this the first memory in the episode?
-    #[serde(default)]
-    pub is_episode_start: bool,
-
-    /// Is this the last memory in the episode?
-    #[serde(default)]
-    pub is_episode_end: bool,
-
     /// Parent episode (for hierarchical episodes)
     /// E.g., a conversation within a larger task session
     #[serde(default)]

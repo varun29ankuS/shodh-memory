@@ -76,8 +76,7 @@ pub use crate::memory::graph_retrieval::{
     calculate_density_weights, spreading_activation_retrieve, ActivatedMemory,
 };
 pub use crate::memory::hybrid_search::{
-    BM25Index, CrossEncoderReranker, HybridSearchConfig, HybridSearchEngine, HybridSearchResult,
-    RRFusion,
+    BM25Index, HybridSearchConfig, HybridSearchEngine, HybridSearchResult, RRFusion,
 };
 pub use crate::memory::introspection::{
     AssociationChange, ConsolidationEvent, ConsolidationEventBuffer, ConsolidationReport,
