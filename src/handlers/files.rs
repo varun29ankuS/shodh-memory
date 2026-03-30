@@ -192,17 +192,36 @@ pub async fn scan_project_codebase(
         });
     }
 
-    let canonical_path = codebase_path.canonicalize().map_err(|e| AppError::InvalidInput {
-        field: "codebase_path".to_string(),
-        reason: format!("Invalid path: {}", e),
-    })?;
+    let canonical_path = codebase_path
+        .canonicalize()
+        .map_err(|e| AppError::InvalidInput {
+            field: "codebase_path".to_string(),
+            reason: format!("Invalid path: {}", e),
+        })?;
 
     let path_str = canonical_path.to_string_lossy().replace('\\', "/");
     let blocked_prefixes = [
-        "/etc", "/bin", "/usr", "/sys", "/proc", "/dev", "/boot", "/lib", "/opt", "/sbin", "/root", "C:/Windows", "C:/Program Files"
+        "/etc",
+        "/bin",
+        "/usr",
+        "/sys",
+        "/proc",
+        "/dev",
+        "/boot",
+        "/lib",
+        "/opt",
+        "/sbin",
+        "/root",
+        "C:/Windows",
+        "C:/Program Files",
     ];
 
-    if path_str == "/" || path_str == "C:/" || blocked_prefixes.iter().any(|&prefix| path_str.starts_with(prefix)) {
+    if path_str == "/"
+        || path_str == "C:/"
+        || blocked_prefixes
+            .iter()
+            .any(|&prefix| path_str.starts_with(prefix))
+    {
         return Err(AppError::InvalidInput {
             field: "codebase_path".to_string(),
             reason: "Access to system directories is blocked for security reasons".to_string(),
@@ -288,17 +307,36 @@ pub async fn index_project_codebase(
         });
     }
 
-    let canonical_path = codebase_path.canonicalize().map_err(|e| AppError::InvalidInput {
-        field: "codebase_path".to_string(),
-        reason: format!("Invalid path: {}", e),
-    })?;
+    let canonical_path = codebase_path
+        .canonicalize()
+        .map_err(|e| AppError::InvalidInput {
+            field: "codebase_path".to_string(),
+            reason: format!("Invalid path: {}", e),
+        })?;
 
     let path_str = canonical_path.to_string_lossy().replace('\\', "/");
     let blocked_prefixes = [
-        "/etc", "/bin", "/usr", "/sys", "/proc", "/dev", "/boot", "/lib", "/opt", "/sbin", "/root", "C:/Windows", "C:/Program Files"
+        "/etc",
+        "/bin",
+        "/usr",
+        "/sys",
+        "/proc",
+        "/dev",
+        "/boot",
+        "/lib",
+        "/opt",
+        "/sbin",
+        "/root",
+        "C:/Windows",
+        "C:/Program Files",
     ];
 
-    if path_str == "/" || path_str == "C:/" || blocked_prefixes.iter().any(|&prefix| path_str.starts_with(prefix)) {
+    if path_str == "/"
+        || path_str == "C:/"
+        || blocked_prefixes
+            .iter()
+            .any(|&prefix| path_str.starts_with(prefix))
+    {
         return Err(AppError::InvalidInput {
             field: "codebase_path".to_string(),
             reason: "Access to system directories is blocked for security reasons".to_string(),
