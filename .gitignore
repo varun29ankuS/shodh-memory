@@ -103,3 +103,10 @@ pitch-deck-stata.md
 shodh-market.csv
 benchmarks/locomo_test2.json
 seps/mcp-sep-mif.md
+
+# Session data and generated artifacts
+sessions/
+memory/
+graph.gexf
+doc-to-lora/
+tui/Cargo.lock
