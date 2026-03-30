@@ -358,11 +358,12 @@ pub async fn remember(
         req.preceding_memory_id.clone(),
     );
 
+    let original_tags = req.tags.clone();
     let experience = Experience {
         content: req.content.clone(),
         experience_type,
-        entities: merged_entities.clone(),
-        tags: merged_entities,
+        entities: merged_entities,          // tags + YAKE → BM25 index
+        tags: original_tags,                // original tags only → graph metadata
         context,
         ner_entities,
         ..Default::default()
@@ -733,11 +734,12 @@ pub async fn batch_remember(
             item.preceding_memory_id.clone(),
         );
 
+        let original_tags = item.tags.clone();
         let experience = Experience {
             content: item.content,
             experience_type,
-            entities: merged_entities.clone(),
-            tags: merged_entities,
+            entities: merged_entities,          // tags + YAKE → BM25 index
+            tags: original_tags,                // original tags only → graph metadata
             context,
             ner_entities: ner_records,
             ..Default::default()
@@ -889,11 +891,12 @@ pub async fn upsert_memory(
         merged_entities.truncate(validation::MAX_ENTITIES_PER_MEMORY);
     }
 
+    let original_tags = req.tags.clone();
     let experience = Experience {
         content: req.content.clone(),
         experience_type,
-        entities: merged_entities.clone(),
-        tags: merged_entities,
+        entities: merged_entities,          // tags + YAKE → BM25 index
+        tags: original_tags,                // original tags only → graph metadata
         ner_entities,
         ..Default::default()
     };
