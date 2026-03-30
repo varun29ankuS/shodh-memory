@@ -844,9 +844,7 @@ impl FeedbackWindow {
         Self {
             user_id,
             turn_counter: 0,
-            entries: VecDeque::with_capacity(
-                crate::constants::FEEDBACK_WINDOW_SIZE + 1,
-            ),
+            entries: VecDeque::with_capacity(crate::constants::FEEDBACK_WINDOW_SIZE + 1),
             window_size: crate::constants::FEEDBACK_WINDOW_SIZE,
             created_at: now,
             last_turn_at: now,
@@ -903,9 +901,7 @@ impl FeedbackWindow {
             if sim > 0.5 {
                 sustained_turns += 1;
             } else {
-                if sustained_turns >= crate::constants::SESSION_COMPLETION_MIN_TURNS
-                    && sim < 0.3
-                {
+                if sustained_turns >= crate::constants::SESSION_COMPLETION_MIN_TURNS && sim < 0.3 {
                     return Some(SessionOutcome::TaskCompletion {
                         turns_engaged: sustained_turns,
                         final_similarity: sim,
@@ -1922,11 +1918,7 @@ impl FeedbackStore {
     ///
     /// Returns memory IDs from any evicted entry (for caller to know which
     /// memories received their final credit).
-    pub fn push_window_entry(
-        &mut self,
-        user_id: &str,
-        entry: WindowEntry,
-    ) -> Vec<MemoryId> {
+    pub fn push_window_entry(&mut self, user_id: &str, entry: WindowEntry) -> Vec<MemoryId> {
         let window = self.get_or_create_window(user_id);
         window.turn_counter = entry.turn_number + 1;
         window.last_turn_at = entry.surfaced_at;
