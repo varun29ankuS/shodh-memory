@@ -2205,6 +2205,76 @@ pub const PROACTIVE_RECENCY_DECAY_RATE: f32 = 0.03;
 pub const ELABORATION_QUALITY_MIN: f32 = 0.3;
 
 // =============================================================================
+// TEMPORAL CREDIT ASSIGNMENT CONSTANTS
+// Multi-turn feedback attribution with exponential discounting.
+//
+// When memories are surfaced at turn T, they receive discounted credit from
+// signals at turns T+1 through T+W. This models delayed utility: a memory
+// surfaced early in a session may guide actions several turns later.
+//
+// Reference: Sutton & Barto (2018) "Reinforcement Learning", Ch. 7 (n-step TD)
+// =============================================================================
+
+/// Temporal discount factor (gamma) for multi-turn credit assignment.
+///
+/// credit(memory, turn) = signal(turn) * gamma^(turn - surfaced_turn)
+///
+/// At gamma = 0.7:
+///   T+1: 0.70, T+2: 0.49, T+3: 0.34, T+4: 0.24, T+5: 0.17
+///
+/// After 5 turns, 83% of total credit has been assigned.
+///
+/// Reference: Sutton (1988) "Learning to Predict by the Methods of Temporal Differences"
+pub const TEMPORAL_DISCOUNT_GAMMA: f32 = 0.70;
+
+/// Maximum turns in the feedback window.
+///
+/// Memories older than this stop accumulating credit.
+/// 5 turns covers ~90% of useful attribution (gamma^5 = 0.17).
+/// Memory overhead: ~5 entries × ~20 memories × ~500 bytes ≈ 50KB/user.
+pub const FEEDBACK_WINDOW_SIZE: usize = 5;
+
+/// Session gap threshold in seconds.
+///
+/// If time between proactive_context calls exceeds this, the window is
+/// flushed and a new session starts. 30 minutes matches standard web
+/// analytics session definitions (Google Analytics).
+pub const FEEDBACK_SESSION_GAP_SECS: i64 = 1800;
+
+/// Minimum turns of sustained engagement to detect task completion.
+///
+/// When the user has >= this many turns on the same topic (cosine > 0.5)
+/// followed by a topic change (cosine < 0.3), all window memories get
+/// a session-level completion boost.
+pub const SESSION_COMPLETION_MIN_TURNS: u32 = 3;
+
+/// Session-level completion boost for all window memories.
+///
+/// Applied once per detected task completion. Conservative at 0.15 to
+/// avoid overwhelming per-turn signals (range -1.0 to +1.0).
+pub const SESSION_COMPLETION_BOOST: f32 = 0.15;
+
+/// Session-level abandonment penalty for recent memories.
+///
+/// Applied to memories in the last 2 window entries when abandonment
+/// is detected. Mild at -0.10 because abandonment is ambiguous (user
+/// may have been interrupted, not dissatisfied).
+pub const SESSION_ABANDONMENT_PENALTY: f32 = -0.10;
+
+/// Re-engagement boost for topic return.
+///
+/// When a user returns to a topic after a gap, memories from the original
+/// topic receive this boost — they were worth returning to. Stronger
+/// than completion boost because re-engagement is a clearer utility signal.
+pub const SESSION_REENGAGEMENT_BOOST: f32 = 0.20;
+
+/// Minimum cumulative discounted attribution to trigger a momentum update.
+///
+/// Deferred credits below this are silently discarded to prevent noise
+/// from micro-signals polluting the momentum EMA.
+pub const TEMPORAL_CREDIT_MIN_THRESHOLD: f32 = 0.02;
+
+// =============================================================================
 // CAUSAL LINEAGE CONSTANTS (SHO-118)
 // Lineage inference detects causal relationships between memories using
 // temporal proximity, entity overlap, and memory type patterns.
@@ -2450,5 +2520,17 @@ pub const LINEAGE_CONFIRM_GRAPH_BOOST: f32 = 0.3;
 // | LATERAL_INHIBITION_STRENGTH   | handlers/recall.rs        | proactive_context() inhibition      |
 // | PROACTIVE_RECENCY_DECAY_RATE  | handlers/recall.rs        | proactive_context() recency curve   |
 // | ELABORATION_QUALITY_MIN       | handlers/recall.rs        | proactive_context() quality gate    |
+//
+// ## Temporal Credit Assignment Constants (Sutton & Barto 2018)
+// | Constant                      | File                      | Function/Context                    |
+// |-------------------------------|---------------------------|-------------------------------------|
+// | TEMPORAL_DISCOUNT_GAMMA       | handlers/recall.rs        | proactive_context() multi-turn TD   |
+// | FEEDBACK_WINDOW_SIZE          | memory/feedback.rs        | FeedbackWindow sliding window       |
+// | FEEDBACK_SESSION_GAP_SECS     | memory/feedback.rs        | Session boundary detection          |
+// | SESSION_COMPLETION_MIN_TURNS  | memory/feedback.rs        | Task completion detection            |
+// | SESSION_COMPLETION_BOOST      | memory/feedback.rs        | Session-level positive signal        |
+// | SESSION_ABANDONMENT_PENALTY   | memory/feedback.rs        | Session-level negative signal        |
+// | SESSION_REENGAGEMENT_BOOST    | memory/feedback.rs        | Topic return detection               |
+// | TEMPORAL_CREDIT_MIN_THRESHOLD | memory/feedback.rs        | Deferred credit noise filter         |
 //
 // =============================================================================

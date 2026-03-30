@@ -2271,6 +2271,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           relevant_facts: ProactiveFact[];
           latency_ms: number;
           detected_entities: DetectedEntityInfo[];
+          temporal_credits_applied: number | null;
         }
 
         // Clean system scaffolding from context — AI clients pass full conversation
@@ -2319,8 +2320,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const feedbackNote = result.feedback_processed
             ? `\n[Feedback: ${result.feedback_processed.memories_evaluated} evaluated, ${result.feedback_processed.reinforced.length} reinforced, ${result.feedback_processed.weakened.length} weakened]`
             : '';
+          const temporalNote = result.temporal_credits_applied
+            ? `\n[Temporal credits: ${result.temporal_credits_applied} multi-turn signals applied]`
+            : '';
 
-          const emptyText = `No relevant memories surfaced for this context.${entityList}${feedbackNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms]`;
+          const emptyText = `No relevant memories surfaced for this context.${entityList}${feedbackNote}${temporalNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms]`;
           lastProactiveResponse = emptyText;
 
           return {
@@ -2450,6 +2454,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const feedbackNote = result.feedback_processed
           ? `\n[Feedback loop: ${result.feedback_processed.memories_evaluated} evaluated, ${result.feedback_processed.reinforced.length} reinforced, ${result.feedback_processed.weakened.length} weakened]`
           : '';
+        const temporalNote = result.temporal_credits_applied
+          ? `\n[Temporal credits: ${result.temporal_credits_applied} multi-turn signals applied]`
+          : '';
 
         // Ingestion confirmation
         const ingestNote = result.ingested_memory_id
@@ -2464,7 +2471,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (result.reminder_count > 0) summaryParts.push(`${result.reminder_count} reminders`);
         const summary = summaryParts.length > 0 ? `Surfaced ${summaryParts.join(', ')}` : 'No relevant context found';
 
-        const responseText = `${temporalHeader}${summary}:\n\n${formattedWithTime}${entitySummary}${factsBlock}${reminderBlock}${todoBlock}${feedbackNote}${ingestNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`;
+        const responseText = `${temporalHeader}${summary}:\n\n${formattedWithTime}${entitySummary}${factsBlock}${reminderBlock}${todoBlock}${feedbackNote}${temporalNote}${ingestNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`;
 
         // Store clean semantic content for implicit feedback on next call.
         // Strip display formatting (emoji borders, latency markers, entity summaries)
