@@ -263,6 +263,9 @@ pub struct ProactiveContextResponse {
     /// Entities detected in the query context
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detected_entities: Vec<DetectedEntityInfo>,
+    /// Number of temporal credits applied from multi-turn feedback window
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temporal_credits_applied: Option<u32>,
 }
 
 // =============================================================================
@@ -906,6 +909,7 @@ pub async fn proactive_context(
             relevant_facts: Vec::new(),
             latency_ms: 0.0,
             detected_entities: Vec::new(),
+            temporal_credits_applied: None,
         }));
     }
 
@@ -927,6 +931,7 @@ pub async fn proactive_context(
     );
 
     // 0. Process pending feedback if previous_response is provided
+    let mut temporal_credits_total: u32 = 0;
     let feedback_processed = if let Some(ref prev_response) = req.previous_response {
         let feedback_store = state.feedback_store.clone();
         let user_id_for_feedback = req.user_id.clone();
@@ -940,9 +945,11 @@ pub async fn proactive_context(
         //   Phase 1: Take pending + detect context pattern (write lock, <1ms)
         //   Phase 2: Compute embedding + signals (NO lock, 10-30ms)
         //   Phase 3: Apply momentum updates + flush (write lock, <5ms)
-        let (result, helpful_ids, misleading_ids) = tokio::task::spawn_blocking(move || {
-            // Phase 1: Extract pending data under brief write lock
-            let (pending, context_pattern) = {
+        let (result, helpful_ids, misleading_ids, temporal_credits_count) = tokio::task::spawn_blocking(move || {
+            // Phase 1: Extract pending data under brief write lock.
+            // Also push the taken pending into the FeedbackWindow as a historical
+            // entry for multi-turn temporal credit assignment (Issue #125).
+            let (pending, context_pattern, window_entries, current_turn) = {
                 let mut store = feedback_store.write();
                 let pending = store.take_pending(&user_id_for_feedback).map(|mut p| {
                     // Attach tool actions from current request to previous pending.
@@ -959,7 +966,28 @@ pub async fn proactive_context(
                     }
                     store.detect_context_pattern(&user_id_for_feedback, &p.context_embedding)
                 });
-                (pending, context_pattern)
+
+                // Push the consumed pending into the window as a historical entry.
+                // This entry is now eligible for multi-turn credit from future turns.
+                if let Some(ref p) = pending {
+                    let window = store.get_or_create_window(&user_id_for_feedback);
+                    let turn_number = window.turn_counter;
+                    let entry = feedback::WindowEntry {
+                        turn_number,
+                        surfaced_memories: p.surfaced_memories.clone(),
+                        surfaced_at: p.surfaced_at,
+                        context_embedding: p.context_embedding.clone(),
+                        context_preview: p.context.chars().take(200).collect(),
+                        tool_actions: p.tool_actions.clone(),
+                    };
+                    store.push_window_entry(&user_id_for_feedback, entry);
+                }
+
+                // Snapshot window entries for Phase 2 (computed without lock)
+                let window_entries = store.snapshot_window_entries(&user_id_for_feedback);
+                let current_turn = store.window_turn_counter(&user_id_for_feedback);
+
+                (pending, context_pattern, window_entries, current_turn)
                 // write lock released here
             };
 
@@ -1002,6 +1030,71 @@ pub async fn proactive_context(
                         .collect();
                 let context_embedding = pending.context_embedding.clone();
 
+                // Phase 2b: Compute temporally discounted signals for older window entries.
+                // The most recent window entry was just pushed in Phase 1 (it IS the taken
+                // pending), so we skip it — it was already processed above as the immediate
+                // signal. We process entries 0..N-1 (older turns).
+                let mut deferred_credits: Vec<(MemoryId, feedback::DeferredCredit)> = Vec::new();
+                let gamma = crate::constants::TEMPORAL_DISCOUNT_GAMMA;
+
+                if window_entries.len() > 1 {
+                    // Iterate all entries except the last one (which is the just-pushed pending)
+                    for entry in window_entries.iter().take(window_entries.len().saturating_sub(1)) {
+                        let turns_elapsed = current_turn.saturating_sub(entry.turn_number);
+                        if turns_elapsed == 0 {
+                            continue;
+                        }
+
+                        let discount = gamma.powi(turns_elapsed as i32);
+                        if discount < 0.05 {
+                            continue; // Below meaningful contribution
+                        }
+
+                        // Build a synthetic PendingFeedback from the window entry
+                        // to reuse existing signal computation
+                        let synthetic_pending = feedback::PendingFeedback::new(
+                            user_id_for_feedback.clone(),
+                            entry.context_preview.clone(),
+                            entry.context_embedding.clone(),
+                            entry.surfaced_memories.clone(),
+                        );
+
+                        let window_signals = feedback::process_implicit_feedback_with_semantics(
+                            &synthetic_pending,
+                            &response_text,
+                            None, // No followup for historical entries
+                            response_embedding.as_deref(),
+                        );
+
+                        for (memory_id, signal) in window_signals {
+                            let discounted_value = signal.value * discount;
+                            if discounted_value.abs() >= crate::constants::TEMPORAL_CREDIT_MIN_THRESHOLD {
+                                deferred_credits.push((
+                                    memory_id,
+                                    feedback::DeferredCredit {
+                                        raw_signal: signal.value,
+                                        confidence: signal.confidence,
+                                        trigger: signal.trigger,
+                                        turns_elapsed,
+                                        discounted_value,
+                                        computed_at: chrono::Utc::now(),
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Detect session-level outcomes from the window
+                let session_outcome = if window_entries.len() >= 2 {
+                    // Build a temporary window to detect outcomes
+                    let mut temp_window = feedback::FeedbackWindow::new(user_id_for_feedback.clone());
+                    temp_window.entries = window_entries.into_iter().collect();
+                    temp_window.detect_session_outcome()
+                } else {
+                    None
+                };
+
                 // Classify signals before acquiring lock
                 let mut reinforced = Vec::new();
                 let mut weakened = Vec::new();
@@ -1019,8 +1112,11 @@ pub async fn proactive_context(
                     .collect();
 
                 // Phase 3: Apply momentum updates under brief write lock
+                let temporal_credits_count;
                 {
                     let mut store = feedback_store.write();
+
+                    // 3a: Apply immediate signals (same as before)
                     for (memory_id, signal, is_helpful, is_misleading) in &classified {
                         let momentum = store.get_or_create_momentum(
                             memory_id.clone(),
@@ -1053,6 +1149,125 @@ pub async fn proactive_context(
                         store.mark_dirty(memory_id);
                     }
 
+                    // 3b: Accumulate deferred credits from multi-turn window
+                    temporal_credits_count = deferred_credits.len();
+                    for (memory_id, credit) in deferred_credits {
+                        store.accumulate_deferred_credit(
+                            &user_id_for_feedback,
+                            &memory_id,
+                            credit,
+                        );
+                    }
+
+                    // 3c: Apply session-level outcome signals
+                    if let Some(ref outcome) = session_outcome {
+                        match outcome {
+                            feedback::SessionOutcome::TaskCompletion { turns_engaged, .. } => {
+                                // Boost all memories in window
+                                let window = store.get_or_create_window(&user_id_for_feedback);
+                                let all_ids = window.all_memory_ids();
+                                for id in all_ids {
+                                    let credit = feedback::DeferredCredit {
+                                        raw_signal: crate::constants::SESSION_COMPLETION_BOOST,
+                                        confidence: 0.7,
+                                        trigger: feedback::SignalTrigger::TopicChange {
+                                            similarity: 0.0,
+                                        },
+                                        turns_elapsed: 0,
+                                        discounted_value: crate::constants::SESSION_COMPLETION_BOOST,
+                                        computed_at: chrono::Utc::now(),
+                                    };
+                                    store.accumulate_deferred_credit(
+                                        &user_id_for_feedback,
+                                        &id,
+                                        credit,
+                                    );
+                                }
+                                tracing::info!(
+                                    user_id = %user_id_for_feedback,
+                                    turns = turns_engaged,
+                                    "Session outcome: task completion detected, boosting window memories"
+                                );
+                            }
+                            feedback::SessionOutcome::Abandonment { gap_seconds, frustration_detected } => {
+                                // Penalize last 2 entries
+                                let window = store.get_or_create_window(&user_id_for_feedback);
+                                let recent_ids: Vec<MemoryId> = window.entries
+                                    .iter()
+                                    .rev()
+                                    .take(2)
+                                    .flat_map(|e| e.surfaced_memories.iter().map(|m| m.id.clone()))
+                                    .collect();
+                                for id in recent_ids {
+                                    let credit = feedback::DeferredCredit {
+                                        raw_signal: crate::constants::SESSION_ABANDONMENT_PENALTY,
+                                        confidence: 0.5,
+                                        trigger: feedback::SignalTrigger::Ignored {
+                                            overlap_ratio: 0.0,
+                                        },
+                                        turns_elapsed: 0,
+                                        discounted_value: crate::constants::SESSION_ABANDONMENT_PENALTY,
+                                        computed_at: chrono::Utc::now(),
+                                    };
+                                    store.accumulate_deferred_credit(
+                                        &user_id_for_feedback,
+                                        &id,
+                                        credit,
+                                    );
+                                }
+                                tracing::info!(
+                                    user_id = %user_id_for_feedback,
+                                    gap_seconds,
+                                    frustration_detected,
+                                    "Session outcome: abandonment detected, penalizing recent memories"
+                                );
+                            }
+                            feedback::SessionOutcome::ReEngagement { gap_turns, topic_similarity } => {
+                                // Boost memories from the first entry (re-engaged topic)
+                                let window = store.get_or_create_window(&user_id_for_feedback);
+                                if let Some(first) = window.entries.front() {
+                                    let topic_ids: Vec<MemoryId> = first
+                                        .surfaced_memories
+                                        .iter()
+                                        .map(|m| m.id.clone())
+                                        .collect();
+                                    for id in topic_ids {
+                                        let credit = feedback::DeferredCredit {
+                                            raw_signal: crate::constants::SESSION_REENGAGEMENT_BOOST,
+                                            confidence: 0.75,
+                                            trigger: feedback::SignalTrigger::TopicChange {
+                                                similarity: *topic_similarity,
+                                            },
+                                            turns_elapsed: *gap_turns,
+                                            discounted_value: crate::constants::SESSION_REENGAGEMENT_BOOST,
+                                            computed_at: chrono::Utc::now(),
+                                        };
+                                        store.accumulate_deferred_credit(
+                                            &user_id_for_feedback,
+                                            &id,
+                                            credit,
+                                        );
+                                    }
+                                }
+                                tracing::info!(
+                                    user_id = %user_id_for_feedback,
+                                    gap_turns,
+                                    topic_similarity,
+                                    "Session outcome: re-engagement detected, boosting original topic memories"
+                                );
+                            }
+                            feedback::SessionOutcome::NaturalEnd => {}
+                        }
+                    }
+
+                    if temporal_credits_count > 0 {
+                        tracing::debug!(
+                            user_id = %user_id_for_feedback,
+                            credits = temporal_credits_count,
+                            "Accumulated temporal deferred credits from multi-turn window"
+                        );
+                    }
+
                     if let Err(e) = store.flush() {
                         tracing::warn!("Failed to flush feedback store: {}", e);
                     }
@@ -1064,13 +1279,15 @@ pub async fn proactive_context(
                     reinforced,
                     weakened,
                 };
-                (Some(result), helpful_ids, misleading_ids)
+                (Some(result), helpful_ids, misleading_ids, temporal_credits_count)
             } else {
-                (None, Vec::new(), Vec::new())
+                (None, Vec::new(), Vec::new(), 0usize)
             }
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Feedback task panicked: {e}")))?;
+
+        temporal_credits_total = temporal_credits_count as u32;
 
         // Apply reinforcement to memory system, graph, AND retrieval weights
         if !helpful_ids.is_empty() || !misleading_ids.is_empty() {
@@ -2271,6 +2488,11 @@ pub async fn proactive_context(
         relevant_facts,
         latency_ms,
         detected_entities,
+        temporal_credits_applied: if temporal_credits_total > 0 {
+            Some(temporal_credits_total)
+        } else {
+            None
+        },
     }))
 }
 
