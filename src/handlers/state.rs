@@ -10,18 +10,6 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 use tracing::info;
 
-/// Static regex for extracting all-caps terms (API, TUI, NER, REST, etc.)
-fn allcaps_regex() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"\b[A-Z]{2,}[A-Z0-9]*\b").unwrap())
-}
-
-/// Static regex for extracting issue IDs (SHO-XX, JIRA-123, etc.)
-fn issue_regex() -> &'static regex::Regex {
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"\b([A-Z]{2,10}-\d+)\b").unwrap())
-}
-
 use crate::ab_testing;
 use crate::backup;
 use crate::config::ServerConfig;
@@ -1901,287 +1889,59 @@ impl MultiUserMemoryManager {
 
         let now = chrono::Utc::now();
 
-        // Stop words for filtering
-        let stop_words: std::collections::HashSet<&str> = [
-            "the", "and", "for", "that", "this", "with", "from", "have", "been", "are", "was",
-            "were", "will", "would", "could", "should", "may", "might",
-        ]
-        .iter()
-        .cloned()
-        .collect();
+        // 1. Run new Extractor
+        let extractor = crate::extraction::Extractor::new(None, vec![], crate::extraction::ExtractionConfig::default());
+        // Note: issue IDs would ideally come from API fields per spec, passing empty for now
+        let mut extraction_result = extractor.extract(&experience.content, &experience.tags, &[]);
 
-        // Use pre-extracted NER records for proper entity labels when available
-        // This avoids redundant NER inference — the handler already ran NER in Pass 1
-        let extracted_entities = if !experience.ner_entities.is_empty() {
-            tracing::debug!(
-                "Using {} pre-extracted NER entities from handler",
-                experience.ner_entities.len()
-            );
-            experience
-                .ner_entities
-                .iter()
-                .map(|record| crate::embeddings::ner::NerEntity {
-                    text: record.text.clone(),
-                    entity_type: match record.entity_type.as_str() {
-                        "PER" => NerEntityType::Person,
-                        "ORG" => NerEntityType::Organization,
-                        "LOC" => NerEntityType::Location,
-                        _ => NerEntityType::Misc,
-                    },
-                    confidence: record.confidence,
-                    start: record.start_char.unwrap_or(0),
-                    end: record.end_char.unwrap_or(record.text.len()),
-                })
-                .collect()
-        } else if !experience.entities.is_empty() {
-            tracing::debug!(
-                "Using {} pre-extracted entity names (no NER types available)",
-                experience.entities.len()
-            );
-            experience
-                .entities
-                .iter()
-                .map(|name| crate::embeddings::ner::NerEntity {
-                    text: name.clone(),
-                    entity_type: NerEntityType::Misc,
-                    confidence: 0.8,
-                    start: 0,
-                    end: name.len(),
-                })
-                .collect()
-        } else {
-            match self.neural_ner.extract(&experience.content) {
-                Ok(entities) => {
-                    tracing::debug!(
-                        "NER extracted {} entities: {:?}",
-                        entities.len(),
-                        entities.iter().map(|e| e.text.as_str()).collect::<Vec<_>>()
-                    );
-                    entities
-                }
-                Err(e) => {
-                    tracing::debug!("NER extraction failed: {}. Continuing without entities.", e);
-                    Vec::new()
-                }
-            }
-        };
-
-        // Filter noise entities
-        let filtered_entities: Vec<_> = extracted_entities
-            .into_iter()
-            .filter(|e| {
-                let name = e.text.trim();
-                if name.len() < 3 {
-                    return false;
-                }
-                if !name.chars().any(|c| c.is_uppercase()) && e.confidence < 0.7 {
-                    return false;
-                }
-                if stop_words.contains(name.to_lowercase().as_str()) {
-                    return false;
-                }
-                if name.len() < 5 && e.confidence < 0.8 {
-                    return false;
-                }
-                true
-            })
+        // 2. Metadata cap & selection
+        let mut metadata_entities: Vec<_> = extraction_result.entities.iter()
+            .filter(|e| e.source == crate::extraction::ExtractionSource::Metadata)
+            .cloned()
             .collect();
+        // Simple cap for metadata
+        metadata_entities.truncate(10); // max_metadata_entities default
+        let metadata_count = metadata_entities.len();
 
-        tracing::debug!(
-            "After filtering: {} entities: {:?}",
-            filtered_entities.len(),
-            filtered_entities
-                .iter()
-                .map(|e| e.text.as_str())
-                .collect::<Vec<_>>()
-        );
-
-        // Build NER entity nodes
-        let ner_entities: Vec<(String, EntityNode)> = filtered_entities
-            .into_iter()
-            .map(|ner_entity| {
-                let label = match ner_entity.entity_type {
-                    NerEntityType::Person => EntityLabel::Person,
-                    NerEntityType::Organization => EntityLabel::Organization,
-                    NerEntityType::Location => EntityLabel::Location,
-                    NerEntityType::Misc => EntityLabel::Other("MISC".to_string()),
-                };
-                let node = EntityNode {
-                    uuid: uuid::Uuid::new_v4(),
-                    name: ner_entity.text.clone(),
-                    labels: vec![label],
-                    created_at: now,
-                    last_seen_at: now,
-                    mention_count: 1,
-                    summary: String::new(),
-                    attributes: HashMap::new(),
-                    name_embedding: None,
-                    salience: ner_entity.confidence,
-                    // Only PER, ORG, LOC are proper nouns; MISC includes non-proper
-                    // nouns like nationalities, events, etc.
-                    is_proper_noun: !matches!(ner_entity.entity_type, NerEntityType::Misc),
-                };
-                (ner_entity.text, node)
-            })
+        let mut text_entities: Vec<_> = extraction_result.entities.iter()
+            .filter(|e| e.source != crate::extraction::ExtractionSource::Metadata)
+            .cloned()
             .collect();
+        
+        // 3. Salience scoring / confidence truncation
+        text_entities.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+        
+        let entity_cap = self.server_config.max_entities_per_memory.saturating_sub(metadata_count);
+        text_entities.truncate(entity_cap);
 
-        // Build tag entity nodes
-        let tag_entities: Vec<(String, EntityNode)> = experience
-            .tags
-            .iter()
-            .filter_map(|tag| {
-                let tag_name = tag.trim();
-                if tag_name.len() >= 2 && !stop_words.contains(tag_name.to_lowercase().as_str()) {
-                    Some((
-                        tag_name.to_string(),
-                        EntityNode {
-                            uuid: uuid::Uuid::new_v4(),
-                            name: tag_name.to_string(),
-                            labels: vec![EntityLabel::Technology],
-                            created_at: now,
-                            last_seen_at: now,
-                            mention_count: 1,
-                            summary: String::new(),
-                            attributes: HashMap::new(),
-                            name_embedding: None,
-                            salience: 0.6,
-                            is_proper_noun: false,
-                        },
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // 4. Combine
+        let mut final_extracted = metadata_entities;
+        final_extracted.extend(text_entities);
 
-        // Collect names already covered (for dedup in regex/verb phases)
-        let mut known_names: Vec<String> = ner_entities
-            .iter()
-            .map(|(name, _)| name.clone())
-            .chain(tag_entities.iter().map(|(name, _)| name.clone()))
-            .collect();
+        // Map to EntityNode
+        let mut all_entities: Vec<(String, EntityNode)> = final_extracted.into_iter().map(|ext_ent| {
+            let label = match ext_ent.entity_type.as_str() {
+                "Domain" | "Url" | "IpAddress" | "OperatorId" | "ClusterName" | "Cve" | "Path" | "DomainLabel" => EntityLabel::Technology,
+                "ProperNoun" => EntityLabel::Concept, // Simplification
+                "NounPhrase" => EntityLabel::Concept,
+                _ => EntityLabel::Other(ext_ent.entity_type.clone()),
+            };
 
-        // Extract all-caps terms (API, TUI, NER, REST, etc.)
-        let allcaps_entities: Vec<(String, EntityNode)> = allcaps_regex()
-            .find_iter(&experience.content)
-            .filter_map(|cap| {
-                let term = cap.as_str();
-                if known_names
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(term))
-                {
-                    return None;
-                }
-                if stop_words.contains(term.to_lowercase().as_str()) {
-                    return None;
-                }
-                known_names.push(term.to_string());
-                Some((
-                    term.to_string(),
-                    EntityNode {
-                        uuid: uuid::Uuid::new_v4(),
-                        name: term.to_string(),
-                        labels: vec![EntityLabel::Technology],
-                        created_at: now,
-                        last_seen_at: now,
-                        mention_count: 1,
-                        summary: String::new(),
-                        attributes: HashMap::new(),
-                        name_embedding: None,
-                        salience: 0.5,
-                        is_proper_noun: true,
-                    },
-                ))
-            })
-            .collect();
-
-        // Extract issue IDs (SHO-XX, JIRA-123, etc.)
-        let issue_entities: Vec<(String, EntityNode)> = issue_regex()
-            .find_iter(&experience.content)
-            .filter_map(|issue| {
-                let issue_id = issue.as_str();
-                if known_names.iter().any(|name| name == issue_id) {
-                    return None;
-                }
-                known_names.push(issue_id.to_string());
-                Some((
-                    issue_id.to_string(),
-                    EntityNode {
-                        uuid: uuid::Uuid::new_v4(),
-                        name: issue_id.to_string(),
-                        labels: vec![EntityLabel::Other("Issue".to_string())],
-                        created_at: now,
-                        last_seen_at: now,
-                        mention_count: 1,
-                        summary: String::new(),
-                        attributes: HashMap::new(),
-                        name_embedding: None,
-                        salience: 0.7,
-                        is_proper_noun: true,
-                    },
-                ))
-            })
-            .collect();
-
-        // Extract verbs for multi-hop reasoning
-        let analysis = query_parser::analyze_query(&experience.content);
-        let mut verb_entities: Vec<(String, EntityNode)> = Vec::new();
-        for verb in &analysis.relational_context {
-            let verb_text = verb.text.as_str();
-            let verb_stem = verb.stem.as_str();
-
-            if known_names
-                .iter()
-                .any(|name| name.eq_ignore_ascii_case(verb_text))
-            {
-                continue;
-            }
-            if stop_words.contains(verb_text.to_lowercase().as_str()) {
-                continue;
-            }
-            if verb_text.len() < 3 {
-                continue;
-            }
-
-            for name in [verb_text, verb_stem] {
-                if name.len() < 3 {
-                    continue;
-                }
-                if known_names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
-                    continue;
-                }
-                known_names.push(name.to_string());
-                verb_entities.push((
-                    name.to_string(),
-                    EntityNode {
-                        uuid: uuid::Uuid::new_v4(),
-                        name: name.to_string(),
-                        labels: vec![EntityLabel::Other("Verb".to_string())],
-                        created_at: now,
-                        last_seen_at: now,
-                        mention_count: 1,
-                        summary: String::new(),
-                        attributes: HashMap::new(),
-                        name_embedding: None,
-                        salience: 0.4,
-                        is_proper_noun: false,
-                    },
-                ));
-            }
-        }
-
-        // Combine all entity groups for insertion, capped at 10 to prevent
-        // O(n²) edge explosion (10 entities → max 45 edges)
-        let mut all_entities: Vec<(String, EntityNode)> = ner_entities
-            .into_iter()
-            .chain(tag_entities)
-            .chain(allcaps_entities)
-            .chain(issue_entities)
-            .chain(verb_entities)
-            .collect();
-        all_entities.sort_by(|a, b| b.1.salience.total_cmp(&a.1.salience));
-        let entity_cap = self.server_config.max_entities_per_memory;
-        all_entities.truncate(entity_cap);
+            let node = EntityNode {
+                uuid: uuid::Uuid::new_v4(),
+                name: ext_ent.text.clone(),
+                labels: vec![label],
+                created_at: now,
+                last_seen_at: now,
+                mention_count: 1,
+                summary: String::new(),
+                attributes: HashMap::new(),
+                name_embedding: None,
+                salience: ext_ent.confidence,
+                is_proper_noun: ext_ent.entity_type == "ProperNoun",
+            };
+            (ext_ent.text, node)
+        }).collect();
 
         // =====================================================================
         // PHASE 2: GRAPH INSERTION (WITH LOCK)
@@ -2213,13 +1973,22 @@ impl MultiUserMemoryManager {
 
         let episode = EpisodicNode {
             uuid: memory_id.0,
-            name: format!("Memory {}", &memory_id.0.to_string()[..8]),
+            name: {
+                let preview: String = experience.content.chars().take(80).collect();
+                let preview = preview.replace('\n', " ");
+                if experience.content.chars().count() > 80 {
+                    format!("{}...", preview.trim())
+                } else {
+                    preview.trim().to_string()
+                }
+            },
             content: experience.content.clone(),
             valid_at: now,
             created_at: now,
             entity_refs: entity_uuids.iter().map(|(_, uuid)| *uuid).collect(),
             source: EpisodeSource::Message,
             metadata: experience.metadata.clone(),
+            extracted_triples: extraction_result.triples.clone(),
         };
 
         match graph_guard.add_episode(episode) {
@@ -2235,32 +2004,76 @@ impl MultiUserMemoryManager {
             }
         }
 
-        // Create relationships between co-occurring entities
-        // Pre-compute truncated context once (avoids re-allocating per edge)
         let truncated_context: String = experience.content.chars().take(150).collect();
+
+        // Check if any pairs have a promoted triple
+        let mut promoted_pairs = std::collections::HashSet::new();
+
+        for triple in extraction_result.triples {
+            if triple.promoted {
+                if let (Some(subj), Some(obj)) = (&triple.subject, Some(&triple.object)) {
+                    let subj_uuid = entity_uuids.iter().find(|(name, _)| name == subj).map(|(_, u)| *u);
+                    let obj_uuid = entity_uuids.iter().find(|(name, _)| name == obj).map(|(_, u)| *u);
+
+                    if let (Some(su), Some(ou)) = (subj_uuid, obj_uuid) {
+                        promoted_pairs.insert((su, ou));
+                        promoted_pairs.insert((ou, su)); // Track undirected pair for suppression
+
+                        if let Some(relation) = crate::extraction::verb_dictionary::get_canonical_relation(&triple.verb) {
+                            let edge = RelationshipEdge {
+                                uuid: uuid::Uuid::new_v4(),
+                                from_entity: su,
+                                to_entity: ou,
+                                relation_type: relation,
+                                strength: triple.confidence,
+                                created_at: now,
+                                valid_at: now,
+                                invalidated_at: None,
+                                source_episode_id: Some(memory_id.0),
+                                context: truncated_context.clone(),
+                                last_activated: now,
+                                activation_count: 1,
+                                ltp_status: LtpStatus::None,
+                                tier: EdgeTier::L1Working,
+                                activation_timestamps: None,
+                                entity_confidence: None,
+                            };
+                            let _ = graph_guard.add_relationship(edge);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create relationships between co-occurring entities
         for i in 0..entity_uuids.len() {
             for j in (i + 1)..entity_uuids.len() {
-                let edge = RelationshipEdge {
-                    uuid: uuid::Uuid::new_v4(),
-                    from_entity: entity_uuids[i].1,
-                    to_entity: entity_uuids[j].1,
-                    relation_type: RelationType::RelatedTo,
-                    strength: EdgeTier::L1Working.initial_weight(),
-                    created_at: now,
-                    valid_at: now,
-                    invalidated_at: None,
-                    source_episode_id: Some(memory_id.0),
-                    context: truncated_context.clone(),
-                    last_activated: now,
-                    activation_count: 1,
-                    ltp_status: LtpStatus::None,
-                    tier: EdgeTier::L1Working,
-                    activation_timestamps: None,
-                    entity_confidence: None,
-                };
+                let u1 = entity_uuids[i].1;
+                let u2 = entity_uuids[j].1;
 
-                if let Err(e) = graph_guard.add_relationship(edge) {
-                    tracing::debug!("Failed to add relationship: {}", e);
+                if !promoted_pairs.contains(&(u1, u2)) {
+                    let edge = RelationshipEdge {
+                        uuid: uuid::Uuid::new_v4(),
+                        from_entity: u1,
+                        to_entity: u2,
+                        relation_type: RelationType::RelatedTo,
+                        strength: EdgeTier::L1Working.initial_weight(),
+                        created_at: now,
+                        valid_at: now,
+                        invalidated_at: None,
+                        source_episode_id: Some(memory_id.0),
+                        context: truncated_context.clone(),
+                        last_activated: now,
+                        activation_count: 1,
+                        ltp_status: LtpStatus::None,
+                        tier: EdgeTier::L1Working,
+                        activation_timestamps: None,
+                        entity_confidence: None,
+                    };
+
+                    if let Err(e) = graph_guard.add_relationship(edge) {
+                        tracing::debug!("Failed to add relationship: {}", e);
+                    }
                 }
             }
         }
