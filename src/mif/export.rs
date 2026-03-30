@@ -556,6 +556,11 @@ fn relation_type_to_string(r: &crate::graph_memory::RelationType) -> String {
         RelationType::AlternativeTo => "alternative_to",
         RelationType::AssignedTo => "assigned_to",
         RelationType::Approves => "approves",
+        RelationType::Compromised => "compromised",
+        RelationType::RedirectsTo => "redirects_to",
+        RelationType::Hosts => "hosts",
+        RelationType::ContainsExtraction => "contains_extraction",
+        RelationType::Blocks => "blocks",
         RelationType::Custom(s) => return s.to_lowercase(),
     }
     .to_string()

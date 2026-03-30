@@ -173,7 +173,7 @@ pub fn episode_to_node(episode: &crate::graph_memory::EpisodicNode) -> ExportNod
     });
 
     ExportNode {
-        id: episode.uuid.to_string(),
+        id: format!("ep-{}", episode.uuid),
         node_type: "episode".to_owned(),
         label: episode.name.clone(),
         attributes: attrs,
@@ -239,8 +239,8 @@ pub fn episode_refs_to_edges(
     entity_ids
         .iter()
         .map(|entity_id| ExportEdge {
-            id: format!("{}-{}", episode_id, entity_id),
-            source: episode_id.to_string(),
+            id: format!("ep-{}-{}", episode_id, entity_id),
+            source: format!("ep-{}", episode_id),
             target: entity_id.to_string(),
             edge_type: "entity_ref".to_owned(),
             label: None,
@@ -644,6 +644,7 @@ mod tests {
             entity_refs: vec![],
             source: EpisodeSource::Message,
             metadata: HashMap::new(),
+            extracted_triples: vec![],
         };
 
         let node = episode_to_node(&episode);

@@ -999,6 +999,15 @@ pub enum RelationType {
     /// Configuration configures Service/Environment
     Configures,
 
+    // =========================================================================
+    // NLP Extraction relations
+    // =========================================================================
+    Compromised,
+    RedirectsTo,
+    Hosts,
+    ContainsExtraction,
+    Blocks,
+
     /// Preference / Recommendation
     /// Person prefers Technology/Configuration/Approach
     Prefers,
@@ -1075,6 +1084,13 @@ impl RelationType {
             Self::AlternativeTo => "AlternativeTo",
             Self::AssignedTo => "AssignedTo",
             Self::Approves => "Approves",
+            Self::Compromised => "Compromised",
+            Self::RedirectsTo => "RedirectsTo",
+            Self::Hosts => "Hosts",
+            Self::ContainsExtraction => "ContainsExtraction",
+            Self::Blocks => "Blocks",
+            Self::Prefers => "Prefers",
+            Self::Recommends => "Recommends",
             Self::Custom(s) => s.as_str(),
         }
     }
@@ -1106,6 +1122,10 @@ pub struct EpisodicNode {
 
     /// Additional metadata
     pub metadata: HashMap<String, String>,
+
+    /// Triples extracted as evidence (stored even if not promoted)
+    #[serde(default)]
+    pub extracted_triples: Vec<crate::extraction::ExtractedTriple>,
 }
 
 /// Episode source types
@@ -6822,6 +6842,7 @@ mod tests {
             entity_refs: vec![entity1_uuid, entity2_uuid],
             source: EpisodeSource::Message,
             metadata: std::collections::HashMap::new(),
+            extracted_triples: vec![],
         };
         graph.add_episode(episode).unwrap();
 
@@ -6884,6 +6905,7 @@ mod tests {
             entity_refs: vec![entity1_uuid, entity2_uuid],
             source: EpisodeSource::Message,
             metadata: std::collections::HashMap::new(),
+            extracted_triples: vec![],
         };
         graph.add_episode(episode).unwrap();
 
@@ -6935,6 +6957,7 @@ mod tests {
             entity_refs: Vec::new(),
             source: EpisodeSource::Message,
             metadata: std::collections::HashMap::new(),
+            extracted_triples: vec![],
         };
         let episode_uuid = episode.uuid;
         let episode_name = episode.name.clone();
