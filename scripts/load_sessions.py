@@ -43,7 +43,7 @@ def extract_from_session_json(path: str) -> list[dict]:
                 memories.append({
                     "content": content_blocks.strip(),
                     "created_at": timestamp,
-                    "tags": ["session", session_id],
+                    "tags": [],
                 })
             continue
 
@@ -51,36 +51,6 @@ def extract_from_session_json(path: str) -> list[dict]:
 
     return memories
 
-
-def _is_autonomite_session(path: str) -> bool:
-    """Check if a JSONL file is an autonomite session (not a regular Claude Code session).
-
-    Autonomite sessions start with:
-    - Pipeline run prompts: {"target_commit": ...}
-    - Think phase: "You are in THINK MODE"
-    - Subagent tasks: "<task-notification>"
-    - Operator broadcasts: "## Operator Message"
-    """
-    with open(path) as f:
-        for line in f:
-            try:
-                d = json.loads(line.strip())
-                if d.get("type") == "queue-operation" and d.get("operation") == "enqueue":
-                    content = d.get("content", "")[:300]
-                    if not content:
-                        return False
-                    if content.strip().startswith("{") and "target_commit" in content:
-                        return True
-                    if "THINK MODE" in content:
-                        return True
-                    if "<task-notification>" in content:
-                        return True
-                    if "## Operator Message" in content:
-                        return True
-                    return False
-            except json.JSONDecodeError:
-                continue
-    return False
 
 
 def extract_from_jsonl(path: str) -> list[dict]:
@@ -109,7 +79,7 @@ def extract_from_jsonl(path: str) -> list[dict]:
                         memories.append({
                             "content": content_blocks.strip(),
                             "created_at": timestamp,
-                            "tags": ["session", session_id],
+                            "tags": [],
                         })
                     continue
 
@@ -225,7 +195,7 @@ def _extract_content_blocks(blocks: list, timestamp: str | None, session_id: str
                 "content": chunk,
                 "created_at": timestamp,
                 "memory_type": "observation",
-                "tags": ["response", session_id],
+                "tags": [],
             })
 
 
@@ -289,6 +259,7 @@ def main():
     parser.add_argument("--api-key", default=None, help="API key (or set SHODH_API_KEY)")
     parser.add_argument("--user-id", default="autonomites-pipeline")
     parser.add_argument("--dry-run", action="store_true", help="Preview without loading")
+    parser.add_argument("--purge", action="store_true", help="Purge all memories before loading")
     parser.add_argument("--limit", type=int, default=0, help="Max files to process (0=all)")
     args = parser.parse_args()
 
@@ -297,13 +268,36 @@ def main():
         print("Error: --api-key or SHODH_API_KEY required", file=sys.stderr)
         sys.exit(1)
 
-    # Collect session files
+    # Purge existing memories if requested
+    if args.purge and not args.dry_run:
+        print(f"Purging all memories for user '{args.user_id}'...")
+        try:
+            req = Request(
+                f"{args.api_url}/api/memories/clear",
+                data=json.dumps({"user_id": args.user_id, "confirm": "CONFIRM"}).encode(),
+                headers={"Content-Type": "application/json", "X-API-Key": api_key or ""},
+                method="POST",
+            )
+            with urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read())
+                print(f"  Purged {result.get('deleted_count', '?')} memories")
+        except Exception as e:
+            print(f"  Purge failed: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Collect session files from paths (recurse into subdirectories for .jsonl)
     all_files = []
     for path in args.sessions:
         p = Path(path)
         if p.is_dir():
             all_files.extend(sorted(p.glob("session-*.json")))
             all_files.extend(sorted(p.glob("*.jsonl")))
+            # Recurse one level into named subdirs (e.g. think_mode/)
+            for subdir in sorted(p.iterdir()):
+                if subdir.is_dir():
+                    sub_jsonl = sorted(subdir.glob("*.jsonl"))
+                    if sub_jsonl:
+                        all_files.extend(sub_jsonl)
         elif p.exists():
             all_files.append(p)
         else:
@@ -313,22 +307,11 @@ def main():
         print("No session files found", file=sys.stderr)
         sys.exit(1)
 
-    # Filter JSONL files to autonomite sessions only (skip regular Claude Code sessions)
-    session_files = []
-    skipped = 0
-    for f in all_files:
-        if f.name.endswith(".jsonl"):
-            if _is_autonomite_session(str(f)):
-                session_files.append(f)
-            else:
-                skipped += 1
-        else:
-            session_files.append(f)
-
+    session_files = all_files
     if args.limit > 0:
         session_files = session_files[:args.limit]
 
-    print(f"Found {len(session_files)} autonomite sessions ({skipped} non-autonomite skipped)")
+    print(f"Found {len(session_files)} session files")
 
     total_loaded = 0
     total_failed = 0
