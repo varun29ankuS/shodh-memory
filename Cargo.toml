@@ -203,6 +203,9 @@ tar = "0.4"
 # NOTE: pyo3 >= 0.24.1 required for RUSTSEC-2025-0020 (buffer overflow fix)
 pyo3 = { version = "0.24", features = ["extension-module", "abi3-py38"], optional = true }
 numpy = { version = "0.24", optional = true }
+aho-corasick = "1.1.4"
+unicode-segmentation = "1.13.2"
+url = "2.5.8"
 
 # Zenoh transport for robotics (optional — pure Rust, zero C deps)
 # Enables pub/sub + request/reply integration with ROS2 via rmw_zenoh or zenoh-bridge-ros2dds

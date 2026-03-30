@@ -23,6 +23,7 @@ pub mod constants;
 pub mod decay;
 pub mod embeddings;
 pub mod errors;
+pub mod extraction;
 pub mod graph_memory;
 pub mod handlers;
 pub mod integrations;
