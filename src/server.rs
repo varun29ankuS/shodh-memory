@@ -314,9 +314,18 @@ async fn async_main() -> Result<()> {
     // to complete before flushing databases, preventing data loss.
     manager_for_shutdown.task_tracker.close();
     let task_timeout = std::time::Duration::from_secs(10);
-    info!("Waiting up to {}s for background graph tasks...", task_timeout.as_secs());
-    if tokio::time::timeout(task_timeout, manager_for_shutdown.task_tracker.wait()).await.is_err() {
-        tracing::warn!("Background task drain timed out after {}s, proceeding with shutdown", task_timeout.as_secs());
+    info!(
+        "Waiting up to {}s for background graph tasks...",
+        task_timeout.as_secs()
+    );
+    if tokio::time::timeout(task_timeout, manager_for_shutdown.task_tracker.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "Background task drain timed out after {}s, proceeding with shutdown",
+            task_timeout.as_secs()
+        );
     } else {
         info!("All background graph tasks completed");
     }
@@ -369,7 +378,9 @@ fn start_maintenance_scheduler(manager: AppState, interval_secs: u64) {
                 tracker.retain(|_user_id, inner| {
                     inner.retain(|_mem_id, entry| {
                         let keep = entry.last_surfaced > cutoff;
-                        if !keep { pruned += 1; }
+                        if !keep {
+                            pruned += 1;
+                        }
                         keep
                     });
                     !inner.is_empty()

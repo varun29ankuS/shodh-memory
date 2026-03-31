@@ -1017,7 +1017,11 @@ impl MultiUserMemoryManager {
     }
 
     /// Prefix-scan and batch-delete all keys starting with `{user_id}:` from a column family
-    fn delete_by_prefix(db: &rocksdb::DB, cf: &rocksdb::ColumnFamily, prefix: &[u8]) -> Result<usize> {
+    fn delete_by_prefix(
+        db: &rocksdb::DB,
+        cf: &rocksdb::ColumnFamily,
+        prefix: &[u8],
+    ) -> Result<usize> {
         let mut batch = rocksdb::WriteBatch::default();
         let mut count = 0;
         let iter = db.prefix_iterator_cf(cf, prefix);
@@ -1030,7 +1034,8 @@ impl MultiUserMemoryManager {
             count += 1;
         }
         if count > 0 {
-            db.write(batch).map_err(|e| anyhow::anyhow!("RocksDB batch delete failed: {e}"))?;
+            db.write(batch)
+                .map_err(|e| anyhow::anyhow!("RocksDB batch delete failed: {e}"))?;
         }
         Ok(count)
     }
@@ -1079,7 +1084,9 @@ impl MultiUserMemoryManager {
                     }
                 }
             }
-            self.shared_db.write(batch).map_err(|e| anyhow::anyhow!("GDPR todo_index purge failed: {e}"))?;
+            self.shared_db
+                .write(batch)
+                .map_err(|e| anyhow::anyhow!("GDPR todo_index purge failed: {e}"))?;
         }
 
         if let Some(cf) = self.shared_db.cf_handle("prospective_index") {
@@ -1103,7 +1110,9 @@ impl MultiUserMemoryManager {
                     }
                 }
             }
-            self.shared_db.write(batch).map_err(|e| anyhow::anyhow!("GDPR prospective_index purge failed: {e}"))?;
+            self.shared_db
+                .write(batch)
+                .map_err(|e| anyhow::anyhow!("GDPR prospective_index purge failed: {e}"))?;
         }
 
         // Files
@@ -1124,13 +1133,16 @@ impl MultiUserMemoryManager {
                     }
                 }
             }
-            self.shared_db.write(batch).map_err(|e| anyhow::anyhow!("GDPR file_index purge failed: {e}"))?;
+            self.shared_db
+                .write(batch)
+                .map_err(|e| anyhow::anyhow!("GDPR file_index purge failed: {e}"))?;
         }
 
         // Feedback: `pending:{user_id}`
         if let Some(cf) = self.shared_db.cf_handle("feedback") {
             let pending_key = format!("pending:{user_id}");
-            self.shared_db.delete_cf(cf, pending_key.as_bytes())
+            self.shared_db
+                .delete_cf(cf, pending_key.as_bytes())
                 .map_err(|e| anyhow::anyhow!("GDPR feedback purge failed: {e}"))?;
         }
 

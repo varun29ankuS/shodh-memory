@@ -515,7 +515,9 @@ impl TodoStore {
         // We capture the vector_id BEFORE the batch write so we can mark_deleted AFTER
         // the batch commits — this ensures the index only reflects committed deletes.
         let rev_key = format!("todo_vector:{}:{}", todo.user_id, id_str);
-        let pending_vector_delete = if let Some(vid_bytes) = self.db.get_cf(index_cf, rev_key.as_bytes())? {
+        let pending_vector_delete = if let Some(vid_bytes) =
+            self.db.get_cf(index_cf, rev_key.as_bytes())?
+        {
             if vid_bytes.len() >= 4 {
                 let vector_id =
                     u32::from_le_bytes([vid_bytes[0], vid_bytes[1], vid_bytes[2], vid_bytes[3]]);
