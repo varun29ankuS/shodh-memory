@@ -36,7 +36,20 @@ const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fil
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
 
 // Configuration
-const API_URL = process.env.SHODH_API_URL || "http://127.0.0.1:3030";
+// Priority: SHODH_API_URL (full URL) > SHODH_HOST+SHODH_PORT (constructed) > localhost default
+function resolveApiUrl(): string {
+  if (process.env.SHODH_API_URL) return process.env.SHODH_API_URL;
+  const host = process.env.SHODH_HOST;
+  const port = process.env.SHODH_PORT;
+  if (host) {
+    const scheme = port === "443" ? "https" : "http";
+    const portSuffix = (port && port !== "443" && port !== "80") ? `:${port}` : "";
+    return `${scheme}://${host}${portSuffix}`;
+  }
+  if (port) return `http://127.0.0.1:${port}`;
+  return "http://127.0.0.1:3030";
+}
+const API_URL = resolveApiUrl();
 const WS_URL = API_URL.replace(/^http/, "ws") + "/api/stream";
 const USER_ID = process.env.SHODH_USER_ID || "claude-code";
 
