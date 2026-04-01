@@ -338,6 +338,23 @@ pub async fn recall(
     let mode = req.mode.clone();
     let retrieval_mode_for_recall = parse_retrieval_mode(&mode);
 
+    // SESSION-SCOPED RETRIEVAL: resolve session_id → time_range before spawn_blocking.
+    // When session_id is provided, look up the session's time window and set
+    // retrieval_mode to Temporal so temporal_search() uses the date range.
+    let session_time_range = req.session_id.as_ref().and_then(|sid| {
+        use crate::memory::sessions::SessionId;
+        let session_id = SessionId(uuid::Uuid::parse_str(sid).ok()?);
+        state.session_store().get_session_time_range(&session_id)
+    });
+    let session_id_for_recall = req.session_id.clone();
+
+    // If session_id resolved to a time range, force Temporal mode
+    let retrieval_mode_for_recall = if session_time_range.is_some() {
+        RetrievalMode::Temporal
+    } else {
+        retrieval_mode_for_recall
+    };
+
     // PROSPECTIVE MEMORY + RECALL: Run inside a single spawn_blocking to share
     // the computed query embedding between prospective semantic matching and recall.
     // This fixes C5 (keyword-only → semantic) and sets up prospective_signals for boosting.
@@ -420,6 +437,8 @@ pub async fn recall(
                 max_results: limit,
                 retrieval_mode: retrieval_mode_for_recall,
                 prospective_signals: prospective_signals.clone(),
+                session_id: session_id_for_recall,
+                time_range: session_time_range,
                 ..Default::default()
             };
 

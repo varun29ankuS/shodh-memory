@@ -301,6 +301,44 @@ pub fn extract_temporal_refs(text: &str) -> TemporalExtraction {
         update_bounds(&mut earliest, &mut latest, date);
     }
 
+    // Extract relative temporal keywords ("yesterday", "last week", "3 days ago")
+    let relative_dates = extract_relative_dates(text, &now);
+    for (date, original, pos, ref_type) in relative_dates {
+        if !is_valid_date(&date) {
+            continue;
+        }
+        if refs.iter().any(|r| r.date == date) {
+            continue;
+        }
+        refs.push(TemporalRef {
+            date,
+            original_text: original,
+            confidence: 0.85,
+            position: pos,
+            ref_type,
+        });
+        update_bounds(&mut earliest, &mut latest, date);
+    }
+
+    // Extract "Month Year" patterns without day (e.g., "March 2026", "in May 2023")
+    let month_year_dates = extract_month_year_dates(text);
+    for (date, original, pos) in month_year_dates {
+        if !is_valid_date(&date) {
+            continue;
+        }
+        if refs.iter().any(|r| r.date == date) {
+            continue;
+        }
+        refs.push(TemporalRef {
+            date,
+            original_text: original,
+            confidence: 0.85,
+            position: pos,
+            ref_type: TemporalRefType::Month,
+        });
+        update_bounds(&mut earliest, &mut latest, date);
+    }
+
     // Sort by position in text
     refs.sort_by_key(|r| r.position);
 
@@ -458,6 +496,113 @@ fn extract_explicit_dates(text: &str) -> Vec<(NaiveDate, String, usize)> {
         let year: i32 = cap[3].parse().unwrap_or(2000);
 
         if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
+            let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
+            results.push((date, cap[0].to_string(), pos));
+        }
+    }
+
+    results
+}
+
+/// Extract relative temporal keywords from text.
+///
+/// Handles patterns that dateparser misses when embedded in longer text:
+/// "yesterday", "today", "last week/month/year", "N days/weeks/months ago",
+/// "this week/month", day-of-week references.
+fn extract_relative_dates(
+    text: &str,
+    now: &DateTime<Utc>,
+) -> Vec<(NaiveDate, String, usize, TemporalRefType)> {
+    use regex::Regex;
+
+    let text_lower = text.to_lowercase();
+    let today = now.date_naive();
+    let mut results = Vec::new();
+
+    // "yesterday"
+    if let Some(pos) = text_lower.find("yesterday") {
+        let date = today - chrono::Duration::days(1);
+        results.push((
+            date,
+            "yesterday".to_string(),
+            pos,
+            TemporalRefType::Relative,
+        ));
+    }
+
+    // "today"
+    if let Some(pos) = text_lower.find("today") {
+        results.push((today, "today".to_string(), pos, TemporalRefType::Relative));
+    }
+
+    // "N days/weeks/months ago"
+    let ago_re = Regex::new(r"(?i)(\d+)\s+(day|week|month|year)s?\s+ago").unwrap();
+    for cap in ago_re.captures_iter(text) {
+        let n: i64 = cap[1].parse().unwrap_or(1);
+        let unit = cap[2].to_lowercase();
+        let date = match unit.as_str() {
+            "day" => today - chrono::Duration::days(n),
+            "week" => today - chrono::Duration::weeks(n),
+            "month" => {
+                // Approximate: 30 days per month
+                today - chrono::Duration::days(n * 30)
+            }
+            "year" => today - chrono::Duration::days(n * 365),
+            _ => continue,
+        };
+        let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
+        results.push((date, cap[0].to_string(), pos, TemporalRefType::Relative));
+    }
+
+    // "last week/month/year"
+    let last_re = Regex::new(r"(?i)last\s+(week|month|year)").unwrap();
+    for cap in last_re.captures_iter(text) {
+        let unit = cap[1].to_lowercase();
+        let date = match unit.as_str() {
+            "week" => today - chrono::Duration::weeks(1),
+            "month" => today - chrono::Duration::days(30),
+            "year" => today - chrono::Duration::days(365),
+            _ => continue,
+        };
+        let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
+        // Skip if we already have a date from "N weeks ago" at similar position
+        if results.iter().any(|r| r.0 == date) {
+            continue;
+        }
+        results.push((date, cap[0].to_string(), pos, TemporalRefType::Relative));
+    }
+
+    // "this week/month/year"
+    let this_re = Regex::new(r"(?i)this\s+(week|month|year)").unwrap();
+    for cap in this_re.captures_iter(text) {
+        let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
+        if results.iter().any(|r| r.0 == today) {
+            continue;
+        }
+        results.push((today, cap[0].to_string(), pos, TemporalRefType::Relative));
+    }
+
+    results
+}
+
+/// Extract "Month Year" patterns without a day number.
+///
+/// Handles: "March 2026", "in May 2023", "last March"
+/// Returns the first day of the month as the date.
+fn extract_month_year_dates(text: &str) -> Vec<(NaiveDate, String, usize)> {
+    use regex::Regex;
+
+    let mut results = Vec::new();
+
+    // "Month Year" (e.g., "March 2026", "in September 2025")
+    let month_year_re = Regex::new(
+        r"(?i)(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})"
+    ).unwrap();
+
+    for cap in month_year_re.captures_iter(text) {
+        let month = month_to_num(&cap[1]);
+        let year: i32 = cap[2].parse().unwrap_or(2000);
+        if let Some(date) = NaiveDate::from_ymd_opt(year, month, 1) {
             let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
             results.push((date, cap[0].to_string(), pos));
         }
@@ -632,6 +777,136 @@ pub fn requires_temporal_filtering(query: &str) -> bool {
 /// the date from the retrieved content.
 pub fn asks_for_temporal_answer(query: &str) -> bool {
     matches!(detect_temporal_intent(query), TemporalIntent::WhenQuestion)
+}
+
+// ============================================================================
+// UNIFIED TEMPORAL ANALYSIS
+// ============================================================================
+// Combines intent detection with parsed date extraction into a single context
+// object. Fixes the gap where `detect_temporal_intent()` uses keyword matching
+// independently of `extract_temporal_refs()` which does real date parsing.
+
+/// Unified temporal query context combining intent, parsed dates, and date range.
+///
+/// Replaces the pattern of calling `extract_temporal_refs()` and
+/// `detect_temporal_intent()` independently. The parsed dates now inform
+/// intent detection, and the date range is computed with appropriate padding
+/// based on the temporal ref type.
+#[derive(Debug, Clone)]
+pub struct TemporalQueryContext {
+    /// The detected temporal intent
+    pub intent: TemporalIntent,
+    /// Parsed temporal references from the query text
+    pub extraction: TemporalExtraction,
+    /// Computed date range for filtering (with padding based on ref type)
+    pub date_range: Option<(NaiveDate, NaiveDate)>,
+    /// True when query has parsed dates to filter BY (SpecificTime, TimeRange)
+    pub is_filtering_query: bool,
+    /// True when query asks FOR a date (WhenQuestion, Ordering, Duration)
+    pub is_seeking_query: bool,
+}
+
+/// Analyze a query for temporal signals, unifying parsing and intent detection.
+///
+/// Strategy:
+/// 1. Parse dates first via `extract_temporal_refs()` (dateparser + regex)
+/// 2. If dates found → derive intent from ref types (no keyword matching needed)
+/// 3. If no dates → fall back to `detect_temporal_intent()` for intent-only
+///    queries like "when did X happen"
+/// 4. Compute padded date range based on ref types
+pub fn analyze_temporal(query: &str) -> TemporalQueryContext {
+    let extraction = extract_temporal_refs(query);
+    let query_lower = query.to_lowercase();
+
+    // Detect "when" prefix — this is asking FOR a date, not filtering BY one
+    let is_when_question = query_lower.starts_with("when")
+        || query_lower.contains(" when ")
+        || query_lower.contains("what date")
+        || query_lower.contains("what day")
+        || query_lower.contains("what time");
+
+    let intent = if extraction.has_temporal_refs() {
+        // Parsed dates found — derive intent from structure
+        if is_when_question {
+            // "When in March did X happen?" — has dates but asking for specifics
+            TemporalIntent::WhenQuestion
+        } else {
+            TemporalIntent::SpecificTime
+        }
+    } else {
+        // No parsed dates — fall back to keyword-based intent detection
+        detect_temporal_intent(query)
+    };
+
+    // Compute date range with padding based on ref types
+    let date_range = compute_padded_date_range(&extraction);
+
+    let is_filtering_query = matches!(
+        intent,
+        TemporalIntent::SpecificTime | TemporalIntent::Ordering
+    ) && date_range.is_some();
+
+    let is_seeking_query = matches!(
+        intent,
+        TemporalIntent::WhenQuestion | TemporalIntent::Duration
+    );
+
+    TemporalQueryContext {
+        intent,
+        extraction,
+        date_range,
+        is_filtering_query,
+        is_seeking_query,
+    }
+}
+
+/// Compute a padded date range from temporal extraction results.
+///
+/// Padding strategy based on the most specific ref type:
+/// - Absolute/DayOfWeek: ±1 day (3-day window)
+/// - Relative: ±1 day
+/// - Month: full calendar month
+/// - Year: full calendar year
+/// - Mixed refs: use extraction bounds directly (already encompass the range)
+fn compute_padded_date_range(extraction: &TemporalExtraction) -> Option<(NaiveDate, NaiveDate)> {
+    let (earliest, latest) = extraction.date_range()?;
+
+    if extraction.refs.len() == 1 {
+        // Single ref — pad based on type
+        let ref_type = extraction.refs[0].ref_type;
+        match ref_type {
+            TemporalRefType::Month => {
+                // Expand to full calendar month
+                let start = NaiveDate::from_ymd_opt(earliest.year(), earliest.month(), 1)?;
+                let end = if earliest.month() == 12 {
+                    NaiveDate::from_ymd_opt(earliest.year() + 1, 1, 1)?
+                        .pred_opt()
+                        .unwrap_or(start)
+                } else {
+                    NaiveDate::from_ymd_opt(earliest.year(), earliest.month() + 1, 1)?
+                        .pred_opt()
+                        .unwrap_or(start)
+                };
+                Some((start, end))
+            }
+            TemporalRefType::Year => {
+                let start = NaiveDate::from_ymd_opt(earliest.year(), 1, 1)?;
+                let end = NaiveDate::from_ymd_opt(earliest.year(), 12, 31)?;
+                Some((start, end))
+            }
+            TemporalRefType::Absolute | TemporalRefType::DayOfWeek | TemporalRefType::Relative => {
+                // ±1 day padding
+                let start = earliest - chrono::Duration::days(1);
+                let end = latest + chrono::Duration::days(1);
+                Some((start, end))
+            }
+        }
+    } else {
+        // Multiple refs — use bounds directly with ±1 day padding
+        let start = earliest - chrono::Duration::days(1);
+        let end = latest + chrono::Duration::days(1);
+        Some((start, end))
+    }
 }
 
 // ============================================================================
@@ -4052,5 +4327,83 @@ mod tests {
             "Should detect 'support group' as phrase. Found: {:?}",
             phrases
         );
+    }
+
+    // ========================================================================
+    // TemporalQueryContext / analyze_temporal tests
+    // ========================================================================
+
+    #[test]
+    fn test_analyze_temporal_specific_month() {
+        let ctx = analyze_temporal("what happened in March 2026");
+        assert_eq!(ctx.intent, TemporalIntent::SpecificTime);
+        assert!(ctx.is_filtering_query, "should be filtering query");
+        assert!(!ctx.is_seeking_query);
+        assert!(ctx.date_range.is_some());
+        let (start, end) = ctx.date_range.unwrap();
+        assert_eq!(start.month(), 3);
+        assert_eq!(start.day(), 1);
+        assert_eq!(end.month(), 3);
+        assert_eq!(end.day(), 31);
+    }
+
+    #[test]
+    fn test_analyze_temporal_when_question() {
+        let ctx = analyze_temporal("when did the deployment happen");
+        assert_eq!(ctx.intent, TemporalIntent::WhenQuestion);
+        assert!(ctx.is_seeking_query, "WhenQuestion should be seeking");
+        assert!(!ctx.is_filtering_query);
+    }
+
+    #[test]
+    fn test_analyze_temporal_yesterday() {
+        let ctx = analyze_temporal("what did we discuss yesterday");
+        assert_eq!(ctx.intent, TemporalIntent::SpecificTime);
+        assert!(ctx.is_filtering_query);
+        assert!(ctx.date_range.is_some());
+    }
+
+    #[test]
+    fn test_analyze_temporal_no_temporal() {
+        let ctx = analyze_temporal("tell me about the robot architecture");
+        assert_eq!(ctx.intent, TemporalIntent::None);
+        assert!(!ctx.is_filtering_query);
+        assert!(!ctx.is_seeking_query);
+        assert!(ctx.date_range.is_none());
+    }
+
+    #[test]
+    fn test_analyze_temporal_iso_date() {
+        let ctx = analyze_temporal("what happened on 2026-03-15");
+        assert_eq!(ctx.intent, TemporalIntent::SpecificTime);
+        assert!(ctx.is_filtering_query);
+        let (start, end) = ctx.date_range.unwrap();
+        // Single absolute date → ±1 day padding
+        assert_eq!(start, NaiveDate::from_ymd_opt(2026, 3, 14).unwrap());
+        assert_eq!(end, NaiveDate::from_ymd_opt(2026, 3, 16).unwrap());
+    }
+
+    #[test]
+    fn test_analyze_temporal_when_with_date() {
+        // "When in March 2026 did X happen" — has dates but asking for specifics
+        let ctx = analyze_temporal("when in March 2026 did the incident happen");
+        assert_eq!(ctx.intent, TemporalIntent::WhenQuestion);
+        assert!(ctx.is_seeking_query);
+        // Has parsed dates but intent is WhenQuestion, so not a filtering query
+        assert!(!ctx.is_filtering_query);
+    }
+
+    #[test]
+    fn test_analyze_temporal_duration() {
+        let ctx = analyze_temporal("how long ago did we fix the bug");
+        assert_eq!(ctx.intent, TemporalIntent::Duration);
+        assert!(ctx.is_seeking_query);
+        assert!(!ctx.is_filtering_query);
+    }
+
+    #[test]
+    fn test_compute_padded_date_range_empty() {
+        let extraction = TemporalExtraction::default();
+        assert!(compute_padded_date_range(&extraction).is_none());
     }
 }

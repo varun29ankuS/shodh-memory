@@ -1019,6 +1019,24 @@ pub const TEMPORAL_MATCH_BOOST_EXACT: f32 = 0.5;
 pub const TEMPORAL_MATCH_BOOST_WEEK: f32 = 0.3;
 pub const TEMPORAL_MATCH_BOOST_MONTH: f32 = 0.1;
 
+/// Temporal pre-filter boost — multiplicative boost for memories within the query's date range
+///
+/// When a query has parsed temporal references (e.g., "yesterday", "in March 2026"),
+/// we pre-fetch memories from that date range via SearchCriteria::ByDate and boost
+/// them in Layer 4.45 of the fusion pipeline. This ensures date-relevant memories
+/// rise above semantically similar but temporally wrong results.
+///
+/// 0.15 is conservative: a moderate nudge that won't override strong semantic matches
+/// but gives temporal-range memories a meaningful advantage.
+pub const TEMPORAL_PREFILTER_BOOST: f32 = 0.15;
+
+/// Minimum confidence for temporal prefix injection into query embeddings
+///
+/// Only inject a temporal context prefix (e.g., "[March 2026]") into the query
+/// embedding when parsed temporal refs have confidence >= this threshold.
+/// Prevents noisy prefix injection from low-confidence date parses.
+pub const TEMPORAL_PREFIX_MIN_CONFIDENCE: f32 = 0.8;
+
 /// Prospective signal boost — per-match multiplicative factor for goal-relevant memories
 ///
 /// Memories matching active goals/reminders get boosted to surface proactively.
@@ -2510,6 +2528,8 @@ pub const LINEAGE_CONFIRM_GRAPH_BOOST: f32 = 0.3;
 // | TEMPORAL_MATCH_BOOST_EXACT    | memory/mod.rs             | semantic_retrieve() Layer 5         |
 // | TEMPORAL_MATCH_BOOST_WEEK     | memory/mod.rs             | semantic_retrieve() Layer 5         |
 // | TEMPORAL_MATCH_BOOST_MONTH    | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | TEMPORAL_PREFILTER_BOOST      | memory/mod.rs             | semantic_retrieve() Layer 4.45      |
+// | TEMPORAL_PREFIX_MIN_CONFIDENCE| memory/mod.rs             | semantic_retrieve() embedding       |
 // | HEBBIAN_ASSOCIATION_WEIGHT    | memory/mod.rs             | semantic_retrieve() Layer 5         |
 // | SCORING_IMPORTANCE_FLOOR      | memory/mod.rs             | semantic_retrieve() Layer 5         |
 // | SCORING_IMPORTANCE_RANGE      | memory/mod.rs             | semantic_retrieve() Layer 5         |

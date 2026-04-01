@@ -1976,6 +1976,13 @@ pub struct Query {
     /// This prevents episode bleeding where unrelated memories mix in results
     pub episode_id: Option<String>,
 
+    // === Session Context ===
+    /// Session ID for session-scoped retrieval
+    /// When set with Temporal retrieval mode, retrieves memories stored during
+    /// the specified session's time window. Enables "what did we discuss in
+    /// yesterday's session?" queries.
+    pub session_id: Option<String>,
+
     // === Scoring Parameters ===
     /// Weight for recency boost in unified scoring (0.0-1.0)
     /// When None, uses hardcoded default (0.1 = 10% contribution)
@@ -2064,6 +2071,7 @@ impl Default for Query {
             confidence_range: None,
             prospective_signals: None,
             episode_id: None,
+            session_id: None,
             recency_weight: None,
             max_results: DEFAULT_MAX_RESULTS,
             retrieval_mode: RetrievalMode::Hybrid,
