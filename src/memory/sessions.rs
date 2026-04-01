@@ -636,6 +636,20 @@ impl SessionStore {
         }
     }
 
+    /// Get session time range (start, end) for date-based retrieval.
+    ///
+    /// For active sessions, `end` is the current time.
+    /// For completed sessions, `end` is the session's `ended_at` timestamp.
+    pub fn get_session_time_range(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+        self.get_session(session_id).map(|session| {
+            let end = session.ended_at.unwrap_or_else(Utc::now);
+            (session.started_at, end)
+        })
+    }
+
     /// Get session by ID
     pub fn get_session(&self, session_id: &SessionId) -> Option<Session> {
         // Check active first

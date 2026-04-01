@@ -1411,25 +1411,79 @@ impl MemorySystem {
         let recall_start = std::time::Instant::now();
 
         // ===========================================================================
-        // TEMPORAL EXTRACTION (TEMPR approach from Hindsight - 89.6% on LoCoMo)
+        // TEMPORAL ANALYSIS (unified intent + date parsing)
         // ===========================================================================
-        // Key insight: Temporal filtering is critical for multi-hop retrieval accuracy.
-        // Extract temporal constraints from query and use them to boost/filter results.
-        let query_temporal = query_parser::extract_temporal_refs(query_text);
-        let has_temporal_query = query_parser::requires_temporal_filtering(query_text);
+        // Replaces independent calls to extract_temporal_refs() and detect_temporal_intent().
+        // analyze_temporal() parses dates first, then derives intent from parsed structure,
+        // falling back to keyword detection only when dateparser finds nothing.
+        let temporal_ctx = query_parser::analyze_temporal(query_text);
+        let has_temporal_query = temporal_ctx.intent != query_parser::TemporalIntent::None;
 
         if has_temporal_query {
-            let temporal_intent = query_parser::detect_temporal_intent(query_text);
             tracing::debug!(
-                "Temporal query detected: intent={:?}, refs={:?}",
-                temporal_intent,
-                query_temporal
+                "Temporal query detected: intent={:?}, filtering={}, seeking={}, date_range={:?}, refs={:?}",
+                temporal_ctx.intent,
+                temporal_ctx.is_filtering_query,
+                temporal_ctx.is_seeking_query,
+                temporal_ctx.date_range,
+                temporal_ctx.extraction
                     .refs
                     .iter()
                     .map(|r| r.date.to_string())
                     .collect::<Vec<_>>()
             );
         }
+
+        // ===========================================================================
+        // LAYER 0.4: TEMPORAL PRE-FILTER (Date-Range Candidate Prefetch)
+        // ===========================================================================
+        // When the query has parsed temporal references (e.g., "yesterday", "March 2026"),
+        // pre-fetch memories from the matching date range via SearchCriteria::ByDate.
+        // These IDs are collected as candidates for boosting at Layer 4.45.
+        // NOT exclusive — memories outside the range still enter via Vamana/BM25.
+        let temporal_prefilter_ids: HashSet<MemoryId> = if temporal_ctx.is_filtering_query {
+            if let Some((start_date, end_date)) = temporal_ctx.date_range {
+                // Convert NaiveDate to DateTime<Utc> (start of first day, end of last day)
+                let start_dt = start_date
+                    .and_hms_opt(0, 0, 0)
+                    .map(|dt| {
+                        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+                    })
+                    .unwrap_or_else(chrono::Utc::now);
+                let end_dt = end_date
+                    .and_hms_opt(23, 59, 59)
+                    .map(|dt| {
+                        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+                    })
+                    .unwrap_or_else(chrono::Utc::now);
+
+                match self.advanced_search(storage::SearchCriteria::ByDate {
+                    start: start_dt,
+                    end: end_dt,
+                }) {
+                    Ok(memories) => {
+                        let ids: HashSet<_> = memories.iter().map(|m| m.id.clone()).collect();
+                        if !ids.is_empty() {
+                            tracing::info!(
+                                    "Layer 0.4: Temporal pre-filter found {} memories in date range {:?} to {:?}",
+                                    ids.len(),
+                                    start_date,
+                                    end_date
+                                );
+                        }
+                        ids
+                    }
+                    Err(e) => {
+                        tracing::warn!("Layer 0.4: Temporal pre-filter search failed: {}", e);
+                        HashSet::new()
+                    }
+                }
+            } else {
+                HashSet::new()
+            }
+        } else {
+            HashSet::new()
+        };
 
         // ===========================================================================
         // LAYER 0.5: ATTRIBUTE QUERY DETECTION (Fact-First Retrieval)
@@ -1718,6 +1772,32 @@ impl MemorySystem {
             "recall [layer:0.5-0.7] query analysis + attribute + temporal fact + fact source lookup"
         );
 
+        // TEMPORAL PREFIX INJECTION: When the query has high-confidence temporal
+        // references, prepend a temporal context string to give MiniLM textual
+        // overlap with memory content mentioning the same time period.
+        // Only applied for filtering queries (not "when did X happen?" seeking queries).
+        let embedding_query_text: std::borrow::Cow<'_, str> = if temporal_ctx.is_filtering_query
+            && temporal_ctx
+                .extraction
+                .refs
+                .iter()
+                .any(|r| r.confidence >= crate::constants::TEMPORAL_PREFIX_MIN_CONFIDENCE)
+        {
+            // Build prefix from the original temporal text (e.g., "March 2026", "yesterday")
+            let temporal_labels: Vec<&str> = temporal_ctx
+                .extraction
+                .refs
+                .iter()
+                .filter(|r| r.confidence >= crate::constants::TEMPORAL_PREFIX_MIN_CONFIDENCE)
+                .map(|r| r.original_text.as_str())
+                .collect();
+            let prefix = format!("[{}] ", temporal_labels.join(", "));
+            tracing::debug!("Temporal prefix injection: \"{}\"", prefix);
+            std::borrow::Cow::Owned(format!("{}{}", prefix, query_text))
+        } else {
+            std::borrow::Cow::Borrowed(query_text)
+        };
+
         // PERFORMANCE: Use pre-computed embedding if caller provided one,
         // otherwise fall back to SHA256-keyed cache (80ms → <1μs for repeated queries)
         let query_embedding =
@@ -1728,21 +1808,21 @@ impl MemorySystem {
                 tracing::debug!("Query embedding PRECOMPUTED by caller — skipping encode");
                 pre.clone()
             } else {
-                let query_hash = Self::sha256_hash(query_text);
+                let query_hash = Self::sha256_hash(&embedding_query_text);
                 if let Some(cached_embedding) = self.query_cache.get(&query_hash) {
                     EMBEDDING_CACHE_QUERY.with_label_values(&["hit"]).inc();
-                    tracing::debug!("Query embedding cache HIT for: {}", query_text);
+                    tracing::debug!("Query embedding cache HIT for: {}", &*embedding_query_text);
                     cached_embedding.clone()
                 } else {
                     EMBEDDING_CACHE_QUERY.with_label_values(&["miss"]).inc();
                     tracing::debug!(
                         "Query embedding cache MISS - generating for: {}",
-                        query_text
+                        &*embedding_query_text
                     );
                     let embedding = self
                         .embedder
                         .as_ref()
-                        .encode(query_text)
+                        .encode(&embedding_query_text)
                         .context("Failed to generate query embedding")?;
 
                     self.query_cache.insert(query_hash, embedding.clone());
@@ -2058,6 +2138,7 @@ impl MemorySystem {
             confidence_range: query.confidence_range,
             offset: query.offset,
             episode_id: query.episode_id.clone(),
+            session_id: query.session_id.clone(),
             prospective_signals: query.prospective_signals.clone(),
             recency_weight: query.recency_weight,
         };
@@ -2219,6 +2300,30 @@ impl MemorySystem {
                 if boosted_count > 0 {
                     tracing::info!(
                         "Layer 4.5: Boosted {} memories for attribute query",
+                        boosted_count
+                    );
+                }
+            }
+
+            // ===========================================================================
+            // LAYER 4.45: TEMPORAL PRE-FILTER BOOST
+            // ===========================================================================
+            // Memories that fell within the query's parsed date range (Layer 0.4)
+            // get a multiplicative boost. This ensures date-relevant memories rise
+            // above semantically similar but temporally wrong results.
+            if !temporal_prefilter_ids.is_empty() {
+                let mut boosted_count = 0;
+                for id in &temporal_prefilter_ids {
+                    if let Some(score) = fused.get_mut(id) {
+                        *score *= 1.0 + crate::constants::TEMPORAL_PREFILTER_BOOST;
+                        boosted_count += 1;
+                    }
+                    // Don't insert memories absent from fusion — date range alone
+                    // without semantic/graph support is insufficient evidence
+                }
+                if boosted_count > 0 {
+                    tracing::info!(
+                        "Layer 4.45: Boosted {} memories from temporal pre-filter",
                         boosted_count
                     );
                 }
@@ -2515,11 +2620,18 @@ impl MemorySystem {
                     .unwrap_or(0.0);
 
                 // TEMPORAL MATCH (TEMPR approach for multi-hop temporal retrieval)
-                let temporal_factor =
-                    if has_temporal_query && !mem.experience.temporal_refs.is_empty() {
-                        let mut best_match = 0.0_f32;
+                //
+                // Three-tier strategy:
+                // 1. If memory has explicit temporal_refs → match against query refs (highest signal)
+                // 2. If query is filtering BY date → use created_at proximity as fallback
+                // 3. If query is seeking FOR a date (WhenQuestion) → skip boost entirely
+                let temporal_factor = if has_temporal_query && !temporal_ctx.is_seeking_query {
+                    let mut best_match = 0.0_f32;
+
+                    // Tier 1: Explicit temporal_refs on the memory
+                    if !mem.experience.temporal_refs.is_empty() {
                         for mem_ref in &mem.experience.temporal_refs {
-                            for query_ref in &query_temporal.refs {
+                            for query_ref in &temporal_ctx.extraction.refs {
                                 if mem_ref == &query_ref.date.to_string() {
                                     best_match = best_match.max(TEMPORAL_MATCH_BOOST_EXACT);
                                 } else if let Ok(mem_date) =
@@ -2538,10 +2650,39 @@ impl MemorySystem {
                                 }
                             }
                         }
-                        best_match
-                    } else {
-                        0.0
-                    };
+                    }
+
+                    // Tier 2: created_at proximity fallback for filtering queries
+                    // Most memories don't have temporal_refs, so use created_at as proxy
+                    if best_match == 0.0 && temporal_ctx.is_filtering_query {
+                        if let Some((range_start, range_end)) = temporal_ctx.date_range {
+                            let created_date = mem.created_at.date_naive();
+                            let range_mid = range_start
+                                + chrono::Duration::days((range_end - range_start).num_days() / 2);
+                            let days_off = (created_date - range_mid).num_days().abs();
+                            let range_half = ((range_end - range_start).num_days() / 2).max(1);
+
+                            if days_off <= range_half {
+                                // Within range: full boost
+                                best_match = TEMPORAL_MATCH_BOOST_EXACT;
+                            } else if days_off <= range_half + 7 {
+                                // Near range: decaying week boost
+                                let proximity = TEMPORAL_MATCH_BOOST_WEEK
+                                    * (1.0 - (days_off - range_half) as f32 / 7.0);
+                                best_match = best_match.max(proximity);
+                            } else if days_off <= range_half + 30 {
+                                // Further out: decaying month boost
+                                let proximity = TEMPORAL_MATCH_BOOST_MONTH
+                                    * (1.0 - (days_off - range_half) as f32 / 30.0);
+                                best_match = best_match.max(proximity);
+                            }
+                        }
+                    }
+
+                    best_match
+                } else {
+                    0.0
+                };
 
                 // FEEDBACK MOMENTUM (PIPE-9)
                 // Symmetric ±15% multiplicative adjustment

@@ -642,9 +642,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             mode: {
               type: "string",
-              enum: ["semantic", "associative", "hybrid"],
-              description: "Retrieval mode: 'semantic' for pure vector similarity, 'associative' for graph-based traversal (follows learned connections), 'hybrid' for density-dependent combination (default)",
+              enum: ["semantic", "associative", "temporal", "hybrid"],
+              description: "Retrieval mode: 'semantic' for pure vector similarity, 'associative' for graph-based traversal (follows learned connections), 'temporal' for time-based retrieval, 'hybrid' for density-dependent combination (default)",
               default: "hybrid",
+            },
+            session_id: {
+              type: "string",
+              description: "Session ID for session-scoped retrieval. When provided, retrieves memories from that session's time window. Forces temporal mode.",
             },
           },
           required: ["query"],
@@ -1508,7 +1512,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "recall": {
-        const { query, limit: rawLimit = 5, mode = "hybrid" } = args as { query: string; limit?: number; mode?: string };
+        const { query, limit: rawLimit = 5, mode = "hybrid", session_id } = args as { query: string; limit?: number; mode?: string; session_id?: string };
 
         if (!query || query.length === 0) {
           return { content: [{ type: "text", text: "Error: 'query' is required and cannot be empty" }], isError: true };
@@ -1516,7 +1520,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (query.length > MAX_QUERY_LENGTH) {
           return { content: [{ type: "text", text: `Error: 'query' exceeds maximum length of ${MAX_QUERY_LENGTH} characters` }], isError: true };
         }
-        const validModes = ["semantic", "associative", "hybrid"];
+        const validModes = ["semantic", "associative", "temporal", "hybrid"];
         if (!validModes.includes(mode)) {
           return { content: [{ type: "text", text: `Error: 'mode' must be one of: ${validModes.join(", ")}` }], isError: true };
         }
@@ -1567,6 +1571,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           query,
           limit,
           mode,
+          ...(session_id ? { session_id } : {}),
         });
 
         const memories = result.memories || [];

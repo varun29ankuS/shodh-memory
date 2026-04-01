@@ -93,9 +93,12 @@ pub struct RecallRequest {
     pub query: String,
     #[serde(default = "default_recall_limit")]
     pub limit: usize,
-    /// Retrieval mode: "semantic", "associative", or "hybrid" (default)
+    /// Retrieval mode: "semantic", "associative", "temporal", or "hybrid" (default)
     #[serde(default = "default_recall_mode")]
     pub mode: String,
+    /// Session ID for session-scoped retrieval (used with mode="temporal")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 pub fn default_recall_limit() -> usize {
