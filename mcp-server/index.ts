@@ -29,7 +29,7 @@ import * as fs from "fs";
 import * as crypto from "crypto";
 import { fileURLToPath } from "url";
 import { nextReconnectDelay, serializeAndValidateBody, shouldWarnInsecureApiUrl } from "./security-utils";
-import { stripSystemNoise as _stripSystemNoise, getContent as _getContent, getType as _getType, formatSurfacedMemories as _formatSurfacedMemories, formatToolCallContent } from "./string-utils";
+import { stripSystemNoise, getContent as _getContent, getType as _getType, formatSurfacedMemories as _formatSurfacedMemories, formatToolCallContent } from "./string-utils";
 import { TokenTracker } from "./token-tracking";
 
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
@@ -174,39 +174,12 @@ const PROACTIVE_SURFACING = process.env.SHODH_PROACTIVE !== "false"; // enabled 
 const PROACTIVE_MIN_CONTEXT_LENGTH = 30; // minimum context length to trigger surfacing
 const MAX_CONTEXT_LENGTH = 4000; // max chars sent to backend (MiniLM truncates at ~256 tokens anyway)
 
-/**
- * Strip system scaffolding from context before sending to the memory backend.
- * AI clients often pass the full conversation context including XML tags like
- * <task-notification>, <system-reminder>, etc. These overwhelm BM25/embedding
- * and provide zero semantic signal for memory retrieval.
- *
- * The Rust backend has its own strip_system_noise(), but we clean client-side too
- * to avoid sending multi-KB payloads over the wire.
- */
-function stripSystemNoise(text: string): string {
-  let result = text;
-  // Remove common system XML blocks (non-greedy, handles multiline)
-  const tagPatterns = [
-    /<task-notification>[\s\S]*?<\/task-notification>/g,
-    /<system-reminder>[\s\S]*?<\/system-reminder>/g,
-    /<shodh-context[\s\S]*?<\/shodh-context>/g,
-    /<shodh-memory[\s\S]*?<\/shodh-memory>/g,
-    /<command-name>[\s\S]*?<\/command-name>/g,
-  ];
-  for (const pattern of tagPatterns) {
-    result = result.replace(pattern, "");
-  }
-  // Collapse runs of whitespace
-  result = result.replace(/\s{3,}/g, " ").trim();
-  return result;
-}
-
-// Track last proactive_context response for implicit feedback loop
-// The backend uses this to evaluate whether surfaced memories were helpful
+// Track last proactive_context response for implicit feedback loop.
+// The backend uses this to evaluate whether surfaced memories were helpful.
+// Guard against concurrent proactive_context calls corrupting feedback state.
 let lastProactiveResponse: string = "";
-// Track previous user context — the user's message that *followed* the last surfaced memories.
-// This is the true user_followup signal (their reaction to what we surfaced last time).
 let lastUserContext: string = "";
+let proactiveCallInFlight = false;
 
 // =============================================================================
 // STREAMING MEMORY INGESTION - Continuous background memory capture
@@ -436,11 +409,14 @@ async function surfaceRelevant(context: string, maxResults: number = 3): Promise
       signal: controller.signal,
     });
 
-    clearTimeout(timeoutId);
+    if (!response.ok) {
+      clearTimeout(timeoutId);
+      return null;
+    }
 
-    if (!response.ok) return null;
-
+    // Parse JSON within the same timeout scope — prevents hang on slow response body
     const result = await response.json() as { memories?: SurfacedMemory[] };
+    clearTimeout(timeoutId);
     return result.memories || null;
   } catch (e) {
     console.error("[Proactive] Failed to surface memories:", e);
@@ -509,12 +485,17 @@ async function apiCall<T>(
         throw new Error(`API error ${response.status}: ${errorText}`);
       }
 
-      return await response.json() as T;
+      try {
+        return await response.json() as T;
+      } catch {
+        throw new Error(`API returned invalid JSON from ${endpoint}`);
+      }
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
 
-      // Don't retry on client errors (4xx)
-      if (lastError.message.includes('API error 4')) {
+      // Don't retry on client errors (4xx) — parse status code explicitly
+      const statusMatch = lastError.message.match(/API error (\d+)/);
+      if (statusMatch && parseInt(statusMatch[1], 10) >= 400 && parseInt(statusMatch[1], 10) < 500) {
         throw lastError;
       }
 
@@ -2358,9 +2339,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        // Capture current context as the user_followup for NEXT call
+        // Capture current context as the user_followup for NEXT call.
         // (this message is the user's reaction to whatever we surfaced last time)
-        const previousUserContext = lastUserContext;
+        // Guard: if another proactive_context call is in-flight, skip feedback
+        // to avoid corrupted state from concurrent updates.
+        const skipFeedback = proactiveCallInFlight;
+        proactiveCallInFlight = true;
+        const previousUserContext = skipFeedback ? "" : lastUserContext;
         lastUserContext = cleanedContext;
 
         // Single API call to the full proactive context pipeline:
@@ -2374,12 +2359,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           recency_weight,
           memory_types,
           auto_ingest,
-          // Implicit feedback: send previous response so backend can evaluate which memories helped
-          previous_response: lastProactiveResponse || undefined,
-          // user_followup is the PREVIOUS user message (their reaction to prior surfaced memories),
-          // not the current one. This avoids the self-referential signal bug where the same text
-          // that triggers recall is evaluated as feedback on the previous response.
-          user_followup: lastProactiveResponse ? (previousUserContext || undefined) : undefined,
+          // Implicit feedback: send previous response so backend can evaluate which memories helped.
+          // Skipped if another proactive_context call was in-flight (prevents corrupted feedback).
+          previous_response: skipFeedback ? undefined : (lastProactiveResponse || undefined),
+          user_followup: (skipFeedback || !lastProactiveResponse) ? undefined : (previousUserContext || undefined),
           // Tool-aware feedback attribution: causal signal from tool/actuator actions
           ...(tool_actions.length > 0 ? { tool_actions } : {}),
         });
@@ -2401,6 +2384,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           const emptyText = `No relevant memories surfaced for this context.${entityList}${feedbackNote}${temporalNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms]`;
           lastProactiveResponse = emptyText;
+          proactiveCallInFlight = false;
 
           return {
             content: [{ type: "text", text: emptyText }],
@@ -2556,6 +2540,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           .filter((c: string) => c.length > 0)
           .join("\n");
         lastProactiveResponse = cleanContent || responseText;
+        proactiveCallInFlight = false;
 
         return {
           content: [{ type: "text", text: responseText }],
@@ -3446,16 +3431,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       if (context.length >= PROACTIVE_MIN_CONTEXT_LENGTH) {
         const surfaced = await surfaceRelevant(context, 3);
-        if (surfaced && surfaced.length > 0) {
+        if (surfaced && surfaced.length > 0 && result.content.length > 0) {
           const surfacedText = formatSurfacedMemories(surfaced);
-          // Append surfaced memories to result
           result.content[result.content.length - 1].text += surfacedText;
         }
       }
     }
 
     // Inject context window warning if >= threshold (SHO-115)
-    if (tokenStatus.alert) {
+    if (tokenStatus.alert && result.content.length > 0) {
       const percentUsed = Math.round(tokenStatus.percent * 100);
       const warning = `⚠️ CONTEXT ALERT: ${percentUsed}% of token budget used (${tokenStatus.tokens.toLocaleString()}/${tokenStatus.budget.toLocaleString()}). Consider starting a new session or running consolidation.\n\n`;
       result.content[0].text = warning + result.content[0].text;
