@@ -1283,20 +1283,20 @@ impl GraphMemory {
 
         // Count relationships and episodes during startup (one-time cost)
         // This is O(n) at startup, but get_stats() will be O(1) at runtime
-        let relationships_cf = db.cf_handle(CF_RELATIONSHIPS).ok_or_else(|| {
-            anyhow::anyhow!("CF '{}' not found after DB open", CF_RELATIONSHIPS)
-        })?;
-        let episodes_cf = db.cf_handle(CF_EPISODES).ok_or_else(|| {
-            anyhow::anyhow!("CF '{}' not found after DB open", CF_EPISODES)
-        })?;
+        let relationships_cf = db
+            .cf_handle(CF_RELATIONSHIPS)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found after DB open", CF_RELATIONSHIPS))?;
+        let episodes_cf = db
+            .cf_handle(CF_EPISODES)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found after DB open", CF_EPISODES))?;
         let relationship_count = Self::count_cf_entries(&db, relationships_cf);
         let episode_count = Self::count_cf_entries(&db, episodes_cf);
 
         // Load entity embedding cache for concept merging
         // Only entities with pre-computed name_embeddings are cached
-        let entities_cf = db.cf_handle(CF_ENTITIES).ok_or_else(|| {
-            anyhow::anyhow!("CF '{}' not found after DB open", CF_ENTITIES)
-        })?;
+        let entities_cf = db
+            .cf_handle(CF_ENTITIES)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found after DB open", CF_ENTITIES))?;
         let entity_embedding_cache =
             Self::load_entity_embedding_cache(&db, entities_cf, &entity_name_index);
         let embedding_cache_size = entity_embedding_cache.len();
@@ -1353,9 +1353,9 @@ impl GraphMemory {
                 continue;
             }
 
-            let cf = db.cf_handle(cf_name).ok_or_else(|| {
-                anyhow::anyhow!("CF '{}' not found during migration", cf_name)
-            })?;
+            let cf = db
+                .cf_handle(cf_name)
+                .ok_or_else(|| anyhow::anyhow!("CF '{}' not found during migration", cf_name))?;
 
             // Only migrate if the CF is empty (avoid double migration)
             if db
@@ -1433,12 +1433,12 @@ impl GraphMemory {
 
     /// Load entity name->UUID index from name_index CF, or migrate from entities CF if empty
     fn load_or_migrate_name_index(db: &DB) -> Result<HashMap<String, Uuid>> {
-        let name_index_cf = db.cf_handle(CF_NAME_INDEX).ok_or_else(|| {
-            anyhow::anyhow!("CF '{}' not found", CF_NAME_INDEX)
-        })?;
-        let entities_cf = db.cf_handle(CF_ENTITIES).ok_or_else(|| {
-            anyhow::anyhow!("CF '{}' not found", CF_ENTITIES)
-        })?;
+        let name_index_cf = db
+            .cf_handle(CF_NAME_INDEX)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_NAME_INDEX))?;
+        let entities_cf = db
+            .cf_handle(CF_ENTITIES)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_ENTITIES))?;
         let mut index = HashMap::new();
 
         // Try to load from name_index CF first
@@ -1483,9 +1483,9 @@ impl GraphMemory {
         db: &DB,
         name_index: &HashMap<String, Uuid>,
     ) -> Result<HashMap<String, Uuid>> {
-        let lowercase_cf = db.cf_handle(CF_LOWERCASE_INDEX).ok_or_else(|| {
-            anyhow::anyhow!("CF '{}' not found", CF_LOWERCASE_INDEX)
-        })?;
+        let lowercase_cf = db
+            .cf_handle(CF_LOWERCASE_INDEX)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_LOWERCASE_INDEX))?;
         let mut index = HashMap::new();
 
         // Try to load from lowercase_index CF
@@ -1523,9 +1523,9 @@ impl GraphMemory {
         db: &DB,
         name_index: &HashMap<String, Uuid>,
     ) -> Result<HashMap<String, Uuid>> {
-        let stemmed_cf = db.cf_handle(CF_STEMMED_INDEX).ok_or_else(|| {
-            anyhow::anyhow!("CF '{}' not found", CF_STEMMED_INDEX)
-        })?;
+        let stemmed_cf = db
+            .cf_handle(CF_STEMMED_INDEX)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_STEMMED_INDEX))?;
         let mut index = HashMap::new();
 
         // Try to load from stemmed_index CF
@@ -2664,9 +2664,10 @@ impl GraphMemory {
 
         // Clear each column family by iterating and batch-deleting
         for cf_name in GRAPH_CF_NAMES {
-            let cf = self.db.cf_handle(cf_name).ok_or_else(|| {
-                anyhow::anyhow!("CF '{}' not found during clear_all", cf_name)
-            })?;
+            let cf = self
+                .db
+                .cf_handle(cf_name)
+                .ok_or_else(|| anyhow::anyhow!("CF '{}' not found during clear_all", cf_name))?;
             let mut batch = rocksdb::WriteBatch::default();
             let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
             for (key, _) in iter.flatten() {

@@ -5187,11 +5187,9 @@ impl MemorySystem {
                         RetrievalOutcome::Helpful => {
                             graph.read().batch_strengthen_synapses(&edge_uuids)
                         }
-                        RetrievalOutcome::Misleading => {
-                            graph
-                                .read()
-                                .batch_weaken_synapses(&edge_uuids, HEBBIAN_DECAY_MISLEADING)
-                        }
+                        RetrievalOutcome::Misleading => graph
+                            .read()
+                            .batch_weaken_synapses(&edge_uuids, HEBBIAN_DECAY_MISLEADING),
                         RetrievalOutcome::Neutral => Ok(0),
                     };
                     match result {

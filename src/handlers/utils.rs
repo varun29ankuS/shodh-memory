@@ -442,9 +442,7 @@ pub fn is_tool_output_noise(content: &str) -> bool {
     }
 
     // Score bar patterns (e.g. "█░░░░░░░░░ 5% │")
-    if (trimmed.contains('█') || trimmed.contains('░'))
-        && trimmed.contains('│')
-    {
+    if (trimmed.contains('█') || trimmed.contains('░')) && trimmed.contains('│') {
         return true;
     }
 
@@ -506,16 +504,12 @@ pub fn is_formatted_recall_output(content: &str) -> bool {
         // Look for hex UUID fragments after pipe
         trimmed.split('│').any(|part| {
             let t = part.trim();
-            t.len() >= 8
-                && t.len() <= 40
-                && t.chars()
-                    .all(|c| c.is_ascii_hexdigit() || c == '-')
+            t.len() >= 8 && t.len() <= 40 && t.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
         })
     };
 
     // Need at least 2 indicators to be confident
-    let indicators =
-        has_progress_bars as u8 + has_tree_connector as u8 + has_pipe_id as u8;
+    let indicators = has_progress_bars as u8 + has_tree_connector as u8 + has_pipe_id as u8;
     indicators >= 2
 }
 
@@ -829,7 +823,9 @@ mod tests {
 
         // Single indicator is not enough
         assert!(!is_formatted_recall_output("Just has ┗━ but nothing else"));
-        assert!(!is_formatted_recall_output("Has █ bar but no tree connector"));
+        assert!(!is_formatted_recall_output(
+            "Has █ bar but no tree connector"
+        ));
 
         // Should NOT detect legitimate content
         assert!(!is_formatted_recall_output(
