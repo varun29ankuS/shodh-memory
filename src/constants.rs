@@ -59,13 +59,14 @@ pub const IMPORTANCE_FLOOR: f32 = 0.05;
 /// protected (fully consolidated synapses resist homeostatic downscaling).
 ///
 /// Justification:
-/// - 0.95 = 5% reduction per cycle, matching "synaptic renormalization" during sleep
-/// - Prevents runaway strengthening and keeps total network energy bounded
-/// - After 14 cycles without reinforcement: 0.4 → 0.19 (falls below L1 prune threshold)
-/// - L3 edges at 0.7: 0.7 × 0.95^14 ≈ 0.34 (still above L3 prune threshold 0.3)
+/// - 0.995 = 0.5% reduction per cycle, conservative synaptic renormalization
+/// - At 48 cycles/day: 0.995^48 ≈ 0.786 (21% daily reduction without reinforcement)
+/// - Unreinforced L1 edge (0.4) reaches prune threshold (0.2) in ~3.5 days
+/// - L3 edges at 0.7: 0.7 × 0.995^48 ≈ 0.55 (well above L3 prune threshold 0.3)
+/// - Prevents runaway strengthening while giving edges time to prove themselves
 ///
 /// Reference: Tononi & Cirelli (2003) "Sleep and synaptic homeostasis: a hypothesis"
-pub const HOMEOSTASIS_SCALING_FACTOR: f32 = 0.95;
+pub const HOMEOSTASIS_SCALING_FACTOR: f32 = 0.995;
 
 /// Emotional decay modulation factor (Amygdala-Hippocampal coupling).
 ///
@@ -106,10 +107,12 @@ pub const GRAPH_LATERAL_INHIBITION_STRENGTH: f32 = 0.15;
 /// memory receive inhibitory suppression. Below threshold = independent memories.
 ///
 /// Justification:
-/// - 0.7 = high similarity required before inhibition fires
-/// - Prevents unrelated memories from suppressing each other
-/// - Matches "receptive field overlap" concept in visual cortex
-pub const GRAPH_LATERAL_INHIBITION_THRESHOLD: f32 = 0.7;
+/// - 0.80 = very high similarity required before inhibition fires
+/// - In MiniLM-L6 384-dim space, 0.80 cosine targets true near-duplicates/paraphrases
+/// - 0.70 was too aggressive — caught related-but-distinct memories (e.g., two different
+///   RocksDB issues would hit 0.72 cosine and suppress each other incorrectly)
+/// - Conservative: only suppress when memories are genuinely redundant
+pub const GRAPH_LATERAL_INHIBITION_THRESHOLD: f32 = 0.80;
 
 /// Minimum prediction error multiplier (VTA/Dopamine system).
 ///
