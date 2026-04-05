@@ -2320,6 +2320,17 @@ impl MultiUserMemoryManager {
 
         let graph_guard = graph.read();
 
+        // Idempotency guard: if this memory's episode already exists in the graph,
+        // skip re-processing. Prevents mention_count inflation and orphan edges
+        // when remember() retries (e.g. MCP timeout → client retry).
+        if graph_guard.get_episode(&memory_id.0)?.is_some() {
+            tracing::debug!(
+                "Episode {} already processed, skipping graph rebuild",
+                &memory_id.0.to_string()[..8]
+            );
+            return Ok(());
+        }
+
         let mut entity_uuids = Vec::new();
 
         // Insert all pre-built entities

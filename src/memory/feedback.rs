@@ -2203,7 +2203,7 @@ impl FeedbackStore {
             avg_ema: if self.momentum.is_empty() {
                 0.0
             } else {
-                self.momentum.values().map(|m| m.ema).sum::<f32>() / self.momentum.len() as f32
+                self.momentum.values().map(|m| m.ema_with_decay()).sum::<f32>() / self.momentum.len() as f32
             },
             avg_stability: if self.momentum.is_empty() {
                 0.0

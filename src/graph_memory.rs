@@ -2710,11 +2710,14 @@ impl GraphMemory {
         );
 
         let value = crate::serialization::encode(&episode)?;
+        let already_existed = self.db.get_cf(self.episodes_cf(), key)?.is_some();
         self.db.put_cf(self.episodes_cf(), key, value)?;
 
-        // Increment episode counter
-        let prev = self.episode_count.fetch_add(1, Ordering::Relaxed);
-        tracing::debug!("add_episode: count {} -> {}", prev, prev + 1);
+        // Only increment counter for genuinely new episodes (not overwrites from retries)
+        if !already_existed {
+            let prev = self.episode_count.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!("add_episode: count {} -> {}", prev, prev + 1);
+        }
 
         // Update inverted index: entity_uuid -> episode_uuid
         for entity_uuid in &episode.entity_refs {
@@ -7112,5 +7115,187 @@ mod tests {
         assert!(strength.is_some());
         let s = strength.unwrap();
         assert!(s > 0.75 && s <= 0.8, "Strength should be ~0.8, got {}", s);
+    }
+
+    // =========================================================================
+    // BEHAVIORAL LOOP TESTS
+    // Verify cognitive loops are closed (not just structurally present).
+    // =========================================================================
+
+    #[test]
+    fn test_loop_episode_idempotency() {
+        // Verify: calling add_episode() twice with same UUID doesn't inflate episode_count
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let memory_uuid = Uuid::new_v4();
+        let entity_uuid = Uuid::new_v4();
+
+        let entity = EntityNode {
+            uuid: entity_uuid,
+            name: "IdempotentEntity".to_string(),
+            labels: vec![EntityLabel::Concept],
+            created_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: std::collections::HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: false,
+        };
+        graph.add_entity(entity).unwrap();
+
+        let episode = EpisodicNode {
+            uuid: memory_uuid,
+            name: "Test Episode".to_string(),
+            content: "Test content for idempotency".to_string(),
+            valid_at: Utc::now(),
+            created_at: Utc::now(),
+            entity_refs: vec![entity_uuid],
+            source: EpisodeSource::Message,
+            metadata: std::collections::HashMap::new(),
+        };
+
+        // First insert
+        graph.add_episode(episode.clone()).unwrap();
+        let count_after_first = graph.episode_count.load(Ordering::Relaxed);
+
+        // Second insert (same UUID — simulates retry)
+        graph.add_episode(episode).unwrap();
+        let count_after_second = graph.episode_count.load(Ordering::Relaxed);
+
+        assert_eq!(
+            count_after_first, count_after_second,
+            "episode_count should not inflate on overwrite (got {} then {})",
+            count_after_first, count_after_second
+        );
+    }
+
+    #[test]
+    fn test_loop_decay_reduces_edge_strength() {
+        // Verify: apply_decay() actually reduces edge strength (decay loop is closed)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let from_uuid = Uuid::new_v4();
+        let to_uuid = Uuid::new_v4();
+
+        // Create entities
+        for (uuid, name) in [(from_uuid, "DecayFrom"), (to_uuid, "DecayTo")] {
+            let entity = EntityNode {
+                uuid,
+                name: name.to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: Utc::now(),
+                last_seen_at: Utc::now(),
+                mention_count: 1,
+                summary: String::new(),
+                attributes: std::collections::HashMap::new(),
+                name_embedding: None,
+                salience: 0.5,
+                is_proper_noun: false,
+            };
+            graph.add_entity(entity).unwrap();
+        }
+
+        // Create edge with strength 0.5, last activated 30 days ago (well past decay threshold)
+        let edge_uuid = Uuid::new_v4();
+        let edge = RelationshipEdge {
+            uuid: edge_uuid,
+            from_entity: from_uuid,
+            to_entity: to_uuid,
+            relation_type: RelationType::RelatedTo,
+            strength: 0.5,
+            created_at: Utc::now() - Duration::days(60),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: "decay test".to_string(),
+            last_activated: Utc::now() - Duration::days(30),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L1Working,
+            entity_confidence: None,
+        };
+        graph.add_relationship(edge).unwrap();
+
+        // Run decay
+        let result = graph.apply_decay().unwrap();
+
+        // Edge should have been affected (either decayed or pruned)
+        if result.pruned_count == 0 {
+            // Not pruned — check it was weakened
+            let updated = graph.get_relationship(&edge_uuid).unwrap();
+            if let Some(updated_edge) = updated {
+                assert!(
+                    updated_edge.strength < 0.5,
+                    "Edge strength should have decayed from 0.5, got {}",
+                    updated_edge.strength
+                );
+            }
+        }
+        // If pruned, the loop is working (edge was weak enough to remove)
+    }
+
+    #[test]
+    fn test_loop_feedback_strengthens_edges() {
+        // Verify: batch_strengthen_synapses() actually increases edge strength (feedback loop)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let from_uuid = Uuid::new_v4();
+        let to_uuid = Uuid::new_v4();
+
+        for (uuid, name) in [(from_uuid, "FeedbackFrom"), (to_uuid, "FeedbackTo")] {
+            let entity = EntityNode {
+                uuid,
+                name: name.to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: Utc::now(),
+                last_seen_at: Utc::now(),
+                mention_count: 1,
+                summary: String::new(),
+                attributes: std::collections::HashMap::new(),
+                name_embedding: None,
+                salience: 0.5,
+                is_proper_noun: false,
+            };
+            graph.add_entity(entity).unwrap();
+        }
+
+        let initial_strength = 0.3;
+        let edge = RelationshipEdge {
+            uuid: Uuid::new_v4(), // add_relationship() will assign a new UUID
+            from_entity: from_uuid,
+            to_entity: to_uuid,
+            relation_type: RelationType::RelatedTo,
+            strength: initial_strength,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: "feedback test".to_string(),
+            last_activated: Utc::now(),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+        };
+        let edge_uuid = graph.add_relationship(edge).unwrap();
+
+        // Simulate "Helpful" feedback → strengthen
+        let count = graph.batch_strengthen_synapses(&[edge_uuid]).unwrap();
+        assert_eq!(count, 1, "Should have strengthened 1 edge");
+
+        let updated = graph.get_relationship(&edge_uuid).unwrap().unwrap();
+        assert!(
+            updated.strength > initial_strength,
+            "Edge strength should increase after Helpful feedback: {} -> {}",
+            initial_strength,
+            updated.strength
+        );
     }
 }

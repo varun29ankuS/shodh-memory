@@ -137,6 +137,17 @@ let episodeSequenceNumber = 0;
 /** ID of the last memory stored in this session, for preceding_memory_id chaining */
 let lastStoredMemoryId: string | null = null;
 
+/** Session activity counters — printed at session end so the user knows memory is working */
+const sessionStats = {
+  memoriesStored: 0,
+  memoriesSurfaced: 0,
+  errorsTracked: 0,
+  editsTracked: 0,
+  commandsTracked: 0,
+  factsReturned: 0,
+  todosReturned: 0,
+};
+
 interface RememberResponse {
   id?: string;
   memory_id?: string;
@@ -227,6 +238,9 @@ async function rememberEnriched(
   const memId = resp?.id || resp?.memory_id;
   if (memId) {
     lastStoredMemoryId = memId;
+    sessionStats.memoriesStored++;
+    if (memoryType === "Error") sessionStats.errorsTracked++;
+    if (memoryType === "CodeEdit") sessionStats.editsTracked++;
   }
 }
 
@@ -319,7 +333,8 @@ export function formatMemoriesForContext(memories: SurfacedMemory[]): string {
       const displayScore = range < 0.001
         ? 100
         : Math.round(((raw[i] - minScore) / range) * 100);
-      return `• [${displayScore}%] (${time}) ${m.content.slice(0, 120)}${m.content.length > 120 ? "..." : ""}`;
+      const snippet = m.content.slice(0, 120) + (m.content.length > 120 ? "..." : "");
+      return `• [${displayScore}% match, ${time}] ${snippet}`;
     })
     .join("\n");
 }
@@ -370,6 +385,11 @@ async function surfaceProactiveContext(context: string, maxResults = 3, autoInge
   const hasFacts = response.relevant_facts?.length > 0;
   const hasTodos = response.relevant_todos?.length > 0;
   const hasReminders = (response.due_reminders?.length || 0) + (response.context_reminders?.length || 0) > 0;
+
+  // Track activity for session-end report
+  sessionStats.memoriesSurfaced += response.memories?.length || 0;
+  sessionStats.factsReturned += response.relevant_facts?.length || 0;
+  sessionStats.todosReturned += response.relevant_todos?.length || 0;
 
   if (!hasMemories && !hasFacts && !hasTodos && !hasReminders) return null;
 
@@ -458,7 +478,7 @@ async function handleUserPrompt(input: HookInput): Promise<void> {
       JSON.stringify({
         hookSpecificOutput: {
           hookEventName: "UserPromptSubmit",
-          additionalContext: `\n<shodh-memory>\n${memoryContext}\n</shodh-memory>`,
+          additionalContext: `\n<shodh-memory>\n${memoryContext}\nIf you use any of these memories in your response, briefly mention the source (e.g. "based on your past experience..." or "from a previous session...").\n</shodh-memory>`,
         },
       })
     );
@@ -513,6 +533,7 @@ async function handlePostToolUse(input: HookInput): Promise<void> {
       actionRecord.output_snippet = toolOutput.slice(0, 200);
     }
     pendingToolActions.push(actionRecord);
+    if (toolName === "Bash") sessionStats.commandsTracked++;
     if (pendingToolActions.length > 50) {
       pendingToolActions.splice(0, pendingToolActions.length - 50);
     }
@@ -794,27 +815,55 @@ async function handleSubagentStop(input: HookInput): Promise<void> {
 }
 
 async function handleStop(input: HookInput): Promise<void> {
-  // Store a lightweight session summary so handleSessionStart can surface
-  // continuity context in the next session. We keep it minimal to avoid
-  // noise — just the session boundary marker with lineage metadata.
   const sessionId = input.session_id || currentEpisodeId || "unknown";
   const stopReason = input.stop_reason || "unknown";
   const cwd = input.cwd || process.cwd();
-
-  // Extract just the project directory name for context
   const projectDir = cwd.split(/[/\\]/).pop() || cwd;
 
-  const content = `Session ended (${stopReason}) in ${projectDir}. Session ID: ${sessionId}`;
+  // Build human-readable session report
+  const lines: string[] = [];
+  lines.push(`[shodh] Session report:`);
+
+  if (sessionStats.memoriesStored > 0) {
+    const parts: string[] = [];
+    if (sessionStats.editsTracked > 0) parts.push(`${sessionStats.editsTracked} edits`);
+    if (sessionStats.errorsTracked > 0) parts.push(`${sessionStats.errorsTracked} errors`);
+    if (sessionStats.commandsTracked > 0) parts.push(`${sessionStats.commandsTracked} commands`);
+    const breakdown = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+    lines.push(`  Captured: ${sessionStats.memoriesStored} memories${breakdown}`);
+  }
+
+  if (sessionStats.memoriesSurfaced > 0) {
+    lines.push(`  Surfaced: ${sessionStats.memoriesSurfaced} relevant memories`);
+  }
+
+  if (sessionStats.factsReturned > 0) {
+    lines.push(`  Facts used: ${sessionStats.factsReturned}`);
+  }
+
+  if (sessionStats.todosReturned > 0) {
+    lines.push(`  Todos matched: ${sessionStats.todosReturned}`);
+  }
+
+  if (sessionStats.memoriesStored === 0 && sessionStats.memoriesSurfaced === 0) {
+    lines.push(`  No memory activity this session.`);
+  }
+
+  // Print to stderr (visible in Claude Code terminal)
+  console.error(lines.join("\n"));
+
+  // Store rich summary as memory for next session's handleSessionStart
+  const summaryContent = `Session in ${projectDir}: ${sessionStats.memoriesStored} memories captured (${sessionStats.editsTracked} edits, ${sessionStats.errorsTracked} errors), ${sessionStats.memoriesSurfaced} memories surfaced, ${sessionStats.factsReturned} facts used. Ended: ${stopReason}.`;
 
   await callBrain("/api/remember", {
     user_id: SHODH_USER_ID,
-    content,
+    content: summaryContent,
     type: "Context",
     tags: ["session-summary", "source:stop-hook"],
     source_type: "system",
-    importance: 0.3,
+    importance: 0.4,
     episode_id: sessionId,
-    preceding_memory_id: currentEpisodeId || undefined,
+    preceding_memory_id: lastStoredMemoryId || undefined,
     credibility: 1.0,
   });
 }
