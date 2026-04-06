@@ -176,6 +176,10 @@ pub fn are_ner_models_downloaded() -> bool {
 }
 
 /// Check if ONNX Runtime is downloaded
+///
+/// Uses `symlink_metadata` instead of `exists()` to detect dangling symlinks.
+/// A dangling symlink (pointing to a non-existent versioned dylib) should
+/// return false so we trigger a re-download that creates a real file.
 pub fn is_onnx_runtime_downloaded() -> bool {
     let onnx_dir = get_onnx_runtime_dir();
 
@@ -186,7 +190,23 @@ pub fn is_onnx_runtime_downloaded() -> bool {
     #[cfg(target_os = "macos")]
     let lib_name = "libonnxruntime.dylib";
 
-    onnx_dir.join(lib_name).exists()
+    let path = onnx_dir.join(lib_name);
+
+    // path.exists() follows symlinks — returns false for dangling symlinks.
+    // That's actually what we want: if it's a dangling symlink, re-download.
+    // But first, clean up the dangling symlink so re-extraction succeeds.
+    if !path.exists() {
+        // Check if it's a dangling symlink (symlink_metadata succeeds but exists() doesn't)
+        if path.symlink_metadata().is_ok() {
+            tracing::warn!(
+                "Removing dangling symlink at {:?} (target does not exist)",
+                path
+            );
+            let _ = fs::remove_file(&path);
+        }
+        return false;
+    }
+    true
 }
 
 /// Get the path to the ONNX Runtime library
@@ -540,53 +560,100 @@ fn extract_onnx_runtime(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         #[cfg(target_os = "macos")]
         let lib_name = "libonnxruntime.dylib";
 
+        // The ONNX Runtime tgz contains both a symlink (libonnxruntime.dylib)
+        // and the real versioned file (libonnxruntime.1.23.2.dylib). If we
+        // extract the symlink first, it dangles because the target doesn't
+        // exist yet. Fix: extract only the real (non-symlink) file that
+        // matches the library name pattern, then copy it to the canonical name.
+        let mut extracted_real_path: Option<std::path::PathBuf> = None;
+
         for entry in archive.entries()? {
             let mut entry = entry?;
+            let entry_type = entry.header().entry_type();
             let path = entry.path()?;
             let name = path.to_string_lossy();
 
-            if name.ends_with(lib_name) || name.contains(lib_name) {
-                let dest_path = dest_dir.join(lib_name);
+            // Skip symlinks — they point to versioned files that may not be
+            // extracted yet, creating dangling symlinks that fail path.exists()
+            if entry_type == tar::EntryType::Symlink || entry_type == tar::EntryType::Link {
+                if name.contains(lib_name) {
+                    tracing::debug!("Skipping symlink entry: {}", name);
+                }
+                continue;
+            }
+
+            // Match the real library file (e.g., libonnxruntime.1.23.2.dylib or libonnxruntime.so.1.23.2)
+            let file_name = path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            let is_target = file_name == lib_name
+                || (file_name.starts_with("libonnxruntime")
+                    && file_name.contains(lib_name.trim_start_matches("libonnxruntime")));
+
+            // Also match versioned variants: libonnxruntime.1.23.2.dylib / libonnxruntime.so.1.23.2
+            let is_versioned = file_name.starts_with("libonnxruntime")
+                && (file_name.ends_with(".dylib")
+                    || file_name.ends_with(".so")
+                    || file_name.contains(".so."));
+
+            if is_target || is_versioned {
+                let dest_path = dest_dir.join(&file_name);
                 entry.unpack(&dest_path)?;
-                tracing::info!("Extracted {}", lib_name);
+                tracing::info!("Extracted {}", file_name);
+                extracted_real_path = Some(dest_path);
+            }
+        }
 
-                // macOS Gatekeeper blocks unsigned dylibs downloaded from the internet.
-                // Remove the quarantine xattr and ad-hoc sign so dlopen succeeds.
-                #[cfg(target_os = "macos")]
+        // Copy the extracted real file to the canonical name if needed
+        if let Some(real_path) = extracted_real_path {
+            let canonical_path = dest_dir.join(lib_name);
+            if real_path != canonical_path {
+                // Copy the real file to the canonical name (not symlink)
+                fs::copy(&real_path, &canonical_path)?;
+                tracing::info!(
+                    "Copied {} -> {} (avoiding dangling symlink)",
+                    real_path.display(),
+                    canonical_path.display()
+                );
+            }
+
+            let dest_path = &canonical_path;
+
+            // macOS Gatekeeper blocks unsigned dylibs downloaded from the internet.
+            // Remove the quarantine xattr and ad-hoc sign so dlopen succeeds.
+            #[cfg(target_os = "macos")]
+            {
+                // Remove com.apple.quarantine attribute (silent fail if not present)
+                let _ = std::process::Command::new("xattr")
+                    .args(["-d", "com.apple.quarantine"])
+                    .arg(dest_path)
+                    .output();
+
+                // Ad-hoc code sign (no identity needed, just removes the unsigned flag)
+                match std::process::Command::new("codesign")
+                    .args(["--force", "--deep", "-s", "-"])
+                    .arg(dest_path)
+                    .output()
                 {
-                    // Remove com.apple.quarantine attribute (silent fail if not present)
-                    let _ = std::process::Command::new("xattr")
-                        .args(["-d", "com.apple.quarantine"])
-                        .arg(&dest_path)
-                        .output();
-
-                    // Ad-hoc code sign (no identity needed, just removes the unsigned flag)
-                    match std::process::Command::new("codesign")
-                        .args(["--force", "--deep", "-s", "-"])
-                        .arg(&dest_path)
-                        .output()
-                    {
-                        Ok(output) if output.status.success() => {
-                            tracing::info!("Ad-hoc signed {} for macOS Gatekeeper", lib_name);
-                        }
-                        Ok(output) => {
-                            tracing::warn!(
-                                "codesign returned non-zero for {}: {}",
-                                lib_name,
-                                String::from_utf8_lossy(&output.stderr)
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "codesign not available ({}), dlopen may fail on macOS",
-                                e
-                            );
-                        }
+                    Ok(output) if output.status.success() => {
+                        tracing::info!("Ad-hoc signed {} for macOS Gatekeeper", lib_name);
+                    }
+                    Ok(output) => {
+                        tracing::warn!(
+                            "codesign returned non-zero for {}: {}",
+                            lib_name,
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("codesign not available ({}), dlopen may fail on macOS", e);
                     }
                 }
-
-                return Ok(());
             }
+
+            return Ok(());
         }
 
         anyhow::bail!("{} not found in archive", lib_name);

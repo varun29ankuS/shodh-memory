@@ -803,12 +803,12 @@ impl ABTestAnalyzer {
             // Interpolate between 0.001 and 0.0001
             let ratio = (chi_squared - CHI_SQUARED_CRITICAL_001)
                 / (CHI_SQUARED_CRITICAL_0001 - CHI_SQUARED_CRITICAL_001);
-            0.001 - ratio * 0.0009
+            (0.001 - ratio * 0.0009).max(0.0)
         } else if chi_squared >= CHI_SQUARED_CRITICAL_005 {
             // Interpolate between 0.05 and 0.001
             let ratio = (chi_squared - CHI_SQUARED_CRITICAL_005)
                 / (CHI_SQUARED_CRITICAL_001 - CHI_SQUARED_CRITICAL_005);
-            0.05 - ratio * 0.049
+            (0.05 - ratio * 0.049).max(0.0)
         } else {
             // Below 0.05 significance
             // Rough approximation: p ≈ exp(-chi_squared/2) for small values
@@ -1113,7 +1113,11 @@ impl ABTestAnalyzer {
         // Use ratio of gamma samples for Beta
         let gamma_a = Self::gamma_sample(alpha, seed, lcg);
         let gamma_b = Self::gamma_sample(beta, seed, lcg);
-        gamma_a / (gamma_a + gamma_b)
+        let denom = gamma_a + gamma_b;
+        if denom == 0.0 {
+            return 0.5; // Uninformative midpoint when both gamma samples are zero
+        }
+        gamma_a / denom
     }
 
     /// Sample from Gamma distribution using Marsaglia and Tsang's method
@@ -1141,7 +1145,8 @@ impl ABTestAnalyzer {
 
     /// Sample from standard normal using Box-Muller transform
     fn normal_sample(seed: &mut u64, lcg: &impl Fn(&mut u64) -> f64) -> f64 {
-        let u1 = lcg(seed);
+        // Clamp u1 away from zero to prevent ln(0) = -inf → NaN propagation
+        let u1 = lcg(seed).max(f64::MIN_POSITIVE);
         let u2 = lcg(seed);
         (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
     }
@@ -1261,6 +1266,16 @@ impl ABTestAnalyzer {
         analysis_number: u32,
         planned_analyses: u32,
     ) -> SequentialTest {
+        if planned_analyses == 0 || analysis_number == 0 {
+            return SequentialTest {
+                analysis_number,
+                planned_analyses,
+                alpha_spent: 0.0,
+                current_alpha: test.config.significance_level,
+                can_stop_early: false,
+                stop_reason: None,
+            };
+        }
         let fraction = analysis_number as f64 / planned_analyses as f64;
 
         // O'Brien-Fleming alpha spending function

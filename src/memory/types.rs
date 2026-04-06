@@ -510,14 +510,6 @@ pub struct EpisodeContext {
     #[serde(default)]
     pub episode_start: Option<DateTime<Utc>>,
 
-    /// Is this the first memory in the episode?
-    #[serde(default)]
-    pub is_episode_start: bool,
-
-    /// Is this the last memory in the episode?
-    #[serde(default)]
-    pub is_episode_end: bool,
-
     /// Parent episode (for hierarchical episodes)
     /// E.g., a conversation within a larger task session
     #[serde(default)]
@@ -794,6 +786,11 @@ pub struct Experience {
     /// Pre-computed by handler to avoid redundant content parsing in downstream passes
     #[serde(default)]
     pub cooccurrence_pairs: Vec<(String, String)>,
+
+    /// Optional importance override (0.0-1.0). When set, bypasses calculate_importance().
+    /// Used by hooks and auto-ingest where importance is known from caller context.
+    #[serde(default)]
+    pub importance_override: Option<f32>,
 }
 
 impl Default for Experience {
@@ -842,6 +839,7 @@ impl Default for Experience {
             temporal_refs: Vec::new(),
             ner_entities: Vec::new(),
             cooccurrence_pairs: Vec::new(),
+            importance_override: None,
         }
     }
 }
@@ -1978,6 +1976,13 @@ pub struct Query {
     /// This prevents episode bleeding where unrelated memories mix in results
     pub episode_id: Option<String>,
 
+    // === Session Context ===
+    /// Session ID for session-scoped retrieval
+    /// When set with Temporal retrieval mode, retrieves memories stored during
+    /// the specified session's time window. Enables "what did we discuss in
+    /// yesterday's session?" queries.
+    pub session_id: Option<String>,
+
     // === Scoring Parameters ===
     /// Weight for recency boost in unified scoring (0.0-1.0)
     /// When None, uses hardcoded default (0.1 = 10% contribution)
@@ -2066,6 +2071,7 @@ impl Default for Query {
             confidence_range: None,
             prospective_signals: None,
             episode_id: None,
+            session_id: None,
             recency_weight: None,
             max_results: DEFAULT_MAX_RESULTS,
             retrieval_mode: RetrievalMode::Hybrid,
@@ -2591,8 +2597,7 @@ impl SessionMemory {
 
     /// Add shared memory (zero-copy)
     pub fn add_shared(&mut self, memory: SharedMemory) -> anyhow::Result<()> {
-        let memory_size =
-            bincode::serde::encode_to_vec(&*memory, bincode::config::standard())?.len();
+        let memory_size = crate::serialization::encode_raw(&*memory)?.len();
 
         // Check if adding would exceed limit
         if self.current_size_bytes + memory_size > self.max_size_mb * 1024 * 1024 {

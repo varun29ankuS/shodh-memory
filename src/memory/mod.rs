@@ -76,8 +76,7 @@ pub use crate::memory::graph_retrieval::{
     calculate_density_weights, spreading_activation_retrieve, ActivatedMemory,
 };
 pub use crate::memory::hybrid_search::{
-    BM25Index, CrossEncoderReranker, HybridSearchConfig, HybridSearchEngine, HybridSearchResult,
-    RRFusion,
+    BM25Index, HybridSearchConfig, HybridSearchEngine, HybridSearchResult, RRFusion,
 };
 pub use crate::memory::introspection::{
     AssociationChange, ConsolidationEvent, ConsolidationEventBuffer, ConsolidationReport,
@@ -89,7 +88,7 @@ pub use crate::memory::learning_history::{
 };
 pub use crate::memory::lineage::{
     CausalRelation, InferenceConfig, LineageBranch, LineageEdge, LineageGraph, LineageSource,
-    LineageStats, LineageTrace, PostMortem, TraceDirection,
+    LineageStats, LineageTrace, TraceDirection,
 };
 pub use crate::memory::prospective::ProspectiveStore;
 pub use crate::memory::replay::{
@@ -246,6 +245,17 @@ pub struct MemorySystem {
     /// re-process the entire memory store. Initialized from the latest fact's
     /// created_at or 0 if no facts exist.
     fact_extraction_watermark: std::sync::atomic::AtomicI64,
+
+    /// Prediction cache for feedback prediction error weighting (VTA/Dopamine system).
+    ///
+    /// Stores (memory_id → final_score) for recently surfaced memories during recall.
+    /// When feedback arrives (Helpful/Misleading), the prediction error (|predicted - actual|)
+    /// scales the learning signal: expected outcomes → 0.5x, surprises → 2.0x.
+    ///
+    /// TTL: 10 minutes via moka cache. Cap: 500 entries (~4KB).
+    ///
+    /// Reference: Schultz et al. (1997) "A neural substrate of prediction and reward"
+    prediction_cache: moka::sync::Cache<MemoryId, f32>,
 }
 
 /// Resolve an entity name to a graph label and salience using pre-extracted NER data.
@@ -275,6 +285,17 @@ fn build_ner_lookup(
     ner_entities
         .iter()
         .map(|r| (r.text.to_lowercase(), (r.entity_type.clone(), r.confidence)))
+        .collect()
+}
+
+/// Tokenize text into word-level tokens for boundary-safe matching.
+///
+/// Splits on non-alphanumeric characters (preserving apostrophes for contractions),
+/// filters tokens shorter than 3 characters. Returns borrowed slices to avoid allocation.
+/// Caller should lowercase the input first for case-insensitive matching.
+fn tokenize_words(text: &str) -> HashSet<&str> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| w.len() >= 3)
         .collect()
 }
 
@@ -535,6 +556,12 @@ impl MemorySystem {
             // Watermark for incremental fact extraction — initialized to 0 (sentinel).
             // On first maintenance call, loaded from RocksDB or derived from latest fact timestamp.
             fact_extraction_watermark: std::sync::atomic::AtomicI64::new(0),
+            // Prediction cache for VTA/dopamine-inspired feedback error weighting
+            // TTL 10 minutes, max 500 entries (~4KB)
+            prediction_cache: moka::sync::Cache::builder()
+                .max_capacity(500)
+                .time_to_live(std::time::Duration::from_secs(600))
+                .build(),
         })
     }
 
@@ -587,7 +614,9 @@ impl MemorySystem {
         mut experience: Experience,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<MemoryId> {
-        let importance = self.calculate_importance(&experience);
+        let importance = experience
+            .importance_override
+            .unwrap_or_else(|| self.calculate_importance(&experience));
 
         // Generate embedding if not provided
         if experience.embeddings.is_none() {
@@ -650,7 +679,9 @@ impl MemorySystem {
         let memory_id = MemoryId(Uuid::new_v4());
 
         // Calculate importance
-        let importance = self.calculate_importance(&experience);
+        let importance = experience
+            .importance_override
+            .unwrap_or_else(|| self.calculate_importance(&experience));
 
         // PERFORMANCE: Content embedding cache (80ms → <1μs for repeated content)
         // If experience doesn't have embeddings, check cache or generate
@@ -749,7 +780,7 @@ impl MemorySystem {
                 .context
                 .as_ref()
                 .map(|c| c.emotional.arousal)
-                .unwrap_or(0.3);
+                .unwrap_or(0.0);
 
             let pattern_memory = pattern_detection::PatternMemory {
                 id: memory.id.0.to_string(),
@@ -993,7 +1024,9 @@ impl MemorySystem {
         let memory_id = MemoryId(Uuid::new_v4());
 
         // Calculate importance
-        let importance = self.calculate_importance(&experience);
+        let importance = experience
+            .importance_override
+            .unwrap_or_else(|| self.calculate_importance(&experience));
 
         // PERFORMANCE: Content embedding cache
         if experience.embeddings.is_none() {
@@ -1305,6 +1338,14 @@ impl MemorySystem {
             }
         }
 
+        // Populate prediction cache for VTA/dopamine-inspired feedback error weighting.
+        // Uses importance as the prediction signal — "how useful we think this memory is."
+        // When feedback arrives later, the prediction error scales learning rate.
+        for memory in &memories {
+            self.prediction_cache
+                .insert(memory.id.clone(), memory.importance());
+        }
+
         // Increment and persist retrieval counter
         if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
             self.stats.write().total_retrievals = count;
@@ -1395,25 +1436,79 @@ impl MemorySystem {
         let recall_start = std::time::Instant::now();
 
         // ===========================================================================
-        // TEMPORAL EXTRACTION (TEMPR approach from Hindsight - 89.6% on LoCoMo)
+        // TEMPORAL ANALYSIS (unified intent + date parsing)
         // ===========================================================================
-        // Key insight: Temporal filtering is critical for multi-hop retrieval accuracy.
-        // Extract temporal constraints from query and use them to boost/filter results.
-        let query_temporal = query_parser::extract_temporal_refs(query_text);
-        let has_temporal_query = query_parser::requires_temporal_filtering(query_text);
+        // Replaces independent calls to extract_temporal_refs() and detect_temporal_intent().
+        // analyze_temporal() parses dates first, then derives intent from parsed structure,
+        // falling back to keyword detection only when dateparser finds nothing.
+        let temporal_ctx = query_parser::analyze_temporal(query_text);
+        let has_temporal_query = temporal_ctx.intent != query_parser::TemporalIntent::None;
 
         if has_temporal_query {
-            let temporal_intent = query_parser::detect_temporal_intent(query_text);
             tracing::debug!(
-                "Temporal query detected: intent={:?}, refs={:?}",
-                temporal_intent,
-                query_temporal
+                "Temporal query detected: intent={:?}, filtering={}, seeking={}, date_range={:?}, refs={:?}",
+                temporal_ctx.intent,
+                temporal_ctx.is_filtering_query,
+                temporal_ctx.is_seeking_query,
+                temporal_ctx.date_range,
+                temporal_ctx.extraction
                     .refs
                     .iter()
                     .map(|r| r.date.to_string())
                     .collect::<Vec<_>>()
             );
         }
+
+        // ===========================================================================
+        // LAYER 0.4: TEMPORAL PRE-FILTER (Date-Range Candidate Prefetch)
+        // ===========================================================================
+        // When the query has parsed temporal references (e.g., "yesterday", "March 2026"),
+        // pre-fetch memories from the matching date range via SearchCriteria::ByDate.
+        // These IDs are collected as candidates for boosting at Layer 4.45.
+        // NOT exclusive — memories outside the range still enter via Vamana/BM25.
+        let temporal_prefilter_ids: HashSet<MemoryId> = if temporal_ctx.is_filtering_query {
+            if let Some((start_date, end_date)) = temporal_ctx.date_range {
+                // Convert NaiveDate to DateTime<Utc> (start of first day, end of last day)
+                let start_dt = start_date
+                    .and_hms_opt(0, 0, 0)
+                    .map(|dt| {
+                        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+                    })
+                    .unwrap_or_else(chrono::Utc::now);
+                let end_dt = end_date
+                    .and_hms_opt(23, 59, 59)
+                    .map(|dt| {
+                        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+                    })
+                    .unwrap_or_else(chrono::Utc::now);
+
+                match self.advanced_search(storage::SearchCriteria::ByDate {
+                    start: start_dt,
+                    end: end_dt,
+                }) {
+                    Ok(memories) => {
+                        let ids: HashSet<_> = memories.iter().map(|m| m.id.clone()).collect();
+                        if !ids.is_empty() {
+                            tracing::info!(
+                                    "Layer 0.4: Temporal pre-filter found {} memories in date range {:?} to {:?}",
+                                    ids.len(),
+                                    start_date,
+                                    end_date
+                                );
+                        }
+                        ids
+                    }
+                    Err(e) => {
+                        tracing::warn!("Layer 0.4: Temporal pre-filter search failed: {}", e);
+                        HashSet::new()
+                    }
+                }
+            } else {
+                HashSet::new()
+            }
+        } else {
+            HashSet::new()
+        };
 
         // ===========================================================================
         // LAYER 0.5: ATTRIBUTE QUERY DETECTION (Fact-First Retrieval)
@@ -1432,32 +1527,33 @@ impl MemorySystem {
 
         // Compute graph density for ontological gating (consistent with Layer 2 in graph_retrieval.rs).
         // Dense/young graphs have too many noisy L1 edges for type filtering to help.
-        let graph_density_for_rerank: Option<f32> = if let Some(graph) = self.graph_memory.as_ref()
-        {
-            let g = graph.read();
-            let seed_uuids: Vec<uuid::Uuid> = query_analysis
-                .focal_entities
-                .iter()
-                .filter_map(|e| {
-                    g.find_entity_by_name(&e.text)
-                        .ok()
-                        .flatten()
-                        .map(|n| n.uuid)
-                })
-                .collect();
-            if seed_uuids.is_empty() {
-                None
+        // Short-circuit: skip the RocksDB density lookups entirely when confidence is too low.
+        let (graph_density_for_rerank, use_ontology_rerank) =
+            if onto_intent.confidence < crate::constants::ONTOLOGICAL_MIN_CONFIDENCE {
+                (None, false)
+            } else if let Some(graph) = self.graph_memory.as_ref() {
+                let g = graph.read();
+                let seed_uuids: Vec<uuid::Uuid> = query_analysis
+                    .focal_entities
+                    .iter()
+                    .filter_map(|e| {
+                        g.find_entity_by_name(&e.text)
+                            .ok()
+                            .flatten()
+                            .map(|n| n.uuid)
+                    })
+                    .collect();
+                let density = if seed_uuids.is_empty() {
+                    None
+                } else {
+                    g.entities_average_density(&seed_uuids).ok().flatten()
+                };
+                let use_rerank =
+                    !density.is_some_and(|d| d >= crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD);
+                (density, use_rerank)
             } else {
-                g.entities_average_density(&seed_uuids).ok().flatten()
-            }
-        } else {
-            None
-        };
-
-        let use_ontology_rerank = onto_intent.confidence
-            >= crate::constants::ONTOLOGICAL_MIN_CONFIDENCE
-            && !graph_density_for_rerank
-                .is_some_and(|d| d >= crate::constants::ONTOLOGICAL_DENSITY_THRESHOLD);
+                (None, false)
+            };
 
         // Ontology telemetry
         crate::metrics::ONTOLOGICAL_INTENT_CONFIDENCE.observe(onto_intent.confidence as f64);
@@ -1519,15 +1615,21 @@ impl MemorySystem {
                         });
 
                     if let Some(content) = content {
-                        // Must contain entity
-                        if !content.contains(&entity_lower) {
+                        let content_words = tokenize_words(&content);
+                        // Must contain all entity words (word-boundary safe)
+                        if !entity_lower
+                            .split_whitespace()
+                            .all(|w| content_words.contains(w))
+                        {
                             continue;
                         }
-                        // Must contain at least one attribute synonym
-                        let has_synonym = attr_query
-                            .attribute_synonyms
-                            .iter()
-                            .any(|syn| content.contains(&syn.to_lowercase()));
+                        // Must contain at least one attribute synonym (word-level)
+                        let has_synonym = attr_query.attribute_synonyms.iter().any(|syn| {
+                            let syn_lower = syn.to_lowercase();
+                            syn_lower
+                                .split_whitespace()
+                                .all(|w| content_words.contains(w))
+                        });
                         if has_synonym {
                             boosted_ids.insert(mem_id);
                         }
@@ -1695,6 +1797,32 @@ impl MemorySystem {
             "recall [layer:0.5-0.7] query analysis + attribute + temporal fact + fact source lookup"
         );
 
+        // TEMPORAL PREFIX INJECTION: When the query has high-confidence temporal
+        // references, prepend a temporal context string to give MiniLM textual
+        // overlap with memory content mentioning the same time period.
+        // Only applied for filtering queries (not "when did X happen?" seeking queries).
+        let embedding_query_text: std::borrow::Cow<'_, str> = if temporal_ctx.is_filtering_query
+            && temporal_ctx
+                .extraction
+                .refs
+                .iter()
+                .any(|r| r.confidence >= crate::constants::TEMPORAL_PREFIX_MIN_CONFIDENCE)
+        {
+            // Build prefix from the original temporal text (e.g., "March 2026", "yesterday")
+            let temporal_labels: Vec<&str> = temporal_ctx
+                .extraction
+                .refs
+                .iter()
+                .filter(|r| r.confidence >= crate::constants::TEMPORAL_PREFIX_MIN_CONFIDENCE)
+                .map(|r| r.original_text.as_str())
+                .collect();
+            let prefix = format!("[{}] ", temporal_labels.join(", "));
+            tracing::debug!("Temporal prefix injection: \"{}\"", prefix);
+            std::borrow::Cow::Owned(format!("{}{}", prefix, query_text))
+        } else {
+            std::borrow::Cow::Borrowed(query_text)
+        };
+
         // PERFORMANCE: Use pre-computed embedding if caller provided one,
         // otherwise fall back to SHA256-keyed cache (80ms → <1μs for repeated queries)
         let query_embedding =
@@ -1705,21 +1833,21 @@ impl MemorySystem {
                 tracing::debug!("Query embedding PRECOMPUTED by caller — skipping encode");
                 pre.clone()
             } else {
-                let query_hash = Self::sha256_hash(query_text);
+                let query_hash = Self::sha256_hash(&embedding_query_text);
                 if let Some(cached_embedding) = self.query_cache.get(&query_hash) {
                     EMBEDDING_CACHE_QUERY.with_label_values(&["hit"]).inc();
-                    tracing::debug!("Query embedding cache HIT for: {}", query_text);
+                    tracing::debug!("Query embedding cache HIT for: {}", &*embedding_query_text);
                     cached_embedding.clone()
                 } else {
                     EMBEDDING_CACHE_QUERY.with_label_values(&["miss"]).inc();
                     tracing::debug!(
                         "Query embedding cache MISS - generating for: {}",
-                        query_text
+                        &*embedding_query_text
                     );
                     let embedding = self
                         .embedder
                         .as_ref()
-                        .encode(query_text)
+                        .encode(&embedding_query_text)
                         .context("Failed to generate query embedding")?;
 
                     self.query_cache.insert(query_hash, embedding.clone());
@@ -1959,39 +2087,6 @@ impl MemorySystem {
                     }
                 }
 
-                // Fallback: if ontology-filtered traversal returned too few results, retry unfiltered
-                if use_onto_filter && ids.len() < 3 {
-                    tracing::debug!(
-                        "Layer 2: Ontology-filtered traversal returned {} results, falling back to unfiltered",
-                        ids.len()
-                    );
-                    for entity_uuid in &query_entities {
-                        if let Ok(t) =
-                            g.traverse_weighted(entity_uuid, weighted_depth, None, weighted_min_str)
-                        {
-                            for tr in &t.entities {
-                                if let Ok(mut eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
-                                    eps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                                    eps.truncate(50);
-                                    for ep in eps {
-                                        let mid = MemoryId(ep.uuid);
-                                        if episode_candidates
-                                            .as_ref()
-                                            .map_or(true, |c| c.contains(&mid))
-                                        {
-                                            ids.push((
-                                                mid,
-                                                tr.entity.salience * tr.decay_factor,
-                                                tr.decay_factor,
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
                 let mut seen: std::collections::HashMap<MemoryId, (f32, f32)> =
                     std::collections::HashMap::new();
                 for (id, act, heb) in ids {
@@ -2068,6 +2163,7 @@ impl MemorySystem {
             confidence_range: query.confidence_range,
             offset: query.offset,
             episode_id: query.episode_id.clone(),
+            session_id: query.session_id.clone(),
             prospective_signals: query.prospective_signals.clone(),
             recency_weight: query.recency_weight,
         };
@@ -2162,7 +2258,9 @@ impl MemorySystem {
             //
             // The density weights directly control the balance - no extra multipliers.
             // This follows ACT-R's additive activation model.
-            const K: f32 = 30.0;
+            // K value from constants.rs — see Cormack et al. (2009), Anderson & Lebiere (1998)
+            use crate::constants::RRF_K_GRAPH_FUSION;
+            let k = RRF_K_GRAPH_FUSION;
             let mut fused: std::collections::HashMap<MemoryId, f32> =
                 std::collections::HashMap::new();
             let mut heb: std::collections::HashMap<MemoryId, f32> =
@@ -2188,20 +2286,23 @@ impl MemorySystem {
 
             // Graph results: pure RRF with density weight
             for (r, (id, activation, h)) in graph_results.iter().enumerate() {
-                // Standard RRF: weight / (K + rank), rank is 1-indexed
-                let rrf_score = graph_w / (K + (r + 1) as f32);
+                // Standard RRF: weight / (k + rank), rank is 1-indexed
+                let rrf_score = graph_w / (k + (r + 1) as f32);
                 *fused.entry(id.clone()).or_insert(0.0) += rrf_score;
                 heb.insert(id.clone(), *h);
 
-                // Additive activation bonus (ACT-R style spreading activation)
+                // Multiplicative activation bonus (ACT-R style spreading activation)
                 // Scaled by graph_w: trust activation more when graph is sparse/mature
-                let activation_bonus = graph_w * 0.2 * activation.clamp(0.0, 1.0);
-                *fused.get_mut(id).unwrap() += activation_bonus;
+                let activation_factor = 1.0
+                    + graph_w
+                        * crate::constants::ACTIVATION_BONUS_SCALE
+                        * activation.clamp(0.0, 1.0);
+                *fused.get_mut(id).unwrap() *= activation_factor;
             }
 
             // Hybrid (BM25+vector) results: pure RRF with density weight
             for (r, (id, _)) in hybrid_ids.iter().enumerate() {
-                *fused.entry(id.clone()).or_insert(0.0) += hybrid_w / (K + (r + 1) as f32);
+                *fused.entry(id.clone()).or_insert(0.0) += hybrid_w / (k + (r + 1) as f32);
             }
 
             // ===========================================================================
@@ -2211,21 +2312,43 @@ impl MemorySystem {
             // AND an attribute synonym value. This ensures "Caroline is single" ranks
             // high for "What is Caroline's relationship status?".
             if !attribute_boost_ids.is_empty() {
-                const ATTRIBUTE_BOOST: f32 = 0.5; // Strong boost for attribute matches
                 let mut boosted_count = 0;
                 for id in &attribute_boost_ids {
-                    if fused.contains_key(id) {
-                        *fused.get_mut(id).unwrap() += ATTRIBUTE_BOOST;
-                        boosted_count += 1;
-                    } else {
-                        // Also add memories that weren't in the fusion but match attribute
-                        fused.insert(id.clone(), ATTRIBUTE_BOOST);
+                    if let Some(score) = fused.get_mut(id) {
+                        // Multiplicative: preserve base ranking while amplifying attribute matches
+                        *score *= 1.0 + crate::constants::ATTRIBUTE_QUERY_BOOST;
                         boosted_count += 1;
                     }
+                    // Don't insert memories absent from fusion — attribute match alone
+                    // without semantic/graph support is insufficient evidence
                 }
                 if boosted_count > 0 {
                     tracing::info!(
                         "Layer 4.5: Boosted {} memories for attribute query",
+                        boosted_count
+                    );
+                }
+            }
+
+            // ===========================================================================
+            // LAYER 4.45: TEMPORAL PRE-FILTER BOOST
+            // ===========================================================================
+            // Memories that fell within the query's parsed date range (Layer 0.4)
+            // get a multiplicative boost. This ensures date-relevant memories rise
+            // above semantically similar but temporally wrong results.
+            if !temporal_prefilter_ids.is_empty() {
+                let mut boosted_count = 0;
+                for id in &temporal_prefilter_ids {
+                    if let Some(score) = fused.get_mut(id) {
+                        *score *= 1.0 + crate::constants::TEMPORAL_PREFILTER_BOOST;
+                        boosted_count += 1;
+                    }
+                    // Don't insert memories absent from fusion — date range alone
+                    // without semantic/graph support is insufficient evidence
+                }
+                if boosted_count > 0 {
+                    tracing::info!(
+                        "Layer 4.45: Boosted {} memories from temporal pre-filter",
                         boosted_count
                     );
                 }
@@ -2238,16 +2361,14 @@ impl MemorySystem {
             // This ensures "When did Melanie paint a sunrise?" boosts the memory that
             // recorded the event, not just memories with temporal_refs.
             if !temporal_fact_boost_ids.is_empty() {
-                const TEMPORAL_FACT_BOOST: f32 = 0.4;
                 let mut boosted_count = 0;
                 for id in &temporal_fact_boost_ids {
-                    if fused.contains_key(id) {
-                        *fused.get_mut(id).unwrap() += TEMPORAL_FACT_BOOST;
-                        boosted_count += 1;
-                    } else {
-                        fused.insert(id.clone(), TEMPORAL_FACT_BOOST);
+                    if let Some(score) = fused.get_mut(id) {
+                        // Multiplicative: temporal fact match amplifies base score
+                        *score *= 1.0 + crate::constants::TEMPORAL_FACT_BOOST;
                         boosted_count += 1;
                     }
+                    // Don't insert absent memories — temporal fact match alone is insufficient
                 }
                 if boosted_count > 0 {
                     tracing::info!(
@@ -2322,8 +2443,7 @@ impl MemorySystem {
             // via keyword or semantic similarity (built in recall handler C5).
             if let Some(ref signals) = query.prospective_signals {
                 if !signals.is_empty() {
-                    const PROSPECTIVE_BOOST_PER_MATCH: f32 = 0.15;
-                    const MAX_PROSPECTIVE_BOOST: f32 = 0.5;
+                    use crate::constants::{PROSPECTIVE_BOOST_MAX, PROSPECTIVE_BOOST_PER_MATCH};
 
                     // Tokenize all signals into unique terms (skip noise words < 3 chars)
                     let signal_terms: std::collections::HashSet<String> = signals
@@ -2344,17 +2464,19 @@ impl MemorySystem {
                         for id in &ids {
                             if let Some(content) = get_content(id) {
                                 let content_lower = content.to_lowercase();
+                                let content_words = tokenize_words(&content_lower);
                                 let match_count = signal_terms
                                     .iter()
-                                    .filter(|term| content_lower.contains(term.as_str()))
+                                    .filter(|term| content_words.contains(term.as_str()))
                                     .count();
 
                                 if match_count > 0 {
                                     // Sqrt scaling: diminishing returns for additional matches
-                                    let boost = (PROSPECTIVE_BOOST_PER_MATCH
-                                        * (match_count as f32).sqrt())
-                                    .min(MAX_PROSPECTIVE_BOOST);
-                                    *fused.get_mut(id).unwrap() += boost;
+                                    let boost_factor = 1.0
+                                        + (PROSPECTIVE_BOOST_PER_MATCH
+                                            * (match_count as f32).sqrt())
+                                        .min(PROSPECTIVE_BOOST_MAX);
+                                    *fused.get_mut(id).unwrap() *= boost_factor;
                                     boosted_count += 1;
                                 }
                             }
@@ -2384,7 +2506,8 @@ impl MemorySystem {
                 let mut boosted_count = 0;
                 for (id, boost) in &fact_source_boosts {
                     if let Some(score) = fused.get_mut(id) {
-                        *score += boost;
+                        // Multiplicative: fact source validation amplifies base score
+                        *score *= 1.0 + boost;
                         boosted_count += 1;
                     }
                 }
@@ -2399,16 +2522,22 @@ impl MemorySystem {
             // ===========================================================================
             // LAYER 4.9: ONTOLOGICAL RE-RANKING
             // ===========================================================================
-            // Boost memories connected to type-matching entities. Conservative additive
-            // boost on top of the fused score. Only active when ontological intent has
-            // sufficient confidence.
+            // Boost memories connected to type-matching entities. Multiplicative boost
+            // on fused score. Only active when ontological intent has sufficient confidence.
             //
             // Reference: Collins & Quillian (1969) — type-plausible paths retrieved faster
+            // Pre-sort and limit candidates before expensive re-ranking.
+            // Only look up graph entities for the top 2x max_results candidates,
+            // not all fused results (avoids 100s of RocksDB reads).
+            let mut res: Vec<_> = fused.into_iter().collect();
+            res.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let rerank_budget = query.max_results * 2;
+
             if use_ontology_rerank && !onto_intent.expected_labels.is_empty() {
                 if let Some(graph) = self.graph_memory.as_ref() {
                     let g = graph.read();
                     let mut boosted_count = 0usize;
-                    for (_mem_id, fused_score) in fused.iter_mut() {
+                    for (_mem_id, fused_score) in res.iter_mut().take(rerank_budget) {
                         if let Ok(Some(episode)) = g.get_episode(&_mem_id.0) {
                             let type_matches = episode
                                 .entity_refs
@@ -2432,7 +2561,7 @@ impl MemorySystem {
                                 let boost = (type_matches as f32
                                     * crate::constants::ONTOLOGICAL_RERANK_BOOST)
                                     .min(crate::constants::ONTOLOGICAL_RERANK_MAX);
-                                *fused_score += boost;
+                                *fused_score *= 1.0 + boost;
                                 boosted_count += 1;
                                 crate::metrics::ONTOLOGICAL_RERANK_BOOST_APPLIED
                                     .observe(boost as f64);
@@ -2441,16 +2570,17 @@ impl MemorySystem {
                     }
                     if boosted_count > 0 {
                         tracing::debug!(
-                            "Layer 4.9: Ontological re-rank boosted {} memories (labels={:?})",
+                            "Layer 4.9: Ontological re-rank boosted {} of {} candidates (labels={:?})",
                             boosted_count,
+                            rerank_budget.min(res.len()),
                             onto_intent.expected_labels
                         );
                     }
+                    // Re-sort after boosting since ranks may have changed
+                    res.sort_by(|a, b| b.1.total_cmp(&a.1));
                 }
             }
 
-            let mut res: Vec<_> = fused.into_iter().collect();
-            res.sort_by(|a, b| b.1.total_cmp(&a.1));
             res.truncate(query.max_results);
             tracing::debug!("Layer 4: {} fused results", res.len());
             (res, heb)
@@ -2473,9 +2603,8 @@ impl MemorySystem {
         let mut filtered_out = 0;
 
         // Layer 5: Unified scoring with hebbian + recency + emotional + feedback signals
-        // Recency decay: recent memories get boost, old memories decay
-        // λ = 0.01 means ~50% at 70 hours, ~25% at 140 hours
-        const RECENCY_DECAY_RATE: f32 = 0.01;
+        // All signals are multiplicative on the base score to preserve RRF ranking.
+        // Formula: base × importance × (1 + recency + arousal + credibility + temporal) × feedback
         let now = chrono::Utc::now();
 
         // PIPE-9: Get feedback store guard for momentum-based scoring
@@ -2483,94 +2612,131 @@ impl MemorySystem {
         let feedback_guard = self.feedback_store.as_ref().map(|fs| fs.read());
 
         for (memory_id, score) in memory_ids {
-            // Hebbian boost from learned graph weights (10% contribution)
+            // Hebbian boost from learned graph weights (multiplicative)
             let hebbian_boost = hebbian_scores.get(&memory_id).copied().unwrap_or(0.0);
-            let base_score = score + hebbian_boost * 0.1;
+            let base_score =
+                score * (1.0 + hebbian_boost * crate::constants::HEBBIAN_ASSOCIATION_WEIGHT);
 
-            // Helper to apply unified scoring (recency + arousal + credibility + temporal)
-            let recency_scale = query.recency_weight.unwrap_or(0.1);
+            // Helper to apply unified scoring (all multiplicative on base score)
+            let recency_scale_override = query.recency_weight;
             let with_unified_score = |mem: &SharedMemory, base: f32| -> SharedMemory {
-                // Recency decay: exponential decay based on age
+                use crate::constants::*;
+
+                // Recency: exponential decay, multiplicative factor
                 let hours_old = (now - mem.created_at).num_hours().max(0) as f32;
-                let recency_boost = (-RECENCY_DECAY_RATE * hours_old).exp() * recency_scale;
+                let recency_scale = recency_scale_override.unwrap_or(RECENCY_BOOST_SCALE);
+                let recency_factor = (-RECENCY_DECAY_RATE * hours_old).exp() * recency_scale;
 
-                // Emotional arousal boost: high arousal = more salient (5% contribution)
-                // Research: LaBar & Cabeza (2006) - emotionally arousing events better remembered
-                let arousal_boost = mem
+                // Emotional arousal: high arousal = more salient
+                // Reference: LaBar & Cabeza (2006) — emotionally arousing events better remembered
+                let arousal_factor = mem
                     .experience
                     .context
                     .as_ref()
-                    .map(|c| c.emotional.arousal * 0.05)
+                    .map(|c| c.emotional.arousal * AROUSAL_BOOST_SCALE)
                     .unwrap_or(0.0);
 
-                // Source credibility boost: credible sources weighted higher (5% contribution)
-                // Research: Source monitoring affects memory reliability
-                let credibility_boost = mem
+                // Source credibility: credible sources weighted higher
+                let credibility_factor = mem
                     .experience
                     .context
                     .as_ref()
-                    .map(|c| (c.source.credibility - 0.5).max(0.0) * 0.1)
+                    .map(|c| (c.source.credibility - 0.5).max(0.0) * CREDIBILITY_BOOST_SCALE)
                     .unwrap_or(0.0);
 
-                // TEMPORAL BOOST (TEMPR approach - key for multi-hop retrieval)
-                // If query has temporal intent and memory has matching temporal references,
-                // significantly boost the memory's score (25% contribution when matched)
-                let temporal_boost = if has_temporal_query
-                    && !mem.experience.temporal_refs.is_empty()
-                {
-                    // Check if any memory temporal ref matches query temporal refs
+                // TEMPORAL MATCH (TEMPR approach for multi-hop temporal retrieval)
+                //
+                // Three-tier strategy:
+                // 1. If memory has explicit temporal_refs → match against query refs (highest signal)
+                // 2. If query is filtering BY date → use created_at proximity as fallback
+                // 3. If query is seeking FOR a date (WhenQuestion) → skip boost entirely
+                let temporal_factor = if has_temporal_query && !temporal_ctx.is_seeking_query {
                     let mut best_match = 0.0_f32;
-                    for mem_ref in &mem.experience.temporal_refs {
-                        for query_ref in &query_temporal.refs {
-                            // Exact date match: strong boost
-                            if mem_ref == &query_ref.date.to_string() {
-                                best_match = best_match.max(0.25);
-                            } else if let Ok(mem_date) =
-                                chrono::NaiveDate::parse_from_str(mem_ref, "%Y-%m-%d")
-                            {
-                                // Approximate match: within 7 days gets partial boost
-                                let days_diff = (mem_date - query_ref.date).num_days().abs();
-                                if days_diff <= 7 {
-                                    let proximity_boost = 0.15 * (1.0 - days_diff as f32 / 7.0);
-                                    best_match = best_match.max(proximity_boost);
-                                } else if days_diff <= 30 {
-                                    // Within a month: smaller boost
-                                    let proximity_boost = 0.05 * (1.0 - days_diff as f32 / 30.0);
-                                    best_match = best_match.max(proximity_boost);
+
+                    // Tier 1: Explicit temporal_refs on the memory
+                    if !mem.experience.temporal_refs.is_empty() {
+                        for mem_ref in &mem.experience.temporal_refs {
+                            for query_ref in &temporal_ctx.extraction.refs {
+                                if mem_ref == &query_ref.date.to_string() {
+                                    best_match = best_match.max(TEMPORAL_MATCH_BOOST_EXACT);
+                                } else if let Ok(mem_date) =
+                                    chrono::NaiveDate::parse_from_str(mem_ref, "%Y-%m-%d")
+                                {
+                                    let days_diff = (mem_date - query_ref.date).num_days().abs();
+                                    if days_diff <= 7 {
+                                        let proximity = TEMPORAL_MATCH_BOOST_WEEK
+                                            * (1.0 - days_diff as f32 / 7.0);
+                                        best_match = best_match.max(proximity);
+                                    } else if days_diff <= 30 {
+                                        let proximity = TEMPORAL_MATCH_BOOST_MONTH
+                                            * (1.0 - days_diff as f32 / 30.0);
+                                        best_match = best_match.max(proximity);
+                                    }
                                 }
                             }
                         }
                     }
+
+                    // Tier 2: created_at proximity fallback for filtering queries
+                    // Most memories don't have temporal_refs, so use created_at as proxy
+                    if best_match == 0.0 && temporal_ctx.is_filtering_query {
+                        if let Some((range_start, range_end)) = temporal_ctx.date_range {
+                            let created_date = mem.created_at.date_naive();
+                            let range_mid = range_start
+                                + chrono::Duration::days((range_end - range_start).num_days() / 2);
+                            let days_off = (created_date - range_mid).num_days().abs();
+                            let range_half = ((range_end - range_start).num_days() / 2).max(1);
+
+                            if days_off <= range_half {
+                                // Within range: full boost
+                                best_match = TEMPORAL_MATCH_BOOST_EXACT;
+                            } else if days_off <= range_half + 7 {
+                                // Near range: decaying week boost
+                                let proximity = TEMPORAL_MATCH_BOOST_WEEK
+                                    * (1.0 - (days_off - range_half) as f32 / 7.0);
+                                best_match = best_match.max(proximity);
+                            } else if days_off <= range_half + 30 {
+                                // Further out: decaying month boost
+                                let proximity = TEMPORAL_MATCH_BOOST_MONTH
+                                    * (1.0 - (days_off - range_half) as f32 / 30.0);
+                                best_match = best_match.max(proximity);
+                            }
+                        }
+                    }
+
                     best_match
                 } else {
                     0.0
                 };
 
                 // FEEDBACK MOMENTUM (PIPE-9)
-                // Apply momentum from past feedback to consistently boost/suppress memories
-                // - Positive momentum (proven helpful) → boost score
-                // - Negative momentum (frequently ignored) → suppress up to 20%
-                // This ensures consistent feedback integration across ALL retrieval paths
+                // Symmetric ±15% multiplicative adjustment
                 let feedback_multiplier = if let Some(ref guard) = feedback_guard {
                     if let Some(fm) = guard.get_momentum(&mem.id) {
                         let momentum = fm.ema_with_decay();
                         if momentum < 0.0 {
-                            // Suppress: up to 20% penalty for highly negative momentum
-                            1.0 + (momentum * 0.2).max(-0.2)
+                            1.0 + (momentum * FEEDBACK_MOMENTUM_SCALE).max(-FEEDBACK_MOMENTUM_SCALE)
                         } else {
-                            // Boost: up to 10% bonus for positive momentum
-                            1.0 + (momentum * 0.1).min(0.1)
+                            1.0 + (momentum * FEEDBACK_MOMENTUM_SCALE).min(FEEDBACK_MOMENTUM_SCALE)
                         }
                     } else {
-                        1.0 // No feedback history
+                        1.0
                     }
                 } else {
-                    1.0 // No feedback store configured
+                    1.0
                 };
 
-                let final_score =
-                    (base + recency_boost + arousal_boost + credibility_boost + temporal_boost)
-                        * feedback_multiplier;
+                // Importance: scale base score by learned importance (7 factors)
+                let importance_factor =
+                    SCORING_IMPORTANCE_FLOOR + mem.importance() * SCORING_IMPORTANCE_RANGE;
+
+                // Unified multiplicative scoring:
+                // base × importance × (1 + recency + arousal + credibility + temporal) × feedback
+                // All boost factors are additive within the parenthetical, then multiplicative
+                // on the base. This preserves RRF ranking while allowing signals to modulate.
+                let combined_boost =
+                    1.0 + recency_factor + arousal_factor + credibility_factor + temporal_factor;
+                let final_score = base * importance_factor * combined_boost * feedback_multiplier;
 
                 let mut cloned: Memory = mem.as_ref().clone();
                 cloned.set_score(final_score);
@@ -2663,6 +2829,25 @@ impl MemorySystem {
             "recall [layer:5] memory fetch + unified scoring"
         );
 
+        // Quality gate: multiplicative factor based on content richness.
+        // Prevents empty/trivial memories from surfacing on recency or graph boost alone.
+        // Same formula as proactive_context (Berntsen elaboration quality).
+        for mem in &mut memories {
+            let content_len = mem.experience.content.len() as f32;
+            let has_entities = !mem.experience.entities.is_empty();
+            let has_context = mem.experience.context.is_some();
+            let quality = (content_len / 200.0).min(1.0)
+                * (1.0
+                    + if has_entities { 0.1 } else { 0.0 }
+                    + if has_context { 0.1 } else { 0.0 });
+            let quality_factor = quality.max(crate::constants::ELABORATION_QUALITY_MIN);
+            if let Some(score) = mem.score {
+                let mut cloned: Memory = mem.as_ref().clone();
+                cloned.set_score(score * quality_factor);
+                *mem = Arc::new(cloned);
+            }
+        }
+
         // Linguistic analysis: additive boost (5% of IC weight), not a full re-sort
         if !query_analysis.focal_entities.is_empty() {
             memories.sort_by(|a, b| {
@@ -2684,14 +2869,14 @@ impl MemorySystem {
         // strengthen associations between memories that "won" the competition.
         // Suppressed memories should not be coactivated (Hebbian "losers don't learn").
         if memories.len() >= 2 {
-            // Calculate similarity scores for competition analysis
+            // Use actual pipeline scores for competition, not position-based proxies.
+            // Previously used 1.0 - (i/n)*0.3 which compressed all scores to [0.7, 1.0],
+            // making suppression (ratio > 0.9) almost impossible.
             let candidates: Vec<(String, f32, f32)> = memories
                 .iter()
-                .enumerate()
-                .map(|(i, m)| {
-                    let relevance = 1.0 - (i as f32 / memories.len() as f32) * 0.3; // Position-based score
-                    let similarity = m.score.unwrap_or(0.5); // Use computed retrieval score
-                    (m.id.0.to_string(), relevance, similarity)
+                .map(|m| {
+                    let pipeline_score = m.score.unwrap_or(0.0);
+                    (m.id.0.to_string(), pipeline_score, pipeline_score)
                 })
                 .collect();
 
@@ -2794,6 +2979,13 @@ impl MemorySystem {
         let mut seen_ids: HashSet<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
         self.expand_with_hierarchy(&mut memories, &mut seen_ids);
 
+        // Re-sort by score and trim to max_results after expansion.
+        // Expanded memories must compete on score, not get a free pass.
+        if memories.len() > query.max_results {
+            memories.sort_by(|a, b| b.score.unwrap_or(0.0).total_cmp(&a.score.unwrap_or(0.0)));
+            memories.truncate(query.max_results);
+        }
+
         let t_total = recall_start.elapsed();
         tracing::info!(
             post_ms = format!("{:.2}", (t_total - t_fetch).as_secs_f64() * 1000.0),
@@ -2803,75 +2995,6 @@ impl MemorySystem {
         );
 
         Ok(memories)
-    }
-
-    /// Apply learning velocity boost to retrieved memories
-    ///
-    /// This method should be called after `recall()` when user_id is known.
-    /// It boosts memories that have been recently learned/reinforced, implementing
-    /// the principle that "learning should improve retrieval over time".
-    ///
-    /// Boost factors:
-    /// - Base boost for any learning activity (5%)
-    /// - Velocity boost for rapid learning (up to 15%)
-    /// - Potentiation bonus for LTP'd edges (10%)
-    /// - Total max boost: 30%
-    ///
-    /// The memories are re-sorted by adjusted score after boosting.
-    pub fn apply_learning_boost(
-        &self,
-        user_id: &str,
-        mut memories: Vec<SharedMemory>,
-    ) -> Vec<SharedMemory> {
-        if memories.is_empty() {
-            return memories;
-        }
-
-        // Calculate boosts for all memories
-        let mut boosted: Vec<(SharedMemory, f32)> = memories
-            .drain(..)
-            .map(|mem| {
-                let base_score = mem.score.unwrap_or(0.5);
-                let boost = self
-                    .learning_history
-                    .recency_boost(user_id, &mem.id.0.to_string())
-                    .unwrap_or(1.0);
-                let adjusted_score = base_score * boost;
-                (mem, adjusted_score)
-            })
-            .collect();
-
-        // Log if any memories got significant boosts
-        let boosted_count = boosted.iter().filter(|(_, s)| *s > 0.5).count();
-        if boosted_count > 0 {
-            tracing::debug!(
-                user_id = %user_id,
-                boosted_count = boosted_count,
-                "Applied learning velocity boost to retrieved memories"
-            );
-        }
-
-        // Sort by adjusted score (descending)
-        boosted.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-        // Rebuild memories with updated scores
-        boosted
-            .into_iter()
-            .map(|(mem, score)| {
-                let mut cloned: Memory = mem.as_ref().clone();
-                cloned.set_score(score);
-                Arc::new(cloned)
-            })
-            .collect()
-    }
-
-    /// Recall with learning boost applied
-    ///
-    /// Convenience method that combines `recall()` with `apply_learning_boost()`.
-    /// Use this when you have the user_id available at recall time.
-    pub fn recall_for_user(&self, user_id: &str, query: &Query) -> Result<Vec<SharedMemory>> {
-        let memories = self.recall(query)?;
-        Ok(self.apply_learning_boost(user_id, memories))
     }
 
     /// Get learning velocity statistics for a memory
@@ -4886,6 +5009,35 @@ impl MemorySystem {
     pub fn save_vector_index(&self, _path: &Path) -> Result<()> {
         self.retriever.save()
     }
+
+    /// Merge BM25 index segments to remove ghost state from overwrites.
+    /// Should be called during heavy maintenance cycles only (expensive operation).
+    /// Returns the number of segments merged (0 if already optimal).
+    pub fn optimize_bm25(&self) -> Result<usize> {
+        self.hybrid_search.optimize_bm25()
+    }
+
+    /// Drain the write retry buffer, re-attempting any failed stores.
+    /// Returns the number of successfully retried writes.
+    pub fn drain_write_retries(&self) -> usize {
+        self.long_term_memory.drain_retry_buffer()
+    }
+
+    /// Number of writes pending retry
+    pub fn pending_write_retries(&self) -> usize {
+        self.long_term_memory.pending_retry_count()
+    }
+
+    /// Total write failures since server start
+    pub fn total_write_failures(&self) -> u64 {
+        self.long_term_memory.total_write_failures()
+    }
+
+    /// Get BM25 segment count for health metrics
+    pub fn bm25_segment_count(&self) -> usize {
+        self.hybrid_search.bm25_segment_count()
+    }
+
     /// Get vector index health information
     ///
     /// Returns metrics about the Vamana index including total vectors,
@@ -5045,6 +5197,48 @@ impl MemorySystem {
             }
         }
 
+        // Hebbian feedback on entity-level graph edges:
+        // Helpful → strengthen entity edges for involved memories
+        // Misleading → weaken entity edges (anti-Hebbian)
+        if let Some(graph) = &self.graph_memory {
+            let memory_uuids: Vec<uuid::Uuid> = memory_ids.iter().map(|id| id.0).collect();
+            const MAX_FEEDBACK_EDGES: usize = 200;
+            match graph
+                .read()
+                .collect_entity_edges_for_memories(&memory_uuids, MAX_FEEDBACK_EDGES)
+            {
+                Ok(edge_uuids) if !edge_uuids.is_empty() => {
+                    let result = match outcome {
+                        RetrievalOutcome::Helpful => {
+                            graph.read().batch_strengthen_synapses(&edge_uuids)
+                        }
+                        RetrievalOutcome::Misleading => graph
+                            .read()
+                            .batch_weaken_synapses(&edge_uuids, HEBBIAN_DECAY_MISLEADING),
+                        RetrievalOutcome::Neutral => Ok(0),
+                    };
+                    match result {
+                        Ok(count) => {
+                            stats.entity_edges_reinforced = count;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to reinforce entity-level graph edges"
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {} // No entity edges found
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to collect entity edges for feedback reinforcement"
+                    );
+                }
+            }
+        }
+
         // CACHE COHERENT IMPORTANCE UPDATES:
         // 1. First try to find memory in caches (working, session)
         // 2. If found in cache, modify through the cached Arc (interior mutability)
@@ -5052,8 +5246,26 @@ impl MemorySystem {
         // 3. Then persist to storage for durability
         // 4. If not in cache, get from storage, modify, and persist
         let mut persist_failures: Vec<(MemoryId, String)> = Vec::new();
+        let mut total_prediction_error = 0.0f32;
+        let mut prediction_error_count = 0u32;
 
         for id in memory_ids {
+            // Prediction error weighting (VTA/Dopamine system — Schultz 1997):
+            // Look up how important we predicted this memory to be when surfaced.
+            // Compute prediction error → scale learning signal by surprise level.
+            let predicted = self.prediction_cache.get(id).unwrap_or(0.5);
+            let prediction_error = match &outcome {
+                RetrievalOutcome::Helpful => 1.0 - predicted, // High importance + Helpful = expected = low error
+                RetrievalOutcome::Misleading => predicted, // High importance + Misleading = surprising = high error
+                RetrievalOutcome::Neutral => 0.5,          // Baseline
+            };
+            let error_multiplier = crate::constants::PREDICTION_ERROR_MIN_MULTIPLIER
+                + prediction_error
+                    * (crate::constants::PREDICTION_ERROR_MAX_MULTIPLIER
+                        - crate::constants::PREDICTION_ERROR_MIN_MULTIPLIER);
+            total_prediction_error += prediction_error;
+            prediction_error_count += 1;
+
             // Try working memory cache first
             let cached_memory = {
                 let working = self.working_memory.read();
@@ -5071,11 +5283,11 @@ impl MemorySystem {
                 memory.record_access();
                 match &outcome {
                     RetrievalOutcome::Helpful => {
-                        memory.boost_importance(HEBBIAN_BOOST_HELPFUL);
+                        memory.boost_importance(HEBBIAN_BOOST_HELPFUL * error_multiplier);
                         stats.importance_boosts += 1;
                     }
                     RetrievalOutcome::Misleading => {
-                        memory.decay_importance(HEBBIAN_DECAY_MISLEADING);
+                        memory.decay_importance(HEBBIAN_DECAY_MISLEADING * error_multiplier);
                         stats.importance_decays += 1;
                     }
                     RetrievalOutcome::Neutral => {
@@ -5099,11 +5311,12 @@ impl MemorySystem {
                         memory.record_access();
                         match &outcome {
                             RetrievalOutcome::Helpful => {
-                                memory.boost_importance(HEBBIAN_BOOST_HELPFUL);
+                                memory.boost_importance(HEBBIAN_BOOST_HELPFUL * error_multiplier);
                                 stats.importance_boosts += 1;
                             }
                             RetrievalOutcome::Misleading => {
-                                memory.decay_importance(HEBBIAN_DECAY_MISLEADING);
+                                memory
+                                    .decay_importance(HEBBIAN_DECAY_MISLEADING * error_multiplier);
                                 stats.importance_decays += 1;
                             }
                             RetrievalOutcome::Neutral => {
@@ -5138,6 +5351,15 @@ impl MemorySystem {
                 failure_count = persist_failures.len(),
                 "Hebbian reinforcement had persistence failures - learning feedback partially lost"
             );
+        }
+
+        // Record average prediction error multiplier for observability
+        if prediction_error_count > 0 {
+            let avg_error = total_prediction_error / prediction_error_count as f32;
+            stats.prediction_error_multiplier = crate::constants::PREDICTION_ERROR_MIN_MULTIPLIER
+                + avg_error
+                    * (crate::constants::PREDICTION_ERROR_MAX_MULTIPLIER
+                        - crate::constants::PREDICTION_ERROR_MIN_MULTIPLIER);
         }
 
         Ok(stats)
@@ -5458,7 +5680,9 @@ impl MemorySystem {
         } else {
             // === CREATE PATH ===
             let memory_id = MemoryId(Uuid::new_v4());
-            let importance = self.calculate_importance(&experience);
+            let importance = experience
+                .importance_override
+                .unwrap_or_else(|| self.calculate_importance(&experience));
 
             // Generate embeddings if not provided
             if experience.embeddings.is_none() {
@@ -5719,11 +5943,20 @@ impl MemorySystem {
         const AT_RISK_THRESHOLD: f32 = 0.2; // Memories below this are at risk of being forgotten
 
         // Decay working memory activations with event tracking
+        // Emotional modulation: high-arousal memories decay slower (amygdala coupling)
         {
             let working = self.working_memory.read();
             for memory in working.all_memories() {
                 let activation_before = memory.activation();
-                memory.decay_activation(decay_factor);
+                let arousal = memory
+                    .experience
+                    .context
+                    .as_ref()
+                    .map(|c| c.emotional.arousal)
+                    .unwrap_or(0.0);
+                let emotional_factor =
+                    1.0 - (arousal * crate::constants::EMOTIONAL_DECAY_MODULATION);
+                memory.decay_activation(decay_factor * emotional_factor);
                 let activation_after = memory.activation();
                 decayed_count += 1;
 
@@ -5748,11 +5981,20 @@ impl MemorySystem {
         }
 
         // Decay session memory activations with event tracking
+        // Emotional modulation: high-arousal memories decay slower (amygdala coupling)
         {
             let session = self.session_memory.read();
             for memory in session.all_memories() {
                 let activation_before = memory.activation();
-                memory.decay_activation(decay_factor);
+                let arousal = memory
+                    .experience
+                    .context
+                    .as_ref()
+                    .map(|c| c.emotional.arousal)
+                    .unwrap_or(0.0);
+                let emotional_factor =
+                    1.0 - (arousal * crate::constants::EMOTIONAL_DECAY_MODULATION);
+                memory.decay_activation(decay_factor * emotional_factor);
                 let activation_after = memory.activation();
                 decayed_count += 1;
 
@@ -6693,11 +6935,10 @@ impl MemorySystem {
         let mut inferred_edges = Vec::new();
 
         for candidate in candidate_memories {
-            // Try inferring from candidate to new memory (candidate caused new)
+            // Backward pass: candidate → new_memory (what caused this memory?)
             if let Some((relation, confidence)) =
                 self.lineage_graph.infer_relation(candidate, new_memory)
             {
-                // Check if edge already exists
                 if !self
                     .lineage_graph
                     .edge_exists(user_id, &candidate.id, &new_memory.id)?
@@ -6712,12 +6953,63 @@ impl MemorySystem {
                     inferred_edges.push(edge);
                 }
             }
+
+            // Forward pass: new_memory → candidate (what did this memory cause?)
+            // This catches retroactive causality: when an earlier memory is stored
+            // after a later one (out-of-order ingestion), or when a new memory's
+            // type makes it a cause of existing memories (e.g., Learning stored
+            // before the Decision it informed).
+            if let Some((relation, confidence)) =
+                self.lineage_graph.infer_relation(new_memory, candidate)
+            {
+                if !self
+                    .lineage_graph
+                    .edge_exists(user_id, &new_memory.id, &candidate.id)?
+                {
+                    let edge = LineageEdge::inferred(
+                        new_memory.id.clone(),
+                        candidate.id.clone(),
+                        relation,
+                        confidence,
+                    );
+                    self.lineage_graph.store_edge(user_id, &edge)?;
+                    inferred_edges.push(edge);
+                }
+            }
         }
 
         // Check for branch signal in memory content
         if lineage::LineageGraph::detect_branch_signal(&new_memory.experience.content) {
-            // Ensure main branch exists
             self.lineage_graph.ensure_main_branch(user_id)?;
+            // Auto-create branch for the pivot
+            let branch_name = format!("pivot-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+            match self.lineage_graph.create_branch(
+                user_id,
+                &branch_name,
+                "main",
+                new_memory.id.clone(),
+                Some(&format!(
+                    "Auto-detected pivot: {}",
+                    &new_memory
+                        .experience
+                        .content
+                        .chars()
+                        .take(80)
+                        .collect::<String>()
+                )),
+            ) {
+                Ok(branch) => {
+                    tracing::info!(
+                        user_id = %user_id,
+                        branch = %branch.name,
+                        memory_id = %new_memory.id.0,
+                        "Auto-created lineage branch from pivot signal"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!("Auto-branch creation failed (non-fatal): {}", e);
+                }
+            }
         }
 
         Ok(inferred_edges)

@@ -7,14 +7,14 @@
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tracing::info;
 
 use crate::ab_testing;
 use crate::backup;
 use crate::config::ServerConfig;
 use crate::embeddings::{
-    are_ner_models_downloaded, download_ner_models, get_ner_models_dir, ner::NerEntityType,
+    are_ner_models_downloaded, download_ner_models, get_ner_models_dir,
     KeywordExtractor, NerConfig, NeuralNer,
 };
 use crate::graph_memory::{
@@ -22,7 +22,7 @@ use crate::graph_memory::{
     LtpStatus, RelationType, RelationshipEdge,
 };
 use crate::memory::{
-    query_parser, Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats,
+    Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats,
     MemorySystem, ProspectiveStore, SessionStore, TodoStore,
 };
 use crate::relevance::RelevanceEngine;
@@ -32,6 +32,26 @@ use super::types::{AuditEvent, ContextStatus, MemoryEvent};
 
 /// Type alias for context sessions map
 pub type ContextSessions = DashMap<String, ContextStatus>;
+
+/// Tracks habituation state for a single memory in proactive surfacing.
+///
+/// When a memory is surfaced by proactive_context but receives no positive
+/// feedback (the agent never references it), its surfacing count increases
+/// and a logarithmic penalty is applied. Positive feedback resets the count.
+/// This models neural habituation (Thompson & Spencer 1966).
+#[derive(Debug, Clone)]
+pub struct HabituationEntry {
+    /// Number of times surfaced without subsequent positive feedback
+    pub surfacings_without_utility: u32,
+    /// Last time this memory was surfaced
+    pub last_surfaced: chrono::DateTime<chrono::Utc>,
+    /// Last time positive feedback was received for this memory
+    pub last_utility: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Per-user habituation tracker for proactive_context.
+/// Outer key: user_id, inner key: memory UUID string.
+pub type HabituationTracker = DashMap<String, DashMap<String, HabituationEntry>>;
 
 /// Helper struct for audit log rotation (allows spawn_blocking with minimal clone)
 struct MultiUserMemoryManagerRotationHelper {
@@ -243,6 +263,17 @@ pub struct MultiUserMemoryManager {
     /// Without this, each user's MemoryStorage + GraphMemory allocates ~96MB in
     /// independent caches — 6 users = 576MB just in block caches alone.
     shared_rocksdb_cache: rocksdb::Cache,
+
+    /// Per-user, per-memory habituation tracker for proactive_context.
+    /// Tracks how many times a memory was surfaced without positive feedback,
+    /// applying logarithmic decay to prevent pathological repeated intrusions.
+    /// See: Berntsen (2009), Thompson & Spencer (1966).
+    pub habituation_tracker: Arc<HabituationTracker>,
+
+    /// Tracks background tasks (graph processing, lineage inference) spawned by
+    /// remember/upsert handlers. On shutdown, we close + await all tracked tasks
+    /// to prevent data loss from fire-and-forget graph writes.
+    pub task_tracker: tokio_util::task::TaskTracker,
 }
 
 impl MultiUserMemoryManager {
@@ -318,10 +349,32 @@ impl MultiUserMemoryManager {
         let evictions_clone = user_evictions.clone();
         let max_cache = server_config.max_users_in_memory;
         let eviction_base_path = base_path.clone();
+        let habituation_tracker: Arc<HabituationTracker> = Arc::new(DashMap::new());
+        let habituation_for_eviction = habituation_tracker.clone();
 
-        let user_memories = moka::sync::Cache::builder()
-            .max_capacity(server_config.max_users_in_memory as u64)
-            .time_to_idle(std::time::Duration::from_secs(3600))
+        // Configurable idle eviction timeout. Default: 0 (disabled).
+        // Single-user deployments (local Claude Code) should keep 0 — idle eviction
+        // causes persistent RocksDB lock contention when background tasks hold Arc
+        // references past the eviction point. Multi-user shared servers can set
+        // SHODH_CACHE_IDLE_SECS=3600 to reclaim memory from idle users.
+        let cache_idle_secs: u64 = std::env::var("SHODH_CACHE_IDLE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
+        let mut user_memories_builder =
+            moka::sync::Cache::builder().max_capacity(server_config.max_users_in_memory as u64);
+        if cache_idle_secs > 0 {
+            user_memories_builder =
+                user_memories_builder.time_to_idle(std::time::Duration::from_secs(cache_idle_secs));
+            info!(
+                "Cache idle eviction enabled: {}s (multi-user mode)",
+                cache_idle_secs
+            );
+        } else {
+            info!("Cache idle eviction disabled (single-user mode). Set SHODH_CACHE_IDLE_SECS to enable.");
+        }
+        let user_memories = user_memories_builder
             .eviction_listener(move |key: Arc<String>, value: Arc<parking_lot::RwLock<MemorySystem>>, cause| {
                 if matches!(cause, moka::notification::RemovalCause::Size | moka::notification::RemovalCause::Expired) {
                     evictions_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -338,7 +391,10 @@ impl MultiUserMemoryManager {
                     // while the lock is held, MemorySystem::new() fails with a lock error.
                     let index_path = eviction_base_path.join(key.as_str()).join("vector_index");
                     let user_key = key.clone();
+                    let hab_tracker = habituation_for_eviction.clone();
                     std::thread::spawn(move || {
+                        // Clean up habituation tracking for evicted user
+                        hab_tracker.remove(user_key.as_str());
                         // Scope the read guard so it drops before we drop the Arc.
                         // This ensures the RocksDB file lock is released promptly.
                         let save_result = {
@@ -376,9 +432,13 @@ impl MultiUserMemoryManager {
             })
             .build();
 
-        let graph_memories = moka::sync::Cache::builder()
-            .max_capacity(server_config.max_users_in_memory as u64)
-            .time_to_idle(std::time::Duration::from_secs(3600))
+        let mut graph_memories_builder =
+            moka::sync::Cache::builder().max_capacity(server_config.max_users_in_memory as u64);
+        if cache_idle_secs > 0 {
+            graph_memories_builder = graph_memories_builder
+                .time_to_idle(std::time::Duration::from_secs(cache_idle_secs));
+        }
+        let graph_memories = graph_memories_builder
             .eviction_listener(move |key: Arc<String>, _value, cause| {
                 let cause_label = if cause == moka::notification::RemovalCause::Expired {
                     "idle-timeout"
@@ -537,6 +597,8 @@ impl MultiUserMemoryManager {
             user_memory_init_locks: DashMap::new(),
             user_graph_init_locks: DashMap::new(),
             shared_rocksdb_cache,
+            habituation_tracker,
+            task_tracker: tokio_util::task::TaskTracker::new(),
         };
 
         info!("Running initial audit log rotation...");
@@ -647,7 +709,7 @@ impl MultiUserMemoryManager {
                 0
             })
         );
-        if let Ok(serialized) = bincode::serde::encode_to_vec(&event, bincode::config::standard()) {
+        if let Ok(serialized) = crate::serialization::encode(&event) {
             let db = self.shared_db.clone();
             let key_bytes = key.into_bytes();
 
@@ -737,10 +799,7 @@ impl MultiUserMemoryManager {
                     break;
                 }
 
-                if let Ok((event, _)) = bincode::serde::decode_from_slice::<AuditEvent, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok((event, _)) = crate::serialization::try_decode::<AuditEvent>(&value) {
                     events.push(event);
                 }
             }
@@ -861,6 +920,7 @@ impl MultiUserMemoryManager {
     pub fn evict_user(&self, user_id: &str) {
         self.user_memories.invalidate(user_id);
         self.graph_memories.invalidate(user_id);
+        self.habituation_tracker.remove(user_id);
         self.user_memories.run_pending_tasks();
         self.graph_memories.run_pending_tasks();
 
@@ -884,6 +944,7 @@ impl MultiUserMemoryManager {
     pub fn forget_user(&self, user_id: &str) -> Result<()> {
         self.user_memories.invalidate(user_id);
         self.graph_memories.invalidate(user_id);
+        self.habituation_tracker.remove(user_id);
 
         self.user_memories.run_pending_tasks();
         self.graph_memories.run_pending_tasks();
@@ -941,7 +1002,11 @@ impl MultiUserMemoryManager {
     }
 
     /// Prefix-scan and batch-delete all keys starting with `{user_id}:` from a column family
-    fn delete_by_prefix(db: &rocksdb::DB, cf: &rocksdb::ColumnFamily, prefix: &[u8]) -> usize {
+    fn delete_by_prefix(
+        db: &rocksdb::DB,
+        cf: &rocksdb::ColumnFamily,
+        prefix: &[u8],
+    ) -> Result<usize> {
         let mut batch = rocksdb::WriteBatch::default();
         let mut count = 0;
         let iter = db.prefix_iterator_cf(cf, prefix);
@@ -954,9 +1019,10 @@ impl MultiUserMemoryManager {
             count += 1;
         }
         if count > 0 {
-            let _ = db.write(batch);
+            db.write(batch)
+                .map_err(|e| anyhow::anyhow!("RocksDB batch delete failed: {e}"))?;
         }
-        count
+        Ok(count)
     }
 
     /// Purge all user data from shared RocksDB (todos, reminders, files, feedback, audit)
@@ -968,7 +1034,7 @@ impl MultiUserMemoryManager {
         let cf_names = ["todos", "projects", "prospective"];
         for name in &cf_names {
             if let Some(cf) = self.shared_db.cf_handle(name) {
-                let n = Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes);
+                let n = Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes)?;
                 if n > 0 {
                     tracing::debug!("GDPR: purged {n} entries from {name} CF for {user_id}");
                 }
@@ -989,7 +1055,7 @@ impl MultiUserMemoryManager {
                 format!("todo_vector:{user_id}:"),
             ];
             for p in &prefixes {
-                Self::delete_by_prefix(&self.shared_db, cf, p.as_bytes());
+                Self::delete_by_prefix(&self.shared_db, cf, p.as_bytes())?;
             }
             // Priority and due/context keys also contain user_id but at varying positions.
             // Full scan of index CF to catch them all.
@@ -1003,7 +1069,9 @@ impl MultiUserMemoryManager {
                     }
                 }
             }
-            let _ = self.shared_db.write(batch);
+            self.shared_db
+                .write(batch)
+                .map_err(|e| anyhow::anyhow!("GDPR todo_index purge failed: {e}"))?;
         }
 
         if let Some(cf) = self.shared_db.cf_handle("prospective_index") {
@@ -1014,7 +1082,7 @@ impl MultiUserMemoryManager {
                 format!("status:Dismissed:{user_id}:"),
             ];
             for p in &prefixes {
-                Self::delete_by_prefix(&self.shared_db, cf, p.as_bytes());
+                Self::delete_by_prefix(&self.shared_db, cf, p.as_bytes())?;
             }
             // Context keyword indices: `context:{keyword}:{user_id}:{id}`
             let mut batch = rocksdb::WriteBatch::default();
@@ -1027,16 +1095,18 @@ impl MultiUserMemoryManager {
                     }
                 }
             }
-            let _ = self.shared_db.write(batch);
+            self.shared_db
+                .write(batch)
+                .map_err(|e| anyhow::anyhow!("GDPR prospective_index purge failed: {e}"))?;
         }
 
         // Files
         if let Some(cf) = self.shared_db.cf_handle("files") {
-            Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes);
+            Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes)?;
         }
         if let Some(cf) = self.shared_db.cf_handle("file_index") {
             let idx_prefix = format!("file_idx:{user_id}:");
-            Self::delete_by_prefix(&self.shared_db, cf, idx_prefix.as_bytes());
+            Self::delete_by_prefix(&self.shared_db, cf, idx_prefix.as_bytes())?;
             // Also catch other patterns
             let mut batch = rocksdb::WriteBatch::default();
             let iter = self.shared_db.iterator_cf(cf, rocksdb::IteratorMode::Start);
@@ -1048,18 +1118,22 @@ impl MultiUserMemoryManager {
                     }
                 }
             }
-            let _ = self.shared_db.write(batch);
+            self.shared_db
+                .write(batch)
+                .map_err(|e| anyhow::anyhow!("GDPR file_index purge failed: {e}"))?;
         }
 
         // Feedback: `pending:{user_id}`
         if let Some(cf) = self.shared_db.cf_handle("feedback") {
             let pending_key = format!("pending:{user_id}");
-            let _ = self.shared_db.delete_cf(cf, pending_key.as_bytes());
+            self.shared_db
+                .delete_cf(cf, pending_key.as_bytes())
+                .map_err(|e| anyhow::anyhow!("GDPR feedback purge failed: {e}"))?;
         }
 
         // Audit logs
         if let Some(cf) = self.shared_db.cf_handle("audit") {
-            Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes);
+            Self::delete_by_prefix(&self.shared_db, cf, prefix_bytes)?;
         }
 
         // Clear in-memory audit log cache
@@ -1138,10 +1212,7 @@ impl MultiUserMemoryManager {
                 if !key_str.starts_with(&prefix) {
                     break;
                 }
-                if let Ok((event, _)) = bincode::serde::decode_from_slice::<AuditEvent, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok((event, _)) = crate::serialization::try_decode::<AuditEvent>(&value) {
                     events.push(event);
                 }
             }
@@ -1495,6 +1566,20 @@ impl MultiUserMemoryManager {
                 }
             }
 
+            // Drain write retry buffer — re-attempt any failed writes from transient errors.
+            // Runs every cycle (not just heavy) since buffered memories are at risk of loss.
+            if let Ok(memory_lock) = self.get_user_memory(&user_id) {
+                let memory = memory_lock.read();
+                let retried = memory.drain_write_retries();
+                if retried > 0 {
+                    tracing::info!(
+                        user_id = %user_id,
+                        retried,
+                        "Drained write retry buffer"
+                    );
+                }
+            }
+
             // Direction 2: Lazy decay — flush opportunistic pruning queue
             // Instead of scanning all 34k+ edges (apply_decay), we queue edges found
             // below threshold during normal reads and batch-delete them here.
@@ -1594,6 +1679,36 @@ impl MultiUserMemoryManager {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // BM25 segment merge on heavy cycles — removes ghost state from upsert
+        // tombstones and reclaims disk space. Tantivy segments accumulate from
+        // per-memory commits; without periodic merging, search quality degrades
+        // and disk usage grows unboundedly.
+        if is_heavy {
+            let mut total_bm25_merged = 0usize;
+            for (user_id_arc, _) in self.user_memories.iter() {
+                let user_id = user_id_arc.as_ref();
+                if let Ok(memory_lock) = self.get_user_memory(user_id) {
+                    let memory = memory_lock.read();
+                    match memory.optimize_bm25() {
+                        Ok(merged) => total_bm25_merged += merged,
+                        Err(e) => {
+                            tracing::debug!(
+                                user_id = %user_id,
+                                error = %e,
+                                "BM25 optimize failed"
+                            );
+                        }
+                    }
+                }
+            }
+            if total_bm25_merged > 0 {
+                tracing::info!(
+                    "BM25 optimization: merged {} total segments across users",
+                    total_bm25_merged
+                );
             }
         }
 
@@ -1721,6 +1836,21 @@ impl MultiUserMemoryManager {
     /// Get users in cache count
     pub fn users_in_cache(&self) -> usize {
         self.user_memories.entry_count() as usize
+    }
+
+    /// Aggregate write failure metrics across all cached users.
+    /// Returns (total_failures, pending_retries).
+    pub fn write_failure_metrics(&self) -> (u64, usize) {
+        let mut total_failures = 0u64;
+        let mut total_pending = 0usize;
+        for (user_id, _) in self.user_memories.iter() {
+            if let Ok(memory_lock) = self.get_user_memory(user_id.as_ref()) {
+                let memory = memory_lock.read();
+                total_failures += memory.total_write_failures();
+                total_pending += memory.pending_write_retries();
+            }
+        }
+        (total_failures, total_pending)
     }
 
     /// Active reminder check: scan all users for due reminders, mark them triggered,
@@ -1892,7 +2022,7 @@ impl MultiUserMemoryManager {
         // 1. Run new Extractor
         let extractor = crate::extraction::Extractor::new(None, vec![], crate::extraction::ExtractionConfig::default());
         // Note: issue IDs would ideally come from API fields per spec, passing empty for now
-        let mut extraction_result = extractor.extract(&experience.content, &experience.tags, &[]);
+        let extraction_result = extractor.extract(&experience.content, &experience.tags, &[]);
 
         // 2. Metadata cap & selection
         let mut metadata_entities: Vec<_> = extraction_result.entities.iter()
@@ -1919,7 +2049,7 @@ impl MultiUserMemoryManager {
         final_extracted.extend(text_entities);
 
         // Map to EntityNode
-        let mut all_entities: Vec<(String, EntityNode)> = final_extracted.into_iter().map(|ext_ent| {
+        let all_entities: Vec<(String, EntityNode)> = final_extracted.into_iter().map(|ext_ent| {
             let label = match ext_ent.entity_type.as_str() {
                 "Domain" | "Url" | "IpAddress" | "OperatorId" | "ClusterName" | "Cve" | "Path" | "DomainLabel" => EntityLabel::Technology,
                 "ProperNoun" => EntityLabel::Concept, // Simplification
@@ -1949,6 +2079,17 @@ impl MultiUserMemoryManager {
         // =====================================================================
 
         let graph_guard = graph.read();
+
+        // Idempotency guard: if this memory's episode already exists in the graph,
+        // skip re-processing. Prevents mention_count inflation and orphan edges
+        // when remember() retries (e.g. MCP timeout → client retry).
+        if graph_guard.get_episode(&memory_id.0)?.is_some() {
+            tracing::debug!(
+                "Episode {} already processed, skipping graph rebuild",
+                &memory_id.0.to_string()[..8]
+            );
+            return Ok(());
+        }
 
         let mut entity_uuids = Vec::new();
 

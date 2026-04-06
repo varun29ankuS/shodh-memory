@@ -124,7 +124,7 @@ impl TemporalFactStore {
     pub fn store(&self, user_id: &str, fact: &TemporalFact) -> Result<()> {
         // Primary storage
         let key = format!("temporal_facts:{}:{}", user_id, fact.id);
-        let value = bincode::serde::encode_to_vec(fact, bincode::config::standard())?;
+        let value = crate::serialization::encode(fact)?;
         self.db.put(key.as_bytes(), &value)?;
 
         // Entity index
@@ -161,8 +161,7 @@ impl TemporalFactStore {
         let key = format!("temporal_facts:{}:{}", user_id, fact_id);
         match self.db.get(key.as_bytes())? {
             Some(data) => {
-                let (fact, _): (TemporalFact, _) =
-                    bincode::serde::decode_from_slice(&data, bincode::config::standard())?;
+                let (fact, _) = crate::serialization::try_decode::<TemporalFact>(&data)?;
                 Ok(Some(fact))
             }
             None => Ok(None),
@@ -282,10 +281,7 @@ impl TemporalFactStore {
                 break;
             }
 
-            if let Ok((fact, _)) = bincode::serde::decode_from_slice::<TemporalFact, _>(
-                &value,
-                bincode::config::standard(),
-            ) {
+            if let Ok((fact, _)) = crate::serialization::try_decode::<TemporalFact>(&value) {
                 facts.push(fact);
                 if facts.len() >= limit {
                     break;

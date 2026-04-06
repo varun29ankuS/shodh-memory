@@ -231,7 +231,7 @@ pub fn tier_decay_factor(hours_elapsed: f64, tier: u8, ltp_decay_factor: f32) ->
     // Check if edge exceeded max age (should prune)
     // PIPE-4: Potentiated edges (ltp_decay_factor < 1.0) extend max age proportionally
     let effective_max_age = if ltp_decay_factor < 1.0 {
-        max_age_hours / ltp_decay_factor as f64
+        max_age_hours / (ltp_decay_factor as f64).max(0.01)
     } else {
         max_age_hours
     };

@@ -52,6 +52,7 @@ shodh_config.json
 # Internal documentation (keep local only)
 COGNITIVE_ARCHITECTURE.md
 *_ARCHITECTURE.md
+AUDIT_PLAYBOOK.md
 literature/
 literature/
 

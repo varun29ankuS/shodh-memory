@@ -48,6 +48,97 @@ pub const HEBBIAN_DECAY_MISLEADING: f32 = 0.10;
 pub const IMPORTANCE_FLOOR: f32 = 0.05;
 
 // =============================================================================
+// NEUROSCIENCE-INSPIRED DYNAMICS
+// =============================================================================
+
+/// Synaptic homeostasis scaling factor (Tononi & Cirelli 2003).
+///
+/// After each graph maintenance cycle, ALL edge strengths are multiplied by this
+/// factor. Strong edges (>0.7) survive with minimal impact; weak edges (<0.2)
+/// fall below prune threshold and get cleared. Edges with LtpStatus::Full are
+/// protected (fully consolidated synapses resist homeostatic downscaling).
+///
+/// Justification:
+/// - 0.995 = 0.5% reduction per cycle, conservative synaptic renormalization
+/// - At 48 cycles/day: 0.995^48 ≈ 0.786 (21% daily reduction without reinforcement)
+/// - Unreinforced L1 edge (0.4) reaches prune threshold (0.2) in ~3.5 days
+/// - L3 edges at 0.7: 0.7 × 0.995^48 ≈ 0.55 (well above L3 prune threshold 0.3)
+/// - Prevents runaway strengthening while giving edges time to prove themselves
+///
+/// Reference: Tononi & Cirelli (2003) "Sleep and synaptic homeostasis: a hypothesis"
+pub const HOMEOSTASIS_SCALING_FACTOR: f32 = 0.995;
+
+/// Emotional decay modulation factor (Amygdala-Hippocampal coupling).
+///
+/// High-arousal memories decay slower. The effective decay factor is:
+///   effective_decay = base_decay × (1.0 - arousal × EMOTIONAL_DECAY_MODULATION)
+///
+/// At max arousal (1.0), decay is 30% slower. At zero arousal, baseline decay.
+///
+/// Justification:
+/// - 0.3 is conservative — prevents immortal memories while preserving emotional salience
+/// - Matches amygdala modulation of hippocampal consolidation strength
+/// - Frustrating bugs (arousal=0.8) decay 24% slower than routine observations (arousal=0.2)
+///
+/// Reference: McGaugh (2004) "The amygdala modulates the consolidation of memories"
+pub const EMOTIONAL_DECAY_MODULATION: f32 = 0.3;
+
+/// Graph retrieval lateral inhibition strength (cortical winner-take-all dynamics).
+///
+/// After scoring candidates in graph retrieval, high-scoring memories suppress
+/// semantically similar lower-ranked competitors by this factor of their score.
+///
+/// penalty = higher.score × GRAPH_LATERAL_INHIBITION_STRENGTH × cosine_similarity
+///
+/// Justification:
+/// - 0.15 = mild suppression, sharpens recall without discarding valid alternatives
+/// - Prevents retrieval of near-duplicate memories that dilute answer quality
+/// - Total penalty capped at 50% of original score to prevent over-suppression
+///
+/// Note: Distinct from LATERAL_INHIBITION_STRENGTH (0.3) used in proactive_context.
+/// Graph retrieval uses gentler inhibition because it feeds into the RRF fusion stage.
+///
+/// Reference: Rumelhart & Zipser (1985) "Feature discovery by competitive learning"
+pub const GRAPH_LATERAL_INHIBITION_STRENGTH: f32 = 0.15;
+
+/// Graph retrieval cosine similarity threshold for lateral inhibition.
+///
+/// Only memories with cosine similarity above this threshold to a higher-ranked
+/// memory receive inhibitory suppression. Below threshold = independent memories.
+///
+/// Justification:
+/// - 0.80 = very high similarity required before inhibition fires
+/// - In MiniLM-L6 384-dim space, 0.80 cosine targets true near-duplicates/paraphrases
+/// - 0.70 was too aggressive — caught related-but-distinct memories (e.g., two different
+///   RocksDB issues would hit 0.72 cosine and suppress each other incorrectly)
+/// - Conservative: only suppress when memories are genuinely redundant
+pub const GRAPH_LATERAL_INHIBITION_THRESHOLD: f32 = 0.80;
+
+/// Minimum prediction error multiplier (VTA/Dopamine system).
+///
+/// When feedback confirms expectations (high-score memory marked Helpful),
+/// the learning signal is scaled down to this multiplier (0.5x).
+///
+/// Justification:
+/// - Expected outcomes produce small prediction errors → modest learning
+/// - Matches reward prediction error in dopaminergic systems (Schultz 1997)
+/// - Prevents over-learning from confirmatory signals
+///
+/// Reference: Schultz et al. (1997) "A neural substrate of prediction and reward"
+pub const PREDICTION_ERROR_MIN_MULTIPLIER: f32 = 0.5;
+
+/// Maximum prediction error multiplier (VTA/Dopamine system).
+///
+/// When feedback surprises (high-score memory marked Misleading, or low-score
+/// memory marked Helpful), the learning signal is scaled up to this multiplier (2.0x).
+///
+/// Justification:
+/// - Surprising outcomes produce large prediction errors → accelerated learning
+/// - 2.0x = double the normal learning rate for maximum surprise
+/// - Enables rapid adaptation when retrieval confidence is miscalibrated
+pub const PREDICTION_ERROR_MAX_MULTIPLIER: f32 = 2.0;
+
+// =============================================================================
 // MEMORY GRAPH EDGE CONSTANTS
 // =============================================================================
 
@@ -868,6 +959,220 @@ pub const ONTOLOGICAL_RERANK_BOOST: f32 = 0.08;
 pub const ONTOLOGICAL_RERANK_MAX: f32 = 0.25;
 
 // =============================================================================
+// RECIPROCAL RANK FUSION (RRF) CONSTANTS
+// Based on Cormack, Clarke & Büttcher (2009) — "Reciprocal Rank Fusion
+// outperforms Condorcet and individual Rank Learning Methods"
+// Standard RRF uses K=60. Lower K gives more weight to top-ranked results.
+// Two-stage fusion: inner pass (BM25+vector) and outer pass (graph+hybrid)
+// use different K values reflecting different rank distribution properties.
+// =============================================================================
+
+/// RRF K for inner BM25+vector fusion in HybridSearchEngine
+///
+/// Used in `hybrid_search.rs::search_with_dynamic_weights()` to fuse BM25
+/// keyword scores with vector similarity scores.
+///
+/// K=45 (vs standard K=60) slightly emphasizes top-ranked results from each
+/// signal. Both BM25 and vector produce well-calibrated rank orderings,
+/// so moderate top-weighting is appropriate.
+pub const RRF_K_HYBRID_FUSION: f32 = 45.0;
+
+/// RRF K for outer graph+hybrid fusion in Layer 4 of semantic_retrieve()
+///
+/// Used in `mod.rs::semantic_retrieve()` to fuse graph spreading activation
+/// results with the already-fused hybrid (BM25+vector) results.
+///
+/// K=30 (more aggressive than inner K=45) because graph results are pre-sorted
+/// by activation strength and the top graph results carry high signal — justified
+/// by ACT-R's spreading activation model where top-activated items have
+/// disproportionately stronger evidence (Anderson & Lebiere, 1998).
+pub const RRF_K_GRAPH_FUSION: f32 = 30.0;
+
+// =============================================================================
+// RETRIEVAL PIPELINE BOOST CONSTANTS
+// All boosts are multiplicative factors applied to the RRF-fused base score.
+// Multiplicative (not additive) prevents boosts from dwarfing the semantic
+// relevance signal computed by RRF fusion.
+//
+// Design: base_score × (1 + Σ boost_i) × feedback_multiplier
+// Each boost_i is small enough that the base score remains the dominant signal.
+// =============================================================================
+
+/// Attribute query boost — multiplicative factor for attribute-matching memories
+///
+/// When a memory matches both entity AND attribute synonyms for an attribute
+/// query (e.g., "What is Caroline's relationship status?"), multiply its score.
+///
+/// Justification:
+/// - Attribute matches are strong relevance signals (user is asking about a
+///   specific property), so we use a significant boost
+/// - 2.5x multiplier (1.0 + 1.5) keeps the base semantic score dominant while
+///   giving clear priority to attribute-matching memories
+/// - Previously hardcoded as additive 0.5 (31x RRF scale — overwhelming)
+///
+/// Reference: Attribute-value pair retrieval in knowledge-grounded QA systems
+pub const ATTRIBUTE_QUERY_BOOST: f32 = 1.5;
+
+/// Temporal fact boost — multiplicative factor for temporal fact source memories
+///
+/// When a temporal query matches a fact's temporal references, boost the
+/// source memory (e.g., "When did Melanie paint a sunrise?" boosts the memory
+/// that recorded the painting event).
+///
+/// Justification:
+/// - Temporal fact matches are high-confidence relevance signals
+/// - 2.0x multiplier (1.0 + 1.0) is strong but doesn't override semantic ranking
+/// - Previously hardcoded as additive 0.4 (25x RRF scale — overwhelming)
+///
+/// Reference: TEMPR temporal retrieval approach (multi-hop temporal reasoning)
+pub const TEMPORAL_FACT_BOOST: f32 = 1.0;
+
+/// Activation bonus scale — maximum contribution of graph spreading activation
+///
+/// ACT-R spreading activation provides a relevance signal from the knowledge
+/// graph topology. This constant scales the activation value (0-1) into a
+/// multiplicative boost on the base score.
+///
+/// Justification:
+/// - Graph activation is a complementary signal, not a primary one
+/// - 0.3 means a fully-activated memory gets 1.3x its base score
+/// - Scaled further by graph_w (density weight), so effective range is 0.03-0.15
+/// - Previously hardcoded as additive 0.2 * graph_w (up to 6x RRF scale)
+///
+/// Reference: Anderson & Lebiere (1998) ACT-R spreading activation theory
+pub const ACTIVATION_BONUS_SCALE: f32 = 0.3;
+
+/// Recency boost scale — maximum multiplicative boost for recent memories
+///
+/// Applied as: recency_boost = exp(-RECENCY_DECAY_RATE × hours) × scale
+/// This modulates base score rather than adding to it.
+///
+/// Justification:
+/// - 0.5 means a just-created memory gets up to 1.5x its base score
+/// - Decays exponentially: 24h ≈ 1.37x, 72h ≈ 1.24x, 168h ≈ 1.09x
+/// - Previously hardcoded as additive 0.1 (5x RRF scale — dominant signal)
+///
+/// Reference: Wixted (2004) exponential-power law forgetting curves
+pub const RECENCY_BOOST_SCALE: f32 = 0.5;
+
+/// Arousal boost scale — multiplicative weight for emotional arousal signal
+///
+/// High-arousal memories (errors, breakthroughs, critical decisions) should
+/// be more easily retrieved. Arousal is in [0, 1].
+///
+/// Justification:
+/// - 0.15 means max arousal gives 1.15x boost (modest but meaningful)
+/// - Previously hardcoded as additive 0.05 (3x RRF scale)
+///
+/// Reference: LaBar & Cabeza (2006) emotional arousal enhances memory retrieval
+pub const AROUSAL_BOOST_SCALE: f32 = 0.15;
+
+/// Credibility boost scale — multiplicative weight for source credibility
+///
+/// Applied only when credibility > 0.5 (above-average sources).
+/// Formula: (credibility - 0.5) × scale
+///
+/// Justification:
+/// - 0.2 means credibility=1.0 gives (0.5 × 0.2) = 0.1 → 1.1x boost
+/// - Modest: source credibility is a tiebreaker, not a ranking signal
+/// - Previously hardcoded as additive (credibility - 0.5) * 0.1
+pub const CREDIBILITY_BOOST_SCALE: f32 = 0.2;
+
+/// Same-episode boost — additive score for memories sharing the current episode
+///
+/// When the query specifies an episode_id and a candidate belongs to the same
+/// episode, this boost surfaces co-occurring memories from the same work session.
+///
+/// Justification:
+/// - 0.3 is an additive constant in the contextual scoring layer (not the RRF
+///   multiplicative pipeline), matching the scale of other additive adjustments
+///   in `apply_context_scoring` (credibility +0.05, mood congruence +0.1)
+/// - Episode membership is a strong relevance signal — co-occurring memories
+///   share causal/temporal context that semantic similarity alone cannot capture
+///
+/// Reference: Tulving (1983) "Elements of Episodic Memory" — encoding specificity
+pub const SAME_EPISODE_BOOST: f32 = 0.3;
+
+/// Temporal match boost — maximum multiplicative boost for temporal date matching
+///
+/// Three tiers:
+/// - Exact date match: TEMPORAL_MATCH_BOOST_EXACT
+/// - Within 7 days: linearly scaled
+/// - Within 30 days: smaller linearly scaled boost
+///
+/// Justification:
+/// - Exact temporal match is a very strong relevance signal for temporal queries
+/// - 1.5x for exact, decaying to 1.0x at 30 days
+/// - Previously hardcoded as additive 0.25/0.15/0.05 (16x/10x/3x RRF scale)
+///
+/// Reference: TEMPR multi-hop temporal retrieval
+pub const TEMPORAL_MATCH_BOOST_EXACT: f32 = 0.5;
+pub const TEMPORAL_MATCH_BOOST_WEEK: f32 = 0.3;
+pub const TEMPORAL_MATCH_BOOST_MONTH: f32 = 0.1;
+
+/// Temporal pre-filter boost — multiplicative boost for memories within the query's date range
+///
+/// When a query has parsed temporal references (e.g., "yesterday", "in March 2026"),
+/// we pre-fetch memories from that date range via SearchCriteria::ByDate and boost
+/// them in Layer 4.45 of the fusion pipeline. This ensures date-relevant memories
+/// rise above semantically similar but temporally wrong results.
+///
+/// 0.15 is conservative: a moderate nudge that won't override strong semantic matches
+/// but gives temporal-range memories a meaningful advantage.
+pub const TEMPORAL_PREFILTER_BOOST: f32 = 0.15;
+
+/// Minimum confidence for temporal prefix injection into query embeddings
+///
+/// Only inject a temporal context prefix (e.g., "[March 2026]") into the query
+/// embedding when parsed temporal refs have confidence >= this threshold.
+/// Prevents noisy prefix injection from low-confidence date parses.
+pub const TEMPORAL_PREFIX_MIN_CONFIDENCE: f32 = 0.8;
+
+/// Prospective signal boost — per-match multiplicative factor for goal-relevant memories
+///
+/// Memories matching active goals/reminders get boosted to surface proactively.
+///
+/// Justification:
+/// - 0.25 per match, max 0.75 total → up to 1.75x boost
+/// - Previously hardcoded as additive 0.15 per match, max 0.5
+pub const PROSPECTIVE_BOOST_PER_MATCH: f32 = 0.25;
+pub const PROSPECTIVE_BOOST_MAX: f32 = 0.75;
+
+/// Hebbian association weight — contribution of learned graph associations
+///
+/// Scales the Hebbian boost from strengthened graph edges into the base score.
+///
+/// Justification:
+/// - 0.1 (10%) means graph associations are a modest supplement to RRF
+/// - Previously hardcoded as 0.1 (additive, but magnitude was correct given
+///   Hebbian scores are already in a small range)
+pub const HEBBIAN_ASSOCIATION_WEIGHT: f32 = 0.1;
+
+/// Importance scoring factor — how much importance modulates the retrieval score
+///
+/// Formula: importance_factor = SCORING_IMPORTANCE_FLOOR + importance × SCORING_IMPORTANCE_RANGE
+/// Range [0.7, 1.0]: low-importance memories lose up to 30% of base score.
+///
+/// Reference: Importance as a modulator of encoding strength (Craik & Lockhart 1972)
+pub const SCORING_IMPORTANCE_FLOOR: f32 = 0.7;
+pub const SCORING_IMPORTANCE_RANGE: f32 = 0.3;
+
+/// Feedback momentum range — symmetric ±15% multiplicative adjustment
+///
+/// Positive momentum (helpful) boosts up to 15%, negative (misleading) suppresses up to 15%.
+///
+/// Reference: Reinforcement learning in memory retrieval (Anderson & Bjork 1994)
+pub const FEEDBACK_MOMENTUM_SCALE: f32 = 0.15;
+
+/// Recency decay rate — exponential time constant for recency scoring
+///
+/// Formula: exp(-RECENCY_DECAY_RATE × hours_old)
+/// λ = 0.01 means ~50% at 70 hours, ~25% at 140 hours
+///
+/// Reference: Wixted (2004) time-based forgetting curves
+pub const RECENCY_DECAY_RATE: f32 = 0.01;
+
+// =============================================================================
 // EDGE-TIER TRUST WEIGHTS FOR SPREADING ACTIVATION
 // Based on hippocampal-cortical consolidation: edges that survive decay are
 // more reliable for graph traversal. Dense graphs (L1) are noisy for search,
@@ -1646,6 +1951,52 @@ pub const INTERFERENCE_VULNERABILITY_HOURS: i64 = 24;
 /// - Limits memory overhead
 pub const INTERFERENCE_MAX_TRACKED: usize = 10;
 
+/// Competition close-competitor threshold — ratio above which suppression fires
+///
+/// When two memories compete, suppression is applied only if the loser's score
+/// is within this ratio of the winner's score. Below this ratio, the memory
+/// is clearly weaker and passes through without suppression.
+///
+/// Justification:
+/// - 0.9 means only the top 10% competitive band triggers suppression
+/// - Below 0.9, the score gap is large enough that interference is minimal
+///
+/// Reference: Anderson & Bjork (1994) — retrieval-induced forgetting operates
+/// primarily on strong competitors, not weak ones
+pub const COMPETITION_CLOSE_RATIO: f32 = 0.9;
+
+/// Competition suppression multiplier — scales the suppression penalty
+///
+/// Formula: suppression = INTERFERENCE_COMPETITION_FACTOR × (1 - ratio) × COMPETITION_SUPPRESSION_SCALE
+///
+/// Justification:
+/// - 10.0 maps the tiny ratio gap (0.01-0.10) to meaningful suppression
+/// - With INTERFERENCE_COMPETITION_FACTOR=0.15: max suppression = 0.15 × 0.1 × 10 = 0.15
+pub const COMPETITION_SUPPRESSION_SCALE: f32 = 10.0;
+
+/// Minimum score for a suppressed memory to survive competition
+///
+/// If a memory's score falls below this after suppression, it is fully removed.
+/// Above this, it survives with a reduced score.
+pub const COMPETITION_SURVIVAL_FLOOR: f32 = 0.1;
+
+/// Interference damage scaling for close survivors vs fully suppressed
+///
+/// Close survivors (score > COMPETITION_SURVIVAL_FLOOR) record mild interference
+/// at this fraction of the full suppression amount. Fully suppressed memories
+/// record the full amount.
+pub const COMPETITION_SURVIVOR_DAMAGE_RATIO: f32 = 0.3;
+
+/// Connectivity factor divisor for replay candidate prioritization
+///
+/// Higher connectivity = more important for consolidation.
+/// Formula: 1.0 + (connections / divisor).min(max_boost)
+pub const REPLAY_CONNECTIVITY_DIVISOR: f32 = 10.0;
+pub const REPLAY_CONNECTIVITY_MAX_BOOST: f32 = 0.5;
+
+/// Minimum activation floor after interference decay
+pub const INTERFERENCE_ACTIVATION_FLOOR: f32 = 0.05;
+
 // =============================================================================
 // PATTERN-TRIGGERED REPLAY CONSTANTS (PIPE-2)
 // Based on hippocampal sharp-wave ripple research (Rasch & Born 2013)
@@ -1721,6 +2072,18 @@ pub const HIGH_IMPORTANCE_THRESHOLD: f32 = 0.7;
 /// - Matches amygdala activation threshold from neuroscience
 /// - Error/surprise events typically exceed this
 pub const HIGH_AROUSAL_THRESHOLD: f32 = 0.7;
+
+/// Lower arousal threshold for anticipatory prefetch relevance boosting
+///
+/// Two-tier arousal gating: prefetch uses a lower bar than salience spike detection.
+/// Prefetch asks "is this worth surfacing proactively?" while salience spike asks
+/// "is this exceptional enough to trigger replay?"
+///
+/// Justification:
+/// - 0.6 captures moderately arousing memories for prefetch (LaBar & Cabeza, 2006)
+/// - Distinct from HIGH_AROUSAL_THRESHOLD (0.7) which gates replay/salience spikes
+/// - Memories in [0.6, 0.7) get prefetch boost but don't trigger salience replay
+pub const PREFETCH_AROUSAL_THRESHOLD: f32 = 0.6;
 
 /// Surprise factor threshold for salience-triggered replay
 ///
@@ -1878,6 +2241,237 @@ pub const TIER_RETRIEVAL_SUCCESS_BOOST: f32 = 0.25;
 /// Edges above 0.8 weight are considered "potentiated" and decay even slower.
 pub const TIER_LTP_THRESHOLD: f32 = 0.8;
 
+// === ADAPTIVE INVOLUNTARY MEMORY (Berntsen 2009) ===
+// Constraints that keep proactive_context adaptive rather than pathological.
+// proactive_context is an involuntary memory system — cue-driven surfacing
+// without explicit search. Without biological constraints, it degrades into
+// pathological intrusions (Ehlers & Clark 2000). These constants implement
+// the adaptive mechanisms from Berntsen's involuntary autobiographical memory
+// model: habituation, lateral inhibition, elaboration gating, and steep
+// recency gradients.
+
+/// Habituation decay factor for repeated surfacing without utility.
+///
+/// When a memory surfaces via proactive_context and receives no positive
+/// feedback (the agent never references it), its proactive retrieval weight
+/// decays logarithmically: penalty = factor * ln(1 + surfacings_without_utility).
+/// This mirrors neural habituation — repeated stimulation without reinforcement
+/// diminishes the response (Thompson & Spencer 1966).
+///
+/// 0.08 gives: 1 miss → -0.055, 3 misses → -0.111, 10 misses → -0.192
+///
+/// Reference: Thompson & Spencer (1966) "Habituation: A model phenomenon
+/// for the study of neuronal substrates of behavior"
+pub const HABITUATION_DECAY_FACTOR: f32 = 0.08;
+
+/// Maximum habituation penalty — prevents permanent suppression.
+///
+/// Biological habituation is never permanent; dishabituation occurs when
+/// context changes. The cap ensures memories can recover when context shifts.
+pub const HABITUATION_MAX_PENALTY: f32 = 0.4;
+
+/// Cosine similarity threshold for lateral inhibition between candidates.
+///
+/// When two surfaced memories are more similar than this threshold, the
+/// weaker one is suppressed — modeling lateral inhibition in neural
+/// pattern separation. Only the most distinctive match for each "region"
+/// of memory space survives.
+///
+/// 0.75 is high enough that genuinely different memories about the same
+/// topic survive, while near-duplicates and paraphrases suppress each other.
+///
+/// Reference: O'Reilly & McClelland (1994) "Hippocampal conjunctive encoding,
+/// storage, and recall: avoiding a trade-off"
+pub const LATERAL_INHIBITION_THRESHOLD: f32 = 0.75;
+
+/// Strength of lateral inhibition suppression.
+///
+/// When two candidates exceed the similarity threshold, the weaker one's
+/// score is reduced by: strength * similarity * (winner_score / loser_score).
+/// Higher values create more aggressive winner-take-all dynamics.
+pub const LATERAL_INHIBITION_STRENGTH: f32 = 0.3;
+
+/// Recency decay rate for proactive (involuntary) retrieval.
+///
+/// Involuntary memories show a steeper recency gradient than voluntary recall
+/// (Berntsen 2009, Ch. 6). proactive_context uses 0.03/hour vs the default
+/// 0.01/hour in semantic_retrieve, giving:
+///   - 50% boost remaining at ~23 hours (vs ~69 hours for voluntary)
+///   - 10% remaining at ~77 hours (vs ~230 hours for voluntary)
+///
+/// This ensures proactive surfacing strongly favors recent context while
+/// voluntary recall can still reach older memories when explicitly requested.
+///
+/// Reference: Berntsen (2009) "Involuntary Autobiographical Memories:
+/// An Introduction to the Unbidden Past", Ch. 6 (recency gradient)
+pub const PROACTIVE_RECENCY_DECAY_RATE: f32 = 0.03;
+
+/// Minimum elaboration quality factor for proactive surfacing.
+///
+/// Prevents zero-quality memories from being completely suppressed.
+/// Floor of 0.3 means even the shortest valid memories retain 30% of
+/// their score, while rich elaborated memories get full weight.
+pub const ELABORATION_QUALITY_MIN: f32 = 0.3;
+
+/// Tag relevance boost for proactive_context scoring.
+///
+/// When a memory's structured tags (tool:*, file:*, error) match patterns
+/// detected in the current context, the memory receives a multiplicative boost
+/// of (1 + TAG_RELEVANCE_BOOST × min(matches, 3)). This connects hook-written
+/// metadata to retrieval ranking without overriding semantic similarity.
+///
+/// Range: [0.0, 1.0]. At 0.05, maximum boost is +15% for 3 matching patterns.
+pub const TAG_RELEVANCE_BOOST: f32 = 0.05;
+
+// =============================================================================
+// TEMPORAL CREDIT ASSIGNMENT CONSTANTS
+// Multi-turn feedback attribution with exponential discounting.
+//
+// When memories are surfaced at turn T, they receive discounted credit from
+// signals at turns T+1 through T+W. This models delayed utility: a memory
+// surfaced early in a session may guide actions several turns later.
+//
+// Reference: Sutton & Barto (2018) "Reinforcement Learning", Ch. 7 (n-step TD)
+// =============================================================================
+
+/// Temporal discount factor (gamma) for multi-turn credit assignment.
+///
+/// credit(memory, turn) = signal(turn) * gamma^(turn - surfaced_turn)
+///
+/// At gamma = 0.7:
+///   T+1: 0.70, T+2: 0.49, T+3: 0.34, T+4: 0.24, T+5: 0.17
+///
+/// After 5 turns, 83% of total credit has been assigned.
+///
+/// Reference: Sutton (1988) "Learning to Predict by the Methods of Temporal Differences"
+pub const TEMPORAL_DISCOUNT_GAMMA: f32 = 0.70;
+
+/// Maximum turns in the feedback window.
+///
+/// Memories older than this stop accumulating credit.
+/// 5 turns covers ~90% of useful attribution (gamma^5 = 0.17).
+/// Memory overhead: ~5 entries × ~20 memories × ~500 bytes ≈ 50KB/user.
+pub const FEEDBACK_WINDOW_SIZE: usize = 5;
+
+/// Session gap threshold in seconds.
+///
+/// If time between proactive_context calls exceeds this, the window is
+/// flushed and a new session starts. 30 minutes matches standard web
+/// analytics session definitions (Google Analytics).
+pub const FEEDBACK_SESSION_GAP_SECS: i64 = 1800;
+
+/// Minimum turns of sustained engagement to detect task completion.
+///
+/// When the user has >= this many turns on the same topic (cosine > 0.5)
+/// followed by a topic change (cosine < 0.3), all window memories get
+/// a session-level completion boost.
+pub const SESSION_COMPLETION_MIN_TURNS: u32 = 3;
+
+/// Session-level completion boost for all window memories.
+///
+/// Applied once per detected task completion. Conservative at 0.15 to
+/// avoid overwhelming per-turn signals (range -1.0 to +1.0).
+pub const SESSION_COMPLETION_BOOST: f32 = 0.15;
+
+/// Session-level abandonment penalty for recent memories.
+///
+/// Applied to memories in the last 2 window entries when abandonment
+/// is detected. Mild at -0.10 because abandonment is ambiguous (user
+/// may have been interrupted, not dissatisfied).
+pub const SESSION_ABANDONMENT_PENALTY: f32 = -0.10;
+
+/// Re-engagement boost for topic return.
+///
+/// When a user returns to a topic after a gap, memories from the original
+/// topic receive this boost — they were worth returning to. Stronger
+/// than completion boost because re-engagement is a clearer utility signal.
+pub const SESSION_REENGAGEMENT_BOOST: f32 = 0.20;
+
+/// Minimum cumulative discounted attribution to trigger a momentum update.
+///
+/// Deferred credits below this are silently discarded to prevent noise
+/// from micro-signals polluting the momentum EMA.
+pub const TEMPORAL_CREDIT_MIN_THRESHOLD: f32 = 0.02;
+
+// =============================================================================
+// CAUSAL LINEAGE CONSTANTS (SHO-118)
+// Lineage inference detects causal relationships between memories using
+// temporal proximity, entity overlap, and memory type patterns.
+//
+// Reference: Shanahan (2005) "Perception as Abduction: Turning Sensor Data
+// into Meaningful Representation" — causal abduction from temporal sequences
+// =============================================================================
+
+/// Maximum temporal gap (days) between memories for causal inference.
+///
+/// Memories further apart than this are unlikely to share causal links.
+/// 7 days balances catching multi-session causal chains (e.g., Monday's
+/// error→Friday's fix) while filtering noise from stale associations.
+pub const LINEAGE_MAX_TEMPORAL_GAP_DAYS: i64 = 7;
+
+/// Minimum Jaccard entity overlap for causal inference.
+///
+/// Memories must share at least 30% of their entities to infer causation.
+/// Too low and unrelated memories get linked; too high and indirect
+/// causal chains (A→B→C where A and C share few entities) are missed.
+pub const LINEAGE_MIN_ENTITY_OVERLAP: f32 = 0.3;
+
+/// Maximum candidate memories to evaluate for lineage inference.
+///
+/// Caps the per-memory inference cost. 20 candidates × O(1) inference
+/// ≈ negligible latency. Higher values catch more distant causal links
+/// but increase background task duration.
+pub const LINEAGE_MAX_CANDIDATES: usize = 20;
+
+/// Lookback window (days) for finding candidate memories during inference.
+///
+/// Controls how far back the graph entity index is searched for
+/// co-occurring memories. Matches LINEAGE_MAX_TEMPORAL_GAP_DAYS by default.
+pub const LINEAGE_LOOKBACK_DAYS: i64 = 7;
+
+/// Base confidence for Caused relation (Error → Task).
+pub const LINEAGE_CONFIDENCE_CAUSED: f32 = 0.8;
+
+/// Base confidence for ResolvedBy relation (Task → Learning).
+pub const LINEAGE_CONFIDENCE_RESOLVED_BY: f32 = 0.85;
+
+/// Base confidence for InformedBy relation (Learning/Discovery → Decision).
+pub const LINEAGE_CONFIDENCE_INFORMED_BY: f32 = 0.7;
+
+/// Base confidence for SupersededBy relation (Decision → Decision).
+pub const LINEAGE_CONFIDENCE_SUPERSEDED_BY: f32 = 0.6;
+
+/// Base confidence for TriggeredBy relation (Discovery/Learning → Task).
+pub const LINEAGE_CONFIDENCE_TRIGGERED_BY: f32 = 0.75;
+
+/// Base confidence for BranchedFrom relation (pivot detection).
+pub const LINEAGE_CONFIDENCE_BRANCHED_FROM: f32 = 0.9;
+
+/// Base confidence for RelatedTo relation (same-group fallback).
+pub const LINEAGE_CONFIDENCE_RELATED_TO: f32 = 0.5;
+
+/// Scale factor for propagating lineage confidence into graph edge weights.
+///
+/// When a causal lineage edge is inferred between two memories with confidence C,
+/// the corresponding graph edges between their entities are strengthened by
+/// C * LINEAGE_GRAPH_BOOST_SCALE. This bidirectionally couples the lineage system
+/// (explicit causal chains) with the knowledge graph (spreading activation), so
+/// causally-linked memories naturally co-activate during retrieval.
+///
+/// Conservative value: lineage inferences are probabilistic, so we attenuate the
+/// boost to prevent false causal links from dominating the graph topology.
+///
+/// Reference: Anderson (1983) "The Architecture of Cognition" — spreading activation
+/// strength should reflect the reliability of the association source.
+pub const LINEAGE_GRAPH_BOOST_SCALE: f32 = 0.15;
+
+/// Boost applied when a user explicitly confirms a lineage edge.
+///
+/// Confirmation is a strong signal — the user validated the causal relationship.
+/// This uses a higher boost than automatic inference to reward human-in-the-loop
+/// validation and make confirmed causal paths more prominent in retrieval.
+pub const LINEAGE_CONFIRM_GRAPH_BOOST: f32 = 0.3;
+
 // =============================================================================
 // CONSTANTS USAGE DOCUMENTATION
 // =============================================================================
@@ -2007,5 +2601,58 @@ pub const TIER_LTP_THRESHOLD: f32 = 0.8;
 // | ONTOLOGICAL_MIN_CONFIDENCE    | memory/mod.rs             | semantic_retrieve() density gating  |
 // | ONTOLOGICAL_RERANK_BOOST      | memory/mod.rs             | semantic_retrieve() Layer 4.9       |
 // | ONTOLOGICAL_RERANK_MAX        | memory/mod.rs             | semantic_retrieve() Layer 4.9       |
+//
+// ## RRF Fusion Constants (Cormack et al. 2009, Anderson & Lebiere 1998)
+// | Constant                      | File                      | Function/Context                    |
+// |-------------------------------|---------------------------|-------------------------------------|
+// | RRF_K_HYBRID_FUSION           | memory/hybrid_search.rs   | search_with_dynamic_weights()       |
+// | RRF_K_GRAPH_FUSION            | memory/mod.rs             | semantic_retrieve() Layer 4         |
+// | ATTRIBUTE_QUERY_BOOST         | memory/mod.rs             | semantic_retrieve() Layer 4.5       |
+// | TEMPORAL_FACT_BOOST           | memory/mod.rs             | semantic_retrieve() Layer 4.55      |
+// | ACTIVATION_BONUS_SCALE        | memory/mod.rs             | semantic_retrieve() Layer 4 graph   |
+// | PROSPECTIVE_BOOST_PER_MATCH   | memory/mod.rs             | semantic_retrieve() Layer 4.7       |
+// | PROSPECTIVE_BOOST_MAX         | memory/mod.rs             | semantic_retrieve() Layer 4.7       |
+// | RECENCY_BOOST_SCALE           | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | RECENCY_DECAY_RATE            | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | AROUSAL_BOOST_SCALE           | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | CREDIBILITY_BOOST_SCALE       | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | TEMPORAL_MATCH_BOOST_EXACT    | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | TEMPORAL_MATCH_BOOST_WEEK     | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | TEMPORAL_MATCH_BOOST_MONTH    | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | TEMPORAL_PREFILTER_BOOST      | memory/mod.rs             | semantic_retrieve() Layer 4.45      |
+// | TEMPORAL_PREFIX_MIN_CONFIDENCE| memory/mod.rs             | semantic_retrieve() embedding       |
+// | HEBBIAN_ASSOCIATION_WEIGHT    | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | SCORING_IMPORTANCE_FLOOR      | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | SCORING_IMPORTANCE_RANGE      | memory/mod.rs             | semantic_retrieve() Layer 5         |
+// | FEEDBACK_MOMENTUM_SCALE       | memory/mod.rs             | semantic_retrieve() Layer 5         |
+//
+// ## Emotional Arousal Constants (LaBar & Cabeza 2006)
+// | Constant                      | File                      | Function/Context                    |
+// |-------------------------------|---------------------------|-------------------------------------|
+// | HIGH_AROUSAL_THRESHOLD        | memory/pattern_detection.rs| check_salience_spike()             |
+// | PREFETCH_AROUSAL_THRESHOLD    | memory/retrieval.rs       | PrefetchContext::relevance_score() |
+//
+// ## Adaptive Involuntary Memory Constants (Berntsen 2009)
+// | Constant                      | File                      | Function/Context                    |
+// |-------------------------------|---------------------------|-------------------------------------|
+// | HABITUATION_DECAY_FACTOR      | handlers/recall.rs        | proactive_context() habituation     |
+// | HABITUATION_MAX_PENALTY       | handlers/recall.rs        | proactive_context() habituation cap |
+// | LATERAL_INHIBITION_THRESHOLD  | handlers/recall.rs        | proactive_context() pattern sep.    |
+// | LATERAL_INHIBITION_STRENGTH   | handlers/recall.rs        | proactive_context() inhibition      |
+// | PROACTIVE_RECENCY_DECAY_RATE  | handlers/recall.rs        | proactive_context() recency curve   |
+// | ELABORATION_QUALITY_MIN       | handlers/recall.rs        | proactive_context() quality gate    |
+// | TAG_RELEVANCE_BOOST           | handlers/recall.rs        | proactive_context() tag boost       |
+//
+// ## Temporal Credit Assignment Constants (Sutton & Barto 2018)
+// | Constant                      | File                      | Function/Context                    |
+// |-------------------------------|---------------------------|-------------------------------------|
+// | TEMPORAL_DISCOUNT_GAMMA       | handlers/recall.rs        | proactive_context() multi-turn TD   |
+// | FEEDBACK_WINDOW_SIZE          | memory/feedback.rs        | FeedbackWindow sliding window       |
+// | FEEDBACK_SESSION_GAP_SECS     | memory/feedback.rs        | Session boundary detection          |
+// | SESSION_COMPLETION_MIN_TURNS  | memory/feedback.rs        | Task completion detection            |
+// | SESSION_COMPLETION_BOOST      | memory/feedback.rs        | Session-level positive signal        |
+// | SESSION_ABANDONMENT_PENALTY   | memory/feedback.rs        | Session-level negative signal        |
+// | SESSION_REENGAGEMENT_BOOST    | memory/feedback.rs        | Topic return detection               |
+// | TEMPORAL_CREDIT_MIN_THRESHOLD | memory/feedback.rs        | Deferred credit noise filter         |
 //
 // =============================================================================

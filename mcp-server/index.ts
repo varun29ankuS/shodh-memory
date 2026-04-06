@@ -29,14 +29,27 @@ import * as fs from "fs";
 import * as crypto from "crypto";
 import { fileURLToPath } from "url";
 import { nextReconnectDelay, serializeAndValidateBody, shouldWarnInsecureApiUrl } from "./security-utils";
-import { stripSystemNoise as _stripSystemNoise, getContent as _getContent, getType as _getType, formatSurfacedMemories as _formatSurfacedMemories, formatToolCallContent } from "./string-utils";
+import { stripSystemNoise, getContent as _getContent, getType as _getType, formatSurfacedMemories as _formatSurfacedMemories, formatToolCallContent } from "./string-utils";
 import { TokenTracker } from "./token-tracking";
 
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
 
 // Configuration
-const API_URL = process.env.SHODH_API_URL || "http://127.0.0.1:3030";
+// Priority: SHODH_API_URL (full URL) > SHODH_HOST+SHODH_PORT (constructed) > localhost default
+function resolveApiUrl(): string {
+  if (process.env.SHODH_API_URL) return process.env.SHODH_API_URL;
+  const host = process.env.SHODH_HOST;
+  const port = process.env.SHODH_PORT;
+  if (host) {
+    const scheme = port === "443" ? "https" : "http";
+    const portSuffix = (port && port !== "443" && port !== "80") ? `:${port}` : "";
+    return `${scheme}://${host}${portSuffix}`;
+  }
+  if (port) return `http://127.0.0.1:${port}`;
+  return "http://127.0.0.1:3030";
+}
+const API_URL = resolveApiUrl();
 const WS_URL = API_URL.replace(/^http/, "ws") + "/api/stream";
 const USER_ID = process.env.SHODH_USER_ID || "claude-code";
 
@@ -60,14 +73,26 @@ const SANDBOX_MODE = process.env.SMITHERY_SANDBOX === "true";
 //   3. First key from SHODH_API_KEYS (matches server production config)
 //   4. Auto-generate for local servers (passed to server as SHODH_DEV_API_KEY)
 //   5. Error for remote servers
-let API_KEY = process.env.SHODH_API_KEY
-  || process.env.SHODH_DEV_API_KEY
-  || (process.env.SHODH_API_KEYS?.split(",")[0]?.trim())
-  || (SANDBOX_MODE ? "sandbox" : "");
+let API_KEY = "";
+let apiKeySource = "";
+if (process.env.SHODH_API_KEY) {
+  API_KEY = process.env.SHODH_API_KEY;
+  apiKeySource = "SHODH_API_KEY";
+} else if (process.env.SHODH_DEV_API_KEY) {
+  API_KEY = process.env.SHODH_DEV_API_KEY;
+  apiKeySource = "SHODH_DEV_API_KEY";
+} else if (process.env.SHODH_API_KEYS?.split(",")[0]?.trim()) {
+  API_KEY = process.env.SHODH_API_KEYS!.split(",")[0]!.trim();
+  apiKeySource = "SHODH_API_KEYS";
+} else if (SANDBOX_MODE) {
+  API_KEY = "sandbox";
+  apiKeySource = "sandbox";
+}
 if (!API_KEY) {
   if (isLocalServer()) {
     // Auto-generate a random key for local development — zero config
     API_KEY = crypto.randomBytes(32).toString("hex");
+    apiKeySource = "auto-generated";
     console.error("[shodh-memory] No API key set — auto-generated for local server.");
   } else {
     console.error("ERROR: SHODH_API_KEY is required for remote servers.");
@@ -79,6 +104,12 @@ if (!API_KEY) {
     console.error("  export SHODH_API_KEY=your-api-key");
     process.exit(1);
   }
+}
+// Log which source was used (without revealing the key itself)
+if (apiKeySource === "SHODH_DEV_API_KEY") {
+  console.error("[shodh-memory] WARNING: API key loaded from SHODH_DEV_API_KEY — this is a development key. Use SHODH_API_KEY for production.");
+} else if (apiKeySource && apiKeySource !== "auto-generated" && apiKeySource !== "sandbox") {
+  console.error(`[shodh-memory] API key loaded from ${apiKeySource}.`);
 }
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1000;
@@ -143,36 +174,12 @@ const PROACTIVE_SURFACING = process.env.SHODH_PROACTIVE !== "false"; // enabled 
 const PROACTIVE_MIN_CONTEXT_LENGTH = 30; // minimum context length to trigger surfacing
 const MAX_CONTEXT_LENGTH = 4000; // max chars sent to backend (MiniLM truncates at ~256 tokens anyway)
 
-/**
- * Strip system scaffolding from context before sending to the memory backend.
- * AI clients often pass the full conversation context including XML tags like
- * <task-notification>, <system-reminder>, etc. These overwhelm BM25/embedding
- * and provide zero semantic signal for memory retrieval.
- *
- * The Rust backend has its own strip_system_noise(), but we clean client-side too
- * to avoid sending multi-KB payloads over the wire.
- */
-function stripSystemNoise(text: string): string {
-  let result = text;
-  // Remove common system XML blocks (non-greedy, handles multiline)
-  const tagPatterns = [
-    /<task-notification>[\s\S]*?<\/task-notification>/g,
-    /<system-reminder>[\s\S]*?<\/system-reminder>/g,
-    /<shodh-context[\s\S]*?<\/shodh-context>/g,
-    /<shodh-memory[\s\S]*?<\/shodh-memory>/g,
-    /<command-name>[\s\S]*?<\/command-name>/g,
-  ];
-  for (const pattern of tagPatterns) {
-    result = result.replace(pattern, "");
-  }
-  // Collapse runs of whitespace
-  result = result.replace(/\s{3,}/g, " ").trim();
-  return result;
-}
-
-// Track last proactive_context response for implicit feedback loop
-// The backend uses this to evaluate whether surfaced memories were helpful
+// Track last proactive_context response for implicit feedback loop.
+// The backend uses this to evaluate whether surfaced memories were helpful.
+// Guard against concurrent proactive_context calls corrupting feedback state.
 let lastProactiveResponse: string = "";
+let lastUserContext: string = "";
+let proactiveCallInFlight = false;
 
 // =============================================================================
 // STREAMING MEMORY INGESTION - Continuous background memory capture
@@ -402,11 +409,14 @@ async function surfaceRelevant(context: string, maxResults: number = 3): Promise
       signal: controller.signal,
     });
 
-    clearTimeout(timeoutId);
+    if (!response.ok) {
+      clearTimeout(timeoutId);
+      return null;
+    }
 
-    if (!response.ok) return null;
-
+    // Parse JSON within the same timeout scope — prevents hang on slow response body
     const result = await response.json() as { memories?: SurfacedMemory[] };
+    clearTimeout(timeoutId);
     return result.memories || null;
   } catch (e) {
     console.error("[Proactive] Failed to surface memories:", e);
@@ -475,12 +485,17 @@ async function apiCall<T>(
         throw new Error(`API error ${response.status}: ${errorText}`);
       }
 
-      return await response.json() as T;
+      try {
+        return await response.json() as T;
+      } catch {
+        throw new Error(`API returned invalid JSON from ${endpoint}`);
+      }
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
 
-      // Don't retry on client errors (4xx)
-      if (lastError.message.includes('API error 4')) {
+      // Don't retry on client errors (4xx) — parse status code explicitly
+      const statusMatch = lastError.message.match(/API error (\d+)/);
+      if (statusMatch && parseInt(statusMatch[1], 10) >= 400 && parseInt(statusMatch[1], 10) < 500) {
         throw lastError;
       }
 
@@ -602,6 +617,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "Parent memory ID for hierarchical organization. Creates memory trees (e.g., '71-research' -> 'algebraic' -> '21×27≡-1')",
             },
+            importance: {
+              type: "number",
+              description: "Optional importance override (0.0-1.0). Bypasses auto-calculation. Use for memories where importance is known: Decision=0.8, Learning=0.7, Error=0.7, Discovery=0.6, Observation=0.3",
+            },
           },
           required: ["content"],
         },
@@ -623,12 +642,36 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             mode: {
               type: "string",
-              enum: ["semantic", "associative", "hybrid"],
-              description: "Retrieval mode: 'semantic' for pure vector similarity, 'associative' for graph-based traversal (follows learned connections), 'hybrid' for density-dependent combination (default)",
+              enum: ["semantic", "associative", "temporal", "hybrid"],
+              description: "Retrieval mode: 'semantic' for pure vector similarity, 'associative' for graph-based traversal (follows learned connections), 'temporal' for time-based retrieval, 'hybrid' for density-dependent combination (default)",
               default: "hybrid",
+            },
+            session_id: {
+              type: "string",
+              description: "Session ID for session-scoped retrieval. When provided, retrieves memories from that session's time window. Forces temporal mode.",
             },
           },
           required: ["query"],
+        },
+      },
+      {
+        name: "recall_by_tags",
+        description: "Find memories by tags. Returns memories matching ANY of the provided tags. Useful for finding memories by category (e.g., 'tool:Edit', 'file:src/main.rs', 'source:hook', 'error', 'session-summary').",
+        inputSchema: {
+          type: "object",
+          properties: {
+            tags: {
+              type: "array",
+              items: { type: "string" },
+              description: "Tags to search for (returns memories matching ANY of these tags)",
+            },
+            limit: {
+              type: "number",
+              description: "Maximum number of results (default: 50)",
+              default: 50,
+            },
+          },
+          required: ["tags"],
         },
       },
       {
@@ -1405,6 +1448,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           preceding_memory_id,
           // Hierarchy
           parent_id,
+          // Importance override
+          importance,
         } = args as {
           content: string;
           type?: string;
@@ -1419,6 +1464,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sequence_number?: number;
           preceding_memory_id?: string;
           parent_id?: string;
+          importance?: number;
         };
 
         if (!content || content.length === 0) {
@@ -1445,6 +1491,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...(preceding_memory_id && { preceding_memory_id }),
           // Hierarchy
           ...(parent_id && { parent_id }),
+          // Importance override
+          ...(importance !== undefined && { importance }),
         });
 
         // Format response with branded display
@@ -1464,7 +1512,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "recall": {
-        const { query, limit: rawLimit = 5, mode = "hybrid" } = args as { query: string; limit?: number; mode?: string };
+        const { query, limit: rawLimit = 5, mode = "hybrid", session_id } = args as { query: string; limit?: number; mode?: string; session_id?: string };
 
         if (!query || query.length === 0) {
           return { content: [{ type: "text", text: "Error: 'query' is required and cannot be empty" }], isError: true };
@@ -1472,7 +1520,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (query.length > MAX_QUERY_LENGTH) {
           return { content: [{ type: "text", text: `Error: 'query' exceeds maximum length of ${MAX_QUERY_LENGTH} characters` }], isError: true };
         }
-        const validModes = ["semantic", "associative", "hybrid"];
+        const validModes = ["semantic", "associative", "temporal", "hybrid"];
         if (!validModes.includes(mode)) {
           return { content: [{ type: "text", text: `Error: 'mode' must be one of: ${validModes.join(", ")}` }], isError: true };
         }
@@ -1523,6 +1571,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           query,
           limit,
           mode,
+          ...(session_id ? { session_id } : {}),
         });
 
         const memories = result.memories || [];
@@ -1571,14 +1620,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         };
 
+        // Backend normalizes scores relative to top result (0-0.95 range).
+        // Pass through directly — no client-side rescaling needed.
+        const memoryDisplayScores = memories.map(m => m.score || 0);
+        const todoDisplayScores = todos.map(t => t.score || 0);
+
         // Format memories
         if (memories.length > 0) {
           response += `📝 MEMORIES\n`;
           for (let i = 0; i < memories.length; i++) {
             const m = memories[i];
             const content = getContent(m);
-            const score = ((m.score || 0) * 100).toFixed(0);
-            const filled = Math.max(0, Math.min(10, Math.round((m.score || 0) * 10)));
+            const displayScore = memoryDisplayScores[i];
+            const score = (displayScore * 100).toFixed(0);
+            const filled = Math.max(0, Math.min(10, Math.round(displayScore * 10)));
             const matchBar = '█'.repeat(filled) + '░'.repeat(10 - filled);
             const timeStr = formatTime(m.created_at);
 
@@ -1595,8 +1650,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           response += `✅ TODOS\n`;
           for (let i = 0; i < todos.length; i++) {
             const t = todos[i];
-            const score = ((t.score || 0) * 100).toFixed(0);
-            const filled = Math.max(0, Math.min(10, Math.round((t.score || 0) * 10)));
+            const displayScore = todoDisplayScores[i];
+            const score = (displayScore * 100).toFixed(0);
+            const filled = Math.max(0, Math.min(10, Math.round(displayScore * 10)));
             const matchBar = '█'.repeat(filled) + '░'.repeat(10 - filled);
             const statusIcon = t.status === 'done' ? '✓' : t.status === 'in_progress' ? '▶' : t.status === 'blocked' ? '⊗' : '○';
             const timeStr = formatTime(t.created_at);
@@ -1643,6 +1699,48 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: response }],
+        };
+      }
+
+      case "recall_by_tags": {
+        const { tags, limit: rawTagLimit = 50 } = args as { tags: string[]; limit?: number };
+
+        if (!tags || tags.length === 0) {
+          return {
+            content: [{ type: "text", text: "Error: 'tags' is required and must contain at least one tag" }],
+            isError: true,
+          };
+        }
+
+        const tagLimit = Math.max(1, Math.min(Math.floor(rawTagLimit), MAX_LIMIT));
+        const tagResult = await apiCall<{ memories: Memory[]; count: number }>("/api/recall/tags", "POST", {
+          user_id: USER_ID,
+          tags,
+          limit: tagLimit,
+        });
+
+        const tagMemories = tagResult.memories || [];
+
+        if (tagMemories.length === 0) {
+          return {
+            content: [{ type: "text", text: `No memories found matching tags: ${tags.join(", ")}` }],
+          };
+        }
+
+        let tagResponse = `🏷️ Recall by Tags: ${tags.join(", ")}\n`;
+        tagResponse += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        tagResponse += `Found ${tagMemories.length} memories\n\n`;
+
+        for (let i = 0; i < tagMemories.length; i++) {
+          const m = tagMemories[i];
+          const content = getContent(m);
+          const memTags = (m.experience?.tags || []).join(", ");
+          tagResponse += `${String(i + 1).padStart(2)}. ${content.slice(0, 150)}${content.length > 150 ? "..." : ""}\n`;
+          tagResponse += `    ┗━ ${getType(m)} │ tags: [${memTags}] │ ${m.id}\n\n`;
+        }
+
+        return {
+          content: [{ type: "text", text: tagResponse.trimEnd() }],
         };
       }
 
@@ -2241,6 +2339,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           relevant_facts: ProactiveFact[];
           latency_ms: number;
           detected_entities: DetectedEntityInfo[];
+          temporal_credits_applied: number | null;
         }
 
         // Clean system scaffolding from context — AI clients pass full conversation
@@ -2251,6 +2350,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [{ type: "text", text: "No relevant memories surfaced (context too short after cleaning).\n\n[Latency: 0.0ms]" }],
           };
         }
+
+        // Capture current context as the user_followup for NEXT call.
+        // (this message is the user's reaction to whatever we surfaced last time)
+        // Guard: if another proactive_context call is in-flight, skip feedback
+        // to avoid corrupted state from concurrent updates.
+        const skipFeedback = proactiveCallInFlight;
+        proactiveCallInFlight = true;
+        const previousUserContext = skipFeedback ? "" : lastUserContext;
+        lastUserContext = cleanedContext;
 
         // Single API call to the full proactive context pipeline:
         // feedback loop, coactivation, segmented ingest, semantic todos, context reminders
@@ -2263,9 +2371,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           recency_weight,
           memory_types,
           auto_ingest,
-          // Implicit feedback: send previous response so backend can evaluate which memories helped
-          previous_response: lastProactiveResponse || undefined,
-          user_followup: lastProactiveResponse ? cleanedContext : undefined,
+          // Implicit feedback: send previous response so backend can evaluate which memories helped.
+          // Skipped if another proactive_context call was in-flight (prevents corrupted feedback).
+          previous_response: skipFeedback ? undefined : (lastProactiveResponse || undefined),
+          user_followup: (skipFeedback || !lastProactiveResponse) ? undefined : (previousUserContext || undefined),
           // Tool-aware feedback attribution: causal signal from tool/actuator actions
           ...(tool_actions.length > 0 ? { tool_actions } : {}),
         });
@@ -2281,9 +2390,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const feedbackNote = result.feedback_processed
             ? `\n[Feedback: ${result.feedback_processed.memories_evaluated} evaluated, ${result.feedback_processed.reinforced.length} reinforced, ${result.feedback_processed.weakened.length} weakened]`
             : '';
+          const temporalNote = result.temporal_credits_applied
+            ? `\n[Temporal credits: ${result.temporal_credits_applied} multi-turn signals applied]`
+            : '';
 
-          const emptyText = `No relevant memories surfaced for this context.${entityList}${feedbackNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms]`;
+          const emptyText = `No relevant memories surfaced for this context.${entityList}${feedbackNote}${temporalNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms]`;
           lastProactiveResponse = emptyText;
+          proactiveCallInFlight = false;
 
           return {
             content: [{ type: "text", text: emptyText }],
@@ -2412,6 +2525,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const feedbackNote = result.feedback_processed
           ? `\n[Feedback loop: ${result.feedback_processed.memories_evaluated} evaluated, ${result.feedback_processed.reinforced.length} reinforced, ${result.feedback_processed.weakened.length} weakened]`
           : '';
+        const temporalNote = result.temporal_credits_applied
+          ? `\n[Temporal credits: ${result.temporal_credits_applied} multi-turn signals applied]`
+          : '';
 
         // Ingestion confirmation
         const ingestNote = result.ingested_memory_id
@@ -2426,10 +2542,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (result.reminder_count > 0) summaryParts.push(`${result.reminder_count} reminders`);
         const summary = summaryParts.length > 0 ? `Surfaced ${summaryParts.join(', ')}` : 'No relevant context found';
 
-        const responseText = `${temporalHeader}${summary}:\n\n${formattedWithTime}${entitySummary}${factsBlock}${reminderBlock}${todoBlock}${feedbackNote}${ingestNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`;
+        const responseText = `${temporalHeader}${summary}:\n\n${formattedWithTime}${entitySummary}${factsBlock}${reminderBlock}${todoBlock}${feedbackNote}${temporalNote}${ingestNote}\n\n[Latency: ${(result.latency_ms ?? 0).toFixed(1)}ms | Threshold: ${(semantic_threshold * 100).toFixed(0)}%]`;
 
-        // Store for implicit feedback on next call
-        lastProactiveResponse = responseText;
+        // Store clean semantic content for implicit feedback on next call.
+        // Strip display formatting (emoji borders, latency markers, entity summaries)
+        // that would add embedding noise and dilute the semantic signal.
+        const cleanContent = memories
+          .map((m: { content?: string }) => m.content || "")
+          .filter((c: string) => c.length > 0)
+          .join("\n");
+        lastProactiveResponse = cleanContent || responseText;
+        proactiveCallInFlight = false;
 
         return {
           content: [{ type: "text", text: responseText }],
@@ -3320,16 +3443,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       if (context.length >= PROACTIVE_MIN_CONTEXT_LENGTH) {
         const surfaced = await surfaceRelevant(context, 3);
-        if (surfaced && surfaced.length > 0) {
+        if (surfaced && surfaced.length > 0 && result.content.length > 0) {
           const surfacedText = formatSurfacedMemories(surfaced);
-          // Append surfaced memories to result
           result.content[result.content.length - 1].text += surfacedText;
         }
       }
     }
 
     // Inject context window warning if >= threshold (SHO-115)
-    if (tokenStatus.alert) {
+    if (tokenStatus.alert && result.content.length > 0) {
       const percentUsed = Math.round(tokenStatus.percent * 100);
       const warning = `⚠️ CONTEXT ALERT: ${percentUsed}% of token budget used (${tokenStatus.tokens.toLocaleString()}/${tokenStatus.budget.toLocaleString()}). Consider starting a new session or running consolidation.\n\n`;
       result.content[0].text = warning + result.content[0].text;

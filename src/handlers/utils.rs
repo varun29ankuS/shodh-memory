@@ -416,6 +416,103 @@ pub fn is_boilerplate_response(content: &str) -> bool {
     false
 }
 
+/// Check if content is formatted tool/recall output that survived `strip_system_noise`.
+/// Detects MCP-formatted memory listings, score bars, and structured output that
+/// should never be stored as a memory.
+pub fn is_tool_output_noise(content: &str) -> bool {
+    let trimmed = content.trim();
+
+    // Formatted recall output markers
+    let noise_prefixes = [
+        "─◎",
+        "━━",
+        "📝 MEMORIES",
+        "✅ TODOS",
+        "🐘 Recalled",
+        "🐘 Memory",
+    ];
+    if noise_prefixes.iter().any(|p| trimmed.starts_with(p)) {
+        return true;
+    }
+
+    // Memory tier markers from recall output re-ingestion
+    let tier_markers = ["│ Working │", "│ Session │", "│ LongTerm │"];
+    if tier_markers.iter().any(|m| trimmed.contains(m)) {
+        return true;
+    }
+
+    // Score bar patterns (e.g. "█░░░░░░░░░ 5% │")
+    if (trimmed.contains('█') || trimmed.contains('░')) && trimmed.contains('│') {
+        return true;
+    }
+
+    // Memory ID patterns at end of lines (UUID suffix after ┗━)
+    if trimmed.contains("┗━") {
+        let memory_types = [
+            "Observation",
+            "Learning",
+            "Decision",
+            "Error",
+            "Discovery",
+            "Pattern",
+            "Context",
+            "Task",
+            "CodeEdit",
+            "FileAccess",
+            "Search",
+            "Command",
+            "Conversation",
+        ];
+        if memory_types.iter().any(|t| trimmed.contains(t)) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Check if content has a sufficient ratio of alphabetic characters to be meaningful.
+/// Catches JSON dumps, emoji-heavy formatted output, hex strings, and control characters.
+/// Returns `true` if the ratio is acceptable (≥40% alphabetic), `false` if too noisy.
+pub fn has_sufficient_alpha_ratio(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let total_chars = trimmed.chars().count();
+    let alpha_chars = trimmed.chars().filter(|c| c.is_alphabetic()).count();
+
+    // At least 40% of characters must be alphabetic
+    (alpha_chars as f64 / total_chars as f64) >= 0.4
+}
+
+/// Check if content is a re-ingested recall result (formatted memory listing).
+/// This happens when the MCP proactive_context output gets fed back as input context
+/// by hooks, and strip_system_noise doesn't fully clean it.
+pub fn is_formatted_recall_output(content: &str) -> bool {
+    let trimmed = content.trim();
+
+    // Progress bar characters from score display
+    let has_progress_bars = trimmed.contains('█') || trimmed.contains('░');
+
+    // Memory tree connector from formatted output
+    let has_tree_connector = trimmed.contains("┗━");
+
+    // UUID-like pattern after │ separator (memory ID display)
+    let has_pipe_id = trimmed.contains("│") && {
+        // Look for hex UUID fragments after pipe
+        trimmed.split('│').any(|part| {
+            let t = part.trim();
+            t.len() >= 8 && t.len() <= 40 && t.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        })
+    };
+
+    // Need at least 2 indicators to be confident
+    let indicators = has_progress_bars as u8 + has_tree_connector as u8 + has_pipe_id as u8;
+    indicators >= 2
+}
+
 /// Strip MCP response formatting noise before embedding for feedback.
 ///
 /// MCP tools (proactive_context, recall, etc.) wrap semantic content in
@@ -677,6 +774,62 @@ mod tests {
         ));
         assert!(!is_boilerplate_response(
             "The issue is caused by a race condition in the authentication middleware."
+        ));
+    }
+
+    #[test]
+    fn test_is_tool_output_noise() {
+        // Should detect formatted recall output
+        assert!(is_tool_output_noise(
+            "─◎ RETRIEVE 2m ▲ │ ○ !!!GROW-2 Rewrite GitHub R.."
+        ));
+        assert!(is_tool_output_noise("📝 MEMORIES\n• some memory here"));
+        assert!(is_tool_output_noise("🐘 Recalled 4 Results"));
+        assert!(is_tool_output_noise(
+            "Something │ Working │ with tier marker"
+        ));
+        assert!(is_tool_output_noise(
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        ));
+
+        // Should NOT detect legitimate content
+        assert!(!is_tool_output_noise("User prefers Rust for memory safety"));
+        assert!(!is_tool_output_noise(
+            "The pipeline audit found 8 bugs that need fixing"
+        ));
+    }
+
+    #[test]
+    fn test_has_sufficient_alpha_ratio() {
+        // Good alpha ratio — legitimate content
+        assert!(has_sufficient_alpha_ratio(
+            "User prefers Rust for memory safety guarantees"
+        ));
+        assert!(has_sufficient_alpha_ratio("The bug was in authentication"));
+
+        // Bad alpha ratio — noise
+        assert!(!has_sufficient_alpha_ratio("█░░░░░░░░░ 3% │ 06:04 PM"));
+        assert!(!has_sufficient_alpha_ratio("━━━━━━━━━━━━━━━━━━━━━━━"));
+        assert!(!has_sufficient_alpha_ratio(""));
+        assert!(!has_sufficient_alpha_ratio("│ │ │ │ │ │ │"));
+    }
+
+    #[test]
+    fn test_is_formatted_recall_output() {
+        // Should detect re-ingested recall output (needs 2+ indicators)
+        assert!(is_formatted_recall_output(
+            "█░░░░░░░░░ 5% │ 02:08 PM\n  Some memory\n  ┗━ Observation │ Working │ abc12345"
+        ));
+
+        // Single indicator is not enough
+        assert!(!is_formatted_recall_output("Just has ┗━ but nothing else"));
+        assert!(!is_formatted_recall_output(
+            "Has █ bar but no tree connector"
+        ));
+
+        // Should NOT detect legitimate content
+        assert!(!is_formatted_recall_output(
+            "The retrieval pipeline has 5 stages and processes memories in order"
         ));
     }
 }

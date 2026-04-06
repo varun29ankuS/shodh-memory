@@ -26,12 +26,17 @@ pub struct HealthResponse {
     pub users_in_cache: usize,
     pub user_evictions: usize,
     pub max_cache_size: usize,
+    pub write_failures: u64,
+    pub pending_retries: usize,
 }
 
 /// Main health check endpoint
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let users_in_cache = state.users_in_cache();
     let user_evictions = state.user_evictions();
+
+    // Aggregate write failure metrics across all cached users
+    let (write_failures, pending_retries) = state.write_failure_metrics();
 
     Json(HealthResponse {
         status: "healthy".to_string(),
@@ -40,6 +45,8 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         users_in_cache,
         user_evictions,
         max_cache_size: state.server_config().max_users_in_memory,
+        write_failures,
+        pending_retries,
     })
 }
 

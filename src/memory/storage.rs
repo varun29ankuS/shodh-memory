@@ -62,7 +62,7 @@ impl Default for WriteMode {
 // Handles versioned format (SHO magic + checksum), current, and legacy formats
 // ============================================================================
 
-const STORAGE_MAGIC: &[u8; 3] = b"SHO";
+pub(crate) const STORAGE_MAGIC: &[u8; 3] = b"SHO";
 
 use std::collections::HashMap;
 
@@ -138,6 +138,62 @@ impl MemoryWith3ByteHeader {
             Vec::new(),
             Vec::new(),
         )
+    }
+}
+
+/// Check if data could plausibly be a MessagePack-encoded struct.
+///
+/// Memory structs serialize as maps in MessagePack. Without this guard,
+/// arbitrary binary data (e.g. bincode, raw UTF-8) fed to `rmp_serde::from_slice`
+/// can be misinterpreted: a byte that happens to be a str32/bin32/array32 format
+/// code causes rmp to read subsequent bytes as a u32 length prefix, triggering
+/// multi-gigabyte (or larger) allocation attempts that crash the process.
+///
+/// We check that the first byte is a valid MessagePack map format code (fixmap,
+/// map16, or map32) since serde structs always encode as maps.
+fn is_plausible_msgpack_struct(data: &[u8]) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    let first = data[0];
+    // rmp_serde serializes structs as arrays (to_vec) or maps (to_vec_named).
+    // Both are valid, so accept either container type.
+    //
+    // fixarray: 0x90-0x9f | array16: 0xdc | array32: 0xdd
+    // fixmap:   0x80-0x8f | map16:   0xde | map32:   0xdf
+    matches!(first, 0x80..=0x9f | 0xdc..=0xdf)
+}
+
+/// Maximum size for data eligible for MessagePack deserialization.
+///
+/// rmp_serde has no built-in allocation limits. Corrupted data with valid-looking
+/// MessagePack headers can declare multi-exabyte string/bin lengths, causing the
+/// allocator to abort the process. Since catch_unwind doesn't catch abort (Windows),
+/// the only defense is refusing to attempt deserialization on data larger than a
+/// sane maximum. Legitimate memory entries serialized as MessagePack are typically
+/// under 100KB. 1MB provides generous headroom.
+const MAX_MSGPACK_DESER_SIZE: usize = 1024 * 1024;
+
+/// Safely attempt MessagePack deserialization with pre-flight validation.
+///
+/// Returns None (skip) if the data doesn't look like a MessagePack struct
+/// or exceeds the safe size limit.
+fn try_msgpack_deserialize<T: serde::de::DeserializeOwned>(
+    data: &[u8],
+) -> Option<Result<T, String>> {
+    if !is_plausible_msgpack_struct(data) {
+        return None;
+    }
+    if data.len() > MAX_MSGPACK_DESER_SIZE {
+        return Some(Err(format!(
+            "msgpack data too large ({} bytes, max {})",
+            data.len(),
+            MAX_MSGPACK_DESER_SIZE
+        )));
+    }
+    match rmp_serde::from_slice::<T>(data) {
+        Ok(val) => Some(Ok(val)),
+        Err(e) => Some(Err(e.to_string())),
     }
 }
 
@@ -483,6 +539,7 @@ impl LegacyExperienceV1 {
             temporal_refs: Vec::new(),
             ner_entities: Vec::new(),
             cooccurrence_pairs: Vec::new(),
+            importance_override: None,
         }
     }
 }
@@ -639,31 +696,43 @@ impl LegacyMemoryV2 {
 /// Returns (Memory, needs_migration) where needs_migration=true means the data
 /// was in a legacy format and should be re-written for future performance.
 fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
+    use crate::serialization::{SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};
+
     // Check for versioned format: SHO + version byte + payload + 4-byte CRC32
-    if data.len() >= 8 && &data[0..3] == STORAGE_MAGIC {
-        let version = data[3];
-        let payload_end = data.len() - 4;
-        let stored_checksum = u32::from_le_bytes([
-            data[payload_end],
-            data[payload_end + 1],
-            data[payload_end + 2],
-            data[payload_end + 3],
-        ]);
-        let computed_checksum = crc32_simple(&data[..payload_end]);
-        if stored_checksum != computed_checksum {
-            tracing::warn!(
-                "Checksum mismatch: stored={:08x} computed={:08x}",
-                stored_checksum,
-                computed_checksum
-            );
+    if let Some((version, payload)) = crate::serialization::unwrap_sho(data) {
+        match version {
+            SHO_VERSION_POSTCARD => {
+                // Current format: postcard — single decode, no fallback
+                let memory: Memory = crate::serialization::decode_raw(payload)
+                    .map_err(|e| anyhow!("SHO v2 postcard decode failed: {e}"))?;
+                Ok((memory, false))
+            }
+            SHO_VERSION_BINCODE2 => {
+                // Legacy SHO v1: bincode 2.x — decode and mark for migration
+                let (memory, _): (Memory, _) =
+                    bincode::serde::decode_from_slice(payload, crate::bincode_safe_config())
+                        .map_err(|e| anyhow!("SHO v1 bincode decode failed: {e}"))?;
+                Ok((memory, true))
+            }
+            _ => {
+                // Unknown version — try the legacy fallback chain
+                deserialize_with_fallback(payload)
+                    .map_err(|e| anyhow!("SHO v{version} decode failed: {e}"))
+            }
         }
-        let payload = &data[4..payload_end];
-        // Try current format first, then fallback to legacy formats
-        deserialize_with_fallback(payload).map_err(|e| anyhow!("v{version} decode failed: {e}"))
     } else {
-        // Legacy format: raw bincode (no SHO header)
-        deserialize_with_fallback(data).map_err(|e| anyhow!("legacy decode failed: {e}"))
+        // No SHO header — legacy format (raw bincode/msgpack)
+        deserialize_with_fallback(data)
+            .map_err(|e| anyhow!("legacy (no SHO header) decode failed: {e}"))
     }
+}
+
+/// Public wrapper around the full legacy fallback chain, used by the migration module.
+///
+/// Tries SHO v2 (postcard), SHO v1 (bincode 2.x), then the 17-path legacy
+/// fallback for raw bincode/msgpack data. Returns just the Memory on success.
+pub fn deserialize_memory_for_migration(data: &[u8]) -> Result<Memory> {
+    deserialize_memory(data).map(|(m, _)| m)
 }
 
 /// Legacy MemoryFlat for bincode 2.x data written BEFORE multimodal Experience fields
@@ -734,13 +803,15 @@ fn deserialize_with_fallback(data: &[u8]) -> Result<(Memory, bool)> {
 
     // Try current format first (bincode 2.x with current Memory/Experience)
     // This is the hot path — avoid any allocations before this check.
-    match bincode::serde::decode_from_slice::<Memory, _>(data, bincode::config::standard()) {
+    match bincode::serde::decode_from_slice::<Memory, _>(data, crate::bincode_safe_config()) {
         Ok((memory, _)) => {
             return Ok((memory, false));
         } // Current format, no migration needed
         Err(e) => {
             // Current format failed — enter fallback chain.
-            // From here on we collect errors for diagnostics.
+            // Bincode 1.x paths use with_limit() to cap allocations.
+            // MessagePack paths use try_msgpack_deserialize() which scans for
+            // oversized length prefixes before calling rmp_serde::from_slice.
             return deserialize_legacy_fallback(data, e, record_branch);
         }
     }
@@ -766,7 +837,8 @@ fn deserialize_legacy_fallback(
 
     // Try bincode 2.x MINIMAL format (just UUID + content string)
     // This matches the hex pattern: 16-byte UUID + varint length + string bytes
-    match bincode::serde::decode_from_slice::<MinimalMemory, _>(data, bincode::config::standard()) {
+    match bincode::serde::decode_from_slice::<MinimalMemory, _>(data, crate::bincode_safe_config())
+    {
         Ok((minimal, _)) => {
             tracing::debug!("Migrated memory from bincode 2.x minimal format");
             record_branch("bincode2_minimal");
@@ -779,7 +851,7 @@ fn deserialize_legacy_fallback(
     // Matches entries with 2 extra bytes before content (byte 16=unknown, byte 17=exp_type)
     match bincode::serde::decode_from_slice::<MemoryWithTypePrefix, _>(
         data,
-        bincode::config::standard(),
+        crate::bincode_safe_config(),
     ) {
         Ok((typed, _)) => {
             tracing::debug!("Migrated memory from bincode 2.x with type prefix");
@@ -792,7 +864,7 @@ fn deserialize_legacy_fallback(
     // Try bincode 2.x with OLD Experience (before multimodal fields were added)
     match bincode::serde::decode_from_slice::<LegacyMemoryFlatV2, _>(
         data,
-        bincode::config::standard(),
+        crate::bincode_safe_config(),
     ) {
         Ok((legacy, _)) => {
             tracing::debug!("Migrated memory from bincode 2.x pre-multimodal format");
@@ -802,8 +874,18 @@ fn deserialize_legacy_fallback(
         Err(e) => errors.push(("bincode2 LegacyMemoryFlatV2", e.to_string())),
     }
 
+    // Bincode 1.x with size limit — prevents OOM from corrupted u64 length prefixes.
+    // Bincode 1.x reads string/vec lengths as u64; corrupted data can declare exabyte allocations.
+    // Must keep allow_trailing_bytes() to match bincode1::deserialize() default behavior.
+    use bincode1::Options;
+    // bincode1::deserialize() uses FixintEncoding internally, so we must match that.
+    let bincode1_safe = bincode1::options()
+        .with_fixint_encoding()
+        .with_limit(data.len() as u64 + 1024)
+        .allow_trailing_bytes();
+
     // Try bincode 1.x with LegacyMemoryV1 (v0.1.0 format)
-    match bincode1::deserialize::<LegacyMemoryV1>(data) {
+    match bincode1_safe.deserialize::<LegacyMemoryV1>(data) {
         Ok(legacy) => {
             tracing::debug!("Migrated memory from bincode 1.x v0.1.0 format");
             record_branch("bincode1_legacy_v1");
@@ -813,7 +895,7 @@ fn deserialize_legacy_fallback(
     }
 
     // Try bincode 1.x MINIMAL format (just UUID + content)
-    match bincode1::deserialize::<MinimalMemory>(data) {
+    match bincode1_safe.deserialize::<MinimalMemory>(data) {
         Ok(minimal) => {
             tracing::debug!("Migrated memory from bincode 1.x minimal format");
             record_branch("bincode1_minimal");
@@ -823,7 +905,7 @@ fn deserialize_legacy_fallback(
     }
 
     // Try bincode 1.x with SIMPLE legacy format (content as direct field, no Experience wrapper)
-    match bincode1::deserialize::<SimpleLegacyMemory>(data) {
+    match bincode1_safe.deserialize::<SimpleLegacyMemory>(data) {
         Ok(legacy) => {
             tracing::debug!("Migrated memory from bincode 1.x simple format");
             record_branch("bincode1_simple");
@@ -833,9 +915,9 @@ fn deserialize_legacy_fallback(
     }
 
     // Try bincode 1.x with fixint encoding (u64 lengths instead of varint)
-    use bincode1::Options;
     let fixint_config = bincode1::options()
         .with_fixint_encoding()
+        .with_limit(data.len() as u64 + 1024)
         .allow_trailing_bytes();
 
     // Try bincode 1.x fixint MinimalMemory
@@ -857,28 +939,33 @@ fn deserialize_legacy_fallback(
         Err(e) => errors.push(("bincode1 fixint SimpleLegacyMemory", e.to_string())),
     }
 
-    // Try MessagePack minimal format
-    match rmp_serde::from_slice::<MinimalMemory>(data) {
-        Ok(minimal) => {
+    // Try MessagePack minimal format (guarded: non-msgpack data can trigger OOM)
+    match try_msgpack_deserialize::<MinimalMemory>(data) {
+        Some(Ok(minimal)) => {
             tracing::debug!("Migrated memory from MessagePack minimal format");
             record_branch("msgpack_minimal");
             return Ok((minimal.into_memory(), true));
         }
-        Err(e) => errors.push(("msgpack MinimalMemory", e.to_string())),
+        Some(Err(e)) => errors.push(("msgpack MinimalMemory", e)),
+        None => errors.push(("msgpack MinimalMemory", "not msgpack format".to_string())),
     }
 
     // Try MessagePack format (rmp-serde) - self-describing format
-    match rmp_serde::from_slice::<SimpleLegacyMemory>(data) {
-        Ok(legacy) => {
+    match try_msgpack_deserialize::<SimpleLegacyMemory>(data) {
+        Some(Ok(legacy)) => {
             tracing::debug!("Migrated memory from MessagePack simple format");
             record_branch("msgpack_simple");
             return Ok((legacy.into_memory(), true));
         }
-        Err(e) => errors.push(("msgpack SimpleLegacyMemory", e.to_string())),
+        Some(Err(e)) => errors.push(("msgpack SimpleLegacyMemory", e)),
+        None => errors.push((
+            "msgpack SimpleLegacyMemory",
+            "not msgpack format".to_string(),
+        )),
     }
 
     // Try bincode 1.x format with original Experience (no multimodal fields)
-    match bincode1::deserialize::<LegacyMemoryV1Full>(data) {
+    match bincode1_safe.deserialize::<LegacyMemoryV1Full>(data) {
         Ok(legacy) => {
             tracing::debug!("Migrated memory from bincode 1.x v1 full format");
             record_branch("bincode1_legacy_v1_full");
@@ -897,18 +984,22 @@ fn deserialize_legacy_fallback(
         Err(e) => errors.push(("bincode1 fixint LegacyMemoryV1Full", e.to_string())),
     }
 
-    // Try MessagePack with full legacy format
-    match rmp_serde::from_slice::<LegacyMemoryV1Full>(data) {
-        Ok(legacy) => {
+    // Try MessagePack with full legacy format (guarded: non-msgpack data can trigger OOM)
+    match try_msgpack_deserialize::<LegacyMemoryV1Full>(data) {
+        Some(Ok(legacy)) => {
             tracing::debug!("Migrated memory from MessagePack v1 full format");
             record_branch("msgpack_legacy_v1_full");
             return Ok((legacy.into_memory(), true));
         }
-        Err(e) => errors.push(("msgpack LegacyMemoryV1Full", e.to_string())),
+        Some(Err(e)) => errors.push(("msgpack LegacyMemoryV1Full", e)),
+        None => errors.push((
+            "msgpack LegacyMemoryV1Full",
+            "not msgpack format".to_string(),
+        )),
     }
 
     // Try bincode 1.x format (used in versions prior to bincode 2.0 migration)
-    match bincode1::deserialize::<LegacyMemoryV1>(data) {
+    match bincode1_safe.deserialize::<LegacyMemoryV1>(data) {
         Ok(legacy) => {
             tracing::debug!("Migrated memory from bincode 1.x format");
             record_branch("bincode1_legacy_v1_repeat");
@@ -918,7 +1009,7 @@ fn deserialize_legacy_fallback(
     }
 
     // Try legacy v2 format with bincode 1.x (cognitive extensions era)
-    match bincode1::deserialize::<LegacyMemoryV2>(data) {
+    match bincode1_safe.deserialize::<LegacyMemoryV2>(data) {
         Ok(legacy) => {
             tracing::debug!("Migrated memory from bincode 1.x v2 format");
             record_branch("bincode1_legacy_v2");
@@ -931,7 +1022,7 @@ fn deserialize_legacy_fallback(
     // Hex analysis shows content starts at byte 19 (byte 18 is 0xa4, not valid UTF-8 start)
     match bincode::serde::decode_from_slice::<MemoryWith3ByteHeader, _>(
         data,
-        bincode::config::standard(),
+        crate::bincode_safe_config(),
     ) {
         Ok((mem, _)) => {
             tracing::debug!("Migrated memory from bincode 2.x with 3-byte header");
@@ -975,7 +1066,7 @@ fn deserialize_legacy_fallback(
 }
 
 /// Simple CRC32 implementation (IEEE polynomial)
-fn crc32_simple(data: &[u8]) -> u32 {
+pub(crate) fn crc32_simple(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFFFFFF;
     for byte in data {
         crc ^= *byte as u32;
@@ -998,12 +1089,23 @@ const CF_INDEX: &str = "memory_index";
 /// Uses a single RocksDB instance with 2 column families:
 /// - default: main memory data (also shared by LearningHistoryStore, TemporalFactStore, etc. via key prefixes)
 /// - `memory_index`: secondary indices for tag/type/timestamp queries
+/// Maximum number of failed writes to buffer for retry.
+/// Small enough to bound memory usage (~100 memories × ~2KB ≈ 200KB)
+/// but large enough to absorb transient RocksDB contention bursts.
+const WRITE_RETRY_BUFFER_CAPACITY: usize = 100;
+
 pub struct MemoryStorage {
     db: Arc<DB>,
     /// Base storage path for all memory data
     storage_path: PathBuf,
     /// Write mode (sync vs async) - affects latency vs durability tradeoff
     write_mode: WriteMode,
+    /// Bounded retry buffer for failed writes.
+    /// Memories that fail to store (transient RocksDB lock contention, disk pressure)
+    /// are queued here and retried on the next maintenance tick or successful store.
+    write_retry_buffer: parking_lot::Mutex<std::collections::VecDeque<Memory>>,
+    /// Counter of total write failures (for /api/health metrics)
+    write_failure_count: std::sync::atomic::AtomicU64,
 }
 
 impl MemoryStorage {
@@ -1106,6 +1208,8 @@ impl MemoryStorage {
             db,
             storage_path: path.to_path_buf(),
             write_mode,
+            write_retry_buffer: parking_lot::Mutex::new(std::collections::VecDeque::new()),
+            write_failure_count: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -1277,10 +1381,51 @@ impl MemoryStorage {
     /// For robotics/edge: Use async mode + periodic flush() calls for best latency.
     /// For compliance/critical: Set SHODH_WRITE_MODE=sync for full durability.
     pub fn store(&self, memory: &Memory) -> Result<()> {
+        // Opportunistically drain retry buffer on successful writes
+        self.drain_retry_buffer();
+
+        match self.store_inner(memory) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let err_str = e.to_string();
+                // Buffer transient failures (lock contention, disk pressure)
+                // but not serialization errors (those are permanent)
+                if err_str.contains("lock")
+                    || err_str.contains("LOCK")
+                    || err_str.contains("disk")
+                    || err_str.contains("space")
+                    || err_str.contains("I/O")
+                {
+                    self.write_failure_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let mut buffer = self.write_retry_buffer.lock();
+                    if buffer.len() < WRITE_RETRY_BUFFER_CAPACITY {
+                        tracing::warn!(
+                            memory_id = %memory.id.0,
+                            buffer_len = buffer.len() + 1,
+                            error = %e,
+                            "Write failed, buffered for retry"
+                        );
+                        buffer.push_back(memory.clone());
+                    } else {
+                        tracing::error!(
+                            memory_id = %memory.id.0,
+                            error = %e,
+                            "Write failed and retry buffer full — memory dropped"
+                        );
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Internal store implementation (two-phase commit with rollback)
+    fn store_inner(&self, memory: &Memory) -> Result<()> {
         let key = memory.id.0.as_bytes();
 
-        // Serialize memory
-        let value = bincode::serde::encode_to_vec(memory, bincode::config::standard())
+        // Serialize memory (postcard + SHO v2 envelope)
+        let value = crate::serialization::encode_sho(memory)
             .context(format!("Failed to serialize memory {}", memory.id.0))?;
 
         // Use write mode based on configuration
@@ -1308,6 +1453,66 @@ impl MemoryStorage {
         }
 
         Ok(())
+    }
+
+    /// Drain the retry buffer, re-attempting failed writes.
+    /// Called opportunistically on every successful store() and explicitly
+    /// from the maintenance cycle.
+    pub fn drain_retry_buffer(&self) -> usize {
+        let mut buffer = self.write_retry_buffer.lock();
+        if buffer.is_empty() {
+            return 0;
+        }
+
+        let count = buffer.len();
+        let mut succeeded = 0;
+        let mut still_failing = std::collections::VecDeque::new();
+
+        for memory in buffer.drain(..) {
+            match self.store_inner(&memory) {
+                Ok(()) => {
+                    succeeded += 1;
+                    tracing::info!(
+                        memory_id = %memory.id.0,
+                        "Retried write succeeded"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        memory_id = %memory.id.0,
+                        error = %e,
+                        "Retry write still failing"
+                    );
+                    if still_failing.len() < WRITE_RETRY_BUFFER_CAPACITY {
+                        still_failing.push_back(memory);
+                    }
+                }
+            }
+        }
+
+        *buffer = still_failing;
+
+        if succeeded > 0 || !buffer.is_empty() {
+            tracing::info!(
+                "Write retry drain: {}/{} succeeded, {} still pending",
+                succeeded,
+                count,
+                buffer.len()
+            );
+        }
+
+        succeeded
+    }
+
+    /// Number of writes currently buffered for retry
+    pub fn pending_retry_count(&self) -> usize {
+        self.write_retry_buffer.lock().len()
+    }
+
+    /// Total number of write failures since server start
+    pub fn total_write_failures(&self) -> u64 {
+        self.write_failure_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Update secondary indices for efficient retrieval
@@ -1363,7 +1568,9 @@ impl MemoryStorage {
 
                 // Also index by sequence within episode for temporal ordering
                 if let Some(seq) = ctx.episode.sequence_number {
-                    let seq_key = format!("episode_seq:{}:{}:{}", episode_id, seq, memory.id.0);
+                    // Zero-pad sequence number for correct lexicographic ordering in RocksDB
+                    // Without padding: 1, 10, 100, 2, 20... With {:010}: 0000000001, 0000000002...
+                    let seq_key = format!("episode_seq:{}:{:010}:{}", episode_id, seq, memory.id.0);
                     batch.put_cf(idx, seq_key.as_bytes(), b"1");
                 }
             }
@@ -1511,7 +1718,7 @@ impl MemoryStorage {
     /// Re-write a memory in current format (lazy migration helper)
     fn migrate_memory_format(&self, memory: &Memory) -> Result<()> {
         let key = memory.id.0.as_bytes();
-        let value = bincode::serde::encode_to_vec(memory, bincode::config::standard())
+        let value = crate::serialization::encode_sho(memory)
             .context("Failed to serialize for migration")?;
 
         let mut write_opts = WriteOptions::default();
@@ -1635,7 +1842,7 @@ impl MemoryStorage {
                 batch.delete_cf(idx, episode_key.as_bytes());
 
                 if let Some(seq) = ctx.episode.sequence_number {
-                    let seq_key = format!("episode_seq:{}:{}:{}", episode_id, seq, id.0);
+                    let seq_key = format!("episode_seq:{}:{:010}:{}", episode_id, seq, id.0);
                     batch.delete_cf(idx, seq_key.as_bytes());
                 }
             }
@@ -2407,8 +2614,7 @@ impl MemoryStorage {
                             .metadata
                             .insert("forgotten_at".to_string(), now.clone());
 
-                        let updated_value =
-                            bincode::serde::encode_to_vec(&memory, bincode::config::standard())?;
+                        let updated_value = crate::serialization::encode_sho(&memory)?;
                         batch.put(&key, updated_value);
                     }
                 }
@@ -2453,8 +2659,7 @@ impl MemoryStorage {
                             .metadata
                             .insert("forgotten_at".to_string(), now.clone());
 
-                        let updated_value =
-                            bincode::serde::encode_to_vec(&memory, bincode::config::standard())?;
+                        let updated_value = crate::serialization::encode_sho(&memory)?;
                         batch.put(&key, updated_value);
                     }
                 }
@@ -2723,12 +2928,8 @@ impl MemoryStorage {
                     continue;
                 }
 
-                // Try current format first (quick check)
-                let is_current = bincode::serde::decode_from_slice::<Memory, _>(
-                    &value,
-                    bincode::config::standard(),
-                )
-                .is_ok();
+                // Try current format first (quick check) — postcard or bincode
+                let is_current = deserialize_memory(&value).is_ok();
 
                 if is_current {
                     already_current += 1;
@@ -2759,7 +2960,7 @@ impl MemoryStorage {
             write_opts.set_sync(self.write_mode == WriteMode::Sync);
 
             for (key, memory) in to_migrate {
-                match bincode::serde::encode_to_vec(&memory, bincode::config::standard()) {
+                match crate::serialization::encode_sho(&memory) {
                     Ok(serialized) => {
                         if let Err(e) = self.db.put_opt(&key, &serialized, &write_opts) {
                             tracing::warn!("Failed to migrate memory: {e}");
@@ -3107,7 +3308,7 @@ impl MemoryStorage {
 
         // 1. Serialize memory
         let memory_key = memory.id.0.as_bytes();
-        let memory_value = bincode::serde::encode_to_vec(memory, bincode::config::standard())
+        let memory_value = crate::serialization::encode_sho(memory)
             .context(format!("Failed to serialize memory {}", memory.id.0))?;
         batch.put(memory_key, &memory_value);
 
@@ -3120,9 +3321,8 @@ impl MemoryStorage {
         // Add/update the modality vectors
         mapping_entry.add_modality(modality, vector_ids);
 
-        let mapping_value =
-            bincode::serde::encode_to_vec(&mapping_entry, bincode::config::standard())
-                .context("Failed to serialize vector mapping")?;
+        let mapping_value = crate::serialization::encode(&mapping_entry)
+            .context("Failed to serialize vector mapping")?;
         batch.put(mapping_key.as_bytes(), &mapping_value);
 
         // 3. Atomic write - both succeed or both fail
@@ -3145,9 +3345,8 @@ impl MemoryStorage {
         let mapping_key = format!("vmapping:{}", memory_id.0);
         match self.db.get(mapping_key.as_bytes())? {
             Some(data) => {
-                let (entry, _): (VectorMappingEntry, _) =
-                    bincode::serde::decode_from_slice(&data, bincode::config::standard())
-                        .context("Failed to deserialize vector mapping")?;
+                let (entry, _) = crate::serialization::try_decode::<VectorMappingEntry>(&data)
+                    .context("Failed to deserialize vector mapping")?;
                 Ok(Some(entry))
             }
             None => Ok(None),
@@ -3178,10 +3377,7 @@ impl MemoryStorage {
                     if let Some(id_str) = key_str.strip_prefix("vmapping:") {
                         if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
                             if let Ok((entry, _)) =
-                                bincode::serde::decode_from_slice::<VectorMappingEntry, _>(
-                                    &value,
-                                    bincode::config::standard(),
-                                )
+                                crate::serialization::try_decode::<VectorMappingEntry>(&value)
                             {
                                 mappings.push((MemoryId(uuid), entry));
                             }
@@ -3230,8 +3426,7 @@ impl MemoryStorage {
         // Update the specific modality
         mapping_entry.add_modality(modality, vector_ids);
 
-        let mapping_value =
-            bincode::serde::encode_to_vec(&mapping_entry, bincode::config::standard())?;
+        let mapping_value = crate::serialization::encode(&mapping_entry)?;
 
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(self.write_mode == WriteMode::Sync);

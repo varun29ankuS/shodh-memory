@@ -9,24 +9,10 @@ use std::env;
 
 use crate::errors::ErrorResponse;
 
-
 /// Check if running in production mode
 pub fn is_production_mode() -> bool {
     env::var("SHODH_ENV")
         .map(|v| v.to_lowercase() == "production" || v.to_lowercase() == "prod")
-        .unwrap_or(false)
-}
-
-/// Check if dev key should be hidden from error messages.
-///
-/// Returns true when SHODH_HIDE_DEV_KEY=true (opt-in).
-/// In production mode, always returns true regardless of the env var.
-fn should_hide_dev_key() -> bool {
-    if is_production_mode() {
-        return true;
-    }
-    env::var("SHODH_HIDE_DEV_KEY")
-        .map(|v| v.to_lowercase() == "true" || v == "1")
         .unwrap_or(false)
 }
 
@@ -133,7 +119,7 @@ impl IntoResponse for AuthError {
 ///
 /// Compares all bytes of both strings to prevent length-based timing leaks.
 /// The comparison time is constant regardless of where differences occur.
-fn constant_time_compare(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_compare(a: &str, b: &str) -> bool {
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
     let a_len = a_bytes.len();
@@ -160,7 +146,7 @@ fn constant_time_compare(a: &str, b: &str) -> bool {
 pub fn validate_api_key(provided_key: &str) -> Result<(), AuthError> {
     // Get API keys from environment.
     // Resolution order: SHODH_API_KEYS (plural, comma-separated) → SHODH_API_KEY (singular)
-    //                 → SHODH_DEV_API_KEY (dev mode) → built-in default (dev mode only)
+    //                 → SHODH_DEV_API_KEY (dev mode) → NotConfigured error
     let valid_keys = match env::var("SHODH_API_KEYS") {
         Ok(keys) if !keys.trim().is_empty() => keys,
         _ => match env::var("SHODH_API_KEY") {
@@ -290,7 +276,6 @@ mod tests {
         env::remove_var("SHODH_API_KEYS");
         env::remove_var("SHODH_DEV_API_KEY");
         env::remove_var("SHODH_ENV");
-        env::remove_var("SHODH_HIDE_DEV_KEY");
     }
 
     // ── constant_time_compare ──
@@ -408,7 +393,6 @@ mod tests {
         clear_auth_env();
     }
 
-
     // ── validate_api_key: production mode ──
 
     #[test]
@@ -446,7 +430,6 @@ mod tests {
         assert!(validate_api_key("anything").is_err());
         clear_auth_env();
     }
-
 
     #[test]
     fn api_keys_takes_priority_over_dev_key() {
@@ -573,76 +556,6 @@ mod tests {
         let parsed: ErrorResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.code, "AUTH_NOT_CONFIGURED");
         assert!(parsed.message.contains("SHODH_API_KEYS"));
-    }
-
-    // ── SHODH_HIDE_DEV_KEY ──
-
-    #[tokio::test]
-    async fn hide_dev_key_suppresses_key_in_missing_key_error() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_HIDE_DEV_KEY", "true");
-
-        let resp = AuthError::MissingApiKey.into_response();
-        let body = to_bytes(resp.into_body(), 2048).await.unwrap();
-        let parsed: ErrorResponse = serde_json::from_slice(&body).unwrap();
-
-
-        assert!(
-            parsed.message.contains("SHODH_DEV_API_KEY"),
-            "Should still mention env var name: {}",
-            parsed.message
-        );
-        clear_auth_env();
-    }
-
-    #[tokio::test]
-    async fn hide_dev_key_suppresses_key_in_invalid_key_error() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_HIDE_DEV_KEY", "true");
-
-        let resp = AuthError::InvalidApiKey.into_response();
-        let body = to_bytes(resp.into_body(), 2048).await.unwrap();
-        let parsed: ErrorResponse = serde_json::from_slice(&body).unwrap();
-
-
-        clear_auth_env();
-    }
-
-    #[test]
-    fn should_hide_dev_key_defaults_to_false() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        assert!(!should_hide_dev_key());
-        clear_auth_env();
-    }
-
-    #[test]
-    fn should_hide_dev_key_respects_env_var() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-
-        env::set_var("SHODH_HIDE_DEV_KEY", "true");
-        assert!(should_hide_dev_key());
-
-        env::set_var("SHODH_HIDE_DEV_KEY", "1");
-        assert!(should_hide_dev_key());
-
-        env::set_var("SHODH_HIDE_DEV_KEY", "false");
-        assert!(!should_hide_dev_key());
-
-        clear_auth_env();
-    }
-
-    #[test]
-    fn should_hide_dev_key_always_true_in_production() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_auth_env();
-        env::set_var("SHODH_ENV", "production");
-        // Even without SHODH_HIDE_DEV_KEY, production always hides
-        assert!(should_hide_dev_key());
-        clear_auth_env();
     }
 
     // ── Query parameter auth (WebSocket fallback) ──

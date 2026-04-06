@@ -20,7 +20,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
 
-    dot / (norm_a * norm_b)
+    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
 }
 
 /// Find top-k most similar vectors

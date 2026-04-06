@@ -98,8 +98,7 @@ impl CompressionPipeline {
 
     /// LZ4 compression - preserves all data
     fn compress_lz4(&self, memory: &Memory) -> Result<Memory> {
-        let original =
-            bincode::serde::encode_to_vec(&memory.experience, bincode::config::standard())?;
+        let original = crate::serialization::encode_raw(&memory.experience)?;
         let compressed = lz4::block::compress(&original, None, false)?;
 
         let compression_ratio = compressed.len() as f32 / original.len() as f32;
@@ -287,8 +286,7 @@ impl CompressionPipeline {
                 ));
             }
 
-            let (experience, _): (Experience, _) =
-                bincode::serde::decode_from_slice(&decompressed, bincode::config::standard())?;
+            let experience: Experience = crate::serialization::decode_raw(&decompressed)?;
 
             // Restore the memory
             let mut restored = memory.clone();

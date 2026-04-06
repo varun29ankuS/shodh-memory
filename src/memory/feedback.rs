@@ -203,6 +203,16 @@ pub enum SignalTrigger {
         /// Raw cosine similarity before projection (for comparison/diagnostics)
         raw_similarity: f32,
     },
+
+    /// Temporal credit from multi-turn attribution.
+    /// Aggregated discounted signals from N turns after memory was surfaced.
+    /// Reference: Sutton & Barto (2018) "Reinforcement Learning", Ch. 7 (n-step TD)
+    TemporalCredit {
+        /// Number of turns whose signals were aggregated
+        turns_aggregated: u32,
+        /// Sum of raw (undiscounted) signal values before gamma scaling
+        raw_total: f32,
+    },
 }
 
 /// A tool or actuator action performed between feedback cycles.
@@ -375,9 +385,9 @@ impl ContextFingerprint {
         // Compress embedding to 16 components by taking evenly spaced samples
         let mut signature = [0.0f32; 16];
         if !embedding.is_empty() {
-            let step = embedding.len() / 16;
+            let len = embedding.len();
             for (i, sig) in signature.iter_mut().enumerate() {
-                let idx = (i * step).min(embedding.len() - 1);
+                let idx = (i * len / 16).min(len - 1);
                 *sig = embedding[idx];
             }
         }
@@ -732,6 +742,223 @@ impl PendingFeedback {
     /// Check if this pending feedback has expired (older than 1 hour)
     pub fn is_expired(&self) -> bool {
         Utc::now() - self.surfaced_at > Duration::hours(1)
+    }
+}
+
+// =============================================================================
+// TEMPORAL CREDIT ASSIGNMENT (Issue #125)
+// Multi-turn feedback attribution with exponential discounting.
+//
+// Instead of single-turn evaluation (PendingFeedback consumed on next call),
+// FeedbackWindow tracks the last N turns so memories surfaced at turn T can
+// receive discounted credit from signals at turns T+1 through T+W.
+//
+// Reference: Sutton & Barto (2018) "Reinforcement Learning", Ch. 7 (n-step TD)
+// =============================================================================
+
+/// A sliding window of recent turns for multi-turn temporal credit assignment.
+///
+/// The window tracks surfaced memories from recent turns so they can receive
+/// discounted credit from future turn signals. Works alongside PendingFeedback:
+/// - PendingFeedback handles the immediate T-1 signal (highest confidence)
+/// - FeedbackWindow handles T-2 through T-W (temporally discounted)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedbackWindow {
+    pub user_id: String,
+    /// Current turn counter (monotonically increasing within a session).
+    pub turn_counter: u32,
+    /// Sliding window of recent turns (most recent at back).
+    pub entries: VecDeque<WindowEntry>,
+    /// Maximum entries before oldest is evicted.
+    pub window_size: usize,
+    /// When this window was created (session start proxy).
+    pub created_at: DateTime<Utc>,
+    /// Timestamp of the last turn added. Used for session gap detection.
+    pub last_turn_at: DateTime<Utc>,
+    /// Accumulated deferred credits: memory_id -> Vec<DeferredCredit>.
+    /// Applied incrementally on eviction and on session close.
+    pub deferred_credits: HashMap<MemoryId, Vec<DeferredCredit>>,
+}
+
+/// A single turn's surfaced memories and context, stored in the window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowEntry {
+    /// Which turn this represents (0-indexed within session).
+    pub turn_number: u32,
+    /// Memories surfaced on this turn.
+    pub surfaced_memories: Vec<SurfacedMemoryInfo>,
+    /// When this turn occurred.
+    pub surfaced_at: DateTime<Utc>,
+    /// Context embedding from the proactive_context request.
+    pub context_embedding: Vec<f32>,
+    /// Context text (truncated for storage efficiency).
+    pub context_preview: String,
+    /// Tool actions reported on the NEXT turn (filled retroactively).
+    #[serde(default)]
+    pub tool_actions: Vec<ToolAction>,
+}
+
+/// A discounted credit from a future turn applied to a past-surfaced memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeferredCredit {
+    /// The signal value from attribution computation.
+    pub raw_signal: f32,
+    /// Confidence of the signal.
+    pub confidence: f32,
+    /// The trigger type that produced this signal.
+    pub trigger: SignalTrigger,
+    /// Turns elapsed between surfacing and this signal.
+    pub turns_elapsed: u32,
+    /// Discounted signal value: raw_signal * gamma^turns_elapsed.
+    pub discounted_value: f32,
+    /// When this credit was computed.
+    pub computed_at: DateTime<Utc>,
+}
+
+/// Session-level outcome detected from conversation patterns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SessionOutcome {
+    /// 3+ turns sustained engagement then topic change → task completed.
+    TaskCompletion {
+        turns_engaged: u32,
+        final_similarity: f32,
+    },
+    /// Gap > SESSION_GAP_THRESHOLD or frustration keywords → memories didn't help.
+    Abandonment {
+        gap_seconds: i64,
+        frustration_detected: bool,
+    },
+    /// Return to a topic after a gap → delayed positive signal.
+    ReEngagement {
+        gap_turns: u32,
+        topic_similarity: f32,
+    },
+    /// Session ended naturally — neutral.
+    NaturalEnd,
+}
+
+impl FeedbackWindow {
+    /// Create a new empty window for a user.
+    pub fn new(user_id: String) -> Self {
+        let now = Utc::now();
+        Self {
+            user_id,
+            turn_counter: 0,
+            entries: VecDeque::with_capacity(crate::constants::FEEDBACK_WINDOW_SIZE + 1),
+            window_size: crate::constants::FEEDBACK_WINDOW_SIZE,
+            created_at: now,
+            last_turn_at: now,
+            deferred_credits: HashMap::new(),
+        }
+    }
+
+    /// Check if the window has a session gap (stale).
+    pub fn has_session_gap(&self) -> bool {
+        let gap = (Utc::now() - self.last_turn_at).num_seconds();
+        gap > crate::constants::FEEDBACK_SESSION_GAP_SECS
+    }
+
+    /// Check if window is expired (older than 2 hours — cleanup threshold).
+    pub fn is_expired(&self) -> bool {
+        (Utc::now() - self.last_turn_at).num_seconds() > 7200
+    }
+
+    /// Collect all unique memory IDs across all window entries.
+    pub fn all_memory_ids(&self) -> Vec<MemoryId> {
+        let mut ids = Vec::new();
+        for entry in &self.entries {
+            for mem in &entry.surfaced_memories {
+                if !ids.contains(&mem.id) {
+                    ids.push(mem.id.clone());
+                }
+            }
+        }
+        ids
+    }
+
+    /// Detect session-level outcomes by analyzing the full window.
+    pub fn detect_session_outcome(&self) -> Option<SessionOutcome> {
+        if self.entries.len() < 2 {
+            return None;
+        }
+
+        let entries: Vec<&WindowEntry> = self.entries.iter().collect();
+        let len = entries.len();
+
+        // Task completion: N+ turns on same topic, then topic change
+        let mut sustained_turns = 0u32;
+        for i in 1..len {
+            if entries[i - 1].context_embedding.is_empty()
+                || entries[i].context_embedding.is_empty()
+            {
+                sustained_turns = 0;
+                continue;
+            }
+            let sim = cosine_similarity_vecs(
+                &entries[i - 1].context_embedding,
+                &entries[i].context_embedding,
+            );
+            if sim > 0.5 {
+                sustained_turns += 1;
+            } else {
+                if sustained_turns >= crate::constants::SESSION_COMPLETION_MIN_TURNS && sim < 0.3 {
+                    return Some(SessionOutcome::TaskCompletion {
+                        turns_engaged: sustained_turns,
+                        final_similarity: sim,
+                    });
+                }
+                sustained_turns = 0;
+            }
+        }
+
+        // Re-engagement: topic return after gap
+        if len >= 4 {
+            for i in 2..len {
+                if entries[0].context_embedding.is_empty()
+                    || entries[i].context_embedding.is_empty()
+                    || entries[i - 1].context_embedding.is_empty()
+                {
+                    continue;
+                }
+                let sim_to_earlier = cosine_similarity_vecs(
+                    &entries[0].context_embedding,
+                    &entries[i].context_embedding,
+                );
+                let sim_to_mid = cosine_similarity_vecs(
+                    &entries[0].context_embedding,
+                    &entries[i - 1].context_embedding,
+                );
+                if sim_to_mid < 0.3 && sim_to_earlier > 0.6 {
+                    return Some(SessionOutcome::ReEngagement {
+                        gap_turns: i as u32 - 1,
+                        topic_similarity: sim_to_earlier,
+                    });
+                }
+            }
+        }
+
+        None
+    }
+}
+
+/// Compute cosine similarity between two embedding vectors.
+fn cosine_similarity_vecs(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut norm_a = 0.0f32;
+    let mut norm_b = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    let denom = norm_a.sqrt() * norm_b.sqrt();
+    if denom < 1e-10 {
+        0.0
+    } else {
+        (dot / denom).clamp(-1.0, 1.0)
     }
 }
 
@@ -1267,6 +1494,11 @@ pub struct FeedbackStore {
     /// Pending feedback per user: user_id -> PendingFeedback (in-memory only)
     pending: HashMap<String, PendingFeedback>,
 
+    /// Feedback windows per user for multi-turn temporal credit assignment.
+    /// The window tracks surfaced memories from the last N turns so they can
+    /// receive discounted credit from future signals.
+    windows: HashMap<String, FeedbackWindow>,
+
     /// Previous context per user: for repetition/topic change detection
     /// Tracks what the user asked last time to detect patterns
     previous_context: HashMap<String, PreviousContext>,
@@ -1283,6 +1515,7 @@ impl std::fmt::Debug for FeedbackStore {
         f.debug_struct("FeedbackStore")
             .field("momentum_count", &self.momentum.len())
             .field("pending_count", &self.pending.len())
+            .field("windows_count", &self.windows.len())
             .field("previous_context_count", &self.previous_context.len())
             .field("has_db", &self.db.is_some())
             .field("dirty_count", &self.dirty.len())
@@ -1295,6 +1528,7 @@ impl Default for FeedbackStore {
         Self {
             momentum: HashMap::new(),
             pending: HashMap::new(),
+            windows: HashMap::new(),
             previous_context: HashMap::new(),
             db: None,
             dirty: HashSet::new(),
@@ -1375,16 +1609,38 @@ impl FeedbackStore {
             }
         }
 
+        // Load feedback windows (discard stale ones older than 2 hours)
+        let mut windows = HashMap::new();
+        let iter = db.prefix_iterator_cf(cf, b"window:");
+        for item in iter {
+            if let Ok((key, value)) = item {
+                if let Ok(key_str) = std::str::from_utf8(&key) {
+                    if !key_str.starts_with("window:") {
+                        break;
+                    }
+                    if let Ok(w) = serde_json::from_slice::<FeedbackWindow>(&value) {
+                        if !w.is_expired() {
+                            windows.insert(w.user_id.clone(), w);
+                        } else {
+                            let _ = db.delete_cf(cf, key_str.as_bytes());
+                        }
+                    }
+                }
+            }
+        }
+
         tracing::info!(
-            "Loaded {} momentum, {} pending, {} previous context from shared feedback CF",
+            "Loaded {} momentum, {} pending, {} windows, {} previous context from shared feedback CF",
             momentum.len(),
             pending.len(),
+            windows.len(),
             previous_context.len()
         );
 
         Ok(Self {
             momentum,
             pending,
+            windows,
             previous_context,
             db: Some(db),
             dirty: HashSet::new(),
@@ -1523,6 +1779,7 @@ impl FeedbackStore {
         Ok(Self {
             momentum,
             pending,
+            windows: HashMap::new(),
             previous_context,
             db: Some(db),
             dirty: HashSet::new(),
@@ -1613,6 +1870,214 @@ impl FeedbackStore {
     /// Clean up expired pending feedback
     pub fn cleanup_expired(&mut self) {
         self.pending.retain(|_, p| !p.is_expired());
+        // Also clean up expired windows
+        let expired_users: Vec<String> = self
+            .windows
+            .iter()
+            .filter(|(_, w)| w.is_expired())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for user_id in &expired_users {
+            self.flush_window(user_id);
+        }
+    }
+
+    // =========================================================================
+    // FEEDBACK WINDOW METHODS (Temporal Credit Assignment)
+    // =========================================================================
+
+    /// Get or create a FeedbackWindow for a user.
+    ///
+    /// If the existing window has a session gap > FEEDBACK_SESSION_GAP_SECS,
+    /// the old window is flushed (credits applied to momentum) and a new one
+    /// is created.
+    pub fn get_or_create_window(&mut self, user_id: &str) -> &mut FeedbackWindow {
+        // Check for session gap — flush stale window before creating new
+        if let Some(window) = self.windows.get(user_id) {
+            if window.has_session_gap() {
+                // Flush the stale window's deferred credits
+                let stale = self.windows.remove(user_id).unwrap();
+                self.apply_window_credits(&stale);
+                // Delete from disk
+                if let (Some(db), Some(cf)) = (&self.db, self.feedback_cf()) {
+                    let key = format!("window:{}", user_id);
+                    let _ = db.delete_cf(cf, key.as_bytes());
+                }
+            }
+        }
+
+        self.windows
+            .entry(user_id.to_string())
+            .or_insert_with(|| FeedbackWindow::new(user_id.to_string()))
+    }
+
+    /// Push a new turn entry into the user's window.
+    ///
+    /// If the window is full, the oldest entry is evicted and its deferred
+    /// credits are flushed to momentum.
+    ///
+    /// Returns memory IDs from any evicted entry (for caller to know which
+    /// memories received their final credit).
+    pub fn push_window_entry(&mut self, user_id: &str, entry: WindowEntry) -> Vec<MemoryId> {
+        let window = self.get_or_create_window(user_id);
+        window.turn_counter = entry.turn_number + 1;
+        window.last_turn_at = entry.surfaced_at;
+        window.entries.push_back(entry);
+
+        let mut evicted_ids = Vec::new();
+
+        // Evict oldest if over capacity
+        if window.entries.len() > window.window_size {
+            if let Some(evicted) = window.entries.pop_front() {
+                for mem in &evicted.surfaced_memories {
+                    evicted_ids.push(mem.id.clone());
+                }
+            }
+        }
+
+        // Apply deferred credits for evicted memories
+        if !evicted_ids.is_empty() {
+            // Collect credits for evicted memories, then apply them
+            let mut credits_to_apply: Vec<(MemoryId, Vec<DeferredCredit>)> = Vec::new();
+            let window = self.windows.get_mut(user_id).unwrap();
+            for id in &evicted_ids {
+                if let Some(credits) = window.deferred_credits.remove(id) {
+                    if !credits.is_empty() {
+                        credits_to_apply.push((id.clone(), credits));
+                    }
+                }
+            }
+            for (id, credits) in credits_to_apply {
+                self.apply_deferred_credit(&id, &credits);
+            }
+        }
+
+        // Persist window
+        self.persist_window(user_id);
+
+        evicted_ids
+    }
+
+    /// Accumulate deferred credits for a memory in a user's window.
+    pub fn accumulate_deferred_credit(
+        &mut self,
+        user_id: &str,
+        memory_id: &MemoryId,
+        credit: DeferredCredit,
+    ) {
+        if let Some(window) = self.windows.get_mut(user_id) {
+            window
+                .deferred_credits
+                .entry(memory_id.clone())
+                .or_default()
+                .push(credit);
+        }
+    }
+
+    /// Get a read-only snapshot of the window entries for a user.
+    /// Used in Phase 2 (no lock) to compute signals without holding the store lock.
+    pub fn snapshot_window_entries(&self, user_id: &str) -> Vec<WindowEntry> {
+        self.windows
+            .get(user_id)
+            .map(|w| w.entries.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Get the current turn counter for a user's window.
+    pub fn window_turn_counter(&self, user_id: &str) -> u32 {
+        self.windows
+            .get(user_id)
+            .map(|w| w.turn_counter)
+            .unwrap_or(0)
+    }
+
+    /// Detect session outcome from a user's window.
+    pub fn detect_session_outcome(&self, user_id: &str) -> Option<SessionOutcome> {
+        self.windows
+            .get(user_id)
+            .and_then(|w| w.detect_session_outcome())
+    }
+
+    /// Flush a window: apply all deferred credits to momentum, then remove.
+    pub fn flush_window(&mut self, user_id: &str) {
+        if let Some(window) = self.windows.remove(user_id) {
+            self.apply_window_credits(&window);
+            // Remove from disk
+            if let (Some(db), Some(cf)) = (&self.db, self.feedback_cf()) {
+                let key = format!("window:{}", user_id);
+                let _ = db.delete_cf(cf, key.as_bytes());
+            }
+        }
+    }
+
+    /// Apply all deferred credits from a window to momentum.
+    fn apply_window_credits(&mut self, window: &FeedbackWindow) {
+        for (memory_id, credits) in &window.deferred_credits {
+            self.apply_deferred_credit(memory_id, credits);
+        }
+    }
+
+    /// Apply deferred credits for a single memory to its momentum.
+    ///
+    /// Sums discounted values weighted by confidence, creates a synthetic
+    /// SignalRecord, and updates momentum via the standard EMA path.
+    fn apply_deferred_credit(&mut self, memory_id: &MemoryId, credits: &[DeferredCredit]) {
+        if credits.is_empty() {
+            return;
+        }
+
+        let total: f32 = credits
+            .iter()
+            .map(|c| c.discounted_value * c.confidence)
+            .sum();
+        let avg_confidence: f32 =
+            credits.iter().map(|c| c.confidence).sum::<f32>() / credits.len() as f32;
+
+        // Skip if below noise threshold
+        if total.abs() < crate::constants::TEMPORAL_CREDIT_MIN_THRESHOLD {
+            return;
+        }
+
+        // Clamp to prevent single flush from overwhelming momentum
+        let clamped = total.clamp(-0.5, 0.5);
+
+        let signal = SignalRecord::new(
+            clamped,
+            // Slightly reduced confidence for deferred signals
+            (avg_confidence * 0.8).clamp(0.0, 1.0),
+            SignalTrigger::TemporalCredit {
+                turns_aggregated: credits.len() as u32,
+                raw_total: total,
+            },
+        );
+
+        let momentum = self.get_or_create_momentum(
+            memory_id.clone(),
+            crate::memory::types::ExperienceType::Context,
+        );
+        momentum.update(signal);
+        self.dirty.insert(memory_id.clone());
+
+        tracing::debug!(
+            memory_id = %memory_id.0,
+            credits = credits.len(),
+            total_discounted = format!("{:.3}", clamped),
+            "Applied temporal deferred credits to momentum"
+        );
+    }
+
+    /// Persist a window to RocksDB.
+    fn persist_window(&self, user_id: &str) {
+        if let Some(window) = self.windows.get(user_id) {
+            if let (Some(db), Some(cf)) = (&self.db, self.feedback_cf()) {
+                let key = format!("window:{}", user_id);
+                if let Ok(value) = serde_json::to_vec(window) {
+                    if let Err(e) = db.put_cf(cf, key.as_bytes(), &value) {
+                        tracing::warn!("Failed to persist feedback window: {}", e);
+                    }
+                }
+            }
+        }
     }
 
     /// Set previous context for a user (for repetition/topic change detection)
@@ -1704,6 +2169,13 @@ impl FeedbackStore {
             db.put_cf(cf, key.as_bytes(), &value)?;
         }
 
+        // Persist feedback windows
+        for (user_id, window) in &self.windows {
+            let key = format!("window:{}", user_id);
+            let value = serde_json::to_vec(window)?;
+            db.put_cf(cf, key.as_bytes(), &value)?;
+        }
+
         // Flush the feedback CF to ensure data persistence (critical for graceful shutdown)
         use rocksdb::FlushOptions;
         let mut flush_opts = FlushOptions::default();
@@ -1731,7 +2203,11 @@ impl FeedbackStore {
             avg_ema: if self.momentum.is_empty() {
                 0.0
             } else {
-                self.momentum.values().map(|m| m.ema).sum::<f32>() / self.momentum.len() as f32
+                self.momentum
+                    .values()
+                    .map(|m| m.ema_with_decay())
+                    .sum::<f32>()
+                    / self.momentum.len() as f32
             },
             avg_stability: if self.momentum.is_empty() {
                 0.0
@@ -1739,6 +2215,12 @@ impl FeedbackStore {
                 self.momentum.values().map(|m| m.stability).sum::<f32>()
                     / self.momentum.len() as f32
             },
+            total_windows: self.windows.len(),
+            total_deferred_credits: self
+                .windows
+                .values()
+                .map(|w| w.deferred_credits.values().map(|v| v.len()).sum::<usize>())
+                .sum(),
         }
     }
 }
@@ -1750,6 +2232,8 @@ pub struct FeedbackStoreStats {
     pub total_pending: usize,
     pub avg_ema: f32,
     pub avg_stability: f32,
+    pub total_windows: usize,
+    pub total_deferred_credits: usize,
 }
 
 #[cfg(test)]

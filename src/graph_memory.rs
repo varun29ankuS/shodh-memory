@@ -1303,14 +1303,20 @@ impl GraphMemory {
 
         // Count relationships and episodes during startup (one-time cost)
         // This is O(n) at startup, but get_stats() will be O(1) at runtime
-        let relationships_cf = db.cf_handle(CF_RELATIONSHIPS).unwrap();
-        let episodes_cf = db.cf_handle(CF_EPISODES).unwrap();
+        let relationships_cf = db
+            .cf_handle(CF_RELATIONSHIPS)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found after DB open", CF_RELATIONSHIPS))?;
+        let episodes_cf = db
+            .cf_handle(CF_EPISODES)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found after DB open", CF_EPISODES))?;
         let relationship_count = Self::count_cf_entries(&db, relationships_cf);
         let episode_count = Self::count_cf_entries(&db, episodes_cf);
 
         // Load entity embedding cache for concept merging
         // Only entities with pre-computed name_embeddings are cached
-        let entities_cf = db.cf_handle(CF_ENTITIES).unwrap();
+        let entities_cf = db
+            .cf_handle(CF_ENTITIES)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found after DB open", CF_ENTITIES))?;
         let entity_embedding_cache =
             Self::load_entity_embedding_cache(&db, entities_cf, &entity_name_index);
         let embedding_cache_size = entity_embedding_cache.len();
@@ -1367,7 +1373,9 @@ impl GraphMemory {
                 continue;
             }
 
-            let cf = db.cf_handle(cf_name).unwrap();
+            let cf = db
+                .cf_handle(cf_name)
+                .ok_or_else(|| anyhow::anyhow!("CF '{}' not found during migration", cf_name))?;
 
             // Only migrate if the CF is empty (avoid double migration)
             if db
@@ -1445,8 +1453,12 @@ impl GraphMemory {
 
     /// Load entity name->UUID index from name_index CF, or migrate from entities CF if empty
     fn load_or_migrate_name_index(db: &DB) -> Result<HashMap<String, Uuid>> {
-        let name_index_cf = db.cf_handle(CF_NAME_INDEX).unwrap();
-        let entities_cf = db.cf_handle(CF_ENTITIES).unwrap();
+        let name_index_cf = db
+            .cf_handle(CF_NAME_INDEX)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_NAME_INDEX))?;
+        let entities_cf = db
+            .cf_handle(CF_ENTITIES)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_ENTITIES))?;
         let mut index = HashMap::new();
 
         // Try to load from name_index CF first
@@ -1465,12 +1477,7 @@ impl GraphMemory {
             let entity_iter = db.iterator_cf(entities_cf, rocksdb::IteratorMode::Start);
             let mut migrated_count = 0;
             for (_, value) in entity_iter.flatten() {
-                if let Ok(entity) = bincode::serde::decode_from_slice::<EntityNode, _>(
-                    &value,
-                    bincode::config::standard(),
-                )
-                .map(|(v, _)| v)
-                {
+                if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value) {
                     // Store in name_index CF: name -> UUID bytes
                     db.put_cf(
                         name_index_cf,
@@ -1496,7 +1503,9 @@ impl GraphMemory {
         db: &DB,
         name_index: &HashMap<String, Uuid>,
     ) -> Result<HashMap<String, Uuid>> {
-        let lowercase_cf = db.cf_handle(CF_LOWERCASE_INDEX).unwrap();
+        let lowercase_cf = db
+            .cf_handle(CF_LOWERCASE_INDEX)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_LOWERCASE_INDEX))?;
         let mut index = HashMap::new();
 
         // Try to load from lowercase_index CF
@@ -1534,7 +1543,9 @@ impl GraphMemory {
         db: &DB,
         name_index: &HashMap<String, Uuid>,
     ) -> Result<HashMap<String, Uuid>> {
-        let stemmed_cf = db.cf_handle(CF_STEMMED_INDEX).unwrap();
+        let stemmed_cf = db
+            .cf_handle(CF_STEMMED_INDEX)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_STEMMED_INDEX))?;
         let mut index = HashMap::new();
 
         // Try to load from stemmed_index CF
@@ -1593,10 +1604,7 @@ impl GraphMemory {
         for uuid in name_index.values() {
             let key = uuid.as_bytes();
             if let Ok(Some(value)) = db.get_cf(entities_cf, key) {
-                if let Ok((entity, _)) = bincode::serde::decode_from_slice::<EntityNode, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value) {
                     if let Some(emb) = entity.name_embedding {
                         cache.push((*uuid, emb));
                         if cache.len() >= ENTITY_EMBEDDING_CACHE_MAX {
@@ -1782,7 +1790,7 @@ impl GraphMemory {
 
         // Store entity in database
         let key = entity.uuid.as_bytes();
-        let value = bincode::serde::encode_to_vec(&entity, bincode::config::standard())?;
+        let value = crate::serialization::encode(&entity)?;
         self.db.put_cf(self.entities_cf(), key, value)?;
 
         // Increment counter only for truly new entities
@@ -1798,8 +1806,7 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.entities_cf(), key)? {
             Some(value) => {
-                let (entity, _): (EntityNode, _) =
-                    bincode::serde::decode_from_slice(&value, bincode::config::standard())?;
+                let (entity, _) = crate::serialization::try_decode::<EntityNode>(&value)?;
                 Ok(Some(entity))
             }
             None => Ok(None),
@@ -2186,7 +2193,7 @@ impl GraphMemory {
 
             // Persist the strengthened edge
             let key = existing.uuid.as_bytes();
-            let value = bincode::serde::encode_to_vec(&existing, bincode::config::standard())?;
+            let value = crate::serialization::encode(&existing)?;
             self.db.put_cf(self.relationships_cf(), key, value)?;
 
             return Ok(existing.uuid);
@@ -2198,7 +2205,7 @@ impl GraphMemory {
 
         // Store relationship
         let key = edge.uuid.as_bytes();
-        let value = bincode::serde::encode_to_vec(&edge, bincode::config::standard())?;
+        let value = crate::serialization::encode(&edge)?;
         self.db.put_cf(self.relationships_cf(), key, value)?;
 
         // Increment relationship counter
@@ -2372,10 +2379,7 @@ impl GraphMemory {
 
         let mut edges = Vec::with_capacity(edge_uuids.len());
         for value in results.into_iter().flatten().flatten() {
-            if let Ok((edge, _)) = bincode::serde::decode_from_slice::<RelationshipEdge, _>(
-                &value,
-                bincode::config::standard(),
-            ) {
+            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value) {
                 edges.push(edge);
             }
         }
@@ -2544,8 +2548,7 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.relationships_cf(), key)? {
             Some(value) => {
-                let (edge, _): (RelationshipEdge, _) =
-                    bincode::serde::decode_from_slice(&value, bincode::config::standard())?;
+                let (edge, _) = crate::serialization::try_decode::<RelationshipEdge>(&value)?;
                 Ok(Some(edge))
             }
             None => Ok(None),
@@ -2564,8 +2567,7 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.relationships_cf(), key)? {
             Some(value) => {
-                let (mut edge, _): (RelationshipEdge, _) =
-                    bincode::serde::decode_from_slice(&value, bincode::config::standard())?;
+                let (mut edge, _) = crate::serialization::try_decode::<RelationshipEdge>(&value)?;
                 // Apply effective strength calculation (doesn't persist)
                 edge.strength = edge.effective_strength();
                 Ok(Some(edge))
@@ -2647,10 +2649,7 @@ impl GraphMemory {
             .iterator_cf(self.relationships_cf(), rocksdb::IteratorMode::Start);
         let mut edges_to_delete = Vec::new();
         for (_, value) in iter.flatten() {
-            if let Ok((edge, _)) = bincode::serde::decode_from_slice::<RelationshipEdge, _>(
-                &value,
-                bincode::config::standard(),
-            ) {
+            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value) {
                 if edge.source_episode_id == Some(*episode_uuid) {
                     edges_to_delete.push(edge.uuid);
                 }
@@ -2685,7 +2684,10 @@ impl GraphMemory {
 
         // Clear each column family by iterating and batch-deleting
         for cf_name in GRAPH_CF_NAMES {
-            let cf = self.db.cf_handle(cf_name).unwrap();
+            let cf = self
+                .db
+                .cf_handle(cf_name)
+                .ok_or_else(|| anyhow::anyhow!("CF '{}' not found during clear_all", cf_name))?;
             let mut batch = rocksdb::WriteBatch::default();
             let iter = self.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
             for (key, _) in iter.flatten() {
@@ -2727,12 +2729,15 @@ impl GraphMemory {
             entity_count
         );
 
-        let value = bincode::serde::encode_to_vec(&episode, bincode::config::standard())?;
+        let value = crate::serialization::encode(&episode)?;
+        let already_existed = self.db.get_cf(self.episodes_cf(), key)?.is_some();
         self.db.put_cf(self.episodes_cf(), key, value)?;
 
-        // Increment episode counter
-        let prev = self.episode_count.fetch_add(1, Ordering::Relaxed);
-        tracing::debug!("add_episode: count {} -> {}", prev, prev + 1);
+        // Only increment counter for genuinely new episodes (not overwrites from retries)
+        if !already_existed {
+            let prev = self.episode_count.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!("add_episode: count {} -> {}", prev, prev + 1);
+        }
 
         // Update inverted index: entity_uuid -> episode_uuid
         for entity_uuid in &episode.entity_refs {
@@ -2755,8 +2760,7 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.episodes_cf(), key)? {
             Some(value) => {
-                let (episode, _): (EpisodicNode, _) =
-                    bincode::serde::decode_from_slice(&value, bincode::config::standard())?;
+                let (episode, _) = crate::serialization::try_decode::<EpisodicNode>(&value)?;
                 Ok(Some(episode))
             }
             None => Ok(None),
@@ -2804,10 +2808,7 @@ impl GraphMemory {
 
         let mut episodes = Vec::with_capacity(episode_uuids.len());
         for value in results.into_iter().flatten().flatten() {
-            if let Ok((episode, _)) = bincode::serde::decode_from_slice::<EpisodicNode, _>(
-                &value,
-                bincode::config::standard(),
-            ) {
+            if let Ok((episode, _)) = crate::serialization::try_decode::<EpisodicNode>(&value) {
                 episodes.push(episode);
             }
         }
@@ -3133,7 +3134,9 @@ impl GraphMemory {
         // Sort entities by path score (decay_factor) descending
         all_entities.sort_by(|a, b| b.decay_factor.total_cmp(&a.decay_factor));
 
-        // Hebbian strengthening
+        // Hebbian strengthening (deduplicate: same edge may appear on multiple paths)
+        edges_to_strengthen.sort();
+        edges_to_strengthen.dedup();
         if !edges_to_strengthen.is_empty() {
             if let Err(e) = self.batch_strengthen_synapses(&edges_to_strengthen) {
                 tracing::debug!("Failed to strengthen synapses: {}", e);
@@ -3529,8 +3532,7 @@ impl GraphMemory {
             }
 
             let (_, value) = result?;
-            let (entity, _): (EntityNode, _) =
-                bincode::serde::decode_from_slice(&value, bincode::config::standard())?;
+            let (entity, _) = crate::serialization::try_decode::<EntityNode>(&value)?;
 
             let entity_matches = self.match_pattern(&entity.uuid, pattern, min_strength)?;
             for m in entity_matches {
@@ -3565,7 +3567,7 @@ impl GraphMemory {
             edge.invalidated_at = Some(Utc::now());
 
             let key = edge.uuid.as_bytes();
-            let value = bincode::serde::encode_to_vec(&edge, bincode::config::standard())?;
+            let value = crate::serialization::encode(&edge)?;
             self.db.put_cf(self.relationships_cf(), key, value)?;
         }
 
@@ -3589,7 +3591,7 @@ impl GraphMemory {
             let _ = edge.strengthen();
 
             let key = edge.uuid.as_bytes();
-            let value = bincode::serde::encode_to_vec(&edge, bincode::config::standard())?;
+            let value = crate::serialization::encode(&edge)?;
             self.db.put_cf(self.relationships_cf(), key, value)?;
         }
 
@@ -3627,12 +3629,11 @@ impl GraphMemory {
 
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
-                if let Ok((mut edge, _)) = bincode::serde::decode_from_slice::<RelationshipEdge, _>(
-                    &value,
-                    bincode::config::standard(),
-                ) {
+                if let Ok((mut edge, _)) =
+                    crate::serialization::try_decode::<RelationshipEdge>(&value)
+                {
                     let _ = edge.strengthen();
-                    match bincode::serde::encode_to_vec(&edge, bincode::config::standard()) {
+                    match crate::serialization::encode(&edge) {
                         Ok(encoded) => {
                             batch.put_cf(self.relationships_cf(), &keys[i], encoded);
                             strengthened += 1;
@@ -3651,6 +3652,124 @@ impl GraphMemory {
         }
 
         Ok(strengthened)
+    }
+
+    /// Weaken edges in batch (anti-Hebbian: misleading retrieval feedback).
+    ///
+    /// Applies multiplicative decay (`1 - decay_factor`) to each edge's strength.
+    /// Edges below their tier's prune threshold are queued for lazy removal.
+    /// Uses a single RocksDB `WriteBatch` and one lock acquisition.
+    ///
+    /// Returns the number of edges successfully weakened.
+    pub fn batch_weaken_synapses(&self, edge_uuids: &[Uuid], decay_factor: f32) -> Result<usize> {
+        if edge_uuids.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self
+            .synapse_update_lock
+            .try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| {
+                anyhow::anyhow!("synapse_update_lock timeout in batch_weaken_synapses")
+            })?;
+
+        let keys: Vec<[u8; 16]> = edge_uuids.iter().map(|u| *u.as_bytes()).collect();
+        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let results = self
+            .db
+            .batched_multi_get_cf(self.relationships_cf(), &key_refs, false);
+
+        let mut batch = WriteBatch::default();
+        let mut weakened = 0;
+        let clamped_decay = decay_factor.clamp(0.0, 1.0);
+
+        for (i, result) in results.into_iter().enumerate() {
+            if let Ok(Some(value)) = result {
+                if let Ok((mut edge, _)) =
+                    crate::serialization::try_decode::<RelationshipEdge>(&value)
+                {
+                    edge.strength *= 1.0 - clamped_decay;
+                    // Queue for pruning if below tier threshold
+                    if edge.strength < edge.tier.prune_threshold() {
+                        self.pending_prune.lock().push(edge.uuid);
+                    }
+                    match crate::serialization::encode(&edge) {
+                        Ok(encoded) => {
+                            batch.put_cf(self.relationships_cf(), keys[i], encoded);
+                            weakened += 1;
+                        }
+                        Err(e) => {
+                            tracing::debug!("Failed to serialize edge {}: {}", edge_uuids[i], e);
+                        }
+                    }
+                }
+            }
+        }
+
+        if weakened > 0 {
+            self.db.write(batch)?;
+        }
+
+        Ok(weakened)
+    }
+
+    /// Collect edge UUIDs for a set of memory UUIDs via their episodic entity refs.
+    ///
+    /// For each memory, looks up its EpisodicNode to find entity_refs, then collects
+    /// all edges incident to those entities (capped at `max_edges`).
+    /// Used by feedback-driven Hebbian reinforcement.
+    pub fn collect_entity_edges_for_memories(
+        &self,
+        memory_uuids: &[Uuid],
+        max_edges: usize,
+    ) -> Result<Vec<Uuid>> {
+        use std::collections::HashSet;
+
+        let mut entity_set: HashSet<Uuid> = HashSet::new();
+
+        // Phase 1: gather all entities referenced by these memories' episodes
+        for mem_uuid in memory_uuids.iter().take(20) {
+            if let Some(episode) = self.get_episode(mem_uuid)? {
+                for entity_ref in &episode.entity_refs {
+                    entity_set.insert(*entity_ref);
+                }
+            }
+        }
+
+        if entity_set.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase 2: collect edge UUIDs from entity_edges index (deduplicated)
+        let mut edge_set: HashSet<Uuid> = HashSet::new();
+        for entity_uuid in &entity_set {
+            let prefix = format!("{entity_uuid}:");
+            let iter = self
+                .db
+                .prefix_iterator_cf(self.entity_edges_cf(), prefix.as_bytes());
+
+            for (key, _) in iter.flatten() {
+                if edge_set.len() >= max_edges {
+                    break;
+                }
+                if let Ok(key_str) = std::str::from_utf8(&key) {
+                    if !key_str.starts_with(&prefix) {
+                        break;
+                    }
+                    if let Some(edge_uuid_str) = key_str.split(':').nth(1) {
+                        if let Ok(edge_uuid) = Uuid::parse_str(edge_uuid_str) {
+                            edge_set.insert(edge_uuid);
+                        }
+                    }
+                }
+            }
+
+            if edge_set.len() >= max_edges {
+                break;
+            }
+        }
+
+        Ok(edge_set.into_iter().collect())
     }
 
     /// Record co-retrieval of memories (Hebbian learning between memories)
@@ -3697,9 +3816,7 @@ impl GraphMemory {
                     // Strengthen existing edge
                     let _ = edge.strengthen();
                     let key = edge.uuid.as_bytes();
-                    if let Ok(value) =
-                        bincode::serde::encode_to_vec(&edge, bincode::config::standard())
-                    {
+                    if let Ok(value) = crate::serialization::encode(&edge) {
                         batch.put_cf(self.relationships_cf(), key, value);
                         edges_updated += 1;
                     }
@@ -3727,9 +3844,7 @@ impl GraphMemory {
                     };
 
                     let key = edge.uuid.as_bytes();
-                    if let Ok(value) =
-                        bincode::serde::encode_to_vec(&edge, bincode::config::standard())
-                    {
+                    if let Ok(value) = crate::serialization::encode(&edge) {
                         batch.put_cf(self.relationships_cf(), key, value);
 
                         // Also index in the reverse direction for lookup
@@ -3825,7 +3940,7 @@ impl GraphMemory {
         let mut strengthened = 0;
         let mut promotion_boosts = Vec::new();
 
-        for (from_id_str, to_id_str, _boost) in edge_boosts {
+        for (from_id_str, to_id_str, boost) in edge_boosts {
             // Parse UUIDs
             let from_uuid = match Uuid::parse_str(from_id_str) {
                 Ok(u) => u,
@@ -3849,8 +3964,7 @@ impl GraphMemory {
                 // Strengthen existing edge — capture tier promotion if it occurs
                 let promotion = edge.strengthen();
                 let key = edge.uuid.as_bytes();
-                if let Ok(value) = bincode::serde::encode_to_vec(&edge, bincode::config::standard())
-                {
+                if let Ok(value) = crate::serialization::encode(&edge) {
                     batch.put_cf(self.relationships_cf(), key, value);
                     strengthened += 1;
 
@@ -3885,13 +3999,15 @@ impl GraphMemory {
                 }
             } else {
                 // Create new ReplayStrengthened edge
-                // Replay edges start in L2 (episodic) since they represent consolidated associations
+                // Replay edges start in L2 (episodic) with replay boost applied to initial strength.
+                // Without this, the computed replay priority score was discarded and all new edges
+                // started at identical strength regardless of their consolidation importance.
                 let edge = RelationshipEdge {
                     uuid: Uuid::new_v4(),
                     from_entity: from_uuid,
                     to_entity: to_uuid,
                     relation_type: RelationType::CoRetrieved,
-                    strength: EdgeTier::L2Episodic.initial_weight(),
+                    strength: EdgeTier::L2Episodic.initial_weight() + boost,
                     created_at: Utc::now(),
                     valid_at: Utc::now(),
                     invalidated_at: None,
@@ -3907,8 +4023,7 @@ impl GraphMemory {
                 };
 
                 let key = edge.uuid.as_bytes();
-                if let Ok(value) = bincode::serde::encode_to_vec(&edge, bincode::config::standard())
-                {
+                if let Ok(value) = crate::serialization::encode(&edge) {
                     batch.put_cf(self.relationships_cf(), key, value);
 
                     // Index both directions
@@ -3974,6 +4089,66 @@ impl GraphMemory {
         }
 
         Ok((strengthened, promotion_boosts))
+    }
+
+    /// Strengthen graph edges between two causally-linked memories.
+    ///
+    /// Resolves memory UUIDs to their entity_refs via EpisodicNodes, then strengthens
+    /// the cross-product of entity pairs. This couples the lineage system (explicit
+    /// causal chains) with the knowledge graph (spreading activation), so causally-linked
+    /// memories naturally co-activate during retrieval.
+    ///
+    /// Returns the number of entity-pair edges strengthened.
+    pub fn strengthen_lineage_connection(
+        &self,
+        from_memory_uuid: &Uuid,
+        to_memory_uuid: &Uuid,
+        boost: f32,
+    ) -> Result<usize> {
+        // Resolve entity_refs for both memories
+        let from_episode = self.get_episode(from_memory_uuid)?;
+        let to_episode = self.get_episode(to_memory_uuid)?;
+
+        let (from_entities, to_entities) = match (from_episode, to_episode) {
+            (Some(fe), Some(te)) if !fe.entity_refs.is_empty() && !te.entity_refs.is_empty() => {
+                (fe.entity_refs, te.entity_refs)
+            }
+            _ => return Ok(0),
+        };
+
+        // Cap entity lists to prevent O(N^2) explosion on heavily-tagged memories.
+        // 8 × 8 = 64 pairs max, which is reasonable for a single lineage edge.
+        const MAX_ENTITIES_PER_SIDE: usize = 8;
+        let from_capped = &from_entities[..from_entities.len().min(MAX_ENTITIES_PER_SIDE)];
+        let to_capped = &to_entities[..to_entities.len().min(MAX_ENTITIES_PER_SIDE)];
+
+        // Build cross-product of entity pairs with lineage boost
+        let mut edge_boosts: Vec<(String, String, f32)> =
+            Vec::with_capacity(from_capped.len() * to_capped.len());
+        for from_entity in from_capped {
+            for to_entity in to_capped {
+                if from_entity != to_entity {
+                    edge_boosts.push((from_entity.to_string(), to_entity.to_string(), boost));
+                }
+            }
+        }
+
+        if edge_boosts.is_empty() {
+            return Ok(0);
+        }
+
+        let (strengthened, _promotions) = self.strengthen_memory_edges(&edge_boosts)?;
+
+        tracing::debug!(
+            from_memory = %&from_memory_uuid.to_string()[..8],
+            to_memory = %&to_memory_uuid.to_string()[..8],
+            entity_pairs = edge_boosts.len(),
+            strengthened,
+            boost,
+            "Lineage→graph edge strengthening"
+        );
+
+        Ok(strengthened)
     }
 
     /// Find memories associated with a given memory through co-retrieval
@@ -4076,9 +4251,7 @@ impl GraphMemory {
                     }
                     let _ = edge.strengthen();
                     let key = edge.uuid.as_bytes();
-                    if let Ok(value) =
-                        bincode::serde::encode_to_vec(&edge, bincode::config::standard())
-                    {
+                    if let Ok(value) = crate::serialization::encode(&edge) {
                         batch.put_cf(self.relationships_cf(), key, value);
                         strengthened += 1;
                     }
@@ -4185,7 +4358,7 @@ impl GraphMemory {
             let should_prune = edge.decay();
 
             let key = edge.uuid.as_bytes();
-            let value = bincode::serde::encode_to_vec(&edge, bincode::config::standard())?;
+            let value = crate::serialization::encode(&edge)?;
             self.db.put_cf(self.relationships_cf(), key, value)?;
 
             return Ok(should_prune);
@@ -4218,7 +4391,7 @@ impl GraphMemory {
                 let should_prune = edge.decay();
 
                 let key = edge.uuid.as_bytes();
-                match bincode::serde::encode_to_vec(&edge, bincode::config::standard()) {
+                match crate::serialization::encode(&edge) {
                     Ok(value) => {
                         batch.put_cf(self.relationships_cf(), key, value);
                         if should_prune {
@@ -4266,7 +4439,7 @@ impl GraphMemory {
             // so this reduces the WriteBatch from ~12MB (all 34k edges) to ~150KB.
             if should_prune || (edge.strength - strength_before).abs() > f32::EPSILON {
                 let key = edge.uuid.as_bytes();
-                match bincode::serde::encode_to_vec(&*edge, bincode::config::standard()) {
+                match crate::serialization::encode(&*edge) {
                     Ok(value) => {
                         batch.put_cf(self.relationships_cf(), key, value);
                         if should_prune {
@@ -4284,12 +4457,73 @@ impl GraphMemory {
         Ok(to_prune)
     }
 
+    /// Apply synaptic homeostasis: global downscaling of all edge strengths.
+    ///
+    /// After each maintenance cycle, scales ALL edge weights by `factor` (typically 0.95).
+    /// Edges with LtpStatus::Full are protected — fully consolidated synapses resist
+    /// homeostatic downscaling, matching biological systems consolidation.
+    ///
+    /// This prevents runaway strengthening and keeps total network energy bounded.
+    /// Strong edges survive; weak edges fall below prune thresholds and are cleared
+    /// in the next decay cycle.
+    ///
+    /// Reference: Tononi & Cirelli (2003) "Sleep and synaptic homeostasis: a hypothesis"
+    pub fn apply_synaptic_homeostasis(&self, factor: f32) -> Result<usize> {
+        let mut all_edges = self.get_all_relationships()?;
+        if all_edges.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self
+            .synapse_update_lock
+            .try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| {
+                anyhow::anyhow!("synapse_update_lock timeout in apply_synaptic_homeostasis")
+            })?;
+
+        let mut batch = WriteBatch::default();
+        let mut scaled_count = 0;
+
+        for edge in all_edges.iter_mut() {
+            // Fully potentiated edges are protected from homeostatic downscaling
+            if matches!(edge.ltp_status, LtpStatus::Full) {
+                continue;
+            }
+
+            let old_strength = edge.strength;
+            edge.strength *= factor;
+            // Never scale below absolute floor
+            edge.strength = edge.strength.max(crate::constants::LTP_MIN_STRENGTH);
+
+            if (edge.strength - old_strength).abs() > f32::EPSILON {
+                let key = edge.uuid.as_bytes();
+                if let Ok(value) = crate::serialization::encode(&*edge) {
+                    batch.put_cf(self.relationships_cf(), key, value);
+                    scaled_count += 1;
+                }
+            }
+        }
+
+        if scaled_count > 0 {
+            self.db.write(batch)?;
+            tracing::debug!(
+                "Synaptic homeostasis: scaled {} of {} edges by factor {}",
+                scaled_count,
+                all_edges.len(),
+                factor
+            );
+        }
+
+        Ok(scaled_count)
+    }
+
     /// Apply decay to all synapses and prune weak edges (AUD-2)
     ///
     /// Called during maintenance cycle to:
     /// 1. Apply time-based decay to all edge strengths
     /// 2. Remove edges that have decayed below threshold
     /// 3. Detect orphaned entities (entities that lost all their edges)
+    /// 4. Apply synaptic homeostasis (global edge downscaling)
     ///
     /// Returns a `GraphDecayResult` with pruned count and orphaned entity/memory IDs
     /// for Direction 2 coupling (edge pruning → orphan detection).
@@ -4347,6 +4581,15 @@ impl GraphMemory {
                 all_edges.len(),
                 orphaned_entity_ids.len()
             );
+        }
+
+        // 4. Apply synaptic homeostasis (global edge downscaling)
+        // Runs after pruning so that homeostatic pressure doesn't interfere with
+        // the prune decision (edges are pruned at their true decayed strength first).
+        if let Err(e) =
+            self.apply_synaptic_homeostasis(crate::constants::HOMEOSTASIS_SCALING_FACTOR)
+        {
+            tracing::warn!("Synaptic homeostasis failed (non-fatal): {}", e);
         }
 
         Ok(crate::memory::types::GraphDecayResult {
@@ -4430,12 +4673,7 @@ impl GraphMemory {
             self.db
                 .iterator_cf_opt(self.entities_cf(), read_opts, rocksdb::IteratorMode::Start);
         for (_, value) in iter.flatten() {
-            if let Ok(entity) = bincode::serde::decode_from_slice::<EntityNode, _>(
-                &value,
-                bincode::config::standard(),
-            )
-            .map(|(v, _)| v)
-            {
+            if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value) {
                 entities.push(entity);
             }
         }
@@ -4461,12 +4699,7 @@ impl GraphMemory {
             rocksdb::IteratorMode::Start,
         );
         for (_, value) in iter.flatten() {
-            if let Ok(edge) = bincode::serde::decode_from_slice::<RelationshipEdge, _>(
-                &value,
-                bincode::config::standard(),
-            )
-            .map(|(v, _)| v)
-            {
+            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value) {
                 // Only include non-invalidated relationships
                 if edge.invalidated_at.is_none() {
                     relationships.push(edge);
@@ -6974,5 +7207,188 @@ mod tests {
         assert_eq!(returned.name, episode_name);
         assert_eq!(returned.content, episode_content);
         assert_eq!(returned.source, EpisodeSource::Message);
+    }
+
+    // =========================================================================
+    // BEHAVIORAL LOOP TESTS
+    // Verify cognitive loops are closed (not just structurally present).
+    // =========================================================================
+
+    #[test]
+    fn test_loop_episode_idempotency() {
+        // Verify: calling add_episode() twice with same UUID doesn't inflate episode_count
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let memory_uuid = Uuid::new_v4();
+        let entity_uuid = Uuid::new_v4();
+
+        let entity = EntityNode {
+            uuid: entity_uuid,
+            name: "IdempotentEntity".to_string(),
+            labels: vec![EntityLabel::Concept],
+            created_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: std::collections::HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: false,
+        };
+        graph.add_entity(entity).unwrap();
+
+        let episode = EpisodicNode {
+            uuid: memory_uuid,
+            name: "Test Episode".to_string(),
+            content: "Test content for idempotency".to_string(),
+            valid_at: Utc::now(),
+            created_at: Utc::now(),
+            entity_refs: vec![entity_uuid],
+            source: EpisodeSource::Message,
+            metadata: std::collections::HashMap::new(),
+            extracted_triples: vec![],
+        };
+
+        // First insert
+        graph.add_episode(episode.clone()).unwrap();
+        let count_after_first = graph.episode_count.load(Ordering::Relaxed);
+
+        // Second insert (same UUID — simulates retry)
+        graph.add_episode(episode).unwrap();
+        let count_after_second = graph.episode_count.load(Ordering::Relaxed);
+
+        assert_eq!(
+            count_after_first, count_after_second,
+            "episode_count should not inflate on overwrite (got {} then {})",
+            count_after_first, count_after_second
+        );
+    }
+
+    #[test]
+    fn test_loop_decay_reduces_edge_strength() {
+        // Verify: apply_decay() actually reduces edge strength (decay loop is closed)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let from_uuid = Uuid::new_v4();
+        let to_uuid = Uuid::new_v4();
+
+        // Create entities
+        for (uuid, name) in [(from_uuid, "DecayFrom"), (to_uuid, "DecayTo")] {
+            let entity = EntityNode {
+                uuid,
+                name: name.to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: Utc::now(),
+                last_seen_at: Utc::now(),
+                mention_count: 1,
+                summary: String::new(),
+                attributes: std::collections::HashMap::new(),
+                name_embedding: None,
+                salience: 0.5,
+                is_proper_noun: false,
+            };
+            graph.add_entity(entity).unwrap();
+        }
+
+        // Create edge with strength 0.5, last activated 30 days ago (well past decay threshold)
+        let edge_uuid = Uuid::new_v4();
+        let edge = RelationshipEdge {
+            uuid: edge_uuid,
+            from_entity: from_uuid,
+            to_entity: to_uuid,
+            relation_type: RelationType::RelatedTo,
+            strength: 0.5,
+            created_at: Utc::now() - Duration::days(60),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: "decay test".to_string(),
+            last_activated: Utc::now() - Duration::days(30),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L1Working,
+            entity_confidence: None,
+        };
+        graph.add_relationship(edge).unwrap();
+
+        // Run decay
+        let result = graph.apply_decay().unwrap();
+
+        // Edge should have been affected (either decayed or pruned)
+        if result.pruned_count == 0 {
+            // Not pruned — check it was weakened
+            let updated = graph.get_relationship(&edge_uuid).unwrap();
+            if let Some(updated_edge) = updated {
+                assert!(
+                    updated_edge.strength < 0.5,
+                    "Edge strength should have decayed from 0.5, got {}",
+                    updated_edge.strength
+                );
+            }
+        }
+        // If pruned, the loop is working (edge was weak enough to remove)
+    }
+
+    #[test]
+    fn test_loop_feedback_strengthens_edges() {
+        // Verify: batch_strengthen_synapses() actually increases edge strength (feedback loop)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let from_uuid = Uuid::new_v4();
+        let to_uuid = Uuid::new_v4();
+
+        for (uuid, name) in [(from_uuid, "FeedbackFrom"), (to_uuid, "FeedbackTo")] {
+            let entity = EntityNode {
+                uuid,
+                name: name.to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: Utc::now(),
+                last_seen_at: Utc::now(),
+                mention_count: 1,
+                summary: String::new(),
+                attributes: std::collections::HashMap::new(),
+                name_embedding: None,
+                salience: 0.5,
+                is_proper_noun: false,
+            };
+            graph.add_entity(entity).unwrap();
+        }
+
+        let initial_strength = 0.3;
+        let edge = RelationshipEdge {
+            uuid: Uuid::new_v4(), // add_relationship() will assign a new UUID
+            from_entity: from_uuid,
+            to_entity: to_uuid,
+            relation_type: RelationType::RelatedTo,
+            strength: initial_strength,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: "feedback test".to_string(),
+            last_activated: Utc::now(),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+        };
+        let edge_uuid = graph.add_relationship(edge).unwrap();
+
+        // Simulate "Helpful" feedback → strengthen
+        let count = graph.batch_strengthen_synapses(&[edge_uuid]).unwrap();
+        assert_eq!(count, 1, "Should have strengthened 1 edge");
+
+        let updated = graph.get_relationship(&edge_uuid).unwrap().unwrap();
+        assert!(
+            updated.strength > initial_strength,
+            "Edge strength should increase after Helpful feedback: {} -> {}",
+            initial_strength,
+            updated.strength
+        );
     }
 }

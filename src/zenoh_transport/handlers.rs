@@ -34,6 +34,57 @@ use crate::streaming::{ExtractionConfig, StreamHandshake, StreamMessage, StreamM
 use crate::validation;
 
 // =============================================================================
+// AUTHENTICATION
+// =============================================================================
+
+/// Validate the `"api_key"` field in a Zenoh JSON payload against the configured secret.
+///
+/// Returns `true` if the request should be processed:
+/// - If `expected` is `None` (no key configured), authentication is skipped (backwards compatible).
+/// - If `expected` is `Some`, the payload must be valid JSON containing an `"api_key"` field
+///   whose value matches the expected key via constant-time comparison.
+///
+/// Returns `false` and logs a warning if authentication fails.
+pub fn authenticate_payload(payload: &ZBytes, expected: Option<&str>) -> bool {
+    let expected = match expected {
+        Some(key) => key,
+        None => return true, // No auth configured — allow all
+    };
+
+    let text = match payload.try_to_string() {
+        Ok(cow) => cow.into_owned(),
+        Err(_) => {
+            warn!("Zenoh auth: payload is not valid UTF-8, rejecting");
+            return false;
+        }
+    };
+
+    // Parse just enough to extract the api_key field without deserializing the full payload
+    let provided = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(val) => val
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        Err(_) => {
+            warn!("Zenoh auth: payload is not valid JSON, rejecting");
+            return false;
+        }
+    };
+
+    match provided {
+        Some(ref key) if crate::auth::constant_time_compare(key, expected) => true,
+        Some(_) => {
+            warn!("Zenoh auth: api_key mismatch, rejecting request");
+            false
+        }
+        None => {
+            warn!("Zenoh auth: payload missing 'api_key' field, rejecting request");
+            false
+        }
+    }
+}
+
+// =============================================================================
 // PAYLOAD HELPERS
 // =============================================================================
 
@@ -368,6 +419,7 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
     let agent_id = req.agent_id.clone();
     let run_id = req.run_id.clone();
     let created_at = req.created_at;
+    let created_at_for_facts = created_at.unwrap_or_else(chrono::Utc::now);
 
     let memory_id = match tokio::task::spawn_blocking(move || {
         let guard = memory_clone.read();
@@ -490,7 +542,11 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
         memory_type: Some(experience_type_str),
         importance: None,
         count: None,
-        entities: if req.tags.is_empty() { None } else { Some(req.tags.clone()) },
+        entities: if req.tags.is_empty() {
+            None
+        } else {
+            Some(req.tags.clone())
+        },
         results: None,
     });
 
@@ -526,7 +582,7 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
             let uid = user_id.clone();
             let content = experience.content.clone();
             let entities = experience.entities.clone();
-            let created_at = chrono::Utc::now();
+            let created_at = created_at_for_facts;
             let _ = tokio::task::spawn_blocking(move || {
                 let guard = mem.read();
                 guard.store_temporal_facts_for_memory(&uid, &mid, &content, &entities, created_at)
@@ -648,15 +704,11 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
         }
     };
 
-    // Convert to response format
-    let total = memories.len();
+    // Convert to response format — preserve pipeline scores
     let recall_memories: Vec<RecallMemory> = memories
         .iter()
-        .enumerate()
-        .map(|(rank, m)| {
-            let rank_score = 1.0 - (rank as f32 / total.max(1) as f32);
-            let salience = m.salience_score_with_access();
-            let score = rank_score * 0.7 + salience * 0.3;
+        .map(|m| {
+            let score = m.score.unwrap_or_else(|| m.salience_score_with_access());
             RecallMemory {
                 id: m.id.0.to_string(),
                 experience: RecallExperience {
@@ -783,6 +835,8 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
         Some(facts.len())
     };
 
+    let has_recall_memories = !recall_memories.is_empty();
+
     let response = RecallResponse {
         memories: recall_memories,
         count: total,
@@ -811,7 +865,7 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
 
     // Store PendingFeedback so subsequent remember() calls with action+reward
     // can attribute outcomes to the memories we just surfaced.
-    if !recall_memories.is_empty() {
+    if has_recall_memories {
         let memory_for_embed = memory.clone();
         let query_for_embed = query_text.clone();
         let user_id_for_fb = user_id.clone();
@@ -866,7 +920,7 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
 /// Handle a Zenoh DELETE/PUT on `{prefix}/{user_id}/forget`.
 ///
 /// Payload: `{ "memory_id": "uuid-string" }` or `{ "id": "uuid-string" }`
-pub async fn handle_forget(sample: Sample, manager: Arc<MultiUserMemoryManager>) {
+pub async fn handle_forget(sample: Sample, manager: Arc<MultiUserMemoryManager>, prefix: &str) {
     #[derive(serde::Deserialize)]
     struct ForgetRequest {
         #[serde(default)]
@@ -885,11 +939,11 @@ pub async fn handle_forget(sample: Sample, manager: Arc<MultiUserMemoryManager>)
         }
     };
 
-    // Extract user_id from key expression or payload
+    // Extract user_id from payload, falling back to key expression: {prefix}/{user_id}/forget
     let user_id = req.user_id.unwrap_or_else(|| {
-        // Try to extract from key expr: shodh/{user_id}/forget
-        // This will be the fallback since we parsed from payload first
-        String::new()
+        extract_user_id(&key, prefix)
+            .map(|s| s.to_string())
+            .unwrap_or_default()
     });
 
     if user_id.is_empty() {

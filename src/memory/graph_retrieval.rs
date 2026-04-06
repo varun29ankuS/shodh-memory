@@ -47,7 +47,7 @@ use crate::constants::{
     SPREADING_RELAXED_THRESHOLD,
 };
 use crate::embeddings::Embedder;
-use crate::graph_memory::{EdgeTier, EpisodicNode, GraphMemory, RelationType};
+use crate::graph_memory::{EdgeTier, EntityLabel, EpisodicNode, GraphMemory, RelationType};
 use crate::memory::query_parser::{infer_ontological_intent, OntologicalIntent};
 use crate::memory::types::MemoryTier;
 // Note: compute_relevance removed - using unified density-weighted scoring directly
@@ -169,6 +169,7 @@ fn spread_single_direction(
     max_hops: usize,
     threshold: f32,
     ontological_intent: Option<&OntologicalIntent>,
+    entity_label_cache: &mut HashMap<Uuid, Option<Vec<EntityLabel>>>,
 ) -> Result<(HashMap<Uuid, f32>, Vec<Uuid>)> {
     let mut activation_map: HashMap<Uuid, f32> = seeds.iter().cloned().collect();
     let mut traversed_edges: Vec<Uuid> = Vec::new();
@@ -236,9 +237,18 @@ fn spread_single_direction(
 
                     // Entity type penalty (target entity label mismatch)
                     // Uses hierarchical matching: Team matches Organization, Service matches Technology
+                    // Cached: each entity is read from RocksDB at most once across all hops.
                     if !intent.expected_labels.is_empty() {
-                        if let Ok(Some(target_entity)) = graph.get_entity(&target_uuid) {
-                            let type_match = target_entity.labels.iter().any(|l| {
+                        let cached_labels =
+                            entity_label_cache.entry(target_uuid).or_insert_with(|| {
+                                graph
+                                    .get_entity(&target_uuid)
+                                    .ok()
+                                    .flatten()
+                                    .map(|e| e.labels)
+                            });
+                        if let Some(labels) = cached_labels {
+                            let type_match = labels.iter().any(|l| {
                                 intent
                                     .expected_labels
                                     .iter()
@@ -333,6 +343,9 @@ fn bidirectional_spread(
     );
 
     // Spread from both directions with density-adaptive hops
+    // Shared entity label cache: each entity is read from RocksDB at most once
+    // across both forward and backward passes.
+    let mut entity_label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
     let threshold = SPREADING_ACTIVATION_THRESHOLD;
     let (forward_map, forward_edges) = spread_single_direction(
         &forward_seeds,
@@ -340,6 +353,7 @@ fn bidirectional_spread(
         hops_per_direction,
         threshold,
         ontological_intent,
+        &mut entity_label_cache,
     )?;
 
     let (backward_map, backward_edges) = spread_single_direction(
@@ -348,6 +362,7 @@ fn bidirectional_spread(
         hops_per_direction,
         threshold,
         ontological_intent,
+        &mut entity_label_cache,
     )?;
 
     // Combine maps with intersection boost
@@ -415,6 +430,7 @@ pub fn spreading_activation_retrieve(
         graph,
         embedder,
         None, // No density = use legacy fixed weights
+        None, // No pre-computed intent = compute internally
         episode_to_memory_fn,
     )?;
     Ok(memories)
@@ -433,6 +449,7 @@ pub fn spreading_activation_retrieve(
 /// - `graph`: The knowledge graph for spreading activation
 /// - `embedder`: Embedding model for semantic scoring
 /// - `graph_density`: Optional density (edges/memories). If None, uses fixed weights.
+/// - `ontological_intent`: Pre-computed ontological intent. When `Some`, avoids recomputing.
 /// - `episode_to_memory_fn`: Function to convert episodes to memories
 ///
 /// # Returns
@@ -443,6 +460,7 @@ pub fn spreading_activation_retrieve_with_stats(
     graph: &GraphMemory,
     embedder: &dyn Embedder,
     graph_density: Option<f32>,
+    ontological_intent: Option<&OntologicalIntent>,
     episode_to_memory_fn: impl Fn(&EpisodicNode) -> Result<Option<SharedMemory>>,
 ) -> Result<(Vec<ActivatedMemory>, RetrievalStats)> {
     let start_time = Instant::now();
@@ -470,12 +488,19 @@ pub fn spreading_activation_retrieve_with_stats(
     // Step 1: Linguistic query analysis (Lioma & Ounis 2006)
     let analysis = analyze_query(query_text);
 
-    // Ontological intent: infer expected entity types and relation types from query structure
-    let ontological_intent = infer_ontological_intent(query_text, &analysis);
-    let use_ontology = ontological_intent.confidence >= ONTOLOGICAL_MIN_CONFIDENCE
+    // Ontological intent: use pre-computed if provided, otherwise infer from query structure
+    let computed_intent;
+    let ontological_intent_resolved = match ontological_intent {
+        Some(intent) => intent,
+        None => {
+            computed_intent = infer_ontological_intent(query_text, &analysis);
+            &computed_intent
+        }
+    };
+    let use_ontology = ontological_intent_resolved.confidence >= ONTOLOGICAL_MIN_CONFIDENCE
         && !graph_density.is_some_and(|d| d >= ONTOLOGICAL_DENSITY_THRESHOLD);
     let intent_ref = if use_ontology {
-        Some(&ontological_intent)
+        Some(ontological_intent_resolved)
     } else {
         None
     };
@@ -483,13 +508,13 @@ pub fn spreading_activation_retrieve_with_stats(
     if use_ontology {
         tracing::info!(
             "Ontological intent: labels={:?}, relations={:?}, confidence={:.2}",
-            ontological_intent.expected_labels,
-            ontological_intent
+            ontological_intent_resolved.expected_labels,
+            ontological_intent_resolved
                 .relation_types
                 .iter()
                 .map(|r| r.as_str())
                 .collect::<Vec<_>>(),
-            ontological_intent.confidence
+            ontological_intent_resolved.confidence
         );
     }
 
@@ -633,6 +658,8 @@ pub fn spreading_activation_retrieve_with_stats(
 
         let mut edges_collected: Vec<Uuid> = Vec::new();
         let mut current_threshold = SPREADING_ACTIVATION_THRESHOLD;
+        // Entity label cache: each entity is read from RocksDB at most once across all hops.
+        let mut entity_label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
 
         for hop in 1..=SPREADING_MAX_HOPS {
             stats.graph_hops = hop;
@@ -660,6 +687,14 @@ pub fn spreading_activation_retrieve_with_stats(
                 let edges = graph
                     .get_entity_relationships_limited(&entity_uuid, Some(MAX_EDGES_PER_SPREAD))?;
 
+                // Degree normalization: prevent hub nodes from flooding the network.
+                // Matches bidirectional path (Anderson & Reder 1999 ACT-R).
+                let degree_norm = if SPREADING_DEGREE_NORMALIZATION {
+                    1.0 / (1.0 + edges.len() as f32).sqrt()
+                } else {
+                    1.0
+                };
+
                 for edge in edges {
                     // Spread activation to connected entity
                     let target_uuid = edge.to_entity;
@@ -680,7 +715,8 @@ pub fn spreading_activation_retrieve_with_stats(
                     let decay_rate = calculate_importance_weighted_decay(effective);
                     let decay = (-decay_rate * hop as f32).exp();
 
-                    let base_spread = source_activation * decay * effective * tier_trust;
+                    let base_spread =
+                        source_activation * decay * effective * tier_trust * degree_norm;
 
                     // Ontological type penalty (same as bidirectional path)
                     let spread_amount = if let Some(intent) = intent_ref {
@@ -697,12 +733,22 @@ pub fn spreading_activation_retrieve_with_stats(
                             penalty *= ONTOLOGICAL_RELATION_PENALTY;
                         }
                         if !intent.expected_labels.is_empty() {
-                            if let Ok(Some(target_entity)) = graph.get_entity(&target_uuid) {
-                                if !target_entity
-                                    .labels
-                                    .iter()
-                                    .any(|l| intent.expected_labels.contains(l))
-                                {
+                            let cached_labels =
+                                entity_label_cache.entry(target_uuid).or_insert_with(|| {
+                                    graph
+                                        .get_entity(&target_uuid)
+                                        .ok()
+                                        .flatten()
+                                        .map(|e| e.labels)
+                                });
+                            if let Some(labels) = cached_labels {
+                                let type_match = labels.iter().any(|l| {
+                                    intent
+                                        .expected_labels
+                                        .iter()
+                                        .any(|exp| l.matches_with_hierarchy(exp))
+                                });
+                                if !type_match {
                                     penalty *= ONTOLOGICAL_ENTITY_PENALTY;
                                 }
                             }
@@ -904,6 +950,17 @@ pub fn spreading_activation_retrieve_with_stats(
     // Step 6: Sort by final score (descending)
     scored_memories.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
 
+    // Step 6.5: Lateral inhibition — high-scoring memories suppress similar competitors
+    // Mimics cortical winner-take-all dynamics (Rumelhart & Zipser 1985)
+    if scored_memories.len() > 1 {
+        let penalties = calculate_lateral_inhibition(&scored_memories);
+        for (i, penalty) in penalties.iter().enumerate() {
+            scored_memories[i].final_score -= penalty;
+        }
+        // Re-sort after inhibition reweighting
+        scored_memories.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
+    }
+
     // Step 7: Apply limit
     scored_memories.truncate(query.max_results);
 
@@ -913,6 +970,15 @@ pub fn spreading_activation_retrieve_with_stats(
     traversed_edges.sort();
     traversed_edges.dedup();
     stats.traversed_edges = traversed_edges;
+
+    // Hebbian reinforcement: strengthen edges traversed during spreading activation
+    // Other traversal methods (traverse_from_entity, traverse_weighted, traverse_bidirectional)
+    // all call batch_strengthen_synapses — spreading activation should too
+    if !stats.traversed_edges.is_empty() {
+        if let Err(e) = graph.batch_strengthen_synapses(&stats.traversed_edges) {
+            tracing::debug!("Spreading activation edge strengthening failed: {}", e);
+        }
+    }
 
     tracing::info!(
         "🎯 Returning {} memories (top scores: {:?}), {} edges traversed",
@@ -969,6 +1035,50 @@ fn calculate_linguistic_match(memory: &Memory, analysis: &QueryAnalysis) -> f32 
     } else {
         0.0
     }
+}
+
+/// Calculate lateral inhibition penalties for scored memories.
+///
+/// Implements cortical winner-take-all dynamics: for each memory (starting from rank 2),
+/// compute inhibitory signal from all higher-ranked memories based on embedding similarity.
+/// If similarity exceeds threshold, the lower-ranked memory receives a penalty proportional
+/// to the higher-ranked memory's score.
+///
+/// Total penalty per memory is capped at 50% of its original score to prevent over-suppression.
+///
+/// Reference: Rumelhart & Zipser (1985) "Feature discovery by competitive learning"
+fn calculate_lateral_inhibition(scored: &[ActivatedMemory]) -> Vec<f32> {
+    use crate::constants::{GRAPH_LATERAL_INHIBITION_STRENGTH, GRAPH_LATERAL_INHIBITION_THRESHOLD};
+
+    let mut penalties = vec![0.0f32; scored.len()];
+
+    // For each memory, check similarity to all higher-ranked memories
+    for i in 1..scored.len() {
+        let emb_i = match &scored[i].memory.experience.embeddings {
+            Some(e) => e,
+            None => continue,
+        };
+
+        let mut total_penalty = 0.0f32;
+
+        for j in 0..i {
+            let emb_j = match &scored[j].memory.experience.embeddings {
+                Some(e) => e,
+                None => continue,
+            };
+
+            let sim = cosine_similarity(emb_i, emb_j);
+            if sim > GRAPH_LATERAL_INHIBITION_THRESHOLD {
+                // Higher-ranked memory suppresses this one proportional to similarity
+                total_penalty += scored[j].final_score * GRAPH_LATERAL_INHIBITION_STRENGTH * sim;
+            }
+        }
+
+        // Cap penalty at 50% of original score to prevent over-suppression
+        penalties[i] = total_penalty.min(scored[i].final_score * 0.5);
+    }
+
+    penalties
 }
 
 #[cfg(test)]

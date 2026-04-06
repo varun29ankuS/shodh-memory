@@ -1717,6 +1717,8 @@ pub struct ReinforcementStats {
     pub memories_processed: usize,
     /// How many association edges were strengthened
     pub associations_strengthened: usize,
+    /// How many entity-level graph edges were strengthened/weakened by feedback
+    pub entity_edges_reinforced: usize,
     /// How many importance boosts were applied
     pub importance_boosts: usize,
     /// How many importance decays were applied
@@ -1725,6 +1727,9 @@ pub struct ReinforcementStats {
     pub outcome: RetrievalOutcome,
     /// How many persistence operations failed (non-zero indicates data loss risk)
     pub persist_failures: usize,
+    /// Average prediction error multiplier applied to learning signals (VTA/Dopamine).
+    /// 0.5 = expected outcomes (slow learning), 2.0 = max surprise (fast learning).
+    pub prediction_error_multiplier: f32,
 }
 
 impl Default for RetrievalOutcome {
@@ -2043,8 +2048,8 @@ impl AnticipatoryPrefetch {
         // SHO-104: Emotional arousal boost - high-arousal memories are more salient
         // Research: Emotionally arousing events are better remembered (LaBar & Cabeza, 2006)
         if let Some(ctx) = &memory.experience.context {
-            // High arousal memories get a relevance boost
-            if ctx.emotional.arousal > 0.6 {
+            // High arousal memories get a relevance boost (two-tier: prefetch uses lower bar)
+            if ctx.emotional.arousal > crate::constants::PREFETCH_AROUSAL_THRESHOLD {
                 score += 0.1 * ctx.emotional.arousal;
             }
 
@@ -2056,12 +2061,14 @@ impl AnticipatoryPrefetch {
             // Episode context: same episode = highly relevant
             if let Some(current_episode) = &context.episode_id {
                 if ctx.episode.episode_id.as_ref() == Some(current_episode) {
-                    score += 0.3; // Strong boost for same-episode memories
+                    score += crate::constants::SAME_EPISODE_BOOST;
                 }
             }
 
             // Mood-congruent retrieval: similar emotional valence boosts relevance
-            // Research: We recall happy memories when happy, sad when sad
+            // Research: Bower (1981) mood-congruent memory effect
+            // NOTE: Currently inert — Query struct has no emotional_valence field.
+            // Requires hook enrichment (#143) to populate emotional context on queries.
             if let Some(current_valence) = context.emotional_valence {
                 let valence_diff = (ctx.emotional.valence - current_valence).abs();
                 if valence_diff < 0.3 {

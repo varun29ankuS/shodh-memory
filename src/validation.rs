@@ -109,10 +109,26 @@ pub fn validate_memory_id_or_prefix(memory_id: &str) -> Result<Option<uuid::Uuid
     Ok(None)
 }
 
+/// Minimum content length for a meaningful memory.
+/// Anything shorter (e.g. "TT", "OK", "WTesti") is noise from truncated tool output
+/// or partial hook captures and should be rejected.
+pub const MIN_MEANINGFUL_CONTENT_LENGTH: usize = 10;
+
 /// Validate content
 pub fn validate_content(content: &str, allow_empty: bool) -> Result<()> {
-    if !allow_empty && content.trim().is_empty() {
+    let trimmed = content.trim();
+
+    if !allow_empty && trimmed.is_empty() {
         return Err(anyhow!("content cannot be empty"));
+    }
+
+    // Reject very short content that can't possibly be a meaningful memory
+    if !allow_empty && !trimmed.is_empty() && trimmed.len() < MIN_MEANINGFUL_CONTENT_LENGTH {
+        return Err(anyhow!(
+            "content too short: {} chars (min: {})",
+            trimmed.len(),
+            MIN_MEANINGFUL_CONTENT_LENGTH
+        ));
     }
 
     if content.len() > MAX_CONTENT_LENGTH {
@@ -334,6 +350,24 @@ mod tests {
     fn test_invalid_content() {
         assert!(validate_content("", false).is_err()); // empty not allowed
         assert!(validate_content(&"x".repeat(100_000), false).is_err()); // too long
+    }
+
+    #[test]
+    fn test_content_min_length_gate() {
+        // Junk that should be rejected
+        assert!(validate_content("TT", false).is_err());
+        assert!(validate_content("OK", false).is_err());
+        assert!(validate_content("WTesti", false).is_err());
+        assert!(validate_content("A", false).is_err());
+        assert!(validate_content("   TT   ", false).is_err()); // trimmed still too short
+
+        // Legitimate short content that should pass
+        assert!(validate_content("short note", false).is_ok()); // exactly 10 chars
+        assert!(validate_content("real memory content here", false).is_ok());
+
+        // allow_empty bypasses both empty and min-length checks (used for optional updates)
+        assert!(validate_content("", true).is_ok());
+        assert!(validate_content("TT", true).is_ok());
     }
 
     #[test]

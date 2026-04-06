@@ -1,23 +1,19 @@
 //! Shodh-Memory Server — standalone binary entry point.
 //!
-//! This is a thin wrapper around `shodh_memory::server::run()`.
-//! For the unified CLI, use `shodh server` instead.
+//! Subcommands:
+//!   serve     Start the memory server (default if no subcommand given)
+//!   migrate   Migrate RocksDB data from bincode/msgpack to postcard
 //!
 //! Usage:
-//!   shodh-memory-server [OPTIONS]
-//!
-//! Options:
-//!   -H, --host <HOST>         Bind address [env: SHODH_HOST] [default: 127.0.0.1]
-//!   -p, --port <PORT>         Port number [env: SHODH_PORT] [default: 3030]
-//!   -s, --storage <PATH>      Storage directory [env: SHODH_MEMORY_PATH]
-//!   -h, --help                Print help
-//!   -V, --version             Print version
+//!   shodh-memory-server [OPTIONS]                          # serve (default)
+//!   shodh-memory-server serve [OPTIONS]                    # explicit serve
+//!   shodh-memory-server migrate --storage <PATH> [--dry-run]
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 const LONG_ABOUT: &str = r#"
@@ -51,8 +47,8 @@ INTEGRATION:
 
 EXAMPLES:
   shodh-memory-server                          # Start with defaults
-  shodh-memory-server -H 0.0.0.0 -p 8080      # Custom host and port
-  shodh-memory-server --production -s /var/lib/shodh  # Production mode
+  shodh-memory-server serve -H 0.0.0.0 -p 8080  # Custom host and port
+  shodh-memory-server migrate -s ./data --dry-run  # Preview migration
 
 DOCUMENTATION:
   GitHub:  https://github.com/varun29ankuS/shodh-memory
@@ -63,12 +59,22 @@ DOCUMENTATION:
 #[command(name = "shodh-memory-server")]
 #[command(version, about, long_about = LONG_ABOUT, after_help = AFTER_HELP)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    // ── Flat args for backward compat (no subcommand = serve) ──
     /// Bind address (use 0.0.0.0 for network access)
-    #[arg(short = 'H', long, env = "SHODH_HOST", default_value = "127.0.0.1")]
+    #[arg(
+        short = 'H',
+        long,
+        env = "SHODH_HOST",
+        default_value = "127.0.0.1",
+        global = true
+    )]
     host: String,
 
     /// Port number to listen on
-    #[arg(short, long, env = "SHODH_PORT", default_value_t = 3030)]
+    #[arg(short, long, env = "SHODH_PORT", default_value_t = 3030, global = true)]
     port: u16,
 
     /// Storage directory for RocksDB data
@@ -76,32 +82,69 @@ struct Cli {
         short,
         long = "storage",
         env = "SHODH_MEMORY_PATH",
-        default_value_os_t = shodh_memory::config::default_storage_path()
+        default_value_os_t = shodh_memory::config::default_storage_path(),
+        global = true,
     )]
     storage_path: PathBuf,
 
     /// Production mode: stricter CORS, automatic backups enabled
-    #[arg(long, env = "SHODH_ENV")]
+    #[arg(long, env = "SHODH_ENV", global = true)]
     production: bool,
 
     /// Rate limit: max requests per second per client
-    #[arg(long, env = "SHODH_RATE_LIMIT", default_value_t = 4000)]
+    #[arg(long, env = "SHODH_RATE_LIMIT", default_value_t = 4000, global = true)]
     rate_limit: u64,
 
     /// Maximum concurrent requests before load shedding
-    #[arg(long, env = "SHODH_MAX_CONCURRENT", default_value_t = 200)]
+    #[arg(
+        long,
+        env = "SHODH_MAX_CONCURRENT",
+        default_value_t = 200,
+        global = true
+    )]
     max_concurrent: usize,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Start the memory server (default)
+    Serve,
+    /// Migrate RocksDB data from bincode/msgpack to postcard
+    Migrate {
+        /// Report what would be migrated without writing any data
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    shodh_memory::server::run(shodh_memory::server::ServerRunConfig {
-        host: cli.host,
-        port: cli.port,
-        storage_path: cli.storage_path,
-        production: cli.production,
-        rate_limit: cli.rate_limit,
-        max_concurrent: cli.max_concurrent,
-    })
+    match cli.command {
+        None | Some(Command::Serve) => {
+            shodh_memory::server::run(shodh_memory::server::ServerRunConfig {
+                host: cli.host,
+                port: cli.port,
+                storage_path: cli.storage_path,
+                production: cli.production,
+                rate_limit: cli.rate_limit,
+                max_concurrent: cli.max_concurrent,
+            })
+        }
+        Some(Command::Migrate { dry_run }) => {
+            eprintln!(
+                "Shodh-Memory: migrating storage at {}{}",
+                cli.storage_path.display(),
+                if dry_run { " (dry run)" } else { "" }
+            );
+
+            let report = shodh_memory::migration::migrate_all(&cli.storage_path, dry_run)?;
+            eprintln!("{report}");
+
+            if !report.errors.is_empty() {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+    }
 }

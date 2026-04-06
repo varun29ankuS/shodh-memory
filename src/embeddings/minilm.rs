@@ -521,11 +521,14 @@ impl MiniLMEmbedder {
             // Distribute hash bits across embedding dimensions with positional offset
             for j in 0..self.dimension {
                 let index = (i.wrapping_mul(7) + j) % self.dimension;
-                if j < 64 {
-                    embedding[index] += ((hash >> j) & 1) as f32 * 0.1;
+                // For j >= 64, use a scattered bit index that varies with both word
+                // position (i) and dimension (j), avoiding reuse of the same bit pattern.
+                let bit_index = if j < 64 {
+                    j
                 } else {
-                    embedding[index] += ((hash >> (j % 64)) & 1) as f32 * 0.1;
-                }
+                    (i.wrapping_mul(7).wrapping_add(j)) % 64
+                };
+                embedding[index] += ((hash >> bit_index) & 1) as f32 * 0.1;
             }
         }
 

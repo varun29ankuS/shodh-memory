@@ -21,6 +21,11 @@ use std::sync::Arc;
 
 use super::introspection::ConsolidationEvent;
 
+/// Maximum size for a single serialized learning event (1 MB).
+/// Any value exceeding this is treated as corrupted and silently skipped,
+/// preventing rmp_serde from interpreting garbage bytes as multi-GB length prefixes.
+const MAX_LEARNING_EVENT_SIZE: usize = 1024 * 1024;
+
 /// Stored learning event with full event fidelity
 ///
 /// Stores the complete ConsolidationEvent (including its serde tag) using
@@ -149,8 +154,11 @@ impl LearningHistoryStore {
         });
 
         // Primary storage (time-ordered)
-        // Use MessagePack (rmp-serde) - binary format that supports serde tagged enums
         let key = format!("learning:{}:{:020}", user_id, timestamp_nanos);
+        // ConsolidationEvent uses #[serde(tag = "type")] (internally tagged enum),
+        // which is incompatible with non-self-describing formats like postcard.
+        // Keep msgpack here; the migrate command will handle conversion once
+        // ConsolidationEvent's serde representation is updated.
         let value = rmp_serde::to_vec(&stored)?;
 
         // Batch all writes atomically — avoids orphaned index entries on crash
@@ -377,8 +385,10 @@ impl LearningHistoryStore {
                 break;
             }
 
-            if let Ok(event) = rmp_serde::from_slice::<StoredLearningEvent>(&value) {
-                events.push(event);
+            if value.len() <= MAX_LEARNING_EVENT_SIZE {
+                if let Ok(event) = rmp_serde::from_slice::<StoredLearningEvent>(&value) {
+                    events.push(event);
+                }
             }
         }
 
@@ -424,8 +434,10 @@ impl LearningHistoryStore {
                 break;
             }
 
-            if let Ok(event) = rmp_serde::from_slice::<StoredLearningEvent>(&value) {
-                events.push(event);
+            if value.len() <= MAX_LEARNING_EVENT_SIZE {
+                if let Ok(event) = rmp_serde::from_slice::<StoredLearningEvent>(&value) {
+                    events.push(event);
+                }
             }
         }
 
@@ -454,8 +466,10 @@ impl LearningHistoryStore {
             // Value is the primary key - fetch the actual event
             let primary_key = String::from_utf8_lossy(&value);
             if let Some(event_data) = self.db.get(primary_key.as_bytes())? {
-                if let Ok(event) = rmp_serde::from_slice::<StoredLearningEvent>(&event_data) {
-                    events.push(event);
+                if event_data.len() <= MAX_LEARNING_EVENT_SIZE {
+                    if let Ok(event) = rmp_serde::from_slice::<StoredLearningEvent>(&event_data) {
+                        events.push(event);
+                    }
                 }
             }
         }
@@ -484,8 +498,10 @@ impl LearningHistoryStore {
 
             let primary_key = String::from_utf8_lossy(&value);
             if let Some(event_data) = self.db.get(primary_key.as_bytes())? {
-                if let Ok(event) = rmp_serde::from_slice::<StoredLearningEvent>(&event_data) {
-                    events.push(event);
+                if event_data.len() <= MAX_LEARNING_EVENT_SIZE {
+                    if let Ok(event) = rmp_serde::from_slice::<StoredLearningEvent>(&event_data) {
+                        events.push(event);
+                    }
                 }
             }
         }
@@ -719,38 +735,44 @@ impl LearningHistoryStore {
                         batch.delete(&key);
 
                         // Also delete secondary index entries for this event
-                        if let Ok(stored) = rmp_serde::from_slice::<StoredLearningEvent>(&value) {
-                            let ts_fmt = format!("{:020}", ts);
-                            if let Some(ref mem_id) = stored.memory_id {
-                                batch.delete(
-                                    format!("learning_by_memory:{}:{}:{}", user_id, mem_id, ts_fmt)
+                        if value.len() <= MAX_LEARNING_EVENT_SIZE {
+                            if let Ok(stored) = rmp_serde::from_slice::<StoredLearningEvent>(&value)
+                            {
+                                let ts_fmt = format!("{:020}", ts);
+                                if let Some(ref mem_id) = stored.memory_id {
+                                    batch.delete(
+                                        format!(
+                                            "learning_by_memory:{}:{}:{}",
+                                            user_id, mem_id, ts_fmt
+                                        )
                                         .as_bytes(),
-                                );
-                            }
-                            if let Some(ref related_id) = stored.related_memory_id {
+                                    );
+                                }
+                                if let Some(ref related_id) = stored.related_memory_id {
+                                    batch.delete(
+                                        format!(
+                                            "learning_by_memory:{}:{}:{}",
+                                            user_id, related_id, ts_fmt
+                                        )
+                                        .as_bytes(),
+                                    );
+                                }
+                                if let Some(ref f_id) = stored.fact_id {
+                                    batch.delete(
+                                        format!("learning_by_fact:{}:{}:{}", user_id, f_id, ts_fmt)
+                                            .as_bytes(),
+                                    );
+                                }
                                 batch.delete(
                                     format!(
-                                        "learning_by_memory:{}:{}:{}",
-                                        user_id, related_id, ts_fmt
+                                        "learning_by_type:{}:{}:{}",
+                                        user_id,
+                                        stored.event_type.as_str(),
+                                        ts_fmt
                                     )
                                     .as_bytes(),
                                 );
                             }
-                            if let Some(ref f_id) = stored.fact_id {
-                                batch.delete(
-                                    format!("learning_by_fact:{}:{}:{}", user_id, f_id, ts_fmt)
-                                        .as_bytes(),
-                                );
-                            }
-                            batch.delete(
-                                format!(
-                                    "learning_by_type:{}:{}:{}",
-                                    user_id,
-                                    stored.event_type.as_str(),
-                                    ts_fmt
-                                )
-                                .as_bytes(),
-                            );
                         }
 
                         deleted += 1;

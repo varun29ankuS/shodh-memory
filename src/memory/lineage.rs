@@ -12,7 +12,6 @@
 //! - `lineage:by_from:{user_id}:{from_id}:{edge_id}` - Index by source memory
 //! - `lineage:by_to:{user_id}:{to_id}:{edge_id}` - Index by target memory
 //! - `lineage:branches:{user_id}:{branch_id}` - Branch metadata
-//! - `lineage:branch_members:{user_id}:{branch_id}:{memory_id}` - Memories in branch
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -44,14 +43,19 @@ pub enum CausalRelation {
 }
 
 impl CausalRelation {
-    /// Get the inverse relation for bidirectional traversal
+    /// Get the inverse relation for bidirectional traversal.
+    ///
+    /// When edge A→B has relation R, traversing B→A should show R.inverse().
+    /// True pairs: Caused↔ResolvedBy. Directional relations (InformedBy,
+    /// TriggeredBy) are self-inverse because the from/to already encodes
+    /// directionality — "A informed-by B" reversed is "B informed A".
     pub fn inverse(&self) -> Self {
         match self {
             CausalRelation::Caused => CausalRelation::ResolvedBy,
             CausalRelation::ResolvedBy => CausalRelation::Caused,
-            CausalRelation::InformedBy => CausalRelation::TriggeredBy,
-            CausalRelation::SupersededBy => CausalRelation::SupersededBy, // symmetric conceptually
-            CausalRelation::TriggeredBy => CausalRelation::InformedBy,
+            CausalRelation::InformedBy => CausalRelation::InformedBy,
+            CausalRelation::TriggeredBy => CausalRelation::TriggeredBy,
+            CausalRelation::SupersededBy => CausalRelation::SupersededBy,
             CausalRelation::BranchedFrom => CausalRelation::BranchedFrom,
             CausalRelation::RelatedTo => CausalRelation::RelatedTo,
         }
@@ -258,18 +262,26 @@ pub struct InferenceConfig {
 
 impl Default for InferenceConfig {
     fn default() -> Self {
+        use crate::constants::*;
+
         let mut relation_confidence = HashMap::new();
-        relation_confidence.insert(CausalRelation::Caused, 0.8);
-        relation_confidence.insert(CausalRelation::ResolvedBy, 0.85);
-        relation_confidence.insert(CausalRelation::InformedBy, 0.7);
-        relation_confidence.insert(CausalRelation::SupersededBy, 0.6);
-        relation_confidence.insert(CausalRelation::TriggeredBy, 0.75);
-        relation_confidence.insert(CausalRelation::BranchedFrom, 0.9);
-        relation_confidence.insert(CausalRelation::RelatedTo, 0.5);
+        relation_confidence.insert(CausalRelation::Caused, LINEAGE_CONFIDENCE_CAUSED);
+        relation_confidence.insert(CausalRelation::ResolvedBy, LINEAGE_CONFIDENCE_RESOLVED_BY);
+        relation_confidence.insert(CausalRelation::InformedBy, LINEAGE_CONFIDENCE_INFORMED_BY);
+        relation_confidence.insert(
+            CausalRelation::SupersededBy,
+            LINEAGE_CONFIDENCE_SUPERSEDED_BY,
+        );
+        relation_confidence.insert(CausalRelation::TriggeredBy, LINEAGE_CONFIDENCE_TRIGGERED_BY);
+        relation_confidence.insert(
+            CausalRelation::BranchedFrom,
+            LINEAGE_CONFIDENCE_BRANCHED_FROM,
+        );
+        relation_confidence.insert(CausalRelation::RelatedTo, LINEAGE_CONFIDENCE_RELATED_TO);
 
         Self {
-            max_temporal_gap_days: 7,
-            min_entity_overlap: 0.3,
+            max_temporal_gap_days: LINEAGE_MAX_TEMPORAL_GAP_DAYS,
+            min_entity_overlap: LINEAGE_MIN_ENTITY_OVERLAP,
             relation_confidence,
         }
     }
@@ -316,7 +328,7 @@ impl LineageGraph {
     pub fn store_edge(&self, user_id: &str, edge: &LineageEdge) -> Result<()> {
         // Primary storage
         let key = format!("lineage:edges:{}:{}", user_id, edge.id);
-        let value = bincode::serde::encode_to_vec(edge, bincode::config::standard())?;
+        let value = crate::serialization::encode(edge)?;
         self.db.put(key.as_bytes(), &value)?;
 
         // Index by source (from)
@@ -335,8 +347,7 @@ impl LineageGraph {
         let key = format!("lineage:edges:{}:{}", user_id, edge_id);
         match self.db.get(key.as_bytes())? {
             Some(data) => {
-                let (edge, _): (LineageEdge, _) =
-                    bincode::serde::decode_from_slice(&data, bincode::config::standard())?;
+                let (edge, _) = crate::serialization::try_decode::<LineageEdge>(&data)?;
                 Ok(Some(edge))
             }
             None => Ok(None),
@@ -419,12 +430,7 @@ impl LineageGraph {
                 break;
             }
 
-            if let Ok(edge) = bincode::serde::decode_from_slice::<LineageEdge, _>(
-                &value,
-                bincode::config::standard(),
-            )
-            .map(|(v, _)| v)
-            {
+            if let Ok((edge, _)) = crate::serialization::try_decode::<LineageEdge>(&value) {
                 edges.push(edge);
                 if edges.len() >= limit {
                     break;
@@ -444,7 +450,7 @@ impl LineageGraph {
     /// Store a branch
     pub fn store_branch(&self, user_id: &str, branch: &LineageBranch) -> Result<()> {
         let key = format!("lineage:branches:{}:{}", user_id, branch.id);
-        let value = bincode::serde::encode_to_vec(branch, bincode::config::standard())?;
+        let value = crate::serialization::encode(branch)?;
         self.db.put(key.as_bytes(), &value)?;
         Ok(())
     }
@@ -454,8 +460,7 @@ impl LineageGraph {
         let key = format!("lineage:branches:{}:{}", user_id, branch_id);
         match self.db.get(key.as_bytes())? {
             Some(data) => {
-                let (branch, _): (LineageBranch, _) =
-                    bincode::serde::decode_from_slice(&data, bincode::config::standard())?;
+                let (branch, _) = crate::serialization::try_decode::<LineageBranch>(&data)?;
                 Ok(Some(branch))
             }
             None => Ok(None),
@@ -480,12 +485,7 @@ impl LineageGraph {
                 break;
             }
 
-            if let Ok(branch) = bincode::serde::decode_from_slice::<LineageBranch, _>(
-                &value,
-                bincode::config::standard(),
-            )
-            .map(|(v, _)| v)
-            {
+            if let Ok((branch, _)) = crate::serialization::try_decode::<LineageBranch>(&value) {
                 branches.push(branch);
             }
         }
@@ -537,7 +537,13 @@ impl LineageGraph {
         // Calculate entity overlap using experience.entities (tags)
         let overlap =
             Self::calculate_entity_overlap(&from.experience.entities, &to.experience.entities);
-        if overlap < self.config.min_entity_overlap {
+
+        // When both memories have entities, require minimum overlap.
+        // When either memory has no entities (NER failed or content too short),
+        // allow inference to proceed at reduced confidence via the overlap factor.
+        let has_entities =
+            !from.experience.entities.is_empty() && !to.experience.entities.is_empty();
+        if has_entities && overlap < self.config.min_entity_overlap {
             return None;
         }
 
@@ -547,10 +553,12 @@ impl LineageGraph {
             &to.experience.experience_type,
         )?;
 
-        // Adjust confidence based on entity overlap and temporal proximity
+        // Adjust confidence based on entity overlap and temporal proximity.
+        // When entities are absent, use a floor of 0.3 to avoid zeroing out confidence.
+        let effective_overlap = if has_entities { overlap } else { 0.3 };
         let temporal_factor =
             1.0 - (gap.num_days() as f32 / self.config.max_temporal_gap_days as f32);
-        let confidence = base_confidence * overlap * (0.5 + 0.5 * temporal_factor);
+        let confidence = base_confidence * effective_overlap * (0.5 + 0.5 * temporal_factor);
 
         Some((relation, confidence))
     }
@@ -718,23 +726,43 @@ impl LineageGraph {
         }
     }
 
-    /// Detect branch point from memory content (pivot language)
+    /// Detect branch point from memory content (pivot language).
+    ///
+    /// Uses strong phrase-level signals to avoid false positives from common words
+    /// like "actually" or "instead" which appear in normal discourse.
+    /// Requires either one strong signal or two weak signals to trigger.
     pub fn detect_branch_signal(content: &str) -> bool {
-        let pivot_signals = [
-            "actually",
-            "instead",
-            "pivot",
+        let content_lower = content.to_lowercase();
+
+        // Strong signals: unambiguous pivot language
+        let strong_signals = [
+            "pivot to",
             "change direction",
-            "new approach",
-            "scrap",
             "start fresh",
-            "rewrite",
-            "rethink",
+            "start over",
+            "complete rewrite",
+            "should rewrite",
+            "need to rewrite",
+            "scrap this",
+            "scrap the",
             "different strategy",
+            "new strategy",
+            "abandon",
         ];
 
-        let content_lower = content.to_lowercase();
-        pivot_signals.iter().any(|s| content_lower.contains(s))
+        // Weak signals: common words that only indicate a pivot when combined
+        let weak_signals = ["instead", "new approach", "rethink", "rewrite", "pivot"];
+
+        let strong_count = strong_signals
+            .iter()
+            .filter(|s| content_lower.contains(*s))
+            .count();
+        let weak_count = weak_signals
+            .iter()
+            .filter(|s| content_lower.contains(*s))
+            .count();
+
+        strong_count >= 1 || weak_count >= 2
     }
 
     // =========================================================================
@@ -805,12 +833,21 @@ impl LineageGraph {
     }
 
     /// Find the root cause of a memory (trace all the way back)
+    ///
+    /// Returns `None` if the memory has no ancestors (is itself a root).
     pub fn find_root_cause(&self, user_id: &str, memory_id: &MemoryId) -> Result<Option<MemoryId>> {
         let trace = self.trace(user_id, memory_id, TraceDirection::Backward, 100)?;
-        Ok(trace.path.last().cloned())
+        // path[0] is the starting memory — only return a root if we found ancestors
+        if trace.path.len() <= 1 {
+            Ok(None)
+        } else {
+            Ok(trace.path.last().cloned())
+        }
     }
 
     /// Find all effects of a memory (trace all the way forward)
+    ///
+    /// Returns effects only (excludes the starting memory itself).
     pub fn find_effects(
         &self,
         user_id: &str,
@@ -818,7 +855,8 @@ impl LineageGraph {
         max_depth: usize,
     ) -> Result<Vec<MemoryId>> {
         let trace = self.trace(user_id, memory_id, TraceDirection::Forward, max_depth)?;
-        Ok(trace.path)
+        // Skip the first element (the starting memory itself)
+        Ok(trace.path.into_iter().skip(1).collect())
     }
 
     // =========================================================================
@@ -864,9 +902,13 @@ impl LineageGraph {
     // STATISTICS
     // =========================================================================
 
-    /// Get lineage statistics for a user
+    /// Get lineage statistics for a user.
+    ///
+    /// Caps the scan at 10,000 edges. For users with more edges, the stats
+    /// will be approximate (counts capped, averages computed over the sample).
     pub fn stats(&self, user_id: &str) -> Result<LineageStats> {
-        let edges = self.list_edges(user_id, 10000)?;
+        const STATS_SCAN_LIMIT: usize = 10_000;
+        let edges = self.list_edges(user_id, STATS_SCAN_LIMIT)?;
         let branches = self.list_branches(user_id)?;
 
         let mut stats = LineageStats {
@@ -896,128 +938,6 @@ impl LineageGraph {
         }
 
         Ok(stats)
-    }
-}
-
-// =========================================================================
-// POST-MORTEM GENERATION
-// =========================================================================
-
-/// Summary of learnings from a completed task
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PostMortem {
-    /// The completed task/todo memory ID
-    pub task_id: MemoryId,
-    /// Summary of what was accomplished
-    pub summary: String,
-    /// Learnings extracted from the task chain
-    pub learnings: Vec<String>,
-    /// Decisions made during this task
-    pub decisions: Vec<String>,
-    /// Errors encountered and resolved
-    pub errors_resolved: Vec<String>,
-    /// Patterns discovered
-    pub patterns: Vec<String>,
-    /// Related memory IDs in the lineage
-    pub related_memories: Vec<MemoryId>,
-    /// When the post-mortem was generated
-    pub generated_at: DateTime<Utc>,
-}
-
-impl PostMortem {
-    /// Create a new post-mortem from a lineage trace
-    pub fn from_trace(
-        task_id: MemoryId,
-        task_content: &str,
-        trace: &LineageTrace,
-        memories: &HashMap<MemoryId, Memory>,
-    ) -> Self {
-        let mut learnings = Vec::new();
-        let mut decisions = Vec::new();
-        let mut errors_resolved = Vec::new();
-        let mut patterns = Vec::new();
-
-        for mem_id in &trace.path {
-            if let Some(memory) = memories.get(mem_id) {
-                match memory.experience.experience_type {
-                    ExperienceType::Learning => {
-                        learnings.push(memory.experience.content.clone());
-                    }
-                    ExperienceType::Decision => {
-                        decisions.push(memory.experience.content.clone());
-                    }
-                    ExperienceType::Error => {
-                        errors_resolved.push(memory.experience.content.clone());
-                    }
-                    ExperienceType::Pattern => {
-                        patterns.push(memory.experience.content.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        PostMortem {
-            task_id,
-            summary: format!("Completed: {}", task_content),
-            learnings,
-            decisions,
-            errors_resolved,
-            patterns,
-            related_memories: trace.path.clone(),
-            generated_at: Utc::now(),
-        }
-    }
-
-    /// Format as markdown summary
-    pub fn to_markdown(&self) -> String {
-        let mut md = String::new();
-
-        md.push_str("# Project Growth Summary\n\n");
-        md.push_str(&format!("**{}**\n\n", self.summary));
-        md.push_str(&format!(
-            "Generated: {}\n\n",
-            self.generated_at.format("%Y-%m-%d %H:%M UTC")
-        ));
-
-        if !self.learnings.is_empty() {
-            md.push_str("## Learnings\n");
-            for learning in &self.learnings {
-                md.push_str(&format!("- {}\n", learning));
-            }
-            md.push('\n');
-        }
-
-        if !self.decisions.is_empty() {
-            md.push_str("## Decisions Made\n");
-            for decision in &self.decisions {
-                md.push_str(&format!("- {}\n", decision));
-            }
-            md.push('\n');
-        }
-
-        if !self.errors_resolved.is_empty() {
-            md.push_str("## Errors Resolved\n");
-            for error in &self.errors_resolved {
-                md.push_str(&format!("- {}\n", error));
-            }
-            md.push('\n');
-        }
-
-        if !self.patterns.is_empty() {
-            md.push_str("## Patterns Discovered\n");
-            for pattern in &self.patterns {
-                md.push_str(&format!("- {}\n", pattern));
-            }
-            md.push('\n');
-        }
-
-        md.push_str(&format!(
-            "---\n*Related memories: {}*\n",
-            self.related_memories.len()
-        ));
-
-        md
     }
 }
 

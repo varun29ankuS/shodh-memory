@@ -55,26 +55,33 @@ pub struct ServerRunConfig {
 /// Environment variables are set **before** the tokio runtime is created, so no
 /// threads exist yet. This avoids the `set_var` unsoundness on multi-threaded runtimes.
 pub fn run(config: ServerRunConfig) -> Result<()> {
-    // Set environment variables from config so ServerConfig::from_env() picks them up.
-    // Safe: no threads exist yet — we haven't built the tokio runtime.
-    std::env::set_var("SHODH_HOST", &config.host);
-    std::env::set_var("SHODH_PORT", config.port.to_string());
-    std::env::set_var(
-        "SHODH_MEMORY_PATH",
-        config.storage_path.to_string_lossy().to_string(),
-    );
-    if config.production {
-        std::env::set_var("SHODH_ENV", "production");
+    // SAFETY: These set_var calls run before any threads are spawned — the tokio
+    // runtime is not yet built, and pre_init_ort_runtime (below) is also single-threaded.
+    // `std::env::set_var` is marked unsafe starting in Rust 2024 edition because it is
+    // unsound to call concurrently with `std::env::var` in other threads. Here, this
+    // process is single-threaded, so the invariant holds.
+    unsafe {
+        std::env::set_var("SHODH_HOST", &config.host);
+        std::env::set_var("SHODH_PORT", config.port.to_string());
+        std::env::set_var(
+            "SHODH_MEMORY_PATH",
+            config.storage_path.to_string_lossy().to_string(),
+        );
+        if config.production {
+            std::env::set_var("SHODH_ENV", "production");
+        }
+        std::env::set_var("SHODH_RATE_LIMIT", config.rate_limit.to_string());
+        std::env::set_var("SHODH_MAX_CONCURRENT", config.max_concurrent.to_string());
     }
-    std::env::set_var("SHODH_RATE_LIMIT", config.rate_limit.to_string());
-    std::env::set_var("SHODH_MAX_CONCURRENT", config.max_concurrent.to_string());
 
     // Pre-initialize ORT_DYLIB_PATH before any threads are spawned.
     pre_init_ort_runtime(false);
 
-    // Set default log level if not configured
+    // SAFETY: Still single-threaded — setting default log level before runtime construction.
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "shodh_memory=info,tower_http=warn");
+        unsafe {
+            std::env::set_var("RUST_LOG", "shodh_memory=info,tower_http=warn");
+        }
     }
 
     // Load .env file if present (won't override CLI-set vars)
@@ -303,6 +310,26 @@ async fn async_main() -> Result<()> {
         }
     }
 
+    // Wait for tracked background tasks (graph processing, lineage inference)
+    // to complete before flushing databases, preventing data loss.
+    manager_for_shutdown.task_tracker.close();
+    let task_timeout = std::time::Duration::from_secs(10);
+    info!(
+        "Waiting up to {}s for background graph tasks...",
+        task_timeout.as_secs()
+    );
+    if tokio::time::timeout(task_timeout, manager_for_shutdown.task_tracker.wait())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "Background task drain timed out after {}s, proceeding with shutdown",
+            task_timeout.as_secs()
+        );
+    } else {
+        info!("All background graph tasks completed");
+    }
+
     // Shut down Zenoh transport before flushing databases
     #[cfg(feature = "zenoh")]
     if let Some(handle) = zenoh_handle {
@@ -340,6 +367,27 @@ fn start_maintenance_scheduler(manager: AppState, interval_secs: u64) {
             let session_cleaned = manager.session_store().cleanup_stale_sessions();
             if session_cleaned > 0 {
                 tracing::debug!("Ended {} stale user sessions", session_cleaned);
+            }
+
+            // Prune stale habituation entries (> 24 hours since last surfaced)
+            {
+                let tracker = &manager.habituation_tracker;
+                let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+                let mut pruned = 0usize;
+                // Outer map: user_id -> inner map
+                tracker.retain(|_user_id, inner| {
+                    inner.retain(|_mem_id, entry| {
+                        let keep = entry.last_surfaced > cutoff;
+                        if !keep {
+                            pruned += 1;
+                        }
+                        keep
+                    });
+                    !inner.is_empty()
+                });
+                if pruned > 0 {
+                    tracing::debug!("Pruned {} stale habituation entries (>24h)", pruned);
+                }
             }
 
             // Run maintenance in blocking thread pool

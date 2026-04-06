@@ -1500,11 +1500,15 @@ impl VamanaIndex {
             deleted_ids: self.deleted_ids.read().clone(),
         };
 
-        // Save as binary
+        // Save as length-prefixed postcard binary
         let index_file = path.join("vamana_index.bin");
+        let encoded = crate::serialization::encode_raw(&data)?;
         let file = File::create(&index_file)?;
         let mut writer = BufWriter::new(file);
-        bincode::serde::encode_into_std_write(&data, &mut writer, bincode::config::standard())?;
+        use std::io::Write;
+        writer.write_all(&(encoded.len() as u64).to_le_bytes())?;
+        writer.write_all(&encoded)?;
+        writer.flush()?;
 
         info!(
             "Saved Vamana index with {} vectors to {:?}",
@@ -1539,8 +1543,31 @@ impl VamanaIndex {
             deleted_ids: HashSet<u32>,
         }
 
-        let data: VamanaData =
-            bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())?;
+        // Try new length-prefixed postcard format, fall back to legacy bincode streaming
+        let data: VamanaData = {
+            use std::io::Read;
+            let mut len_buf = [0u8; 8];
+            let postcard_result = reader.read_exact(&mut len_buf).ok().and_then(|()| {
+                let len = u64::from_le_bytes(len_buf) as usize;
+                // Sanity check: reject implausible lengths (> 4 GB)
+                if len > 4 * 1024 * 1024 * 1024 {
+                    return None;
+                }
+                let mut buf = vec![0u8; len];
+                reader.read_exact(&mut buf).ok()?;
+                crate::serialization::decode_raw::<VamanaData>(&buf).ok()
+            });
+            match postcard_result {
+                Some(data) => data,
+                None => {
+                    // Fall back to legacy bincode streaming format
+                    drop(reader);
+                    let file = File::open(path.join("vamana_index.bin"))?;
+                    let mut reader = BufReader::new(file);
+                    bincode::serde::decode_from_std_read(&mut reader, crate::bincode_safe_config())?
+                }
+            }
+        };
 
         // Update internal state
         *self.graph.write() = data.graph;

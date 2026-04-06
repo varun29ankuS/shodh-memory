@@ -62,6 +62,11 @@ pub struct RememberRequest {
     /// Use this to create memory trees (e.g., "71-research" -> "algebraic" -> "21×27≡-1")
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Optional importance override (0.0-1.0). When provided, bypasses auto-calculation.
+    /// Use for hook-generated memories where importance is known from context:
+    /// Decision=0.8, Learning=0.7, Error=0.7, Discovery=0.6, Observation=0.3
+    #[serde(default)]
+    pub importance: Option<f32>,
 }
 
 /// Remember response
@@ -81,12 +86,21 @@ pub struct BatchRememberRequest {
 }
 
 /// Options for batch remember
-#[derive(Debug, serde::Deserialize, Clone, Default)]
+#[derive(Debug, serde::Deserialize, Clone)]
 pub struct BatchRememberOptions {
     #[serde(default = "default_true")]
     pub extract_entities: bool,
     #[serde(default = "default_true")]
     pub create_edges: bool,
+}
+
+impl Default for BatchRememberOptions {
+    fn default() -> Self {
+        Self {
+            extract_entities: true,
+            create_edges: true,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -122,6 +136,9 @@ pub struct BatchMemoryItem {
     /// Parent memory ID for hierarchical organization
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Optional importance override (0.0-1.0)
+    #[serde(default)]
+    pub importance: Option<f32>,
 }
 
 /// Error detail for batch item
@@ -156,6 +173,9 @@ pub struct UpsertRequest {
     pub changed_by: Option<String>,
     #[serde(default)]
     pub change_reason: Option<String>,
+    /// Optional importance override (0.0-1.0). When provided, bypasses auto-calculation.
+    #[serde(default)]
+    pub importance: Option<f32>,
 }
 
 fn default_change_type() -> String {
@@ -258,7 +278,6 @@ pub fn build_rich_context(
         episode_id,
         sequence_number,
         preceding_memory_id,
-        is_episode_start: sequence_number == Some(1),
         ..Default::default()
     };
 
@@ -328,12 +347,20 @@ pub async fn remember(
     let mut seen: HashSet<String> = merged_entities.iter().map(|t| t.to_lowercase()).collect();
     for record in &ner_entities {
         if seen.insert(record.text.to_lowercase()) {
-            merged_entities.push(record.text.clone());
+            if validation::validate_entity(&record.text).is_ok() {
+                merged_entities.push(record.text.clone());
+            } else {
+                tracing::debug!(entity = %record.text, "Skipping invalid NER entity (too long or invalid chars)");
+            }
         }
     }
     for keyword in extracted_keywords {
         if seen.insert(keyword.to_lowercase()) {
-            merged_entities.push(keyword);
+            if validation::validate_entity(&keyword).is_ok() {
+                merged_entities.push(keyword);
+            } else {
+                tracing::debug!(entity = %keyword, "Skipping invalid YAKE keyword (too long or invalid chars)");
+            }
         }
     }
     if merged_entities.len() > validation::MAX_ENTITIES_PER_MEMORY {
@@ -366,6 +393,7 @@ pub async fn remember(
         tags: original_tags,                // original tags only → graph metadata
         context,
         ner_entities,
+        importance_override: req.importance.map(|v| v.clamp(0.0, 1.0)),
         ..Default::default()
     };
 
@@ -421,7 +449,11 @@ pub async fn remember(
         memory_type: Some(experience_type_str),
         importance: None,
         count: None,
-        entities: if req.tags.is_empty() { None } else { Some(req.tags.clone()) },
+        entities: if req.tags.is_empty() {
+            None
+        } else {
+            Some(req.tags.clone())
+        },
         results: None,
     });
 
@@ -431,8 +463,10 @@ pub async fn remember(
     // caused 5-15s handler latency, exceeding the MCP client's 10s timeout and
     // triggering retries that created duplicate memories (31% duplication rate).
     // Now fire-and-forget: response returns in <200ms, post-tasks run in background.
+    // Use task_tracker.spawn() so shutdown can await in-flight graph writes.
     let response_id = memory_id.0.to_string();
     {
+        let tracker = state.task_tracker.clone();
         let state = state.clone();
         let memory = memory.clone();
         let user_id = req.user_id.clone();
@@ -441,7 +475,7 @@ pub async fn remember(
         let parent_id = req.parent_id.clone();
         let created_at = req.created_at;
 
-        tokio::spawn(async move {
+        tracker.spawn(async move {
             // Task 1: Build episodic graph (entities + episode + relationships)
             if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id) {
                 tracing::debug!("Graph processing failed (non-fatal): {}", e);
@@ -509,84 +543,7 @@ pub async fn remember(
             }
 
             // Task 4: Infer causal lineage (runs after graph processing)
-            {
-                let graph_arc = state.get_user_graph(&user_id).ok();
-                let memory_arc = memory.clone();
-                let uid = user_id.clone();
-                let mid = memory_id.clone();
-
-                if let Err(e) = tokio::task::spawn_blocking(move || {
-                    let Some(graph_arc) = graph_arc else {
-                        return;
-                    };
-                    let graph = graph_arc.read();
-                    let memory_guard = memory_arc.read();
-
-                    let episode = match graph.get_episode(&mid.0) {
-                        Ok(Some(ep)) => ep,
-                        _ => return,
-                    };
-
-                    if episode.entity_refs.is_empty() {
-                        return;
-                    }
-
-                    let mut candidate_ids = std::collections::HashSet::new();
-                    let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
-
-                    for entity_uuid in &episode.entity_refs {
-                        if let Ok(episodes) = graph.get_episodes_by_entity(entity_uuid) {
-                            for ep in &episodes {
-                                if ep.created_at >= cutoff {
-                                    candidate_ids.insert(crate::memory::MemoryId(ep.uuid));
-                                }
-                            }
-                        }
-                    }
-
-                    candidate_ids.remove(&mid);
-                    let candidate_ids: Vec<_> = candidate_ids.into_iter().take(20).collect();
-                    if candidate_ids.is_empty() {
-                        return;
-                    }
-
-                    let candidates: Vec<_> = candidate_ids
-                        .iter()
-                        .filter_map(|id| memory_guard.get_memory(id).ok())
-                        .collect();
-
-                    let Ok(new_memory) = memory_guard.get_memory(&mid) else {
-                        return;
-                    };
-
-                    match memory_guard.infer_lineage_for_memory(&uid, &new_memory, &candidates) {
-                        Ok(edges) if !edges.is_empty() => {
-                            tracing::info!(
-                                user_id = %uid,
-                                memory_id = %mid.0,
-                                edges = edges.len(),
-                                relations = ?edges.iter().map(|e| format!("{:?}", e.relation)).collect::<Vec<_>>(),
-                                "Lineage inference: {} causal edges detected",
-                                edges.len()
-                            );
-                        }
-                        Ok(_) => {
-                            tracing::debug!(
-                                "Lineage inference: no causal edges for {} (checked {} candidates)",
-                                mid.0,
-                                candidates.len()
-                            );
-                        }
-                        Err(e) => {
-                            tracing::debug!("Lineage inference failed (non-fatal): {}", e);
-                        }
-                    }
-                })
-                .await
-                {
-                    tracing::debug!("Lineage inference panicked (non-fatal): {e}");
-                }
-            }
+            spawn_lineage_inference(state, user_id, memory_id);
         });
     }
 
@@ -742,6 +699,7 @@ pub async fn batch_remember(
             tags: original_tags,                // original tags only → graph metadata
             context,
             ner_entities: ner_records,
+            importance_override: item.importance.map(|v| v.clamp(0.0, 1.0)),
             ..Default::default()
         };
 
@@ -786,6 +744,7 @@ pub async fn batch_remember(
     let failed = all_errors.len();
 
     // Build episodic graph for each stored memory (enables multi-hop retrieval)
+    // Then fire-and-forget lineage inference for each.
     for (_, id_str, experience) in &memory_results {
         if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
             let memory_id = crate::memory::MemoryId(uuid);
@@ -794,6 +753,7 @@ pub async fn batch_remember(
             {
                 tracing::debug!("Graph processing failed for {} (non-fatal): {}", id_str, e);
             }
+            spawn_lineage_inference(state.clone(), req.user_id.clone(), memory_id);
         }
     }
 
@@ -874,12 +834,20 @@ pub async fn upsert_memory(
     let mut seen: HashSet<String> = merged_entities.iter().map(|t| t.to_lowercase()).collect();
     for record in &ner_entities {
         if seen.insert(record.text.to_lowercase()) {
-            merged_entities.push(record.text.clone());
+            if validation::validate_entity(&record.text).is_ok() {
+                merged_entities.push(record.text.clone());
+            } else {
+                tracing::debug!(entity = %record.text, "Skipping invalid NER entity in upsert (too long or invalid chars)");
+            }
         }
     }
     for keyword in extracted_keywords {
         if seen.insert(keyword.to_lowercase()) {
-            merged_entities.push(keyword);
+            if validation::validate_entity(&keyword).is_ok() {
+                merged_entities.push(keyword);
+            } else {
+                tracing::debug!(entity = %keyword, "Skipping invalid YAKE keyword in upsert (too long or invalid chars)");
+            }
         }
     }
     if merged_entities.len() > validation::MAX_ENTITIES_PER_MEMORY {
@@ -898,6 +866,7 @@ pub async fn upsert_memory(
         entities: merged_entities,          // tags + YAKE → BM25 index
         tags: original_tags,                // original tags only → graph metadata
         ner_entities,
+        importance_override: req.importance.map(|v| v.clamp(0.0, 1.0)),
         ..Default::default()
     };
 
@@ -988,9 +957,18 @@ pub async fn upsert_memory(
         memory_type: req.memory_type.clone(),
         importance: None,
         count: None,
-        entities: if req.tags.is_empty() { None } else { Some(req.tags.clone()) },
+        entities: if req.tags.is_empty() {
+            None
+        } else {
+            Some(req.tags.clone())
+        },
         results: None,
     });
+
+    // Fire-and-forget lineage inference (only for new memories, not updates)
+    if !was_update {
+        spawn_lineage_inference(state.clone(), req.user_id.clone(), memory_id.clone());
+    }
 
     Ok(Json(UpsertResponse {
         id: memory_id.0.to_string(),
@@ -998,4 +976,147 @@ pub async fn upsert_memory(
         was_update,
         version,
     }))
+}
+
+/// Spawn fire-and-forget lineage inference for a newly stored memory.
+///
+/// Resolves the memory's entity graph, finds temporal candidates, infers causal
+/// edges, and strengthens corresponding knowledge graph connections. All failures
+/// are logged but never propagate — lineage is best-effort.
+fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::memory::MemoryId) {
+    let tracker = state.task_tracker.clone();
+    tracker.spawn(async move {
+        let graph_arc = match state.get_user_graph(&user_id) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::debug!(
+                    user_id = %user_id,
+                    memory_id = %memory_id.0,
+                    error = %e,
+                    "Lineage inference skipped: graph initialization failed"
+                );
+                return;
+            }
+        };
+        let memory_arc = match state.get_user_memory(&user_id) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        let uid = user_id;
+        let mid = memory_id;
+
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            let graph = graph_arc.read();
+            let memory_guard = memory_arc.read();
+
+            let episode = match graph.get_episode(&mid.0) {
+                Ok(Some(ep)) => ep,
+                Ok(None) => {
+                    tracing::debug!(
+                        memory_id = %mid.0,
+                        "Lineage skipped: no episode found (graph processing may have failed)"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        memory_id = %mid.0,
+                        error = %e,
+                        "Lineage skipped: episode lookup failed"
+                    );
+                    return;
+                }
+            };
+
+            if episode.entity_refs.is_empty() {
+                tracing::debug!(memory_id = %mid.0, "Lineage skipped: episode has no entity refs");
+                return;
+            }
+
+            let mut candidate_ids = std::collections::HashSet::new();
+            let cutoff =
+                chrono::Utc::now() - chrono::Duration::days(crate::constants::LINEAGE_LOOKBACK_DAYS);
+
+            for entity_uuid in &episode.entity_refs {
+                if let Ok(episodes) = graph.get_episodes_by_entity(entity_uuid) {
+                    for ep in &episodes {
+                        if ep.created_at >= cutoff {
+                            candidate_ids.insert(crate::memory::MemoryId(ep.uuid));
+                        }
+                    }
+                }
+            }
+
+            candidate_ids.remove(&mid);
+            let candidate_ids: Vec<_> = candidate_ids
+                .into_iter()
+                .take(crate::constants::LINEAGE_MAX_CANDIDATES)
+                .collect();
+            if candidate_ids.is_empty() {
+                return;
+            }
+
+            let candidates: Vec<_> = candidate_ids
+                .iter()
+                .filter_map(|id| memory_guard.get_memory(id).ok())
+                .collect();
+
+            let Ok(new_memory) = memory_guard.get_memory(&mid) else {
+                return;
+            };
+
+            match memory_guard.infer_lineage_for_memory(&uid, &new_memory, &candidates) {
+                Ok(edges) if !edges.is_empty() => {
+                    tracing::info!(
+                        user_id = %uid,
+                        memory_id = %mid.0,
+                        edges = edges.len(),
+                        relations = ?edges.iter().map(|e| format!("{:?}", e.relation)).collect::<Vec<_>>(),
+                        "Lineage inference: {} causal edges detected",
+                        edges.len()
+                    );
+
+                    // Propagate lineage confidence into graph edge weights
+                    let boost_scale = crate::constants::LINEAGE_GRAPH_BOOST_SCALE;
+                    let mut total_strengthened = 0usize;
+                    for edge in &edges {
+                        let boost = edge.confidence * boost_scale;
+                        match graph.strengthen_lineage_connection(
+                            &edge.from.0,
+                            &edge.to.0,
+                            boost,
+                        ) {
+                            Ok(n) => total_strengthened += n,
+                            Err(e) => tracing::debug!(
+                                "Lineage→graph strengthening failed (non-fatal): {}", e
+                            ),
+                        }
+                    }
+                    if total_strengthened > 0 {
+                        tracing::debug!(
+                            user_id = %uid,
+                            lineage_edges = edges.len(),
+                            graph_edges_strengthened = total_strengthened,
+                            "Lineage→graph integration complete"
+                        );
+                    }
+                }
+                Ok(_) => {
+                    tracing::debug!(
+                        "Lineage inference: no causal edges for {} (checked {} candidates)",
+                        mid.0,
+                        candidates.len()
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!("Lineage inference failed (non-fatal): {}", e);
+                }
+            }
+        })
+        .await
+        {
+            tracing::debug!("Lineage inference panicked (non-fatal): {e}");
+        }
+    });
 }

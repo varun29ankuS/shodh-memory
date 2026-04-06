@@ -82,53 +82,6 @@ pub struct RecordResponse {
     pub created_at: String,
 }
 
-/// Simplified remember request - just content, auto-creates Experience
-#[derive(Deserialize)]
-pub struct RememberRequest {
-    pub user_id: String,
-    pub content: String,
-    /// Optional memory type (default: auto-classified)
-    #[serde(default)]
-    pub memory_type: Option<String>,
-    /// Optional tags/entities
-    #[serde(default)]
-    pub tags: Vec<String>,
-    /// Optional override timestamp (ISO 8601)
-    #[serde(default)]
-    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Optional emotional valence (-1.0 to 1.0)
-    #[serde(default)]
-    pub emotional_valence: Option<f32>,
-    /// Optional emotional arousal (0.0 to 1.0)
-    #[serde(default)]
-    pub emotional_arousal: Option<f32>,
-    /// Optional dominant emotion label
-    #[serde(default)]
-    pub emotion: Option<String>,
-    /// Optional source type
-    #[serde(default)]
-    pub source_type: Option<String>,
-    /// Optional credibility score (0.0 to 1.0)
-    #[serde(default)]
-    pub credibility: Option<f32>,
-    /// Optional episode ID for grouping related memories
-    #[serde(default)]
-    pub episode_id: Option<String>,
-    /// Optional sequence number within episode
-    #[serde(default)]
-    pub sequence_number: Option<u32>,
-    /// Optional preceding memory ID (for temporal chains)
-    #[serde(default)]
-    pub preceding_memory_id: Option<String>,
-}
-
-/// Simplified remember response
-#[derive(Serialize)]
-pub struct RememberResponse {
-    pub id: String,
-    pub stored: bool,
-}
-
 // =============================================================================
 // RECALL API
 // =============================================================================
@@ -140,9 +93,12 @@ pub struct RecallRequest {
     pub query: String,
     #[serde(default = "default_recall_limit")]
     pub limit: usize,
-    /// Retrieval mode: "semantic", "associative", or "hybrid" (default)
+    /// Retrieval mode: "semantic", "associative", "temporal", or "hybrid" (default)
     #[serde(default = "default_recall_mode")]
     pub mode: String,
+    /// Session ID for session-scoped retrieval (used with mode="temporal")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 pub fn default_recall_limit() -> usize {
@@ -251,84 +207,6 @@ pub struct RecallExperience {
 }
 
 // =============================================================================
-// BATCH REMEMBER API
-// =============================================================================
-
-/// Batch remember request for bulk inserts
-#[derive(Deserialize)]
-pub struct BatchRememberRequest {
-    pub user_id: String,
-    pub memories: Vec<BatchMemoryItem>,
-    #[serde(default)]
-    pub options: BatchRememberOptions,
-}
-
-/// Options for batch remember operation
-#[derive(Deserialize)]
-pub struct BatchRememberOptions {
-    #[serde(default = "default_true")]
-    pub extract_entities: bool,
-    #[serde(default = "default_true")]
-    pub create_edges: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-impl Default for BatchRememberOptions {
-    fn default() -> Self {
-        Self {
-            extract_entities: true,
-            create_edges: true,
-        }
-    }
-}
-
-#[derive(Deserialize, Clone)]
-pub struct BatchMemoryItem {
-    pub content: String,
-    #[serde(default)]
-    pub memory_type: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(default)]
-    pub emotional_valence: Option<f32>,
-    #[serde(default)]
-    pub emotional_arousal: Option<f32>,
-    #[serde(default)]
-    pub emotion: Option<String>,
-    #[serde(default)]
-    pub source_type: Option<String>,
-    #[serde(default)]
-    pub credibility: Option<f32>,
-    #[serde(default)]
-    pub episode_id: Option<String>,
-    #[serde(default)]
-    pub sequence_number: Option<u32>,
-    #[serde(default)]
-    pub preceding_memory_id: Option<String>,
-}
-
-/// Error detail for a single item in batch
-#[derive(Serialize)]
-pub struct BatchErrorItem {
-    pub index: usize,
-    pub error: String,
-}
-
-#[derive(Serialize)]
-pub struct BatchRememberResponse {
-    pub created: usize,
-    pub failed: usize,
-    pub memory_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub errors: Vec<BatchErrorItem>,
-}
-
-// =============================================================================
 // UPSERT API
 // =============================================================================
 
@@ -348,6 +226,9 @@ pub struct UpsertRequest {
     pub changed_by: Option<String>,
     #[serde(default)]
     pub change_reason: Option<String>,
+    /// Optional importance override (0.0-1.0). When provided, bypasses auto-calculation.
+    #[serde(default)]
+    pub importance: Option<f32>,
 }
 
 fn default_change_type() -> String {
@@ -825,28 +706,14 @@ pub struct BuildVisualizationRequest {
     pub user_id: String,
 }
 
-// =============================================================================
-// COMPILE CONTEXT (Pipeline-time memory priming)
-// =============================================================================
-
-/// Request for pipeline-time context compilation.
-/// Returns pre-formatted text ready for prompt injection — the agent never
-/// sees a "memory block", just a richer context.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CompileContextRequest {
     pub user_id: String,
-    /// Name of the autonomite requesting context
-    #[serde(default)]
     pub autonomite: Option<String>,
-    /// What the autonomite is about to do
     pub task_description: String,
-    /// Recent workspace state for additional retrieval signal
-    #[serde(default)]
     pub workspace_context: Option<String>,
-    /// Max approximate characters in returned context (default 4000)
     #[serde(default = "compile_ctx_default_max_chars")]
     pub max_chars: usize,
-    /// Number of memories to retrieve before formatting (default 10)
     #[serde(default = "compile_ctx_default_limit")]
     pub limit: usize,
 }
@@ -860,18 +727,15 @@ fn compile_ctx_default_limit() -> usize {
 
 #[derive(Debug, Serialize)]
 pub struct CompileContextResponse {
-    /// Pre-formatted context text, ready for prompt injection
     pub context: String,
-    /// Memory IDs used (for feedback attribution)
     pub memory_ids: Vec<String>,
-    /// How many memories contributed
     pub memory_count: usize,
-    /// Processing time in ms
     pub latency_ms: f64,
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::remember::{BatchRememberOptions, BatchRememberRequest, RememberRequest};
     use super::*;
     use serde_json::json;
 

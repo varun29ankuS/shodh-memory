@@ -52,7 +52,7 @@ impl SemanticFactStore {
     pub fn store(&self, user_id: &str, fact: &SemanticFact) -> Result<()> {
         // Primary storage
         let key = format!("facts:{}:{}", user_id, fact.id);
-        let value = bincode::serde::encode_to_vec(fact, bincode::config::standard())?;
+        let value = crate::serialization::encode(fact)?;
         self.db.put(key.as_bytes(), &value)?;
 
         // Entity index - index by each related entity
@@ -90,8 +90,7 @@ impl SemanticFactStore {
         let key = format!("facts:{}:{}", user_id, fact_id);
         match self.db.get(key.as_bytes())? {
             Some(data) => {
-                let (fact, _): (SemanticFact, _) =
-                    bincode::serde::decode_from_slice(&data, bincode::config::standard())?;
+                let (fact, _) = crate::serialization::try_decode::<SemanticFact>(&data)?;
                 Ok(Some(fact))
             }
             None => Ok(None),
@@ -102,7 +101,7 @@ impl SemanticFactStore {
     pub fn update(&self, user_id: &str, fact: &SemanticFact) -> Result<()> {
         // Simply overwrite - indices stay valid since ID doesn't change
         let key = format!("facts:{}:{}", user_id, fact.id);
-        let value = bincode::serde::encode_to_vec(fact, bincode::config::standard())?;
+        let value = crate::serialization::encode(fact)?;
         self.db.put(key.as_bytes(), &value)?;
         Ok(())
     }
@@ -164,12 +163,7 @@ impl SemanticFactStore {
                 continue;
             }
 
-            if let Ok(fact) = bincode::serde::decode_from_slice::<SemanticFact, _>(
-                &value,
-                bincode::config::standard(),
-            )
-            .map(|(v, _)| v)
-            {
+            if let Ok((fact, _)) = crate::serialization::try_decode::<SemanticFact>(&value) {
                 facts.push(fact);
                 if facts.len() >= limit {
                     break;
@@ -326,10 +320,7 @@ impl SemanticFactStore {
             if key_str.matches(':').count() > 2 {
                 continue;
             }
-            if let Ok((fact, _)) = bincode::serde::decode_from_slice::<SemanticFact, _>(
-                &value,
-                bincode::config::standard(),
-            ) {
+            if let Ok((fact, _)) = crate::serialization::try_decode::<SemanticFact>(&value) {
                 let millis = fact.created_at.timestamp_millis();
                 max_millis = Some(max_millis.map_or(millis, |cur| cur.max(millis)));
             }
@@ -465,7 +456,7 @@ impl SemanticFactStore {
     /// Stored separately from SemanticFact struct for backward compatibility.
     pub fn store_embedding(&self, user_id: &str, fact_id: &str, embedding: &[f32]) -> Result<()> {
         let key = format!("facts_embedding:{user_id}:{fact_id}");
-        let value = bincode::serde::encode_to_vec(embedding, bincode::config::standard())?;
+        let value = crate::serialization::encode(embedding)?;
         self.db.put(key.as_bytes(), &value)?;
         Ok(())
     }
@@ -475,8 +466,7 @@ impl SemanticFactStore {
         let key = format!("facts_embedding:{user_id}:{fact_id}");
         match self.db.get(key.as_bytes())? {
             Some(data) => {
-                let (embedding, _): (Vec<f32>, _) =
-                    bincode::serde::decode_from_slice(&data, bincode::config::standard())?;
+                let (embedding, _) = crate::serialization::try_decode::<Vec<f32>>(&data)?;
                 Ok(Some(embedding))
             }
             None => Ok(None),

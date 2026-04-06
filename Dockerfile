@@ -37,6 +37,14 @@ RUN curl -L -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/downlo
 
 ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 
+# Download MiniLM-L6-v2 model files for semantic embeddings (cacheable independent of source)
+# Pinned to commit c9745ed1 for reproducibility (~23MB quantized model + ~700KB tokenizer)
+RUN mkdir -p /models/minilm-l6 \
+    && curl -L -o /models/minilm-l6/model_quantized.onnx \
+       "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/onnx/model_quint8_avx2.onnx" \
+    && curl -L -o /models/minilm-l6/tokenizer.json \
+       "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/tokenizer.json"
+
 # Create dummy sources to build and cache dependencies
 RUN mkdir -p src benches tests \
     && echo "fn main() {}" > src/main.rs \
@@ -74,9 +82,10 @@ RUN useradd -m -u 1000 shodh && \
     mkdir -p /data && \
     chown -R shodh:shodh /data
 
-# Copy binary and ONNX Runtime from builder
+# Copy binary, ONNX Runtime, and model files from builder
 COPY --from=builder /app/target/release/shodh-memory-server /usr/local/bin/shodh-memory
 COPY --from=builder /usr/local/lib/libonnxruntime.so /usr/local/lib/libonnxruntime.so
+COPY --from=builder --chown=shodh:shodh /models/minilm-l6 /home/shodh/.cache/shodh-memory/models/minilm-l6
 RUN ldconfig
 
 # Switch to non-root user
@@ -97,7 +106,8 @@ ENV RUST_LOG=info \
     SHODH_HOST=0.0.0.0 \
     SHODH_PORT=3030 \
     SHODH_MEMORY_PATH=/data \
-    LD_LIBRARY_PATH=/usr/local/lib
+    LD_LIBRARY_PATH=/usr/local/lib \
+    ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 
 # Run the binary
 CMD ["shodh-memory"]
