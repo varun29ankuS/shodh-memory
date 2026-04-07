@@ -511,10 +511,86 @@ pub async fn recall(
     // Raw pipeline scores (RRF fusion × hebbian × recency × feedback) cluster in
     // 0.01-0.10 range, making percentage display useless (everything shows 1-5%).
     // Normalize relative to top score so results span 0-95% for meaningful display.
-    let raw_scores: Vec<f32> = memories
+    let mut raw_scores: Vec<f32> = memories
         .iter()
         .map(|m| m.score.unwrap_or_else(|| m.salience_score_with_access()))
         .collect();
+
+    // Lineage-aware retrieval boost: memories connected by causal chains to
+    // other recalled memories receive a score boost proportional to edge confidence.
+    // This makes causally related memories cluster together in results.
+    if memories.len() >= 2 {
+        let memory_for_lineage = memory.clone();
+        let user_id_for_lineage = req.user_id.clone();
+        let memory_ids: Vec<String> = memories.iter().map(|m| m.id.0.to_string()).collect();
+
+        if let Ok(boosts) = tokio::task::spawn_blocking({
+            let memory_ids = memory_ids.clone();
+            move || -> Vec<f32> {
+                let memory_guard = memory_for_lineage.read();
+                let lineage = memory_guard.lineage_graph();
+                let mut boosts = vec![0.0_f32; memory_ids.len()];
+                let id_to_idx: std::collections::HashMap<&str, usize> = memory_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| (id.as_str(), i))
+                    .collect();
+
+                for (idx, id_str) in memory_ids.iter().enumerate() {
+                    let Ok(uuid) = uuid::Uuid::parse_str(id_str) else {
+                        continue;
+                    };
+                    let mid = crate::memory::MemoryId(uuid);
+
+                    // Check outgoing edges to other recalled memories
+                    if let Ok(edges) = lineage.get_edges_from(&user_id_for_lineage, &mid) {
+                        for edge in &edges {
+                            if edge.confidence < crate::constants::LINEAGE_RETRIEVAL_MIN_CONFIDENCE
+                            {
+                                continue;
+                            }
+                            let to_str = edge.to.0.to_string();
+                            if let Some(&target_idx) = id_to_idx.get(to_str.as_str()) {
+                                if target_idx != idx {
+                                    let boost = edge.confidence
+                                        * crate::constants::LINEAGE_RETRIEVAL_BOOST_SCALE;
+                                    boosts[target_idx] = (boosts[target_idx] + boost)
+                                        .min(crate::constants::LINEAGE_RETRIEVAL_MAX_BOOST);
+                                }
+                            }
+                        }
+                    }
+
+                    // Check incoming edges from other recalled memories
+                    if let Ok(edges) = lineage.get_edges_to(&user_id_for_lineage, &mid) {
+                        for edge in &edges {
+                            if edge.confidence < crate::constants::LINEAGE_RETRIEVAL_MIN_CONFIDENCE
+                            {
+                                continue;
+                            }
+                            let from_str = edge.from.0.to_string();
+                            if let Some(&source_idx) = id_to_idx.get(from_str.as_str()) {
+                                if source_idx != idx {
+                                    let boost = edge.confidence
+                                        * crate::constants::LINEAGE_RETRIEVAL_BOOST_SCALE;
+                                    boosts[source_idx] = (boosts[source_idx] + boost)
+                                        .min(crate::constants::LINEAGE_RETRIEVAL_MAX_BOOST);
+                                }
+                            }
+                        }
+                    }
+                }
+                boosts
+            }
+        })
+        .await
+        {
+            for (score, boost) in raw_scores.iter_mut().zip(boosts.iter()) {
+                *score += boost;
+            }
+        }
+    }
+
     let top_score = raw_scores.iter().cloned().fold(0.0_f32, f32::max);
 
     let recall_memories: Vec<RecallMemory> = memories
@@ -1376,6 +1452,7 @@ pub async fn proactive_context(
             let relevance_engine = state.relevance_engine.clone();
             let helpful_count = helpful_ids.len();
             let misleading_count = misleading_ids.len();
+            let user_id = req.user_id.clone();
             tokio::task::spawn_blocking(move || {
                 let memory_guard = memory_sys_for_reinforce.read();
 
@@ -1420,6 +1497,54 @@ pub async fn proactive_context(
                                 );
                             }
                             _ => {}
+                        }
+                    }
+                }
+
+                // Reinforce/weaken lineage edges connected to helpful/misleading memories.
+                // This is the selection pressure that makes causal chains adaptive:
+                // chains that participate in useful recalls get stronger, chains connected
+                // to misleading memories weaken. Without this, all inferred edges remain
+                // at their initial confidence with no learning signal.
+                {
+                    let lineage = memory_guard.lineage_graph();
+                    let mut reinforced_edge_ids = std::collections::HashSet::new();
+
+                    // Reinforce edges for helpful memories
+                    for memory_id in &helpful_ids_for_graph {
+                        for edges in [
+                            lineage.get_edges_from(&user_id, memory_id),
+                            lineage.get_edges_to(&user_id, memory_id),
+                        ] {
+                            if let Ok(edges) = edges {
+                                for mut edge in edges {
+                                    if reinforced_edge_ids.insert(edge.id.clone()) {
+                                        edge.reinforce();
+                                        let _ = lineage.store_edge(&user_id, &edge);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Weaken edges for misleading memories, pruning zombie edges
+                    for memory_id in &misleading_ids {
+                        for edges in [
+                            lineage.get_edges_from(&user_id, memory_id),
+                            lineage.get_edges_to(&user_id, memory_id),
+                        ] {
+                            if let Ok(edges) = edges {
+                                for mut edge in edges {
+                                    if reinforced_edge_ids.insert(edge.id.clone()) {
+                                        let should_prune = edge.weaken();
+                                        if should_prune {
+                                            let _ = lineage.delete_edge(&user_id, &edge.id);
+                                        } else {
+                                            let _ = lineage.store_edge(&user_id, &edge);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
