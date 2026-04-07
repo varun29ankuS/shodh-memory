@@ -2404,10 +2404,13 @@ pub const TEMPORAL_CREDIT_MIN_THRESHOLD: f32 = 0.02;
 
 /// Maximum temporal gap (days) between memories for causal inference.
 ///
-/// Memories further apart than this are unlikely to share causal links.
-/// 7 days balances catching multi-session causal chains (e.g., Monday's
-/// error→Friday's fix) while filtering noise from stale associations.
-pub const LINEAGE_MAX_TEMPORAL_GAP_DAYS: i64 = 7;
+/// Real causal chains span weeks: a decision from week 1 shapes implementation
+/// in week 3, a learning from one session informs a decision 10 sessions later.
+/// 30 days captures cross-week causality while the temporal_factor formula
+/// naturally reduces confidence for distant connections (20-day gap → factor 0.33).
+///
+/// Previous value was 7 days, which missed all cross-week causal links.
+pub const LINEAGE_MAX_TEMPORAL_GAP_DAYS: i64 = 30;
 
 /// Minimum Jaccard entity overlap for causal inference.
 ///
@@ -2426,8 +2429,10 @@ pub const LINEAGE_MAX_CANDIDATES: usize = 20;
 /// Lookback window (days) for finding candidate memories during inference.
 ///
 /// Controls how far back the graph entity index is searched for
-/// co-occurring memories. Matches LINEAGE_MAX_TEMPORAL_GAP_DAYS by default.
-pub const LINEAGE_LOOKBACK_DAYS: i64 = 7;
+/// co-occurring memories. Shorter than LINEAGE_MAX_TEMPORAL_GAP_DAYS because
+/// candidate discovery is capped at LINEAGE_MAX_CANDIDATES (20). 14 days
+/// casts a wide enough net without overloading inference.
+pub const LINEAGE_LOOKBACK_DAYS: i64 = 14;
 
 /// Base confidence for Caused relation (Error → Task).
 pub const LINEAGE_CONFIDENCE_CAUSED: f32 = 0.8;
@@ -2471,6 +2476,29 @@ pub const LINEAGE_GRAPH_BOOST_SCALE: f32 = 0.15;
 /// This uses a higher boost than automatic inference to reward human-in-the-loop
 /// validation and make confirmed causal paths more prominent in retrieval.
 pub const LINEAGE_CONFIRM_GRAPH_BOOST: f32 = 0.3;
+
+/// Scale factor for lineage-aware retrieval score boosting.
+///
+/// When recalled memories have causal chain connections, the connected memories
+/// receive a score boost of `edge.confidence * LINEAGE_RETRIEVAL_BOOST_SCALE`.
+/// Conservative value prevents lineage from dominating semantic relevance.
+/// Only applied to edges with confidence >= 0.5.
+///
+/// Max boost per memory capped at LINEAGE_RETRIEVAL_MAX_BOOST.
+pub const LINEAGE_RETRIEVAL_BOOST_SCALE: f32 = 0.06;
+
+/// Maximum total lineage boost per memory during retrieval.
+///
+/// Prevents a memory with many lineage edges from dominating results.
+/// With BOOST_SCALE=0.06 and this cap=0.15, a memory needs ~3 high-confidence
+/// edges to reach the cap.
+pub const LINEAGE_RETRIEVAL_MAX_BOOST: f32 = 0.15;
+
+/// Minimum edge confidence for lineage retrieval boosting.
+///
+/// Only edges above this threshold affect retrieval scores. This filters out
+/// low-confidence inferred edges that haven't been reinforced by feedback.
+pub const LINEAGE_RETRIEVAL_MIN_CONFIDENCE: f32 = 0.5;
 
 // =============================================================================
 // CONSTANTS USAGE DOCUMENTATION

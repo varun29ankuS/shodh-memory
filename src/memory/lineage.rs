@@ -165,6 +165,17 @@ impl LineageEdge {
         self.last_reinforced = Utc::now();
         self.reinforcement_count += 1;
     }
+
+    /// Weaken this edge (decrease confidence via multiplicative decay).
+    ///
+    /// Asymmetric with reinforce: weakening is multiplicative (*0.85) while
+    /// strengthening is additive (+0.1). This matches the Hebbian asymmetry
+    /// used in the knowledge graph — it takes many failures to destroy a
+    /// strong connection, but a single confirmation can rescue a weak one.
+    pub fn weaken(&mut self) {
+        self.confidence *= 0.85;
+        self.last_reinforced = Utc::now();
+    }
 }
 
 /// A branch in the lineage graph (for project pivots)
@@ -521,7 +532,17 @@ impl LineageGraph {
     // LINEAGE INFERENCE ENGINE
     // =========================================================================
 
-    /// Infer causal relationship between two memories
+    /// Infer causal relationship between two memories.
+    ///
+    /// Uses three complementary signals:
+    /// 1. **Type-pair rules**: ExperienceType combinations → CausalRelation + base confidence
+    /// 2. **Semantic overlap**: max(Jaccard entity overlap, cosine embedding similarity)
+    /// 3. **Temporal proximity**: linear decay over the temporal gap
+    ///
+    /// The semantic overlap combines entity tags (precise but brittle — exact string match)
+    /// with embedding similarity (fuzzy but robust — captures synonyms and paraphrases).
+    /// Using `max()` ensures we never regress when entities work well, while rescuing
+    /// cases where NER fails or different surface forms describe the same concept.
     pub fn infer_relation(&self, from: &Memory, to: &Memory) -> Option<(CausalRelation, f32)> {
         // Must be in temporal order (from before to)
         if from.created_at >= to.created_at {
@@ -534,16 +555,35 @@ impl LineageGraph {
             return None;
         }
 
-        // Calculate entity overlap using experience.entities (tags)
-        let overlap =
+        // Signal 1: Entity overlap (Jaccard on entity tags)
+        let entity_overlap =
             Self::calculate_entity_overlap(&from.experience.entities, &to.experience.entities);
 
-        // When both memories have entities, require minimum overlap.
-        // When either memory has no entities (NER failed or content too short),
-        // allow inference to proceed at reduced confidence via the overlap factor.
+        // Signal 2: Embedding similarity (cosine between content embeddings)
+        let embedding_sim = match (&from.experience.embeddings, &to.experience.embeddings) {
+            (Some(emb_a), Some(emb_b)) if emb_a.len() == emb_b.len() && !emb_a.is_empty() => {
+                Self::cosine_similarity(emb_a, emb_b).max(0.0) // clamp negatives
+            }
+            _ => 0.0,
+        };
+
+        // Combined semantic signal: best of entity overlap and embedding similarity.
+        // This ensures neither signal pathway can suppress the other.
+        let semantic_signal = entity_overlap.max(embedding_sim);
+
+        // Gate: when we have both entities AND embeddings, require minimum semantic signal.
+        // When either is missing, let inference proceed at whatever signal we have.
         let has_entities =
             !from.experience.entities.is_empty() && !to.experience.entities.is_empty();
-        if has_entities && overlap < self.config.min_entity_overlap {
+        let has_embeddings =
+            from.experience.embeddings.is_some() && to.experience.embeddings.is_some();
+
+        if has_entities && !has_embeddings && entity_overlap < self.config.min_entity_overlap {
+            // Only entities available, and they don't overlap enough
+            return None;
+        }
+        if has_entities && has_embeddings && semantic_signal < self.config.min_entity_overlap {
+            // Both signals available, but neither reaches threshold
             return None;
         }
 
@@ -553,14 +593,33 @@ impl LineageGraph {
             &to.experience.experience_type,
         )?;
 
-        // Adjust confidence based on entity overlap and temporal proximity.
-        // When entities are absent, use a floor of 0.3 to avoid zeroing out confidence.
-        let effective_overlap = if has_entities { overlap } else { 0.3 };
+        // Compute effective overlap for confidence scaling.
+        // When no entities and no embeddings, use a floor of 0.3 to avoid zeroing out.
+        let effective_overlap = if semantic_signal > 0.0 {
+            semantic_signal
+        } else if has_entities {
+            entity_overlap
+        } else {
+            0.3 // floor for memories with no semantic signals
+        };
+
+        // Signal 3: Temporal proximity (linear decay)
         let temporal_factor =
             1.0 - (gap.num_days() as f32 / self.config.max_temporal_gap_days as f32);
         let confidence = base_confidence * effective_overlap * (0.5 + 0.5 * temporal_factor);
 
         Some((relation, confidence))
+    }
+
+    /// Cosine similarity between two embedding vectors
+    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return 0.0;
+        }
+        dot / (norm_a * norm_b)
     }
 
     /// Infer relation based on memory types
@@ -652,6 +711,105 @@ impl LineageGraph {
                     .unwrap_or(&0.75),
             )),
 
+            // Observation → Task = TriggeredBy (observation led to work)
+            (Observation, Task) => Some((
+                CausalRelation::TriggeredBy,
+                *self
+                    .config
+                    .relation_confidence
+                    .get(&CausalRelation::TriggeredBy)
+                    .unwrap_or(&0.75)
+                    * 0.85, // slightly lower — observations are less direct triggers than discoveries
+            )),
+
+            // Observation → Decision = InformedBy (observation informed a decision)
+            (Observation, Decision) => Some((
+                CausalRelation::InformedBy,
+                *self
+                    .config
+                    .relation_confidence
+                    .get(&CausalRelation::InformedBy)
+                    .unwrap_or(&0.7)
+                    * 0.85,
+            )),
+
+            // Observation → Error = Caused (observation of a problem → error report)
+            (Observation, Error) => Some((
+                CausalRelation::Caused,
+                *self
+                    .config
+                    .relation_confidence
+                    .get(&CausalRelation::Caused)
+                    .unwrap_or(&0.8)
+                    * 0.75, // observations rarely directly cause errors; lower confidence
+            )),
+
+            // Observation → Learning = TriggeredBy (observation sparked learning)
+            (Observation, Learning) => Some((
+                CausalRelation::TriggeredBy,
+                *self
+                    .config
+                    .relation_confidence
+                    .get(&CausalRelation::TriggeredBy)
+                    .unwrap_or(&0.75)
+                    * 0.85,
+            )),
+
+            // Conversation → Decision = InformedBy (discussion informed a decision)
+            (Conversation, Decision) => Some((
+                CausalRelation::InformedBy,
+                *self
+                    .config
+                    .relation_confidence
+                    .get(&CausalRelation::InformedBy)
+                    .unwrap_or(&0.7)
+                    * 0.9, // conversations are strong informational sources
+            )),
+
+            // Conversation → Task = TriggeredBy (discussion spawned work)
+            (Conversation, Task) => Some((
+                CausalRelation::TriggeredBy,
+                *self
+                    .config
+                    .relation_confidence
+                    .get(&CausalRelation::TriggeredBy)
+                    .unwrap_or(&0.75)
+                    * 0.85,
+            )),
+
+            // Conversation → Learning = InformedBy (discussion led to learning)
+            (Conversation, Learning) => Some((
+                CausalRelation::InformedBy,
+                *self
+                    .config
+                    .relation_confidence
+                    .get(&CausalRelation::InformedBy)
+                    .unwrap_or(&0.7)
+                    * 0.85,
+            )),
+
+            // Conversation → Error = Caused (discussion surfaced a bug)
+            (Conversation, Error) => Some((
+                CausalRelation::Caused,
+                *self
+                    .config
+                    .relation_confidence
+                    .get(&CausalRelation::Caused)
+                    .unwrap_or(&0.8)
+                    * 0.7, // conversations weakly cause error reports
+            )),
+
+            // Conversation → Discovery = TriggeredBy (discussion led to discovery)
+            (Conversation, Discovery) => Some((
+                CausalRelation::TriggeredBy,
+                *self
+                    .config
+                    .relation_confidence
+                    .get(&CausalRelation::TriggeredBy)
+                    .unwrap_or(&0.75)
+                    * 0.85,
+            )),
+
             // Default: RelatedTo if same type or generic relation
             _ => {
                 // Only suggest RelatedTo for semantically related types
@@ -671,7 +829,11 @@ impl LineageGraph {
         }
     }
 
-    /// Check if two experience types are semantically related
+    /// Check if two experience types are semantically related.
+    ///
+    /// Returns true for same-group pairs AND for cross-group bridging types.
+    /// Observation and Conversation are "bridge" types — they can relate to
+    /// any other type because observations and conversations often span domains.
     fn are_types_related(a: &ExperienceType, b: &ExperienceType) -> bool {
         use ExperienceType::*;
 
@@ -680,10 +842,18 @@ impl LineageGraph {
             return true;
         }
 
-        // Define related type groups
-        let knowledge_types = [Learning, Discovery, Pattern, Observation];
+        // Bridge types: Observation and Conversation can relate to anything.
+        // These are the most common types in production (segmentation fallback
+        // and hook ingestion), so they must bridge across groups to form chains.
+        let is_bridge = |t: &ExperienceType| matches!(t, Observation | Conversation);
+        if is_bridge(a) || is_bridge(b) {
+            return true;
+        }
+
+        // Define related type groups for non-bridge types
+        let knowledge_types = [Learning, Discovery, Pattern];
         let action_types = [Task, Decision, Command, CodeEdit];
-        let context_types = [Context, Conversation, FileAccess, Search];
+        let context_types = [Context, FileAccess, Search];
 
         let in_knowledge = |t: &ExperienceType| {
             knowledge_types
@@ -1135,5 +1305,198 @@ mod tests {
         assert_eq!(stats.inferred_edges, 1);
         assert_eq!(stats.explicit_edges, 1);
         assert_eq!(stats.total_branches, 1);
+    }
+
+    // =========================================================================
+    // Observation type inference tests (#205)
+    // =========================================================================
+
+    #[test]
+    fn test_infer_observation_to_task() {
+        let (graph, _dir) = create_test_graph();
+        let obs = create_test_memory(ExperienceType::Observation, vec!["auth", "login"]);
+        let mut task = create_test_memory(ExperienceType::Task, vec!["auth", "login"]);
+        task.created_at = obs.created_at + Duration::days(1);
+
+        let result = graph.infer_relation(&obs, &task);
+        assert!(result.is_some(), "Observation → Task should infer");
+        let (relation, confidence) = result.unwrap();
+        assert_eq!(relation, CausalRelation::TriggeredBy);
+        assert!(confidence > 0.3, "confidence was {}", confidence);
+    }
+
+    #[test]
+    fn test_infer_observation_to_decision() {
+        let (graph, _dir) = create_test_graph();
+        let obs = create_test_memory(ExperienceType::Observation, vec!["perf", "latency"]);
+        let mut decision =
+            create_test_memory(ExperienceType::Decision, vec!["perf", "latency", "cache"]);
+        decision.created_at = obs.created_at + Duration::days(1);
+
+        let result = graph.infer_relation(&obs, &decision);
+        assert!(result.is_some(), "Observation → Decision should infer");
+        let (relation, _) = result.unwrap();
+        assert_eq!(relation, CausalRelation::InformedBy);
+    }
+
+    #[test]
+    fn test_infer_observation_to_error() {
+        let (graph, _dir) = create_test_graph();
+        let obs = create_test_memory(ExperienceType::Observation, vec!["mutex", "deadlock"]);
+        let mut error = create_test_memory(ExperienceType::Error, vec!["mutex", "deadlock"]);
+        error.created_at = obs.created_at + Duration::days(1);
+
+        let result = graph.infer_relation(&obs, &error);
+        assert!(result.is_some(), "Observation → Error should infer");
+        let (relation, _) = result.unwrap();
+        assert_eq!(relation, CausalRelation::Caused);
+    }
+
+    #[test]
+    fn test_infer_observation_to_learning() {
+        let (graph, _dir) = create_test_graph();
+        let obs = create_test_memory(ExperienceType::Observation, vec!["rocksdb", "column"]);
+        let mut learning = create_test_memory(
+            ExperienceType::Learning,
+            vec!["rocksdb", "column", "family"],
+        );
+        learning.created_at = obs.created_at + Duration::days(1);
+
+        let result = graph.infer_relation(&obs, &learning);
+        assert!(result.is_some(), "Observation → Learning should infer");
+        let (relation, _) = result.unwrap();
+        assert_eq!(relation, CausalRelation::TriggeredBy);
+    }
+
+    // =========================================================================
+    // Conversation type inference tests (#205)
+    // =========================================================================
+
+    #[test]
+    fn test_infer_conversation_to_decision() {
+        let (graph, _dir) = create_test_graph();
+        let conv = create_test_memory(ExperienceType::Conversation, vec!["api", "design"]);
+        let mut decision =
+            create_test_memory(ExperienceType::Decision, vec!["api", "design", "rest"]);
+        decision.created_at = conv.created_at + Duration::days(1);
+
+        let result = graph.infer_relation(&conv, &decision);
+        assert!(result.is_some(), "Conversation → Decision should infer");
+        let (relation, _) = result.unwrap();
+        assert_eq!(relation, CausalRelation::InformedBy);
+    }
+
+    #[test]
+    fn test_infer_conversation_to_task() {
+        let (graph, _dir) = create_test_graph();
+        let conv = create_test_memory(ExperienceType::Conversation, vec!["bug", "deploy"]);
+        let mut task = create_test_memory(ExperienceType::Task, vec!["bug", "deploy"]);
+        task.created_at = conv.created_at + Duration::days(1);
+
+        let result = graph.infer_relation(&conv, &task);
+        assert!(result.is_some(), "Conversation → Task should infer");
+        let (relation, _) = result.unwrap();
+        assert_eq!(relation, CausalRelation::TriggeredBy);
+    }
+
+    #[test]
+    fn test_infer_conversation_to_learning() {
+        let (graph, _dir) = create_test_graph();
+        let conv = create_test_memory(ExperienceType::Conversation, vec!["hebbian", "memory"]);
+        let mut learning =
+            create_test_memory(ExperienceType::Learning, vec!["hebbian", "memory", "decay"]);
+        learning.created_at = conv.created_at + Duration::days(1);
+
+        let result = graph.infer_relation(&conv, &learning);
+        assert!(result.is_some(), "Conversation → Learning should infer");
+        let (relation, _) = result.unwrap();
+        assert_eq!(relation, CausalRelation::InformedBy);
+    }
+
+    #[test]
+    fn test_infer_conversation_to_error() {
+        let (graph, _dir) = create_test_graph();
+        let conv = create_test_memory(ExperienceType::Conversation, vec!["auth", "token"]);
+        let mut error = create_test_memory(ExperienceType::Error, vec!["auth", "token"]);
+        error.created_at = conv.created_at + Duration::days(1);
+
+        let result = graph.infer_relation(&conv, &error);
+        assert!(result.is_some(), "Conversation → Error should infer");
+        let (relation, _) = result.unwrap();
+        assert_eq!(relation, CausalRelation::Caused);
+    }
+
+    #[test]
+    fn test_infer_conversation_to_discovery() {
+        let (graph, _dir) = create_test_graph();
+        let conv = create_test_memory(ExperienceType::Conversation, vec!["graph", "edge"]);
+        let mut discovery =
+            create_test_memory(ExperienceType::Discovery, vec!["graph", "edge", "weight"]);
+        discovery.created_at = conv.created_at + Duration::days(1);
+
+        let result = graph.infer_relation(&conv, &discovery);
+        assert!(result.is_some(), "Conversation → Discovery should infer");
+        let (relation, _) = result.unwrap();
+        assert_eq!(relation, CausalRelation::TriggeredBy);
+    }
+
+    // =========================================================================
+    // Bridge type tests — reverse direction (action → Observation/Conversation)
+    // =========================================================================
+
+    #[test]
+    fn test_infer_decision_to_observation_related() {
+        let (graph, _dir) = create_test_graph();
+        let decision = create_test_memory(ExperienceType::Decision, vec!["cache", "redis"]);
+        let mut obs = create_test_memory(ExperienceType::Observation, vec!["cache", "redis"]);
+        obs.created_at = decision.created_at + Duration::days(1);
+
+        let result = graph.infer_relation(&decision, &obs);
+        assert!(
+            result.is_some(),
+            "Decision → Observation should produce RelatedTo via bridge"
+        );
+        let (relation, _) = result.unwrap();
+        assert_eq!(relation, CausalRelation::RelatedTo);
+    }
+
+    #[test]
+    fn test_infer_task_to_conversation_related() {
+        let (graph, _dir) = create_test_graph();
+        let task = create_test_memory(ExperienceType::Task, vec!["deploy", "staging"]);
+        let mut conv = create_test_memory(ExperienceType::Conversation, vec!["deploy", "staging"]);
+        conv.created_at = task.created_at + Duration::days(1);
+
+        let result = graph.infer_relation(&task, &conv);
+        assert!(
+            result.is_some(),
+            "Task → Conversation should produce RelatedTo via bridge"
+        );
+        let (relation, _) = result.unwrap();
+        assert_eq!(relation, CausalRelation::RelatedTo);
+    }
+
+    #[test]
+    fn test_observation_no_entities_still_bridges() {
+        let (graph, _dir) = create_test_graph();
+        // No entities — tests the 0.3 floor path
+        let obs = create_test_memory(ExperienceType::Observation, vec![]);
+        let mut task = create_test_memory(ExperienceType::Task, vec![]);
+        task.created_at = obs.created_at + Duration::days(1);
+
+        let result = graph.infer_relation(&obs, &task);
+        assert!(
+            result.is_some(),
+            "Observation → Task should infer even without entities"
+        );
+        let (relation, confidence) = result.unwrap();
+        assert_eq!(relation, CausalRelation::TriggeredBy);
+        // With no entities: effective_overlap=0.3, temporal_factor≈0.97
+        // base * 0.85 * 0.3 * (0.5 + 0.5*0.97) ≈ 0.75 * 0.85 * 0.3 * 0.985 ≈ 0.19
+        assert!(
+            confidence > 0.1,
+            "low-entity confidence should still be nonzero, was {}",
+            confidence
+        );
     }
 }

@@ -1126,21 +1126,35 @@ fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::m
                 }
             };
 
-            if episode.entity_refs.is_empty() {
-                tracing::debug!(memory_id = %mid.0, "Lineage skipped: episode has no entity refs");
-                return;
-            }
-
             let mut candidate_ids = std::collections::HashSet::new();
             let cutoff =
                 chrono::Utc::now() - chrono::Duration::days(crate::constants::LINEAGE_LOOKBACK_DAYS);
 
-            for entity_uuid in &episode.entity_refs {
-                if let Ok(episodes) = graph.get_episodes_by_entity(entity_uuid) {
-                    for ep in &episodes {
-                        if ep.created_at >= cutoff {
-                            candidate_ids.insert(crate::memory::MemoryId(ep.uuid));
+            // Phase 1: Entity-graph candidates (highest quality — shared entities)
+            if !episode.entity_refs.is_empty() {
+                for entity_uuid in &episode.entity_refs {
+                    if let Ok(episodes) = graph.get_episodes_by_entity(entity_uuid) {
+                        for ep in &episodes {
+                            if ep.created_at >= cutoff {
+                                candidate_ids.insert(crate::memory::MemoryId(ep.uuid));
+                            }
                         }
+                    }
+                }
+            }
+
+            // Phase 2: Recency fallback — fill remaining slots with recent memories.
+            // This ensures lineage inference runs even when NER fails (empty entity_refs)
+            // or when entity-graph candidates are sparse.
+            if candidate_ids.len() < crate::constants::LINEAGE_MAX_CANDIDATES {
+                let remaining = crate::constants::LINEAGE_MAX_CANDIDATES - candidate_ids.len();
+                if let Ok(recent) = memory_guard.recall_by_date(
+                    cutoff,
+                    chrono::Utc::now(),
+                    remaining,
+                ) {
+                    for mem in recent {
+                        candidate_ids.insert(mem.id.clone());
                     }
                 }
             }
