@@ -290,6 +290,56 @@ pub fn validate_weight(name: &str, value: f32) -> Result<()> {
     Ok(())
 }
 
+/// Validate geo_location coordinates [lat, lon, alt]
+pub fn validate_geo_location(geo: &[f64; 3]) -> Result<()> {
+    if !geo[0].is_finite() || !(-90.0..=90.0).contains(&geo[0]) {
+        return Err(anyhow!(
+            "latitude must be between -90.0 and 90.0, got: {}",
+            geo[0]
+        ));
+    }
+    if !geo[1].is_finite() || !(-180.0..=180.0).contains(&geo[1]) {
+        return Err(anyhow!(
+            "longitude must be between -180.0 and 180.0, got: {}",
+            geo[1]
+        ));
+    }
+    if !geo[2].is_finite() {
+        return Err(anyhow!("altitude must be a finite number, got: {}", geo[2]));
+    }
+    Ok(())
+}
+
+/// Validate a GeoFilter for spatial recall queries
+pub fn validate_geo_filter(
+    lat: f64,
+    lon: f64,
+    radius_meters: f64,
+) -> Result<()> {
+    if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
+        return Err(anyhow!(
+            "geo_filter latitude must be between -90.0 and 90.0, got: {lat}"
+        ));
+    }
+    if !lon.is_finite() || !(-180.0..=180.0).contains(&lon) {
+        return Err(anyhow!(
+            "geo_filter longitude must be between -180.0 and 180.0, got: {lon}"
+        ));
+    }
+    if !radius_meters.is_finite() || radius_meters <= 0.0 {
+        return Err(anyhow!(
+            "geo_filter radius_meters must be > 0, got: {radius_meters}"
+        ));
+    }
+    // Earth's circumference is ~40,075 km
+    if radius_meters > 40_075_000.0 {
+        return Err(anyhow!(
+            "geo_filter radius_meters exceeds Earth's circumference: {radius_meters}"
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a reminder timestamp is not unreasonably far in the past or future
 pub fn validate_reminder_timestamp(at: &chrono::DateTime<chrono::Utc>) -> Result<()> {
     let now = chrono::Utc::now();
@@ -505,6 +555,45 @@ mod tests {
         assert!(validate_weight("test", 1.1).is_err());
         assert!(validate_weight("test", f32::NAN).is_err());
         assert!(validate_weight("test", f32::INFINITY).is_err());
+    }
+
+    #[test]
+    fn test_validate_geo_location() {
+        // Valid coordinates
+        assert!(validate_geo_location(&[37.7749, -122.4194, 10.0]).is_ok());
+        assert!(validate_geo_location(&[0.0, 0.0, 0.0]).is_ok());
+        assert!(validate_geo_location(&[-90.0, -180.0, -100.0]).is_ok());
+        assert!(validate_geo_location(&[90.0, 180.0, 8848.0]).is_ok());
+
+        // Invalid latitude
+        assert!(validate_geo_location(&[91.0, 0.0, 0.0]).is_err());
+        assert!(validate_geo_location(&[-91.0, 0.0, 0.0]).is_err());
+
+        // Invalid longitude
+        assert!(validate_geo_location(&[0.0, 181.0, 0.0]).is_err());
+        assert!(validate_geo_location(&[0.0, -181.0, 0.0]).is_err());
+
+        // NaN/Inf
+        assert!(validate_geo_location(&[f64::NAN, 0.0, 0.0]).is_err());
+        assert!(validate_geo_location(&[0.0, 0.0, f64::INFINITY]).is_err());
+    }
+
+    #[test]
+    fn test_validate_geo_filter() {
+        // Valid filters
+        assert!(validate_geo_filter(37.7749, -122.4194, 1000.0).is_ok());
+        assert!(validate_geo_filter(0.0, 0.0, 1.0).is_ok());
+
+        // Invalid latitude
+        assert!(validate_geo_filter(91.0, 0.0, 100.0).is_err());
+
+        // Invalid longitude
+        assert!(validate_geo_filter(0.0, 181.0, 100.0).is_err());
+
+        // Invalid radius
+        assert!(validate_geo_filter(0.0, 0.0, 0.0).is_err());
+        assert!(validate_geo_filter(0.0, 0.0, -1.0).is_err());
+        assert!(validate_geo_filter(0.0, 0.0, 50_000_000.0).is_err()); // > Earth circumference
     }
 
     #[test]

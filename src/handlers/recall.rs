@@ -33,6 +33,7 @@ use crate::memory::types::MemoryId;
 use crate::memory::{
     Experience, ExperienceType, Query as MemoryQuery, RetrievalMode, SharedMemory,
 };
+use crate::memory::types::GeoFilter;
 use crate::memory::{ProspectiveTrigger, TodoStatus};
 use crate::metrics;
 use crate::relevance;
@@ -49,6 +50,9 @@ fn parse_retrieval_mode(mode: &str) -> RetrievalMode {
         "associative" => RetrievalMode::Associative,
         "temporal" => RetrievalMode::Temporal,
         "causal" => RetrievalMode::Causal,
+        "spatial" => RetrievalMode::Spatial,
+        "mission" => RetrievalMode::Mission,
+        "action_outcome" | "action-outcome" => RetrievalMode::ActionOutcome,
         _ => RetrievalMode::Hybrid,
     }
 }
@@ -329,6 +333,31 @@ pub async fn recall(
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
     validation::validate_max_results(req.limit).map_validation_err("limit")?;
 
+    // Validate and build geo_filter from lat/lon/radius triple
+    let geo_filter = match (req.geo_lat, req.geo_lon, req.geo_radius_meters) {
+        (Some(lat), Some(lon), Some(radius)) => {
+            validation::validate_geo_filter(lat, lon, radius)
+                .map_validation_err("geo_filter")?;
+            Some(GeoFilter::new(lat, lon, radius))
+        }
+        (None, None, None) => None,
+        _ => {
+            return Err(AppError::InvalidInput {
+                field: "geo_filter".to_string(),
+                reason: "geo_lat, geo_lon, and geo_radius_meters must all be provided together"
+                    .to_string(),
+            });
+        }
+    };
+
+    // Build reward range from min/max pair
+    let reward_range = match (req.reward_min, req.reward_max) {
+        (Some(min), Some(max)) => Some((min, max)),
+        (Some(min), None) => Some((min, 1.0)),
+        (None, Some(max)) => Some((-1.0, max)),
+        (None, None) => None,
+    };
+
     let memory = state
         .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
@@ -357,6 +386,15 @@ pub async fn recall(
     } else {
         retrieval_mode_for_recall
     };
+
+    // Clone robotics filter fields for the spawn_blocking move boundary
+    let robot_id_for_recall = req.robot_id.clone();
+    let mission_id_for_recall = req.mission_id.clone();
+    let action_type_for_recall = req.action_type.clone();
+    let outcome_type_for_recall = req.outcome_type.clone();
+    let terrain_type_for_recall = req.terrain_type.clone();
+    let tags_for_recall = req.tags.clone();
+    let failures_only_for_recall = req.failures_only.unwrap_or(false);
 
     // PROSPECTIVE MEMORY + RECALL: Run inside a single spawn_blocking to share
     // the computed query embedding between prospective semantic matching and recall.
@@ -433,7 +471,7 @@ pub async fn recall(
                 Some(signals)
             };
 
-            // 4. Execute recall with prospective signals for future-informed retrieval
+            // 4. Execute recall with prospective signals + robotics filters
             let query = MemoryQuery {
                 user_id: Some(user_id_for_recall),
                 query_text: Some(query_for_recall),
@@ -442,6 +480,15 @@ pub async fn recall(
                 prospective_signals: prospective_signals.clone(),
                 session_id: session_id_for_recall,
                 time_range: session_time_range,
+                robot_id: robot_id_for_recall,
+                mission_id: mission_id_for_recall,
+                geo_filter,
+                action_type: action_type_for_recall,
+                reward_range,
+                outcome_type: outcome_type_for_recall,
+                failures_only: failures_only_for_recall,
+                terrain_type: terrain_type_for_recall,
+                tags: tags_for_recall,
                 ..Default::default()
             };
 

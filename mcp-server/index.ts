@@ -621,13 +621,61 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "number",
               description: "Optional importance override (0.0-1.0). Bypasses auto-calculation. Use for memories where importance is known: Decision=0.8, Learning=0.7, Error=0.7, Discovery=0.6, Observation=0.3",
             },
+            // Robotics context
+            robot_id: {
+              type: "string",
+              description: "Robot/drone identifier for multi-robot systems",
+            },
+            mission_id: {
+              type: "string",
+              description: "Mission identifier for grouping experiences",
+            },
+            geo_location: {
+              type: "array",
+              items: { type: "number" },
+              minItems: 3,
+              maxItems: 3,
+              description: "GPS coordinates [latitude, longitude, altitude] in WGS84",
+            },
+            local_position: {
+              type: "array",
+              items: { type: "number" },
+              minItems: 3,
+              maxItems: 3,
+              description: "Local position [x, y, z] in meters (robot-local frame)",
+            },
+            heading: {
+              type: "number",
+              description: "Heading in degrees (0-360)",
+            },
+            action_type: {
+              type: "string",
+              description: "Action type name (e.g., 'navigate', 'grasp', 'dock')",
+            },
+            reward: {
+              type: "number",
+              description: "Reinforcement learning reward signal (-1.0 to 1.0)",
+            },
+            sensor_data: {
+              type: "object",
+              additionalProperties: { type: "number" },
+              description: "Raw sensor readings (e.g., {battery: 72.5, temperature: 23.1})",
+            },
+            outcome_type: {
+              type: "string",
+              description: "Outcome type: success, failure, partial, aborted, timeout",
+            },
+            terrain_type: {
+              type: "string",
+              description: "Terrain type: indoor, outdoor, urban, rural, water, aerial",
+            },
           },
           required: ["content"],
         },
       },
       {
         name: "recall",
-        description: "Search memories AND todos using semantic similarity. Returns both relevant memories and matching todos. Use this to find past experiences, decisions, context, or pending work. Modes: 'semantic' (vector similarity), 'associative' (graph traversal), 'hybrid' (combined).",
+        description: "Search memories AND todos using semantic similarity. Returns both relevant memories and matching todos. Use this to find past experiences, decisions, context, or pending work. Modes: 'semantic' (vector similarity), 'associative' (graph traversal), 'temporal' (time-based retrieval), 'hybrid' (combined), 'spatial' (geo-location based), 'mission' (mission context), 'action_outcome' (reward-based learning).",
         inputSchema: {
           type: "object",
           properties: {
@@ -642,13 +690,62 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             mode: {
               type: "string",
-              enum: ["semantic", "associative", "temporal", "hybrid"],
-              description: "Retrieval mode: 'semantic' for pure vector similarity, 'associative' for graph-based traversal (follows learned connections), 'temporal' for time-based retrieval, 'hybrid' for density-dependent combination (default)",
+              enum: ["semantic", "associative", "temporal", "hybrid", "spatial", "mission", "action_outcome"],
+              description: "Retrieval mode: 'semantic' for pure vector similarity, 'associative' for graph-based traversal (follows learned connections), 'temporal' for time-based retrieval, 'hybrid' for density-dependent combination (default), 'spatial' for geo-location based, 'mission' for mission context, 'action_outcome' for reward-based learning",
               default: "hybrid",
             },
             session_id: {
               type: "string",
               description: "Session ID for session-scoped retrieval. When provided, retrieves memories from that session's time window. Forces temporal mode.",
+            },
+            robot_id: {
+              type: "string",
+              description: "Filter by robot/drone identifier (for multi-robot systems)",
+            },
+            mission_id: {
+              type: "string",
+              description: "Filter by mission identifier",
+            },
+            geo_lat: {
+              type: "number",
+              description: "Spatial filter: center latitude (-90 to 90). Requires geo_lon and geo_radius_meters.",
+            },
+            geo_lon: {
+              type: "number",
+              description: "Spatial filter: center longitude (-180 to 180). Requires geo_lat and geo_radius_meters.",
+            },
+            geo_radius_meters: {
+              type: "number",
+              description: "Spatial filter: search radius in meters. Requires geo_lat and geo_lon.",
+            },
+            action_type: {
+              type: "string",
+              description: "Filter by action type (e.g., 'navigate', 'grasp', 'dock')",
+            },
+            reward_min: {
+              type: "number",
+              description: "Filter by minimum reward value (-1.0 to 1.0)",
+            },
+            reward_max: {
+              type: "number",
+              description: "Filter by maximum reward value (-1.0 to 1.0)",
+            },
+            outcome_type: {
+              type: "string",
+              description: "Filter by outcome type: success, failure, partial, aborted, timeout",
+            },
+            failures_only: {
+              type: "boolean",
+              description: "If true, only return failure/error experiences",
+            },
+            terrain_type: {
+              type: "string",
+              description: "Filter by terrain type: indoor, outdoor, urban, rural, water, aerial",
+            },
+            tags: {
+              type: "array",
+              items: { type: "string" },
+              description: "Filter by tags (any match)",
             },
           },
           required: ["query"],
@@ -1450,6 +1547,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           parent_id,
           // Importance override
           importance,
+          // Robotics context
+          robot_id,
+          mission_id,
+          geo_location,
+          local_position,
+          heading,
+          action_type,
+          reward,
+          sensor_data,
+          outcome_type,
+          terrain_type,
         } = args as {
           content: string;
           type?: string;
@@ -1465,6 +1573,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           preceding_memory_id?: string;
           parent_id?: string;
           importance?: number;
+          robot_id?: string;
+          mission_id?: string;
+          geo_location?: number[];
+          local_position?: number[];
+          heading?: number;
+          action_type?: string;
+          reward?: number;
+          sensor_data?: Record<string, number>;
+          outcome_type?: string;
+          terrain_type?: string;
         };
 
         if (!content || content.length === 0) {
@@ -1493,6 +1611,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...(parent_id && { parent_id }),
           // Importance override
           ...(importance !== undefined && { importance }),
+          // Robotics context
+          ...(robot_id && { robot_id }),
+          ...(mission_id && { mission_id }),
+          ...(geo_location && geo_location.length === 3 && { geo_location }),
+          ...(local_position && local_position.length === 3 && { local_position }),
+          ...(heading !== undefined && { heading }),
+          ...(action_type && { action_type }),
+          ...(reward !== undefined && { reward }),
+          ...(sensor_data && Object.keys(sensor_data).length > 0 && { sensor_data }),
+          ...(outcome_type && { outcome_type }),
+          ...(terrain_type && { terrain_type }),
         });
 
         // Format response with branded display
@@ -1512,7 +1641,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "recall": {
-        const { query, limit: rawLimit = 5, mode = "hybrid", session_id } = args as { query: string; limit?: number; mode?: string; session_id?: string };
+        const {
+          query, limit: rawLimit = 5, mode = "hybrid", session_id,
+          robot_id, mission_id, geo_lat, geo_lon, geo_radius_meters,
+          action_type, reward_min, reward_max, outcome_type, failures_only,
+          terrain_type, tags,
+        } = args as {
+          query: string; limit?: number; mode?: string; session_id?: string;
+          robot_id?: string; mission_id?: string;
+          geo_lat?: number; geo_lon?: number; geo_radius_meters?: number;
+          action_type?: string; reward_min?: number; reward_max?: number;
+          outcome_type?: string; failures_only?: boolean;
+          terrain_type?: string; tags?: string[];
+        };
 
         if (!query || query.length === 0) {
           return { content: [{ type: "text", text: "Error: 'query' is required and cannot be empty" }], isError: true };
@@ -1520,7 +1661,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (query.length > MAX_QUERY_LENGTH) {
           return { content: [{ type: "text", text: `Error: 'query' exceeds maximum length of ${MAX_QUERY_LENGTH} characters` }], isError: true };
         }
-        const validModes = ["semantic", "associative", "temporal", "hybrid"];
+        const validModes = ["semantic", "associative", "temporal", "hybrid", "spatial", "mission", "action_outcome"];
         if (!validModes.includes(mode)) {
           return { content: [{ type: "text", text: `Error: 'mode' must be one of: ${validModes.join(", ")}` }], isError: true };
         }
@@ -1572,6 +1713,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           limit,
           mode,
           ...(session_id ? { session_id } : {}),
+          ...(robot_id ? { robot_id } : {}),
+          ...(mission_id ? { mission_id } : {}),
+          ...(geo_lat !== undefined ? { geo_lat } : {}),
+          ...(geo_lon !== undefined ? { geo_lon } : {}),
+          ...(geo_radius_meters !== undefined ? { geo_radius_meters } : {}),
+          ...(action_type ? { action_type } : {}),
+          ...(reward_min !== undefined ? { reward_min } : {}),
+          ...(reward_max !== undefined ? { reward_max } : {}),
+          ...(outcome_type ? { outcome_type } : {}),
+          ...(failures_only !== undefined ? { failures_only } : {}),
+          ...(terrain_type ? { terrain_type } : {}),
+          ...(tags && tags.length > 0 ? { tags } : {}),
         });
 
         const memories = result.memories || [];

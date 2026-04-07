@@ -67,6 +67,53 @@ pub struct RememberRequest {
     /// Decision=0.8, Learning=0.7, Error=0.7, Discovery=0.6, Observation=0.3
     #[serde(default)]
     pub importance: Option<f32>,
+
+    // === Robotics Context ===
+    /// Robot/drone identifier for multi-robot systems
+    #[serde(default)]
+    pub robot_id: Option<String>,
+    /// Mission identifier for grouping experiences
+    #[serde(default)]
+    pub mission_id: Option<String>,
+    /// GPS coordinates [latitude, longitude, altitude] in WGS84
+    #[serde(default)]
+    pub geo_location: Option<[f64; 3]>,
+    /// Local position [x, y, z] in meters (robot-local frame)
+    #[serde(default)]
+    pub local_position: Option<[f32; 3]>,
+    /// Heading in degrees (0-360)
+    #[serde(default)]
+    pub heading: Option<f32>,
+    /// Action type name (e.g., "navigate", "grasp", "dock")
+    #[serde(default)]
+    pub action_type: Option<String>,
+    /// Action parameters (e.g., {"speed": "0.5", "target": "shelf_3"})
+    #[serde(default)]
+    pub action_params: Option<std::collections::HashMap<String, String>>,
+    /// Reinforcement learning reward signal (-1.0 to 1.0)
+    #[serde(default)]
+    pub reward: Option<f32>,
+    /// Raw sensor readings (e.g., {"battery": 72.5, "temperature": 23.1})
+    #[serde(default)]
+    pub sensor_data: Option<std::collections::HashMap<String, f64>>,
+    /// Outcome type: success, failure, partial, aborted, timeout
+    #[serde(default)]
+    pub outcome_type: Option<String>,
+    /// Detailed outcome description
+    #[serde(default)]
+    pub outcome_details: Option<String>,
+    /// Terrain type: indoor, outdoor, urban, rural, water, aerial
+    #[serde(default)]
+    pub terrain_type: Option<String>,
+    /// Whether this is a failure/error experience
+    #[serde(default)]
+    pub is_failure: Option<bool>,
+    /// Whether this is an anomaly/unexpected event
+    #[serde(default)]
+    pub is_anomaly: Option<bool>,
+    /// Severity level: info, warning, error, critical
+    #[serde(default)]
+    pub severity: Option<String>,
 }
 
 /// Remember response
@@ -418,6 +465,11 @@ pub async fn remember(
         req.preceding_memory_id.clone(),
     );
 
+    // Validate robotics fields
+    if let Some(ref geo) = req.geo_location {
+        validation::validate_geo_location(geo).map_validation_err("geo_location")?;
+    }
+
     let experience = Experience {
         content: req.content.clone(),
         experience_type,
@@ -426,6 +478,21 @@ pub async fn remember(
         context,
         ner_entities,
         importance_override: req.importance.map(|v| v.clamp(0.0, 1.0)),
+        robot_id: req.robot_id.clone(),
+        mission_id: req.mission_id.clone(),
+        geo_location: req.geo_location,
+        local_position: req.local_position,
+        heading: req.heading,
+        action_type: req.action_type.clone(),
+        action_params: req.action_params.clone(),
+        reward: req.reward,
+        sensor_data: req.sensor_data.clone().unwrap_or_default(),
+        outcome_type: req.outcome_type.clone(),
+        outcome_details: req.outcome_details.clone(),
+        terrain_type: req.terrain_type.clone(),
+        is_failure: req.is_failure.unwrap_or(false),
+        is_anomaly: req.is_anomaly.unwrap_or(false),
+        severity: req.severity.clone(),
         ..Default::default()
     };
 
