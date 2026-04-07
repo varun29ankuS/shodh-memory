@@ -93,12 +93,50 @@ pub struct RecallRequest {
     pub query: String,
     #[serde(default = "default_recall_limit")]
     pub limit: usize,
-    /// Retrieval mode: "semantic", "associative", "temporal", or "hybrid" (default)
+    /// Retrieval mode: "semantic", "associative", "temporal", "spatial", "mission", "action_outcome", or "hybrid" (default)
     #[serde(default = "default_recall_mode")]
     pub mode: String,
     /// Session ID for session-scoped retrieval (used with mode="temporal")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+
+    // === Robotics Filters ===
+    /// Filter by robot/drone identifier
+    #[serde(default)]
+    pub robot_id: Option<String>,
+    /// Filter by mission identifier
+    #[serde(default)]
+    pub mission_id: Option<String>,
+    /// Spatial filter: center latitude (requires geo_lon and geo_radius_meters)
+    #[serde(default)]
+    pub geo_lat: Option<f64>,
+    /// Spatial filter: center longitude
+    #[serde(default)]
+    pub geo_lon: Option<f64>,
+    /// Spatial filter: search radius in meters
+    #[serde(default)]
+    pub geo_radius_meters: Option<f64>,
+    /// Filter by action type
+    #[serde(default)]
+    pub action_type: Option<String>,
+    /// Filter by minimum reward value
+    #[serde(default)]
+    pub reward_min: Option<f32>,
+    /// Filter by maximum reward value
+    #[serde(default)]
+    pub reward_max: Option<f32>,
+    /// Filter by outcome type: success, failure, partial, aborted, timeout
+    #[serde(default)]
+    pub outcome_type: Option<String>,
+    /// Filter for failures only
+    #[serde(default)]
+    pub failures_only: Option<bool>,
+    /// Filter by terrain type
+    #[serde(default)]
+    pub terrain_type: Option<String>,
+    /// Filter by tags (any match)
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 pub fn default_recall_limit() -> usize {
