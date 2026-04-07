@@ -1586,11 +1586,7 @@ mod tests {
             vec![],
             Some(emb.clone()),
         );
-        let mut task = create_test_memory_with_embeddings(
-            ExperienceType::Task,
-            vec![],
-            Some(emb),
-        );
+        let mut task = create_test_memory_with_embeddings(ExperienceType::Task, vec![], Some(emb));
         task.created_at = obs.created_at + Duration::days(1);
 
         let result = graph.infer_relation(&obs, &task);
@@ -1611,11 +1607,8 @@ mod tests {
         // Low entity overlap but high embedding similarity
         let emb_a = vec![0.1, 0.5, 0.8, 0.3, 0.9];
         let emb_b = vec![0.12, 0.48, 0.82, 0.28, 0.88]; // very similar
-        let learning = create_test_memory_with_embeddings(
-            ExperienceType::Learning,
-            vec!["rust"],
-            Some(emb_a),
-        );
+        let learning =
+            create_test_memory_with_embeddings(ExperienceType::Learning, vec!["rust"], Some(emb_a));
         let mut decision = create_test_memory_with_embeddings(
             ExperienceType::Decision,
             vec!["go", "lang", "rust"],
@@ -1639,16 +1632,10 @@ mod tests {
         // Low embedding similarity, no entities
         let emb_a = vec![1.0, 0.0, 0.0, 0.0, 0.0];
         let emb_b = vec![0.0, 0.0, 0.0, 0.0, 1.0]; // orthogonal
-        let obs = create_test_memory_with_embeddings(
-            ExperienceType::Observation,
-            vec![],
-            Some(emb_a),
-        );
-        let mut task = create_test_memory_with_embeddings(
-            ExperienceType::Task,
-            vec![],
-            Some(emb_b),
-        );
+        let obs =
+            create_test_memory_with_embeddings(ExperienceType::Observation, vec![], Some(emb_a));
+        let mut task =
+            create_test_memory_with_embeddings(ExperienceType::Task, vec![], Some(emb_b));
         task.created_at = obs.created_at + Duration::days(1);
 
         let result = graph.infer_relation(&obs, &task);
@@ -1670,12 +1657,19 @@ mod tests {
         // First weakening: 1.0 * 0.90 = 0.90
         let should_prune = edge.weaken();
         assert!(!should_prune);
-        assert!((edge.confidence - 0.90).abs() < 0.001, "expected ~0.90, got {}", edge.confidence);
+        assert!(
+            (edge.confidence - 0.90).abs() < 0.001,
+            "expected ~0.90, got {}",
+            edge.confidence
+        );
 
         // After many weakenings, should eventually prune
         for _ in 0..50 {
             edge.weaken();
         }
-        assert!(edge.confidence < 0.05, "should be below prune threshold after 50 weakenings");
+        assert!(
+            edge.confidence < 0.05,
+            "should be below prune threshold after 50 weakenings"
+        );
     }
 }
