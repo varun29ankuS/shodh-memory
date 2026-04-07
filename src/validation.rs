@@ -311,11 +311,7 @@ pub fn validate_geo_location(geo: &[f64; 3]) -> Result<()> {
 }
 
 /// Validate a GeoFilter for spatial recall queries
-pub fn validate_geo_filter(
-    lat: f64,
-    lon: f64,
-    radius_meters: f64,
-) -> Result<()> {
+pub fn validate_geo_filter(lat: f64, lon: f64, radius_meters: f64) -> Result<()> {
     if !lat.is_finite() || !(-90.0..=90.0).contains(&lat) {
         return Err(anyhow!(
             "geo_filter latitude must be between -90.0 and 90.0, got: {lat}"

@@ -29,11 +29,11 @@ use dashmap::DashMap;
 use crate::memory::segmentation::{InputSource, SegmentationEngine};
 use crate::memory::sessions::SessionEvent;
 use crate::memory::storage::SearchCriteria;
+use crate::memory::types::GeoFilter;
 use crate::memory::types::MemoryId;
 use crate::memory::{
     Experience, ExperienceType, Query as MemoryQuery, RetrievalMode, SharedMemory,
 };
-use crate::memory::types::GeoFilter;
 use crate::memory::{ProspectiveTrigger, TodoStatus};
 use crate::metrics;
 use crate::relevance;
@@ -336,8 +336,7 @@ pub async fn recall(
     // Validate and build geo_filter from lat/lon/radius triple
     let geo_filter = match (req.geo_lat, req.geo_lon, req.geo_radius_meters) {
         (Some(lat), Some(lon), Some(radius)) => {
-            validation::validate_geo_filter(lat, lon, radius)
-                .map_validation_err("geo_filter")?;
+            validation::validate_geo_filter(lat, lon, radius).map_validation_err("geo_filter")?;
             Some(GeoFilter::new(lat, lon, radius))
         }
         (None, None, None) => None,
