@@ -172,9 +172,14 @@ impl LineageEdge {
     /// strengthening is additive (+0.1). This matches the Hebbian asymmetry
     /// used in the knowledge graph — it takes many failures to destroy a
     /// strong connection, but a single confirmation can rescue a weak one.
-    pub fn weaken(&mut self) {
+    ///
+    /// Returns true if the edge should be pruned (confidence dropped below 0.05).
+    /// Callers should delete pruned edges to prevent the lineage graph from
+    /// accumulating zombie edges with negligible confidence.
+    pub fn weaken(&mut self) -> bool {
         self.confidence *= 0.85;
         self.last_reinforced = Utc::now();
+        self.confidence < 0.05
     }
 }
 
@@ -582,6 +587,10 @@ impl LineageGraph {
             // Only entities available, and they don't overlap enough
             return None;
         }
+        if has_embeddings && !has_entities && embedding_sim < self.config.min_entity_overlap {
+            // Only embeddings available, and similarity too low
+            return None;
+        }
         if has_entities && has_embeddings && semantic_signal < self.config.min_entity_overlap {
             // Both signals available, but neither reaches threshold
             return None;
@@ -611,15 +620,10 @@ impl LineageGraph {
         Some((relation, confidence))
     }
 
-    /// Cosine similarity between two embedding vectors
+    /// Cosine similarity between two embedding vectors.
+    /// Delegates to the SIMD-optimized implementation in similarity.rs.
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if norm_a == 0.0 || norm_b == 0.0 {
-            return 0.0;
-        }
-        dot / (norm_a * norm_b)
+        crate::similarity::cosine_similarity(a, b)
     }
 
     /// Infer relation based on memory types

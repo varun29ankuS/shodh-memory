@@ -1146,14 +1146,19 @@ fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::m
             // Phase 2: Recency fallback — fill remaining slots with recent memories.
             // This ensures lineage inference runs even when NER fails (empty entity_refs)
             // or when entity-graph candidates are sparse.
+            // Fetch more than needed, sort by newest first, then take `remaining`.
+            // recall_by_date returns oldest-first (date index order), so we reverse.
             if candidate_ids.len() < crate::constants::LINEAGE_MAX_CANDIDATES {
                 let remaining = crate::constants::LINEAGE_MAX_CANDIDATES - candidate_ids.len();
-                if let Ok(recent) = memory_guard.recall_by_date(
+                // Over-fetch to get a representative sample, then pick most recent
+                let fetch_limit = remaining * 3;
+                if let Ok(mut recent) = memory_guard.recall_by_date(
                     cutoff,
                     chrono::Utc::now(),
-                    remaining,
+                    fetch_limit,
                 ) {
-                    for mem in recent {
+                    recent.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                    for mem in recent.into_iter().take(remaining) {
                         candidate_ids.insert(mem.id.clone());
                     }
                 }

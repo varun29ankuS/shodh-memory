@@ -1527,7 +1527,7 @@ pub async fn proactive_context(
                         }
                     }
 
-                    // Weaken edges for misleading memories
+                    // Weaken edges for misleading memories, pruning zombie edges
                     for memory_id in &misleading_ids {
                         for edges in [
                             lineage.get_edges_from(&user_id, memory_id),
@@ -1536,8 +1536,12 @@ pub async fn proactive_context(
                             if let Ok(edges) = edges {
                                 for mut edge in edges {
                                     if reinforced_edge_ids.insert(edge.id.clone()) {
-                                        edge.weaken();
-                                        let _ = lineage.store_edge(&user_id, &edge);
+                                        let should_prune = edge.weaken();
+                                        if should_prune {
+                                            let _ = lineage.delete_edge(&user_id, &edge.id);
+                                        } else {
+                                            let _ = lineage.store_edge(&user_id, &edge);
+                                        }
                                     }
                                 }
                             }
