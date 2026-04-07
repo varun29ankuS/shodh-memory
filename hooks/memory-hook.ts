@@ -122,6 +122,11 @@ interface HookState {
   };
   consecutiveFailures: number;
   surfacedMemoryIds: string[];
+  // Conversation extraction
+  turnCount: number;
+  lastTranscriptOffset: number;
+  // TaskCreate/TaskUpdate bridging
+  taskIdMap: Record<string, string>;
 }
 
 function defaultState(sessionId: string): HookState {
@@ -143,6 +148,9 @@ function defaultState(sessionId: string): HookState {
     },
     consecutiveFailures: 0,
     surfacedMemoryIds: [],
+    turnCount: 0,
+    lastTranscriptOffset: 0,
+    taskIdMap: {},
   };
 }
 
@@ -660,7 +668,245 @@ async function surfaceProactiveContext(context: string, maxResults = 3, autoInge
 }
 
 // ---------------------------------------------------------------------------
-// 10. Event Handlers
+// 10. Conversation Extraction — captures assistant responses from transcript
+// ---------------------------------------------------------------------------
+
+const DECISION_PATTERNS = [
+  /\bshould\b/i, /\bdecided\b/i, /\bthe approach is\b/i,
+  /\brecommendation\b/i, /\bwon't work because\b/i,
+  /\bthe fix is\b/i, /\broot cause\b/i, /\bchose\b/i,
+  /\binstead of\b/i, /\btrade-?off\b/i,
+];
+
+const DIRECTIVE_PATTERNS = [
+  /\balways\b/i, /\bnever\b/i, /\bmust\b/i, /\bdon'?t\b/i,
+  /\bcritical\b/i, /\bimportant\b/i,
+];
+
+const INSIGHT_PATTERNS = [
+  /\bthe problem was\b/i, /\blearned that\b/i, /\bturns out\b/i,
+  /\bkey insight\b/i, /\bpattern\b/i, /\barchitecture\b/i,
+];
+
+/**
+ * Score an assistant response for decision/insight content.
+ * Returns 0 for short acknowledgments, higher for substantive responses.
+ */
+function scoreResponse(text: string): number {
+  if (text.length < 200) return 0;
+
+  let score = 0;
+
+  // Length bonus (logarithmic, caps at 3)
+  score += Math.min(Math.log2(text.length / 200), 3);
+
+  for (const p of DECISION_PATTERNS) {
+    if (p.test(text)) score += 1;
+  }
+  for (const p of DIRECTIVE_PATTERNS) {
+    if (p.test(text)) score += 1.5;
+  }
+  for (const p of INSIGHT_PATTERNS) {
+    if (p.test(text)) score += 1;
+  }
+
+  return score;
+}
+
+/**
+ * Read transcript tail, extract assistant text responses, score them,
+ * and store top 5 as Conversation memories.
+ *
+ * Uses byte offset tracking for incremental reads — never reads the full file.
+ * Capped at 512KB per extraction to stay within 5s hook timeout.
+ */
+async function extractConversationMemories(transcriptPath: string): Promise<void> {
+  const fs = require("fs");
+  const MAX_READ_BYTES = 512 * 1024;
+
+  let fileSize: number;
+  try {
+    const stat = fs.statSync(transcriptPath);
+    fileSize = stat.size;
+  } catch {
+    return;
+  }
+
+  // File shrank (truncated/rotated) — reset offset
+  if (hookState.lastTranscriptOffset > fileSize) {
+    hookState.lastTranscriptOffset = 0;
+    return;
+  }
+
+  // Nothing new since last extraction
+  if (hookState.lastTranscriptOffset >= fileSize) return;
+
+  const bytesToRead = Math.min(MAX_READ_BYTES, fileSize - hookState.lastTranscriptOffset);
+  const readStart = Math.max(hookState.lastTranscriptOffset, fileSize - MAX_READ_BYTES);
+
+  let fd: number;
+  try {
+    fd = fs.openSync(transcriptPath, "r");
+  } catch {
+    return;
+  }
+
+  try {
+    const buffer = Buffer.alloc(bytesToRead);
+    fs.readSync(fd, buffer, 0, bytesToRead, readStart);
+
+    let text = buffer.toString("utf-8");
+
+    // If we seeked past the stored offset (file too large), skip first partial line
+    if (readStart > hookState.lastTranscriptOffset) {
+      const firstNewline = text.indexOf("\n");
+      if (firstNewline >= 0) {
+        text = text.substring(firstNewline + 1);
+      }
+    }
+
+    // Update offset for next extraction
+    hookState.lastTranscriptOffset = fileSize;
+
+    // Parse JSONL, extract assistant text blocks
+    const assistantTexts: string[] = [];
+    const lines = text.split("\n");
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      let entry: { type?: string; message?: { content?: Array<{ type: string; text?: string }> } };
+      try {
+        entry = JSON.parse(trimmed);
+      } catch {
+        continue;
+      }
+
+      if (entry.type !== "assistant" || !entry.message?.content) continue;
+
+      // Extract only text blocks, skip tool_use/thinking blocks
+      const textBlocks = entry.message.content
+        .filter((b: { type: string; text?: string }) => b.type === "text" && b.text)
+        .map((b: { type: string; text?: string }) => b.text!)
+        .join("\n");
+
+      if (textBlocks.length > 0) {
+        assistantTexts.push(textBlocks);
+      }
+    }
+
+    // Score and pick top 5
+    const scored = assistantTexts
+      .map((t) => ({ text: t, score: scoreResponse(t) }))
+      .filter((t) => t.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+
+    if (scored.length === 0) return;
+
+    // Store each as Conversation memory (parallel)
+    await Promise.all(
+      scored.map((item) =>
+        rememberEnriched(
+          item.text.slice(0, 2000),
+          "Conversation",
+          ["source:transcript", "auto-extract"],
+          "task",
+          "task",
+        )
+      )
+    );
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 11. TaskCreate/TaskUpdate Bridging — mirrors Claude Code tasks to shodh todos
+// ---------------------------------------------------------------------------
+
+async function handleTaskCreate(input: HookInput): Promise<void> {
+  const toolInput = input.tool_input;
+  const toolOutput = input.tool_output;
+  if (!toolInput) return;
+
+  const subject = toolInput.subject as string;
+  const description = toolInput.description as string | undefined;
+
+  if (!subject) return;
+
+  // Parse output to get Claude Code's taskId
+  let claudeTaskId: string | null = null;
+  if (toolOutput) {
+    try {
+      const parsed = typeof toolOutput === "string" ? JSON.parse(toolOutput) : toolOutput;
+      claudeTaskId = parsed.taskId || null;
+    } catch {
+      // Output wasn't JSON
+    }
+  }
+
+  // Create shodh todo
+  const resp = (await callBrain("/api/todos/add", {
+    user_id: SHODH_USER_ID,
+    content: subject,
+    notes: description || undefined,
+    project: "session-tasks",
+    priority: "high",
+    external_id: claudeTaskId ? `claude-task:${claudeTaskId}` : undefined,
+    tags: ["source:hook", "claude-task"],
+  })) as { success?: boolean; todo?: { id: string; seq_num?: number; project_prefix?: string } } | null;
+
+  // Map Claude taskId to shodh short_id for future updates
+  if (claudeTaskId && resp?.todo) {
+    const shortId = resp.todo.project_prefix && resp.todo.seq_num != null
+      ? `${resp.todo.project_prefix}-${resp.todo.seq_num}`
+      : resp.todo.id;
+    hookState.taskIdMap[claudeTaskId] = shortId;
+  }
+}
+
+async function handleTaskUpdate(input: HookInput): Promise<void> {
+  const toolInput = input.tool_input;
+  if (!toolInput) return;
+
+  const claudeTaskId = toolInput.taskId as string;
+  if (!claudeTaskId) return;
+
+  const shodhShortId = hookState.taskIdMap[claudeTaskId];
+  if (!shodhShortId) return;
+
+  const status = toolInput.status as string | undefined;
+
+  if (status === "completed") {
+    await callBrain(`/api/todos/${shodhShortId}/complete`, {
+      user_id: SHODH_USER_ID,
+    });
+  } else if (status === "in_progress") {
+    await callBrain(`/api/todos/${shodhShortId}/update`, {
+      user_id: SHODH_USER_ID,
+      status: "in_progress",
+    });
+  } else if (status === "deleted") {
+    await callBrain(`/api/todos/${shodhShortId}/update`, {
+      user_id: SHODH_USER_ID,
+      status: "cancelled",
+    });
+  }
+
+  // If subject changed, update content
+  const newSubject = toolInput.subject as string | undefined;
+  if (newSubject) {
+    await callBrain(`/api/todos/${shodhShortId}/update`, {
+      user_id: SHODH_USER_ID,
+      content: newSubject,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 12. Event Handlers
 // ---------------------------------------------------------------------------
 
 async function handleSessionStart(input: HookInput): Promise<void> {
@@ -687,14 +933,19 @@ async function handleSessionStart(input: HookInput): Promise<void> {
 
   const context = `Starting session in project: ${projectName}`;
 
-  // Parallel: semantic context + tag-based session restoration
-  const [memoryResult, tagResult] = await Promise.all([
+  // Parallel: semantic context + tag-based session restoration + active todos
+  const [memoryResult, tagResult, activeTodosResult] = await Promise.all([
     surfaceProactiveContext(context, 5),
     callBrain("/api/recall/tags", {
       user_id: SHODH_USER_ID,
       tags: ["session-summary", "source:hook"],
       limit: 5,
     }) as Promise<{ memories?: Array<{ id: string; content?: string; experience?: { content?: string } }> } | null>,
+    callBrain("/api/todos/list", {
+      user_id: SHODH_USER_ID,
+      status: ["in_progress", "todo"],
+      limit: 5,
+    }) as Promise<{ todos?: Array<{ id: string; seq_num?: number; project_prefix?: string; content: string; status: string; priority: string }> } | null>,
   ]);
 
   // Extract tag-based session context (cap at 3 to avoid noise)
@@ -712,6 +963,24 @@ async function handleSessionStart(input: HookInput): Promise<void> {
   const hasMemoryContext = memoryResult !== null;
   const hasTagContext = tagContext.length > 0;
 
+  // Active work surfacing
+  let activeWorkContext = "";
+  if (activeTodosResult?.todos?.length) {
+    const todoLines: string[] = [];
+    for (const t of activeTodosResult.todos) {
+      const shortId = t.project_prefix && t.seq_num != null
+        ? `${t.project_prefix}-${t.seq_num}`
+        : "?";
+      const icon = t.status === "in_progress" ? "\u25D0" : "\u25CB";
+      const truncContent = t.content.length > 60
+        ? t.content.slice(0, 57) + "..."
+        : t.content;
+      todoLines.push(`  ${icon} ${shortId.padEnd(8)} ${truncContent}`);
+    }
+    console.error(`[shodh] Active work:\n${todoLines.join("\n")}`);
+    activeWorkContext = `\nActive todos:\n${todoLines.join("\n")}`;
+  }
+
   // Visibility Moment 3: First-session welcome
   if (!hasMemoryContext && !hasTagContext) {
     // No memories and no session summaries — likely first session
@@ -722,7 +991,17 @@ async function handleSessionStart(input: HookInput): Promise<void> {
         JSON.stringify({
           hookSpecificOutput: {
             hookEventName: "SessionStart",
-            additionalContext: `\n<shodh-memory>\nFirst session detected. Shodh will learn automatically \u2014 edits, errors, and commands are captured as memories. A session report will be shown when you end the session.\n</shodh-memory>`,
+            additionalContext: `\n<shodh-memory>\nFirst session detected. Shodh will learn automatically \u2014 edits, errors, and commands are captured as memories. A session report will be shown when you end the session.${activeWorkContext}\n</shodh-memory>`,
+          },
+        })
+      );
+    } else if (activeWorkContext) {
+      // No memories but has active todos — still inject context
+      console.log(
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: "SessionStart",
+            additionalContext: `\n<shodh-memory>${activeWorkContext}\n</shodh-memory>`,
           },
         })
       );
@@ -734,6 +1013,7 @@ async function handleSessionStart(input: HookInput): Promise<void> {
   const parts: string[] = [];
   if (memoryResult) parts.push(memoryResult.text);
   if (hasTagContext) parts.push(tagContext);
+  if (activeWorkContext) parts.push(activeWorkContext);
   const combinedContext = parts.join("\n\n");
 
   const surfacedCount = memoryResult?.meta.count || 0;
@@ -774,6 +1054,12 @@ async function handleUserPrompt(input: HookInput): Promise<void> {
         },
       })
     );
+  }
+
+  // Conversation extraction every 10 turns
+  hookState.turnCount++;
+  if (hookState.turnCount % 10 === 0 && input.transcript_path) {
+    await extractConversationMemories(input.transcript_path);
   }
 }
 
@@ -831,6 +1117,16 @@ async function handlePostToolUse(input: HookInput): Promise<void> {
     if (hookState.pendingToolActions.length > 50) {
       hookState.pendingToolActions.splice(0, hookState.pendingToolActions.length - 50);
     }
+  }
+
+  // TaskCreate/TaskUpdate bridging — mirror to shodh todos
+  if (toolName === "TaskCreate") {
+    await handleTaskCreate(input);
+    return;
+  }
+  if (toolName === "TaskUpdate") {
+    await handleTaskUpdate(input);
+    return;
   }
 
   // Orchestration: handle Task tool completions
@@ -1149,6 +1445,11 @@ async function handleStop(input: HookInput): Promise<void> {
     require("fs").appendFileSync(logFile, entry, "utf-8");
   } catch {
     // Best effort — don't crash the hook
+  }
+
+  // Final conversation extraction — capture any remaining assistant responses
+  if (input.transcript_path) {
+    await extractConversationMemories(input.transcript_path);
   }
 
   // Store rich summary as memory for next session's handleSessionStart
