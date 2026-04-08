@@ -403,7 +403,7 @@ pub async fn recall(
     let user_id_for_recall = req.user_id.clone();
     let query_for_recall = req.query.clone();
 
-    let (memories, triggered_reminders, _prospective_signals) =
+    let (mut memories, triggered_reminders, _prospective_signals) =
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory_for_recall.read();
 
@@ -587,6 +587,86 @@ pub async fn recall(
         {
             for (score, boost) in raw_scores.iter_mut().zip(boosts.iter()) {
                 *score += boost;
+            }
+        }
+    }
+
+    // Lineage candidate expansion: inject causally-connected memories not in results.
+    // Higher confidence bar (0.7) than boost (0.5) since we're adding new results.
+    if !memories.is_empty() {
+        let existing_ids: std::collections::HashSet<String> =
+            memories.iter().map(|m| m.id.0.to_string()).collect();
+        let memory_for_expansion = memory.clone();
+        let user_id_for_expansion = req.user_id.clone();
+        let existing_ids_clone = existing_ids.clone();
+        let memory_ids_for_expansion: Vec<(String, f32)> = memories
+            .iter()
+            .zip(raw_scores.iter())
+            .map(|(m, &s)| (m.id.0.to_string(), s))
+            .collect();
+
+        if let Ok(expanded) = tokio::task::spawn_blocking(move || {
+            let memory_guard = memory_for_expansion.read();
+            let lineage = memory_guard.lineage_graph();
+            // Collect (memory, derived_score) pairs for connected memories not in results
+            let mut candidates: Vec<(crate::memory::Memory, f32)> = Vec::new();
+
+            for (id_str, source_score) in &memory_ids_for_expansion {
+                let Ok(uuid) = uuid::Uuid::parse_str(id_str) else {
+                    continue;
+                };
+                let mid = crate::memory::MemoryId(uuid);
+
+                // Check both directions
+                let mut edges = Vec::new();
+                if let Ok(out) = lineage.get_edges_from(&user_id_for_expansion, &mid) {
+                    edges.extend(out);
+                }
+                if let Ok(inc) = lineage.get_edges_to(&user_id_for_expansion, &mid) {
+                    edges.extend(inc);
+                }
+
+                for edge in &edges {
+                    if edge.confidence < crate::constants::LINEAGE_EXPANSION_MIN_CONFIDENCE {
+                        continue;
+                    }
+                    // Get the other end of the edge
+                    let other_id = if edge.from.0.to_string() == *id_str {
+                        &edge.to
+                    } else {
+                        &edge.from
+                    };
+                    let other_str = other_id.0.to_string();
+                    if existing_ids_clone.contains(&other_str) {
+                        continue; // already in results
+                    }
+                    // Check we haven't already added this candidate
+                    if candidates.iter().any(|(m, _)| m.id == *other_id) {
+                        continue;
+                    }
+                    // Fetch from storage
+                    if let Ok(mem) = memory_guard.get_memory(other_id) {
+                        // Injected memories get 50% of source score scaled by edge confidence.
+                        // A perfect edge (1.0) from the top result gives 50% of top score,
+                        // ensuring injected memories sort below their source.
+                        let derived_score = source_score * edge.confidence * 0.5;
+                        candidates.push((mem, derived_score));
+                        if candidates.len() >= crate::constants::LINEAGE_EXPANSION_MAX {
+                            return candidates;
+                        }
+                    }
+                }
+                if candidates.len() >= crate::constants::LINEAGE_EXPANSION_MAX {
+                    break;
+                }
+            }
+            candidates
+        })
+        .await
+        {
+            for (mem, score) in expanded {
+                raw_scores.push(score);
+                memories.push(std::sync::Arc::new(mem));
             }
         }
     }
