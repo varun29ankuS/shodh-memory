@@ -13,7 +13,9 @@ use tracing::info;
 use super::state::MultiUserMemoryManager;
 use super::types::MemoryEvent;
 use crate::errors::{AppError, ValidationErrorExt};
-use crate::graph_memory::{EntityNode, EpisodicNode, GraphStats, GraphTraversal, MemoryUniverse};
+use crate::graph_memory::{
+    CurvatureStats, EntityNode, EpisodicNode, GraphStats, GraphTraversal, MemoryUniverse,
+};
 use crate::memory::{Experience, MemoryId};
 use crate::validation;
 use std::sync::Arc;
@@ -30,6 +32,31 @@ pub async fn get_graph_stats(
     let stats = state
         .get_user_graph_stats(&user_id)
         .map_err(AppError::Internal)?;
+
+    Ok(Json(stats))
+}
+
+/// POST /api/graph/{user_id}/curvature - Compute Forman-Ricci curvature
+///
+/// Triggers on-demand Forman-Ricci curvature computation for all edges
+/// in the user's knowledge graph. Returns distribution statistics.
+///
+/// This is also computed automatically during heavy maintenance cycles.
+pub async fn compute_curvature(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<CurvatureStats>, AppError> {
+    validation::validate_user_id(&user_id).map_validation_err("user_id")?;
+
+    let graph = state.get_user_graph(&user_id).map_err(AppError::Internal)?;
+
+    let stats = tokio::task::spawn_blocking(move || {
+        let graph_guard = graph.read();
+        graph_guard.compute_forman_ricci_curvature()
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Task join error: {}", e)))?
+    .map_err(AppError::Internal)?;
 
     Ok(Json(stats))
 }

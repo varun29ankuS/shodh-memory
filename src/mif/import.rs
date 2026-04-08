@@ -335,6 +335,7 @@ pub fn import_graph_relationships(
             tier,
             activation_timestamps: None,
             entity_confidence: rel.confidence,
+            forman_curvature: None,
         };
 
         match graph.add_relationship(edge) {

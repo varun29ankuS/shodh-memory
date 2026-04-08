@@ -1188,6 +1188,7 @@ impl MemorySystem {
                         tier: crate::graph_memory::EdgeTier::L1Working,
                         activation_timestamps: None,
                         entity_confidence,
+                        forman_curvature: None,
                     };
 
                     if let Err(e) = graph_guard.add_relationship(edge) {
@@ -5491,6 +5492,7 @@ impl MemorySystem {
                             tier: crate::graph_memory::EdgeTier::L2Episodic,
                             activation_timestamps: None,
                             entity_confidence: Some(fact.confidence),
+                            forman_curvature: None,
                         };
                         if graph_guard.add_relationship(edge).is_ok() {
                             edges_added += 1;
@@ -5850,6 +5852,7 @@ impl MemorySystem {
                             tier: crate::graph_memory::EdgeTier::L1Working,
                             activation_timestamps: None,
                             entity_confidence,
+                            forman_curvature: None,
                         };
 
                         if let Err(e) = graph_guard.add_relationship(edge) {

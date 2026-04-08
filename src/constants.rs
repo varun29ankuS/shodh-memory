@@ -2394,6 +2394,25 @@ pub const SESSION_REENGAGEMENT_BOOST: f32 = 0.20;
 pub const TEMPORAL_CREDIT_MIN_THRESHOLD: f32 = 0.02;
 
 // =============================================================================
+// FORMAN-RICCI CURVATURE CONSTANTS
+// Discrete Ricci curvature on the knowledge graph, computed during heavy
+// maintenance cycles. Measures information flow structure: bridges vs. clusters.
+//
+// Reference: Leal, Restrepo, Stadler, Jost (2018) arXiv:1811.07825
+//            "Forman-Ricci curvature for hypergraphs"
+// Neuroscience: Farooq et al. (2019) Nature Communications — Ricci curvature
+//               detects structural differences in brain networks invisible to
+//               traditional graph metrics.
+// =============================================================================
+
+/// Minimum number of edges required before curvature computation runs.
+///
+/// Below this threshold the graph is too sparse for curvature to be meaningful.
+/// A single connected component needs at least ~10 edges for the degree
+/// distribution to produce non-trivial curvature variation.
+pub const CURVATURE_MIN_EDGES: usize = 10;
+
+// =============================================================================
 // CAUSAL LINEAGE CONSTANTS (SHO-118)
 // Lineage inference detects causal relationships between memories using
 // temporal proximity, entity overlap, and memory type patterns.
