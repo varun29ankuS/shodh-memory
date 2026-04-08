@@ -4769,8 +4769,7 @@ impl GraphMemory {
         for (entity_id, selectivity) in &entity_selectivity {
             let key = entity_id.as_bytes();
             if let Ok(Some(value)) = self.db.get_cf(self.entities_cf(), key) {
-                if let Ok((mut entity, _)) =
-                    crate::serialization::try_decode::<EntityNode>(&value)
+                if let Ok((mut entity, _)) = crate::serialization::try_decode::<EntityNode>(&value)
                 {
                     entity.selectivity = Some(*selectivity);
                     if let Ok(encoded) = crate::serialization::encode(&entity) {
@@ -4779,9 +4778,9 @@ impl GraphMemory {
                 }
             }
         }
-        self.db.write(entity_batch).map_err(|e| {
-            anyhow::anyhow!("Failed to write entity selectivity batch: {}", e)
-        })?;
+        self.db
+            .write(entity_batch)
+            .map_err(|e| anyhow::anyhow!("Failed to write entity selectivity batch: {}", e))?;
 
         // Phase 5: Write edges with curvature + endpoint_selectivity
         let mut edge_batch = WriteBatch::default();
@@ -4813,9 +4812,9 @@ impl GraphMemory {
 
         let edges_computed = positive_count + zero_count + negative_count;
 
-        self.db.write(edge_batch).map_err(|e| {
-            anyhow::anyhow!("Failed to write curvature batch: {}", e)
-        })?;
+        self.db
+            .write(edge_batch)
+            .map_err(|e| anyhow::anyhow!("Failed to write curvature batch: {}", e))?;
 
         let stats = CurvatureStats {
             edges_computed,
@@ -7872,14 +7871,17 @@ mod tests {
         let a_entity = graph.get_entity(&a).unwrap().unwrap();
 
         let hub_sel = hub_entity.selectivity.expect("hub should have selectivity");
-        let a_sel = a_entity.selectivity.expect("concept A should have selectivity");
+        let a_sel = a_entity
+            .selectivity
+            .expect("concept A should have selectivity");
 
         // Concept node A should have higher selectivity than the hub
         // because A's incident edges span different curvature regimes
         assert!(
             a_sel > hub_sel,
             "Concept node selectivity ({}) should exceed hub selectivity ({})",
-            a_sel, hub_sel
+            a_sel,
+            hub_sel
         );
     }
 
@@ -7940,7 +7942,8 @@ mod tests {
         assert!(
             low_sel_edge.strength < high_sel_edge.strength,
             "Low-selectivity edge ({}) should decay more than high-selectivity edge ({})",
-            low_sel_edge.strength, high_sel_edge.strength
+            low_sel_edge.strength,
+            high_sel_edge.strength
         );
 
         // High-selectivity edge with Full LTP should retain most of its strength
@@ -8009,7 +8012,9 @@ mod tests {
         assert!(
             diff < 0.001,
             "None selectivity should match high selectivity: none={}, high={}, diff={}",
-            edge_none.strength, edge_high.strength, diff
+            edge_none.strength,
+            edge_high.strength,
+            diff
         );
     }
 
