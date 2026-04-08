@@ -10,10 +10,414 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 use tracing::info;
 
+/// Comprehensive entity blocklist — terms that should never become graph entities.
+/// Covers English stop words, programming tokens, structural/meta terms, and
+/// generic nouns that add noise without semantic value.
+fn entity_blocklist() -> &'static std::collections::HashSet<&'static str> {
+    static BL: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+    BL.get_or_init(|| {
+        [
+            // English stop words: articles, prepositions, conjunctions, pronouns, common verbs
+            "the",
+            "a",
+            "an",
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "been",
+            "being",
+            "have",
+            "has",
+            "had",
+            "do",
+            "does",
+            "did",
+            "will",
+            "would",
+            "could",
+            "should",
+            "may",
+            "might",
+            "shall",
+            "can",
+            "must",
+            "need",
+            "dare",
+            "ought",
+            "used",
+            "get",
+            "got",
+            "make",
+            "made",
+            "let",
+            "say",
+            "said",
+            "go",
+            "went",
+            "come",
+            "came",
+            "take",
+            "took",
+            "give",
+            "gave",
+            "see",
+            "saw",
+            "know",
+            "knew",
+            "think",
+            "thought",
+            "want",
+            "find",
+            "found",
+            "tell",
+            "told",
+            "ask",
+            "asked",
+            "work",
+            "seem",
+            "feel",
+            "try",
+            "leave",
+            "call",
+            "keep",
+            "put",
+            "run",
+            "set",
+            "show",
+            "turn",
+            "move",
+            "play",
+            "mean",
+            "add",
+            "read",
+            "pay",
+            "meet",
+            "write",
+            "lead",
+            "live",
+            "hold",
+            "bring",
+            "begin",
+            "start",
+            "end",
+            "just",
+            "also",
+            "very",
+            "often",
+            "however",
+            "too",
+            "usually",
+            "really",
+            "already",
+            "always",
+            "never",
+            "sometimes",
+            "still",
+            "now",
+            "then",
+            "here",
+            "there",
+            "where",
+            "when",
+            "how",
+            "what",
+            "which",
+            "who",
+            "whom",
+            "why",
+            "each",
+            "every",
+            "both",
+            "few",
+            "more",
+            "most",
+            "other",
+            "some",
+            "such",
+            "only",
+            "own",
+            "same",
+            "than",
+            "well",
+            "not",
+            "no",
+            "yes",
+            "but",
+            "or",
+            "and",
+            "so",
+            "yet",
+            "for",
+            "nor",
+            "that",
+            "this",
+            "with",
+            "from",
+            "into",
+            "about",
+            "after",
+            "before",
+            "between",
+            "through",
+            "during",
+            "without",
+            "against",
+            "upon",
+            "above",
+            "below",
+            "to",
+            "at",
+            "by",
+            "in",
+            "on",
+            "of",
+            "up",
+            "out",
+            "off",
+            "over",
+            "under",
+            "again",
+            "further",
+            "once",
+            "it",
+            "its",
+            "he",
+            "she",
+            "we",
+            "they",
+            "me",
+            "him",
+            "her",
+            "us",
+            "them",
+            "my",
+            "your",
+            "his",
+            "our",
+            "their",
+            "mine",
+            "yours",
+            "hers",
+            "ours",
+            "theirs",
+            "i",
+            "you",
+            "if",
+            "as",
+            "am",
+            // Programming tokens: keywords that bert-tiny misclassifies as entities
+            "impl",
+            "fn",
+            "pub",
+            "struct",
+            "enum",
+            "mod",
+            "use",
+            "let",
+            "mut",
+            "const",
+            "static",
+            "type",
+            "trait",
+            "where",
+            "self",
+            "super",
+            "crate",
+            "async",
+            "await",
+            "match",
+            "return",
+            "if",
+            "else",
+            "for",
+            "while",
+            "loop",
+            "break",
+            "continue",
+            "true",
+            "false",
+            "none",
+            "some",
+            "ok",
+            "err",
+            "todo",
+            "fixme",
+            "hack",
+            "note",
+            "debug",
+            "info",
+            "warn",
+            "error",
+            "test",
+            "cfg",
+            "derive",
+            "allow",
+            "deny",
+            "macro",
+            "unsafe",
+            "ref",
+            "dyn",
+            "box",
+            "def",
+            "class",
+            "import",
+            "from",
+            "pass",
+            "raise",
+            "except",
+            "try",
+            "finally",
+            "with",
+            "as",
+            "yield",
+            "lambda",
+            "elif",
+            "var",
+            "val",
+            "fun",
+            "object",
+            "interface",
+            "package",
+            "void",
+            "int",
+            "float",
+            "double",
+            "string",
+            "bool",
+            "char",
+            "byte",
+            "long",
+            "short",
+            "null",
+            "nil",
+            "undefined",
+            "typeof",
+            "instanceof",
+            "new",
+            "delete",
+            "throw",
+            "catch",
+            "switch",
+            "case",
+            "default",
+            "export",
+            "require",
+            // Structural/meta terms: describe content structure, not concepts
+            "auto-extract",
+            "source:transcript",
+            "source:hook",
+            "source:api",
+            "source:web",
+            "source:file",
+            "source:user",
+            "source:system",
+            "source:ai_generated",
+            "source:inferred",
+            "user",
+            "system",
+            "process",
+            "function",
+            "method",
+            "class",
+            "file",
+            "module",
+            "component",
+            "service",
+            "handler",
+            "controller",
+            "model",
+            "view",
+            "config",
+            "setting",
+            "option",
+            "parameter",
+            "argument",
+            "variable",
+            "output",
+            "input",
+            "value",
+            "key",
+            "index",
+            "item",
+            "element",
+            "node",
+            "edge",
+            "list",
+            "array",
+            "map",
+            "table",
+            "row",
+            "column",
+            "field",
+            "record",
+            "entry",
+            "object",
+            "instance",
+            "request",
+            "response",
+            "event",
+            "action",
+            "state",
+            "status",
+            "context",
+            "content",
+            "text",
+            "name",
+            "path",
+            "code",
+            "line",
+            "block",
+            "section",
+            // Common nouns: generic terms that never form meaningful graph concepts
+            "thing",
+            "stuff",
+            "something",
+            "anything",
+            "nothing",
+            "everything",
+            "way",
+            "place",
+            "time",
+            "case",
+            "point",
+            "part",
+            "example",
+            "issue",
+            "problem",
+            "question",
+            "answer",
+            "result",
+            "data",
+            "information",
+            "change",
+            "update",
+            "version",
+            "number",
+            "size",
+            "count",
+            "total",
+            "kind",
+            "sort",
+            "form",
+            "step",
+            "level",
+            "bit",
+            "lot",
+            "ones",
+        ]
+        .iter()
+        .copied()
+        .collect()
+    })
+}
+
 /// Static regex for extracting all-caps terms (API, TUI, NER, REST, etc.)
+/// Minimum 3 chars to avoid noise (IF, OR, DO, SO, AS, AT, BY, IT, NO, UP, ON)
 fn allcaps_regex() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"\b[A-Z]{2,}[A-Z0-9]*\b").unwrap())
+    RE.get_or_init(|| regex::Regex::new(r"\b[A-Z]{3,}[A-Z0-9]*\b").unwrap())
 }
 
 /// Static regex for extracting issue IDs (SHO-XX, JIRA-123, etc.)
@@ -2069,13 +2473,7 @@ impl MultiUserMemoryManager {
         let now = chrono::Utc::now();
 
         // Stop words for filtering
-        let stop_words: std::collections::HashSet<&str> = [
-            "the", "and", "for", "that", "this", "with", "from", "have", "been", "are", "was",
-            "were", "will", "would", "could", "should", "may", "might",
-        ]
-        .iter()
-        .cloned()
-        .collect();
+        let blocklist = entity_blocklist();
 
         // Use pre-extracted NER records for proper entity labels when available
         // This avoids redundant NER inference — the handler already ran NER in Pass 1
@@ -2133,26 +2531,98 @@ impl MultiUserMemoryManager {
             }
         };
 
-        // Filter noise entities
+        // Filter noise entities — comprehensive multi-layer quality gate
         let filtered_entities: Vec<_> = extracted_entities
             .into_iter()
             .filter(|e| {
                 let name = e.text.trim();
-                if name.len() < 3 {
+                // 1. Minimum length
+                if name.len() < 2 {
                     return false;
                 }
-                if !name.chars().any(|c| c.is_uppercase()) && e.confidence < 0.7 {
+                // 2. Blocklist (200+ terms: stop words, code tokens, structural terms)
+                if blocklist.contains(name.to_lowercase().as_str()) {
                     return false;
                 }
-                if stop_words.contains(name.to_lowercase().as_str()) {
+                // 3. Absolute confidence floor
+                if e.confidence < 0.5 {
                     return false;
                 }
-                if name.len() < 5 && e.confidence < 0.8 {
+                // 4. Pure numeric strings ("123", "42")
+                if name.chars().all(|c| c.is_ascii_digit()) {
+                    return false;
+                }
+                // 5. Single repeated character ("aaa", "xxx")
+                if name.len() >= 2 {
+                    let first = name.chars().next().unwrap().to_lowercase().next().unwrap();
+                    if name
+                        .chars()
+                        .all(|c| c.to_lowercase().next().unwrap() == first)
+                    {
+                        return false;
+                    }
+                }
+                // 6. Only punctuation/symbols
+                if !name.chars().any(|c| c.is_alphanumeric()) {
+                    return false;
+                }
+                // 7. MISC type without uppercase needs higher confidence
+                if matches!(e.entity_type, NerEntityType::Misc)
+                    && !name.chars().any(|c| c.is_uppercase())
+                    && e.confidence < 0.8
+                {
+                    return false;
+                }
+                // 8. Short MISC entities need very high confidence
+                if matches!(e.entity_type, NerEntityType::Misc)
+                    && name.len() < 6
+                    && e.confidence < 0.85
+                {
                     return false;
                 }
                 true
             })
             .collect();
+
+        // Graph-aware reputation check: penalize entities that the graph already
+        // knows are stop-word hubs (low selectivity + high degree + many mentions).
+        // Uses read-only O(1) lookups — no locks, no blocking.
+        let filtered_entities: Vec<_> = {
+            let graph = self.get_user_graph(user_id).ok();
+            let graph_guard = graph.as_ref().map(|g| g.read());
+            filtered_entities
+                .into_iter()
+                .filter(|e| {
+                    let Some(ref gg) = graph_guard else {
+                        return true;
+                    };
+                    let Some(rep) = gg.get_entity_reputation(&e.text) else {
+                        return true; // New entity, no graph data yet
+                    };
+                    // Hard reject: confirmed stop-word by both high degree and low selectivity
+                    if rep.degree > 200 && rep.selectivity < 0.1 {
+                        tracing::debug!(
+                            "Graph-rejected hub entity '{}' (degree={}, selectivity={:.3})",
+                            e.text, rep.degree, rep.selectivity
+                        );
+                        return false;
+                    }
+                    // Soft penalty: known low-selectivity entity with many mentions —
+                    // halve effective confidence and re-check against thresholds
+                    if rep.selectivity < 0.15 && rep.mention_count > 10 {
+                        let penalized = e.confidence * 0.5;
+                        if penalized < 0.5 {
+                            tracing::debug!(
+                                "Graph-penalized entity '{}' below floor (conf={:.2}→{:.2}, sel={:.3})",
+                                e.text, e.confidence, penalized, rep.selectivity
+                            );
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .collect()
+        };
 
         tracing::debug!(
             "After filtering: {} entities: {:?}",
@@ -2199,7 +2669,7 @@ impl MultiUserMemoryManager {
             .iter()
             .filter_map(|tag| {
                 let tag_name = tag.trim();
-                if tag_name.len() >= 2 && !stop_words.contains(tag_name.to_lowercase().as_str()) {
+                if tag_name.len() >= 2 && !blocklist.contains(tag_name.to_lowercase().as_str()) {
                     Some((
                         tag_name.to_string(),
                         EntityNode {
@@ -2231,25 +2701,32 @@ impl MultiUserMemoryManager {
             .collect();
 
         // Extract all-caps terms (API, TUI, NER, REST, etc.)
-        let allcaps_entities: Vec<(String, EntityNode)> = allcaps_regex()
-            .find_iter(&experience.content)
-            .filter_map(|cap| {
-                let term = cap.as_str();
+        // Count occurrences first — only extract terms that appear 2+ times
+        let mut allcaps_counts: HashMap<String, usize> = HashMap::new();
+        for cap in allcaps_regex().find_iter(&experience.content) {
+            *allcaps_counts.entry(cap.as_str().to_string()).or_insert(0) += 1;
+        }
+        let allcaps_entities: Vec<(String, EntityNode)> = allcaps_counts
+            .into_iter()
+            .filter_map(|(term, count)| {
+                if count < 2 {
+                    return None; // Require 2+ occurrences to be meaningful
+                }
                 if known_names
                     .iter()
-                    .any(|name| name.eq_ignore_ascii_case(term))
+                    .any(|name| name.eq_ignore_ascii_case(&term))
                 {
                     return None;
                 }
-                if stop_words.contains(term.to_lowercase().as_str()) {
+                if blocklist.contains(term.to_lowercase().as_str()) {
                     return None;
                 }
-                known_names.push(term.to_string());
+                known_names.push(term.clone());
                 Some((
-                    term.to_string(),
+                    term.clone(),
                     EntityNode {
                         uuid: uuid::Uuid::new_v4(),
-                        name: term.to_string(),
+                        name: term,
                         labels: vec![EntityLabel::Technology],
                         created_at: now,
                         last_seen_at: now,
@@ -2307,15 +2784,15 @@ impl MultiUserMemoryManager {
             {
                 continue;
             }
-            if stop_words.contains(verb_text.to_lowercase().as_str()) {
+            if blocklist.contains(verb_text.to_lowercase().as_str()) {
                 continue;
             }
-            if verb_text.len() < 3 {
-                continue;
+            if verb_text.len() < 4 {
+                continue; // Skip short verbs: is, do, be, go, get, set, run, put, etc.
             }
 
             for name in [verb_text, verb_stem] {
-                if name.len() < 3 {
+                if name.len() < 4 {
                     continue;
                 }
                 if known_names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
@@ -2334,7 +2811,7 @@ impl MultiUserMemoryManager {
                         summary: String::new(),
                         attributes: HashMap::new(),
                         name_embedding: None,
-                        salience: 0.4,
+                        salience: 0.3, // Low salience: verbs decay faster than named entities
                         is_proper_noun: false,
                         selectivity: None,
                     },
@@ -2420,9 +2897,43 @@ impl MultiUserMemoryManager {
 
         // Create relationships between co-occurring entities
         // Pre-compute truncated context once (avoids re-allocating per edge)
+        // Edge quality gate: skip edges between two confirmed stop-word hubs
+        // or when either endpoint is a saturated hub (degree > 300).
         let truncated_context: String = experience.content.chars().take(150).collect();
         for i in 0..entity_uuids.len() {
             for j in (i + 1)..entity_uuids.len() {
+                // Edge quality gate using graph reputation
+                let rep_i = graph_guard.get_entity_reputation(&entity_uuids[i].0);
+                let rep_j = graph_guard.get_entity_reputation(&entity_uuids[j].0);
+
+                // Skip: both endpoints are low-selectivity (co-occurrence is meaningless)
+                if let (Some(ri), Some(rj)) = (&rep_i, &rep_j) {
+                    if ri.selectivity < 0.2 && rj.selectivity < 0.2 {
+                        tracing::debug!(
+                            "Skipping edge '{}'-'{}': both low selectivity ({:.3}, {:.3})",
+                            entity_uuids[i].0,
+                            entity_uuids[j].0,
+                            ri.selectivity,
+                            rj.selectivity
+                        );
+                        continue;
+                    }
+                }
+
+                // Skip: either endpoint is a saturated hub
+                if rep_i.as_ref().is_some_and(|r| r.degree > 300)
+                    || rep_j.as_ref().is_some_and(|r| r.degree > 300)
+                {
+                    tracing::debug!(
+                        "Skipping edge '{}'-'{}': hub saturated (degrees: {:?}, {:?})",
+                        entity_uuids[i].0,
+                        entity_uuids[j].0,
+                        rep_i.as_ref().map(|r| r.degree),
+                        rep_j.as_ref().map(|r| r.degree),
+                    );
+                    continue;
+                }
+
                 let edge = RelationshipEdge {
                     uuid: uuid::Uuid::new_v4(),
                     from_entity: entity_uuids[i].1,
@@ -2452,5 +2963,83 @@ impl MultiUserMemoryManager {
         // Lock released here
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_blocklist_contains_english_stop_words() {
+        let bl = entity_blocklist();
+        for word in &[
+            "the", "is", "are", "have", "will", "would", "could", "should",
+        ] {
+            assert!(
+                bl.contains(word),
+                "Blocklist missing English stop word: {}",
+                word
+            );
+        }
+    }
+
+    #[test]
+    fn test_blocklist_contains_programming_tokens() {
+        let bl = entity_blocklist();
+        for token in &[
+            "impl", "fn", "pub", "struct", "enum", "async", "await", "const",
+        ] {
+            assert!(
+                bl.contains(token),
+                "Blocklist missing programming token: {}",
+                token
+            );
+        }
+    }
+
+    #[test]
+    fn test_blocklist_contains_structural_terms() {
+        let bl = entity_blocklist();
+        for term in &[
+            "auto-extract",
+            "source:transcript",
+            "source:hook",
+            "source:api",
+        ] {
+            assert!(
+                bl.contains(term),
+                "Blocklist missing structural term: {}",
+                term
+            );
+        }
+    }
+
+    #[test]
+    fn test_blocklist_rejects_common_nouns() {
+        let bl = entity_blocklist();
+        for noun in &["thing", "stuff", "something", "nothing", "everything"] {
+            assert!(bl.contains(noun), "Blocklist missing common noun: {}", noun);
+        }
+    }
+
+    #[test]
+    fn test_blocklist_preserves_real_entities() {
+        let bl = entity_blocklist();
+        // Real entity names should NOT be in the blocklist
+        for name in &["OpenAI", "Rust", "Kubernetes", "Anthropic", "GraphMemory"] {
+            assert!(
+                !bl.contains(name.to_lowercase().as_str()),
+                "Blocklist incorrectly contains real entity: {}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_blocklist_is_singleton() {
+        let a = entity_blocklist() as *const _;
+        let b = entity_blocklist() as *const _;
+        assert_eq!(a, b, "Blocklist should be a singleton via OnceLock");
     }
 }

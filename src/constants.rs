@@ -2438,6 +2438,11 @@ pub const SELECTIVITY_HALF_SAT: f32 = 0.5;
 /// distribution to produce non-trivial curvature variation.
 pub const CURVATURE_MIN_EDGES: usize = 10;
 
+/// Scale factor for curvature → path_boost conversion in retrieval.
+/// Positive curvature (community) increases boost, negative (bridge) decreases.
+/// 0.05 gives ±0.5 range for typical curvature values of [-10, +10].
+pub const CURVATURE_PATH_BOOST_SCALE: f32 = 0.05;
+
 // =============================================================================
 // CAUSAL LINEAGE CONSTANTS (SHO-118)
 // Lineage inference detects causal relationships between memories using
