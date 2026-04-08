@@ -2018,10 +2018,26 @@ impl MemorySystem {
                                 bidir_depth,
                                 bidir_min_str,
                             ) {
+                                // Curvature-weighted path boost: positive curvature
+                                // (community interior) increases boost, negative
+                                // (bridge/bottleneck) decreases it.
+                                let path_boost = {
+                                    let curvatures: Vec<f32> = path
+                                        .relationships
+                                        .iter()
+                                        .filter_map(|e| e.forman_curvature)
+                                        .collect();
+                                    if curvatures.is_empty() {
+                                        1.5
+                                    } else {
+                                        let mean = curvatures.iter().sum::<f32>()
+                                            / curvatures.len() as f32;
+                                        (1.5 + mean * crate::constants::CURVATURE_PATH_BOOST_SCALE)
+                                            .clamp(0.8, 2.5)
+                                    }
+                                };
                                 for tr in &path.entities {
                                     if let Ok(mut eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
-                                        // Keep most recent episodes — recency correlates
-                                        // with relevance for graph-surfaced candidates.
                                         eps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
                                         eps.truncate(50);
                                         for ep in eps {
@@ -2030,7 +2046,6 @@ impl MemorySystem {
                                                 .as_ref()
                                                 .map_or(true, |c| c.contains(&mid))
                                             {
-                                                let path_boost = 1.5;
                                                 ids.push((
                                                     mid,
                                                     tr.entity.salience
@@ -2068,6 +2083,20 @@ impl MemorySystem {
                         relation_filter.as_deref(),
                         weighted_min_str,
                     ) {
+                        let weighted_boost = {
+                            let curvatures: Vec<f32> = t
+                                .relationships
+                                .iter()
+                                .filter_map(|e| e.forman_curvature)
+                                .collect();
+                            if curvatures.is_empty() {
+                                1.0
+                            } else {
+                                let mean = curvatures.iter().sum::<f32>() / curvatures.len() as f32;
+                                (1.0 + mean * crate::constants::CURVATURE_PATH_BOOST_SCALE)
+                                    .clamp(0.6, 2.0)
+                            }
+                        };
                         for tr in &t.entities {
                             if let Ok(mut eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
                                 eps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -2080,7 +2109,7 @@ impl MemorySystem {
                                     {
                                         ids.push((
                                             mid,
-                                            tr.entity.salience * tr.decay_factor,
+                                            tr.entity.salience * tr.decay_factor * weighted_boost,
                                             tr.decay_factor,
                                         ));
                                     }

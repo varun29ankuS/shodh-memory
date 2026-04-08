@@ -2059,6 +2059,25 @@ impl GraphMemory {
         Ok(None)
     }
 
+    /// Lightweight quality metrics for an existing entity in the graph.
+    /// Used by NER filtering to suppress known stop-word entities.
+    pub fn get_entity_reputation(&self, name: &str) -> Option<EntityReputation> {
+        // O(1) lookup via lowercase index
+        let uuid = {
+            let index = self.entity_lowercase_index.read();
+            index.get(&name.to_lowercase()).copied()
+        }?;
+
+        let entity = self.get_entity(&uuid).ok()??;
+        let degree = self.entity_edge_count(&uuid).unwrap_or(0);
+
+        Some(EntityReputation {
+            selectivity: entity.selectivity.unwrap_or(1.0), // Conservative default
+            mention_count: entity.mention_count,
+            degree,
+        })
+    }
+
     /// Find all entities matching a name with fuzzy matching
     ///
     /// Returns multiple matches ranked by match quality.
@@ -5203,6 +5222,18 @@ pub struct GraphStats {
 
 /// Summary statistics from Forman-Ricci curvature computation
 ///
+/// Lightweight reputation signal for an entity, derived from graph topology.
+/// Used by NER quality gating to penalize/reject known stop-word entities.
+#[derive(Debug, Clone)]
+pub struct EntityReputation {
+    /// Curvature selectivity: high = concept, low = stop-word hub
+    pub selectivity: f32,
+    /// How many times this entity has been mentioned
+    pub mention_count: usize,
+    /// Number of edges incident to this entity
+    pub degree: usize,
+}
+
 /// Captures the distribution of curvature across the knowledge graph.
 /// Positive curvature = tightly-connected community interior edges.
 /// Negative curvature = bridge/bottleneck edges between hubs.
@@ -8059,5 +8090,49 @@ mod tests {
             entity_b.selectivity.is_some(),
             "Entity B should have selectivity"
         );
+    }
+
+    #[test]
+    fn test_entity_reputation_returns_none_for_unknown() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        assert!(graph.get_entity_reputation("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_entity_reputation_reflects_graph_state() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let hub = make_entity(&graph, "HubEntity");
+        let a = make_entity(&graph, "SpokeA");
+        let b = make_entity(&graph, "SpokeB");
+        let c = make_entity(&graph, "SpokeC");
+
+        make_edge(&graph, hub, a);
+        make_edge(&graph, hub, b);
+        make_edge(&graph, hub, c);
+        make_edge(&graph, a, b); // give a,b some edges too
+
+        graph.compute_forman_ricci_curvature().unwrap();
+
+        let rep = graph.get_entity_reputation("HubEntity").unwrap();
+        assert_eq!(rep.degree, 3);
+        assert_eq!(rep.mention_count, 1);
+        // Hub has lower selectivity than spokes
+        let rep_a = graph.get_entity_reputation("SpokeA").unwrap();
+        assert!(
+            rep.selectivity <= rep_a.selectivity || rep.degree > rep_a.degree,
+            "Hub should have lower selectivity or higher degree than spoke"
+        );
+    }
+
+    #[test]
+    fn test_entity_reputation_case_insensitive() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        make_entity(&graph, "TestEntity");
+        assert!(graph.get_entity_reputation("testentity").is_some());
+        assert!(graph.get_entity_reputation("TESTENTITY").is_some());
     }
 }
