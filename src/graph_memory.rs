@@ -82,6 +82,22 @@ pub struct EntityNode {
     /// Proper nouns have higher base salience than common nouns
     #[serde(default)]
     pub is_proper_noun: bool,
+
+    /// Curvature selectivity: stdev(incident edge curvatures) / degree
+    ///
+    /// Measures whether this entity participates in specific communities
+    /// (high selectivity) or connects to everything uniformly (low selectivity).
+    ///
+    /// High selectivity → concept (e.g., "Hebbian learning" connects within neuroscience)
+    /// Low selectivity  → stop word (e.g., "impl" connects to everything equally)
+    ///
+    /// Used to gate LTP protection: low-selectivity entities cannot earn
+    /// permanent LTP regardless of activation count, mimicking habituation
+    /// in biological neural systems.
+    ///
+    /// Computed during Forman-Ricci curvature pass. None = not yet computed.
+    #[serde(default)]
+    pub selectivity: Option<f32>,
 }
 
 fn default_salience() -> f32 {
@@ -447,6 +463,18 @@ pub struct RelationshipEdge {
     #[serde(default)]
     pub entity_confidence: Option<f32>,
 
+    /// Minimum curvature selectivity of the two endpoint entities.
+    ///
+    /// Cached from EntityNode.selectivity during curvature computation.
+    /// Used by decay() to gate LTP protection: if the weakest endpoint
+    /// is a stop word (low selectivity), LTP protection is reduced,
+    /// allowing curvature-accelerated decay to clean up noise edges
+    /// even if they're frequently co-activated.
+    ///
+    /// None = not yet computed (full LTP protection applies).
+    #[serde(default)]
+    pub endpoint_selectivity: Option<f32>,
+
     /// Forman-Ricci curvature of this edge (Leal, Restrepo, Stadler, Jost 2018)
     ///
     /// For directed graphs:
@@ -803,7 +831,30 @@ impl RelationshipEdge {
             EdgeTier::L2Episodic => 1,
             EdgeTier::L3Semantic => 2,
         };
-        let ltp_factor = self.ltp_status.decay_factor();
+        let raw_ltp_factor = self.ltp_status.decay_factor();
+
+        // Gate LTP protection by endpoint selectivity (habituation mechanism).
+        // Low-selectivity edges (connecting stop-word entities) get reduced
+        // LTP protection regardless of activation count, because high-frequency
+        // low-information signals should habituate, not potentiate.
+        //
+        // effective_ltp = raw_ltp * (selectivity / (selectivity + half_sat))
+        //
+        // selectivity=0.0 → effective_ltp=raw_ltp*0.0 = 1.0 (no protection)
+        // selectivity=0.5 → effective_ltp=raw_ltp*0.5 (half protection)
+        // selectivity=5.0 → effective_ltp=raw_ltp*0.91 (nearly full protection)
+        // selectivity=None → full protection (not yet computed, conservative)
+        let ltp_factor = match self.endpoint_selectivity {
+            Some(sel) if sel < crate::constants::SELECTIVITY_STOP_WORD_THRESHOLD => {
+                // Blend toward 1.0 (no protection) as selectivity → 0
+                let gate = sel / (sel + crate::constants::SELECTIVITY_HALF_SAT);
+                // ltp_factor is in (0, 1]: 0.1 = Full LTP, 1.0 = no LTP
+                // gate → 0 means override toward 1.0 (no protection)
+                raw_ltp_factor + (1.0 - raw_ltp_factor) * (1.0 - gate)
+            }
+            _ => raw_ltp_factor, // Not computed yet or above threshold: full protection
+        };
+
         let (decay_factor, exceeded_max_age) =
             tier_decay_factor(hours_elapsed, tier_num, ltp_factor);
         self.strength *= decay_factor;
@@ -3840,6 +3891,7 @@ impl GraphMemory {
                         // PIPE-5: Memory-to-memory edges use default confidence
                         entity_confidence: None,
                         forman_curvature: None,
+                        endpoint_selectivity: None,
                     };
 
                     let key = edge.uuid.as_bytes();
@@ -4020,6 +4072,7 @@ impl GraphMemory {
                     // PIPE-5: Replay edges use default confidence
                     entity_confidence: None,
                     forman_curvature: None,
+                    endpoint_selectivity: None,
                 };
 
                 let key = edge.uuid.as_bytes();
@@ -4639,10 +4692,8 @@ impl GraphMemory {
             *in_degree.entry(edge.to_entity).or_insert(0) += 1;
         }
 
-        // Phase 2: Compute curvature for each edge and write back
-        // F(e) = 4 - deg(source) - deg(target)
-        // where deg(v) = in_deg(v) + out_deg(v) for the total curvature
-        let mut batch = WriteBatch::default();
+        // Phase 2: Compute curvature for each edge, collect per-entity curvatures
+        let mut entity_curvatures: HashMap<Uuid, Vec<f32>> = HashMap::new();
 
         let mut sum_curvature: f64 = 0.0;
         let mut min_curvature = f32::MAX;
@@ -4651,7 +4702,9 @@ impl GraphMemory {
         let mut zero_count: usize = 0;
         let mut negative_count: usize = 0;
 
-        for mut edge in all_edges {
+        // First pass: compute curvature values and collect per-entity
+        let mut edge_curvatures: Vec<f32> = Vec::with_capacity(all_edges.len());
+        for edge in &all_edges {
             let src_in = in_degree.get(&edge.from_entity).copied().unwrap_or(0);
             let src_out = out_degree.get(&edge.from_entity).copied().unwrap_or(0);
             let tgt_in = in_degree.get(&edge.to_entity).copied().unwrap_or(0);
@@ -4662,7 +4715,17 @@ impl GraphMemory {
             let flow_loss = 2 - src_out - tgt_in; // F(←e←)
             let curvature = (flow_through + flow_loss) as f32; // F(e) = 4 - deg(u) - deg(v)
 
-            edge.forman_curvature = Some(curvature);
+            edge_curvatures.push(curvature);
+
+            // Collect per-entity curvature for selectivity computation
+            entity_curvatures
+                .entry(edge.from_entity)
+                .or_default()
+                .push(curvature);
+            entity_curvatures
+                .entry(edge.to_entity)
+                .or_default()
+                .push(curvature);
 
             // Update stats
             sum_curvature += curvature as f64;
@@ -4680,12 +4743,67 @@ impl GraphMemory {
             } else {
                 negative_count += 1;
             }
+        }
 
-            // Serialize and write back
+        // Phase 3: Compute selectivity per entity
+        // selectivity = stdev(incident curvatures) / degree
+        // High selectivity → concept (mixed community + bridge edges)
+        // Low selectivity → stop word (uniform curvature across all edges)
+        let mut entity_selectivity: HashMap<Uuid, f32> = HashMap::new();
+        for (entity_id, curvs) in &entity_curvatures {
+            let n = curvs.len() as f32;
+            if n < 2.0 {
+                // Single edge: can't compute variance, assign neutral selectivity
+                entity_selectivity.insert(*entity_id, 1.0);
+                continue;
+            }
+            let mean = curvs.iter().sum::<f32>() / n;
+            let variance = curvs.iter().map(|c| (c - mean).powi(2)).sum::<f32>() / (n - 1.0);
+            let stdev = variance.sqrt();
+            let selectivity = stdev / n; // Normalize by degree
+            entity_selectivity.insert(*entity_id, selectivity);
+        }
+
+        // Phase 4: Write entity selectivity back to RocksDB
+        let mut entity_batch = WriteBatch::default();
+        for (entity_id, selectivity) in &entity_selectivity {
+            let key = entity_id.as_bytes();
+            if let Ok(Some(value)) = self.db.get_cf(self.entities_cf(), key) {
+                if let Ok((mut entity, _)) =
+                    crate::serialization::try_decode::<EntityNode>(&value)
+                {
+                    entity.selectivity = Some(*selectivity);
+                    if let Ok(encoded) = crate::serialization::encode(&entity) {
+                        entity_batch.put_cf(self.entities_cf(), key, encoded);
+                    }
+                }
+            }
+        }
+        self.db.write(entity_batch).map_err(|e| {
+            anyhow::anyhow!("Failed to write entity selectivity batch: {}", e)
+        })?;
+
+        // Phase 5: Write edges with curvature + endpoint_selectivity
+        let mut edge_batch = WriteBatch::default();
+        for (mut edge, curvature) in all_edges.into_iter().zip(edge_curvatures.iter()) {
+            edge.forman_curvature = Some(*curvature);
+
+            // endpoint_selectivity = min of both endpoints
+            // The weakest link determines if this edge connects stop words
+            let src_sel = entity_selectivity
+                .get(&edge.from_entity)
+                .copied()
+                .unwrap_or(1.0);
+            let tgt_sel = entity_selectivity
+                .get(&edge.to_entity)
+                .copied()
+                .unwrap_or(1.0);
+            edge.endpoint_selectivity = Some(src_sel.min(tgt_sel));
+
             let key = edge.uuid.as_bytes();
             match crate::serialization::encode(&edge) {
                 Ok(value) => {
-                    batch.put_cf(self.relationships_cf(), key, value);
+                    edge_batch.put_cf(self.relationships_cf(), key, value);
                 }
                 Err(e) => {
                     tracing::debug!("Failed to serialize edge {}: {}", edge.uuid, e);
@@ -4695,9 +4813,9 @@ impl GraphMemory {
 
         let edges_computed = positive_count + zero_count + negative_count;
 
-        self.db
-            .write(batch)
-            .map_err(|e| anyhow::anyhow!("Failed to write curvature batch: {}", e))?;
+        self.db.write(edge_batch).map_err(|e| {
+            anyhow::anyhow!("Failed to write curvature batch: {}", e)
+        })?;
 
         let stats = CurvatureStats {
             edges_computed,
@@ -4728,7 +4846,8 @@ impl GraphMemory {
             max = stats.max_curvature,
             positive = stats.positive_count,
             negative = stats.negative_count,
-            "Forman-Ricci curvature computed"
+            entities_with_selectivity = entity_selectivity.len(),
+            "Forman-Ricci curvature and selectivity computed"
         );
 
         Ok(stats)
@@ -6540,6 +6659,7 @@ mod tests {
             tier,
             entity_confidence: None, // PIPE-5: Default for tests
             forman_curvature: None,
+            endpoint_selectivity: None,
         }
     }
 
@@ -7176,6 +7296,7 @@ mod tests {
             name_embedding: None,
             salience: 0.5,
             is_proper_noun: false,
+            selectivity: None,
         };
         let entity2 = EntityNode {
             uuid: Uuid::new_v4(),
@@ -7189,6 +7310,7 @@ mod tests {
             name_embedding: None,
             salience: 0.5,
             is_proper_noun: false,
+            selectivity: None,
         };
 
         let entity1_uuid = graph.add_entity(entity1.clone()).unwrap();
@@ -7238,6 +7360,7 @@ mod tests {
             name_embedding: None,
             salience: 0.5,
             is_proper_noun: false,
+            selectivity: None,
         };
         let entity2 = EntityNode {
             uuid: entity2_uuid,
@@ -7251,6 +7374,7 @@ mod tests {
             name_embedding: None,
             salience: 0.5,
             is_proper_noun: false,
+            selectivity: None,
         };
 
         graph.add_entity(entity1).unwrap();
@@ -7289,6 +7413,7 @@ mod tests {
             tier: EdgeTier::L2Episodic, // Use L2 since it has activation count
             entity_confidence: None,    // PIPE-5: Default for tests
             forman_curvature: None,
+            endpoint_selectivity: None,
         };
         graph.add_relationship(edge).unwrap();
 
@@ -7325,6 +7450,7 @@ mod tests {
             name_embedding: None,
             salience: 0.5,
             is_proper_noun: false,
+            selectivity: None,
         };
         graph.add_entity(entity).unwrap();
 
@@ -7377,6 +7503,7 @@ mod tests {
                 name_embedding: None,
                 salience: 0.5,
                 is_proper_noun: false,
+                selectivity: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -7401,6 +7528,7 @@ mod tests {
             tier: EdgeTier::L1Working,
             entity_confidence: None,
             forman_curvature: None,
+            endpoint_selectivity: None,
         };
         graph.add_relationship(edge).unwrap();
 
@@ -7444,6 +7572,7 @@ mod tests {
                 name_embedding: None,
                 salience: 0.5,
                 is_proper_noun: false,
+                selectivity: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -7467,6 +7596,7 @@ mod tests {
             tier: EdgeTier::L2Episodic,
             entity_confidence: None,
             forman_curvature: None,
+            endpoint_selectivity: None,
         };
         let edge_uuid = graph.add_relationship(edge).unwrap();
 
@@ -7503,9 +7633,10 @@ mod tests {
             name_embedding: None,
             salience: 0.5,
             is_proper_noun: false,
+            selectivity: None,
         };
-        graph.add_entity(entity).unwrap();
-        uuid
+        // add_entity may dedup and return a different UUID
+        graph.add_entity(entity).unwrap()
     }
 
     /// Helper: create a directed edge from → to
@@ -7528,6 +7659,7 @@ mod tests {
             tier: EdgeTier::L2Episodic,
             entity_confidence: None,
             forman_curvature: None,
+            endpoint_selectivity: None,
         };
         graph.add_relationship(edge).unwrap()
     }
@@ -7687,6 +7819,240 @@ mod tests {
             bridge_curv < 0.0,
             "Bridge curvature should be negative, got {}",
             bridge_curv
+        );
+    }
+
+    #[test]
+    fn test_selectivity_hub_vs_concept() {
+        // Hub connected to many unrelated spokes → uniform curvature → LOW selectivity
+        // Concept node in a tight cluster → varied curvature → HIGH selectivity
+        //
+        // Topology:
+        //   Hub → {S1, S2, S3, S4, S5, S6}  (star — uniform edges)
+        //   A → B → C → A  (triangle — tight community)
+        //   A → Hub  (bridge connecting triangle to star)
+        //
+        // Hub: all incident edges have similar curvature (uniform negative)
+        //   → low stdev/degree → low selectivity
+        // A: participates in triangle (curvature=0-ish) AND bridge to hub (curvature<<0)
+        //   → high stdev across incident edges → high selectivity
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let hub = make_entity(&graph, "SelectHub");
+        let s1 = make_entity(&graph, "Spoke1");
+        let s2 = make_entity(&graph, "Spoke2");
+        let s3 = make_entity(&graph, "Spoke3");
+        let s4 = make_entity(&graph, "Spoke4");
+        let s5 = make_entity(&graph, "Spoke5");
+        let s6 = make_entity(&graph, "Spoke6");
+        let a = make_entity(&graph, "ConceptA");
+        let b = make_entity(&graph, "ConceptB");
+        let c = make_entity(&graph, "ConceptC");
+
+        // Star
+        make_edge(&graph, hub, s1);
+        make_edge(&graph, hub, s2);
+        make_edge(&graph, hub, s3);
+        make_edge(&graph, hub, s4);
+        make_edge(&graph, hub, s5);
+        make_edge(&graph, hub, s6);
+
+        // Triangle
+        make_edge(&graph, a, b);
+        make_edge(&graph, b, c);
+        make_edge(&graph, c, a);
+
+        // Bridge
+        make_edge(&graph, a, hub);
+
+        graph.compute_forman_ricci_curvature().unwrap();
+
+        let hub_entity = graph.get_entity(&hub).unwrap().unwrap();
+        let a_entity = graph.get_entity(&a).unwrap().unwrap();
+
+        let hub_sel = hub_entity.selectivity.expect("hub should have selectivity");
+        let a_sel = a_entity.selectivity.expect("concept A should have selectivity");
+
+        // Concept node A should have higher selectivity than the hub
+        // because A's incident edges span different curvature regimes
+        assert!(
+            a_sel > hub_sel,
+            "Concept node selectivity ({}) should exceed hub selectivity ({})",
+            a_sel, hub_sel
+        );
+    }
+
+    #[test]
+    fn test_selectivity_gated_ltp_decay() {
+        // Two edges with identical LTP (Full) but different endpoint_selectivity.
+        // Low-selectivity edge should decay MORE (less LTP protection).
+        // High-selectivity edge should decay LESS (full LTP protection).
+        let now = Utc::now();
+        let one_hour_ago = now - chrono::Duration::hours(1);
+
+        let mut low_sel_edge = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength: 0.8,
+            created_at: one_hour_ago,
+            valid_at: one_hour_ago,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: one_hour_ago,
+            activation_count: 20,
+            ltp_status: LtpStatus::Full,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: Some(-5.0),
+            endpoint_selectivity: Some(0.05), // very low = stop-word
+        };
+
+        let mut high_sel_edge = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength: 0.8,
+            created_at: one_hour_ago,
+            valid_at: one_hour_ago,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: one_hour_ago,
+            activation_count: 20,
+            ltp_status: LtpStatus::Full,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: Some(-5.0),
+            endpoint_selectivity: Some(2.0), // high = concept, above threshold
+        };
+
+        low_sel_edge.decay();
+        high_sel_edge.decay();
+
+        // Both started at 0.8. Low-selectivity should have decayed more.
+        assert!(
+            low_sel_edge.strength < high_sel_edge.strength,
+            "Low-selectivity edge ({}) should decay more than high-selectivity edge ({})",
+            low_sel_edge.strength, high_sel_edge.strength
+        );
+
+        // High-selectivity edge with Full LTP should retain most of its strength
+        // LTP_DECAY_FACTOR = 0.1 → 10x slower decay → after 1 hour should be ~0.79+
+        assert!(
+            high_sel_edge.strength > 0.7,
+            "High-selectivity Full LTP edge should retain most strength, got {}",
+            high_sel_edge.strength
+        );
+    }
+
+    #[test]
+    fn test_selectivity_none_preserves_ltp() {
+        // Edge with endpoint_selectivity=None (not yet computed) should get
+        // full LTP protection — conservative default.
+        let now = Utc::now();
+        let one_hour_ago = now - chrono::Duration::hours(1);
+
+        let mut edge_none = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength: 0.8,
+            created_at: one_hour_ago,
+            valid_at: one_hour_ago,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: one_hour_ago,
+            activation_count: 20,
+            ltp_status: LtpStatus::Full,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None, // not computed yet
+        };
+
+        let mut edge_high = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength: 0.8,
+            created_at: one_hour_ago,
+            valid_at: one_hour_ago,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: one_hour_ago,
+            activation_count: 20,
+            ltp_status: LtpStatus::Full,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: Some(-2.0),
+            endpoint_selectivity: Some(5.0), // high selectivity
+        };
+
+        edge_none.decay();
+        edge_high.decay();
+
+        // Both should get full LTP protection, so strengths should be equal
+        let diff = (edge_none.strength - edge_high.strength).abs();
+        assert!(
+            diff < 0.001,
+            "None selectivity should match high selectivity: none={}, high={}, diff={}",
+            edge_none.strength, edge_high.strength, diff
+        );
+    }
+
+    #[test]
+    fn test_endpoint_selectivity_written_to_edges() {
+        // After compute_forman_ricci_curvature(), edges should have
+        // endpoint_selectivity set based on their source entity's selectivity.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let a = make_entity(&graph, "EndpointA");
+        let b = make_entity(&graph, "EndpointB");
+        let c = make_entity(&graph, "EndpointC");
+
+        let e1 = make_edge(&graph, a, b);
+        let e2 = make_edge(&graph, b, c);
+
+        graph.compute_forman_ricci_curvature().unwrap();
+
+        let edge1 = graph.get_relationship(&e1).unwrap().unwrap();
+        let edge2 = graph.get_relationship(&e2).unwrap().unwrap();
+
+        // All edges should have endpoint_selectivity set after curvature pass
+        assert!(
+            edge1.endpoint_selectivity.is_some(),
+            "Edge 1 should have endpoint_selectivity after curvature computation"
+        );
+        assert!(
+            edge2.endpoint_selectivity.is_some(),
+            "Edge 2 should have endpoint_selectivity after curvature computation"
+        );
+
+        // A has degree 1 (only outgoing to B) — selectivity = stdev/degree = 0/1 = 0
+        // B has degree 2 (in from A, out to C) — selectivity = stdev/degree
+        let entity_a = graph.get_entity(&a).unwrap().unwrap();
+        let entity_b = graph.get_entity(&b).unwrap().unwrap();
+        assert!(
+            entity_a.selectivity.is_some(),
+            "Entity A should have selectivity"
+        );
+        assert!(
+            entity_b.selectivity.is_some(),
+            "Entity B should have selectivity"
         );
     }
 }

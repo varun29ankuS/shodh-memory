@@ -1131,6 +1131,7 @@ impl MemorySystem {
                             .next()
                             .map(|c| c.is_uppercase())
                             .unwrap_or(false),
+                        selectivity: None,
                     }
                 })
                 .collect();
@@ -1189,6 +1190,7 @@ impl MemorySystem {
                         activation_timestamps: None,
                         entity_confidence,
                         forman_curvature: None,
+                        endpoint_selectivity: None,
                     };
 
                     if let Err(e) = graph_guard.add_relationship(edge) {
@@ -5451,6 +5453,7 @@ impl MemorySystem {
                         .next()
                         .map(|c| c.is_uppercase())
                         .unwrap_or(false),
+                    selectivity: None,
                 };
                 if graph_guard.add_entity(entity).is_ok() {
                     entities_added += 1;
@@ -5493,6 +5496,7 @@ impl MemorySystem {
                             activation_timestamps: None,
                             entity_confidence: Some(fact.confidence),
                             forman_curvature: None,
+                            endpoint_selectivity: None,
                         };
                         if graph_guard.add_relationship(edge).is_ok() {
                             edges_added += 1;
@@ -5794,6 +5798,7 @@ impl MemorySystem {
                                 .next()
                                 .map(|c| c.is_uppercase())
                                 .unwrap_or(false),
+                            selectivity: None,
                         }
                     })
                     .collect();
@@ -5853,6 +5858,7 @@ impl MemorySystem {
                             activation_timestamps: None,
                             entity_confidence,
                             forman_curvature: None,
+                            endpoint_selectivity: None,
                         };
 
                         if let Err(e) = graph_guard.add_relationship(edge) {

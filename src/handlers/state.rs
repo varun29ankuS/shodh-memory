@@ -2187,6 +2187,7 @@ impl MultiUserMemoryManager {
                     // Only PER, ORG, LOC are proper nouns; MISC includes non-proper
                     // nouns like nationalities, events, etc.
                     is_proper_noun: !matches!(ner_entity.entity_type, NerEntityType::Misc),
+                    selectivity: None,
                 };
                 (ner_entity.text, node)
             })
@@ -2213,6 +2214,7 @@ impl MultiUserMemoryManager {
                             name_embedding: None,
                             salience: 0.6,
                             is_proper_noun: false,
+                            selectivity: None,
                         },
                     ))
                 } else {
@@ -2257,6 +2259,7 @@ impl MultiUserMemoryManager {
                         name_embedding: None,
                         salience: 0.5,
                         is_proper_noun: true,
+                        selectivity: None,
                     },
                 ))
             })
@@ -2285,6 +2288,7 @@ impl MultiUserMemoryManager {
                         name_embedding: None,
                         salience: 0.7,
                         is_proper_noun: true,
+                        selectivity: None,
                     },
                 ))
             })
@@ -2332,6 +2336,7 @@ impl MultiUserMemoryManager {
                         name_embedding: None,
                         salience: 0.4,
                         is_proper_noun: false,
+                        selectivity: None,
                     },
                 ));
             }
@@ -2436,6 +2441,7 @@ impl MultiUserMemoryManager {
                     activation_timestamps: None,
                     entity_confidence: None,
                     forman_curvature: None,
+                    endpoint_selectivity: None,
                 };
 
                 if let Err(e) = graph_guard.add_relationship(edge) {

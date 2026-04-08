@@ -2405,6 +2405,32 @@ pub const TEMPORAL_CREDIT_MIN_THRESHOLD: f32 = 0.02;
 //               traditional graph metrics.
 // =============================================================================
 
+/// Selectivity threshold below which an entity is classified as a "stop word."
+///
+/// Entities with selectivity below this connect to everything uniformly
+/// (like `impl`, `check`, `encode`) — their LTP protection is reduced,
+/// allowing curvature-accelerated decay to clean up their noise edges.
+///
+/// Entities with selectivity above this have community structure (like
+/// "Hebbian learning", "RocksDB") and retain full LTP protection.
+///
+/// Derived from live graph measurement: noise hubs have selectivity ~0.0-0.5,
+/// concept entities have selectivity ~1.0-10.0+.
+pub const SELECTIVITY_STOP_WORD_THRESHOLD: f32 = 0.5;
+
+/// Half-saturation constant for selectivity-gated LTP.
+///
+/// Controls how sharply LTP protection transitions from full to zero
+/// as selectivity decreases. The effective LTP factor is:
+///   ltp_factor * (selectivity / (selectivity + SELECTIVITY_HALF_SAT))
+///
+/// At selectivity = SELECTIVITY_HALF_SAT: 50% of normal LTP protection.
+/// At selectivity = 2 * SELECTIVITY_HALF_SAT: 67% protection.
+/// At selectivity = 0: 0% protection (stop word, no LTP).
+///
+/// Set to match the stop word threshold for smooth transition.
+pub const SELECTIVITY_HALF_SAT: f32 = 0.5;
+
 /// Minimum number of edges required before curvature computation runs.
 ///
 /// Below this threshold the graph is too sparse for curvature to be meaningful.

@@ -379,6 +379,7 @@ pub async fn add_entity(
         name_embedding: None,
         salience: 0.5,
         is_proper_noun: true,
+        selectivity: None,
     };
 
     graph_guard.add_entity(entity).map_err(AppError::Internal)?;
@@ -480,6 +481,7 @@ pub async fn add_relationship(
         activation_timestamps: None,
         entity_confidence,
         forman_curvature: None,
+        endpoint_selectivity: None,
     };
 
     graph_guard

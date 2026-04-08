@@ -261,6 +261,7 @@ pub fn import_graph_entities(kg: &MifKnowledgeGraph, graph: &GraphMemory) -> (us
             name_embedding: None,
             salience: 0.5,
             is_proper_noun: true,
+            selectivity: None,
         };
 
         match graph.add_entity(node) {
@@ -336,6 +337,7 @@ pub fn import_graph_relationships(
             activation_timestamps: None,
             entity_confidence: rel.confidence,
             forman_curvature: None,
+            endpoint_selectivity: None,
         };
 
         match graph.add_relationship(edge) {
