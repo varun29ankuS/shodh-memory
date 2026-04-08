@@ -2532,6 +2532,25 @@ pub const LINEAGE_RETRIEVAL_MAX_BOOST: f32 = 0.15;
 /// misleading feedback) are excluded.
 pub const LINEAGE_RETRIEVAL_MIN_CONFIDENCE: f32 = 0.5;
 
+/// Maximum number of causally-connected memories to inject into recall results.
+///
+/// When recalled memories have high-confidence causal edges to memories NOT
+/// in the result set, those connected memories are fetched and appended.
+/// This prevents causal chains from being invisible when the connected memory
+/// didn't score high enough on semantic similarity alone.
+///
+/// Capped at 3 to avoid overwhelming results with tangential causal links.
+/// Each injected memory gets a score derived from the connecting edge's
+/// confidence and the source memory's score, so they sort naturally.
+pub const LINEAGE_EXPANSION_MAX: usize = 3;
+
+/// Minimum edge confidence for candidate expansion (higher bar than boost).
+///
+/// Candidate expansion injects new memories into results, which is a stronger
+/// signal than re-ranking. Requires higher confidence (0.7) than boost (0.5)
+/// to prevent noise injection. Only confirmed or strongly-inferred edges qualify.
+pub const LINEAGE_EXPANSION_MIN_CONFIDENCE: f32 = 0.7;
+
 // =============================================================================
 // CONSTANTS USAGE DOCUMENTATION
 // =============================================================================
