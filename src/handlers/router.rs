@@ -198,6 +198,10 @@ pub fn build_protected_routes(state: AppState) -> Router {
         // =================================================================
         .route("/api/graph/{user_id}/stats", get(graph::get_graph_stats))
         .route(
+            "/api/graph/{user_id}/curvature",
+            post(graph::compute_curvature),
+        )
+        .route(
             "/api/graph/{user_id}/universe",
             get(graph::get_memory_universe),
         )

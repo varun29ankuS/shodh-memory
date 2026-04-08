@@ -82,6 +82,22 @@ pub struct EntityNode {
     /// Proper nouns have higher base salience than common nouns
     #[serde(default)]
     pub is_proper_noun: bool,
+
+    /// Curvature selectivity: stdev(incident edge curvatures) / degree
+    ///
+    /// Measures whether this entity participates in specific communities
+    /// (high selectivity) or connects to everything uniformly (low selectivity).
+    ///
+    /// High selectivity → concept (e.g., "Hebbian learning" connects within neuroscience)
+    /// Low selectivity  → stop word (e.g., "impl" connects to everything equally)
+    ///
+    /// Used to gate LTP protection: low-selectivity entities cannot earn
+    /// permanent LTP regardless of activation count, mimicking habituation
+    /// in biological neural systems.
+    ///
+    /// Computed during Forman-Ricci curvature pass. None = not yet computed.
+    #[serde(default)]
+    pub selectivity: Option<f32>,
 }
 
 fn default_salience() -> f32 {
@@ -446,6 +462,36 @@ pub struct RelationshipEdge {
     /// Based on synaptic tagging: behaviorally relevant synapses consolidate faster.
     #[serde(default)]
     pub entity_confidence: Option<f32>,
+
+    /// Minimum curvature selectivity of the two endpoint entities.
+    ///
+    /// Cached from EntityNode.selectivity during curvature computation.
+    /// Used by decay() to gate LTP protection: if the weakest endpoint
+    /// is a stop word (low selectivity), LTP protection is reduced,
+    /// allowing curvature-accelerated decay to clean up noise edges
+    /// even if they're frequently co-activated.
+    ///
+    /// None = not yet computed (full LTP protection applies).
+    #[serde(default)]
+    pub endpoint_selectivity: Option<f32>,
+
+    /// Forman-Ricci curvature of this edge (Leal, Restrepo, Stadler, Jost 2018)
+    ///
+    /// For directed graphs:
+    ///   F(→e→) = 2 - in_deg(source) - out_deg(target)   [flow-through]
+    ///   F(←e←) = 2 - out_deg(source) - in_deg(target)   [flow-loss]
+    ///   F(e)   = F(→e→) + F(←e←) = 4 - deg(source) - deg(target)
+    ///
+    /// Interpretation:
+    ///   Positive: edge connects low-degree nodes (tight community interior)
+    ///   Near zero: neutral / transitional
+    ///   Negative: edge bridges high-degree hubs (information bottleneck)
+    ///
+    /// Computed during heavy maintenance cycle. None = not yet computed.
+    ///
+    /// Reference: arXiv:1811.07825 — "Forman-Ricci curvature for hypergraphs"
+    #[serde(default)]
+    pub forman_curvature: Option<f32>,
 }
 
 fn default_last_activated() -> DateTime<Utc> {
@@ -785,7 +831,30 @@ impl RelationshipEdge {
             EdgeTier::L2Episodic => 1,
             EdgeTier::L3Semantic => 2,
         };
-        let ltp_factor = self.ltp_status.decay_factor();
+        let raw_ltp_factor = self.ltp_status.decay_factor();
+
+        // Gate LTP protection by endpoint selectivity (habituation mechanism).
+        // Low-selectivity edges (connecting stop-word entities) get reduced
+        // LTP protection regardless of activation count, because high-frequency
+        // low-information signals should habituate, not potentiate.
+        //
+        // effective_ltp = raw_ltp * (selectivity / (selectivity + half_sat))
+        //
+        // selectivity=0.0 → effective_ltp=raw_ltp*0.0 = 1.0 (no protection)
+        // selectivity=0.5 → effective_ltp=raw_ltp*0.5 (half protection)
+        // selectivity=5.0 → effective_ltp=raw_ltp*0.91 (nearly full protection)
+        // selectivity=None → full protection (not yet computed, conservative)
+        let ltp_factor = match self.endpoint_selectivity {
+            Some(sel) if sel < crate::constants::SELECTIVITY_STOP_WORD_THRESHOLD => {
+                // Blend toward 1.0 (no protection) as selectivity → 0
+                let gate = sel / (sel + crate::constants::SELECTIVITY_HALF_SAT);
+                // ltp_factor is in (0, 1]: 0.1 = Full LTP, 1.0 = no LTP
+                // gate → 0 means override toward 1.0 (no protection)
+                raw_ltp_factor + (1.0 - raw_ltp_factor) * (1.0 - gate)
+            }
+            _ => raw_ltp_factor, // Not computed yet or above threshold: full protection
+        };
+
         let (decay_factor, exceeded_max_age) =
             tier_decay_factor(hours_elapsed, tier_num, ltp_factor);
         self.strength *= decay_factor;
@@ -3821,6 +3890,8 @@ impl GraphMemory {
                         tier: EdgeTier::L1Working,
                         // PIPE-5: Memory-to-memory edges use default confidence
                         entity_confidence: None,
+                        forman_curvature: None,
+                        endpoint_selectivity: None,
                     };
 
                     let key = edge.uuid.as_bytes();
@@ -4000,6 +4071,8 @@ impl GraphMemory {
                     tier: EdgeTier::L2Episodic,
                     // PIPE-5: Replay edges use default confidence
                     entity_confidence: None,
+                    forman_curvature: None,
+                    endpoint_selectivity: None,
                 };
 
                 let key = edge.uuid.as_bytes();
@@ -4579,6 +4652,206 @@ impl GraphMemory {
         })
     }
 
+    /// Compute Forman-Ricci curvature for all active edges in the graph.
+    ///
+    /// For a directed edge e = (u → v) in the knowledge graph:
+    ///   F(→e→) = 2 - in_deg(u) - out_deg(v)    [flow-through curvature]
+    ///   F(←e←) = 2 - out_deg(u) - in_deg(v)    [flow-loss curvature]
+    ///   F(e)   = F(→e→) + F(←e←) = 4 - deg(u) - deg(v)
+    ///
+    /// The directed components reveal information flow structure:
+    /// - F(→e→) captures how much flow converges through this edge
+    /// - F(←e←) captures how much flow is lost/dispersed at this edge
+    ///
+    /// Stores computed curvature on each edge and writes back to RocksDB.
+    ///
+    /// Reference: Leal, Restrepo, Stadler, Jost (2018) arXiv:1811.07825
+    ///            "Forman-Ricci curvature for hypergraphs"
+    pub fn compute_forman_ricci_curvature(&self) -> Result<CurvatureStats> {
+        let all_edges = self.get_all_relationships()?;
+
+        if all_edges.is_empty() {
+            return Ok(CurvatureStats {
+                edges_computed: 0,
+                mean_curvature: 0.0,
+                min_curvature: 0.0,
+                max_curvature: 0.0,
+                positive_count: 0,
+                zero_count: 0,
+                negative_count: 0,
+            });
+        }
+
+        // Phase 1: Build degree maps (in-degree and out-degree per entity)
+        // Single pass over all edges — O(|E|)
+        let mut in_degree: HashMap<Uuid, i32> = HashMap::new();
+        let mut out_degree: HashMap<Uuid, i32> = HashMap::new();
+
+        for edge in &all_edges {
+            *out_degree.entry(edge.from_entity).or_insert(0) += 1;
+            *in_degree.entry(edge.to_entity).or_insert(0) += 1;
+        }
+
+        // Phase 2: Compute curvature for each edge, collect per-entity curvatures
+        let mut entity_curvatures: HashMap<Uuid, Vec<f32>> = HashMap::new();
+
+        let mut sum_curvature: f64 = 0.0;
+        let mut min_curvature = f32::MAX;
+        let mut max_curvature = f32::MIN;
+        let mut positive_count: usize = 0;
+        let mut zero_count: usize = 0;
+        let mut negative_count: usize = 0;
+
+        // First pass: compute curvature values and collect per-entity
+        let mut edge_curvatures: Vec<f32> = Vec::with_capacity(all_edges.len());
+        for edge in &all_edges {
+            let src_in = in_degree.get(&edge.from_entity).copied().unwrap_or(0);
+            let src_out = out_degree.get(&edge.from_entity).copied().unwrap_or(0);
+            let tgt_in = in_degree.get(&edge.to_entity).copied().unwrap_or(0);
+            let tgt_out = out_degree.get(&edge.to_entity).copied().unwrap_or(0);
+
+            // Directed Forman-Ricci (Equations 5 + 7 from the paper)
+            let flow_through = 2 - src_in - tgt_out; // F(→e→)
+            let flow_loss = 2 - src_out - tgt_in; // F(←e←)
+            let curvature = (flow_through + flow_loss) as f32; // F(e) = 4 - deg(u) - deg(v)
+
+            edge_curvatures.push(curvature);
+
+            // Collect per-entity curvature for selectivity computation
+            entity_curvatures
+                .entry(edge.from_entity)
+                .or_default()
+                .push(curvature);
+            entity_curvatures
+                .entry(edge.to_entity)
+                .or_default()
+                .push(curvature);
+
+            // Update stats
+            sum_curvature += curvature as f64;
+            if curvature < min_curvature {
+                min_curvature = curvature;
+            }
+            if curvature > max_curvature {
+                max_curvature = curvature;
+            }
+            #[allow(clippy::float_cmp)]
+            if curvature > 0.0 {
+                positive_count += 1;
+            } else if curvature == 0.0 {
+                zero_count += 1;
+            } else {
+                negative_count += 1;
+            }
+        }
+
+        // Phase 3: Compute selectivity per entity
+        // selectivity = stdev(incident curvatures) / degree
+        // High selectivity → concept (mixed community + bridge edges)
+        // Low selectivity → stop word (uniform curvature across all edges)
+        let mut entity_selectivity: HashMap<Uuid, f32> = HashMap::new();
+        for (entity_id, curvs) in &entity_curvatures {
+            let n = curvs.len() as f32;
+            if n < 2.0 {
+                // Single edge: can't compute variance, assign neutral selectivity
+                entity_selectivity.insert(*entity_id, 1.0);
+                continue;
+            }
+            let mean = curvs.iter().sum::<f32>() / n;
+            let variance = curvs.iter().map(|c| (c - mean).powi(2)).sum::<f32>() / (n - 1.0);
+            let stdev = variance.sqrt();
+            let selectivity = stdev / n; // Normalize by degree
+            entity_selectivity.insert(*entity_id, selectivity);
+        }
+
+        // Phase 4: Write entity selectivity back to RocksDB
+        let mut entity_batch = WriteBatch::default();
+        for (entity_id, selectivity) in &entity_selectivity {
+            let key = entity_id.as_bytes();
+            if let Ok(Some(value)) = self.db.get_cf(self.entities_cf(), key) {
+                if let Ok((mut entity, _)) = crate::serialization::try_decode::<EntityNode>(&value)
+                {
+                    entity.selectivity = Some(*selectivity);
+                    if let Ok(encoded) = crate::serialization::encode(&entity) {
+                        entity_batch.put_cf(self.entities_cf(), key, encoded);
+                    }
+                }
+            }
+        }
+        self.db
+            .write(entity_batch)
+            .map_err(|e| anyhow::anyhow!("Failed to write entity selectivity batch: {}", e))?;
+
+        // Phase 5: Write edges with curvature + endpoint_selectivity
+        let mut edge_batch = WriteBatch::default();
+        for (mut edge, curvature) in all_edges.into_iter().zip(edge_curvatures.iter()) {
+            edge.forman_curvature = Some(*curvature);
+
+            // endpoint_selectivity = min of both endpoints
+            // The weakest link determines if this edge connects stop words
+            let src_sel = entity_selectivity
+                .get(&edge.from_entity)
+                .copied()
+                .unwrap_or(1.0);
+            let tgt_sel = entity_selectivity
+                .get(&edge.to_entity)
+                .copied()
+                .unwrap_or(1.0);
+            edge.endpoint_selectivity = Some(src_sel.min(tgt_sel));
+
+            let key = edge.uuid.as_bytes();
+            match crate::serialization::encode(&edge) {
+                Ok(value) => {
+                    edge_batch.put_cf(self.relationships_cf(), key, value);
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to serialize edge {}: {}", edge.uuid, e);
+                }
+            }
+        }
+
+        let edges_computed = positive_count + zero_count + negative_count;
+
+        self.db
+            .write(edge_batch)
+            .map_err(|e| anyhow::anyhow!("Failed to write curvature batch: {}", e))?;
+
+        let stats = CurvatureStats {
+            edges_computed,
+            mean_curvature: if edges_computed > 0 {
+                (sum_curvature / edges_computed as f64) as f32
+            } else {
+                0.0
+            },
+            min_curvature: if edges_computed > 0 {
+                min_curvature
+            } else {
+                0.0
+            },
+            max_curvature: if edges_computed > 0 {
+                max_curvature
+            } else {
+                0.0
+            },
+            positive_count,
+            zero_count,
+            negative_count,
+        };
+
+        tracing::info!(
+            edges = stats.edges_computed,
+            mean = format!("{:.2}", stats.mean_curvature),
+            min = stats.min_curvature,
+            max = stats.max_curvature,
+            positive = stats.positive_count,
+            negative = stats.negative_count,
+            entities_with_selectivity = entity_selectivity.len(),
+            "Forman-Ricci curvature and selectivity computed"
+        );
+
+        Ok(stats)
+    }
+
     /// Flush pending maintenance from opportunistic pruning queues.
     ///
     /// Called every maintenance cycle (5 min). Instead of scanning all 34k+ edges,
@@ -4926,6 +5199,31 @@ pub struct GraphStats {
     pub entity_count: usize,
     pub relationship_count: usize,
     pub episode_count: usize,
+}
+
+/// Summary statistics from Forman-Ricci curvature computation
+///
+/// Captures the distribution of curvature across the knowledge graph.
+/// Positive curvature = tightly-connected community interior edges.
+/// Negative curvature = bridge/bottleneck edges between hubs.
+///
+/// Reference: Leal, Restrepo, Stadler, Jost (2018) arXiv:1811.07825
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurvatureStats {
+    /// Number of edges with curvature computed
+    pub edges_computed: usize,
+    /// Mean curvature across all edges
+    pub mean_curvature: f32,
+    /// Minimum curvature (most negative = strongest bottleneck)
+    pub min_curvature: f32,
+    /// Maximum curvature (most positive = tightest community)
+    pub max_curvature: f32,
+    /// Number of edges with positive curvature (community-interior)
+    pub positive_count: usize,
+    /// Number of edges with zero curvature
+    pub zero_count: usize,
+    /// Number of edges with negative curvature (bridges/bottlenecks)
+    pub negative_count: usize,
 }
 
 /// Extracted entity with salience information
@@ -6359,6 +6657,8 @@ mod tests {
             activation_timestamps: None,
             tier,
             entity_confidence: None, // PIPE-5: Default for tests
+            forman_curvature: None,
+            endpoint_selectivity: None,
         }
     }
 
@@ -6995,6 +7295,7 @@ mod tests {
             name_embedding: None,
             salience: 0.5,
             is_proper_noun: false,
+            selectivity: None,
         };
         let entity2 = EntityNode {
             uuid: Uuid::new_v4(),
@@ -7008,6 +7309,7 @@ mod tests {
             name_embedding: None,
             salience: 0.5,
             is_proper_noun: false,
+            selectivity: None,
         };
 
         let entity1_uuid = graph.add_entity(entity1.clone()).unwrap();
@@ -7057,6 +7359,7 @@ mod tests {
             name_embedding: None,
             salience: 0.5,
             is_proper_noun: false,
+            selectivity: None,
         };
         let entity2 = EntityNode {
             uuid: entity2_uuid,
@@ -7070,6 +7373,7 @@ mod tests {
             name_embedding: None,
             salience: 0.5,
             is_proper_noun: false,
+            selectivity: None,
         };
 
         graph.add_entity(entity1).unwrap();
@@ -7107,6 +7411,8 @@ mod tests {
             activation_timestamps: None,
             tier: EdgeTier::L2Episodic, // Use L2 since it has activation count
             entity_confidence: None,    // PIPE-5: Default for tests
+            forman_curvature: None,
+            endpoint_selectivity: None,
         };
         graph.add_relationship(edge).unwrap();
 
@@ -7143,6 +7449,7 @@ mod tests {
             name_embedding: None,
             salience: 0.5,
             is_proper_noun: false,
+            selectivity: None,
         };
         graph.add_entity(entity).unwrap();
 
@@ -7195,6 +7502,7 @@ mod tests {
                 name_embedding: None,
                 salience: 0.5,
                 is_proper_noun: false,
+                selectivity: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -7218,6 +7526,8 @@ mod tests {
             activation_timestamps: None,
             tier: EdgeTier::L1Working,
             entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
         };
         graph.add_relationship(edge).unwrap();
 
@@ -7261,6 +7571,7 @@ mod tests {
                 name_embedding: None,
                 salience: 0.5,
                 is_proper_noun: false,
+                selectivity: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -7283,6 +7594,8 @@ mod tests {
             activation_timestamps: None,
             tier: EdgeTier::L2Episodic,
             entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
         };
         let edge_uuid = graph.add_relationship(edge).unwrap();
 
@@ -7296,6 +7609,455 @@ mod tests {
             "Edge strength should increase after Helpful feedback: {} -> {}",
             initial_strength,
             updated.strength
+        );
+    }
+
+    // =========================================================================
+    // Forman-Ricci Curvature Tests
+    // Reference: Leal, Restrepo, Stadler, Jost (2018) arXiv:1811.07825
+    // =========================================================================
+
+    /// Helper: create an entity node with a given name
+    fn make_entity(graph: &GraphMemory, name: &str) -> Uuid {
+        let uuid = Uuid::new_v4();
+        let entity = EntityNode {
+            uuid,
+            name: name.to_string(),
+            labels: vec![EntityLabel::Concept],
+            created_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: std::collections::HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: false,
+            selectivity: None,
+        };
+        // add_entity may dedup and return a different UUID
+        graph.add_entity(entity).unwrap()
+    }
+
+    /// Helper: create a directed edge from → to
+    fn make_edge(graph: &GraphMemory, from: Uuid, to: Uuid) -> Uuid {
+        let edge = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type: RelationType::RelatedTo,
+            strength: 0.5,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: Utc::now(),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+        };
+        graph.add_relationship(edge).unwrap()
+    }
+
+    #[test]
+    fn test_forman_curvature_isolated_edge() {
+        // Single edge A → B: deg(A) = 1, deg(B) = 1
+        // F(e) = 4 - 1 - 1 = 2 (positive = tight community)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let a = make_entity(&graph, "NodeA");
+        let b = make_entity(&graph, "NodeB");
+        let edge_id = make_edge(&graph, a, b);
+
+        let stats = graph.compute_forman_ricci_curvature().unwrap();
+        assert_eq!(stats.edges_computed, 1);
+        assert_eq!(stats.positive_count, 1);
+        assert_eq!(stats.negative_count, 0);
+
+        let edge = graph.get_relationship(&edge_id).unwrap().unwrap();
+        let curv = edge.forman_curvature.expect("curvature should be computed");
+        // F(e) = 4 - deg(A) - deg(B) = 4 - 1 - 1 = 2
+        assert!(
+            (curv - 2.0).abs() < f32::EPSILON,
+            "Isolated edge curvature should be 2.0, got {}",
+            curv
+        );
+    }
+
+    #[test]
+    fn test_forman_curvature_hub_topology() {
+        // Star topology: Hub → {A, B, C, D}
+        // For edge Hub→A: deg(Hub) = 4 (out), deg(A) = 1 (in)
+        //   in_deg(Hub) = 0, out_deg(Hub) = 4
+        //   in_deg(A) = 1, out_deg(A) = 0
+        //   F(→e→) = 2 - in(Hub) - out(A) = 2 - 0 - 0 = 2
+        //   F(←e←) = 2 - out(Hub) - in(A) = 2 - 4 - 1 = -3
+        //   F(e) = 2 + (-3) = -1
+        // Equivalently: F(e) = 4 - deg(Hub) - deg(A) = 4 - 4 - 1 = -1
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let hub = make_entity(&graph, "Hub");
+        let a = make_entity(&graph, "SpokeA");
+        let b = make_entity(&graph, "SpokeB");
+        let c = make_entity(&graph, "SpokeC");
+        let d = make_entity(&graph, "SpokeD");
+
+        let edge_a = make_edge(&graph, hub, a);
+        make_edge(&graph, hub, b);
+        make_edge(&graph, hub, c);
+        make_edge(&graph, hub, d);
+
+        let stats = graph.compute_forman_ricci_curvature().unwrap();
+        assert_eq!(stats.edges_computed, 4);
+        // All edges should have negative curvature (hub bridges)
+        assert_eq!(
+            stats.negative_count, 4,
+            "All hub edges should be negative, got {} negative",
+            stats.negative_count
+        );
+
+        let edge = graph.get_relationship(&edge_a).unwrap().unwrap();
+        let curv = edge.forman_curvature.unwrap();
+        // F(e) = 4 - 4 - 1 = -1
+        assert!(
+            (curv - (-1.0)).abs() < f32::EPSILON,
+            "Hub→Spoke curvature should be -1.0, got {}",
+            curv
+        );
+    }
+
+    #[test]
+    fn test_forman_curvature_triangle() {
+        // Triangle: A→B, B→C, C→A
+        // Each node: in_deg=1, out_deg=1, total deg=2
+        // F(e) = 4 - 2 - 2 = 0 (neutral / transitional)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let a = make_entity(&graph, "TriA");
+        let b = make_entity(&graph, "TriB");
+        let c = make_entity(&graph, "TriC");
+
+        make_edge(&graph, a, b);
+        make_edge(&graph, b, c);
+        make_edge(&graph, c, a);
+
+        let stats = graph.compute_forman_ricci_curvature().unwrap();
+        assert_eq!(stats.edges_computed, 3);
+        assert_eq!(
+            stats.zero_count, 3,
+            "Triangle edges should all be zero curvature"
+        );
+        assert!(
+            stats.mean_curvature.abs() < f32::EPSILON,
+            "Mean curvature of triangle should be 0.0, got {}",
+            stats.mean_curvature
+        );
+    }
+
+    #[test]
+    fn test_forman_curvature_empty_graph() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let stats = graph.compute_forman_ricci_curvature().unwrap();
+        assert_eq!(stats.edges_computed, 0);
+        assert_eq!(stats.mean_curvature, 0.0);
+    }
+
+    #[test]
+    fn test_forman_curvature_bridge_detection() {
+        // Two triangles connected by a bridge:
+        // Triangle 1: A→B, B→C, C→A
+        // Bridge: C→D
+        // Triangle 2: D→E, E→F, F→D
+        //
+        // Bridge edge C→D: deg(C) = 3 (in from B, out to A, out to D)
+        //                  deg(D) = 3 (in from C, in from F, out to E)
+        // F(C→D) = 4 - 3 - 3 = -2 (most negative = bottleneck)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let a = make_entity(&graph, "BridgeA");
+        let b = make_entity(&graph, "BridgeB");
+        let c = make_entity(&graph, "BridgeC");
+        let d = make_entity(&graph, "BridgeD");
+        let e = make_entity(&graph, "BridgeE");
+        let f = make_entity(&graph, "BridgeF");
+
+        // Triangle 1
+        make_edge(&graph, a, b);
+        make_edge(&graph, b, c);
+        make_edge(&graph, c, a);
+        // Bridge
+        let bridge_id = make_edge(&graph, c, d);
+        // Triangle 2
+        make_edge(&graph, d, e);
+        make_edge(&graph, e, f);
+        make_edge(&graph, f, d);
+
+        let stats = graph.compute_forman_ricci_curvature().unwrap();
+        assert_eq!(stats.edges_computed, 7);
+
+        // Bridge should be the most negative edge
+        let bridge = graph.get_relationship(&bridge_id).unwrap().unwrap();
+        let bridge_curv = bridge.forman_curvature.unwrap();
+        assert!(
+            bridge_curv <= stats.min_curvature + f32::EPSILON,
+            "Bridge should be among most negative edges: bridge={}, min={}",
+            bridge_curv,
+            stats.min_curvature
+        );
+        assert!(
+            bridge_curv < 0.0,
+            "Bridge curvature should be negative, got {}",
+            bridge_curv
+        );
+    }
+
+    #[test]
+    fn test_selectivity_hub_vs_concept() {
+        // Hub connected to many unrelated spokes → uniform curvature → LOW selectivity
+        // Concept node in a tight cluster → varied curvature → HIGH selectivity
+        //
+        // Topology:
+        //   Hub → {S1, S2, S3, S4, S5, S6}  (star — uniform edges)
+        //   A → B → C → A  (triangle — tight community)
+        //   A → Hub  (bridge connecting triangle to star)
+        //
+        // Hub: all incident edges have similar curvature (uniform negative)
+        //   → low stdev/degree → low selectivity
+        // A: participates in triangle (curvature=0-ish) AND bridge to hub (curvature<<0)
+        //   → high stdev across incident edges → high selectivity
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let hub = make_entity(&graph, "SelectHub");
+        let s1 = make_entity(&graph, "Spoke1");
+        let s2 = make_entity(&graph, "Spoke2");
+        let s3 = make_entity(&graph, "Spoke3");
+        let s4 = make_entity(&graph, "Spoke4");
+        let s5 = make_entity(&graph, "Spoke5");
+        let s6 = make_entity(&graph, "Spoke6");
+        let a = make_entity(&graph, "ConceptA");
+        let b = make_entity(&graph, "ConceptB");
+        let c = make_entity(&graph, "ConceptC");
+
+        // Star
+        make_edge(&graph, hub, s1);
+        make_edge(&graph, hub, s2);
+        make_edge(&graph, hub, s3);
+        make_edge(&graph, hub, s4);
+        make_edge(&graph, hub, s5);
+        make_edge(&graph, hub, s6);
+
+        // Triangle
+        make_edge(&graph, a, b);
+        make_edge(&graph, b, c);
+        make_edge(&graph, c, a);
+
+        // Bridge
+        make_edge(&graph, a, hub);
+
+        graph.compute_forman_ricci_curvature().unwrap();
+
+        let hub_entity = graph.get_entity(&hub).unwrap().unwrap();
+        let a_entity = graph.get_entity(&a).unwrap().unwrap();
+
+        let hub_sel = hub_entity.selectivity.expect("hub should have selectivity");
+        let a_sel = a_entity
+            .selectivity
+            .expect("concept A should have selectivity");
+
+        // Concept node A should have higher selectivity than the hub
+        // because A's incident edges span different curvature regimes
+        assert!(
+            a_sel > hub_sel,
+            "Concept node selectivity ({}) should exceed hub selectivity ({})",
+            a_sel,
+            hub_sel
+        );
+    }
+
+    #[test]
+    fn test_selectivity_gated_ltp_decay() {
+        // Two edges with identical LTP (Full) but different endpoint_selectivity.
+        // Low-selectivity edge should decay MORE (less LTP protection).
+        // High-selectivity edge should decay LESS (full LTP protection).
+        let now = Utc::now();
+        let one_hour_ago = now - chrono::Duration::hours(1);
+
+        let mut low_sel_edge = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength: 0.8,
+            created_at: one_hour_ago,
+            valid_at: one_hour_ago,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: one_hour_ago,
+            activation_count: 20,
+            ltp_status: LtpStatus::Full,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: Some(-5.0),
+            endpoint_selectivity: Some(0.05), // very low = stop-word
+        };
+
+        let mut high_sel_edge = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength: 0.8,
+            created_at: one_hour_ago,
+            valid_at: one_hour_ago,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: one_hour_ago,
+            activation_count: 20,
+            ltp_status: LtpStatus::Full,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: Some(-5.0),
+            endpoint_selectivity: Some(2.0), // high = concept, above threshold
+        };
+
+        low_sel_edge.decay();
+        high_sel_edge.decay();
+
+        // Both started at 0.8. Low-selectivity should have decayed more.
+        assert!(
+            low_sel_edge.strength < high_sel_edge.strength,
+            "Low-selectivity edge ({}) should decay more than high-selectivity edge ({})",
+            low_sel_edge.strength,
+            high_sel_edge.strength
+        );
+
+        // High-selectivity edge with Full LTP should retain most of its strength
+        // LTP_DECAY_FACTOR = 0.1 → 10x slower decay → after 1 hour should be ~0.79+
+        assert!(
+            high_sel_edge.strength > 0.7,
+            "High-selectivity Full LTP edge should retain most strength, got {}",
+            high_sel_edge.strength
+        );
+    }
+
+    #[test]
+    fn test_selectivity_none_preserves_ltp() {
+        // Edge with endpoint_selectivity=None (not yet computed) should get
+        // full LTP protection — conservative default.
+        let now = Utc::now();
+        let one_hour_ago = now - chrono::Duration::hours(1);
+
+        let mut edge_none = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength: 0.8,
+            created_at: one_hour_ago,
+            valid_at: one_hour_ago,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: one_hour_ago,
+            activation_count: 20,
+            ltp_status: LtpStatus::Full,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None, // not computed yet
+        };
+
+        let mut edge_high = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength: 0.8,
+            created_at: one_hour_ago,
+            valid_at: one_hour_ago,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: one_hour_ago,
+            activation_count: 20,
+            ltp_status: LtpStatus::Full,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: Some(-2.0),
+            endpoint_selectivity: Some(5.0), // high selectivity
+        };
+
+        edge_none.decay();
+        edge_high.decay();
+
+        // Both should get full LTP protection, so strengths should be equal
+        let diff = (edge_none.strength - edge_high.strength).abs();
+        assert!(
+            diff < 0.001,
+            "None selectivity should match high selectivity: none={}, high={}, diff={}",
+            edge_none.strength,
+            edge_high.strength,
+            diff
+        );
+    }
+
+    #[test]
+    fn test_endpoint_selectivity_written_to_edges() {
+        // After compute_forman_ricci_curvature(), edges should have
+        // endpoint_selectivity set based on their source entity's selectivity.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let a = make_entity(&graph, "EndpointA");
+        let b = make_entity(&graph, "EndpointB");
+        let c = make_entity(&graph, "EndpointC");
+
+        let e1 = make_edge(&graph, a, b);
+        let e2 = make_edge(&graph, b, c);
+
+        graph.compute_forman_ricci_curvature().unwrap();
+
+        let edge1 = graph.get_relationship(&e1).unwrap().unwrap();
+        let edge2 = graph.get_relationship(&e2).unwrap().unwrap();
+
+        // All edges should have endpoint_selectivity set after curvature pass
+        assert!(
+            edge1.endpoint_selectivity.is_some(),
+            "Edge 1 should have endpoint_selectivity after curvature computation"
+        );
+        assert!(
+            edge2.endpoint_selectivity.is_some(),
+            "Edge 2 should have endpoint_selectivity after curvature computation"
+        );
+
+        // A has degree 1 (only outgoing to B) — selectivity = stdev/degree = 0/1 = 0
+        // B has degree 2 (in from A, out to C) — selectivity = stdev/degree
+        let entity_a = graph.get_entity(&a).unwrap().unwrap();
+        let entity_b = graph.get_entity(&b).unwrap().unwrap();
+        assert!(
+            entity_a.selectivity.is_some(),
+            "Entity A should have selectivity"
+        );
+        assert!(
+            entity_b.selectivity.is_some(),
+            "Entity B should have selectivity"
         );
     }
 }

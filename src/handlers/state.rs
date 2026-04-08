@@ -1670,6 +1670,43 @@ impl MultiUserMemoryManager {
             }
         }
 
+        // Heavy cycle: compute Forman-Ricci curvature on graph edges
+        // Runs after decay so curvature reflects post-decay degree distribution.
+        // Only runs if graph has enough edges (CURVATURE_MIN_EDGES).
+        if is_heavy {
+            for (user_id_arc, _) in self.user_memories.iter() {
+                let user_id = user_id_arc.as_ref();
+                if let Ok(graph) = self.get_user_graph(user_id) {
+                    let graph_guard = graph.read();
+                    let edge_count = graph_guard
+                        .get_stats()
+                        .map(|s| s.relationship_count)
+                        .unwrap_or(0);
+                    if edge_count >= crate::constants::CURVATURE_MIN_EDGES {
+                        match graph_guard.compute_forman_ricci_curvature() {
+                            Ok(stats) => {
+                                tracing::debug!(
+                                    user_id = %user_id,
+                                    edges = stats.edges_computed,
+                                    mean = format!("{:.2}", stats.mean_curvature),
+                                    positive = stats.positive_count,
+                                    negative = stats.negative_count,
+                                    "Forman-Ricci curvature updated"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    user_id = %user_id,
+                                    error = %e,
+                                    "Forman-Ricci curvature computation failed"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Heavy cycle: clean up old triggered/dismissed reminders (C4 fix)
         if is_heavy {
             for (user_id_arc, _) in self.user_memories.iter() {
@@ -2150,6 +2187,7 @@ impl MultiUserMemoryManager {
                     // Only PER, ORG, LOC are proper nouns; MISC includes non-proper
                     // nouns like nationalities, events, etc.
                     is_proper_noun: !matches!(ner_entity.entity_type, NerEntityType::Misc),
+                    selectivity: None,
                 };
                 (ner_entity.text, node)
             })
@@ -2176,6 +2214,7 @@ impl MultiUserMemoryManager {
                             name_embedding: None,
                             salience: 0.6,
                             is_proper_noun: false,
+                            selectivity: None,
                         },
                     ))
                 } else {
@@ -2220,6 +2259,7 @@ impl MultiUserMemoryManager {
                         name_embedding: None,
                         salience: 0.5,
                         is_proper_noun: true,
+                        selectivity: None,
                     },
                 ))
             })
@@ -2248,6 +2288,7 @@ impl MultiUserMemoryManager {
                         name_embedding: None,
                         salience: 0.7,
                         is_proper_noun: true,
+                        selectivity: None,
                     },
                 ))
             })
@@ -2295,6 +2336,7 @@ impl MultiUserMemoryManager {
                         name_embedding: None,
                         salience: 0.4,
                         is_proper_noun: false,
+                        selectivity: None,
                     },
                 ));
             }
@@ -2398,6 +2440,8 @@ impl MultiUserMemoryManager {
                     tier: EdgeTier::L1Working,
                     activation_timestamps: None,
                     entity_confidence: None,
+                    forman_curvature: None,
+                    endpoint_selectivity: None,
                 };
 
                 if let Err(e) = graph_guard.add_relationship(edge) {
