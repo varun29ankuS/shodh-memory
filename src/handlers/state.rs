@@ -2580,6 +2580,65 @@ impl MultiUserMemoryManager {
                 {
                     return false;
                 }
+                // 9. Hook metadata patterns (tool:Edit, tool:Write, auto-captured, modified file)
+                if name.starts_with("tool:")
+                    || name.starts_with("source:")
+                    || name.starts_with("file:")
+                {
+                    return false;
+                }
+                // 10. Hook boilerplate phrases
+                {
+                    let lower = name.to_lowercase();
+                    if lower == "auto-captured"
+                        || lower == "modified file"
+                        || lower == "memories surfaced"
+                        || lower == "memories captured"
+                        || lower == "complete"
+                        || lower == "surfaced"
+                        || lower == "captured"
+                        || lower == "session-summary"
+                        || lower == "remember call"
+                    {
+                        return false;
+                    }
+                }
+                // 11. Path fragments — common directory/drive names that appear in file paths
+                {
+                    let lower = name.to_lowercase();
+                    if lower == "documents"
+                        || lower == "onedrive"
+                        || lower == "desktop"
+                        || lower == "downloads"
+                        || lower == "appdata"
+                        || lower == "users"
+                        || lower == "program files"
+                        || lower == "tmp"
+                        || lower == "temp"
+                    {
+                        return false;
+                    }
+                }
+                // 12. Sentence fragments — text containing sentence-ending punctuation
+                if name.contains(". ")
+                    || name.ends_with('.')
+                    || name.ends_with(',')
+                    || name.ends_with(';')
+                {
+                    return false;
+                }
+                // 13. CamelCase fragment artifacts — 1-2 char entities that are not all-caps acronyms
+                if name.len() <= 2 && !name.chars().all(|c| c.is_uppercase() || c.is_ascii_digit())
+                {
+                    return false;
+                }
+                // 14. Todo/issue ID patterns (REF-1, SHOD-7, PIPE-9, SHO-1, etc.)
+                {
+                    let issue_re = issue_regex();
+                    if issue_re.is_match(name) && name.len() < 10 {
+                        return false;
+                    }
+                }
                 true
             })
             .collect();
@@ -2669,7 +2728,14 @@ impl MultiUserMemoryManager {
             .iter()
             .filter_map(|tag| {
                 let tag_name = tag.trim();
-                if tag_name.len() >= 2 && !blocklist.contains(tag_name.to_lowercase().as_str()) {
+                if tag_name.len() >= 2
+                    && !blocklist.contains(tag_name.to_lowercase().as_str())
+                    && !tag_name.starts_with("tool:")
+                    && !tag_name.starts_with("source:")
+                    && !tag_name.starts_with("file:")
+                    && !tag_name.contains(". ")
+                    && !tag_name.ends_with('.')
+                {
                     Some((
                         tag_name.to_string(),
                         EntityNode {
@@ -2719,6 +2785,19 @@ impl MultiUserMemoryManager {
                     return None;
                 }
                 if blocklist.contains(term.to_lowercase().as_str()) {
+                    return None;
+                }
+                // Reject all-caps terms that are common words, not acronyms
+                static ALLCAPS_BLOCKLIST: &[&str] = &[
+                    "THE", "AND", "FOR", "NOT", "BUT", "ALL", "ANY", "CAN", "HAS", "HER", "WAS",
+                    "ONE", "OUR", "OUT", "ARE", "HIS", "HOW", "ITS", "MAY", "NEW", "NOW", "OLD",
+                    "SEE", "WAY", "WHO", "DID", "GET", "HIM", "LET", "SAY", "SHE", "TOO", "USE",
+                    "RUN", "SET", "TRY", "ADD", "END", "PUT", "ROT", "SPAN", "THEN", "THEM",
+                    "THAN", "THIS", "THAT", "WITH", "FROM", "JUST", "ALSO", "BEEN", "SOME", "EACH",
+                    "DOES", "INTO", "ONLY", "OVER", "SUCH", "TAKE", "HAVE", "MADE", "MANY", "MOST",
+                    "MUCH", "MUST", "VERY", "WELL",
+                ];
+                if ALLCAPS_BLOCKLIST.contains(&term.as_str()) {
                     return None;
                 }
                 known_names.push(term.clone());
