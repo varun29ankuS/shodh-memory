@@ -37,6 +37,24 @@ RUN curl -L -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/downlo
 
 ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 
+# Pre-download embedding models (cacheable independent of source code)
+# MiniLM-L6-v2 quantized (~23MB) + tokenizer (~700KB)
+# NER TinyBERT quantized (~14.5MB) + tokenizer (~700KB)
+# Pinned to immutable HuggingFace commit hashes with SHA-256 verification
+RUN mkdir -p /models/minilm-l6 /models/bert-tiny-ner \
+    && curl -fSL -o /models/minilm-l6/model_quantized.onnx \
+       "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/onnx/model_quint8_avx2.onnx" \
+    && curl -fSL -o /models/minilm-l6/tokenizer.json \
+       "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/tokenizer.json" \
+    && curl -fSL -o /models/bert-tiny-ner/model.onnx \
+       "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/onnx/model_quantized.onnx" \
+    && curl -fSL -o /models/bert-tiny-ner/tokenizer.json \
+       "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/tokenizer.json" \
+    && echo "b941bf19f1f1283680f449fa6a7336bb5600bdcd5f84d10ddc5cd72218a0fd21  /models/minilm-l6/model_quantized.onnx" | sha256sum -c - \
+    && echo "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037  /models/minilm-l6/tokenizer.json" | sha256sum -c - \
+    && echo "ba4a1a00cf1600cae8e7cf3fda4650c825811719065b51041256392edd3647b8  /models/bert-tiny-ner/model.onnx" | sha256sum -c - \
+    && echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  /models/bert-tiny-ner/tokenizer.json" | sha256sum -c -
+
 # Create dummy sources to build and cache dependencies
 RUN mkdir -p src benches tests \
     && echo "fn main() {}" > src/main.rs \
@@ -68,7 +86,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
+# Create non-root user with home directory
 RUN useradd -m -u 1000 shodh && \
     mkdir -p /data && \
     chown -R shodh:shodh /data
@@ -77,6 +95,12 @@ RUN useradd -m -u 1000 shodh && \
 COPY --from=builder /app/target/release/shodh-memory-server /usr/local/bin/shodh-memory
 COPY --from=builder /usr/local/lib/libonnxruntime.so /usr/local/lib/libonnxruntime.so
 RUN ldconfig
+
+# Copy pre-downloaded models into the image (eliminates runtime downloads)
+# Directory structure matches what the downloader expects:
+#   minilm-l6/model_quantized.onnx + tokenizer.json  (embedding model)
+#   bert-tiny-ner/model.onnx + tokenizer.json         (NER model)
+COPY --from=builder --chown=shodh:shodh /models /home/shodh/.cache/shodh-memory/models
 
 # Switch to non-root user
 USER shodh
@@ -87,15 +111,20 @@ WORKDIR /data
 # Expose default port
 EXPOSE 3030
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
+# Health check — 120s start period allows for first-time RocksDB initialization
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
   CMD curl -f http://localhost:3030/health || exit 1
 
 # Set environment variables
+# ORT_DYLIB_PATH: tells ort crate where libonnxruntime.so is (skips runtime download)
+# SHODH_MODEL_PATH: tells embedder where pre-baked models are (skips model download)
 ENV RUST_LOG=info \
     SHODH_HOST=0.0.0.0 \
     SHODH_PORT=3030 \
     SHODH_MEMORY_PATH=/data \
+    ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so \
+    SHODH_MODEL_PATH=/home/shodh/.cache/shodh-memory/models/minilm-l6 \
+    SHODH_NER_MODEL_PATH=/home/shodh/.cache/shodh-memory/models/bert-tiny-ner \
     LD_LIBRARY_PATH=/usr/local/lib
 
 # Run the binary

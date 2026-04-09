@@ -233,18 +233,17 @@ impl MiniLMEmbedder {
         if let Ok(existing_path) = std::env::var("ORT_DYLIB_PATH") {
             let path = std::path::PathBuf::from(&existing_path);
             if path.exists() {
-                tracing::debug!(
-                    "Using existing ONNX Runtime from ORT_DYLIB_PATH: {:?}",
-                    path
-                );
+                // eprintln because tracing subscriber may not be initialized yet
+                // (pre_init_ort_runtime runs before tokio/tracing setup)
+                eprintln!("[shodh] Using ONNX Runtime from ORT_DYLIB_PATH: {:?}", path);
                 return Ok(path);
             }
         }
 
         // Check for bundled ONNX Runtime in Python package (1-click install)
         if let Some(bundled_path) = Self::find_bundled_onnx_runtime() {
-            tracing::info!(
-                "Using bundled ONNX Runtime from package: {:?}",
+            eprintln!(
+                "[shodh] Using bundled ONNX Runtime from package: {:?}",
                 bundled_path
             );
             // SAFETY: This is called once via OnceLock, before other threads start
@@ -254,10 +253,7 @@ impl MiniLMEmbedder {
 
         // Check if we have ONNX Runtime in our cache
         if let Some(cached_path) = super::downloader::get_onnx_runtime_path() {
-            tracing::info!(
-                "Setting ORT_DYLIB_PATH to cached runtime: {:?}",
-                cached_path
-            );
+            eprintln!("[shodh] Using cached ONNX Runtime: {:?}", cached_path);
             // SAFETY: This is called once via OnceLock, before other threads start
             std::env::set_var("ORT_DYLIB_PATH", &cached_path);
             return Ok(cached_path);
@@ -268,13 +264,10 @@ impl MiniLMEmbedder {
             return Err("ONNX Runtime not found and SHODH_OFFLINE=true".to_string());
         }
 
-        tracing::info!("ONNX Runtime not found. Downloading...");
+        eprintln!("[shodh] ONNX Runtime not found. Downloading...");
         let onnx_path =
             super::downloader::download_onnx_runtime(None).map_err(|e| e.to_string())?;
-        tracing::info!(
-            "Setting ORT_DYLIB_PATH to downloaded runtime: {:?}",
-            onnx_path
-        );
+        eprintln!("[shodh] Downloaded ONNX Runtime to: {:?}", onnx_path);
         // SAFETY: This is called once via OnceLock, before other threads start
         std::env::set_var("ORT_DYLIB_PATH", &onnx_path);
         Ok(onnx_path)

@@ -1,7 +1,7 @@
 services:
   shodh-memory:
     build: .
-    image: ghcr.io/varun29ankus/shodh-memory:latest
+    image: varunshodh/shodh-memory:latest
     container_name: shodh-memory
     ports:
       - "3030:3030"
@@ -16,9 +16,9 @@ services:
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3030/health"]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
-      start_period: 40s
+      start_period: 120s
     networks:
       - shodh-network
 
