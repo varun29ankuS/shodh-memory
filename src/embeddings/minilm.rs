@@ -235,10 +235,7 @@ impl MiniLMEmbedder {
             if path.exists() {
                 // eprintln because tracing subscriber may not be initialized yet
                 // (pre_init_ort_runtime runs before tokio/tracing setup)
-                eprintln!(
-                    "[shodh] Using ONNX Runtime from ORT_DYLIB_PATH: {:?}",
-                    path
-                );
+                eprintln!("[shodh] Using ONNX Runtime from ORT_DYLIB_PATH: {:?}", path);
                 return Ok(path);
             }
         }
@@ -256,10 +253,7 @@ impl MiniLMEmbedder {
 
         // Check if we have ONNX Runtime in our cache
         if let Some(cached_path) = super::downloader::get_onnx_runtime_path() {
-            eprintln!(
-                "[shodh] Using cached ONNX Runtime: {:?}",
-                cached_path
-            );
+            eprintln!("[shodh] Using cached ONNX Runtime: {:?}", cached_path);
             // SAFETY: This is called once via OnceLock, before other threads start
             std::env::set_var("ORT_DYLIB_PATH", &cached_path);
             return Ok(cached_path);
@@ -273,10 +267,7 @@ impl MiniLMEmbedder {
         eprintln!("[shodh] ONNX Runtime not found. Downloading...");
         let onnx_path =
             super::downloader::download_onnx_runtime(None).map_err(|e| e.to_string())?;
-        eprintln!(
-            "[shodh] Downloaded ONNX Runtime to: {:?}",
-            onnx_path
-        );
+        eprintln!("[shodh] Downloaded ONNX Runtime to: {:?}", onnx_path);
         // SAFETY: This is called once via OnceLock, before other threads start
         std::env::set_var("ORT_DYLIB_PATH", &onnx_path);
         Ok(onnx_path)
