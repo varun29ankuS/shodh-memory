@@ -4938,11 +4938,7 @@ impl GraphMemory {
     /// then batch-updates salience clamped to [0.05, 1.0].
     ///
     /// Returns the number of entities adjusted.
-    pub fn reinforce_entity_salience(
-        &self,
-        memory_uuids: &[Uuid],
-        boost: f32,
-    ) -> Result<usize> {
+    pub fn reinforce_entity_salience(&self, memory_uuids: &[Uuid], boost: f32) -> Result<usize> {
         if memory_uuids.is_empty() || boost == 0.0 {
             return Ok(0);
         }
@@ -4975,8 +4971,7 @@ impl GraphMemory {
 
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
-                if let Ok((mut entity, _)) =
-                    crate::serialization::try_decode::<EntityNode>(&value)
+                if let Ok((mut entity, _)) = crate::serialization::try_decode::<EntityNode>(&value)
                 {
                     let old_salience = entity.salience;
                     entity.salience = (entity.salience + boost).clamp(0.05, 1.0);

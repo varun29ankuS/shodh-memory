@@ -2161,8 +2161,7 @@ pub async fn proactive_context(
             // Also penalize entities when memories exceed habituation threshold.
             {
                 use crate::constants::{
-                    ENTITY_SALIENCE_HABITUATION_PENALTY,
-                    ENTITY_SALIENCE_HABITUATION_THRESHOLD,
+                    ENTITY_SALIENCE_HABITUATION_PENALTY, ENTITY_SALIENCE_HABITUATION_THRESHOLD,
                 };
                 let user_map = habituation_tracker
                     .entry(user_id_for_habituation)
@@ -2183,7 +2182,8 @@ pub async fn proactive_context(
                         entry.last_surfaced = now;
 
                         // Penalize entities when memory repeatedly ignored
-                        if entry.surfacings_without_utility > ENTITY_SALIENCE_HABITUATION_THRESHOLD {
+                        if entry.surfacings_without_utility > ENTITY_SALIENCE_HABITUATION_THRESHOLD
+                        {
                             if let Some(ref graph) = graph_for_habituation {
                                 let graph_guard = graph.read();
                                 let _ = graph_guard.reinforce_entity_salience(
@@ -3065,9 +3065,7 @@ pub async fn reinforce_feedback(
         .map_err(AppError::Internal)?;
 
     // Run reinforcement in blocking task (involves RocksDB writes)
-    let graph = state
-        .get_user_graph(&req.user_id)
-        .ok();
+    let graph = state.get_user_graph(&req.user_id).ok();
 
     let memory_uuids: Vec<uuid::Uuid> = memory_ids.iter().map(|m| m.0).collect();
     let mut stats = {
