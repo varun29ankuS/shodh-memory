@@ -2380,7 +2380,7 @@ impl GraphMemory {
         }
 
         if !to_prune.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 entity = %entity_uuid,
                 pruned = to_prune.len(),
                 remaining = MAX_ENTITY_DEGREE,
