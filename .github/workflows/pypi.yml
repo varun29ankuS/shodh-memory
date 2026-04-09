@@ -31,11 +31,22 @@ jobs:
       - name: Download models and ONNX Runtime
         run: |
           mkdir -p bundled/lib bundled/models/minilm-l6 bundled/models/bert-tiny-ner
-          curl -L -o bundled/models/minilm-l6/model_quantized.onnx "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model_quint8_avx2.onnx"
-          curl -L -o bundled/models/minilm-l6/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
-          curl -L -o bundled/models/bert-tiny-ner/model.onnx "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx"
-          curl -L -o bundled/models/bert-tiny-ner/tokenizer.json "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json"
-          curl -L -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz"
+          # Pinned to immutable HuggingFace commit hashes
+          curl -fSL -o bundled/models/minilm-l6/model_quantized.onnx \
+            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/onnx/model_quint8_avx2.onnx"
+          curl -fSL -o bundled/models/minilm-l6/tokenizer.json \
+            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/tokenizer.json"
+          curl -fSL -o bundled/models/bert-tiny-ner/model.onnx \
+            "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/onnx/model_quantized.onnx"
+          curl -fSL -o bundled/models/bert-tiny-ner/tokenizer.json \
+            "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/tokenizer.json"
+          # SHA-256 verification
+          echo "b941bf19f1f1283680f449fa6a7336bb5600bdcd5f84d10ddc5cd72218a0fd21  bundled/models/minilm-l6/model_quantized.onnx" | sha256sum -c -
+          echo "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037  bundled/models/minilm-l6/tokenizer.json" | sha256sum -c -
+          echo "ba4a1a00cf1600cae8e7cf3fda4650c825811719065b51041256392edd3647b8  bundled/models/bert-tiny-ner/model.onnx" | sha256sum -c -
+          echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  bundled/models/bert-tiny-ner/tokenizer.json" | sha256sum -c -
+          # ONNX Runtime
+          curl -fSL -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz"
           tar -xzf onnxruntime.tgz
           cp onnxruntime-linux-x64-1.23.2/lib/libonnxruntime.so.1.23.2 bundled/lib/libonnxruntime.so
           echo "=== Downloaded files ==="
@@ -122,11 +133,22 @@ jobs:
       - name: Download models and ONNX Runtime
         run: |
           mkdir -p bundled/lib bundled/models/minilm-l6 bundled/models/bert-tiny-ner
-          curl -L -o bundled/models/minilm-l6/model_quantized.onnx "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model_quint8_avx2.onnx"
-          curl -L -o bundled/models/minilm-l6/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
-          curl -L -o bundled/models/bert-tiny-ner/model.onnx "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx"
-          curl -L -o bundled/models/bert-tiny-ner/tokenizer.json "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json"
-          curl -L -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-arm64-1.23.2.tgz"
+          # Pinned to immutable HuggingFace commit hashes
+          curl -fSL -o bundled/models/minilm-l6/model_quantized.onnx \
+            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/onnx/model_quint8_avx2.onnx"
+          curl -fSL -o bundled/models/minilm-l6/tokenizer.json \
+            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/tokenizer.json"
+          curl -fSL -o bundled/models/bert-tiny-ner/model.onnx \
+            "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/onnx/model_quantized.onnx"
+          curl -fSL -o bundled/models/bert-tiny-ner/tokenizer.json \
+            "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/tokenizer.json"
+          # SHA-256 verification (shasum on macOS)
+          echo "b941bf19f1f1283680f449fa6a7336bb5600bdcd5f84d10ddc5cd72218a0fd21  bundled/models/minilm-l6/model_quantized.onnx" | shasum -a 256 -c -
+          echo "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037  bundled/models/minilm-l6/tokenizer.json" | shasum -a 256 -c -
+          echo "ba4a1a00cf1600cae8e7cf3fda4650c825811719065b51041256392edd3647b8  bundled/models/bert-tiny-ner/model.onnx" | shasum -a 256 -c -
+          echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  bundled/models/bert-tiny-ner/tokenizer.json" | shasum -a 256 -c -
+          # ONNX Runtime
+          curl -fSL -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-arm64-1.23.2.tgz"
           tar -xzf onnxruntime.tgz
           cp onnxruntime-osx-arm64-1.23.2/lib/libonnxruntime.1.23.2.dylib bundled/lib/libonnxruntime.dylib
           echo "=== Downloaded files ==="
@@ -209,11 +231,22 @@ jobs:
       - name: Download models and ONNX Runtime
         run: |
           mkdir -p bundled/lib bundled/models/minilm-l6 bundled/models/bert-tiny-ner
-          curl -L -o bundled/models/minilm-l6/model_quantized.onnx "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model_quint8_avx2.onnx"
-          curl -L -o bundled/models/minilm-l6/tokenizer.json "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
-          curl -L -o bundled/models/bert-tiny-ner/model.onnx "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx"
-          curl -L -o bundled/models/bert-tiny-ner/tokenizer.json "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json"
-          curl -L -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-x86_64-1.23.2.tgz"
+          # Pinned to immutable HuggingFace commit hashes
+          curl -fSL -o bundled/models/minilm-l6/model_quantized.onnx \
+            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/onnx/model_quint8_avx2.onnx"
+          curl -fSL -o bundled/models/minilm-l6/tokenizer.json \
+            "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/tokenizer.json"
+          curl -fSL -o bundled/models/bert-tiny-ner/model.onnx \
+            "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/onnx/model_quantized.onnx"
+          curl -fSL -o bundled/models/bert-tiny-ner/tokenizer.json \
+            "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/tokenizer.json"
+          # SHA-256 verification (shasum on macOS)
+          echo "b941bf19f1f1283680f449fa6a7336bb5600bdcd5f84d10ddc5cd72218a0fd21  bundled/models/minilm-l6/model_quantized.onnx" | shasum -a 256 -c -
+          echo "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037  bundled/models/minilm-l6/tokenizer.json" | shasum -a 256 -c -
+          echo "ba4a1a00cf1600cae8e7cf3fda4650c825811719065b51041256392edd3647b8  bundled/models/bert-tiny-ner/model.onnx" | shasum -a 256 -c -
+          echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  bundled/models/bert-tiny-ner/tokenizer.json" | shasum -a 256 -c -
+          # ONNX Runtime
+          curl -fSL -o onnxruntime.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-x86_64-1.23.2.tgz"
           tar -xzf onnxruntime.tgz
           cp onnxruntime-osx-x86_64-1.23.2/lib/libonnxruntime.1.23.2.dylib bundled/lib/libonnxruntime.dylib
           echo "=== Downloaded files ==="
@@ -296,10 +329,27 @@ jobs:
           New-Item -ItemType Directory -Force -Path bundled/lib
           New-Item -ItemType Directory -Force -Path bundled/models/minilm-l6
           New-Item -ItemType Directory -Force -Path bundled/models/bert-tiny-ner
-          Invoke-WebRequest -Uri "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model_quint8_avx2.onnx" -OutFile "bundled/models/minilm-l6/model_quantized.onnx"
-          Invoke-WebRequest -Uri "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json" -OutFile "bundled/models/minilm-l6/tokenizer.json"
-          Invoke-WebRequest -Uri "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/onnx/model_quantized.onnx" -OutFile "bundled/models/bert-tiny-ner/model.onnx"
-          Invoke-WebRequest -Uri "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/main/tokenizer.json" -OutFile "bundled/models/bert-tiny-ner/tokenizer.json"
+          # Pinned to immutable HuggingFace commit hashes
+          Invoke-WebRequest -Uri "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/onnx/model_quint8_avx2.onnx" -OutFile "bundled/models/minilm-l6/model_quantized.onnx"
+          Invoke-WebRequest -Uri "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/tokenizer.json" -OutFile "bundled/models/minilm-l6/tokenizer.json"
+          Invoke-WebRequest -Uri "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/onnx/model_quantized.onnx" -OutFile "bundled/models/bert-tiny-ner/model.onnx"
+          Invoke-WebRequest -Uri "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/tokenizer.json" -OutFile "bundled/models/bert-tiny-ner/tokenizer.json"
+          # SHA-256 verification
+          $expected = @{
+            "bundled/models/minilm-l6/model_quantized.onnx" = "b941bf19f1f1283680f449fa6a7336bb5600bdcd5f84d10ddc5cd72218a0fd21"
+            "bundled/models/minilm-l6/tokenizer.json" = "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037"
+            "bundled/models/bert-tiny-ner/model.onnx" = "ba4a1a00cf1600cae8e7cf3fda4650c825811719065b51041256392edd3647b8"
+            "bundled/models/bert-tiny-ner/tokenizer.json" = "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+          }
+          foreach ($entry in $expected.GetEnumerator()) {
+            $actual = (Get-FileHash -Algorithm SHA256 $entry.Key).Hash.ToLower()
+            if ($actual -ne $entry.Value) {
+              Write-Error "SHA-256 mismatch for $($entry.Key): expected $($entry.Value), got $actual"
+              exit 1
+            }
+            Write-Host "OK: $($entry.Key)"
+          }
+          # ONNX Runtime
           Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip" -OutFile "onnxruntime.zip"
           Expand-Archive -Path "onnxruntime.zip" -DestinationPath "."
           Copy-Item "onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll" -Destination "bundled/lib/onnxruntime.dll"
