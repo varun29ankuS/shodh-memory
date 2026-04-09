@@ -4489,31 +4489,34 @@ process.on("SIGTERM", () => {
   process.exit(0);
 });
 
-// Detect MCP session end via stdin close (host closed pipe)
-// This is the primary shutdown signal from MCP hosts like kiro-cli, Cursor, etc.
-process.stdin.on("end", () => {
-  console.error("[shodh-memory] stdin closed (MCP session ended), shutting down...");
+// Guard against multiple shutdown calls (end + close can both fire)
+let shuttingDown = false;
+function gracefulShutdown(reason: string, code: number = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.error(`[shodh-memory] ${reason}`);
   cleanupServer();
-  process.exit(0);
-});
+  // Brief grace period for any in-flight stdout writes to flush
+  setTimeout(() => process.exit(code), 100);
+}
 
-process.stdin.on("close", () => {
-  console.error("[shodh-memory] stdin pipe closed, shutting down...");
-  cleanupServer();
-  process.exit(0);
-});
+// Detect MCP session end via stdin close (host closed pipe).
+// This is the primary shutdown signal from MCP hosts like kiro-cli, Cursor, etc.
+// stdin "end" fires when EOF is read (host closed write end of pipe).
+// stdin "close" fires when the underlying resource is freed.
+// Both are terminal — the host is gone, there's no session to evict.
+process.stdin.on("end", () => gracefulShutdown("stdin closed (MCP session ended), shutting down..."));
+process.stdin.on("close", () => gracefulShutdown("stdin pipe closed, shutting down..."));
 
 // Catch unhandled errors to ensure cleanup runs
 process.on("uncaughtException", (err) => {
   console.error("[shodh-memory] Uncaught exception:", err);
-  cleanupServer();
-  process.exit(1);
+  gracefulShutdown("Shutting down after uncaught exception", 1);
 });
 
 process.on("unhandledRejection", (reason) => {
   console.error("[shodh-memory] Unhandled rejection:", reason);
-  cleanupServer();
-  process.exit(1);
+  gracefulShutdown("Shutting down after unhandled rejection", 1);
 });
 
 // Smithery sandbox export — allows tool scanning without a running backend
