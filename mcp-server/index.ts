@@ -165,7 +165,7 @@ function resetTokenSession(): void {
 }
 
 // Streaming ingestion settings
-const STREAM_ENABLED = process.env.SHODH_STREAM !== "false"; // enabled by default
+let STREAM_ENABLED = process.env.SHODH_STREAM !== "false"; // enabled by default
 const STREAM_MIN_CONTENT_LENGTH = 50; // minimum content length to stream
 
 // Proactive surfacing settings
@@ -4441,8 +4441,22 @@ async function ensureServerRunning(): Promise<void> {
   }
 }
 
-// Graceful shutdown helper
+// Graceful shutdown helper — tears down ALL event loop references
 function cleanupServer() {
+  // 1. Stop WebSocket reconnect loop (prevents event loop from staying alive)
+  if (streamReconnectTimer) {
+    clearTimeout(streamReconnectTimer);
+    streamReconnectTimer = null;
+  }
+  STREAM_ENABLED = false; // prevent further reconnect attempts
+
+  // 2. Close WebSocket explicitly
+  if (streamSocket) {
+    try { streamSocket.close(); } catch (_) { /* ignore */ }
+    streamSocket = null;
+  }
+
+  // 3. Kill child process
   if (serverProcess && !serverProcess.killed) {
     // For detached processes, we need to kill the process group on Unix
     if (process.platform !== "win32" && serverProcess.pid) {
@@ -4451,10 +4465,10 @@ function cleanupServer() {
         process.kill(-serverProcess.pid, "SIGTERM");
       } catch (e) {
         console.error("[Cleanup] Process group kill failed, falling back to direct kill:", e);
-        serverProcess.kill("SIGTERM");
+        try { serverProcess.kill("SIGTERM"); } catch (_) { /* ignore */ }
       }
     } else {
-      serverProcess.kill();
+      try { serverProcess.kill(); } catch (_) { /* ignore */ }
     }
   }
 }
@@ -4473,6 +4487,33 @@ process.on("SIGTERM", () => {
   console.error("[shodh-memory] Received SIGTERM, shutting down...");
   cleanupServer();
   process.exit(0);
+});
+
+// Detect MCP session end via stdin close (host closed pipe)
+// This is the primary shutdown signal from MCP hosts like kiro-cli, Cursor, etc.
+process.stdin.on("end", () => {
+  console.error("[shodh-memory] stdin closed (MCP session ended), shutting down...");
+  cleanupServer();
+  process.exit(0);
+});
+
+process.stdin.on("close", () => {
+  console.error("[shodh-memory] stdin pipe closed, shutting down...");
+  cleanupServer();
+  process.exit(0);
+});
+
+// Catch unhandled errors to ensure cleanup runs
+process.on("uncaughtException", (err) => {
+  console.error("[shodh-memory] Uncaught exception:", err);
+  cleanupServer();
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[shodh-memory] Unhandled rejection:", reason);
+  cleanupServer();
+  process.exit(1);
 });
 
 // Smithery sandbox export — allows tool scanning without a running backend
