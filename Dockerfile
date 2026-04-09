@@ -40,7 +40,7 @@ ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 # Pre-download embedding models (cacheable independent of source code)
 # MiniLM-L6-v2 quantized (~23MB) + tokenizer (~700KB)
 # NER TinyBERT quantized (~14.5MB) + tokenizer (~700KB)
-# Pinned to immutable HuggingFace commit hashes
+# Pinned to immutable HuggingFace commit hashes with SHA-256 verification
 RUN mkdir -p /models/minilm-l6 /models/bert-tiny-ner \
     && curl -fSL -o /models/minilm-l6/model_quantized.onnx \
        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/onnx/model_quint8_avx2.onnx" \
@@ -49,7 +49,11 @@ RUN mkdir -p /models/minilm-l6 /models/bert-tiny-ner \
     && curl -fSL -o /models/bert-tiny-ner/model.onnx \
        "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/onnx/model_quantized.onnx" \
     && curl -fSL -o /models/bert-tiny-ner/tokenizer.json \
-       "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/tokenizer.json"
+       "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/tokenizer.json" \
+    && echo "b941bf19f1f1283680f449fa6a7336bb5600bdcd5f84d10ddc5cd72218a0fd21  /models/minilm-l6/model_quantized.onnx" | sha256sum -c - \
+    && echo "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037  /models/minilm-l6/tokenizer.json" | sha256sum -c - \
+    && echo "ba4a1a00cf1600cae8e7cf3fda4650c825811719065b51041256392edd3647b8  /models/bert-tiny-ner/model.onnx" | sha256sum -c - \
+    && echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  /models/bert-tiny-ner/tokenizer.json" | sha256sum -c -
 
 # Create dummy sources to build and cache dependencies
 RUN mkdir -p src benches tests \
