@@ -472,6 +472,7 @@ impl PyMemorySystem {
             // NER + co-occurrence (populated by handler pipeline, empty for direct Python API)
             ner_entities: vec![],
             cooccurrence_pairs: vec![],
+            importance_override: None,
         };
 
         let memory_id = self
@@ -793,6 +794,7 @@ impl PyMemorySystem {
             prospective_signals: None,
             episode_id: None,
             recency_weight: None,
+            session_id: None,
             max_results: limit,
             retrieval_mode,
             offset: 0,
@@ -1828,6 +1830,7 @@ impl PyMemorySystem {
             prospective_signals: None,
             episode_id: None,
             recency_weight: None,
+            session_id: None,
             max_results: max_results * 2, // Get more for filtering
             retrieval_mode: RetrievalMode::Hybrid,
             offset: 0,
