@@ -2678,6 +2678,16 @@ impl MultiUserMemoryManager {
                             return false;
                         }
                     }
+                    // Reward loop filter: entity driven below salience floor by feedback
+                    if rep.salience < crate::constants::ENTITY_SALIENCE_FILTER_FLOOR
+                        && rep.mention_count > crate::constants::ENTITY_SALIENCE_FILTER_MIN_MENTIONS
+                    {
+                        tracing::debug!(
+                            "Salience-rejected entity '{}' (salience={:.3}, mentions={})",
+                            e.text, rep.salience, rep.mention_count
+                        );
+                        return false;
+                    }
                     true
                 })
                 .collect()

@@ -1855,6 +1855,7 @@ pub async fn proactive_context(
     let embedding_for_query = context_embedding.clone();
     let habituation_tracker = state.habituation_tracker.clone();
     let user_id_for_habituation = req.user_id.clone();
+    let graph_for_habituation = state.get_user_graph(&req.user_id).ok();
     let memory_type_filter: Vec<ExperienceType> = req
         .memory_types
         .iter()
@@ -2157,7 +2158,11 @@ pub async fn proactive_context(
 
             // (E) Update habituation state — record that these memories were surfaced.
             // Positive feedback resets count in Phase 0 of the next call.
+            // Also penalize entities when memories exceed habituation threshold.
             {
+                use crate::constants::{
+                    ENTITY_SALIENCE_HABITUATION_PENALTY, ENTITY_SALIENCE_HABITUATION_THRESHOLD,
+                };
                 let user_map = habituation_tracker
                     .entry(user_id_for_habituation)
                     .or_insert_with(DashMap::new);
@@ -2165,6 +2170,7 @@ pub async fn proactive_context(
                 for (m, score, _) in enriched.iter() {
                     if *score >= effective_min {
                         let mem_id = m.id.0.to_string();
+                        let mem_uuid = m.id.0;
                         let mut entry = user_map.entry(mem_id).or_insert_with(|| {
                             super::state::HabituationEntry {
                                 surfacings_without_utility: 0,
@@ -2174,6 +2180,18 @@ pub async fn proactive_context(
                         });
                         entry.surfacings_without_utility += 1;
                         entry.last_surfaced = now;
+
+                        // Penalize entities when memory repeatedly ignored
+                        if entry.surfacings_without_utility > ENTITY_SALIENCE_HABITUATION_THRESHOLD
+                        {
+                            if let Some(ref graph) = graph_for_habituation {
+                                let graph_guard = graph.read();
+                                let _ = graph_guard.reinforce_entity_salience(
+                                    &[mem_uuid],
+                                    ENTITY_SALIENCE_HABITUATION_PENALTY,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -3047,7 +3065,10 @@ pub async fn reinforce_feedback(
         .map_err(AppError::Internal)?;
 
     // Run reinforcement in blocking task (involves RocksDB writes)
-    let stats = {
+    let graph = state.get_user_graph(&req.user_id).ok();
+
+    let memory_uuids: Vec<uuid::Uuid> = memory_ids.iter().map(|m| m.0).collect();
+    let mut stats = {
         let memory = memory.clone();
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
@@ -3058,12 +3079,47 @@ pub async fn reinforce_feedback(
         .map_err(AppError::Internal)?
     };
 
+    // Propagate feedback to entity salience in the knowledge graph
+    if let Some(graph) = graph {
+        let boost = match outcome {
+            crate::memory::RetrievalOutcome::Helpful => {
+                crate::constants::ENTITY_SALIENCE_HELPFUL_BOOST
+            }
+            crate::memory::RetrievalOutcome::Misleading => {
+                crate::constants::ENTITY_SALIENCE_MISLEADING_PENALTY
+            }
+            crate::memory::RetrievalOutcome::Neutral => 0.0,
+        };
+        if boost != 0.0 {
+            let graph_clone = graph.clone();
+            let uuids = memory_uuids.clone();
+            match tokio::task::spawn_blocking(move || {
+                let graph_guard = graph_clone.read();
+                graph_guard.reinforce_entity_salience(&uuids, boost)
+            })
+            .await
+            {
+                Ok(Ok(count)) => {
+                    stats.entity_edges_reinforced = count;
+                    tracing::info!(
+                        entities_reinforced = count,
+                        boost = boost,
+                        "Entity salience reinforcement applied"
+                    );
+                }
+                Ok(Err(e)) => tracing::warn!("Entity reinforcement failed: {}", e),
+                Err(e) => tracing::warn!("Entity reinforcement task panicked: {}", e),
+            }
+        }
+    }
+
     tracing::info!(
         user_id = %req.user_id,
         processed = stats.memories_processed,
         strengthened = stats.associations_strengthened,
         boosts = stats.importance_boosts,
         decays = stats.importance_decays,
+        entity_salience_reinforced = stats.entity_edges_reinforced,
         "Hebbian reinforcement applied"
     );
 
