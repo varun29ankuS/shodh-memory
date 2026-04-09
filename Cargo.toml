@@ -1,6 +1,6 @@
 [package]
 name = "shodh-memory"
-version = "0.1.91"
+version = "0.2.0"
 edition = "2021"
 authors = ["Shodh Team <29.varuns@gmail.com>"]
 description = "Persistent cognitive memory for AI agents and robots — Hebbian learning, knowledge graph, spatial recall. Zenoh/ROS2 native. Single binary, runs offline."

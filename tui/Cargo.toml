@@ -1,6 +1,6 @@
 [package]
 name = "shodh-tui"
-version = "0.1.91"
+version = "0.2.0"
 edition = "2021"
 description = "Terminal UI for Shodh Memory - real-time visualization"
 authors = ["Shodh"]
