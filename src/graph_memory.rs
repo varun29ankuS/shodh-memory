@@ -2075,6 +2075,7 @@ impl GraphMemory {
             selectivity: entity.selectivity.unwrap_or(1.0), // Conservative default
             mention_count: entity.mention_count,
             degree,
+            salience: entity.salience,
         })
     }
 
@@ -4926,6 +4927,85 @@ impl GraphMemory {
         })
     }
 
+    /// Adjust entity salience for all entities connected to the given memories.
+    ///
+    /// Used by the reward loop to propagate recall feedback to entity reputation:
+    /// - Helpful recall → positive boost → entities become more trusted
+    /// - Misleading recall → negative penalty → entities lose reputation
+    /// - Habituation (ignored surfacings) → tiny penalty → noise entities decay
+    ///
+    /// Looks up each memory's EpisodicNode, reads `entity_refs`, deduplicates,
+    /// then batch-updates salience clamped to [0.05, 1.0].
+    ///
+    /// Returns the number of entities adjusted.
+    pub fn reinforce_entity_salience(
+        &self,
+        memory_uuids: &[Uuid],
+        boost: f32,
+    ) -> Result<usize> {
+        if memory_uuids.is_empty() || boost == 0.0 {
+            return Ok(0);
+        }
+
+        // Collect all unique entity UUIDs across all memories' episodes
+        let mut entity_uuids: std::collections::HashSet<Uuid> =
+            std::collections::HashSet::with_capacity(memory_uuids.len() * 4);
+
+        for mem_uuid in memory_uuids {
+            if let Some(episode) = self.get_episode(mem_uuid)? {
+                for entity_uuid in &episode.entity_refs {
+                    entity_uuids.insert(*entity_uuid);
+                }
+            }
+        }
+
+        if entity_uuids.is_empty() {
+            return Ok(0);
+        }
+
+        // Batch-read all entities
+        let keys: Vec<[u8; 16]> = entity_uuids.iter().map(|u| *u.as_bytes()).collect();
+        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let results = self
+            .db
+            .batched_multi_get_cf(self.entities_cf(), &key_refs, false);
+
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut adjusted = 0;
+
+        for (i, result) in results.into_iter().enumerate() {
+            if let Ok(Some(value)) = result {
+                if let Ok((mut entity, _)) =
+                    crate::serialization::try_decode::<EntityNode>(&value)
+                {
+                    let old_salience = entity.salience;
+                    entity.salience = (entity.salience + boost).clamp(0.05, 1.0);
+
+                    // Skip write if salience didn't actually change (already at boundary)
+                    if (entity.salience - old_salience).abs() < f32::EPSILON {
+                        continue;
+                    }
+
+                    if let Ok(encoded) = crate::serialization::encode(&entity) {
+                        batch.put_cf(self.entities_cf(), &keys[i], encoded);
+                        adjusted += 1;
+                    }
+                }
+            }
+        }
+
+        if adjusted > 0 {
+            self.db.write(batch)?;
+            tracing::debug!(
+                adjusted,
+                boost,
+                "Entity salience reinforcement batch committed"
+            );
+        }
+
+        Ok(adjusted)
+    }
+
     /// Get graph statistics - O(1) using atomic counters
     pub fn get_stats(&self) -> Result<GraphStats> {
         Ok(GraphStats {
@@ -5232,6 +5312,8 @@ pub struct EntityReputation {
     pub mention_count: usize,
     /// Number of edges incident to this entity
     pub degree: usize,
+    /// Feedback-driven salience (reward loop output, 0.05–1.0)
+    pub salience: f32,
 }
 
 /// Captures the distribution of curvature across the knowledge graph.

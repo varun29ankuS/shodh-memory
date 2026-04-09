@@ -2784,4 +2784,49 @@ pub const LINEAGE_EXPANSION_MIN_CONFIDENCE: f32 = 0.7;
 // | SESSION_REENGAGEMENT_BOOST    | memory/feedback.rs        | Topic return detection               |
 // | TEMPORAL_CREDIT_MIN_THRESHOLD | memory/feedback.rs        | Deferred credit noise filter         |
 //
+// ## Entity Salience Reward Loop Constants (Piece 3)
+// | Constant                            | File                | Function/Context                     |
+// |-------------------------------------|---------------------|--------------------------------------|
+// | ENTITY_SALIENCE_HELPFUL_BOOST       | handlers/recall.rs  | reinforce_feedback() entity salience |
+// | ENTITY_SALIENCE_MISLEADING_PENALTY  | handlers/recall.rs  | reinforce_feedback() entity salience |
+// | ENTITY_SALIENCE_HABITUATION_PENALTY | handlers/recall.rs  | proactive_context() habituation      |
+// | ENTITY_SALIENCE_FILTER_FLOOR        | handlers/state.rs   | process_experience entity filtering  |
+// | ENTITY_SALIENCE_FILTER_MIN_MENTIONS | handlers/state.rs   | process_experience entity filtering  |
+//
 // =============================================================================
+
+// =============================================================================
+// ENTITY SALIENCE REWARD LOOP
+// =============================================================================
+
+/// Salience boost per helpful recall feedback (+3%).
+/// Asymmetric with penalty: rewards accumulate slowly, punishments hit harder.
+/// This prevents runaway positive feedback while allowing noise to decay fast.
+pub const ENTITY_SALIENCE_HELPFUL_BOOST: f32 = 0.03;
+
+/// Salience penalty per misleading recall feedback (-5%).
+/// Asymmetric: misleading is penalized ~1.7× harder than helpful is rewarded.
+/// Rationale: a single misleading recall is more damaging than a single helpful
+/// recall is valuable — false positives erode trust faster than true positives build it.
+pub const ENTITY_SALIENCE_MISLEADING_PENALTY: f32 = -0.05;
+
+/// Salience penalty per habituation event (-1%).
+/// Applied when a memory has been surfaced 3+ times without utility.
+/// Tiny because habituation is noisy — the user may ignore a memory for reasons
+/// unrelated to entity quality (context mismatch, timing, etc.).
+pub const ENTITY_SALIENCE_HABITUATION_PENALTY: f32 = -0.01;
+
+/// Minimum salience before an entity gets filtered from extraction (feedback-driven floor).
+/// Entities driven below this by the reward loop are excluded from new memories.
+/// The floor is 0.15, well below the default 0.5 — entities need sustained negative
+/// feedback to reach this threshold.
+pub const ENTITY_SALIENCE_FILTER_FLOOR: f32 = 0.15;
+
+/// Minimum mention count before salience filtering applies.
+/// Prevents filtering entities that haven't accumulated enough feedback signal.
+/// An entity must have been seen 5+ times before its salience is trusted as a quality signal.
+pub const ENTITY_SALIENCE_FILTER_MIN_MENTIONS: usize = 5;
+
+/// Minimum surfacings without utility before habituation penalty kicks in.
+/// Below this threshold, we assume the memory might still be useful in the right context.
+pub const ENTITY_SALIENCE_HABITUATION_THRESHOLD: u32 = 3;
