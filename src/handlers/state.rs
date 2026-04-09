@@ -2581,7 +2581,10 @@ impl MultiUserMemoryManager {
                     return false;
                 }
                 // 9. Hook metadata patterns (tool:Edit, tool:Write, auto-captured, modified file)
-                if name.starts_with("tool:") || name.starts_with("source:") || name.starts_with("file:") {
+                if name.starts_with("tool:")
+                    || name.starts_with("source:")
+                    || name.starts_with("file:")
+                {
                     return false;
                 }
                 // 10. Hook boilerplate phrases
@@ -2617,11 +2620,16 @@ impl MultiUserMemoryManager {
                     }
                 }
                 // 12. Sentence fragments — text containing sentence-ending punctuation
-                if name.contains(". ") || name.ends_with('.') || name.ends_with(',') || name.ends_with(';') {
+                if name.contains(". ")
+                    || name.ends_with('.')
+                    || name.ends_with(',')
+                    || name.ends_with(';')
+                {
                     return false;
                 }
                 // 13. CamelCase fragment artifacts — 1-2 char entities that are not all-caps acronyms
-                if name.len() <= 2 && !name.chars().all(|c| c.is_uppercase() || c.is_ascii_digit()) {
+                if name.len() <= 2 && !name.chars().all(|c| c.is_uppercase() || c.is_ascii_digit())
+                {
                     return false;
                 }
                 // 14. Todo/issue ID patterns (REF-1, SHOD-7, PIPE-9, SHO-1, etc.)
@@ -2781,13 +2789,13 @@ impl MultiUserMemoryManager {
                 }
                 // Reject all-caps terms that are common words, not acronyms
                 static ALLCAPS_BLOCKLIST: &[&str] = &[
-                    "THE", "AND", "FOR", "NOT", "BUT", "ALL", "ANY", "CAN", "HAS", "HER",
-                    "WAS", "ONE", "OUR", "OUT", "ARE", "HIS", "HOW", "ITS", "MAY", "NEW",
-                    "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GET", "HIM", "LET", "SAY",
-                    "SHE", "TOO", "USE", "RUN", "SET", "TRY", "ADD", "END", "PUT", "ROT",
-                    "SPAN", "THEN", "THEM", "THAN", "THIS", "THAT", "WITH", "FROM", "JUST",
-                    "ALSO", "BEEN", "SOME", "EACH", "DOES", "INTO", "ONLY", "OVER", "SUCH",
-                    "TAKE", "HAVE", "MADE", "MANY", "MOST", "MUCH", "MUST", "VERY", "WELL",
+                    "THE", "AND", "FOR", "NOT", "BUT", "ALL", "ANY", "CAN", "HAS", "HER", "WAS",
+                    "ONE", "OUR", "OUT", "ARE", "HIS", "HOW", "ITS", "MAY", "NEW", "NOW", "OLD",
+                    "SEE", "WAY", "WHO", "DID", "GET", "HIM", "LET", "SAY", "SHE", "TOO", "USE",
+                    "RUN", "SET", "TRY", "ADD", "END", "PUT", "ROT", "SPAN", "THEN", "THEM",
+                    "THAN", "THIS", "THAT", "WITH", "FROM", "JUST", "ALSO", "BEEN", "SOME", "EACH",
+                    "DOES", "INTO", "ONLY", "OVER", "SUCH", "TAKE", "HAVE", "MADE", "MANY", "MOST",
+                    "MUCH", "MUST", "VERY", "WELL",
                 ];
                 if ALLCAPS_BLOCKLIST.contains(&term.as_str()) {
                     return None;
