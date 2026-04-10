@@ -31,10 +31,8 @@ const TEST_KEY: &str = "pipeline-test-key";
 static ENV_INIT: Once = Once::new();
 
 fn init_env() {
-    ENV_INIT.call_once(|| {
-        unsafe {
-            std::env::set_var("SHODH_API_KEYS", TEST_KEY);
-        }
+    ENV_INIT.call_once(|| unsafe {
+        std::env::set_var("SHODH_API_KEYS", TEST_KEY);
     });
 }
 
@@ -62,9 +60,9 @@ impl Harness {
 
     fn app(&self) -> Router {
         let public = build_public_routes(self.mgr.clone());
-        let protected = build_protected_routes(self.mgr.clone()).layer(
-            axum::middleware::from_fn(shodh_memory::auth::auth_middleware),
-        );
+        let protected = build_protected_routes(self.mgr.clone()).layer(axum::middleware::from_fn(
+            shodh_memory::auth::auth_middleware,
+        ));
         Router::new().merge(public).merge(protected)
     }
 }
@@ -135,9 +133,8 @@ async fn json_of(app: Router, req: Request<Body>) -> (StatusCode, Value) {
     let val = if bytes.is_empty() {
         Value::Null
     } else {
-        serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-            Value::String(String::from_utf8_lossy(&bytes).to_string())
-        })
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).to_string()))
     };
     (status, val)
 }
@@ -156,7 +153,10 @@ async fn store_memory(h: &Harness, user_id: &str, content: &str) -> String {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "store_memory failed: {body}");
-    body["id"].as_str().expect("missing id in response").to_string()
+    body["id"]
+        .as_str()
+        .expect("missing id in response")
+        .to_string()
 }
 
 /// Helper: store a memory with full options and return its ID
@@ -368,9 +368,19 @@ mod remember_tests {
     async fn remember_different_memory_types() {
         let h = Harness::new();
         let types = [
-            "Observation", "Decision", "Learning", "Error", "Discovery",
-            "Pattern", "Context", "Task", "CodeEdit", "FileAccess",
-            "Search", "Command", "Conversation",
+            "Observation",
+            "Decision",
+            "Learning",
+            "Error",
+            "Discovery",
+            "Pattern",
+            "Context",
+            "Task",
+            "CodeEdit",
+            "FileAccess",
+            "Search",
+            "Command",
+            "Conversation",
         ];
         for t in types {
             let (status, body) = json_of(
@@ -973,7 +983,12 @@ mod recall_tests {
     async fn recall_after_remember() {
         let h = Harness::new();
         // Store a memory
-        store_memory(&h, "test-user", "The Vamana graph index uses greedy search for nearest neighbor queries").await;
+        store_memory(
+            &h,
+            "test-user",
+            "The Vamana graph index uses greedy search for nearest neighbor queries",
+        )
+        .await;
         // Small delay for async processing
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         // Recall it
@@ -989,7 +1004,9 @@ mod recall_tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let memories = body["memories"].as_array().expect("memories should be array");
+        let memories = body["memories"]
+            .as_array()
+            .expect("memories should be array");
         assert!(!memories.is_empty(), "Should recall the stored memory");
     }
 
@@ -1087,7 +1104,12 @@ mod recall_tests {
     #[tokio::test]
     async fn recall_hybrid_mode() {
         let h = Harness::new();
-        store_memory(&h, "test-user", "Hybrid retrieval combines multiple signals").await;
+        store_memory(
+            &h,
+            "test-user",
+            "Hybrid retrieval combines multiple signals",
+        )
+        .await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let (status, body) = json_of(
@@ -1126,7 +1148,14 @@ mod recall_tests {
     #[tokio::test]
     async fn recall_by_tags() {
         let h = Harness::new();
-        store_memory_typed(&h, "test-user", "Tagged memory about Rust", "Observation", vec!["rust", "programming"]).await;
+        store_memory_typed(
+            &h,
+            "test-user",
+            "Tagged memory about Rust",
+            "Observation",
+            vec!["rust", "programming"],
+        )
+        .await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let (status, body) = json_of(
@@ -1358,7 +1387,10 @@ mod crud_tests {
         assert_eq!(status, StatusCode::OK);
         // MemoryWithHierarchy uses #[serde(flatten)] on Memory — response is flat
         // The experience.content is nested under "experience"
-        assert!(body["experience"]["content"].as_str().unwrap().contains("Memory to retrieve"));
+        assert!(body["experience"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Memory to retrieve"));
     }
 
     #[tokio::test]
@@ -1375,11 +1407,7 @@ mod crud_tests {
     #[tokio::test]
     async fn list_memories_empty() {
         let h = Harness::new();
-        let (status, body) = json_of(
-            h.app(),
-            authed_get("/api/list/test-user"),
-        )
-        .await;
+        let (status, body) = json_of(h.app(), authed_get("/api/list/test-user")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["memories"].is_array());
     }
@@ -1390,11 +1418,7 @@ mod crud_tests {
         store_memory(&h, "test-user", "First memory").await;
         store_memory(&h, "test-user", "Second memory").await;
 
-        let (status, body) = json_of(
-            h.app(),
-            authed_get("/api/list/test-user"),
-        )
-        .await;
+        let (status, body) = json_of(h.app(), authed_get("/api/list/test-user")).await;
         assert_eq!(status, StatusCode::OK);
         let memories = body["memories"].as_array().unwrap();
         assert!(memories.len() >= 2, "Should list at least 2 memories");
@@ -1532,7 +1556,14 @@ mod crud_tests {
     #[tokio::test]
     async fn forget_by_tags() {
         let h = Harness::new();
-        store_memory_typed(&h, "test-user", "Tagged to forget", "Observation", vec!["deleteme"]).await;
+        store_memory_typed(
+            &h,
+            "test-user",
+            "Tagged to forget",
+            "Observation",
+            vec!["deleteme"],
+        )
+        .await;
         let (status, _) = json_of(
             h.app(),
             authed_post(
@@ -1622,11 +1653,7 @@ mod crud_tests {
         assert_eq!(status, StatusCode::OK);
 
         // Verify empty
-        let (_, body) = json_of(
-            h.app(),
-            authed_get("/api/list/test-user"),
-        )
-        .await;
+        let (_, body) = json_of(h.app(), authed_get("/api/list/test-user")).await;
         let memories = body["memories"].as_array().unwrap();
         assert!(memories.is_empty(), "All memories should be cleared");
     }
@@ -1653,11 +1680,7 @@ mod crud_tests {
     async fn list_memories_get_endpoint() {
         let h = Harness::new();
         store_memory(&h, "test-user", "Listed via GET").await;
-        let (status, body) = json_of(
-            h.app(),
-            authed_get("/api/memories?user_id=test-user"),
-        )
-        .await;
+        let (status, body) = json_of(h.app(), authed_get("/api/memories?user_id=test-user")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["memories"].is_array());
     }
@@ -1735,11 +1758,7 @@ mod graph_tests {
     async fn graph_stats_empty() {
         let h = Harness::new();
         // Route is /api/graph/{user_id}/stats — user_id is path param
-        let (status, body) = json_of(
-            h.app(),
-            authed_get("/api/graph/test-user/stats"),
-        )
-        .await;
+        let (status, body) = json_of(h.app(), authed_get("/api/graph/test-user/stats")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.is_object());
     }
@@ -1747,11 +1766,7 @@ mod graph_tests {
     #[tokio::test]
     async fn graph_data_endpoint() {
         let h = Harness::new();
-        let (status, _) = json_of(
-            h.app(),
-            authed_get("/api/graph/data/test-user"),
-        )
-        .await;
+        let (status, _) = json_of(h.app(), authed_get("/api/graph/data/test-user")).await;
         assert_eq!(status, StatusCode::OK);
     }
 
@@ -1890,7 +1905,14 @@ mod search_tests {
     #[tokio::test]
     async fn advanced_search_by_entity() {
         let h = Harness::new();
-        store_memory_typed(&h, "test-user", "Searchable memory about Rust programming", "Decision", vec!["important"]).await;
+        store_memory_typed(
+            &h,
+            "test-user",
+            "Searchable memory about Rust programming",
+            "Decision",
+            vec!["important"],
+        )
+        .await;
 
         let (status, body) = json_of(
             h.app(),
@@ -1960,11 +1982,7 @@ mod user_tests {
     #[tokio::test]
     async fn list_users_empty() {
         let h = Harness::new();
-        let (status, body) = json_of(
-            h.app(),
-            authed_get("/api/users"),
-        )
-        .await;
+        let (status, body) = json_of(h.app(), authed_get("/api/users")).await;
         assert_eq!(status, StatusCode::OK);
         // Response is a bare JSON array of strings, not wrapped in {"users": ...}
         assert!(body.is_array());
@@ -1976,11 +1994,7 @@ mod user_tests {
         store_memory(&h, "user-alpha", "Memory from alpha user account").await;
         store_memory(&h, "user-beta", "Memory from beta user account").await;
 
-        let (status, body) = json_of(
-            h.app(),
-            authed_get("/api/users"),
-        )
-        .await;
+        let (status, body) = json_of(h.app(), authed_get("/api/users")).await;
         assert_eq!(status, StatusCode::OK);
         // Response is a bare JSON array
         let users = body.as_array().unwrap();
@@ -1992,11 +2006,7 @@ mod user_tests {
         let h = Harness::new();
         store_memory(&h, "stats-user", "Memory for stats").await;
 
-        let (status, body) = json_of(
-            h.app(),
-            authed_get("/api/users/stats-user/stats"),
-        )
-        .await;
+        let (status, body) = json_of(h.app(), authed_get("/api/users/stats-user/stats")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.is_object());
     }
@@ -2006,11 +2016,7 @@ mod user_tests {
         let h = Harness::new();
         store_memory(&h, "query-stats-user", "Memory for query stats").await;
 
-        let (status, _) = json_of(
-            h.app(),
-            authed_get("/api/stats?user_id=query-stats-user"),
-        )
-        .await;
+        let (status, _) = json_of(h.app(), authed_get("/api/stats?user_id=query-stats-user")).await;
         assert_eq!(status, StatusCode::OK);
     }
 }
@@ -2025,11 +2031,8 @@ mod compression_tests {
     #[tokio::test]
     async fn storage_stats() {
         let h = Harness::new();
-        let (status, _) = json_of(
-            h.app(),
-            authed_get("/api/storage/stats?user_id=test-user"),
-        )
-        .await;
+        let (status, _) =
+            json_of(h.app(), authed_get("/api/storage/stats?user_id=test-user")).await;
         assert_eq!(status, StatusCode::OK);
     }
 }
