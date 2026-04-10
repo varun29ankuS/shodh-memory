@@ -4953,6 +4953,13 @@ impl MemorySystem {
             stats.vector_index_count = indexed_after;
         }
 
+        // Persist repaired index to disk so orphans don't reappear on restart
+        if repaired > 0 {
+            if let Err(e) = self.retriever.save() {
+                tracing::error!(error = %e, "Failed to persist vector index after repair");
+            }
+        }
+
         tracing::info!(
             total_storage = total_storage,
             indexed_before = indexed_before,
@@ -5025,6 +5032,11 @@ impl MemorySystem {
         {
             let mut stats = self.stats.write();
             stats.vector_index_count = indexed;
+        }
+
+        // Persist rebuilt index to disk so it survives restart
+        if let Err(e) = self.retriever.save() {
+            tracing::error!(error = %e, "Failed to persist vector index after rebuild");
         }
 
         tracing::info!(
