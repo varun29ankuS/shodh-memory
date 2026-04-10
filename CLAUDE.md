@@ -1,7 +1,7 @@
 # Shodh-Memory Project Instructions
 
 ## MUST Rules
-- MUST NOT run `cargo build` or `cargo run`. Only `cargo check`, `cargo clippy`, and `cargo test` are allowed.
+- MUST NOT run `cargo build` or `cargo run` unless the user explicitly asks. Only `cargo check`, `cargo clippy`, and `cargo test` are allowed by default.
 - MUST NOT add "Co-Authored-By" or "Generated with Claude Code" to commits. Clean commit messages only.
 - MUST NOT comment on GitHub issues/PRs without showing user a draft first.
 

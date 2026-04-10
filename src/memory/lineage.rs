@@ -601,8 +601,16 @@ impl LineageGraph {
             // Only entities available, and they don't overlap enough
             return None;
         }
-        if has_embeddings && !has_entities && embedding_sim < self.config.min_entity_overlap {
-            // Only embeddings available, and similarity too low
+        if has_embeddings
+            && !has_entities
+            && embedding_sim < crate::constants::LINEAGE_MIN_EMBEDDING_SIMILARITY
+        {
+            // Only embeddings available, and similarity too low.
+            // Uses a dedicated threshold (0.25) rather than the entity overlap
+            // threshold (0.30) because cosine similarity on MiniLM-L6-v2 is a
+            // stronger signal than Jaccard on noisy NER output — 0.25 is
+            // intentionally permissive since the type-pair table and temporal
+            // gating provide additional filtering downstream.
             return None;
         }
         if has_entities && has_embeddings && semantic_signal < self.config.min_entity_overlap {
@@ -856,6 +864,34 @@ impl LineageGraph {
                     .get(&CausalRelation::TriggeredBy)
                     .unwrap_or(&0.75)
                     * 0.85,
+            )),
+
+            // Conversation → Conversation = InformedBy (sequential discussion thread)
+            // Adjacent conversations on the same topic form a causal thread — the
+            // earlier one informs the later one's context. This is the most common
+            // memory type from hook ingestion and was previously falling through to
+            // the weak RelatedTo default (0.50), breaking chain density.
+            (Conversation, Conversation) => Some((
+                CausalRelation::InformedBy,
+                *self
+                    .config
+                    .relation_confidence
+                    .get(&CausalRelation::InformedBy)
+                    .unwrap_or(&0.7)
+                    * 0.80, // lower than cross-type pairs — same-type has weaker directionality
+            )),
+
+            // Observation → Observation = InformedBy (sequential observations build context)
+            // Repeated observations on the same subject form a monitoring chain.
+            // Each observation is informed by the prior context.
+            (Observation, Observation) => Some((
+                CausalRelation::InformedBy,
+                *self
+                    .config
+                    .relation_confidence
+                    .get(&CausalRelation::InformedBy)
+                    .unwrap_or(&0.7)
+                    * 0.75, // weakest same-type pair — observations are less directed than conversations
             )),
 
             // Default: RelatedTo if same type or generic relation
