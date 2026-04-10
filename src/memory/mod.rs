@@ -4781,7 +4781,8 @@ impl MemorySystem {
         limit: usize,
         exclude_id: Option<&MemoryId>,
     ) -> Result<Vec<(MemoryId, f32)>> {
-        self.retriever.search_by_embedding(embedding, limit, exclude_id)
+        self.retriever
+            .search_by_embedding(embedding, limit, exclude_id)
     }
 
     /// Update a memory in storage with full re-indexing

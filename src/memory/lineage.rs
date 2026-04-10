@@ -601,7 +601,8 @@ impl LineageGraph {
             // Only entities available, and they don't overlap enough
             return None;
         }
-        if has_embeddings && !has_entities
+        if has_embeddings
+            && !has_entities
             && embedding_sim < crate::constants::LINEAGE_MIN_EMBEDDING_SIMILARITY
         {
             // Only embeddings available, and similarity too low.
