@@ -114,6 +114,9 @@ pub struct RememberRequest {
     /// Severity level: info, warning, error, critical
     #[serde(default)]
     pub severity: Option<String>,
+    /// When true, require robot_id and geo_location for strict robotics mode
+    #[serde(default)]
+    pub validate_robotics: Option<bool>,
 }
 
 /// Remember response
@@ -468,6 +471,47 @@ pub async fn remember(
     // Validate robotics fields
     if let Some(ref geo) = req.geo_location {
         validation::validate_geo_location(geo).map_validation_err("geo_location")?;
+    }
+    if let Some(reward) = req.reward {
+        validation::validate_reward(reward).map_validation_err("reward")?;
+    }
+    if let Some(heading) = req.heading {
+        validation::validate_heading(heading).map_validation_err("heading")?;
+    }
+    if let Some(ref sensor_data) = req.sensor_data {
+        validation::validate_sensor_data(sensor_data).map_validation_err("sensor_data")?;
+    }
+
+    // Warn on unknown outcome_type/severity (log, don't reject)
+    let mut warnings = Vec::new();
+    if let Some(ref outcome_type) = req.outcome_type {
+        if let Some(warn) = validation::warn_outcome_type(outcome_type) {
+            warnings.push(warn);
+        }
+    }
+    if let Some(ref severity) = req.severity {
+        if let Some(warn) = validation::warn_severity(severity) {
+            warnings.push(warn);
+        }
+    }
+    for warn in &warnings {
+        tracing::warn!("remember validation warning: {}", warn);
+    }
+
+    // Strict robotics mode: require robot_id and geo_location
+    if req.validate_robotics.unwrap_or(false) {
+        if req.robot_id.is_none() {
+            return Err(AppError::InvalidInput {
+                field: "robot_id".into(),
+                reason: "validate_robotics=true requires robot_id".into(),
+            });
+        }
+        if req.geo_location.is_none() {
+            return Err(AppError::InvalidInput {
+                field: "geo_location".into(),
+                reason: "validate_robotics=true requires geo_location".into(),
+            });
+        }
     }
 
     let experience = Experience {
