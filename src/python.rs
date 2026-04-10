@@ -77,12 +77,15 @@ pub struct PyGeoLocation {
 impl PyGeoLocation {
     #[new]
     #[pyo3(signature = (latitude=0.0, longitude=0.0, altitude=0.0))]
-    fn new(latitude: f64, longitude: f64, altitude: f64) -> Self {
-        PyGeoLocation {
+    fn new(latitude: f64, longitude: f64, altitude: f64) -> PyResult<Self> {
+        use crate::validation::validate_geo_location;
+        validate_geo_location(&[latitude, longitude, altitude])
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(PyGeoLocation {
             latitude,
             longitude,
             altitude,
-        }
+        })
     }
 
     fn to_list(&self) -> Vec<f64> {

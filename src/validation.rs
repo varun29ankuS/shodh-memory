@@ -336,6 +336,88 @@ pub fn validate_geo_filter(lat: f64, lon: f64, radius_meters: f64) -> Result<()>
     Ok(())
 }
 
+/// Maximum number of keys in sensor_data
+pub const MAX_SENSOR_DATA_KEYS: usize = 1000;
+
+/// Known outcome_type values for robotics experiences
+const KNOWN_OUTCOME_TYPES: &[&str] = &[
+    "success", "failure", "failed", "error", "partial", "aborted", "timeout",
+];
+
+/// Known severity levels for robotics experiences
+const KNOWN_SEVERITIES: &[&str] = &["info", "warning", "error", "critical"];
+
+/// Validate reward signal is finite and within [-1.0, 1.0]
+pub fn validate_reward(reward: f32) -> Result<()> {
+    if !reward.is_finite() {
+        return Err(anyhow!("reward must be a finite number, got: {reward}"));
+    }
+    if !(-1.0..=1.0).contains(&reward) {
+        return Err(anyhow!(
+            "reward must be between -1.0 and 1.0, got: {reward}"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate heading is finite and within [0.0, 360.0]
+pub fn validate_heading(heading: f32) -> Result<()> {
+    if !heading.is_finite() {
+        return Err(anyhow!("heading must be a finite number, got: {heading}"));
+    }
+    if !(0.0..=360.0).contains(&heading) {
+        return Err(anyhow!(
+            "heading must be between 0.0 and 360.0 degrees, got: {heading}"
+        ));
+    }
+    Ok(())
+}
+
+/// Warn on unknown outcome_type values (returns warning message, does not reject)
+pub fn warn_outcome_type(outcome_type: &str) -> Option<String> {
+    if !KNOWN_OUTCOME_TYPES.contains(&outcome_type) {
+        Some(format!(
+            "unknown outcome_type '{}', known values: {:?}",
+            outcome_type, KNOWN_OUTCOME_TYPES
+        ))
+    } else {
+        None
+    }
+}
+
+/// Warn on unknown severity values (returns warning message, does not reject)
+pub fn warn_severity(severity: &str) -> Option<String> {
+    if !KNOWN_SEVERITIES.contains(&severity) {
+        Some(format!(
+            "unknown severity '{}', known values: {:?}",
+            severity, KNOWN_SEVERITIES
+        ))
+    } else {
+        None
+    }
+}
+
+/// Validate sensor_data: max key count, all values must be finite
+pub fn validate_sensor_data(sensor_data: &std::collections::HashMap<String, f64>) -> Result<()> {
+    if sensor_data.len() > MAX_SENSOR_DATA_KEYS {
+        return Err(anyhow!(
+            "sensor_data has too many keys: {} (max: {})",
+            sensor_data.len(),
+            MAX_SENSOR_DATA_KEYS
+        ));
+    }
+    for (key, value) in sensor_data {
+        if !value.is_finite() {
+            return Err(anyhow!(
+                "sensor_data value for key '{}' is not finite: {}",
+                key,
+                value
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate a reminder timestamp is not unreasonably far in the past or future
 pub fn validate_reminder_timestamp(at: &chrono::DateTime<chrono::Utc>) -> Result<()> {
     let now = chrono::Utc::now();
@@ -590,6 +672,74 @@ mod tests {
         assert!(validate_geo_filter(0.0, 0.0, 0.0).is_err());
         assert!(validate_geo_filter(0.0, 0.0, -1.0).is_err());
         assert!(validate_geo_filter(0.0, 0.0, 50_000_000.0).is_err()); // > Earth circumference
+    }
+
+    #[test]
+    fn test_validate_reward() {
+        assert!(validate_reward(0.0).is_ok());
+        assert!(validate_reward(-1.0).is_ok());
+        assert!(validate_reward(1.0).is_ok());
+        assert!(validate_reward(0.5).is_ok());
+        assert!(validate_reward(-0.5).is_ok());
+        assert!(validate_reward(-1.1).is_err());
+        assert!(validate_reward(1.1).is_err());
+        assert!(validate_reward(f32::NAN).is_err());
+        assert!(validate_reward(f32::INFINITY).is_err());
+        assert!(validate_reward(f32::NEG_INFINITY).is_err());
+    }
+
+    #[test]
+    fn test_validate_heading() {
+        assert!(validate_heading(0.0).is_ok());
+        assert!(validate_heading(180.0).is_ok());
+        assert!(validate_heading(360.0).is_ok());
+        assert!(validate_heading(-1.0).is_err());
+        assert!(validate_heading(361.0).is_err());
+        assert!(validate_heading(f32::NAN).is_err());
+        assert!(validate_heading(f32::INFINITY).is_err());
+    }
+
+    #[test]
+    fn test_warn_outcome_type() {
+        assert!(warn_outcome_type("success").is_none());
+        assert!(warn_outcome_type("failure").is_none());
+        assert!(warn_outcome_type("timeout").is_none());
+        assert!(warn_outcome_type("unknown_value").is_some());
+        assert!(warn_outcome_type("").is_some());
+    }
+
+    #[test]
+    fn test_warn_severity() {
+        assert!(warn_severity("info").is_none());
+        assert!(warn_severity("critical").is_none());
+        assert!(warn_severity("unknown").is_some());
+    }
+
+    #[test]
+    fn test_validate_sensor_data() {
+        use std::collections::HashMap;
+
+        // Valid
+        let mut data = HashMap::new();
+        data.insert("battery".to_string(), 72.5);
+        data.insert("temperature".to_string(), 23.1);
+        assert!(validate_sensor_data(&data).is_ok());
+
+        // Empty is valid
+        assert!(validate_sensor_data(&HashMap::new()).is_ok());
+
+        // Non-finite value
+        let mut bad = HashMap::new();
+        bad.insert("broken".to_string(), f64::NAN);
+        assert!(validate_sensor_data(&bad).is_err());
+
+        let mut inf = HashMap::new();
+        inf.insert("overflow".to_string(), f64::INFINITY);
+        assert!(validate_sensor_data(&inf).is_err());
+
+        // Too many keys
+        let too_many: HashMap<String, f64> = (0..1001).map(|i| (format!("k{i}"), 0.0)).collect();
+        assert!(validate_sensor_data(&too_many).is_err());
     }
 
     #[test]

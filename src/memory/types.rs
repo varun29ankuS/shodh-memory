@@ -2189,15 +2189,15 @@ impl Query {
             }
         }
 
-        // Failures only filter
+        // Failures only filter — check both outcome_type strings AND is_failure boolean
         if self.failures_only {
-            let is_failure = memory
+            let outcome_is_failure = memory
                 .experience
                 .outcome_type
                 .as_ref()
                 .map(|o| o == "failure" || o == "failed" || o == "error")
                 .unwrap_or(false);
-            if !is_failure {
+            if !outcome_is_failure && !memory.experience.is_failure {
                 return false;
             }
         }
