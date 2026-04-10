@@ -588,12 +588,15 @@ fn extract_onnx_runtime(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_default();
 
+            // Use "libonnxruntime." (with dot) to exclude provider libraries like
+            // libonnxruntime_providers_shared.so which would otherwise match and
+            // overwrite the real library (last-match-wins). Fixes #223.
             let is_target = file_name == lib_name
-                || (file_name.starts_with("libonnxruntime")
+                || (file_name.starts_with("libonnxruntime.")
                     && file_name.contains(lib_name.trim_start_matches("libonnxruntime")));
 
             // Also match versioned variants: libonnxruntime.1.23.2.dylib / libonnxruntime.so.1.23.2
-            let is_versioned = file_name.starts_with("libonnxruntime")
+            let is_versioned = file_name.starts_with("libonnxruntime.")
                 && (file_name.ends_with(".dylib")
                     || file_name.ends_with(".so")
                     || file_name.contains(".so."));
