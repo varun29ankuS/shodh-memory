@@ -8,6 +8,7 @@
 ## Code Standards
 - IMPORTANT: Production grade code only. No TODOs, no placeholders, no mocks, no stubs.
 - IMPORTANT: Understand architecture and data flow before fixing anything. Read files before editing.
+- IMPORTANT: No assumptions. Always read the actual source code to verify API shapes, response fields, status codes, endpoint methods, and data structures before writing code or tests against them. Never guess.
 - All changes go through PR workflow: branch → commit → push → PR → merge.
 
 ## Persistent Memory (shodh-memory MCP)
