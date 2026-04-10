@@ -2487,6 +2487,20 @@ pub const LINEAGE_MAX_TEMPORAL_GAP_DAYS: i64 = 14;
 /// Reference: Marr (1971) "Simple memory: a theory for archicortex" — 0.2-0.3 cue fraction
 pub const LINEAGE_MIN_ENTITY_OVERLAP: f32 = 0.3;
 
+/// Minimum embedding cosine similarity for lineage inference when entities
+/// are absent (embedding-only gate).
+///
+/// Lower than LINEAGE_MIN_ENTITY_OVERLAP (0.3) because cosine similarity
+/// on MiniLM-L6-v2 (384-dim) is a stronger signal than Jaccard overlap on
+/// noisy NER output. 0.25 on MiniLM means "vaguely related" — enough to
+/// let the type-pair table and temporal gating decide. The entity overlap
+/// threshold is calibrated for sparse binary sets (Jaccard), not dense
+/// continuous embeddings.
+///
+/// Reference: Reimers & Gurevych (2019) "Sentence-BERT" — cosine similarity
+/// distributions on paraphrase tasks show meaningful separation at ~0.3.
+pub const LINEAGE_MIN_EMBEDDING_SIMILARITY: f32 = 0.25;
+
 /// Maximum candidate memories to evaluate for lineage inference.
 ///
 /// Caps the per-memory inference cost. 20 candidates × O(1) inference

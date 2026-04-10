@@ -1187,6 +1187,33 @@ fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::m
                 }
             }
 
+            // Phase 1.5: Semantic candidates via vector index.
+            // Finds memories with similar content even when entity names differ
+            // (e.g. "ORT" vs "ONNX Runtime"). Higher quality than recency fallback
+            // because similarity is content-based, not just temporal.
+            if candidate_ids.len() < crate::constants::LINEAGE_MAX_CANDIDATES {
+                if let Ok(new_memory) = memory_guard.get_memory(&mid) {
+                    if let Some(embedding) = &new_memory.experience.embeddings {
+                        let remaining =
+                            crate::constants::LINEAGE_MAX_CANDIDATES - candidate_ids.len();
+                        if let Ok(similar) = memory_guard.search_similar_by_embedding(
+                            embedding,
+                            remaining,
+                            Some(&mid),
+                        ) {
+                            for (mem_id, _score) in similar {
+                                // Filter to lookback window (same as Phase 1)
+                                if let Ok(mem) = memory_guard.get_memory(&mem_id) {
+                                    if mem.created_at >= cutoff {
+                                        candidate_ids.insert(mem_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Phase 2: Recency fallback — fill remaining slots with recent memories.
             // This ensures lineage inference runs even when NER fails (empty entity_refs)
             // or when entity-graph candidates are sparse.

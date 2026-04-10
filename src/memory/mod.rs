@@ -4767,6 +4767,23 @@ impl MemorySystem {
         self.long_term_memory.get(id)
     }
 
+    /// Search for similar memories by embedding vector.
+    ///
+    /// Delegates to the retriever's vector index search. Used by lineage
+    /// inference to find semantically similar candidate memories when
+    /// entity-graph candidates are sparse (different surface forms for
+    /// the same concept, or NER failures).
+    ///
+    /// Returns (MemoryId, similarity_score) pairs, deduplicated by MemoryId.
+    pub fn search_similar_by_embedding(
+        &self,
+        embedding: &[f32],
+        limit: usize,
+        exclude_id: Option<&MemoryId>,
+    ) -> Result<Vec<(MemoryId, f32)>> {
+        self.retriever.search_by_embedding(embedding, limit, exclude_id)
+    }
+
     /// Update a memory in storage with full re-indexing
     ///
     /// This properly updates the memory by:
