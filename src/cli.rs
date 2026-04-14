@@ -164,6 +164,44 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Export knowledge graph as JSON or GEXF
+    ExportGraph {
+        /// User ID whose graph to export
+        user_id: String,
+
+        /// Output format: json or gexf
+        #[arg(long, default_value = "json")]
+        format: String,
+
+        /// Node types to include (comma-separated: entities,memories,episodes)
+        #[arg(long, default_value = "entities,memories,episodes")]
+        include: String,
+
+        /// Minimum importance threshold for memory nodes
+        #[arg(long, default_value_t = 0.0)]
+        min_importance: f32,
+
+        /// Include embedding vectors
+        #[arg(long)]
+        include_embeddings: bool,
+
+        /// Output file (stdout if omitted)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// API URL for the memory server
+        #[arg(long, env = "SHODH_API_URL", default_value = "http://127.0.0.1:3030")]
+        api_url: String,
+
+        /// API key for authentication
+        #[arg(
+            long,
+            env = "SHODH_API_KEY",
+            default_value = "sk-shodh-dev-local-testing-key"
+        )]
+        api_key: String,
+    },
+
     /// Print version and build information
     Version,
 }
@@ -327,6 +365,56 @@ async fn main() -> Result<()> {
         // =====================================================================
         Commands::Claude { port, args } => {
             handle_claude_launch(port, args).await?;
+        }
+
+        // =====================================================================
+        // NEW: shodh export-graph — export knowledge graph
+        // =====================================================================
+        Commands::ExportGraph {
+            user_id,
+            format,
+            include,
+            min_importance,
+            include_embeddings,
+            output,
+            api_url,
+            api_key,
+        } => {
+            let url = format!(
+                "{}/api/graph/{}/export?format={}&include={}&min_importance={}&include_embeddings={}",
+                api_url, user_id, format, include, min_importance, include_embeddings
+            );
+
+            let client = reqwest::Client::new();
+            let resp = client
+                .get(&url)
+                .header("x-api-key", &api_key)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to connect to shodh server: {e}"))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Export failed (HTTP {status}): {body}");
+            }
+
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to read response: {e}"))?;
+
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, &body).map_err(|e| {
+                        anyhow::anyhow!("Failed to write to {}: {e}", path.display())
+                    })?;
+                    eprintln!("Exported to {}", path.display());
+                }
+                None => {
+                    println!("{body}");
+                }
+            }
         }
 
         // =====================================================================
