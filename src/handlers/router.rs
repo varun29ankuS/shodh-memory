@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use super::state::MultiUserMemoryManager;
 use super::{
-    ab_testing, compression, consolidation, crud, facts, files, graph, health, integrations,
-    lineage, mif, recall, remember, search, sessions, todos, users, visualization, webhooks,
+    ab_testing, compression, consolidation, crud, export, facts, files, graph, health,
+    integrations, lineage, mif, recall, remember, search, sessions, todos, users, visualization,
+    webhooks,
 };
 
 /// Application state type alias
@@ -221,6 +222,7 @@ pub fn build_protected_routes(state: AppState) -> Router {
         )
         .route("/api/graph/traverse", post(graph::traverse_graph))
         .route("/api/graph/episode/get", post(graph::get_episode))
+        .route("/api/graph/{user_id}/export", get(export::export_graph))
         // =================================================================
         // KNOWLEDGE GRAPH (BASIC)
         // =================================================================

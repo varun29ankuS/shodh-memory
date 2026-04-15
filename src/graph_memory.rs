@@ -5060,6 +5060,30 @@ impl GraphMemory {
         Ok(relationships)
     }
 
+    /// Get all episodes in the graph
+    pub fn get_all_episodes(&self) -> Result<Vec<EpisodicNode>> {
+        let mut episodes = Vec::new();
+
+        // fill_cache(false) prevents this full scan from evicting hot data from
+        // the block cache. Decompressed blocks are used transiently and freed
+        // after the iterator advances, reducing peak C++ heap usage.
+        let mut read_opts = rocksdb::ReadOptions::default();
+        read_opts.fill_cache(false);
+        let iter =
+            self.db
+                .iterator_cf_opt(self.episodes_cf(), read_opts, rocksdb::IteratorMode::Start);
+        for (_, value) in iter.flatten() {
+            if let Ok((episode, _)) = crate::serialization::try_decode::<EpisodicNode>(&value) {
+                episodes.push(episode);
+            }
+        }
+
+        // Sort by created_at descending (newest first)
+        episodes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        Ok(episodes)
+    }
+
     /// Get the Memory Universe visualization data
     /// Returns entities as "stars" with positions based on their relationships,
     /// sized by salience, and colored by entity type.
@@ -8211,5 +8235,43 @@ mod tests {
         make_entity(&graph, "TestEntity");
         assert!(graph.get_entity_reputation("testentity").is_some());
         assert!(graph.get_entity_reputation("TESTENTITY").is_some());
+    }
+
+    #[test]
+    fn test_get_all_episodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        // Empty graph returns empty vec
+        let episodes = graph.get_all_episodes().unwrap();
+        assert!(episodes.is_empty(), "Expected empty vec for fresh graph");
+
+        // Add an episode
+        let now = Utc::now();
+        let episode = EpisodicNode {
+            uuid: Uuid::new_v4(),
+            name: "Test Episode".to_string(),
+            content: "Test content for get_all_episodes".to_string(),
+            valid_at: now,
+            created_at: now,
+            entity_refs: Vec::new(),
+            source: EpisodeSource::Message,
+            metadata: std::collections::HashMap::new(),
+        };
+        let episode_uuid = episode.uuid;
+        let episode_name = episode.name.clone();
+        let episode_content = episode.content.clone();
+        graph.add_episode(episode).unwrap();
+
+        // Verify it's returned
+        let episodes = graph.get_all_episodes().unwrap();
+        assert_eq!(episodes.len(), 1, "Expected one episode");
+
+        // Verify fields match
+        let returned = &episodes[0];
+        assert_eq!(returned.uuid, episode_uuid);
+        assert_eq!(returned.name, episode_name);
+        assert_eq!(returned.content, episode_content);
+        assert_eq!(returned.source, EpisodeSource::Message);
     }
 }
