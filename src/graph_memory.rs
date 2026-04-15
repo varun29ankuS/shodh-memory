@@ -5073,12 +5073,7 @@ impl GraphMemory {
             self.db
                 .iterator_cf_opt(self.episodes_cf(), read_opts, rocksdb::IteratorMode::Start);
         for (_, value) in iter.flatten() {
-            if let Ok(episode) = bincode::serde::decode_from_slice::<EpisodicNode, _>(
-                &value,
-                bincode::config::standard(),
-            )
-            .map(|(v, _)| v)
-            {
+            if let Ok((episode, _)) = crate::serialization::try_decode::<EpisodicNode>(&value) {
                 episodes.push(episode);
             }
         }
