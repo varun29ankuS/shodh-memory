@@ -101,11 +101,18 @@ pub async fn request_id(mut req: Request, next: Next) -> Response {
 /// Adds:
 /// - X-Content-Type-Options: nosniff (prevent MIME-type sniffing)
 /// - X-Frame-Options: DENY (prevent clickjacking)
-/// - Content-Security-Policy: default-src 'none' (restrict resource loading)
+/// - Content-Security-Policy: route-aware (locked-down default, permissive for nonced HTML views)
 /// - Cache-Control: no-store (prevent caching of API responses)
 /// - Strict-Transport-Security (HSTS) in production mode only
 pub async fn security_headers(req: Request, next: Next) -> Response {
     let mut response = next.run(req).await;
+
+    // Pull the script nonce (if any) out of response extensions before mutating headers.
+    let nonce = response
+        .extensions()
+        .get::<crate::handlers::visualization::CspNonce>()
+        .map(|n| n.0.clone());
+
     let headers = response.headers_mut();
 
     headers.insert(
@@ -113,10 +120,25 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
         HeaderValue::from_static("nosniff"),
     );
     headers.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
-    headers.insert(
-        "Content-Security-Policy",
-        HeaderValue::from_static("default-src 'none'"),
-    );
+
+    let csp = match nonce {
+        Some(n) => format!(
+            "default-src 'self'; \
+             script-src 'self' 'nonce-{n}'; \
+             style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data:; \
+             connect-src 'self'; \
+             font-src 'self'; \
+             base-uri 'self'; \
+             form-action 'self'; \
+             frame-ancestors 'none'"
+        ),
+        None => "default-src 'none'".to_string(),
+    };
+    if let Ok(value) = HeaderValue::from_str(&csp) {
+        headers.insert("Content-Security-Policy", value);
+    }
+
     headers.insert("Cache-Control", HeaderValue::from_static("no-store"));
 
     // HSTS in production only (requires HTTPS to be meaningful)
@@ -422,6 +444,49 @@ mod tests {
             resp.headers().get("Strict-Transport-Security").is_none(),
             "HSTS should only be set in production"
         );
+    }
+
+    #[tokio::test]
+    async fn security_headers_permissive_csp_when_nonce_extension_present() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::middleware::from_fn;
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        std::env::remove_var("SHODH_ENV");
+
+        let handler = || async {
+            let mut resp = "<html/>".into_response();
+            resp.extensions_mut()
+                .insert(crate::handlers::visualization::CspNonce(
+                    "TESTNONCE".to_string(),
+                ));
+            resp
+        };
+
+        let app = Router::new()
+            .route("/graph/view", get(handler))
+            .layer(from_fn(security_headers));
+
+        let req = HttpRequest::builder()
+            .uri("/graph/view")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        let csp = resp
+            .headers()
+            .get("Content-Security-Policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("script-src 'self' 'nonce-TESTNONCE'"), "got: {csp}");
+        assert!(csp.contains("default-src 'self'"));
+        assert!(!csp.contains("default-src 'none'"));
     }
 
     #[tokio::test]

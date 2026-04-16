@@ -5,8 +5,10 @@
 
 use axum::{
     extract::{Path, Query, State},
-    response::{Html, Json},
+    http::{header, StatusCode},
+    response::{Html, IntoResponse, Json, Response},
 };
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use super::state::MultiUserMemoryManager;
@@ -14,6 +16,10 @@ use crate::errors::{AppError, ValidationErrorExt};
 use crate::memory::GraphStats as VisualizationStats;
 use crate::validation;
 use std::sync::Arc;
+
+/// Response extension carrying a CSP script nonce; read by the security_headers middleware.
+#[derive(Debug, Clone)]
+pub struct CspNonce(pub String);
 
 type AppState = Arc<MultiUserMemoryManager>;
 
@@ -248,9 +254,40 @@ pub struct GraphDataStats {
 }
 
 /// GET /graph/view - Serve interactive graph visualization HTML
-pub async fn graph_view(Query(params): Query<GraphViewParams>) -> Html<String> {
+pub async fn graph_view(Query(params): Query<GraphViewParams>) -> Response {
     let user_id = params.user_id.unwrap_or_else(|| "default".to_string());
-    Html(generate_graph_html(&user_id))
+    let nonce = generate_nonce();
+    let body = generate_graph_html(&user_id, &nonce);
+    let mut response = Html(body).into_response();
+    response.extensions_mut().insert(CspNonce(nonce));
+    response
+}
+
+/// GET /graph/assets/{file} - Serve vendored JS libraries (d3, three.js, OrbitControls)
+pub async fn graph_asset(Path(file): Path<String>) -> Response {
+    let bytes: &'static [u8] = match file.as_str() {
+        "d3.v7.9.0.min.js" => include_bytes!("assets/d3.v7.9.0.min.js"),
+        "three.module.js" => include_bytes!("assets/three.module.js"),
+        "three.core.js" => include_bytes!("assets/three.core.js"),
+        "OrbitControls.js" => include_bytes!("assets/OrbitControls.js"),
+        _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// Generate a 128-bit base64-encoded CSP nonce.
+fn generate_nonce() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// GET /api/graph/data/{user_id} - Get graph data as JSON for d3.js
@@ -392,14 +429,26 @@ pub async fn get_graph_data(
 }
 
 /// Generate the HTML page for graph visualization (includes 2D/3D toggle)
-fn generate_graph_html(user_id: &str) -> String {
+fn generate_graph_html(user_id: &str, nonce: &str) -> String {
     let html = include_str!("graph_view.html");
-    // HTML-escape user_id to prevent reflected XSS via query parameter injection
-    let escaped = user_id
-        .replace('&', "&amp;")
+    let escaped_user = html_escape(user_id);
+    // Only expose the dev API key in non-production mode; production keys
+    // must never be embedded in a page served by the public `/graph/view` route.
+    let api_key = if crate::auth::is_production_mode() {
+        String::new()
+    } else {
+        std::env::var("SHODH_DEV_API_KEY").unwrap_or_default()
+    };
+    let escaped_key = html_escape(&api_key);
+    html.replace("{{USER_ID}}", &escaped_user)
+        .replace("{{NONCE}}", nonce)
+        .replace("{{API_KEY}}", &escaped_key)
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-        .replace('\'', "&#x27;");
-    html.replace("{{USER_ID}}", &escaped)
+        .replace('\'', "&#x27;")
 }

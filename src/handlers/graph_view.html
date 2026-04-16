@@ -4,9 +4,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Shodh Memory Graph</title>
-    <script src="https://d3js.org/d3.v7.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="/graph/assets/d3.v7.9.0.min.js" nonce="{{NONCE}}"></script>
+    <script type="importmap" nonce="{{NONCE}}">
+    {
+        "imports": {
+            "three": "/graph/assets/three.module.js",
+            "three/addons/controls/OrbitControls.js": "/graph/assets/OrbitControls.js"
+        }
+    }
+    </script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -276,8 +282,17 @@
         <span id="info-3d">Drag to rotate | Scroll to zoom | Right-click to pan</span>
     </div>
 
-    <script>
+    <script type="module" nonce="{{NONCE}}">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
         const userId = "{{USER_ID}}";
+        const apiKey = "{{API_KEY}}";
+        const apiFetch = (url, opts = {}) => {
+            const headers = { ...(opts.headers || {}) };
+            if (apiKey) headers['X-API-Key'] = apiKey;
+            return fetch(url, { ...opts, headers });
+        };
         let currentMode = '3d';
         let graphData = { nodes: [], edges: [], stats: {} };
 
@@ -319,7 +334,7 @@
             renderer.setSize(window.innerWidth, window.innerHeight - 60);
             renderer.setPixelRatio(window.devicePixelRatio);
 
-            controls3d = new THREE.OrbitControls(camera, renderer.domElement);
+            controls3d = new OrbitControls(camera, renderer.domElement);
             controls3d.enableDamping = true;
             controls3d.dampingFactor = 0.05;
             controls3d.minDistance = 100;
@@ -549,7 +564,12 @@
         }
 
         function loadGraph() {
-            fetch(`/api/graph/data/${userId}`)
+            if (!apiKey) {
+                document.getElementById('loading').innerHTML =
+                    'No API key available. Set SHODH_DEV_API_KEY in the server environment.';
+                return;
+            }
+            apiFetch(`/api/graph/data/${userId}`)
                 .then(r => r.json())
                 .then(data => {
                     graphData = data;
@@ -610,16 +630,12 @@
             controls3d.autoRotate = e.target.checked;
         });
 
-        // SSE for live updates
-        const evtSource = new EventSource('/api/events/sse');
-        evtSource.addEventListener('MEMORY_CREATE', (e) => {
-            const data = JSON.parse(e.data);
-            if (data.user_id === userId) setTimeout(loadGraph, 1000);
-        });
-
         // Auto-refresh every 10 seconds
+        // (SSE push was removed: EventSource cannot send X-API-Key headers,
+        //  so auth would fail. Polling is the simplest working alternative.)
         setInterval(() => {
-            fetch(`/api/graph/data/${userId}`)
+            if (!apiKey) return;
+            apiFetch(`/api/graph/data/${userId}`)
                 .then(r => r.json())
                 .then(data => {
                     updateStats(data.stats);
