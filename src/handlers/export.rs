@@ -73,9 +73,11 @@ pub struct ExportEdge {
 /// `include_embeddings` controls whether the raw `name_embedding` vector is
 /// serialised into `attributes.embedding`.  Embeddings are large (384–1536
 /// floats) so callers should omit them unless downstream consumers need them.
+/// `include_content` controls whether the `summary` field is included.
 pub fn entity_to_node(
     entity: &crate::graph_memory::EntityNode,
     include_embeddings: bool,
+    include_content: bool,
 ) -> ExportNode {
     let labels_vec: Vec<String> = entity
         .labels
@@ -92,8 +94,11 @@ pub fn entity_to_node(
         "labels_joined": labels_joined,
         "created_at": entity.created_at,
         "last_seen_at": entity.last_seen_at,
-        "summary": entity.summary,
     });
+
+    if include_content {
+        attrs["summary"] = serde_json::Value::String(entity.summary.clone());
+    }
 
     if !entity.attributes.is_empty() {
         attrs["entity_attributes"] =
@@ -119,9 +124,11 @@ pub fn entity_to_node(
 ///
 /// `include_embeddings` controls whether the experience embedding vector is
 /// included in `attributes.embedding`.
+/// `include_content` controls whether the `content` field is included.
 pub fn memory_to_node(
     memory: &crate::memory::Memory,
     include_embeddings: bool,
+    include_content: bool,
 ) -> ExportNode {
     // Truncate content for the label (display-friendly summary).
     let label = if memory.experience.content.len() > 100 {
@@ -132,7 +139,6 @@ pub fn memory_to_node(
     };
 
     let mut attrs = serde_json::json!({
-        "content": memory.experience.content,
         "importance": memory.importance(),
         "tier": format!("{:?}", memory.tier),
         "access_count": memory.access_count(),
@@ -142,6 +148,10 @@ pub fn memory_to_node(
         "experience_type": format!("{:?}", memory.experience.experience_type),
         "created_at": memory.created_at,
     });
+
+    if include_content {
+        attrs["content"] = serde_json::Value::String(memory.experience.content.clone());
+    }
 
     if let Some(ref agent_id) = memory.agent_id {
         attrs["agent_id"] = serde_json::Value::String(agent_id.clone());
@@ -166,13 +176,21 @@ pub fn memory_to_node(
 }
 
 /// Convert an [`EpisodicNode`] to an [`ExportNode`].
-pub fn episode_to_node(episode: &crate::graph_memory::EpisodicNode) -> ExportNode {
-    let attrs = serde_json::json!({
-        "content": episode.content,
+///
+/// `include_content` controls whether the `content` field is included.
+pub fn episode_to_node(
+    episode: &crate::graph_memory::EpisodicNode,
+    include_content: bool,
+) -> ExportNode {
+    let mut attrs = serde_json::json!({
         "source": format!("{:?}", episode.source),
         "valid_at": episode.valid_at,
         "created_at": episode.created_at,
     });
+
+    if include_content {
+        attrs["content"] = serde_json::Value::String(episode.content.clone());
+    }
 
     ExportNode {
         id: format!("ep-{}", episode.uuid),
@@ -536,6 +554,8 @@ pub struct ExportParams {
     pub min_importance: f32,
     #[serde(default)]
     pub include_embeddings: bool,
+    #[serde(default)]
+    pub include_content: bool,
 }
 
 fn default_format() -> String {
@@ -576,7 +596,7 @@ pub async fn export_graph(
             if inc_entities {
                 if let Ok(entities) = graph_guard.get_all_entities() {
                     for entity in &entities {
-                        nodes.push(entity_to_node(entity, params.include_embeddings));
+                        nodes.push(entity_to_node(entity, params.include_embeddings, params.include_content));
                     }
                 }
                 if let Ok(relationships) = graph_guard.get_all_relationships() {
@@ -589,7 +609,7 @@ pub async fn export_graph(
             if inc_episodes {
                 if let Ok(episodes) = graph_guard.get_all_episodes() {
                     for episode in &episodes {
-                        nodes.push(episode_to_node(episode));
+                        nodes.push(episode_to_node(episode, params.include_content));
                         if inc_entities {
                             edges.extend(episode_refs_to_edges(
                                 &episode.uuid,
@@ -617,7 +637,7 @@ pub async fn export_graph(
                             &memory.entity_refs,
                         ));
                     }
-                    nodes.push(memory_to_node(memory, params.include_embeddings));
+                    nodes.push(memory_to_node(memory, params.include_embeddings, params.include_content));
                 }
             }
         }
@@ -696,7 +716,7 @@ mod tests {
     #[test]
     fn test_entity_to_node() {
         let entity = make_entity();
-        let node = entity_to_node(&entity, false);
+        let node = entity_to_node(&entity, false, true);
 
         assert_eq!(node.node_type, "entity");
         assert_eq!(node.label, "Ferris");
@@ -722,13 +742,13 @@ mod tests {
         let mut entity = make_entity();
         entity.name_embedding = Some(vec![0.1, 0.2, 0.3]);
 
-        let node_with = entity_to_node(&entity, true);
+        let node_with = entity_to_node(&entity, true, true);
         assert!(node_with.attributes.get("embedding").is_some());
         let emb = &node_with.attributes["embedding"];
         assert!(emb.is_array());
         assert_eq!(emb.as_array().unwrap().len(), 3);
 
-        let node_without = entity_to_node(&entity, false);
+        let node_without = entity_to_node(&entity, false, true);
         assert!(node_without.attributes.get("embedding").is_none());
     }
 
@@ -737,7 +757,7 @@ mod tests {
         let mut entity = make_entity();
         entity.attributes.insert("role".to_owned(), "mascot".to_owned());
 
-        let node = entity_to_node(&entity, false);
+        let node = entity_to_node(&entity, false, true);
         let ea = &node.attributes["entity_attributes"];
         assert!(ea.is_object());
         assert_eq!(ea["role"], "mascot");
@@ -757,7 +777,7 @@ mod tests {
             extracted_triples: vec![],
         };
 
-        let node = episode_to_node(&episode);
+        let node = episode_to_node(&episode, true);
 
         assert_eq!(node.node_type, "episode");
         assert_eq!(node.label, "First meeting");
@@ -890,7 +910,7 @@ mod tests {
     fn test_gexf_emits_new_entity_attributes() {
         let mut entity = make_entity();
         entity.labels = vec![EntityLabel::Person, EntityLabel::Concept];
-        let node = entity_to_node(&entity, false);
+        let node = entity_to_node(&entity, false, true);
         let response = GraphExportResponse {
             metadata: ExportMetadata {
                 exported_at: Utc::now(),
@@ -933,7 +953,7 @@ mod tests {
             None,                         // created_at (defaults to Utc::now)
         );
 
-        let node = memory_to_node(&memory, false);
+        let node = memory_to_node(&memory, false, true);
         let response = GraphExportResponse {
             metadata: ExportMetadata {
                 exported_at: Utc::now(),
@@ -970,7 +990,7 @@ mod tests {
             metadata: HashMap::new(),
             extracted_triples: vec![],
         };
-        let node = episode_to_node(&episode);
+        let node = episode_to_node(&episode, true);
         let response = GraphExportResponse {
             metadata: ExportMetadata {
                 exported_at: Utc::now(),
@@ -1015,6 +1035,33 @@ mod tests {
             gexf.contains(&expected),
             "expected {expected} in GEXF meta"
         );
+    }
+
+    #[test]
+    fn test_memory_to_node_omits_content_when_flag_false() {
+        use crate::memory::{Experience, ExperienceType, Memory, MemoryId};
+
+        let memory = Memory::new(
+            MemoryId(Uuid::new_v4()),
+            Experience {
+                content: "secret sauce".into(),
+                experience_type: ExperienceType::Observation,
+                ..Default::default()
+            },
+            0.5,   // importance
+            None,  // agent_id
+            None,  // run_id
+            None,  // actor_id
+            None,  // created_at (defaults to Utc::now)
+        );
+
+        let with = memory_to_node(&memory, false, true);
+        assert!(with.attributes.get("content").is_some());
+
+        let without = memory_to_node(&memory, false, false);
+        assert!(without.attributes.get("content").is_none());
+        // Label still truncated from content — that's fine, it's short.
+        assert!(!without.label.is_empty());
     }
 }
 
