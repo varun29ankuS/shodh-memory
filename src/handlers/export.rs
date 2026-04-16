@@ -293,6 +293,11 @@ pub fn to_gexf(export: &GraphExportResponse) -> String {
     writeln!(out, r#"      <attribute id="5" title="activation" type="float"/>"#).unwrap();
     writeln!(out, r#"      <attribute id="6" title="mention_count" type="integer"/>"#).unwrap();
     writeln!(out, r#"      <attribute id="7" title="experience_type" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="8" title="last_accessed" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="9" title="temporal_relevance" type="float"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="10" title="created_at" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="11" title="agent_id" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="12" title="run_id" type="string"/>"#).unwrap();
     writeln!(out, r#"    </attributes>"#).unwrap();
 
     // Edge attribute declarations
@@ -352,6 +357,31 @@ pub fn to_gexf(export: &GraphExportResponse) -> String {
         {
             let v = xml_escape(v);
             writeln!(out, r#"          <attvalue for="7" value="{v}"/>"#).unwrap();
+        }
+        // for="8" last_accessed
+        if let Some(v) = node.attributes.get("last_accessed").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="8" value="{v}"/>"#).unwrap();
+        }
+        // for="9" temporal_relevance — cast to f32 to avoid f64 precision bleed
+        if let Some(v) = node.attributes.get("temporal_relevance").and_then(|v| v.as_f64()) {
+            let v = v as f32;
+            writeln!(out, r#"          <attvalue for="9" value="{v}"/>"#).unwrap();
+        }
+        // for="10" created_at
+        if let Some(v) = node.attributes.get("created_at").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="10" value="{v}"/>"#).unwrap();
+        }
+        // for="11" agent_id
+        if let Some(v) = node.attributes.get("agent_id").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="11" value="{v}"/>"#).unwrap();
+        }
+        // for="12" run_id
+        if let Some(v) = node.attributes.get("run_id").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="12" value="{v}"/>"#).unwrap();
         }
 
         writeln!(out, r#"        </attvalues>"#).unwrap();
@@ -799,6 +829,48 @@ mod tests {
             assert!(edge.label.is_none());
             assert_eq!(edge.attributes["relation"], "referenced");
         }
+    }
+
+    #[test]
+    fn test_gexf_emits_new_memory_attributes() {
+        use crate::memory::{Experience, ExperienceType, Memory, MemoryId};
+
+        let memory = Memory::new(
+            MemoryId(Uuid::new_v4()),
+            Experience {
+                content: "test".into(),
+                experience_type: ExperienceType::Observation,
+                ..Default::default()
+            },
+            0.5,                          // importance
+            Some("agent-1".into()),       // agent_id
+            Some("run-42".into()),        // run_id
+            None,                         // actor_id
+            None,                         // created_at (defaults to Utc::now)
+        );
+
+        let node = memory_to_node(&memory, false);
+        let response = GraphExportResponse {
+            metadata: ExportMetadata {
+                exported_at: Utc::now(),
+                user_id: "u".into(),
+                node_count: 1,
+                edge_count: 0,
+                node_counts_by_type: HashMap::new(),
+                edge_counts_by_type: HashMap::new(),
+            },
+            nodes: vec![node],
+            edges: vec![],
+        };
+        let gexf = to_gexf(&response);
+
+        assert!(gexf.contains(r#"title="last_accessed""#));
+        assert!(gexf.contains(r#"title="temporal_relevance""#));
+        assert!(gexf.contains(r#"title="created_at""#));
+        assert!(gexf.contains(r#"title="agent_id""#));
+        assert!(gexf.contains(r#"title="run_id""#));
+        assert!(gexf.contains(r#"value="agent-1""#));
+        assert!(gexf.contains(r#"value="run-42""#));
     }
 }
 
