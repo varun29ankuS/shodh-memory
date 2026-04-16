@@ -580,6 +580,7 @@ pub async fn export_graph(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
     Query(params): Query<ExportParams>,
+    request_headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, AppError> {
     validation::validate_user_id(&user_id).map_validation_err("user_id")?;
 
@@ -668,17 +669,50 @@ pub async fn export_graph(
         edges,
     };
 
-    match params.format.as_str() {
-        "gexf" => {
-            let gexf = to_gexf(&response);
-            Ok((
-                [(axum::http::header::CONTENT_TYPE, "application/gexf+xml")],
-                gexf,
-            )
-                .into_response())
+    use axum::http::{header, HeaderMap, StatusCode};
+    use sha2::{Digest, Sha256};
+
+    // Weak ETag: SHA-256 of stable content (nodes + edges, excluding the
+    // per-request timestamp in metadata so repeated calls to the same
+    // unchanged graph always produce the same ETag).
+    let stable_key = serde_json::to_string(&(&response.nodes, &response.edges))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+    let hash = Sha256::digest(stable_key.as_bytes());
+    let hex = hash.iter().fold(String::with_capacity(64), |mut s, b| {
+        write!(&mut s, "{b:02x}").unwrap();
+        s
+    });
+    let etag = format!(r#"W/"{}""#, &hex[..16]);
+
+    // If-None-Match → 304 (with ETag, no body).
+    if let Some(inm) = request_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
+        if inm == etag {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ETAG, etag.parse().unwrap());
+            return Ok((StatusCode::NOT_MODIFIED, headers).into_response());
         }
-        _ => Ok(axum::response::Json(response).into_response()),
     }
+
+    // Build payload
+    let (body, content_type) = match params.format.as_str() {
+        "gexf" => (to_gexf(&response), "application/gexf+xml"),
+        _ => (
+            serde_json::to_string(&response)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?,
+            "application/json",
+        ),
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        content_type.parse().unwrap(),
+    );
+    headers.insert(header::ETAG, etag.parse().unwrap());
+    Ok((headers, body).into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -1257,6 +1291,58 @@ mod integration_tests {
             memory_nodes.is_empty(),
             "expected no memory nodes when include=entities, got {}",
             memory_nodes.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_export_handler_emits_etag_and_short_circuits() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+
+        let harness = TestHarness::new();
+
+        // Seed a memory so the body is non-empty.
+        {
+            let mem_sys = harness.manager.get_user_memory("test-user").unwrap();
+            let mem_guard = mem_sys.read();
+            let experience = crate::memory::Experience {
+                content: "etag test memory".to_string(),
+                ..Default::default()
+            };
+            mem_guard.remember(experience, None).unwrap();
+        }
+
+        let app = harness.router();
+
+        // First request: expect 200 + ETag header.
+        let req = test_helpers::get("/api/graph/test-user/export?format=gexf");
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let etag = resp
+            .headers()
+            .get(axum::http::header::ETAG)
+            .expect("etag header present")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(etag.starts_with("W/\""), "weak etag expected: {etag}");
+
+        // Second request with If-None-Match: expect 304 Not Modified.
+        let req2 = Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/api/graph/test-user/export?format=gexf")
+            .header("x-api-key", crate::handlers::test_helpers::TEST_API_KEY)
+            .header(axum::http::header::IF_NONE_MATCH, &etag)
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::NOT_MODIFIED);
+        assert!(
+            resp2
+                .headers()
+                .get(axum::http::header::ETAG)
+                .is_some(),
+            "304 should still carry ETag"
         );
     }
 }
