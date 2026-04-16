@@ -82,12 +82,14 @@ pub fn entity_to_node(
         .iter()
         .map(|l| l.as_str().to_owned())
         .collect();
+    let labels_joined = labels_vec.join(",");
 
     let mut attrs = serde_json::json!({
         "salience": entity.salience,
         "mention_count": entity.mention_count,
         "is_proper_noun": entity.is_proper_noun,
         "labels": labels_vec,
+        "labels_joined": labels_joined,
         "created_at": entity.created_at,
         "last_seen_at": entity.last_seen_at,
         "summary": entity.summary,
@@ -298,6 +300,11 @@ pub fn to_gexf(export: &GraphExportResponse) -> String {
     writeln!(out, r#"      <attribute id="10" title="created_at" type="string"/>"#).unwrap();
     writeln!(out, r#"      <attribute id="11" title="agent_id" type="string"/>"#).unwrap();
     writeln!(out, r#"      <attribute id="12" title="run_id" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="13" title="last_seen_at" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="14" title="entity_created_at" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="15" title="summary" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="16" title="labels" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="17" title="is_proper_noun" type="string"/>"#).unwrap();
     writeln!(out, r#"    </attributes>"#).unwrap();
 
     // Edge attribute declarations
@@ -368,10 +375,12 @@ pub fn to_gexf(export: &GraphExportResponse) -> String {
             let v = v as f32;
             writeln!(out, r#"          <attvalue for="9" value="{v}"/>"#).unwrap();
         }
-        // for="10" created_at
-        if let Some(v) = node.attributes.get("created_at").and_then(|v| v.as_str()) {
-            let v = xml_escape(v);
-            writeln!(out, r#"          <attvalue for="10" value="{v}"/>"#).unwrap();
+        // for="10" created_at (memory nodes only — entity uses id=14)
+        if node.node_type == "memory" {
+            if let Some(v) = node.attributes.get("created_at").and_then(|v| v.as_str()) {
+                let v = xml_escape(v);
+                writeln!(out, r#"          <attvalue for="10" value="{v}"/>"#).unwrap();
+            }
         }
         // for="11" agent_id
         if let Some(v) = node.attributes.get("agent_id").and_then(|v| v.as_str()) {
@@ -382,6 +391,32 @@ pub fn to_gexf(export: &GraphExportResponse) -> String {
         if let Some(v) = node.attributes.get("run_id").and_then(|v| v.as_str()) {
             let v = xml_escape(v);
             writeln!(out, r#"          <attvalue for="12" value="{v}"/>"#).unwrap();
+        }
+        // for="13" last_seen_at
+        if let Some(v) = node.attributes.get("last_seen_at").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="13" value="{v}"/>"#).unwrap();
+        }
+        // for="14" entity_created_at (entity nodes only — memory uses id=10)
+        if node.node_type == "entity" {
+            if let Some(v) = node.attributes.get("created_at").and_then(|v| v.as_str()) {
+                let v = xml_escape(v);
+                writeln!(out, r#"          <attvalue for="14" value="{v}"/>"#).unwrap();
+            }
+        }
+        // for="15" summary
+        if let Some(v) = node.attributes.get("summary").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="15" value="{v}"/>"#).unwrap();
+        }
+        // for="16" labels
+        if let Some(v) = node.attributes.get("labels_joined").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="16" value="{v}"/>"#).unwrap();
+        }
+        // for="17" is_proper_noun
+        if let Some(v) = node.attributes.get("is_proper_noun").and_then(|v| v.as_bool()) {
+            writeln!(out, r#"          <attvalue for="17" value="{v}"/>"#).unwrap();
         }
 
         writeln!(out, r#"        </attvalues>"#).unwrap();
@@ -829,6 +864,35 @@ mod tests {
             assert!(edge.label.is_none());
             assert_eq!(edge.attributes["relation"], "referenced");
         }
+    }
+
+    #[test]
+    fn test_gexf_emits_new_entity_attributes() {
+        let mut entity = make_entity();
+        entity.labels = vec![EntityLabel::Person, EntityLabel::Concept];
+        let node = entity_to_node(&entity, false);
+        let response = GraphExportResponse {
+            metadata: ExportMetadata {
+                exported_at: Utc::now(),
+                user_id: "u".into(),
+                node_count: 1,
+                edge_count: 0,
+                node_counts_by_type: HashMap::new(),
+                edge_counts_by_type: HashMap::new(),
+            },
+            nodes: vec![node],
+            edges: vec![],
+        };
+        let gexf = to_gexf(&response);
+
+        assert!(gexf.contains(r#"title="last_seen_at""#));
+        assert!(gexf.contains(r#"title="entity_created_at""#));
+        assert!(gexf.contains(r#"title="summary""#));
+        assert!(gexf.contains(r#"title="labels""#));
+        assert!(gexf.contains(r#"title="is_proper_noun""#));
+        assert!(gexf.contains(r#"value="The Rust mascot""#));
+        assert!(gexf.contains(r#"value="Person,Concept""#));
+        assert!(gexf.contains(r#"value="true""#));
     }
 
     #[test]
