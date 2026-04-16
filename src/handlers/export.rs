@@ -276,8 +276,10 @@ pub fn to_gexf(export: &GraphExportResponse) -> String {
         r#"<gexf xmlns="http://gexf.net/1.3" version="1.3">"#
     )
     .unwrap();
+    let server_time = export.metadata.exported_at.to_rfc3339();
     writeln!(out, r#"  <meta lastmodifieddate="{date}">"#).unwrap();
     writeln!(out, r#"    <creator>shodh-memory</creator>"#).unwrap();
+    writeln!(out, r#"    <server_time>{server_time}</server_time>"#).unwrap();
     writeln!(out, r#"  </meta>"#).unwrap();
     writeln!(
         out,
@@ -987,6 +989,32 @@ mod tests {
         assert!(gexf.contains(r#"title="valid_at""#));
         assert!(gexf.contains(r#"title="episode_created_at""#));
         assert!(gexf.contains(r#"value="Message""#));
+    }
+
+    #[test]
+    fn test_gexf_meta_includes_server_time() {
+        let response = GraphExportResponse {
+            metadata: ExportMetadata {
+                exported_at: Utc::now(),
+                user_id: "u".into(),
+                node_count: 0,
+                edge_count: 0,
+                node_counts_by_type: HashMap::new(),
+                edge_counts_by_type: HashMap::new(),
+            },
+            nodes: vec![],
+            edges: vec![],
+        };
+        let gexf = to_gexf(&response);
+
+        assert!(gexf.contains("<server_time>"));
+        assert!(gexf.contains("</server_time>"));
+        // The value is whatever exported_at serializes to (RFC-3339)
+        let expected = response.metadata.exported_at.to_rfc3339();
+        assert!(
+            gexf.contains(&expected),
+            "expected {expected} in GEXF meta"
+        );
     }
 }
 
