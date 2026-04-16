@@ -301,6 +301,10 @@ pub fn to_gexf(export: &GraphExportResponse) -> String {
     writeln!(out, r#"      <attribute id="1" title="ltp_status" type="string"/>"#).unwrap();
     writeln!(out, r#"      <attribute id="2" title="tier" type="string"/>"#).unwrap();
     writeln!(out, r#"      <attribute id="3" title="activation_count" type="integer"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="4" title="last_activated" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="5" title="created_at" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="6" title="valid_at" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="7" title="entity_confidence" type="float"/>"#).unwrap();
     writeln!(out, r#"    </attributes>"#).unwrap();
 
     // Nodes
@@ -398,6 +402,27 @@ pub fn to_gexf(export: &GraphExportResponse) -> String {
             .and_then(|v| v.as_u64())
         {
             writeln!(out, r#"          <attvalue for="3" value="{v}"/>"#).unwrap();
+        }
+        // for="4" last_activated (ISO-8601 string)
+        if let Some(v) = edge.attributes.get("last_activated").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="4" value="{v}"/>"#).unwrap();
+        }
+        // for="5" created_at
+        if let Some(v) = edge.attributes.get("created_at").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="5" value="{v}"/>"#).unwrap();
+        }
+        // for="6" valid_at
+        if let Some(v) = edge.attributes.get("valid_at").and_then(|v| v.as_str()) {
+            let v = xml_escape(v);
+            writeln!(out, r#"          <attvalue for="6" value="{v}"/>"#).unwrap();
+        }
+        // for="7" entity_confidence — format as f32 to match original precision
+        // (avoids f64 expansion artifacts like 0.8999999761581421 for 0.9f32).
+        if let Some(v) = edge.attributes.get("entity_confidence").and_then(|v| v.as_f64()) {
+            let v = v as f32;
+            writeln!(out, r#"          <attvalue for="7" value="{v}"/>"#).unwrap();
         }
 
         writeln!(out, r#"        </attvalues>"#).unwrap();
@@ -727,6 +752,33 @@ mod tests {
             assert!(edge.label.is_none());
             assert_eq!(edge.attributes["relation"], r.relation.as_str());
         }
+    }
+
+    #[test]
+    fn test_gexf_emits_new_edge_attributes() {
+        let rel = make_relationship_edge();
+        let response = GraphExportResponse {
+            metadata: ExportMetadata {
+                exported_at: Utc::now(),
+                user_id: "u".into(),
+                node_count: 0,
+                edge_count: 1,
+                node_counts_by_type: HashMap::new(),
+                edge_counts_by_type: HashMap::new(),
+            },
+            nodes: vec![],
+            edges: vec![relationship_to_edge(&rel)],
+        };
+        let gexf = to_gexf(&response);
+
+        // Declarations
+        assert!(gexf.contains(r#"title="last_activated""#));
+        assert!(gexf.contains(r#"title="created_at""#));
+        assert!(gexf.contains(r#"title="valid_at""#));
+        assert!(gexf.contains(r#"title="entity_confidence""#));
+
+        // Values (entity_confidence on make_relationship_edge() is 0.9)
+        assert!(gexf.contains(r#"value="0.9""#), "entity_confidence value missing");
     }
 
     #[test]
