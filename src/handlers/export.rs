@@ -1109,7 +1109,7 @@ mod integration_tests {
         }
 
         let app = harness.router();
-        let req = test_helpers::get("/api/graph/test-user/export");
+        let req = test_helpers::get("/api/graph/test-user/export?include_content=true");
         let resp = app.oneshot(req).await.unwrap();
 
         assert_eq!(resp.status(), StatusCode::OK);
