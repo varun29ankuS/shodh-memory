@@ -305,6 +305,9 @@ pub fn to_gexf(export: &GraphExportResponse) -> String {
     writeln!(out, r#"      <attribute id="15" title="summary" type="string"/>"#).unwrap();
     writeln!(out, r#"      <attribute id="16" title="labels" type="string"/>"#).unwrap();
     writeln!(out, r#"      <attribute id="17" title="is_proper_noun" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="18" title="source" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="19" title="valid_at" type="string"/>"#).unwrap();
+    writeln!(out, r#"      <attribute id="20" title="episode_created_at" type="string"/>"#).unwrap();
     writeln!(out, r#"    </attributes>"#).unwrap();
 
     // Edge attribute declarations
@@ -417,6 +420,21 @@ pub fn to_gexf(export: &GraphExportResponse) -> String {
         // for="17" is_proper_noun
         if let Some(v) = node.attributes.get("is_proper_noun").and_then(|v| v.as_bool()) {
             writeln!(out, r#"          <attvalue for="17" value="{v}"/>"#).unwrap();
+        }
+        // Episode-only emissions
+        if node.node_type == "episode" {
+            if let Some(v) = node.attributes.get("source").and_then(|v| v.as_str()) {
+                let v = xml_escape(v);
+                writeln!(out, r#"          <attvalue for="18" value="{v}"/>"#).unwrap();
+            }
+            if let Some(v) = node.attributes.get("valid_at").and_then(|v| v.as_str()) {
+                let v = xml_escape(v);
+                writeln!(out, r#"          <attvalue for="19" value="{v}"/>"#).unwrap();
+            }
+            if let Some(v) = node.attributes.get("created_at").and_then(|v| v.as_str()) {
+                let v = xml_escape(v);
+                writeln!(out, r#"          <attvalue for="20" value="{v}"/>"#).unwrap();
+            }
         }
 
         writeln!(out, r#"        </attvalues>"#).unwrap();
@@ -935,6 +953,40 @@ mod tests {
         assert!(gexf.contains(r#"title="run_id""#));
         assert!(gexf.contains(r#"value="agent-1""#));
         assert!(gexf.contains(r#"value="run-42""#));
+    }
+
+    #[test]
+    fn test_gexf_emits_new_episode_attributes() {
+        let episode = EpisodicNode {
+            uuid: Uuid::new_v4(),
+            name: "Meeting".into(),
+            content: "...".into(),
+            valid_at: Utc::now(),
+            created_at: Utc::now(),
+            entity_refs: vec![],
+            source: EpisodeSource::Message,
+            metadata: HashMap::new(),
+            extracted_triples: vec![],
+        };
+        let node = episode_to_node(&episode);
+        let response = GraphExportResponse {
+            metadata: ExportMetadata {
+                exported_at: Utc::now(),
+                user_id: "u".into(),
+                node_count: 1,
+                edge_count: 0,
+                node_counts_by_type: HashMap::new(),
+                edge_counts_by_type: HashMap::new(),
+            },
+            nodes: vec![node],
+            edges: vec![],
+        };
+        let gexf = to_gexf(&response);
+
+        assert!(gexf.contains(r#"title="source""#));
+        assert!(gexf.contains(r#"title="valid_at""#));
+        assert!(gexf.contains(r#"title="episode_created_at""#));
+        assert!(gexf.contains(r#"value="Message""#));
     }
 }
 
