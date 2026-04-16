@@ -44,6 +44,15 @@ pub async fn consolidate_memories(
         .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
 
+    // Prevent concurrent consolidation for the same user.
+    // Double consolidation causes double decay, duplicate facts, and lost edge boosts.
+    if !state.try_acquire_consolidation_lock(&req.user_id) {
+        return Err(AppError::InvalidInput {
+            field: "user_id".to_string(),
+            reason: "Consolidation already in progress for this user".to_string(),
+        });
+    }
+
     let user_id = req.user_id.clone();
     let min_support = req.min_support;
     let min_age_days = req.min_age_days;
@@ -51,7 +60,24 @@ pub async fn consolidate_memories(
 
     // Spawn the entire pipeline as a detached background task.
     // This survives HTTP timeout cancellation — the work always completes.
+    // The consolidation lock is released when the task completes (all exit paths).
+    let lock_user_id = user_id.clone();
     tokio::task::spawn(async move {
+        // RAII guard: releases consolidation lock on drop (normal exit, early return, or panic).
+        struct ConsolidationGuard {
+            state: std::sync::Arc<MultiUserMemoryManager>,
+            user_id: String,
+        }
+        impl Drop for ConsolidationGuard {
+            fn drop(&mut self) {
+                self.state.release_consolidation_lock(&self.user_id);
+            }
+        }
+        let _lock_guard = ConsolidationGuard {
+            state: state_clone.clone(),
+            user_id: lock_user_id,
+        };
+
         let op_start = std::time::Instant::now();
 
         let memory = match state_clone.get_user_memory(&user_id) {
@@ -375,12 +401,28 @@ pub async fn create_backup(
     let graph_guard = graph_lock.as_ref().map(|g| g.read());
     let graph_db_ref = graph_guard.as_ref().map(|g| g.get_db());
 
+    // Vector index file for backup (flat binary outside RocksDB)
+    let vamana_path = state
+        .base_path
+        .join(&req.user_id)
+        .join("vector_index")
+        .join("vamana.idx");
+    let vamana_ref = if vamana_path.exists() {
+        Some(vamana_path.as_path())
+    } else {
+        None
+    };
+
     let result = if store_refs.is_empty() && graph_db_ref.is_none() {
         state.backup_engine().create_backup(&db, &req.user_id)
     } else {
-        state
-            .backup_engine()
-            .create_comprehensive_backup_with_graph(&db, &req.user_id, &store_refs, graph_db_ref)
+        state.backup_engine().create_comprehensive_backup_with_graph(
+            &db,
+            &req.user_id,
+            &store_refs,
+            graph_db_ref,
+            vamana_ref,
+        )
     };
 
     match result {
@@ -514,6 +556,9 @@ pub async fn restore_backup(
     // todos, reminders, audit logs, etc. Only per-user stores are restored.
     let secondary_restore_paths: Vec<(&str, &std::path::Path)> = vec![];
 
+    // Vector index restore directory
+    let vi_restore_dir = state.base_path().join(&user_id).join("vector_index");
+
     // Execute restore
     let restored_stores = state
         .backup_engine()
@@ -522,6 +567,7 @@ pub async fn restore_backup(
             req.backup_id,
             &memory_db_path,
             &secondary_restore_paths,
+            Some(&vi_restore_dir),
         )
         .map_err(AppError::Internal)?;
 

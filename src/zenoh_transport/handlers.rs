@@ -692,11 +692,18 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
             terrain_type,
             ..Default::default()
         };
-        guard.recall(&mq).unwrap_or_default()
+        guard
+            .recall(&mq)
+            .map_err(|e| anyhow::anyhow!("Recall failed: {e}"))
     })
     .await
     {
-        Ok(memories) => memories,
+        Ok(Ok(memories)) => memories,
+        Ok(Err(e)) => {
+            error!("Recall failed: {:?}", e);
+            reply_error(&query, &format!("Recall error: {e}")).await;
+            return;
+        }
         Err(e) => {
             error!("Recall task panicked: {:?}", e);
             reply_error(&query, "Internal error during recall").await;

@@ -491,12 +491,15 @@ pub async fn recall(
                 ..Default::default()
             };
 
-            let memories = memory_guard.recall(&query).unwrap_or_default();
+            let memories = memory_guard
+                .recall(&query)
+                .map_err(|e| anyhow::anyhow!("Recall failed: {e}"))?;
 
-            (memories, reminders, prospective_signals)
+            Ok::<_, anyhow::Error>((memories, reminders, prospective_signals))
         })
         .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?;
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+        .map_err(AppError::Internal)?;
 
     let triggered_reminder_count = triggered_reminders.len();
     if triggered_reminder_count > 0 {
@@ -1894,7 +1897,9 @@ pub async fn proactive_context(
                 },
                 ..Default::default()
             };
-            let results = memory_guard.recall(&query).unwrap_or_default();
+            let results = memory_guard
+                .recall(&query)
+                .map_err(|e| anyhow::anyhow!("Recall failed: {e}"))?;
 
             let candidates: Vec<(SharedMemory, f32)> = results
                 .into_iter()
@@ -2197,7 +2202,7 @@ pub async fn proactive_context(
             }
 
             // Return top results with entity overlap annotation
-            enriched
+            let result = enriched
                 .into_iter()
                 .take(max_results)
                 .map(|(m, score, matched)| {
@@ -2226,10 +2231,12 @@ pub async fn proactive_context(
                         embedding: m.experience.embeddings.clone().unwrap_or_default(),
                     }
                 })
-                .collect()
+                .collect();
+            Ok::<_, anyhow::Error>(result)
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+        .map_err(AppError::Internal)?
     };
 
     let t_recall = op_start.elapsed();
@@ -2945,10 +2952,13 @@ pub async fn recall_tracked(
                 retrieval_mode,
                 ..Default::default()
             };
-            memory_guard.recall(&query).unwrap_or_default()
+            memory_guard
+                .recall(&query)
+                .map_err(|e| anyhow::anyhow!("Recall failed: {e}"))
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+        .map_err(AppError::Internal)?
     };
 
     // Extract memory IDs for tracking
