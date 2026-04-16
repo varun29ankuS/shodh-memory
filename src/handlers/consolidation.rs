@@ -416,13 +416,15 @@ pub async fn create_backup(
     let result = if store_refs.is_empty() && graph_db_ref.is_none() {
         state.backup_engine().create_backup(&db, &req.user_id)
     } else {
-        state.backup_engine().create_comprehensive_backup_with_graph(
-            &db,
-            &req.user_id,
-            &store_refs,
-            graph_db_ref,
-            vamana_ref,
-        )
+        state
+            .backup_engine()
+            .create_comprehensive_backup_with_graph(
+                &db,
+                &req.user_id,
+                &store_refs,
+                graph_db_ref,
+                vamana_ref,
+            )
     };
 
     match result {

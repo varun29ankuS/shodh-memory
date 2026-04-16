@@ -261,10 +261,7 @@ impl ShodhBackupEngine {
                     Ok(bytes) => {
                         total_secondary_bytes += bytes;
                         backed_up_stores.push("vector_index".to_string());
-                        tracing::debug!(
-                            size_kb = bytes / 1024,
-                            "Vector index copied to backup"
-                        );
+                        tracing::debug!(size_kb = bytes / 1024, "Vector index copied to backup");
                     }
                     Err(e) => {
                         // Non-fatal: index can be rebuilt from RocksDB on restore
