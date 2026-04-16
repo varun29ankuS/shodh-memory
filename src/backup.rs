@@ -161,16 +161,17 @@ impl ShodhBackupEngine {
         user_id: &str,
         secondary_stores: &[SecondaryStoreRef<'_>],
     ) -> Result<BackupMetadata> {
-        self.create_comprehensive_backup_with_graph(db, user_id, secondary_stores, None)
+        self.create_comprehensive_backup_with_graph(db, user_id, secondary_stores, None, None)
     }
 
-    /// Create a comprehensive backup including the knowledge graph DB.
+    /// Create a comprehensive backup including the knowledge graph DB and optional vector index.
     pub fn create_comprehensive_backup_with_graph(
         &self,
         db: &DB,
         user_id: &str,
         secondary_stores: &[SecondaryStoreRef<'_>],
         graph_db: Option<&DB>,
+        vector_index_file: Option<&Path>,
     ) -> Result<BackupMetadata> {
         // Step 1: Create main memories backup (existing logic)
         let mut metadata = self.create_backup(db, user_id)?;
@@ -244,6 +245,33 @@ impl ShodhBackupEngine {
         // Track graph in metadata if it was checkpointed
         if graph_db.is_some() {
             backed_up_stores.push("graph".to_string());
+        }
+
+        // Step 2b: Copy vector index file if present (flat binary outside RocksDB)
+        if let Some(vamana_path) = vector_index_file {
+            if vamana_path.exists() {
+                let vi_dir = secondary_dir.join("vector_index");
+                fs::create_dir_all(&vi_dir)?;
+                let dest = vi_dir.join(
+                    vamana_path
+                        .file_name()
+                        .unwrap_or(std::ffi::OsStr::new("vamana.idx")),
+                );
+                match fs::copy(vamana_path, &dest) {
+                    Ok(bytes) => {
+                        total_secondary_bytes += bytes;
+                        backed_up_stores.push("vector_index".to_string());
+                        tracing::debug!(size_kb = bytes / 1024, "Vector index copied to backup");
+                    }
+                    Err(e) => {
+                        // Non-fatal: index can be rebuilt from RocksDB on restore
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to copy vector index to backup (will rebuild on restore)"
+                        );
+                    }
+                }
+            }
         }
 
         // Step 3: Update metadata with secondary store info
@@ -347,12 +375,16 @@ impl ShodhBackupEngine {
     ///
     /// The `secondary_restore_paths` map store names to their target restore directories.
     /// Secondary stores are restored by copying the checkpoint directory to the target path.
+    /// `vector_index_restore_dir` is the directory to restore the vector index file into
+    /// (e.g., `<storage_path>/<user_id>/vector_index/`). If None, vector index is not restored
+    /// and will be rebuilt from RocksDB on next startup.
     pub fn restore_comprehensive_backup(
         &self,
         user_id: &str,
         backup_id: Option<u32>,
         restore_path: &Path,
         secondary_restore_paths: &[(&str, &Path)],
+        vector_index_restore_dir: Option<&Path>,
     ) -> Result<Vec<String>> {
         // Step 1: Restore main memories DB
         self.restore_backup(user_id, backup_id, restore_path)?;
@@ -451,6 +483,38 @@ impl ShodhBackupEngine {
                     target = ?target_path,
                     "Secondary store restored from checkpoint"
                 );
+            }
+        }
+
+        // Step 4: Restore vector index file if present in backup
+        if let Some(vi_restore_dir) = vector_index_restore_dir {
+            let vi_backup_dir = secondary_dir.join("vector_index");
+            if vi_backup_dir.exists() {
+                fs::create_dir_all(vi_restore_dir)?;
+                // Copy all files from vector_index backup dir to restore target
+                if let Ok(entries) = fs::read_dir(&vi_backup_dir) {
+                    for entry in entries.flatten() {
+                        let src = entry.path();
+                        if src.is_file() {
+                            let dest = vi_restore_dir.join(entry.file_name());
+                            match fs::copy(&src, &dest) {
+                                Ok(_) => {
+                                    restored_stores.push("vector_index".to_string());
+                                    tracing::info!(
+                                        file = ?entry.file_name(),
+                                        "Vector index restored from backup (instant startup)"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to restore vector index (will rebuild from RocksDB)"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 

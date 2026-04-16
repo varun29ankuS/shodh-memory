@@ -1295,7 +1295,13 @@ impl StreamingMemoryExtractor {
                     max_results,
                     ..Default::default()
                 };
-                let results = memory_guard.recall(&query).unwrap_or_default();
+                let results = match memory_guard.recall(&query) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!("Stream recall failed: {e}");
+                        return Vec::new();
+                    }
+                };
 
                 // Use scores from unified 5-layer pipeline (PIPE-9: feedback now in pipeline)
                 // Recall already applies: RRF fusion + hebbian + recency + feedback

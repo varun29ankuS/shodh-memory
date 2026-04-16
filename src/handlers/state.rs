@@ -690,6 +690,11 @@ pub struct MultiUserMemoryManager {
     /// remember/upsert handlers. On shutdown, we close + await all tracked tasks
     /// to prevent data loss from fire-and-forget graph writes.
     pub task_tracker: tokio_util::task::TaskTracker,
+
+    /// Per-user consolidation guards to prevent concurrent consolidation.
+    /// Without this, overlapping consolidation (manual + maintenance timer, or double API call)
+    /// causes double decay, duplicate fact extraction, and lost edge boosts.
+    consolidation_locks: DashMap<String, std::sync::atomic::AtomicBool>,
 }
 
 impl MultiUserMemoryManager {
@@ -1015,6 +1020,7 @@ impl MultiUserMemoryManager {
             shared_rocksdb_cache,
             habituation_tracker,
             task_tracker: tokio_util::task::TaskTracker::new(),
+            consolidation_locks: DashMap::new(),
         };
 
         info!("Running initial audit log rotation...");
@@ -1849,6 +1855,31 @@ impl MultiUserMemoryManager {
         Ok(graph_arc)
     }
 
+    /// Try to acquire the consolidation lock for a user.
+    /// Returns true if acquired (caller must release), false if already running.
+    pub fn try_acquire_consolidation_lock(&self, user_id: &str) -> bool {
+        let entry = self
+            .consolidation_locks
+            .entry(user_id.to_string())
+            .or_insert_with(|| std::sync::atomic::AtomicBool::new(false));
+        // compare_exchange: if currently false, set to true (acquired)
+        entry
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::Acquire,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+    }
+
+    /// Release the consolidation lock for a user.
+    pub fn release_consolidation_lock(&self, user_id: &str) {
+        if let Some(entry) = self.consolidation_locks.get(user_id) {
+            entry.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+
     /// Get graph statistics for a user
     pub fn get_user_graph_stats(&self, user_id: &str) -> Result<GraphStats> {
         let graph = self.get_user_graph(user_id)?;
@@ -1893,6 +1924,15 @@ impl MultiUserMemoryManager {
         let mut total_facts_reinforced = 0;
 
         for user_id in user_ids {
+            // Skip users with active consolidation (manual API call in progress)
+            if !self.try_acquire_consolidation_lock(&user_id) {
+                tracing::debug!(
+                    user_id = %user_id,
+                    "Skipping maintenance — consolidation already in progress"
+                );
+                continue;
+            }
+
             let maintenance_result = if let Ok(memory_lock) = self.get_user_memory(&user_id) {
                 let memory = memory_lock.read();
                 match memory.run_maintenance(decay_factor, &user_id, is_heavy) {
@@ -2072,6 +2112,9 @@ impl MultiUserMemoryManager {
                     }
                 }
             }
+
+            // Release consolidation lock for this user
+            self.release_consolidation_lock(&user_id);
         }
 
         // Heavy cycle: compute Forman-Ricci curvature on graph edges
@@ -2197,6 +2240,12 @@ impl MultiUserMemoryManager {
                     self.audit_logs.len()
                 );
             }
+        }
+
+        // Periodic vector index save — crash between maintenance cycles loses at most 1 cycle
+        // worth of vectors. The atomic save in retrieval.rs (.tmp + rename) ensures no corruption.
+        if let Err(e) = self.save_all_vector_indices() {
+            tracing::warn!("Periodic vector index save failed: {}", e);
         }
 
         tracing::info!(
@@ -2409,11 +2458,22 @@ impl MultiUserMemoryManager {
                     let graph_lock = self.get_user_graph(name).ok();
                     let graph_guard = graph_lock.as_ref().map(|g| g.read());
                     let graph_db_ref = graph_guard.as_ref().map(|g| g.get_db());
+                    let vamana_path = self
+                        .base_path
+                        .join(name)
+                        .join("vector_index")
+                        .join("vamana.idx");
+                    let vamana_ref = if vamana_path.exists() {
+                        Some(vamana_path.as_path())
+                    } else {
+                        None
+                    };
                     match self.backup_engine.create_comprehensive_backup_with_graph(
                         &db,
                         name,
                         &store_refs,
                         graph_db_ref,
+                        vamana_ref,
                     ) {
                         Ok(metadata) => {
                             tracing::info!(
