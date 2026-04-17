@@ -1980,18 +1980,47 @@ The fork already has a renderer. Replace its reducer wiring with ours (from Task
 **Files:**
 - Modify: `src/handlers/viewer/js/graph/renderer.js` (inherited from fork; rewrite reducers)
 
+**Layering requirement.** The pure `nodeReducer` / `edgeReducer` from Tasks 13–14 do NOT replace the fork's stateful `nodeReducer` closure (currently in `app.js` around line 776) — they are the *base layer*. The fork's reducer closes over hover/selection/manual-hide state (`hoveredNode`, `selectedNode`, `manuallyHidden`, theme). Wire our reducers as follows:
+1. Call `nodeReducer(id, attrs, ctx)` from `node-style.js` to get the base visual spec (`{size, color, shape, haloPulse, recencyBadge, label}`).
+2. On top of that, apply the existing state overlays: hover dimming, selected-highlight, manually-hidden recoloring, `graph.areNeighbors()` emphasis. Do NOT drop these behaviors. Carry them from the fork's reducer into the new wrapper.
+3. Same pattern for `edgeReducer`.
+
+The result is: pure styling comes from the domain modules (single source of truth, unit-tested); interactive state overlays live in the renderer where they belong.
+
 - [ ] **Step 1: Strip fork's domain reducers, wire in shodh reducers**
 
-Open `src/handlers/viewer/js/graph/renderer.js`. Find the `nodeReducer` and `edgeReducer` registrations (typically inside `new Sigma(graph, container, { nodeReducer: ..., edgeReducer: ... })`). Replace them with imports:
+Open `src/handlers/viewer/js/graph/renderer.js`. Find the `nodeReducer` and `edgeReducer` registrations (typically inside `new Sigma(graph, container, { nodeReducer: ..., edgeReducer: ... })`). Replace them with a layered wrapper:
 
 ```javascript
-import { nodeReducer } from '../domain/node-style.js';
-import { edgeReducer } from '../domain/edge-style.js';
+import { nodeReducer as styleNode } from '../domain/node-style.js';
+import { edgeReducer as styleEdge } from '../domain/edge-style.js';
 
 export function mount(graph, container, opts = {}) {
+  // State owned by the renderer, mutated by interaction handlers.
+  const state = { hoveredNode: null, selectedNode: null, manuallyHidden: new Set() };
+
   const sigma = new Sigma(graph, container, {
-    nodeReducer: (id, attrs) => nodeReducer(id, attrs, { now: Date.now() }),
-    edgeReducer: (id, attrs) => edgeReducer(id, attrs, { now: Date.now() }),
+    nodeReducer: (id, attrs) => {
+      const base = styleNode(id, attrs, { now: Date.now() });
+      // Layer interactive state on top of pure styling.
+      if (state.manuallyHidden.has(id)) return { ...base, hidden: true };
+      if (state.hoveredNode && state.hoveredNode !== id && !graph.areNeighbors(state.hoveredNode, id)) {
+        return { ...base, color: 'rgba(0,0,0,0.1)', label: '', zIndex: 0 };
+      }
+      if (state.hoveredNode === id || state.selectedNode === id) {
+        return { ...base, highlighted: true, zIndex: 1 };
+      }
+      return base;
+    },
+    edgeReducer: (id, attrs) => {
+      const base = styleEdge(id, attrs, { now: Date.now() });
+      if (state.hoveredNode) {
+        const [s, t] = graph.extremities(id);
+        const touches = s === state.hoveredNode || t === state.hoveredNode;
+        if (!touches) return { ...base, hidden: true };
+      }
+      return base;
+    },
     ...opts,
   });
 
