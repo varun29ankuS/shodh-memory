@@ -145,5 +145,8 @@ async function main() {
 
 main().catch((e) => {
   console.error('[boot] failed', e);
-  document.body.innerHTML = `<div class="banner">Failed to load: ${String(e.message || e)}</div>`;
+  const banner = document.createElement('div');
+  banner.className = 'banner';
+  banner.textContent = 'Failed to load: ' + String(e.message || e);
+  document.body.appendChild(banner);
 });

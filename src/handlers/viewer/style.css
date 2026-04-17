@@ -429,3 +429,32 @@ input[type="checkbox"] { accent-color: var(--accent-cyan); }
   border-color: var(--border-focus);
   box-shadow: 0 0 8px rgba(255, 113, 206, 0.3);
 }
+
+.drop-zone {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 16px;
+  border: 2px dashed var(--border);
+  margin: 24px;
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+.banner {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 16px;
+  background: var(--bg-card);
+  color: var(--red);
+  border: 1px solid var(--red);
+  border-radius: 6px;
+  font-size: 13px;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(13, 2, 33, 0.8);
+}
