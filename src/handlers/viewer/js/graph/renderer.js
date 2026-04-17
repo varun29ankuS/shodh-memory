@@ -72,8 +72,8 @@ export function mount(graph, container, opts = {}) {
   });
 
   // FA2 loading overlay — shown for an initial settling window, then hidden.
-  // The layout worker keeps running so interactions (drag, refetch) refine
-  // positions further; it is only torn down when the renderer is stopped.
+  // The worker runs until an auto-stop timer fires; FA2Layout has no built-in
+  // convergence detection, so we cap CPU use with a fixed budget.
   const overlay = document.createElement('div');
   overlay.className = 'fa2-overlay';
   overlay.textContent = 'Laying out\u2026';
@@ -81,6 +81,7 @@ export function mount(graph, container, opts = {}) {
 
   const fa2Worker = startFa2(graph);
   const overlayTimer = setTimeout(() => overlay.remove(), 2500);
+  const fa2AutoStop  = setTimeout(() => fa2Worker.stop(), 15_000);
 
   // Animation loop: pulses require refresh
   let rafId;
@@ -96,6 +97,7 @@ export function mount(graph, container, opts = {}) {
     stop: () => {
       cancelAnimationFrame(rafId);
       clearTimeout(overlayTimer);
+      clearTimeout(fa2AutoStop);
       overlay.remove();
       fa2Worker.stop();
     },
