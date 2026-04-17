@@ -267,12 +267,12 @@ pub async fn graph_view(Query(params): Query<GraphViewParams>) -> Response {
 pub async fn graph_asset(Path(file): Path<String>) -> Response {
     let bytes: &'static [u8] = match file.as_str() {
         "d3.v7.9.0.min.js" => include_bytes!("assets/d3.v7.9.0.min.js"),
-        "graphology-library.min.js" => include_bytes!("assets/graphology-library.min.js"),
         "graphology.umd.min.js" => include_bytes!("assets/graphology.umd.min.js"),
-        "OrbitControls.js" => include_bytes!("assets/OrbitControls.js"),
+        "graphology-library.min.js" => include_bytes!("assets/graphology-library.min.js"),
         "sigma.min.js" => include_bytes!("assets/sigma.min.js"),
         "three.module.js" => include_bytes!("assets/three.module.js"),
         "three.core.js" => include_bytes!("assets/three.core.js"),
+        "OrbitControls.js" => include_bytes!("assets/OrbitControls.js"),
         _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
     (
@@ -483,7 +483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn graph_asset_rejects_unknown_file() {
+    async fn graph_asset_rejects_unlisted_filename() {
         let app = asset_router();
 
         let req = Request::builder()
