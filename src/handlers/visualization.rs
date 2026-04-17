@@ -263,13 +263,16 @@ pub async fn graph_view(Query(params): Query<GraphViewParams>) -> Response {
     response
 }
 
-/// GET /graph/assets/{file} - Serve vendored JS libraries (d3, three.js, OrbitControls)
+/// GET /graph/assets/{file} - Serve vendored JS libraries (d3, three.js, OrbitControls, sigma, graphology)
 pub async fn graph_asset(Path(file): Path<String>) -> Response {
     let bytes: &'static [u8] = match file.as_str() {
         "d3.v7.9.0.min.js" => include_bytes!("assets/d3.v7.9.0.min.js"),
+        "graphology-library.min.js" => include_bytes!("assets/graphology-library.min.js"),
+        "graphology.umd.min.js" => include_bytes!("assets/graphology.umd.min.js"),
+        "OrbitControls.js" => include_bytes!("assets/OrbitControls.js"),
+        "sigma.min.js" => include_bytes!("assets/sigma.min.js"),
         "three.module.js" => include_bytes!("assets/three.module.js"),
         "three.core.js" => include_bytes!("assets/three.core.js"),
-        "OrbitControls.js" => include_bytes!("assets/OrbitControls.js"),
         _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
     (
@@ -451,4 +454,43 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#x27;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request, Router};
+    use tower::ServiceExt;
+
+    fn asset_router() -> Router {
+        Router::new().route("/graph/assets/{file}", axum::routing::get(graph_asset))
+    }
+
+    #[tokio::test]
+    async fn graph_asset_serves_vendored_sigma() {
+        let app = asset_router();
+
+        let req = Request::builder()
+            .uri("/graph/assets/sigma.min.js")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/javascript; charset=utf-8"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_asset_rejects_unknown_file() {
+        let app = asset_router();
+
+        let req = Request::builder()
+            .uri("/graph/assets/../Cargo.toml")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
 }
