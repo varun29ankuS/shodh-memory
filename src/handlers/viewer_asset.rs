@@ -18,6 +18,8 @@ use rust_embed::RustEmbed;
 struct ViewerAssets;
 
 fn content_type_for(path: &str) -> &'static str {
+    // No .html arm: index.html is excluded (served by graph_view2 with template
+    // substitution); any future .html assets would need an explicit arm here.
     if path.ends_with(".js") {
         "application/javascript; charset=utf-8"
     } else if path.ends_with(".css") {
@@ -46,7 +48,7 @@ pub async fn viewer_asset(Path(rest): Path<String>) -> Response {
             (header::CONTENT_TYPE, content_type_for(&rest)),
             (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
         ],
-        file.data.into_owned(),
+        file.data,
     )
         .into_response()
 }
@@ -107,7 +109,12 @@ mod tests {
 
     #[tokio::test]
     async fn viewer_asset_rejects_path_traversal() {
-        for bad in ["../Cargo.toml", "js/../../Cargo.toml", "js/../../../etc/passwd"] {
+        for bad in [
+            "../Cargo.toml",
+            "js/../../Cargo.toml",
+            "js/../../../etc/passwd",
+            "%2e%2e/Cargo.toml",
+        ] {
             let app = router();
             let req = Request::builder()
                 .uri(format!("/graph/viewer/{bad}"))
