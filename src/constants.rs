@@ -47,6 +47,20 @@ pub const HEBBIAN_DECAY_MISLEADING: f32 = 0.10;
 /// - Allows for context-dependent recovery
 pub const IMPORTANCE_FLOOR: f32 = 0.05;
 
+/// Reward-based edge strength modulation factor for robotics feedback.
+///
+/// When a memory carries an explicit reward signal (from robot action outcomes),
+/// initial graph edge strength is scaled by (1.0 + reward × this factor).
+/// - reward=+1.0 → edges 40% stronger (successful action → reinforce associations)
+/// - reward=0.0  → no change (neutral outcome)
+/// - reward=-1.0 → edges 40% weaker (failed action → weaken associations)
+///
+/// Justification:
+/// - Bridges explicit RL reward signals to Hebbian graph learning
+/// - 0.4 keeps modulation within ±40% of baseline, preventing runaway strengthening
+/// - Applied at store time (immediate effect) rather than deferred consolidation
+pub const REWARD_EDGE_MODULATION: f32 = 0.4;
+
 // =============================================================================
 // NEUROSCIENCE-INSPIRED DYNAMICS
 // =============================================================================

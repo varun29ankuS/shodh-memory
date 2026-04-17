@@ -3049,6 +3049,27 @@ impl MultiUserMemoryManager {
         // Edge quality gate: skip edges between two confirmed stop-word hubs
         // or when either endpoint is a saturated hub (degree > 300).
         let truncated_context: String = experience.content.chars().take(150).collect();
+
+        // Reward-modulated edge strength: robotics memories with explicit reward
+        // signals get stronger/weaker initial edges via Hebbian-RL bridge.
+        let base_strength = EdgeTier::L1Working.initial_weight();
+        let edge_strength = if let Some(reward) = experience.reward {
+            let modulated =
+                base_strength * (1.0 + reward * crate::constants::REWARD_EDGE_MODULATION);
+            let clamped = modulated.clamp(0.05, 1.0);
+            if (reward).abs() > f32::EPSILON {
+                tracing::info!(
+                    reward = reward,
+                    base = base_strength,
+                    modulated = clamped,
+                    "Reward-modulated edge strength for robotics memory"
+                );
+            }
+            clamped
+        } else {
+            base_strength
+        };
+
         for i in 0..entity_uuids.len() {
             for j in (i + 1)..entity_uuids.len() {
                 // Edge quality gate using graph reputation
@@ -3088,7 +3109,7 @@ impl MultiUserMemoryManager {
                     from_entity: entity_uuids[i].1,
                     to_entity: entity_uuids[j].1,
                     relation_type: RelationType::RelatedTo,
-                    strength: EdgeTier::L1Working.initial_weight(),
+                    strength: edge_strength,
                     created_at: now,
                     valid_at: now,
                     invalidated_at: None,

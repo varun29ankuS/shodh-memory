@@ -878,3 +878,125 @@ fn test_query_builder_with_tags() {
     );
     assert_eq!(query.retrieval_mode, RetrievalMode::Hybrid);
 }
+
+// ============================================================================
+// ROBOTICS RETRIEVAL MODE ROUTING TESTS
+// ============================================================================
+
+#[test]
+fn test_spatial_query_requires_geo_filter() {
+    let query = Query {
+        retrieval_mode: RetrievalMode::Spatial,
+        geo_filter: Some(GeoFilter {
+            lat: 37.7749,
+            lon: -122.4194,
+            radius_meters: 100.0,
+        }),
+        ..Default::default()
+    };
+    assert!(matches!(query.retrieval_mode, RetrievalMode::Spatial));
+    assert!(query.geo_filter.is_some());
+}
+
+#[test]
+fn test_mission_query_requires_mission_id() {
+    let query = Query {
+        retrieval_mode: RetrievalMode::Mission,
+        mission_id: Some("mission_alpha".to_string()),
+        ..Default::default()
+    };
+    assert!(matches!(query.retrieval_mode, RetrievalMode::Mission));
+    assert_eq!(query.mission_id, Some("mission_alpha".to_string()));
+}
+
+#[test]
+fn test_action_outcome_query_with_reward_range() {
+    let query = Query {
+        retrieval_mode: RetrievalMode::ActionOutcome,
+        reward_range: Some((0.5, 1.0)),
+        ..Default::default()
+    };
+    assert!(matches!(query.retrieval_mode, RetrievalMode::ActionOutcome));
+    assert_eq!(query.reward_range, Some((0.5, 1.0)));
+}
+
+#[test]
+fn test_reward_edge_modulation_constant() {
+    use shodh_memory::constants::REWARD_EDGE_MODULATION;
+
+    // Verify the constant is in a sane range
+    assert!(REWARD_EDGE_MODULATION > 0.0);
+    assert!(REWARD_EDGE_MODULATION <= 1.0);
+
+    // Verify modulation math: base_strength * (1.0 + reward * modulation)
+    let base = 0.5_f32;
+
+    // Positive reward should increase strength
+    let positive = base * (1.0 + 1.0 * REWARD_EDGE_MODULATION);
+    assert!(positive > base, "Positive reward should increase edge strength");
+
+    // Negative reward should decrease strength
+    let negative = base * (1.0 + (-1.0) * REWARD_EDGE_MODULATION);
+    assert!(negative < base, "Negative reward should decrease edge strength");
+    assert!(negative > 0.0, "Negative reward should not zero out edges");
+
+    // Zero reward should leave strength unchanged
+    let neutral = base * (1.0 + 0.0 * REWARD_EDGE_MODULATION);
+    assert!((neutral - base).abs() < f32::EPSILON, "Zero reward should not change edges");
+}
+
+#[test]
+fn test_robotics_memory_with_reward_matches_filter() {
+    let memory = create_robotics_memory(
+        "Robot navigated to target successfully",
+        Some("robot_001"),
+        Some("mission_1"),
+        Some([37.7749, -122.4194, 10.0]),
+        Some("navigate"),
+        Some(0.8),
+        None,
+    );
+
+    // Reward filter: should match memories with reward >= 0.5
+    let query = Query {
+        reward_range: Some((0.5, 1.0)),
+        ..Default::default()
+    };
+    assert!(
+        query.matches(&memory),
+        "Memory with reward=0.8 should match reward_range=(0.5, 1.0)"
+    );
+
+    // Reward filter: should NOT match memories outside range
+    let query_negative = Query {
+        reward_range: Some((-1.0, -0.5)),
+        ..Default::default()
+    };
+    assert!(
+        !query_negative.matches(&memory),
+        "Memory with reward=0.8 should not match negative reward range"
+    );
+}
+
+#[test]
+fn test_geo_filter_haversine_distance() {
+    let filter = GeoFilter {
+        lat: 37.7749,
+        lon: -122.4194,
+        radius_meters: 1000.0,
+    };
+
+    // Point ~400m away (within radius)
+    let dist_close = filter.haversine_distance(37.7785, -122.4194);
+    assert!(
+        dist_close < 1000.0,
+        "Point 400m away should be within 1000m radius"
+    );
+
+    // Same point (zero distance)
+    let dist_same = filter.haversine_distance(37.7749, -122.4194);
+    assert!(
+        dist_same < 1.0,
+        "Same point should have near-zero distance"
+    );
+}

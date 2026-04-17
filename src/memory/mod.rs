@@ -1439,6 +1439,28 @@ impl MemorySystem {
         let recall_start = std::time::Instant::now();
 
         // ===========================================================================
+        // ROBOTICS MODE DELEGATION
+        // ===========================================================================
+        // Spatial, Mission, and ActionOutcome modes use index-based retrieval
+        // (geohash, mission_id, reward buckets) rather than semantic search.
+        // Delegate directly to the retrieval engine which has full implementations.
+        match query.retrieval_mode {
+            RetrievalMode::Spatial | RetrievalMode::Mission | RetrievalMode::ActionOutcome => {
+                tracing::info!(
+                    mode = ?query.retrieval_mode,
+                    query = query_text,
+                    "Delegating to index-based retrieval engine for robotics mode"
+                );
+                let results = self.retriever.search(query, query.max_results)?;
+                if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+                    tracing::debug!("Retrieval count: {count}");
+                }
+                return Ok(results);
+            }
+            _ => {}
+        }
+
+        // ===========================================================================
         // TEMPORAL ANALYSIS (unified intent + date parsing)
         // ===========================================================================
         // Replaces independent calls to extract_temporal_refs() and detect_temporal_intent().
@@ -3727,6 +3749,14 @@ impl MemorySystem {
         }
 
         factors.push(("quality", quality_score.min(0.1)));
+
+        // Factor 8: Reward signal (0.0 - 0.15)
+        // Robotics memories with strong reward signals (positive or negative)
+        // are more important — both successes and failures carry learning value.
+        if let Some(reward) = experience.reward {
+            let reward_score = reward.abs() * 0.15;
+            factors.push(("reward", reward_score));
+        }
 
         // Aggregate all factors
         let importance: f32 = factors.iter().map(|(_, score)| score).sum();
