@@ -23,7 +23,7 @@
 button, input, select, textarea { font-family: inherit; }
 
 body {
-  font-family: 'Oxanium', sans-serif;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   background: var(--bg-page);
   color: var(--text-primary);
   display: flex;
@@ -44,7 +44,7 @@ body {
 }
 
 #sidebar h1 {
-  font-family: 'Michroma', sans-serif;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   font-size: 14px;
   font-weight: 600;
   letter-spacing: -0.01em;
@@ -52,7 +52,7 @@ body {
 }
 
 #sidebar h2 {
-  font-family: 'Michroma', sans-serif;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   font-size: 11px;
   font-weight: 600;
   color: var(--accent-violet);
@@ -350,7 +350,7 @@ input[type="checkbox"] { accent-color: var(--accent-cyan); }
   border-radius: 6px;
   padding: 6px 10px;
   font-size: 11px;
-  font-family: 'Oxanium', sans-serif;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   font-weight: 400;
   line-height: 1.4;
   white-space: normal;
