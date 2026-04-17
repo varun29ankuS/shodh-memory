@@ -20,7 +20,7 @@ const LIVE_CLASS = {
  * @param {{ onFilterChange: (state: object) => void, stats?: { node_count?: number, edge_count?: number } }} opts
  * @returns {{ setLiveStatus: (status: 'connecting'|'connected'|'disconnected'|'closed') => void }}
  */
-export function renderSidebar(container, { onFilterChange, onCurationChange, stats }) {
+export function renderSidebar(container, { onFilterChange, onCurationChange, onExportSubgraph, onExportIds, stats }) {
   // ------------------------------------------------------------------
   // Filter state — shape matches matchesFilters expectations.
   // activeTiers holds BOTH memory tiers and edge tiers in one Set.
@@ -228,6 +228,24 @@ export function renderSidebar(container, { onFilterChange, onCurationChange, sta
   curationWrap.appendChild(boolCheckbox('Highlight dead edges', 'showDeadEdges'));
   curationSec.appendChild(curationWrap);
   container.appendChild(curationSec);
+
+  // Export section
+  const exportSec = section('Export');
+  const btnGroup = document.createElement('div');
+  btnGroup.className = 'btn-group';
+
+  const gexfBtn = document.createElement('button');
+  gexfBtn.textContent = 'Export GEXF';
+  gexfBtn.addEventListener('click', () => { if (onExportSubgraph) onExportSubgraph(); });
+
+  const idsBtn = document.createElement('button');
+  idsBtn.textContent = 'Export IDs';
+  idsBtn.addEventListener('click', () => { if (onExportIds) onExportIds(); });
+
+  btnGroup.appendChild(gexfBtn);
+  btnGroup.appendChild(idsBtn);
+  exportSec.appendChild(btnGroup);
+  container.appendChild(exportSec);
 
   // ------------------------------------------------------------------
   // Public API
