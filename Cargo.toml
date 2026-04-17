@@ -174,6 +174,7 @@ ndarray = "0.16"
 
 # Graph visualization
 petgraph = "0.8"
+rust-embed = { version = "8", features = ["include-exclude"] }
 
 # Full-text search (BM25)
 tantivy = "0.25"

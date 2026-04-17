@@ -12,8 +12,8 @@ use std::sync::Arc;
 use super::state::MultiUserMemoryManager;
 use super::{
     ab_testing, compression, consolidation, crud, export, facts, files, graph, health,
-    integrations, lineage, mif, recall, remember, search, sessions, todos, users, visualization,
-    webhooks,
+    integrations, lineage, mif, recall, remember, search, sessions, todos, users, viewer_asset,
+    visualization, webhooks,
 };
 
 /// Application state type alias
@@ -58,6 +58,7 @@ pub fn build_public_routes(state: AppState) -> Router {
         .route("/graph/view", get(visualization::graph_view))
         .route("/graph/view2", get(visualization::graph_view2))
         .route("/graph/assets/{file}", get(visualization::graph_asset))
+        .route("/graph/viewer/{*rest}", get(viewer_asset::viewer_asset))
         // =================================================================
         // STATE
         // =================================================================

@@ -27,6 +27,7 @@ pub mod search;
 pub mod export;
 pub mod graph;
 pub mod visualization;
+pub mod viewer_asset;
 
 // Task management
 pub mod todos;
