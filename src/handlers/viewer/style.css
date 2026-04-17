@@ -383,3 +383,49 @@ input[type="checkbox"] { accent-color: var(--accent-cyan); }
   color: white; border-radius: 4px; font-size: 14px;
   pointer-events: none;
 }
+
+/* Sidebar filter controls */
+.filter-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.filter-checks label {
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.live-indicator {
+  font-size: 11px;
+}
+
+.live-indicator.connected { color: var(--accent-mint); }
+.live-indicator.disconnected { color: var(--text-muted); }
+
+section + section {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+select {
+  width: 100%;
+  padding: 5px 8px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+}
+
+select:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 8px rgba(255, 113, 206, 0.3);
+}

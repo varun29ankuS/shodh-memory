@@ -1,12 +1,32 @@
 import { nodeReducer as styleNode } from '../domain/node-style.js';
 import { edgeReducer as styleEdge } from '../domain/edge-style.js';
+import { matchesFilters } from '../domain/filters.js';
+
+// Module-scope constants for the default filter state — built once, never mutated.
+const ALL_TIERS = Object.freeze(new Set(['Working', 'Session', 'Longterm', 'L1Working', 'L2Episodic', 'L3Semantic']));
+const ALL_TYPES = Object.freeze(new Set(['memory', 'entity', 'episode']));
+const ALL_LTP   = Object.freeze(new Set(['None', 'Pending', 'Consolidated', 'JustPromoted']));
+const DEFAULT_FILTER = Object.freeze({
+  activeTiers: ALL_TIERS,
+  activeTypes: ALL_TYPES,
+  activeLtp: ALL_LTP,
+  minActivation: 0,
+  minWeight: 0,
+  recencyWindowMs: null,
+});
+
+function defaultFilterState() { return DEFAULT_FILTER; }
 
 export function mount(graph, container, opts = {}) {
+  const { filterState = defaultFilterState, ...sigmaOpts } = opts;
+
   // State owned by the renderer, mutated by interaction handlers.
   const state = { hoveredNode: null, selectedNode: null, manuallyHidden: new Set() };
 
   const sigma = new Sigma(graph, container, {
     nodeReducer: (id, attrs) => {
+      const f = filterState();
+      if (!matchesFilters.node(attrs, f)) return { hidden: true };
       const base = styleNode(id, attrs, { now: Date.now() });
       if (state.manuallyHidden.has(id)) return { ...base, hidden: true };
       if (state.hoveredNode && state.hoveredNode !== id && !graph.areNeighbors(state.hoveredNode, id)) {
@@ -18,6 +38,8 @@ export function mount(graph, container, opts = {}) {
       return base;
     },
     edgeReducer: (id, attrs) => {
+      const f = filterState();
+      if (!matchesFilters.edge(attrs, f)) return { hidden: true };
       const base = styleEdge(id, attrs, { now: Date.now() });
       if (state.hoveredNode) {
         const [s, t] = graph.extremities(id);
@@ -26,7 +48,7 @@ export function mount(graph, container, opts = {}) {
       }
       return base;
     },
-    ...opts,
+    ...sigmaOpts,
   });
 
   // FA2 loading overlay
