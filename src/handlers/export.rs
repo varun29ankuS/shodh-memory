@@ -811,7 +811,7 @@ mod tests {
 
         assert_eq!(node.node_type, "episode");
         assert_eq!(node.label, "First meeting");
-        assert_eq!(node.id, episode.uuid.to_string());
+        assert_eq!(node.id, format!("ep-{}", episode.uuid));
 
         let attrs = &node.attributes;
         assert_eq!(attrs["content"], "We discussed the project roadmap");
@@ -927,8 +927,8 @@ mod tests {
 
         assert_eq!(edges.len(), 2);
         for (edge, entity_id) in edges.iter().zip(entity_ids.iter()) {
-            assert_eq!(edge.id, format!("{}-{}", episode_id, entity_id));
-            assert_eq!(edge.source, episode_id.to_string());
+            assert_eq!(edge.id, format!("ep-{}-{}", episode_id, entity_id));
+            assert_eq!(edge.source, format!("ep-{}", episode_id));
             assert_eq!(edge.target, entity_id.to_string());
             assert_eq!(edge.edge_type, "entity_ref");
             assert!(edge.label.is_none());
