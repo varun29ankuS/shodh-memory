@@ -677,12 +677,8 @@ pub async fn export_graph(
     // unchanged graph always produce the same ETag).
     let stable_key = serde_json::to_string(&(&response.nodes, &response.edges))
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-    let hash = Sha256::digest(stable_key.as_bytes());
-    let hex = hash.iter().fold(String::with_capacity(64), |mut s, b| {
-        write!(&mut s, "{b:02x}").unwrap();
-        s
-    });
-    let etag = format!(r#"W/"{}""#, &hex[..16]);
+    let digest = hex::encode(Sha256::digest(stable_key.as_bytes()));
+    let etag = format!(r#"W/"{}""#, &digest[..16]);
 
     // If-None-Match → 304 (with ETag, no body).
     if let Some(inm) = request_headers
