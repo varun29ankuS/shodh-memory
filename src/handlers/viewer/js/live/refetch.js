@@ -1,3 +1,5 @@
+const NEW_NODE_JITTER_PX = 20;
+
 export function diffGraphs(prev, next) {
   const prevNodeIds = new Set(Object.keys(prev.nodes || {}));
   const nextNodeIds = new Set(Object.keys(next.nodes || {}));
@@ -22,7 +24,7 @@ export function applyDiffToGraph(sigma, graph, next, diff) {
     const base = neighbor && graph.hasNode(neighbor)
       ? graph.getNodeAttributes(neighbor)
       : { x: 0, y: 0 };
-    const jitter = () => (Math.random() - 0.5) * 20;
+    const jitter = () => (Math.random() - 0.5) * NEW_NODE_JITTER_PX;
     graph.addNode(id, { ...attrs, x: (base.x || 0) + jitter(), y: (base.y || 0) + jitter() });
   }
   for (const id of diff.commonNodes) graph.mergeNodeAttributes(id, next.nodes[id]);
@@ -36,7 +38,7 @@ export function applyDiffToGraph(sigma, graph, next, diff) {
 }
 
 function findAnyNeighborId(next, nodeId) {
-  for (const [_, e] of Object.entries(next.edges || {})) {
+  for (const e of Object.values(next.edges || {})) {
     if (e.source === nodeId) return e.target;
     if (e.target === nodeId) return e.source;
   }
