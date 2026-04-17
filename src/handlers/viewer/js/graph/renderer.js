@@ -15,7 +15,7 @@ const DEFAULT_FILTER = Object.freeze({
   recencyWindowMs: null,
 });
 
-function defaultFilterState() { return DEFAULT_FILTER; }
+export function defaultFilterState() { return DEFAULT_FILTER; }
 
 export function mount(graph, container, opts = {}) {
   const { filterState = defaultFilterState, ...sigmaOpts } = opts;

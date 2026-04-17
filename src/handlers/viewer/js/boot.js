@@ -1,6 +1,6 @@
 import { createApiClient } from './config/api-client.js';
 import { createLoader } from './graph/loader.js';
-import { mount } from './graph/renderer.js';
+import { mount, defaultFilterState } from './graph/renderer.js';
 import { createSseClient } from './live/sse-client.js';
 import { createRefetcher, diffGraphs, applyDiffToGraph } from './live/refetch.js';
 import { renderSidebar } from './ui/sidebar.js';
@@ -66,18 +66,13 @@ async function main() {
     if (first.unchanged) throw new Error('initial fetch returned 304');
     prevEtag = first.etag;
 
-    // Filter + curation state as mutable closure refs.
-    let currentFilter = null; // sidebar sets this via onFilterChange
-
-    // currentCuration: consumed by renderer in a future task; stored here as
-    // a hook point so Task 25 or a follow-up can extend renderer reducers.
+    let currentFilter = defaultFilterState();
     let currentCuration = { showWeak: false, showOrphans: false, showDeadEdges: false };
 
     const { sigma, state } = mount(first.graph, container, {
-      filterState: () => currentFilter, // renderer falls back to defaults when null
+      filterState: () => currentFilter,
     });
 
-    // Single refresh helper called by both filter and curation changes.
     function invalidate() { sigma.refresh(); }
 
     const detail = createDetailPanel({ container: detailEl, apiClient });
