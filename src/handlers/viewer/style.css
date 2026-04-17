@@ -365,3 +365,13 @@ input[type="checkbox"] { accent-color: var(--accent-cyan); }
   opacity: 1;
   transform: translateY(0);
 }
+
+.legend .swatch { display:inline-block; width:10px; height:10px; margin-right:6px; }
+.legend .swatch-square { border-radius:0; }
+.legend .swatch-circle { border-radius:50%; }
+.legend .swatch-diamond { transform:rotate(45deg); }
+.legend .line { display:inline-block; width:24px; height:0; border-bottom:2px solid; margin-right:6px; vertical-align:middle; }
+.legend .line-l1 { border-color:#d33b2c; }
+.legend .line-l2 { border-color:#e69f12; }
+.legend .line-l3 { border-color:#3c78b5; }
+.legend .line-dashed { border-style:dashed; }
