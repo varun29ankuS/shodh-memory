@@ -1,6 +1,7 @@
 export const matchesFilters = {
   node(attrs, f) {
     if (!f.activeTypes.has(attrs.type)) return false;
+    // Only memory nodes have a tier; entity/episode nodes bypass tier filtering.
     if (attrs.type === 'memory') {
       if (!f.activeTiers.has(attrs.tier)) return false;
     }

@@ -56,7 +56,7 @@ export function renderSidebar(container, { onFilterChange, stats }) {
     return sec;
   }
 
-  function checkGroup(items, getSet, label) {
+  function checkGroup(items, getSet) {
     const wrap = document.createElement('div');
     wrap.className = 'filter-checks';
     items.forEach(({ value, display }) => {

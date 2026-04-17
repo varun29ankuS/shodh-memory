@@ -407,12 +407,12 @@ input[type="checkbox"] { accent-color: var(--accent-cyan); }
 .live-indicator.connected { color: var(--accent-mint); }
 .live-indicator.disconnected { color: var(--text-muted); }
 
-section + section {
+#sidebar section + section {
   border-top: 1px solid var(--border);
   padding-top: 12px;
 }
 
-select {
+#sidebar select {
   width: 100%;
   padding: 5px 8px;
   background: var(--bg-input);
@@ -425,7 +425,7 @@ select {
   outline: none;
 }
 
-select:focus {
+#sidebar select:focus {
   border-color: var(--border-focus);
   box-shadow: 0 0 8px rgba(255, 113, 206, 0.3);
 }
