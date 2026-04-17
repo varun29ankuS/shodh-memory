@@ -159,6 +159,80 @@ pub async fn get_facts_stats(
 }
 
 // =============================================================================
+// Fact Purge
+// =============================================================================
+
+/// Request for purging garbage facts
+#[derive(Debug, Deserialize)]
+pub struct FactPurgeRequest {
+    pub user_id: String,
+    /// Pattern to match against fact content (case-insensitive substring).
+    /// Facts containing this pattern will be deleted.
+    pub pattern: String,
+    /// If true, only count matches without deleting (default: false)
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Response for fact purge
+#[derive(Debug, Serialize)]
+pub struct FactPurgeResponse {
+    pub success: bool,
+    pub deleted: usize,
+    pub total_scanned: usize,
+    pub dry_run: bool,
+}
+
+/// POST /api/facts/purge - Delete facts matching a content pattern
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id, pattern = %req.pattern))]
+pub async fn purge_facts(
+    State(state): State<AppState>,
+    Json(req): Json<FactPurgeRequest>,
+) -> Result<Json<FactPurgeResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    if req.pattern.len() < 3 {
+        return Err(AppError::InvalidInput {
+            field: "pattern".into(),
+            reason: "Must be at least 3 characters to prevent accidental mass deletion".into(),
+        });
+    }
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+    let user_id = req.user_id.clone();
+    let pattern = req.pattern.to_lowercase();
+    let dry_run = req.dry_run;
+
+    let (deleted, total_scanned) = tokio::task::spawn_blocking(move || {
+        let ms = memory.read();
+        if dry_run {
+            // Count only — don't delete
+            let all_facts = ms.get_facts(&user_id, 10_000)?;
+            let total = all_facts.len();
+            let matched = all_facts
+                .iter()
+                .filter(|f| f.fact.to_lowercase().contains(&pattern))
+                .count();
+            Ok::<_, anyhow::Error>((matched, total))
+        } else {
+            ms.purge_facts(&user_id, |f| f.fact.to_lowercase().contains(&pattern))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    Ok(Json(FactPurgeResponse {
+        success: true,
+        deleted,
+        total_scanned,
+        dry_run,
+    }))
+}
+
+// =============================================================================
 // Fact Narratives
 // =============================================================================
 

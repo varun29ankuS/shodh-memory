@@ -181,6 +181,7 @@ pub fn build_protected_routes(state: AppState) -> Router {
         .route("/api/facts/by-entity", post(facts::facts_by_entity))
         .route("/api/facts/stats", post(facts::get_facts_stats))
         .route("/api/facts/narratives", post(facts::fact_narratives))
+        .route("/api/facts/purge", post(facts::purge_facts))
         // =================================================================
         // LINEAGE
         // =================================================================
