@@ -267,14 +267,8 @@ pub async fn context_compressed(
 
         let mut metadata = HashMap::new();
         metadata.insert("session_digest".to_string(), "true".to_string());
-        metadata.insert(
-            "session_id".to_string(),
-            digest.session_id.0.to_string(),
-        );
-        metadata.insert(
-            "started_at".to_string(),
-            digest.started_at.to_rfc3339(),
-        );
+        metadata.insert("session_id".to_string(), digest.session_id.0.to_string());
+        metadata.insert("started_at".to_string(), digest.started_at.to_rfc3339());
         metadata.insert(
             "duration_secs".to_string(),
             digest.duration_secs.to_string(),
@@ -283,14 +277,8 @@ pub async fn context_compressed(
             "memories_created".to_string(),
             digest.memories_created.to_string(),
         );
-        metadata.insert(
-            "tokens_before".to_string(),
-            req.tokens_before.to_string(),
-        );
-        metadata.insert(
-            "tokens_after".to_string(),
-            req.tokens_after.to_string(),
-        );
+        metadata.insert("tokens_before".to_string(), req.tokens_before.to_string());
+        metadata.insert("tokens_after".to_string(), req.tokens_after.to_string());
 
         // Include "session-summary" tag so these show up in session_history queries,
         // alongside "session-digest" to distinguish compression-time snapshots from
@@ -428,12 +416,8 @@ pub async fn session_history(
                     content: m.experience.content.clone(),
                     entities: m.experience.entities.clone(),
                     started_at: meta.get("started_at").cloned(),
-                    duration_secs: meta
-                        .get("duration_secs")
-                        .and_then(|s| s.parse().ok()),
-                    memories_created: meta
-                        .get("memories_created")
-                        .and_then(|s| s.parse().ok()),
+                    duration_secs: meta.get("duration_secs").and_then(|s| s.parse().ok()),
+                    memories_created: meta.get("memories_created").and_then(|s| s.parse().ok()),
                     created_at: m.created_at.to_rfc3339(),
                 }
             })
@@ -445,8 +429,7 @@ pub async fn session_history(
         // session (hook stop comes after compression, so it's more complete).
         entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
-        let mut seen_sessions: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
         entries.retain(|e| {
             match &e.session_id {
                 Some(sid) => seen_sessions.insert(sid.clone()),
@@ -488,11 +471,7 @@ fn compute_project_threads(entries: &[SessionHistoryEntry]) -> Vec<ProjectThread
 
     // System tags appear in every entry and would inflate overlap counts,
     // causing unrelated sessions to cluster together.
-    const SYSTEM_TAGS: &[&str] = &[
-        "session-summary",
-        "session-digest",
-        "source:hook",
-    ];
+    const SYSTEM_TAGS: &[&str] = &["session-summary", "session-digest", "source:hook"];
 
     if entries.len() < 2 {
         return vec![];
@@ -529,10 +508,7 @@ fn compute_project_threads(entries: &[SessionHistoryEntry]) -> Vec<ProjectThread
     // Group by root
     let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
     for i in 0..n {
-        groups
-            .entry(uf_find_root(&parent, i))
-            .or_default()
-            .push(i);
+        groups.entry(uf_find_root(&parent, i)).or_default().push(i);
     }
 
     // Build threads from groups with 2+ sessions

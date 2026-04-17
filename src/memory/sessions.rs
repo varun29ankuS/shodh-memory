@@ -525,9 +525,7 @@ impl Session {
 
         for event in &self.timeline {
             match event {
-                SessionEvent::MemoryCreated {
-                    entities: ents, ..
-                } => {
+                SessionEvent::MemoryCreated { entities: ents, .. } => {
                     entities.extend(ents.iter().cloned());
                 }
                 SessionEvent::ContextCompressed { .. } => {
@@ -730,9 +728,7 @@ impl SessionStore {
 
             // Move to completed
             let mut completed = self.completed.write();
-            let user_sessions = completed
-                .entry(session.user_id.clone())
-                .or_default();
+            let user_sessions = completed.entry(session.user_id.clone()).or_default();
             user_sessions.push(session.clone());
 
             // Trim to max

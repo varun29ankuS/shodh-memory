@@ -350,7 +350,10 @@ pub fn build_protected_routes(state: AppState) -> Router {
         .route("/api/sessions/stats", get(sessions::get_session_stats))
         .route("/api/sessions/end", post(sessions::end_session))
         .route("/api/sessions/digest", post(sessions::get_session_digest))
-        .route("/api/sessions/context-compressed", post(sessions::context_compressed))
+        .route(
+            "/api/sessions/context-compressed",
+            post(sessions::context_compressed),
+        )
         .route("/api/sessions/history", post(sessions::session_history))
         .route("/api/sessions/{session_id}", get(sessions::get_session))
         // =================================================================

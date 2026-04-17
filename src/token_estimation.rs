@@ -50,8 +50,8 @@ pub fn estimate_tokens(text: &str) -> usize {
     for &b in sample {
         match b {
             // Syntax punctuation common in source code
-            b'{' | b'}' | b'[' | b']' | b'(' | b')' | b';' | b'=' | b'<' | b'>' | b'|'
-            | b'&' | b'#' | b'@' | b'!' | b'~' | b'^' | b'\\' | b'"' | b'\'' => {
+            b'{' | b'}' | b'[' | b']' | b'(' | b')' | b';' | b'=' | b'<' | b'>' | b'|' | b'&'
+            | b'#' | b'@' | b'!' | b'~' | b'^' | b'\\' | b'"' | b'\'' => {
                 syntax_count += 1;
             }
             // UTF-8 multi-byte sequence starters (0xC0..=0xFF)
@@ -184,7 +184,8 @@ if __name__ == "__main__":
 
     #[test]
     fn json_data() {
-        let json = r#"{"users": [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}], "total": 2}"#;
+        let json =
+            r#"{"users": [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}], "total": 2}"#;
         let tokens = estimate_tokens(json);
         // JSON has lots of syntax chars → code mode
         let code_estimate = json.len() * 10 / 32;

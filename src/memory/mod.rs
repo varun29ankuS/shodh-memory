@@ -6949,8 +6949,11 @@ impl MemorySystem {
         let mut parent: Vec<usize> = (0..n).collect();
 
         for i in 0..n {
-            let entities_i: std::collections::HashSet<&str> =
-                facts[i].related_entities.iter().map(|s| s.as_str()).collect();
+            let entities_i: std::collections::HashSet<&str> = facts[i]
+                .related_entities
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
             for j in (i + 1)..n {
                 let shared = facts[j]
                     .related_entities
@@ -7386,14 +7389,16 @@ fn detect_causal_chains(sorted_facts: &[SemanticFact]) -> Vec<CausalFactLink> {
                 continue;
             }
 
-            let relation =
-                if b_lower.contains("replaced") || b_lower.contains("instead") || b_lower.contains("no longer") {
-                    "superseded_by"
-                } else if b_lower.contains("fixed") || b_lower.contains("resolved") {
-                    "resolved_by"
-                } else {
-                    "led_to"
-                };
+            let relation = if b_lower.contains("replaced")
+                || b_lower.contains("instead")
+                || b_lower.contains("no longer")
+            {
+                "superseded_by"
+            } else if b_lower.contains("fixed") || b_lower.contains("resolved") {
+                "resolved_by"
+            } else {
+                "led_to"
+            };
 
             chains.push(CausalFactLink {
                 from_fact_id: a.id.clone(),
