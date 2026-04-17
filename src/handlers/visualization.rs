@@ -253,13 +253,14 @@ pub struct GraphDataStats {
     pub l3_edges: usize,
 }
 
+const LEGACY_GRAPH_HTML: &str = include_str!("graph_view.html");
 const VIEWER_HTML: &str = include_str!("viewer/index.html");
 
 /// GET /graph/view - Serve interactive graph visualization HTML
 pub async fn graph_view(Query(params): Query<GraphViewParams>) -> Response {
     let user_id = params.user_id.unwrap_or_else(|| "default".to_string());
     let nonce = generate_nonce();
-    let body = generate_graph_html(&user_id, &nonce);
+    let body = render_graph_html(LEGACY_GRAPH_HTML, &user_id, &nonce);
     let mut response = Html(body).into_response();
     response.extensions_mut().insert(CspNonce(nonce));
     response
@@ -269,23 +270,7 @@ pub async fn graph_view(Query(params): Query<GraphViewParams>) -> Response {
 pub async fn graph_view2(Query(params): Query<GraphViewParams>) -> Response {
     let user_id = params.user_id.unwrap_or_else(|| "default".to_string());
     let nonce = generate_nonce();
-
-    // Match the security stance of `generate_graph_html`: never leak
-    // a server API key into HTML served by a public route in production.
-    let api_key = if crate::auth::is_production_mode() {
-        String::new()
-    } else {
-        std::env::var("SHODH_DEV_API_KEY").unwrap_or_default()
-    };
-
-    let escaped_user = html_escape(&user_id);
-    let escaped_key = html_escape(&api_key);
-
-    let body = VIEWER_HTML
-        .replace("{{NONCE}}", &nonce)
-        .replace("{{API_KEY}}", &escaped_key)
-        .replace("{{USER_ID}}", &escaped_user);
-
+    let body = render_graph_html(VIEWER_HTML, &user_id, &nonce);
     let mut response = Html(body).into_response();
     response.extensions_mut().insert(CspNonce(nonce));
     response
@@ -459,19 +444,23 @@ pub async fn get_graph_data(
     }))
 }
 
-/// Generate the HTML page for graph visualization (includes 2D/3D toggle)
-fn generate_graph_html(user_id: &str, nonce: &str) -> String {
-    let html = include_str!("graph_view.html");
+/// Substitute `{{USER_ID}}`, `{{NONCE}}`, `{{API_KEY}}` into a viewer HTML template.
+///
+/// The API key is read from `SHODH_DEV_API_KEY` only in non-production mode;
+/// production-mode callers get an empty string. All substituted values are
+/// HTML-escaped.
+fn render_graph_html(template: &str, user_id: &str, nonce: &str) -> String {
     let escaped_user = html_escape(user_id);
     // Only expose the dev API key in non-production mode; production keys
-    // must never be embedded in a page served by the public `/graph/view` route.
+    // must never be embedded in a page served by the public `/graph/view*` routes.
     let api_key = if crate::auth::is_production_mode() {
         String::new()
     } else {
         std::env::var("SHODH_DEV_API_KEY").unwrap_or_default()
     };
     let escaped_key = html_escape(&api_key);
-    html.replace("{{USER_ID}}", &escaped_user)
+    template
+        .replace("{{USER_ID}}", &escaped_user)
         .replace("{{NONCE}}", nonce)
         .replace("{{API_KEY}}", &escaped_key)
 }
@@ -532,6 +521,11 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn graph_view2_responds_with_html_and_substitutes_placeholders() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Reset cross-module env state that `auth::tests` may have left behind;
+        // `graph_view2` reads `SHODH_ENV` (via `is_production_mode`) and
+        // `SHODH_DEV_API_KEY`, so both need to be in a known state.
+        std::env::remove_var("SHODH_API_KEYS");
+        std::env::remove_var("SHODH_ENV");
         std::env::set_var("SHODH_DEV_API_KEY", "view2-key");
 
         let app = axum::Router::new().route(
