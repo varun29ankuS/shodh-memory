@@ -138,16 +138,17 @@ const MAX_LIMIT = 250;              // Max results per query
 const TOKEN_BUDGET = parseInt(process.env.SHODH_TOKEN_BUDGET || "100000", 10);
 const ALERT_THRESHOLD = parseFloat(process.env.SHODH_ALERT_THRESHOLD || "0.9");
 
-// Session token tracking
+// Content-aware token tracker (replaces naive len/4 with CJK/code/prose heuristic)
+const tokenTracker = new TokenTracker(TOKEN_BUDGET, ALERT_THRESHOLD);
+
+// Legacy aliases for compatibility with existing code that uses module globals
 let sessionTokens = 0;
 let sessionStartTime = Date.now();
 
-// Simple token estimation: ~4 chars per token (rough approximation)
 function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return tokenTracker.estimateTokens(text);
 }
 
-// Get current token status
 function getTokenStatus(): { tokens: number; budget: number; percent: number; alert: string | null } {
   const percent = sessionTokens / TOKEN_BUDGET;
   return {
@@ -158,10 +159,18 @@ function getTokenStatus(): { tokens: number; budget: number; percent: number; al
   };
 }
 
+// =============================================================================
+// TOOL CALL TRACKING - For session digest
+// =============================================================================
+
+// Tracks tool invocation counts per session (reset on session reset)
+const toolCallCounts: Map<string, number> = new Map();
+
 // Reset session (call on new conversation or explicit clear)
 function resetTokenSession(): void {
   sessionTokens = 0;
   sessionStartTime = Date.now();
+  toolCallCounts.clear();
 }
 
 // Streaming ingestion settings
@@ -989,7 +998,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "token_status",
-        description: "Get current token usage status for this session. Returns tokens used, budget remaining, and percentage consumed. Use this to check context window health.",
+        description: "Get MCP pipeline token throughput for this session. Tracks tokens flowing through shodh memory tools only — NOT the AI context window. Use for internal diagnostics, not context window health.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -1001,6 +1010,51 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {},
+        },
+      },
+      {
+        name: "session_digest",
+        description: "Get a consolidated digest of the current session: timestamps, token usage, memories created/recalled, tools used with counts, entities extracted, topic changes, and consolidation events. Use after context compression or at session milestones.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+        },
+      },
+      {
+        name: "session_history",
+        description: "Show what you worked on across recent sessions. Returns session summaries with entities, memory stats, and timestamps. Use group_by_project to detect cross-session project continuity via entity overlap.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            limit: {
+              type: "number",
+              description: "Number of sessions to show (default: 10, max: 100)",
+              default: 10,
+            },
+            group_by_project: {
+              type: "boolean",
+              description: "Detect and show project threads across sessions (default: false)",
+              default: false,
+            },
+          },
+        },
+      },
+      {
+        name: "fact_narratives",
+        description: "Get synthesized narratives from accumulated facts, clustered by topic with confidence levels and causal chains. Shows what the system has learned, organized into coherent themes.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            limit: {
+              type: "number",
+              description: "Maximum clusters to return (default: 20, max: 50)",
+              default: 20,
+            },
+            entity_filter: {
+              type: "string",
+              description: "Filter to facts related to a specific entity/topic",
+            },
+          },
         },
       },
       // Prospective Memory / Reminders (SHO-116)
@@ -1504,6 +1558,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (STREAM_ENABLED && (!streamSocket || streamSocket.readyState !== WebSocket.OPEN)) {
     connectStream().catch(() => {});
   }
+
+  // Track tool call counts for session digest
+  toolCallCounts.set(name, (toolCallCounts.get(name) || 0) + 1);
 
   // Auto-capture context from tool arguments (non-blocking)
   autoStreamContext(name, args as Record<string, unknown>);
@@ -2724,18 +2781,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const filledLength = Math.round(percentUsed / 100 * barLength);
         const bar = '█'.repeat(filledLength) + '░'.repeat(barLength - filledLength);
 
-        let response = `🐘 Token Status\n`;
+        let response = `🐘 MCP Pipeline Throughput\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
         response += `${bar} ${percentUsed}%\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-        response += `Used: ${status.tokens.toLocaleString()} tokens\n`;
-        response += `Budget: ${status.budget.toLocaleString()} tokens\n`;
-        response += `Remaining: ${remaining.toLocaleString()} tokens\n`;
+        response += `Pipeline tokens: ${status.tokens.toLocaleString()}\n`;
+        response += `Budget: ${status.budget.toLocaleString()}\n`;
         response += `Session: ${sessionDuration} min\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-        response += status.alert
-          ? `⚠️ ALERT: ${percentUsed}% used - Consider new session`
-          : `✓ Context window healthy`;
+        response += `Note: Tracks memory tool I/O only, not AI context window.`;
 
         return {
           content: [{ type: "text", text: response }],
@@ -2745,6 +2799,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "reset_token_session": {
         const previousTokens = sessionTokens;
         resetTokenSession();
+
+        // Signal context compression to backend session tracker
+        callBrain("/api/sessions/context-compressed", {
+          user_id: userId,
+          tokens_before: previousTokens,
+          tokens_after: 0,
+        }).catch(() => {});
 
         let response = `🐘 Token Session Reset\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
@@ -2756,6 +2817,215 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: response }],
+        };
+      }
+
+      case "session_digest": {
+        // Fetch backend session digest
+        const digestResult = await callBrain("/api/sessions/digest", {
+          user_id: userId,
+          token_budget: TOKEN_BUDGET,
+        });
+
+        const now = new Date();
+        const sessionStart = new Date(sessionStartTime);
+        const durationMins = Math.round((now.getTime() - sessionStartTime) / 60000);
+
+        let digestResponse = `📊 Session Digest\n`;
+        digestResponse += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+        digestResponse += `📅 ${now.toLocaleDateString()} | ⏱ ${sessionStart.toLocaleTimeString()} → ${now.toLocaleTimeString()} (${durationMins}m)\n\n`;
+
+        // Token usage
+        const tokenStatus = getTokenStatus();
+        const pct = Math.round(tokenStatus.percent * 100);
+        const barLen = 20;
+        const filled = Math.round(pct / 100 * barLen);
+        const bar = "█".repeat(filled) + "░".repeat(barLen - filled);
+        digestResponse += `🔤 Tokens: ${tokenStatus.tokens.toLocaleString()} / ${tokenStatus.budget.toLocaleString()} (${pct}%)\n`;
+        digestResponse += `   [${bar}]\n\n`;
+
+        // Backend session data (memories, entities, etc.)
+        if (digestResult && typeof digestResult === "object" && "digest" in digestResult && digestResult.digest) {
+          const d = digestResult.digest as Record<string, unknown>;
+          digestResponse += `🧠 Memory: ${d.memories_created ?? 0} created, ${d.memories_surfaced ?? 0} surfaced, ${d.memories_used ?? 0} used`;
+          const hitRate = d.memory_hit_rate as number;
+          if (hitRate > 0) digestResponse += ` (${Math.round(hitRate * 100)}% hit rate)`;
+          digestResponse += `\n`;
+
+          if ((d.todos_created as number) > 0 || (d.todos_completed as number) > 0) {
+            digestResponse += `📋 Todos: ${d.todos_created ?? 0} created, ${d.todos_completed ?? 0} completed\n`;
+          }
+          if ((d.entity_count as number) > 0) {
+            const entities = d.entities_extracted as string[];
+            const preview = entities.slice(0, 8).join(", ");
+            const more = entities.length > 8 ? ` +${entities.length - 8} more` : "";
+            digestResponse += `🏷️ Entities: ${d.entity_count} extracted (${preview}${more})\n`;
+          }
+          if ((d.topic_changes as number) > 0) {
+            digestResponse += `🔀 Topic changes: ${d.topic_changes}\n`;
+          }
+          if ((d.compressions as number) > 0) {
+            digestResponse += `⟳ Context compressions: ${d.compressions}\n`;
+          }
+          if ((d.consolidation_events as number) > 0) {
+            digestResponse += `⚙️ Consolidation events: ${d.consolidation_events}\n`;
+          }
+        }
+
+        // MCP-side tool call counts
+        if (toolCallCounts.size > 0) {
+          digestResponse += `\n🔧 Tools Used:\n`;
+          const sorted = [...toolCallCounts.entries()].sort((a, b) => b[1] - a[1]);
+          for (const [tool, count] of sorted) {
+            digestResponse += `   ${tool}: ${count}\n`;
+          }
+        }
+
+        digestResponse += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+        return {
+          content: [{ type: "text", text: digestResponse }],
+        };
+      }
+
+      case "session_history": {
+        const { limit: histLimit = 10, group_by_project = false } = args as {
+          limit?: number;
+          group_by_project?: boolean;
+        };
+
+        const histResult = await callBrain("/api/sessions/history", {
+          user_id: userId,
+          limit: histLimit,
+          group_by_project,
+        }) as {
+          success?: boolean;
+          sessions?: Array<{
+            session_id?: string;
+            content: string;
+            entities: string[];
+            started_at?: string;
+            duration_secs?: number;
+            memories_created?: number;
+            created_at: string;
+          }>;
+          project_threads?: Array<{
+            name: string;
+            sessions: number[];
+            shared_entities: string[];
+            session_count: number;
+          }>;
+          total?: number;
+        } | null;
+
+        if (!histResult?.success || !histResult?.sessions?.length) {
+          return {
+            content: [{ type: "text", text: "No session history found. Sessions are recorded when Claude Code exits." }],
+          };
+        }
+
+        let histResponse = `Session History (${histResult.total ?? histResult.sessions.length} sessions)\n`;
+        histResponse += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+
+        for (let i = 0; i < histResult.sessions.length; i++) {
+          const s = histResult.sessions[i];
+          const created = new Date(s.created_at);
+          const dateStr = created.toLocaleDateString([], { month: "short", day: "numeric" });
+          const timeStr = created.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+          const durMin = s.duration_secs ? Math.round(s.duration_secs / 60) : null;
+          const durStr = durMin ? ` (${durMin}m)` : "";
+
+          histResponse += `\n${i + 1}. ${dateStr}, ${timeStr}${durStr}\n`;
+
+          if (s.entities.length > 0) {
+            const preview = s.entities.slice(0, 10).join(", ");
+            const more = s.entities.length > 10 ? ` +${s.entities.length - 10} more` : "";
+            histResponse += `   Entities: ${preview}${more}\n`;
+          }
+
+          if (s.memories_created != null) {
+            histResponse += `   Memories created: ${s.memories_created}\n`;
+          }
+
+          // Show content (first 200 chars if long)
+          const contentPreview = s.content.length > 200 ? s.content.slice(0, 200) + "..." : s.content;
+          histResponse += `   ${contentPreview}\n`;
+        }
+
+        // Project threads
+        if (histResult.project_threads && histResult.project_threads.length > 0) {
+          histResponse += `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+          histResponse += `Active Projects (cross-session continuity):\n`;
+          for (const thread of histResult.project_threads) {
+            histResponse += `  • ${thread.name} — ${thread.session_count} sessions\n`;
+            if (thread.shared_entities.length > 0) {
+              histResponse += `    Shared: ${thread.shared_entities.slice(0, 8).join(", ")}\n`;
+            }
+          }
+        }
+
+        return {
+          content: [{ type: "text", text: histResponse }],
+        };
+      }
+
+      case "fact_narratives": {
+        const { limit: narLimit = 20, entity_filter } = args as {
+          limit?: number;
+          entity_filter?: string;
+        };
+
+        const narResult = await callBrain("/api/facts/narratives", {
+          user_id: userId,
+          limit: narLimit,
+          entity_filter: entity_filter || null,
+        }) as {
+          success?: boolean;
+          clusters?: Array<{
+            topic: string;
+            entities: string[];
+            facts: Array<{ id: string; fact: string; confidence: number; support_count: number }>;
+            narrative: string;
+            avg_confidence: number;
+            total_support: number;
+            causal_chains: Array<{
+              from_fact: string;
+              to_fact: string;
+              relation: string;
+            }>;
+          }>;
+          total_facts?: number;
+          total_clusters?: number;
+        } | null;
+
+        if (!narResult?.success || !narResult?.clusters?.length) {
+          return {
+            content: [{ type: "text", text: "No fact narratives found. Facts are extracted during memory consolidation." }],
+          };
+        }
+
+        let narResponse = `Fact Narratives (${narResult.total_clusters ?? narResult.clusters.length} topics, ${narResult.total_facts ?? 0} facts)\n`;
+        narResponse += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+
+        for (const cluster of narResult.clusters) {
+          narResponse += `\n${cluster.narrative || `Regarding ${cluster.topic}:`}\n`;
+          narResponse += `  Confidence: ${Math.round((cluster.avg_confidence ?? 0) * 100)}% avg | Support: ${cluster.total_support ?? 0} memories\n`;
+
+          if (cluster.causal_chains?.length > 0) {
+            narResponse += `  Causal chains:\n`;
+            for (const chain of cluster.causal_chains) {
+              const arrow = chain.relation === "superseded_by" ? " ✕→ "
+                : chain.relation === "resolved_by" ? " ✓→ "
+                : " → ";
+              const fromPreview = chain.from_fact.length > 60 ? chain.from_fact.slice(0, 60) + "..." : chain.from_fact;
+              const toPreview = chain.to_fact.length > 60 ? chain.to_fact.slice(0, 60) + "..." : chain.to_fact;
+              narResponse += `    ${fromPreview}${arrow}${toPreview}\n`;
+            }
+          }
+        }
+
+        return {
+          content: [{ type: "text", text: narResponse }],
         };
       }
 
@@ -3735,7 +4005,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 - **verify_index** - Check memory index health
 - **repair_index** - Fix orphaned memories
 - **streaming_status** - Check streaming connection
-- **token_status** - Check context window usage
+- **token_status** - MCP pipeline throughput (internal diagnostic)
 - **reset_token_session** - Reset token tracking
 
 ## Reminders

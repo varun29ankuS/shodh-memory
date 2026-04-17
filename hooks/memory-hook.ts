@@ -1452,19 +1452,85 @@ async function handleStop(input: HookInput): Promise<void> {
     await extractConversationMemories(input.transcript_path);
   }
 
-  // Store rich summary as memory for next session's handleSessionStart
-  const summaryContent = `Session in ${projectDir} (${durationMin}min): ${s.memoriesStored} memories captured (${s.editsTracked} edits, ${s.errorsTracked} errors), ${s.memoriesSurfaced} memories surfaced, ${s.factsReturned} facts used. Ended: ${stopReason}.`;
+  // Fetch structured digest for rich session summary
+  const digestResp = (await callBrain("/api/sessions/digest", {
+    user_id: SHODH_USER_ID,
+  })) as {
+    digest?: {
+      session_id: string;
+      started_at: string;
+      duration_secs: number;
+      memories_created: number;
+      memories_surfaced: number;
+      memories_used: number;
+      memory_hit_rate: number;
+      todos_created: number;
+      todos_completed: number;
+      entities_extracted: string[];
+      entity_count: number;
+      tools_used: Record<string, number>;
+      topic_changes: number;
+      compressions: number;
+    };
+  } | null;
+
+  let summaryContent: string;
+  let summaryEntities: string[] = [];
+  let summaryMetadata: Record<string, string> = {};
+
+  if (digestResp?.digest) {
+    const d = digestResp.digest;
+    const dm = Math.round(d.duration_secs / 60);
+    const topTools = Object.entries(d.tools_used || {})
+      .sort(([, a], [, b]) => (b as number) - (a as number))
+      .slice(0, 5)
+      .map(([t, c]) => `${t}(${c})`)
+      .join(", ");
+
+    summaryContent = [
+      `Session in ${projectDir} (${dm}min):`,
+      `  Memories: ${d.memories_created} created, ${d.memories_surfaced} surfaced (${Math.round(d.memory_hit_rate * 100)}% hit rate)`,
+      `  Todos: ${d.todos_created} created, ${d.todos_completed} completed`,
+      d.entities_extracted.length > 0
+        ? `  Entities: ${d.entities_extracted.slice(0, 15).join(", ")}`
+        : null,
+      topTools ? `  Tools: ${topTools}` : null,
+      `  Topics changed: ${d.topic_changes} | Compressions: ${d.compressions}`,
+      `  Ended: ${stopReason}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    summaryEntities = d.entities_extracted.slice(0, 20);
+    summaryMetadata = {
+      session_digest: "true",
+      session_id: String(d.session_id),
+      started_at: d.started_at,
+      duration_secs: String(d.duration_secs),
+      memories_created: String(d.memories_created),
+      entity_count: String(d.entity_count),
+    };
+  } else {
+    // Fallback: digest unavailable (server down, no active session)
+    summaryContent = `Session in ${projectDir} (${durationMin}min): ${s.memoriesStored} memories captured (${s.editsTracked} edits, ${s.errorsTracked} errors), ${s.memoriesSurfaced} memories surfaced, ${s.factsReturned} facts used. Ended: ${stopReason}.`;
+  }
+
+  // Merge entities into tags — RememberRequest only has `tags`, not `entities`.
+  // Deduplicate to avoid indexing the same entity twice.
+  const allTags = ["session-summary", "source:hook", ...summaryEntities];
+  const uniqueTags = [...new Set(allTags)];
 
   await callBrain("/api/remember", {
     user_id: SHODH_USER_ID,
     content: summaryContent,
     memory_type: "Context",
-    tags: ["session-summary", "source:hook"],
+    tags: uniqueTags,
     source_type: "system",
     importance: 0.4,
     episode_id: sessionId,
     preceding_memory_id: hookState.lastStoredMemoryId || undefined,
     credibility: 1.0,
+    metadata: summaryMetadata,
   });
 }
 

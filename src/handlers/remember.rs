@@ -117,6 +117,10 @@ pub struct RememberRequest {
     /// When true, require robot_id and geo_location for strict robotics mode
     #[serde(default)]
     pub validate_robotics: Option<bool>,
+    /// Arbitrary key-value metadata (e.g., session_id, started_at, duration_secs).
+    /// Stored directly on the Experience and queryable via session_history.
+    #[serde(default)]
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 /// Remember response
@@ -522,6 +526,7 @@ pub async fn remember(
         context,
         ner_entities,
         importance_override: req.importance.map(|v| v.clamp(0.0, 1.0)),
+        metadata: req.metadata,
         robot_id: req.robot_id.clone(),
         mission_id: req.mission_id.clone(),
         geo_location: req.geo_location,

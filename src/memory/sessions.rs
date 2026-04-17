@@ -274,6 +274,13 @@ pub enum SessionEvent {
         tokens_estimated: usize,
     },
 
+    /// Context window was compressed (triggered by client)
+    ContextCompressed {
+        timestamp: DateTime<Utc>,
+        tokens_before: usize,
+        tokens_after: usize,
+    },
+
     /// Session ended
     SessionEnd {
         timestamp: DateTime<Utc>,
@@ -292,6 +299,7 @@ impl SessionEvent {
             Self::TodoCompleted { timestamp, .. } => *timestamp,
             Self::TopicChange { timestamp, .. } => *timestamp,
             Self::QueryProcessed { timestamp, .. } => *timestamp,
+            Self::ContextCompressed { timestamp, .. } => *timestamp,
             Self::SessionEnd { timestamp, .. } => *timestamp,
         }
     }
@@ -306,6 +314,7 @@ impl SessionEvent {
             Self::TodoCompleted { .. } => "todo_completed",
             Self::TopicChange { .. } => "topic_change",
             Self::QueryProcessed { .. } => "query_processed",
+            Self::ContextCompressed { .. } => "context_compressed",
             Self::SessionEnd { .. } => "session_end",
         }
     }
@@ -452,6 +461,9 @@ impl Session {
                 self.stats.queries_count += 1;
                 self.stats.tokens_estimated += tokens_estimated;
             }
+            SessionEvent::ContextCompressed { .. } => {
+                // No stat update — compressions counted from timeline in digest()
+            }
             _ => {}
         }
 
@@ -501,6 +513,103 @@ impl Session {
             stats: self.stats.clone(),
         }
     }
+
+    /// Generate a session digest by aggregating timeline events and stats.
+    ///
+    /// `tools_used` and `consolidation_events` are left at defaults (0/empty) —
+    /// the API handler enriches them from audit logs and learning history.
+    pub fn digest(&self, token_budget: usize) -> SessionDigest {
+        let now = Utc::now();
+        let mut entities: Vec<String> = Vec::new();
+        let mut compressions: usize = 0;
+
+        for event in &self.timeline {
+            match event {
+                SessionEvent::MemoryCreated { entities: ents, .. } => {
+                    entities.extend(ents.iter().cloned());
+                }
+                SessionEvent::ContextCompressed { .. } => {
+                    compressions += 1;
+                }
+                _ => {}
+            }
+        }
+
+        entities.sort();
+        entities.dedup();
+        let entity_count = entities.len();
+
+        let token_percent = if token_budget > 0 {
+            self.stats.tokens_estimated as f32 / token_budget as f32
+        } else {
+            0.0
+        };
+
+        SessionDigest {
+            session_id: self.id.clone(),
+            started_at: self.started_at,
+            digest_at: now,
+            duration_secs: (now - self.started_at).num_seconds(),
+            tokens_estimated: self.stats.tokens_estimated,
+            token_budget,
+            token_percent,
+            memories_created: self.stats.memories_created,
+            memories_surfaced: self.stats.memories_surfaced,
+            memories_used: self.stats.memories_used,
+            memory_hit_rate: self.stats.memory_hit_rate,
+            todos_created: self.stats.todos_created,
+            todos_completed: self.stats.todos_completed,
+            entities_extracted: entities,
+            entity_count,
+            tools_used: HashMap::new(),
+            topic_changes: self.stats.topic_changes,
+            compressions,
+            consolidation_events: 0,
+        }
+    }
+}
+
+/// Aggregated session digest — computed on the fly from session timeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionDigest {
+    /// Session ID
+    pub session_id: SessionId,
+    /// When session started
+    pub started_at: DateTime<Utc>,
+    /// When this digest was generated
+    pub digest_at: DateTime<Utc>,
+    /// Session duration in seconds
+    pub duration_secs: i64,
+    /// Estimated tokens used (from proactive_context calls)
+    pub tokens_estimated: usize,
+    /// Token budget (client-configured)
+    pub token_budget: usize,
+    /// Token usage as fraction (0.0 - 1.0+)
+    pub token_percent: f32,
+    /// Memories created this session
+    pub memories_created: usize,
+    /// Memories surfaced (recalled) this session
+    pub memories_surfaced: usize,
+    /// Memories actually used in responses
+    pub memories_used: usize,
+    /// Memory hit rate (used / surfaced)
+    pub memory_hit_rate: f32,
+    /// Todos created
+    pub todos_created: usize,
+    /// Todos completed
+    pub todos_completed: usize,
+    /// Unique entities extracted from created memories
+    pub entities_extracted: Vec<String>,
+    /// Count of unique entities
+    pub entity_count: usize,
+    /// Tool usage counts (filled by handler from audit logs)
+    pub tools_used: HashMap<String, usize>,
+    /// Topic changes detected
+    pub topic_changes: usize,
+    /// Number of context compressions
+    pub compressions: usize,
+    /// Consolidation events during this session window
+    pub consolidation_events: usize,
 }
 
 /// Lightweight session summary (without full timeline)
@@ -619,9 +728,7 @@ impl SessionStore {
 
             // Move to completed
             let mut completed = self.completed.write();
-            let user_sessions = completed
-                .entry(session.user_id.clone())
-                .or_insert_with(Vec::new);
+            let user_sessions = completed.entry(session.user_id.clone()).or_default();
             user_sessions.push(session.clone());
 
             // Trim to max

@@ -593,6 +593,43 @@ impl Default for FactType {
     }
 }
 
+/// A cluster of related facts grouped by shared entities, with a template-generated
+/// narrative and heuristic causal chain detection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactCluster {
+    /// Most common entity in the cluster (used as topic heading)
+    pub topic: String,
+    /// All entities appearing in the cluster's facts
+    pub entities: Vec<String>,
+    /// Facts in this cluster, sorted by created_at
+    pub facts: Vec<SemanticFact>,
+    /// Template-generated narrative summary (no LLM required)
+    pub narrative: String,
+    /// Average confidence across facts in the cluster
+    pub avg_confidence: f32,
+    /// Sum of support_count across all facts
+    pub total_support: usize,
+    /// Detected causal relationships between facts in this cluster
+    pub causal_chains: Vec<CausalFactLink>,
+}
+
+/// A heuristic-detected causal relationship between two facts.
+///
+/// Detected via keyword analysis on temporally ordered facts sharing entities.
+/// Relations: "led_to" (default), "superseded_by" (replaced/deprecated),
+/// "resolved_by" (fixed/resolved).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CausalFactLink {
+    pub from_fact_id: String,
+    pub to_fact_id: String,
+    /// The source fact statement
+    pub from_fact: String,
+    /// The target fact statement
+    pub to_fact: String,
+    /// Relationship type: "led_to", "superseded_by", "resolved_by"
+    pub relation: String,
+}
+
 /// Result of consolidation operation
 #[derive(Debug, Clone, Default)]
 pub struct ConsolidationResult {
