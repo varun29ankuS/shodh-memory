@@ -16,8 +16,8 @@ export function createApiClient({ baseUrl, apiKey }) {
     return `${baseUrl}/api/events/sse?user_id=${encodeURIComponent(userId)}&api_key=${encodeURIComponent(apiKey)}`;
   }
 
-  async function fetchMemoryContent(memoryId) {
-    const url = `${baseUrl}/api/memories/${encodeURIComponent(memoryId)}`;
+  async function fetchMemoryContent(memoryId, userId) {
+    const url = `${baseUrl}/api/memories/${encodeURIComponent(memoryId)}?user_id=${encodeURIComponent(userId)}`;
     return fetch(url, { headers: authHeaders() });
   }
 

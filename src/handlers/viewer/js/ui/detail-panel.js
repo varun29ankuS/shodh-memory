@@ -1,4 +1,4 @@
-export function createDetailPanel({ container, apiClient }) {
+export function createDetailPanel({ container, apiClient, userId }) {
   async function show(graph, id) {
     const attrs = graph.getNodeAttributes(id);
     container.innerHTML = `
@@ -15,7 +15,7 @@ export function createDetailPanel({ container, apiClient }) {
 
     if (!attrs.content && attrs.type === 'memory') {
       try {
-        const resp = await apiClient.fetchMemoryContent(id);
+        const resp = await apiClient.fetchMemoryContent(id, userId);
         if (resp.ok) {
           const body = await resp.json();
           const full = body.content || body.experience?.content;
