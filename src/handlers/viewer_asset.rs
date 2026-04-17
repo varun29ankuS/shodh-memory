@@ -15,6 +15,7 @@ use rust_embed::RustEmbed;
 #[folder = "src/handlers/viewer/"]
 #[exclude = "index.html"]
 #[exclude = "*.rs"]
+#[exclude = "tests/*"]
 struct ViewerAssets;
 
 fn content_type_for(path: &str) -> &'static str {
@@ -101,6 +102,17 @@ mod tests {
         let app = router();
         let req = Request::builder()
             .uri("/graph/viewer/index.html")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn viewer_asset_excludes_test_files() {
+        let app = router();
+        let req = Request::builder()
+            .uri("/graph/viewer/tests/unit/node-style.test.js")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
