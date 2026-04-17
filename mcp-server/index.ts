@@ -998,7 +998,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "token_status",
-        description: "Get current token usage status for this session. Returns tokens used, budget remaining, and percentage consumed. Use this to check context window health.",
+        description: "Get MCP pipeline token throughput for this session. Tracks tokens flowing through shodh memory tools only — NOT the AI context window. Use for internal diagnostics, not context window health.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -2781,18 +2781,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const filledLength = Math.round(percentUsed / 100 * barLength);
         const bar = '█'.repeat(filledLength) + '░'.repeat(barLength - filledLength);
 
-        let response = `🐘 Token Status\n`;
+        let response = `🐘 MCP Pipeline Throughput\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
         response += `${bar} ${percentUsed}%\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-        response += `Used: ${status.tokens.toLocaleString()} tokens\n`;
-        response += `Budget: ${status.budget.toLocaleString()} tokens\n`;
-        response += `Remaining: ${remaining.toLocaleString()} tokens\n`;
+        response += `Pipeline tokens: ${status.tokens.toLocaleString()}\n`;
+        response += `Budget: ${status.budget.toLocaleString()}\n`;
         response += `Session: ${sessionDuration} min\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-        response += status.alert
-          ? `⚠️ ALERT: ${percentUsed}% used - Consider new session`
-          : `✓ Context window healthy`;
+        response += `Note: Tracks memory tool I/O only, not AI context window.`;
 
         return {
           content: [{ type: "text", text: response }],
@@ -4008,7 +4005,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 - **verify_index** - Check memory index health
 - **repair_index** - Fix orphaned memories
 - **streaming_status** - Check streaming connection
-- **token_status** - Check context window usage
+- **token_status** - MCP pipeline throughput (internal diagnostic)
 - **reset_token_session** - Reset token tracking
 
 ## Reminders
