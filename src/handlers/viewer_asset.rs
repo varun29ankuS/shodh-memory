@@ -68,10 +68,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn viewer_asset_serves_app_js() {
+    async fn viewer_asset_serves_boot_js() {
         let app = router();
         let req = Request::builder()
-            .uri("/graph/viewer/app.js")
+            .uri("/graph/viewer/js/boot.js")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
