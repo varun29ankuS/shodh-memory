@@ -253,11 +253,39 @@ pub struct GraphDataStats {
     pub l3_edges: usize,
 }
 
+const VIEWER_HTML: &str = include_str!("viewer/index.html");
+
 /// GET /graph/view - Serve interactive graph visualization HTML
 pub async fn graph_view(Query(params): Query<GraphViewParams>) -> Response {
     let user_id = params.user_id.unwrap_or_else(|| "default".to_string());
     let nonce = generate_nonce();
     let body = generate_graph_html(&user_id, &nonce);
+    let mut response = Html(body).into_response();
+    response.extensions_mut().insert(CspNonce(nonce));
+    response
+}
+
+/// GET /graph/view2 - Serve the sigma.js GEXF viewer
+pub async fn graph_view2(Query(params): Query<GraphViewParams>) -> Response {
+    let user_id = params.user_id.unwrap_or_else(|| "default".to_string());
+    let nonce = generate_nonce();
+
+    // Match the security stance of `generate_graph_html`: never leak
+    // a server API key into HTML served by a public route in production.
+    let api_key = if crate::auth::is_production_mode() {
+        String::new()
+    } else {
+        std::env::var("SHODH_DEV_API_KEY").unwrap_or_default()
+    };
+
+    let escaped_user = html_escape(&user_id);
+    let escaped_key = html_escape(&api_key);
+
+    let body = VIEWER_HTML
+        .replace("{{NONCE}}", &nonce)
+        .replace("{{API_KEY}}", &escaped_key)
+        .replace("{{USER_ID}}", &escaped_user);
+
     let mut response = Html(body).into_response();
     response.extensions_mut().insert(CspNonce(nonce));
     response
@@ -460,7 +488,10 @@ fn html_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request, Router};
+    use std::sync::Mutex;
     use tower::ServiceExt;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn asset_router() -> Router {
         Router::new().route("/graph/assets/{file}", axum::routing::get(graph_asset))
@@ -492,5 +523,38 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn graph_view2_responds_with_html_and_substitutes_placeholders() {
+        {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("SHODH_DEV_API_KEY", "view2-key");
+        } // guard dropped before await points
+
+        let app = axum::Router::new().route(
+            "/graph/view2",
+            axum::routing::get(graph_view2),
+        );
+
+        let req = Request::builder()
+            .uri("/graph/view2?user_id=alice")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body.contains("<!DOCTYPE html>"));
+        assert!(body.contains("view2-key"), "API key not substituted");
+        assert!(body.contains("alice"), "user_id not substituted");
+        assert!(!body.contains("{{API_KEY}}"), "template placeholder leaked");
+        assert!(!body.contains("{{NONCE}}"), "template placeholder leaked");
+        assert!(!body.contains("{{USER_ID}}"), "template placeholder leaked");
+
+        std::env::remove_var("SHODH_DEV_API_KEY");
     }
 }

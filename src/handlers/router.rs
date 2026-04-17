@@ -56,6 +56,7 @@ pub fn build_public_routes(state: AppState) -> Router {
         // GRAPH VISUALIZATION (PUBLIC - HTML VIEWER ONLY)
         // =================================================================
         .route("/graph/view", get(visualization::graph_view))
+        .route("/graph/view2", get(visualization::graph_view2))
         .route("/graph/assets/{file}", get(visualization::graph_asset))
         // =================================================================
         // STATE

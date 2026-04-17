@@ -3,6 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script nonce="{{NONCE}}">
+    window.SHODH_API_KEY = "{{API_KEY}}";
+    window.SHODH_USER_ID = "{{USER_ID}}";
+  </script>
   <title>HTTP Graph Viewer | Web Relationship Visualization | nullphase.net</title>
   <meta name="description" content="Visualize web relationships and HTTP requests in real-time. Build a dynamic graph of your browsing activity using the HTTP Graph Collector extension." />
   <meta name="keywords" content="HTTP graph, web relationship visualization, network graph, data visualization, browsing history graph, sigma.js, graphology, Chrome extension tool" />
@@ -20,13 +24,11 @@
   <meta name="twitter:description" content="Watch your web traffic evolve into a complex relationship graph. Real-time visualization of browsing activity." />
   <meta name="twitter:image" content="https://nullphase.net/hg/og-image.png" />
 
-  <script src="/edgeviz.js?id=NP_CLIENT_DC0AF9577AD33806"></script>
-
   <link rel="canonical" href="https://nullphase.net/hg/" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Michroma&family=Oxanium:wght@400;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css" nonce="{{NONCE}}">
 </head>
 <body>
   <div id="sidebar">
@@ -160,9 +162,9 @@
   <div id="tooltip" class="hidden"></div>
   <div id="context-menu" class="hidden"></div>
 
-  <script src="https://unpkg.com/graphology@0.26.0/dist/graphology.umd.min.js"></script>
-  <script src="https://unpkg.com/sigma@3.0.2/dist/sigma.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/graphology-library@0.8.0/dist/graphology-library.min.js"></script>
-  <script src="app.js"></script>
+  <script src="/graph/assets/graphology.umd.min.js" nonce="{{NONCE}}"></script>
+  <script src="/graph/assets/sigma.min.js" nonce="{{NONCE}}"></script>
+  <script src="/graph/assets/graphology-library.min.js" nonce="{{NONCE}}"></script>
+  <script src="app.js" nonce="{{NONCE}}"></script>
 </body>
 </html>
