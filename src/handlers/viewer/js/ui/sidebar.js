@@ -20,7 +20,7 @@ const LIVE_CLASS = {
  * @param {{ onFilterChange: (state: object) => void, stats?: { node_count?: number, edge_count?: number } }} opts
  * @returns {{ setLiveStatus: (status: 'connecting'|'connected'|'disconnected'|'closed') => void }}
  */
-export function renderSidebar(container, { onFilterChange, stats }) {
+export function renderSidebar(container, { onFilterChange, onCurationChange, stats }) {
   // ------------------------------------------------------------------
   // Filter state — shape matches matchesFilters expectations.
   // activeTiers holds BOTH memory tiers and edge tiers in one Set.
@@ -192,6 +192,42 @@ export function renderSidebar(container, { onFilterChange, stats }) {
   recencyRow.appendChild(recencySelect);
   recencySec.appendChild(recencyRow);
   container.appendChild(recencySec);
+
+  // Curation toggles
+  const curationState = { showWeak: false, showOrphans: false, showDeadEdges: false };
+
+  function emitCuration() {
+    if (onCurationChange) {
+      onCurationChange({
+        showWeak:      curationState.showWeak,
+        showOrphans:   curationState.showOrphans,
+        showDeadEdges: curationState.showDeadEdges,
+      });
+    }
+  }
+
+  function boolCheckbox(labelText, key) {
+    const lbl = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = false;
+    cb.addEventListener('change', () => {
+      curationState[key] = cb.checked;
+      emitCuration();
+    });
+    lbl.appendChild(cb);
+    lbl.appendChild(document.createTextNode('\u00a0' + labelText));
+    return lbl;
+  }
+
+  const curationSec = section('Curation');
+  const curationWrap = document.createElement('div');
+  curationWrap.className = 'filter-checks';
+  curationWrap.appendChild(boolCheckbox('Highlight weak',       'showWeak'));
+  curationWrap.appendChild(boolCheckbox('Highlight orphans',    'showOrphans'));
+  curationWrap.appendChild(boolCheckbox('Highlight dead edges', 'showDeadEdges'));
+  curationSec.appendChild(curationWrap);
+  container.appendChild(curationSec);
 
   // ------------------------------------------------------------------
   // Public API
