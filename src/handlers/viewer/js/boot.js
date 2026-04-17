@@ -1,6 +1,6 @@
 import { createApiClient } from './config/api-client.js';
 import { createLoader } from './graph/loader.js';
-import { mount, defaultFilterState } from './graph/renderer.js';
+import { mount, defaultFilterState, defaultCurationState } from './graph/renderer.js';
 import { createSseClient } from './live/sse-client.js';
 import { createRefetcher, diffGraphs, applyDiffToGraph } from './live/refetch.js';
 import { renderSidebar } from './ui/sidebar.js';
@@ -67,15 +67,16 @@ async function main() {
     prevEtag = first.etag;
 
     let currentFilter = defaultFilterState();
-    let currentCuration = { showWeak: false, showOrphans: false, showDeadEdges: false };
+    let currentCuration = defaultCurationState();
 
     const { sigma, state } = mount(first.graph, container, {
       filterState: () => currentFilter,
+      curationState: () => currentCuration,
     });
 
     function invalidate() { sigma.refresh(); }
 
-    const detail = createDetailPanel({ container: detailEl, apiClient });
+    const detail = createDetailPanel({ container: detailEl, apiClient, userId: mode.userId });
     sigma.on('clickNode', ({ node }) => detail.show(first.graph, node));
 
     const refetcher = createRefetcher({
@@ -118,6 +119,7 @@ async function main() {
     const sse = createSseClient({
       url: apiClient.sseUrl(mode.userId),
       onMessage: () => refetcher.trigger(),
+      onReconnect: () => refetcher.trigger(),
       onStatusChange: (s) => sidebar.setLiveStatus(s),
     });
     sse.connect();

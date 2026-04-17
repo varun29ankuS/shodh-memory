@@ -1,6 +1,11 @@
 import { nodeReducer as styleNode } from '../domain/node-style.js';
 import { edgeReducer as styleEdge } from '../domain/edge-style.js';
 import { matchesFilters } from '../domain/filters.js';
+import { isWeak, isOrphan, isDeadEdge } from '../domain/curation.js';
+import { startFa2 } from './layout.js';
+
+const DEFAULT_CURATION = Object.freeze({ showWeak: false, showOrphans: false, showDeadEdges: false });
+const CURATION_HIGHLIGHT = '#ff4444';
 
 // Module-scope constants for the default filter state — built once, never mutated.
 const ALL_TIERS = Object.freeze(new Set(['Working', 'Session', 'Longterm', 'L1Working', 'L2Episodic', 'L3Semantic']));
@@ -16,9 +21,14 @@ const DEFAULT_FILTER = Object.freeze({
 });
 
 export function defaultFilterState() { return DEFAULT_FILTER; }
+export function defaultCurationState() { return DEFAULT_CURATION; }
 
 export function mount(graph, container, opts = {}) {
-  const { filterState = defaultFilterState, ...sigmaOpts } = opts;
+  const {
+    filterState = defaultFilterState,
+    curationState = defaultCurationState,
+    ...sigmaOpts
+  } = opts;
 
   // State owned by the renderer, mutated by interaction handlers.
   const state = { hoveredNode: null, selectedNode: null, manuallyHidden: new Set() };
@@ -27,7 +37,13 @@ export function mount(graph, container, opts = {}) {
     nodeReducer: (id, attrs) => {
       const f = filterState();
       if (!matchesFilters.node(attrs, f)) return { hidden: true };
-      const base = styleNode(id, attrs, { now: Date.now() });
+      let base = styleNode(id, attrs, { now: Date.now() });
+      const c = curationState();
+      const highlightWeak = c.showWeak && isWeak(attrs);
+      const highlightOrphan = c.showOrphans && isOrphan(graph, id);
+      if (highlightWeak || highlightOrphan) {
+        base = { ...base, color: CURATION_HIGHLIGHT, highlighted: true, zIndex: 2 };
+      }
       if (state.manuallyHidden.has(id)) return { ...base, hidden: true };
       if (state.hoveredNode && state.hoveredNode !== id && !graph.areNeighbors(state.hoveredNode, id)) {
         return { ...base, color: 'rgba(0,0,0,0.1)', label: '', zIndex: 0 };
@@ -40,7 +56,11 @@ export function mount(graph, container, opts = {}) {
     edgeReducer: (id, attrs) => {
       const f = filterState();
       if (!matchesFilters.edge(attrs, f)) return { hidden: true };
-      const base = styleEdge(id, attrs, { now: Date.now() });
+      let base = styleEdge(id, attrs, { now: Date.now() });
+      const c = curationState();
+      if (c.showDeadEdges && isDeadEdge(attrs)) {
+        base = { ...base, color: CURATION_HIGHLIGHT, zIndex: 2 };
+      }
       if (state.hoveredNode) {
         const [s, t] = graph.extremities(id);
         const touches = s === state.hoveredNode || t === state.hoveredNode;
@@ -51,26 +71,16 @@ export function mount(graph, container, opts = {}) {
     ...sigmaOpts,
   });
 
-  // FA2 loading overlay
+  // FA2 loading overlay — shown for an initial settling window, then hidden.
+  // The layout worker keeps running so interactions (drag, refetch) refine
+  // positions further; it is only torn down when the renderer is stopped.
   const overlay = document.createElement('div');
   overlay.className = 'fa2-overlay';
   overlay.textContent = 'Laying out\u2026';
   container.appendChild(overlay);
 
-  // Hide overlay after FA2 converges (best-effort: hide on first stall, or 10s timeout)
   const fa2Worker = startFa2(graph);
-  let lastTick = performance.now();
-  const checkConverged = setInterval(() => {
-    if (performance.now() - lastTick > 1500) {
-      overlay.remove();
-      clearInterval(checkConverged);
-      fa2Worker.stop();
-    }
-  }, 500);
-  setTimeout(() => {
-    overlay.remove();
-    clearInterval(checkConverged);
-  }, 10_000);
+  const overlayTimer = setTimeout(() => overlay.remove(), 2500);
 
   // Animation loop: pulses require refresh
   let rafId;
@@ -80,10 +90,14 @@ export function mount(graph, container, opts = {}) {
   }
   rafId = requestAnimationFrame(tick);
 
-  return { sigma, state, stop: () => { cancelAnimationFrame(rafId); fa2Worker.stop(); } };
-}
-
-function startFa2(_graph) {
-  // Placeholder — real FA2 worker is wired in a later task.
-  return { stop: () => {} };
+  return {
+    sigma,
+    state,
+    stop: () => {
+      cancelAnimationFrame(rafId);
+      clearTimeout(overlayTimer);
+      overlay.remove();
+      fa2Worker.stop();
+    },
+  };
 }
