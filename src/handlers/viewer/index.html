@@ -7,164 +7,21 @@
     window.SHODH_API_KEY = "{{API_KEY}}";
     window.SHODH_USER_ID = "{{USER_ID}}";
   </script>
-  <title>HTTP Graph Viewer | Web Relationship Visualization | nullphase.net</title>
-  <meta name="description" content="Visualize web relationships and HTTP requests in real-time. Build a dynamic graph of your browsing activity using the HTTP Graph Collector extension." />
-  <meta name="keywords" content="HTTP graph, web relationship visualization, network graph, data visualization, browsing history graph, sigma.js, graphology, Chrome extension tool" />
-
-  <!-- Open Graph / Facebook -->
-  <meta property="og:type" content="website" />
-  <meta property="og:url" content="https://nullphase.net/hg/" />
-  <meta property="og:title" content="HTTP Graph Viewer | nullphase.net" />
-  <meta property="og:description" content="Watch your web traffic evolve into a complex relationship graph. Real-time visualization of browsing activity." />
-  <meta property="og:image" content="https://nullphase.net/hg/og-image.png" />
-
-  <!-- Twitter -->
-  <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="HTTP Graph Viewer | nullphase.net" />
-  <meta name="twitter:description" content="Watch your web traffic evolve into a complex relationship graph. Real-time visualization of browsing activity." />
-  <meta name="twitter:image" content="https://nullphase.net/hg/og-image.png" />
-
-  <link rel="canonical" href="https://nullphase.net/hg/" />
+  <title>shodh-memory graph viewer</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Michroma&family=Oxanium:wght@400;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/graph/viewer/style.css" nonce="{{NONCE}}">
 </head>
 <body>
-  <div id="sidebar">
-    <h1>HTTP Graph Viewer</h1>
-    <p class="hint">Visualize your browsing as a network graph using the <a href="https://chromewebstore.google.com/detail/http-graph-collector/lkkdeokncfjlinldgikoabgknklnnkoe" target="_blank">HTTP Graph Collector</a> extension. Connect live to stream requests in real time, or load a saved graph. All data stays local to your browser.</p>
-
-    <section id="live-section">
-      <h2>Live</h2>
-      <input type="text" id="ext-id" placeholder="Extension ID" data-tip="Paste the extension ID from the HTTP Graph Collector popup">
-      <div class="btn-group">
-        <button id="btn-live" data-tip="Stream HTTP requests from the extension in real time">Connect</button>
-        <span id="live-status">Disconnected</span>
-      </div>
-      <p class="hint">Open the extension popup and click the extension ID to copy it.</p>
-    </section>
-
-    <section>
-      <div class="btn-group">
-        <label class="file-btn" data-tip="Open a previously saved .gexf graph file">
-          Load GEXF <input type="file" id="file-input" accept=".gexf">
-        </label>
-        <button id="btn-export" class="hidden" data-tip="Download the current graph as a .gexf file">Save GEXF</button>
-        <button id="btn-clear" class="hidden" data-tip="Remove all nodes and edges and start fresh">Clear</button>
-      </div>
-      <span id="graph-stats"></span>
-    </section>
-
-    <section id="layout-section" class="hidden">
-      <h2>Layout</h2>
-      <div class="btn-group">
-        <button id="btn-fa2" data-tip="Physics simulation that clusters related nodes together. Settles automatically when stable.">Start ForceAtlas2</button>
-        <button id="btn-circular" data-tip="Arrange all nodes in a circle">Circular</button>
-        <button id="btn-hierarchical" data-tip="Tree layout from clients down through domains, hosts, and resources">Hierarchical</button>
-      </div>
-      <div id="fa2-settings" class="hidden">
-        <div class="setting-row" data-tip="How strongly nodes push each other apart">
-          <label>Repulsion <span id="fa2-scaling-val">10</span></label>
-          <input type="range" id="fa2-scaling" min="1" max="500" step="1" value="10">
-        </div>
-        <div class="setting-row" data-tip="How strongly nodes are pulled toward the center">
-          <label>Gravity <span id="fa2-gravity-val">0.05</span></label>
-          <input type="range" id="fa2-gravity" min="1" max="500" step="1" value="5">
-        </div>
-        <div class="setting-row" data-tip="Damping factor — higher values make the simulation more stable but slower to converge">
-          <label>Slow Down <span id="fa2-slowdown-val">1</span></label>
-          <input type="range" id="fa2-slowdown" min="1" max="3" step="0.1" value="1">
-        </div>
-        <div class="setting-row" data-tip="Barnes-Hut approximation angle — lower is more accurate but slower">
-          <label>BH Theta <span id="fa2-theta-val">0.5</span></label>
-          <input type="range" id="fa2-theta" min="1" max="30" step="1" value="5">
-        </div>
-        <div class="setting-row" data-tip="Layout iterations per animation frame — more iterations means faster convergence">
-          <label>Iter/tick <span id="fa2-iters-val">10</span></label>
-          <input type="range" id="fa2-iters" min="1" max="50" step="1" value="10">
-        </div>
-        <div class="setting-row" data-tip="Auto-stop threshold — lower values let the layout run longer for a finer result">
-          <label>Settle <span id="fa2-settle-val">0.5</span></label>
-          <input type="range" id="fa2-settle" min="0.1" max="6" value="0.5" step="0.1">
-        </div>
-        <div class="setting-checks">
-          <label data-tip="Approximate repulsion for better performance on large graphs"><input type="checkbox" id="fa2-barneshut" checked> Barnes-Hut</label>
-          <label data-tip="Pull distant nodes harder toward the center, preventing drift"><input type="checkbox" id="fa2-stronggrav"> Strong Gravity</label>
-          <label data-tip="Use log-linear attraction — gives more weight to weakly connected nodes"><input type="checkbox" id="fa2-linlog"> LinLog</label>
-          <label data-tip="Pull domains into distinct regional clusters based on color hue"><input type="checkbox" id="fa2-multifocal" checked> Multi-Focal</label>
-          <label data-tip="Prevent nodes from overlapping based on their visual size"><input type="checkbox" id="fa2-adjustsizes" checked> Adjust Sizes</label>
-        </div>
-        <span id="fa2-mode" class="fa2-mode-label"></span>
-      </div>
-    </section>
-
-    <section id="size-section" class="hidden">
-      <h2>Node Size</h2>
-      <div class="btn-group">
-        <button id="btn-size-default" class="active" data-tip="Use the original node sizes from the graph data">Default</button>
-        <button id="btn-size-visited" data-tip="Scale nodes by how many times they were visited">Visited</button>
-        <button id="btn-size-visited-log" data-tip="Logarithmic visit count — useful when a few nodes dominate">Visited (log)</button>
-      </div>
-      <div id="size-range" class="hidden">
-        <div class="setting-row" data-tip="Clamp the computed sizes to a min/max range">
-          <label>Min <span id="size-min-val">2</span> / Max <span id="size-max-val">20</span></label>
-          <input type="range" id="size-min" min="1" max="10" value="2" step="0.5">
-          <input type="range" id="size-max" min="5" max="50" value="20" step="1">
-        </div>
-      </div>
-      <div class="setting-row" data-tip="Scale all node sizes up or down uniformly">
-        <label>Multiplier <span id="size-mult-val">1.0</span>x</label>
-        <input type="range" id="size-mult" min="0.1" max="5" value="1" step="0.1">
-      </div>
-    </section>
-
-    <section id="search-section" class="hidden">
-      <h2>Search</h2>
-      <input type="text" id="search-input" list="node-list" placeholder="Search nodes..." data-tip="Type a URL or domain to find and zoom to it in the graph">
-      <datalist id="node-list"></datalist>
-    </section>
-
-    <section id="focus-section" class="hidden">
-      <h2>Focus</h2>
-      <div class="focus-controls">
-        <label data-tip="How many connections away from the selected node to include">Hops: <span id="hop-value">2</span></label>
-        <input type="range" id="hop-slider" min="1" max="5" value="2">
-        <button id="btn-focus" data-tip="Hide all nodes except the selected node and its neighbors within the hop distance">Focus on selected</button>
-      </div>
-    </section>
-
-    <section id="filter-section" class="hidden">
-      <h2 data-tip="Toggle node types: client, domain, host, resource, etc.">Filter by Type</h2>
-      <div id="type-filters"></div>
-      <h2 data-tip="Toggle resource groups based on content-type: scripts, styles, images, etc.">Filter by Content</h2>
-      <div id="content-filters"></div>
-      <h2 data-tip="Show or hide entire domains and their nodes">Filter by Domain</h2>
-      <input type="text" id="domain-filter" placeholder="Filter domains..." data-tip="Type to narrow the domain list below">
-      <div id="domain-filters"></div>
-      <label data-tip="Collapse each host's resources into a single bundle node unless they have cross-host connections"><input type="checkbox" id="bundle-toggle" checked> Collapse resources</label>
-      <button id="btn-reset" data-tip="Clear all filters and show every node">Reset Filters</button>
-      <label id="show-hidden-label" class="hidden" data-tip="Reveal nodes you hid via right-click, shown in gray"><input type="checkbox" id="show-hidden"> Show hidden nodes (<span id="hidden-count">0</span>)</label>
-    </section>
-
-  </div>
-
+  <div id="sidebar"></div>
   <div id="graph-container"></div>
-
-  <div id="info-panel" class="hidden">
-    <div id="info-header">
-      <h2>Node Info</h2>
-      <span id="info-close">&times;</span>
-    </div>
-    <div id="info-content"></div>
-  </div>
-  <div id="ui-tip"></div>
-  <div id="tooltip" class="hidden"></div>
-  <div id="context-menu" class="hidden"></div>
+  <div id="legend"></div>
+  <div id="detail"></div>
 
   <script src="/graph/assets/graphology.umd.min.js" nonce="{{NONCE}}"></script>
   <script src="/graph/assets/sigma.min.js" nonce="{{NONCE}}"></script>
   <script src="/graph/assets/graphology-library.min.js" nonce="{{NONCE}}"></script>
-  <script src="/graph/viewer/app.js" nonce="{{NONCE}}"></script>
+  <script type="module" nonce="{{NONCE}}" src="/graph/viewer/js/boot.js"></script>
 </body>
 </html>
