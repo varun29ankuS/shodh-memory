@@ -375,3 +375,11 @@ input[type="checkbox"] { accent-color: var(--accent-cyan); }
 .legend .line-l2 { border-color:#e69f12; }
 .legend .line-l3 { border-color:#3c78b5; }
 .legend .line-dashed { border-style:dashed; }
+
+.fa2-overlay {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 8px 16px; background: rgba(0,0,0,0.6);
+  color: white; border-radius: 4px; font-size: 14px;
+  pointer-events: none;
+}
