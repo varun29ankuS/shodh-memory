@@ -60,4 +60,16 @@ describe('sseClient', () => {
     }
     expect(MockEventSource.instances.length).toBeGreaterThanOrEqual(6);
   });
+
+  it('fires onReconnect only on reconnects (not first open)', () => {
+    const onReconnect = mock();
+    const client = createSseClient({ url: 'http://x/sse', onMessage: mock(), onReconnect });
+    client.connect();
+    jest.runOnlyPendingTimers(); // first open
+    expect(onReconnect).toHaveBeenCalledTimes(0);
+    MockEventSource.instances[0]._fire('error', {});
+    jest.advanceTimersByTime(1000);
+    jest.runOnlyPendingTimers(); // reconnect's open
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+  });
 });

@@ -1,16 +1,20 @@
-export function createSseClient({ url, onMessage, onStatusChange = () => {} }) {
+export function createSseClient({ url, onMessage, onReconnect = () => {}, onStatusChange = () => {} }) {
   let es = null;
   let attempts = 0;
   let reconnectTimer = null;
   let stopped = false;
+  let hadPriorConnection = false;
 
   function connect() {
     if (stopped) return;
     onStatusChange('connecting');
     es = new EventSource(url);
     es.addEventListener('open', () => {
+      const wasReconnect = hadPriorConnection;
       attempts = 0;
+      hadPriorConnection = true;
       onStatusChange('connected');
+      if (wasReconnect) onReconnect();
     });
     es.addEventListener('message', (evt) => {
       try {
