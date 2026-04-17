@@ -910,43 +910,20 @@ impl SemanticConsolidator {
             candidates.push((fact, importance * 0.6));
         }
 
+        // Filter operational noise before dedup/truncation
+        candidates.retain(|(text, _)| Self::is_knowledge_worthy(text));
+
         // Deduplicate overlapping extractions from the same memory
         candidates = self.dedup_within_memory(candidates);
 
         // Cap per-memory candidates
         candidates.truncate(CONSOLIDATION_MAX_CANDIDATES_PER_MEMORY);
 
-        // Entity pair relationships (sorted for determinism)
-        // Filter: min 3 chars, no stop words, remove substring-redundant entities
-        if memory.experience.entities.len() >= 2 {
-            let mut sorted_entities: Vec<String> = memory
-                .experience
-                .entities
-                .iter()
-                .map(|e| e.to_lowercase())
-                .filter(|e| e.len() >= 3 && !self.keyword_extractor.is_stop_word(e))
-                .collect();
-            sorted_entities.sort();
-            sorted_entities.dedup();
-
-            // Remove entities that are substrings of another entity in the set
-            // e.g. "chose" is redundant when "chose rust" exists
-            let before_dedup = sorted_entities.clone();
-            sorted_entities.retain(|entity| {
-                !before_dedup
-                    .iter()
-                    .any(|other| other != entity && other.contains(entity.as_str()))
-            });
-
-            let max_entities = sorted_entities.len().min(4);
-            for i in 0..max_entities {
-                for j in (i + 1)..max_entities {
-                    let relationship =
-                        format!("{} relates to {}", sorted_entities[i], sorted_entities[j]);
-                    candidates.push((relationship, importance * 0.8));
-                }
-            }
-        }
+        // NOTE: Entity pair relationships ("X relates to Y") were removed here.
+        // The knowledge graph already captures entity co-occurrence via O(n²) all-pairs
+        // RelationshipEdge creation (state.rs process_experience_into_graph) with Hebbian
+        // strengthening and edge tier promotion. The template-based pairs were redundant,
+        // lower-fidelity, and constituted ~86% of all extracted facts as noise.
 
         candidates
     }
@@ -1171,6 +1148,83 @@ impl SemanticConsolidator {
         }
 
         best.map(|(s, _)| s)
+    }
+
+    // ── Quality Gate ──────────────────────────────────────────────────────
+
+    /// Reject operational noise that shouldn't become semantic facts.
+    /// Facts should capture domain knowledge, decisions, and patterns —
+    /// not session lifecycle events, tool invocations, or status updates.
+    fn is_knowledge_worthy(text: &str) -> bool {
+        let lower = text.to_lowercase();
+        let len = text.trim().len();
+
+        // Too short to carry meaningful knowledge
+        if len < 25 {
+            return false;
+        }
+
+        // Session lifecycle noise
+        const SESSION_NOISE: &[&str] = &[
+            "session started",
+            "session ended",
+            "session summary",
+            "context compressed",
+            "context window",
+            "token budget",
+            "tokens used",
+            "proactive_context",
+            "auto_ingest",
+            "memory surfaced",
+            "memories surfaced",
+            "memory stored",
+            "memories stored",
+        ];
+        if SESSION_NOISE.iter().any(|s| lower.contains(s)) {
+            return false;
+        }
+
+        // Tool/MCP invocation logs
+        const TOOL_NOISE: &[&str] = &[
+            "tool call",
+            "tool_name",
+            "mcp tool",
+            "called remember",
+            "called recall",
+            "called forget",
+            "hook triggered",
+            "hook fired",
+        ];
+        if TOOL_NOISE.iter().any(|s| lower.contains(s)) {
+            return false;
+        }
+
+        // Todo/task status chatter
+        const TODO_NOISE: &[&str] = &[
+            "todo created",
+            "todo completed",
+            "todo updated",
+            "task created",
+            "task completed",
+            "task updated",
+            "marked as done",
+            "marked as complete",
+            "moved to backlog",
+            "moved to in_progress",
+        ];
+        if TODO_NOISE.iter().any(|s| lower.contains(s)) {
+            return false;
+        }
+
+        // Bare file paths as standalone "facts" (e.g. "src/memory/mod.rs")
+        // Heuristic: short text with path separators and few words is not knowledge
+        let path_chars = lower.chars().filter(|c| *c == '/' || *c == '\\').count();
+        let word_count = text.split_whitespace().count();
+        if path_chars >= 1 && word_count < 6 {
+            return false;
+        }
+
+        true
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
@@ -1707,41 +1761,88 @@ mod tests {
     }
 
     #[test]
-    fn test_entity_relationships_sorted_deterministic() {
+    fn test_no_relates_to_patterns() {
         let consolidator = SemanticConsolidator::new();
 
-        let m1 = create_typed_memory(
-            "Testing entity ordering",
+        let memory = create_typed_memory(
+            "Testing entity extraction without template patterns",
             0.7,
             ExperienceType::Observation,
             vec!["JWT".to_string(), "Auth".to_string(), "Token".to_string()],
         );
 
-        let m2 = create_typed_memory(
-            "Testing entity ordering",
-            0.7,
-            ExperienceType::Observation,
-            vec!["Token".to_string(), "Auth".to_string(), "JWT".to_string()],
+        let candidates = consolidator.extract_fact_candidates(&memory);
+
+        // Entity pair "relates to" patterns were removed (redundant with knowledge graph)
+        let has_relates_to = candidates.iter().any(|(t, _)| t.contains("relates to"));
+        assert!(
+            !has_relates_to,
+            "Should not produce synthetic 'X relates to Y' patterns"
         );
+    }
 
-        let c1 = consolidator.extract_fact_candidates(&m1);
-        let c2 = consolidator.extract_fact_candidates(&m2);
+    #[test]
+    fn test_quality_gate_rejects_session_noise() {
+        assert!(!SemanticConsolidator::is_knowledge_worthy(
+            "Session started at 2:15 PM with token budget of 200k"
+        ));
+        assert!(!SemanticConsolidator::is_knowledge_worthy(
+            "Context compressed after reaching 80% of token budget"
+        ));
+        assert!(!SemanticConsolidator::is_knowledge_worthy(
+            "3 memories surfaced via proactive_context for the current query"
+        ));
+    }
 
-        // Entity relationships should be identical regardless of input order
-        let relations1: Vec<&str> = c1
-            .iter()
-            .filter(|(t, _)| t.contains("relates to"))
-            .map(|(t, _)| t.as_str())
-            .collect();
-        let relations2: Vec<&str> = c2
-            .iter()
-            .filter(|(t, _)| t.contains("relates to"))
-            .map(|(t, _)| t.as_str())
-            .collect();
+    #[test]
+    fn test_quality_gate_rejects_todo_noise() {
+        assert!(!SemanticConsolidator::is_knowledge_worthy(
+            "Todo created for implementing the new authentication module"
+        ));
+        assert!(!SemanticConsolidator::is_knowledge_worthy(
+            "Task completed after fixing the database connection pooling issue"
+        ));
+    }
 
-        assert_eq!(
-            relations1, relations2,
-            "Entity relationships should be deterministic regardless of input order"
-        );
+    #[test]
+    fn test_quality_gate_rejects_short_text() {
+        assert!(!SemanticConsolidator::is_knowledge_worthy("short"));
+        assert!(!SemanticConsolidator::is_knowledge_worthy(
+            "too short to be fact"
+        ));
+    }
+
+    #[test]
+    fn test_quality_gate_rejects_bare_file_paths() {
+        assert!(!SemanticConsolidator::is_knowledge_worthy(
+            "src/memory/compression.rs:919"
+        ));
+        assert!(!SemanticConsolidator::is_knowledge_worthy(
+            "hooks/memory-hook.ts file"
+        ));
+    }
+
+    #[test]
+    fn test_quality_gate_accepts_genuine_knowledge() {
+        assert!(SemanticConsolidator::is_knowledge_worthy(
+            "Rust provides memory safety without garbage collection through its ownership system"
+        ));
+        assert!(SemanticConsolidator::is_knowledge_worthy(
+            "The Vamana index automatically switches to SPANN when the dataset exceeds 100k vectors"
+        ));
+        assert!(SemanticConsolidator::is_knowledge_worthy(
+            "Hebbian learning uses additive boost and multiplicative decay for asymmetric strengthening"
+        ));
+        assert!(SemanticConsolidator::is_knowledge_worthy(
+            "RocksDB column families reduce file descriptor usage by consolidating multiple stores"
+        ));
+    }
+
+    #[test]
+    fn test_quality_gate_accepts_file_paths_with_prose() {
+        // File paths in context of explanation are fine
+        assert!(SemanticConsolidator::is_knowledge_worthy(
+            "The router configuration in src/handlers/router.rs defines all API endpoint routes for the server"
+        ));
     }
 }

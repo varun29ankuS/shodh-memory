@@ -7040,6 +7040,24 @@ impl MemorySystem {
         self.fact_store.delete(user_id, fact_id)
     }
 
+    /// Purge facts matching a content predicate. Returns (deleted, total_scanned).
+    pub fn purge_facts<F>(&self, user_id: &str, predicate: F) -> Result<(usize, usize)>
+    where
+        F: Fn(&SemanticFact) -> bool,
+    {
+        let all_facts = self.fact_store.list(user_id, 10_000)?;
+        let total = all_facts.len();
+        let mut deleted = 0;
+        for fact in &all_facts {
+            if predicate(fact) {
+                if self.fact_store.delete(user_id, &fact.id)? {
+                    deleted += 1;
+                }
+            }
+        }
+        Ok((deleted, total))
+    }
+
     /// Get the fact store for direct access
     pub fn fact_store(&self) -> &Arc<facts::SemanticFactStore> {
         &self.fact_store

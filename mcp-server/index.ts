@@ -1057,6 +1057,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         },
       },
+      {
+        name: "purge_facts",
+        description: "Delete facts matching a content pattern. Use dry_run=true to preview before deleting. Useful for cleaning up garbage facts (e.g., 'relates to' template noise).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            pattern: {
+              type: "string",
+              description: "Substring to match in fact content (case-insensitive, min 3 chars)",
+            },
+            dry_run: {
+              type: "boolean",
+              description: "If true, count matches without deleting (default: false)",
+              default: false,
+            },
+          },
+          required: ["pattern"],
+        },
+      },
       // Prospective Memory / Reminders (SHO-116)
       {
         name: "set_reminder",
@@ -3026,6 +3045,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return {
           content: [{ type: "text", text: narResponse }],
+        };
+      }
+
+      case "purge_facts": {
+        const { pattern, dry_run = false } = args as {
+          pattern: string;
+          dry_run?: boolean;
+        };
+
+        if (!pattern || pattern.length < 3) {
+          return {
+            content: [{ type: "text", text: "Pattern must be at least 3 characters." }],
+          };
+        }
+
+        const purgeResult = await callBrain("/api/facts/purge", {
+          user_id: userId,
+          pattern,
+          dry_run,
+        }) as {
+          success?: boolean;
+          deleted?: number;
+          total_scanned?: number;
+          dry_run?: boolean;
+        } | null;
+
+        if (!purgeResult?.success) {
+          return {
+            content: [{ type: "text", text: "Failed to purge facts. Server may be unavailable." }],
+          };
+        }
+
+        const mode = purgeResult.dry_run ? "DRY RUN" : "PURGED";
+        return {
+          content: [{
+            type: "text",
+            text: `${mode}: ${purgeResult.deleted} of ${purgeResult.total_scanned} facts match "${pattern}"${purgeResult.dry_run ? "\nRe-run with dry_run=false to delete." : ""}`,
+          }],
         };
       }
 

@@ -914,60 +914,173 @@ async function handleSessionStart(input: HookInput): Promise<void> {
   const projectName = projectDir.split(/[/\\]/).pop() || "unknown";
   const claudeDir = `${projectDir}/.claude`;
 
-  // Ensure .claude directory exists before any writes
   try {
     require("fs").mkdirSync(claudeDir, { recursive: true });
   } catch {
     // Best effort
   }
 
-  // Visibility Moment 4: Memory count at session start
-  const statsResp = (await callBrainGet(
-    `/api/stats?user_id=${encodeURIComponent(SHODH_USER_ID)}`
-  )) as { total_memories?: number; graph_nodes?: number; graph_edges?: number } | null;
+  // ── Phase 1: Parallel data fetch ──────────────────────────────────────
+  // Four independent calls — stats, session history, todos, semantic context
 
-  if (statsResp && statsResp.total_memories != null) {
-    const edges = statsResp.graph_edges || 0;
-    console.error(`[shodh] Memory: ${statsResp.total_memories} memories | ${edges} graph edges`);
+  interface SessionEntry {
+    content: string;
+    entities: string[];
+    session_id?: string;
+    started_at?: string;
+    duration_secs?: number;
+    memories_created?: number;
+    created_at: string;
+  }
+  interface ProjectThread {
+    name: string;
+    sessions: number[];
+    shared_entities: string[];
+    session_count: number;
+  }
+  interface SessionHistoryResponse {
+    success: boolean;
+    sessions: SessionEntry[];
+    project_threads: ProjectThread[];
+    total: number;
   }
 
-  const context = `Starting session in project: ${projectName}`;
+  interface SummaryItem {
+    id: string;
+    content: string;
+    importance: number;
+    created_at: string;
+  }
+  interface ContextSummaryResponse {
+    total_memories: number;
+    decisions: SummaryItem[];
+    learnings: SummaryItem[];
+    context: SummaryItem[];
+    patterns: SummaryItem[];
+    errors: SummaryItem[];
+  }
 
-  // Parallel: semantic context + tag-based session restoration + active todos
-  const [memoryResult, tagResult, activeTodosResult] = await Promise.all([
-    surfaceProactiveContext(context, 5),
-    callBrain("/api/recall/tags", {
+  const [statsResp, historyResp, activeTodosResult, memoryResult, summaryResp] = await Promise.all([
+    callBrainGet(
+      `/api/stats?user_id=${encodeURIComponent(SHODH_USER_ID)}`
+    ) as Promise<{ total_memories?: number; graph_nodes?: number; graph_edges?: number; total_facts?: number } | null>,
+
+    callBrain("/api/sessions/history", {
       user_id: SHODH_USER_ID,
-      tags: ["session-summary", "source:hook"],
       limit: 5,
-    }) as Promise<{ memories?: Array<{ id: string; content?: string; experience?: { content?: string } }> } | null>,
+      group_by_project: true,
+    }) as Promise<SessionHistoryResponse | null>,
+
     callBrain("/api/todos/list", {
       user_id: SHODH_USER_ID,
       status: ["in_progress", "todo"],
-      limit: 5,
+      limit: 8,
     }) as Promise<{ todos?: Array<{ id: string; seq_num?: number; project_prefix?: string; content: string; status: string; priority: string }> } | null>,
+
+    surfaceProactiveContext(`Starting session in project: ${projectName}`, 5),
+
+    callBrain("/api/context_summary", {
+      user_id: SHODH_USER_ID,
+      max_items: 5,
+      include_decisions: true,
+      include_learnings: true,
+      include_context: false,
+    }) as Promise<ContextSummaryResponse | null>,
   ]);
 
-  // Extract tag-based session context (cap at 3 to avoid noise)
-  let tagContext = "";
-  if (tagResult?.memories?.length) {
-    tagContext = tagResult.memories
-      .slice(0, 3)
-      .map((m) => {
-        const content = m.content || m.experience?.content || "";
-        return `\u2022 [session] ${content.slice(0, 120)}${content.length > 120 ? "..." : ""}`;
-      })
-      .join("\n");
+  // ── Phase 2: Compute state ────────────────────────────────────────────
+
+  const totalMemories = statsResp?.total_memories || 0;
+  const graphEdges = statsResp?.graph_edges || 0;
+  const totalFacts = statsResp?.total_facts || 0;
+  const sessions = historyResp?.success ? historyResp.sessions : [];
+  const projectThreads = historyResp?.success ? historyResp.project_threads : [];
+  const todos = activeTodosResult?.todos || [];
+  const isFirstSession = totalMemories < 5 && sessions.length === 0;
+
+  // ── Phase 3: stderr status line (always visible to user) ──────────────
+
+  if (isFirstSession) {
+    console.error(`[shodh] First session — memory capture active`);
+  } else {
+    const statParts: string[] = [];
+    if (totalMemories > 0) statParts.push(`${totalMemories} memories`);
+    if (graphEdges > 0) statParts.push(`${graphEdges} edges`);
+    if (totalFacts > 0) statParts.push(`${totalFacts} facts`);
+    console.error(`[shodh] ${statParts.join(" | ")}`);
+
+    // Show recent sessions in stderr so user sees continuity
+    if (sessions.length > 0) {
+      const sessionLines = sessions.slice(0, 3).map((s, i) => {
+        const age = timeAgo(s.created_at);
+        const dur = s.duration_secs ? ` (${formatDuration(s.duration_secs)})` : "";
+        const preview = s.content.length > 80 ? s.content.slice(0, 77) + "..." : s.content;
+        return `  ${i + 1}. ${age}${dur}: ${preview}`;
+      });
+      console.error(`[shodh] Recent sessions:\n${sessionLines.join("\n")}`);
+    }
+
+    if (todos.length > 0) {
+      const inProgress = todos.filter(t => t.status === "in_progress").length;
+      const pending = todos.filter(t => t.status === "todo").length;
+      const parts: string[] = [];
+      if (inProgress > 0) parts.push(`${inProgress} in progress`);
+      if (pending > 0) parts.push(`${pending} pending`);
+      console.error(`[shodh] Active work: ${parts.join(", ")}`);
+    }
   }
 
-  const hasMemoryContext = memoryResult !== null;
-  const hasTagContext = tagContext.length > 0;
+  // ── Phase 4: Build additionalContext for Claude ───────────────────────
 
-  // Active work surfacing
-  let activeWorkContext = "";
-  if (activeTodosResult?.todos?.length) {
-    const todoLines: string[] = [];
-    for (const t of activeTodosResult.todos) {
+  if (isFirstSession) {
+    console.log(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext: `\n<shodh-memory>\nFirst session detected. Shodh will learn automatically — edits, errors, and commands are captured as memories. A session report will be shown when you end the session.\n</shodh-memory>`,
+      },
+    }));
+    return;
+  }
+
+  const contextParts: string[] = [];
+
+  // Session history — structured timeline
+  if (sessions.length > 0) {
+    const sessionBlock: string[] = ["Recent sessions:"];
+    for (const s of sessions) {
+      const age = timeAgo(s.created_at);
+      const dur = s.duration_secs ? ` (${formatDuration(s.duration_secs)})` : "";
+      const memCount = s.memories_created != null ? ` | ${s.memories_created} memories` : "";
+      sessionBlock.push(`• ${age}${dur}${memCount}`);
+      sessionBlock.push(`  ${s.content.slice(0, 200)}`);
+      if (s.entities.length > 0) {
+        const filtered = s.entities.filter(e =>
+          !["session-summary", "session-digest", "source:hook"].includes(e)
+        );
+        if (filtered.length > 0) {
+          sessionBlock.push(`  Topics: ${filtered.slice(0, 8).join(", ")}`);
+        }
+      }
+    }
+    contextParts.push(sessionBlock.join("\n"));
+  }
+
+  // Project threads — cross-session continuity
+  if (projectThreads.length > 0) {
+    const threadBlock: string[] = ["Active projects:"];
+    for (const t of projectThreads) {
+      threadBlock.push(`• ${t.name} — ${t.session_count} sessions`);
+      if (t.shared_entities.length > 0) {
+        threadBlock.push(`  Shared context: ${t.shared_entities.slice(0, 6).join(", ")}`);
+      }
+    }
+    contextParts.push(threadBlock.join("\n"));
+  }
+
+  // Active todos — what's in flight
+  if (todos.length > 0) {
+    const todoBlock: string[] = ["Active work:"];
+    for (const t of todos) {
       const shortId = t.project_prefix && t.seq_num != null
         ? `${t.project_prefix}-${t.seq_num}`
         : "?";
@@ -975,57 +1088,117 @@ async function handleSessionStart(input: HookInput): Promise<void> {
       const truncContent = t.content.length > 60
         ? t.content.slice(0, 57) + "..."
         : t.content;
-      todoLines.push(`  ${icon} ${shortId.padEnd(8)} ${truncContent}`);
+      todoBlock.push(`${icon} ${shortId.padEnd(8)} ${truncContent}`);
     }
-    console.error(`[shodh] Active work:\n${todoLines.join("\n")}`);
-    activeWorkContext = `\nActive todos:\n${todoLines.join("\n")}`;
+    contextParts.push(todoBlock.join("\n"));
   }
 
-  // Visibility Moment 3: First-session welcome
-  if (!hasMemoryContext && !hasTagContext) {
-    // No memories and no session summaries — likely first session
-    const isFirstSession = !statsResp || (statsResp.total_memories || 0) < 5;
-    if (isFirstSession) {
-      console.error(`[shodh] First session \u2014 memory capture active`);
-      console.log(
-        JSON.stringify({
-          hookSpecificOutput: {
-            hookEventName: "SessionStart",
-            additionalContext: `\n<shodh-memory>\nFirst session detected. Shodh will learn automatically \u2014 edits, errors, and commands are captured as memories. A session report will be shown when you end the session.${activeWorkContext}\n</shodh-memory>`,
-          },
-        })
-      );
-    } else if (activeWorkContext) {
-      // No memories but has active todos — still inject context
-      console.log(
-        JSON.stringify({
-          hookSpecificOutput: {
-            hookEventName: "SessionStart",
-            additionalContext: `\n<shodh-memory>${activeWorkContext}\n</shodh-memory>`,
-          },
-        })
-      );
+  // Consolidated knowledge — decisions, learnings, patterns from past sessions
+  if (summaryResp) {
+    const knowledgeBlock: string[] = [];
+
+    const decisions = summaryResp.decisions || [];
+    const learnings = summaryResp.learnings || [];
+    const patterns = summaryResp.patterns || [];
+    const errors = summaryResp.errors || [];
+
+    if (decisions.length > 0) {
+      knowledgeBlock.push("Key decisions:");
+      for (const d of decisions.slice(0, 3)) {
+        const age = timeAgo(d.created_at);
+        const preview = d.content.length > 120 ? d.content.slice(0, 117) + "..." : d.content;
+        knowledgeBlock.push(`  • [${age}] ${preview}`);
+      }
     }
+
+    if (learnings.length > 0) {
+      knowledgeBlock.push("Learnings:");
+      for (const l of learnings.slice(0, 3)) {
+        const age = timeAgo(l.created_at);
+        const preview = l.content.length > 120 ? l.content.slice(0, 117) + "..." : l.content;
+        knowledgeBlock.push(`  • [${age}] ${preview}`);
+      }
+    }
+
+    if (patterns.length > 0) {
+      knowledgeBlock.push("Patterns observed:");
+      for (const p of patterns.slice(0, 2)) {
+        const preview = p.content.length > 120 ? p.content.slice(0, 117) + "..." : p.content;
+        knowledgeBlock.push(`  • ${preview}`);
+      }
+    }
+
+    if (errors.length > 0) {
+      knowledgeBlock.push("Recent errors:");
+      for (const e of errors.slice(0, 2)) {
+        const age = timeAgo(e.created_at);
+        const preview = e.content.length > 120 ? e.content.slice(0, 117) + "..." : e.content;
+        knowledgeBlock.push(`  • [${age}] ${preview}`);
+      }
+    }
+
+    if (knowledgeBlock.length > 0) {
+      contextParts.push(knowledgeBlock.join("\n"));
+    }
+  }
+
+  // Semantic memories — relevant to this project
+  if (memoryResult) {
+    contextParts.push(memoryResult.text);
+  }
+
+  if (contextParts.length === 0) {
     return;
   }
 
-  // Build combined context
-  const parts: string[] = [];
-  if (memoryResult) parts.push(memoryResult.text);
-  if (hasTagContext) parts.push(tagContext);
-  if (activeWorkContext) parts.push(activeWorkContext);
-  const combinedContext = parts.join("\n\n");
-
+  const briefing = contextParts.join("\n\n");
   const surfacedCount = memoryResult?.meta.count || 0;
-  console.error(`[shodh] Session context loaded (${surfacedCount} memories surfaced)`);
+  console.error(`[shodh] Briefing loaded (${sessions.length} sessions, ${todos.length} todos, ${surfacedCount} memories)`);
 
-  // Write to project memory file
+  // Inject into Claude's context
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "SessionStart",
+      additionalContext: `\n<shodh-memory>\n${briefing}\n</shodh-memory>`,
+    },
+  }));
+
+  // Persist to project memory file for reference
   const memoryFile = `${claudeDir}/memory-context.md`;
   try {
-    await Bun.write(memoryFile, `# Shodh Memory Context\n\n${combinedContext}\n`);
+    await Bun.write(memoryFile, `# Session Briefing\n\n${briefing}\n`);
   } catch {
     // Best effort
   }
+}
+
+/** Format seconds into human-readable duration */
+function formatDuration(secs: number): string {
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.round(secs / 60)}m`;
+  const h = Math.floor(secs / 3600);
+  const m = Math.round((secs % 3600) / 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+/** Format ISO timestamp into relative age */
+function timeAgo(isoDate: string): string {
+  const now = Date.now();
+  const then = new Date(isoDate).getTime();
+  if (isNaN(then)) return "unknown";
+
+  const diffMs = now - then;
+  const diffMin = Math.floor(diffMs / 60_000);
+  const diffHr = Math.floor(diffMs / 3_600_000);
+  const diffDay = Math.floor(diffMs / 86_400_000);
+
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  if (diffHr < 24) return `${diffHr}h ago`;
+  if (diffDay === 1) return "yesterday";
+  if (diffDay < 7) return `${diffDay} days ago`;
+  if (diffDay < 30) return `${Math.floor(diffDay / 7)} weeks ago`;
+  return `${Math.floor(diffDay / 30)} months ago`;
 }
 
 async function handleUserPrompt(input: HookInput): Promise<void> {
