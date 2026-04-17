@@ -227,18 +227,18 @@ pub async fn auth_middleware(request: Request, next: Next) -> Response {
                 .map(|s| s.to_string())
         })
         .or_else(|| {
-            // WebSocket fallback: check query parameter for api_key
-            // Browser WebSocket API doesn't support custom headers, so
-            // clients can pass ?api_key=... in the URL instead.
-            // ONLY allow this for WebSocket upgrades to prevent API key
-            // leakage via URLs in server logs, browser history, and referrer headers.
+            // Browser-compatibility fallback: allow `?api_key=...` for endpoints
+            // that cannot set custom headers (WebSocket upgrades, SSE EventSource).
+            // This leaks the key into URLs/logs, so it's explicitly allow-listed
+            // rather than available everywhere.
             let is_websocket = request
                 .headers()
                 .get("upgrade")
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.eq_ignore_ascii_case("websocket"))
                 .unwrap_or(false);
-            if !is_websocket {
+            let is_sse_path = path == "/api/events/sse";
+            if !is_websocket && !is_sse_path {
                 return None;
             }
             request.uri().query().and_then(|q| {
@@ -652,6 +652,68 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "Should reject invalid query parameter API key on WebSocket"
+        );
+
+        clear_auth_env();
+    }
+
+    #[tokio::test]
+    async fn auth_accepts_query_param_for_sse() {
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::middleware::from_fn;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_auth_env();
+        env::set_var("SHODH_API_KEYS", "sse-key");
+
+        let app = Router::new()
+            .route("/api/events/sse", get(|| async { "ok" }))
+            .layer(from_fn(auth_middleware));
+
+        let req = HttpRequest::builder()
+            .uri("/api/events/sse?user_id=u&api_key=sse-key")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should accept API key from query parameter on /api/events/sse"
+        );
+
+        clear_auth_env();
+    }
+
+    #[tokio::test]
+    async fn auth_rejects_query_param_for_non_sse_non_ws() {
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::middleware::from_fn;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_auth_env();
+        env::set_var("SHODH_API_KEYS", "the-key");
+
+        let app = Router::new()
+            .route("/api/memories", get(|| async { "ok" }))
+            .layer(from_fn(auth_middleware));
+
+        let req = HttpRequest::builder()
+            .uri("/api/memories?api_key=the-key")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Query param auth should still be rejected for non-SSE non-WS paths"
         );
 
         clear_auth_env();
