@@ -61,7 +61,7 @@ pub use crate::memory::types::*;
 use crate::embeddings::Embedder;
 use crate::memory::compression::CompressionPipeline;
 pub use crate::memory::compression::{
-    ConsolidationResult, FactType, SemanticConsolidator, SemanticFact,
+    CausalFactLink, ConsolidationResult, FactCluster, FactType, SemanticConsolidator, SemanticFact,
 };
 pub use crate::memory::facts::{FactQueryResponse, FactStats, SemanticFactStore};
 pub use crate::memory::feedback::{
@@ -104,8 +104,8 @@ pub use crate::memory::segmentation::{
     AtomicMemory, DeduplicationEngine, DeduplicationResult, InputSource, SegmentationEngine,
 };
 pub use crate::memory::sessions::{
-    Session, SessionEvent, SessionId, SessionStats, SessionStatus, SessionStore, SessionStoreStats,
-    SessionSummary, TemporalContext, TimeOfDay,
+    Session, SessionDigest, SessionEvent, SessionId, SessionStats, SessionStatus, SessionStore,
+    SessionStoreStats, SessionSummary, TemporalContext, TimeOfDay,
 };
 pub use crate::memory::temporal_facts::{EventType, ResolvedTime, TemporalFact, TemporalFactStore};
 pub use crate::memory::todos::{ProjectStats, TodoStore, UserTodoStats};
@@ -6922,6 +6922,67 @@ impl MemorySystem {
         Ok(results)
     }
 
+    /// Build fact narratives by clustering facts on shared entities.
+    ///
+    /// Groups related facts into topic clusters using single-linkage clustering
+    /// on entity overlap. Each cluster gets a template-generated narrative and
+    /// heuristic-based causal chain detection (keyword analysis on temporally
+    /// ordered facts).
+    pub fn build_fact_narratives(
+        &self,
+        user_id: &str,
+        limit: usize,
+        entity_filter: Option<&str>,
+    ) -> Result<Vec<FactCluster>> {
+        let facts = if let Some(entity) = entity_filter {
+            self.fact_store.find_by_entity(user_id, entity, 200)?
+        } else {
+            self.fact_store.list(user_id, 500)?
+        };
+
+        if facts.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Union-find clustering: merge facts sharing >= 1 entity
+        let n = facts.len();
+        let mut parent: Vec<usize> = (0..n).collect();
+
+        for i in 0..n {
+            let entities_i: std::collections::HashSet<&str> =
+                facts[i].related_entities.iter().map(|s| s.as_str()).collect();
+            for j in (i + 1)..n {
+                let shared = facts[j]
+                    .related_entities
+                    .iter()
+                    .any(|e| entities_i.contains(e.as_str()));
+                if shared {
+                    let ri = uf_find(&parent, i);
+                    let rj = uf_find(&parent, j);
+                    if ri != rj {
+                        parent[rj] = ri;
+                    }
+                }
+            }
+        }
+
+        // Group indices by cluster root
+        let mut groups: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+        for i in 0..n {
+            groups.entry(uf_find(&parent, i)).or_default().push(i);
+        }
+
+        let mut clusters: Vec<FactCluster> = groups
+            .into_values()
+            .map(|indices| build_single_cluster(&facts, &indices))
+            .collect();
+
+        clusters.sort_by(|a, b| b.total_support.cmp(&a.total_support));
+        clusters.truncate(limit);
+        Ok(clusters)
+    }
+
     /// Reinforce a fact with new supporting evidence
     ///
     /// Called when a new memory supports an existing fact.
@@ -7196,6 +7257,157 @@ impl MemorySystem {
 /// Automatic persistence on drop - ensures vector index and ID mappings survive restarts
 ///
 /// This is CRITICAL for local memory: when the system shuts down (gracefully or via drop),
+// =============================================================================
+// Fact Narrative Helpers (private, used by MemorySystem::build_fact_narratives)
+// =============================================================================
+
+/// Union-find: find root (no path compression — immutable slice, N≤500).
+fn uf_find(parent: &[usize], mut i: usize) -> usize {
+    while parent[i] != i {
+        i = parent[i];
+    }
+    i
+}
+
+/// Build a single FactCluster from a set of fact indices.
+fn build_single_cluster(all_facts: &[SemanticFact], indices: &[usize]) -> FactCluster {
+    use std::collections::HashMap;
+
+    let mut entity_counts: HashMap<&str, usize> = HashMap::new();
+    let mut cluster_facts: Vec<SemanticFact> = Vec::with_capacity(indices.len());
+
+    for &i in indices {
+        let f = &all_facts[i];
+        cluster_facts.push(f.clone());
+        for e in &f.related_entities {
+            *entity_counts.entry(e.as_str()).or_default() += 1;
+        }
+    }
+
+    // Sort by created_at for temporal ordering within narrative
+    cluster_facts.sort_by_key(|f| f.created_at);
+
+    let topic = entity_counts
+        .iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(n, _)| (*n).to_string())
+        .unwrap_or_else(|| "General".to_string());
+
+    let mut entities: Vec<String> = entity_counts.keys().map(|e| (*e).to_string()).collect();
+    entities.sort();
+
+    // Template-based narrative: no LLM needed
+    let narrative = if cluster_facts.len() == 1 {
+        format!("Regarding {}: {}", topic, cluster_facts[0].fact)
+    } else {
+        let mut lines = vec![format!(
+            "Regarding {} ({} facts):",
+            topic,
+            cluster_facts.len()
+        )];
+        for (i, f) in cluster_facts.iter().enumerate() {
+            let label = if f.confidence >= 0.8 {
+                "established"
+            } else if f.confidence >= 0.5 {
+                "probable"
+            } else {
+                "tentative"
+            };
+            lines.push(format!("  {}. [{}] {}", i + 1, label, f.fact));
+        }
+        lines.join("\n")
+    };
+
+    let causal_chains = detect_causal_chains(&cluster_facts);
+
+    let avg_confidence = if cluster_facts.is_empty() {
+        0.0
+    } else {
+        cluster_facts.iter().map(|f| f.confidence).sum::<f32>() / cluster_facts.len() as f32
+    };
+    let total_support: usize = cluster_facts.iter().map(|f| f.support_count).sum();
+
+    FactCluster {
+        topic,
+        entities,
+        facts: cluster_facts,
+        narrative,
+        avg_confidence,
+        total_support,
+        causal_chains,
+    }
+}
+
+/// Detect causal relationships between temporally ordered facts sharing entities.
+///
+/// Uses keyword heuristics on the later fact to infer relationship type:
+/// - "replaced", "instead", "no longer" → superseded_by
+/// - "fixed", "resolved" → resolved_by
+/// - Other evolution keywords → led_to
+fn detect_causal_chains(sorted_facts: &[SemanticFact]) -> Vec<CausalFactLink> {
+    const EVOLUTION_KEYWORDS: &[&str] = &[
+        "migrated",
+        "replaced",
+        "fixed",
+        "updated",
+        "changed",
+        "now uses",
+        "switched",
+        "deprecated",
+        "removed",
+        "added",
+        "resolved",
+        "instead",
+        "no longer",
+    ];
+
+    let mut chains = Vec::new();
+
+    // Pre-compute lowercase facts to avoid repeated allocations in O(n²) loop.
+    let lowered: Vec<String> = sorted_facts.iter().map(|f| f.fact.to_lowercase()).collect();
+
+    for i in 0..sorted_facts.len() {
+        for j in (i + 1)..sorted_facts.len() {
+            let a = &sorted_facts[i];
+            let b = &sorted_facts[j];
+
+            // Must share at least one entity
+            let shared = a
+                .related_entities
+                .iter()
+                .any(|e| b.related_entities.contains(e));
+            if !shared {
+                continue;
+            }
+
+            let b_lower = &lowered[j];
+            let has_evolution = EVOLUTION_KEYWORDS.iter().any(|kw| b_lower.contains(kw));
+            if !has_evolution {
+                continue;
+            }
+
+            let relation =
+                if b_lower.contains("replaced") || b_lower.contains("instead") || b_lower.contains("no longer") {
+                    "superseded_by"
+                } else if b_lower.contains("fixed") || b_lower.contains("resolved") {
+                    "resolved_by"
+                } else {
+                    "led_to"
+                };
+
+            chains.push(CausalFactLink {
+                from_fact_id: a.id.clone(),
+                to_fact_id: b.id.clone(),
+                from_fact: a.fact.clone(),
+                to_fact: b.fact.clone(),
+                relation: relation.to_string(),
+            });
+        }
+    }
+
+    chains
+}
+
 /// all in-memory state (vector index, ID mappings) must be persisted to disk.
 impl Drop for MemorySystem {
     fn drop(&mut self) {

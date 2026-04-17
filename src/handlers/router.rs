@@ -180,6 +180,7 @@ pub fn build_protected_routes(state: AppState) -> Router {
         .route("/api/facts/search", post(facts::search_facts))
         .route("/api/facts/by-entity", post(facts::facts_by_entity))
         .route("/api/facts/stats", post(facts::get_facts_stats))
+        .route("/api/facts/narratives", post(facts::fact_narratives))
         // =================================================================
         // LINEAGE
         // =================================================================
@@ -348,6 +349,9 @@ pub fn build_protected_routes(state: AppState) -> Router {
         .route("/api/sessions", post(sessions::list_sessions))
         .route("/api/sessions/stats", get(sessions::get_session_stats))
         .route("/api/sessions/end", post(sessions::end_session))
+        .route("/api/sessions/digest", post(sessions::get_session_digest))
+        .route("/api/sessions/context-compressed", post(sessions::context_compressed))
+        .route("/api/sessions/history", post(sessions::session_history))
         .route("/api/sessions/{session_id}", get(sessions::get_session))
         // =================================================================
         // A/B TESTING

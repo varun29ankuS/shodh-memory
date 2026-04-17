@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::state::MultiUserMemoryManager;
 use crate::errors::{AppError, ValidationErrorExt};
-use crate::memory::{self, SemanticFact};
+use crate::memory::{self, FactCluster, SemanticFact};
 use crate::validation;
 use std::sync::Arc;
 
@@ -156,4 +156,63 @@ pub async fn get_facts_stats(
     .map_err(AppError::Internal)?;
 
     Ok(Json(stats))
+}
+
+// =============================================================================
+// Fact Narratives
+// =============================================================================
+
+fn default_narratives_limit() -> usize {
+    20
+}
+
+/// Request for fact narratives
+#[derive(Debug, Deserialize)]
+pub struct FactNarrativesRequest {
+    pub user_id: String,
+    #[serde(default = "default_narratives_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub entity_filter: Option<String>,
+}
+
+/// Response for fact narratives
+#[derive(Debug, Serialize)]
+pub struct FactNarrativesResponse {
+    pub success: bool,
+    pub clusters: Vec<FactCluster>,
+    pub total_facts: usize,
+    pub total_clusters: usize,
+}
+
+/// POST /api/facts/narratives - Get fact narratives clustered by topic
+pub async fn fact_narratives(
+    State(state): State<AppState>,
+    Json(req): Json<FactNarrativesRequest>,
+) -> Result<Json<FactNarrativesResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+    let user_id = req.user_id.clone();
+    let limit = req.limit.min(50);
+    let entity_filter = req.entity_filter.clone();
+
+    let clusters = tokio::task::spawn_blocking(move || {
+        let ms = memory.read();
+        ms.build_fact_narratives(&user_id, limit, entity_filter.as_deref())
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    let total_facts: usize = clusters.iter().map(|c| c.facts.len()).sum();
+    let total_clusters = clusters.len();
+    Ok(Json(FactNarrativesResponse {
+        success: true,
+        clusters,
+        total_facts,
+        total_clusters,
+    }))
 }
