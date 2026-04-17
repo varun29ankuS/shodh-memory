@@ -526,11 +526,13 @@ mod tests {
     }
 
     #[tokio::test]
+    // Hold ENV_LOCK across awaits so concurrent tests cannot mutate
+    // SHODH_DEV_API_KEY between our set_var and the handler's env::var read.
+    // Safe: the handler does not recursively acquire ENV_LOCK.
+    #[allow(clippy::await_holding_lock)]
     async fn graph_view2_responds_with_html_and_substitutes_placeholders() {
-        {
-            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            std::env::set_var("SHODH_DEV_API_KEY", "view2-key");
-        } // guard dropped before await points
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SHODH_DEV_API_KEY", "view2-key");
 
         let app = axum::Router::new().route(
             "/graph/view2",
