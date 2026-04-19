@@ -332,6 +332,19 @@ pub async fn recall(
     let op_start = std::time::Instant::now();
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
     validation::validate_max_results(req.limit).map_validation_err("limit")?;
+    validation::validate_query_text(&req.query).map_validation_err("query")?;
+
+    // Validate reward range
+    if let (Some(min), Some(max)) = (req.reward_min, req.reward_max) {
+        validation::validate_range(min as f64, max as f64, "reward_range")
+            .map_validation_err("reward_range")?;
+    }
+    if let Some(min) = req.reward_min {
+        validation::validate_reward(min).map_validation_err("reward_min")?;
+    }
+    if let Some(max) = req.reward_max {
+        validation::validate_reward(max).map_validation_err("reward_max")?;
+    }
 
     // Validate and build geo_filter from lat/lon/radius triple
     let geo_filter = match (req.geo_lat, req.geo_lon, req.geo_radius_meters) {

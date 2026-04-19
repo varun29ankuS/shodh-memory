@@ -1086,17 +1086,28 @@ impl ABTestAnalyzer {
 
         lifts.sort_by(|a, b| a.total_cmp(b));
 
-        let prob_treatment_better = treatment_wins as f64 / n_samples as f64;
-        let expected_lift = lift_sum / n_samples as f64;
+        let sample_count = n_samples.max(1) as f64;
+        let prob_treatment_better = treatment_wins as f64 / sample_count;
+        let expected_lift = lift_sum / sample_count;
 
-        // 95% credible interval
-        let ci_low = lifts[(n_samples as f64 * 0.025) as usize];
-        let ci_high = lifts[(n_samples as f64 * 0.975) as usize];
+        // 95% credible interval (bounds-checked to prevent index panic)
+        let ci_low = if lifts.is_empty() {
+            0.0
+        } else {
+            let idx = ((n_samples as f64 * 0.025) as usize).min(lifts.len() - 1);
+            lifts[idx]
+        };
+        let ci_high = if lifts.is_empty() {
+            0.0
+        } else {
+            let idx = ((n_samples as f64 * 0.975) as usize).min(lifts.len() - 1);
+            lifts[idx]
+        };
 
-        // Expected loss (risk) calculation
-        let risk_treatment =
-            lifts.iter().filter(|&&l| l < 0.0).map(|l| -l).sum::<f64>() / n_samples as f64;
-        let risk_control = lifts.iter().filter(|&&l| l > 0.0).sum::<f64>() / n_samples as f64;
+        // Expected loss (risk) calculation (guarded against n_samples=0)
+        let n = n_samples.max(1) as f64;
+        let risk_treatment = lifts.iter().filter(|&&l| l < 0.0).map(|l| -l).sum::<f64>() / n;
+        let risk_control = lifts.iter().filter(|&&l| l > 0.0).sum::<f64>() / n;
 
         BayesianAnalysis {
             prob_treatment_better,

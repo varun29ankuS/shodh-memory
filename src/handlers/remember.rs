@@ -472,6 +472,29 @@ pub async fn remember(
         req.preceding_memory_id.clone(),
     );
 
+    // Validate numeric range fields
+    if let Some(importance) = req.importance {
+        validation::validate_unit_float(importance, "importance")
+            .map_validation_err("importance")?;
+    }
+    if let Some(credibility) = req.credibility {
+        validation::validate_unit_float(credibility, "credibility")
+            .map_validation_err("credibility")?;
+    }
+    if let Some(valence) = req.emotional_valence {
+        validation::validate_bipolar_float(valence, "emotional_valence")
+            .map_validation_err("emotional_valence")?;
+    }
+    if let Some(arousal) = req.emotional_arousal {
+        validation::validate_unit_float(arousal, "emotional_arousal")
+            .map_validation_err("emotional_arousal")?;
+    }
+
+    // Validate tags
+    if !req.tags.is_empty() {
+        validation::validate_tags(&req.tags).map_validation_err("tags")?;
+    }
+
     // Validate robotics fields
     if let Some(ref geo) = req.geo_location {
         validation::validate_geo_location(geo).map_validation_err("geo_location")?;
@@ -484,6 +507,22 @@ pub async fn remember(
     }
     if let Some(ref sensor_data) = req.sensor_data {
         validation::validate_sensor_data(sensor_data).map_validation_err("sensor_data")?;
+    }
+    if let Some(ref local_pos) = req.local_position {
+        let pos_f64 = [
+            local_pos[0] as f64,
+            local_pos[1] as f64,
+            local_pos[2] as f64,
+        ];
+        validation::validate_local_position(&pos_f64).map_validation_err("local_position")?;
+    }
+    if let Some(ref action_type) = req.action_type {
+        validation::validate_short_string(action_type, "action_type")
+            .map_validation_err("action_type")?;
+    }
+    if let Some(ref terrain_type) = req.terrain_type {
+        validation::validate_short_string(terrain_type, "terrain_type")
+            .map_validation_err("terrain_type")?;
     }
 
     // Warn on unknown outcome_type/severity (log, don't reject)
@@ -649,7 +688,7 @@ pub async fn remember(
                     {
                         Ok(result) => result,
                         Err(e) => {
-                            tracing::debug!("Parent resolve panicked (non-fatal): {e}");
+                            tracing::warn!("Parent resolve panicked (non-fatal): {e}");
                             None
                         }
                     }
@@ -664,7 +703,7 @@ pub async fn remember(
                     })
                     .await
                     {
-                        tracing::debug!("Parent set task panicked (non-fatal): {e}");
+                        tracing::warn!("Parent set task panicked (non-fatal): {e}");
                     }
                 } else {
                     tracing::warn!("Could not resolve parent_id: {}", parent_id_str);
@@ -686,7 +725,7 @@ pub async fn remember(
                 })
                 .await
                 {
-                    tracing::debug!("Temporal fact extraction panicked (non-fatal): {e}");
+                    tracing::warn!("Temporal fact extraction panicked (non-fatal): {e}");
                 }
             }
 
@@ -1308,7 +1347,7 @@ fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::m
         })
         .await
         {
-            tracing::debug!("Lineage inference panicked (non-fatal): {e}");
+            tracing::warn!("Lineage inference panicked (non-fatal): {e}");
         }
     });
 }

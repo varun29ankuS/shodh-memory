@@ -437,6 +437,121 @@ pub fn validate_reminder_timestamp(at: &chrono::DateTime<chrono::Utc>) -> Result
     Ok(())
 }
 
+// =============================================================================
+// GENERIC GUARDRAIL VALIDATORS
+// =============================================================================
+
+/// Maximum limit for list/search operations to prevent resource exhaustion.
+pub const MAX_LIMIT: usize = 10_000;
+
+/// Maximum query text length (50KB, same as content).
+pub const MAX_QUERY_LENGTH: usize = 50_000;
+
+/// Maximum string length for short fields (action_type, terrain_type, etc.).
+pub const MAX_SHORT_STRING_LENGTH: usize = 256;
+
+/// Maximum tags per memory/todo.
+pub const MAX_TAGS: usize = 50;
+
+/// Validate a limit/max_results field: must be > 0 and <= MAX_LIMIT.
+pub fn validate_limit(limit: usize, field: &str) -> Result<()> {
+    if limit == 0 {
+        return Err(anyhow!("{field} must be greater than 0"));
+    }
+    if limit > MAX_LIMIT {
+        return Err(anyhow!("{field} too large: {limit} (max: {MAX_LIMIT})"));
+    }
+    Ok(())
+}
+
+/// Validate a float that must be in [0.0, 1.0] and finite.
+pub fn validate_unit_float(value: f32, field: &str) -> Result<()> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(anyhow!("{field} must be between 0.0 and 1.0, got: {value}"));
+    }
+    Ok(())
+}
+
+/// Validate a float that must be in [-1.0, 1.0] and finite (for bipolar values like valence).
+pub fn validate_bipolar_float(value: f32, field: &str) -> Result<()> {
+    if !value.is_finite() || !(-1.0..=1.0).contains(&value) {
+        return Err(anyhow!(
+            "{field} must be between -1.0 and 1.0, got: {value}"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate query text: not empty, not too long.
+pub fn validate_query_text(query: &str) -> Result<()> {
+    if query.trim().is_empty() {
+        return Err(anyhow!("query cannot be empty"));
+    }
+    if query.len() > MAX_QUERY_LENGTH {
+        return Err(anyhow!(
+            "query too long: {} bytes (max: {MAX_QUERY_LENGTH})",
+            query.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a short string field (action_type, terrain_type, etc.).
+pub fn validate_short_string(value: &str, field: &str) -> Result<()> {
+    if value.is_empty() {
+        return Err(anyhow!("{field} cannot be empty"));
+    }
+    if value.len() > MAX_SHORT_STRING_LENGTH {
+        return Err(anyhow!(
+            "{field} too long: {} chars (max: {MAX_SHORT_STRING_LENGTH})",
+            value.len()
+        ));
+    }
+    if value.chars().any(|c| c.is_control()) {
+        return Err(anyhow!("{field} contains invalid control characters"));
+    }
+    Ok(())
+}
+
+/// Validate tags list: count cap + per-tag length.
+pub fn validate_tags(tags: &[String]) -> Result<()> {
+    if tags.len() > MAX_TAGS {
+        return Err(anyhow!("too many tags: {} (max: {MAX_TAGS})", tags.len()));
+    }
+    for tag in tags {
+        if tag.len() > MAX_SHORT_STRING_LENGTH {
+            return Err(anyhow!(
+                "tag too long: {} chars (max: {MAX_SHORT_STRING_LENGTH})",
+                tag.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate a range pair: min must be <= max, both must be finite.
+pub fn validate_range(min: f64, max: f64, field: &str) -> Result<()> {
+    if !min.is_finite() || !max.is_finite() {
+        return Err(anyhow!("{field} range values must be finite"));
+    }
+    if min > max {
+        return Err(anyhow!("{field} min ({min}) must be <= max ({max})"));
+    }
+    Ok(())
+}
+
+/// Validate local_position [x, y, z]: all values must be finite.
+pub fn validate_local_position(pos: &[f64; 3]) -> Result<()> {
+    for (i, v) in pos.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(anyhow!(
+                "local_position[{i}] must be a finite number, got: {v}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,5 +872,86 @@ mod tests {
 
         // Invalid: 10 years from now
         assert!(validate_reminder_timestamp(&(now + chrono::Duration::days(365 * 10))).is_err());
+    }
+
+    // =========================================================================
+    // GUARDRAIL VALIDATOR TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_validate_limit() {
+        assert!(validate_limit(1, "limit").is_ok());
+        assert!(validate_limit(100, "limit").is_ok());
+        assert!(validate_limit(10_000, "limit").is_ok());
+        assert!(validate_limit(0, "limit").is_err());
+        assert!(validate_limit(10_001, "limit").is_err());
+        assert!(validate_limit(usize::MAX, "limit").is_err());
+    }
+
+    #[test]
+    fn test_validate_unit_float() {
+        assert!(validate_unit_float(0.0, "x").is_ok());
+        assert!(validate_unit_float(0.5, "x").is_ok());
+        assert!(validate_unit_float(1.0, "x").is_ok());
+        assert!(validate_unit_float(-0.1, "x").is_err());
+        assert!(validate_unit_float(1.1, "x").is_err());
+        assert!(validate_unit_float(f32::NAN, "x").is_err());
+        assert!(validate_unit_float(f32::INFINITY, "x").is_err());
+    }
+
+    #[test]
+    fn test_validate_bipolar_float() {
+        assert!(validate_bipolar_float(0.0, "x").is_ok());
+        assert!(validate_bipolar_float(-1.0, "x").is_ok());
+        assert!(validate_bipolar_float(1.0, "x").is_ok());
+        assert!(validate_bipolar_float(-1.1, "x").is_err());
+        assert!(validate_bipolar_float(1.1, "x").is_err());
+        assert!(validate_bipolar_float(f32::NAN, "x").is_err());
+    }
+
+    #[test]
+    fn test_validate_query_text() {
+        assert!(validate_query_text("hello world").is_ok());
+        assert!(validate_query_text("").is_err());
+        assert!(validate_query_text("   ").is_err());
+        assert!(validate_query_text(&"a".repeat(50_001)).is_err());
+    }
+
+    #[test]
+    fn test_validate_short_string() {
+        assert!(validate_short_string("navigate", "action_type").is_ok());
+        assert!(validate_short_string("", "action_type").is_err());
+        assert!(validate_short_string(&"a".repeat(257), "action_type").is_err());
+        assert!(validate_short_string("bad\x00string", "action_type").is_err());
+    }
+
+    #[test]
+    fn test_validate_tags() {
+        let tags: Vec<String> = vec!["a".into(), "b".into()];
+        assert!(validate_tags(&tags).is_ok());
+
+        let too_many: Vec<String> = (0..51).map(|i| format!("tag{i}")).collect();
+        assert!(validate_tags(&too_many).is_err());
+
+        let long_tag: Vec<String> = vec!["a".repeat(257)];
+        assert!(validate_tags(&long_tag).is_err());
+    }
+
+    #[test]
+    fn test_validate_range() {
+        assert!(validate_range(0.0, 1.0, "x").is_ok());
+        assert!(validate_range(-1.0, 1.0, "x").is_ok());
+        assert!(validate_range(0.5, 0.5, "x").is_ok()); // equal is valid
+        assert!(validate_range(1.0, 0.0, "x").is_err()); // min > max
+        assert!(validate_range(f64::NAN, 1.0, "x").is_err());
+        assert!(validate_range(0.0, f64::INFINITY, "x").is_err());
+    }
+
+    #[test]
+    fn test_validate_local_position() {
+        assert!(validate_local_position(&[0.0, 0.0, 0.0]).is_ok());
+        assert!(validate_local_position(&[12.5, -3.2, 100.0]).is_ok());
+        assert!(validate_local_position(&[f64::NAN, 0.0, 0.0]).is_err());
+        assert!(validate_local_position(&[0.0, f64::INFINITY, 0.0]).is_err());
     }
 }
