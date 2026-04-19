@@ -534,12 +534,33 @@ pub const IMPORTANCE_RECENCY_DAYS: f64 = 7.0;
 // SEMANTIC CONSOLIDATION THRESHOLDS
 // =============================================================================
 
-/// Minimum supporting memories to extract a semantic fact
+/// Minimum supporting memories to extract a semantic fact (base value).
 ///
 /// Justification:
 /// - 2 minimum ensures pattern isn't a one-off
 /// - Higher values (3-5) for more confidence but slower learning
+/// - Overridden by adaptive thresholds when corpus is large
 pub const CONSOLIDATION_MIN_SUPPORT: usize = 2;
+
+/// Adaptive min_support thresholds based on eligible memory count.
+///
+/// Models the LTP induction threshold from neuroscience: as overall neural
+/// activity increases (more memories), the threshold for long-term potentiation
+/// rises to prevent noise from being encoded as durable knowledge.
+///
+/// Reference: Bienenstock, Cooper & Munro (1982) "Theory for the development
+/// of neuron selectivity" — the BCM sliding threshold.
+pub const CONSOLIDATION_MIN_SUPPORT_SMALL: usize = 2; // <= 100 eligible memories
+pub const CONSOLIDATION_MIN_SUPPORT_MEDIUM: usize = 3; // <= 1000 eligible memories
+pub const CONSOLIDATION_MIN_SUPPORT_LARGE: usize = 4; // > 1000 eligible memories
+
+/// Maximum members in a single consolidation cluster.
+///
+/// Prevents semantic drift in greedy clustering: once a cluster reaches this
+/// size, new candidates start fresh clusters instead of being absorbed.
+/// Models dentate gyrus pattern separation — sparse, non-overlapping
+/// representations that resist interference.
+pub const CONSOLIDATION_CLUSTER_SIZE_CAP: usize = 20;
 
 /// Minimum age in days before consolidation
 ///

@@ -6837,8 +6837,11 @@ impl MemorySystem {
                 .find_similar(user_id, &fact.fact, &fact.related_entities, emb_ref)
             {
                 Ok(Some(mut existing)) => {
-                    // Pattern completion: reinforce existing trace
-                    existing.support_count += fact.support_count;
+                    // Pattern completion: reinforce existing trace.
+                    // Always += 1: one dedup match = one reinforcement event.
+                    // Previously += fact.support_count (cluster_size) which
+                    // inflated counts to 200+ across cycles.
+                    existing.support_count += 1;
                     let mut all_sources: std::collections::HashSet<MemoryId> =
                         existing.source_memories.iter().cloned().collect();
                     for src in &fact.source_memories {
