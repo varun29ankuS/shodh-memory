@@ -6865,9 +6865,7 @@ impl MemorySystem {
 
         // Store genuinely new facts (passed pattern separation gate)
         if !deduplicated_facts.is_empty() {
-            let stored = self
-                .fact_store
-                .store_batch(user_id, &deduplicated_facts)?;
+            let stored = self.fact_store.store_batch(user_id, &deduplicated_facts)?;
             tracing::info!(
                 user_id = %user_id,
                 facts_extracted = result.facts_extracted,
@@ -7559,16 +7557,15 @@ fn detect_causal_chains(sorted_facts: &[SemanticFact]) -> Vec<CausalFactLink> {
             }
 
             // Classify by most specific match (superseded > resolved > informed > led_to)
-            let relation =
-                if SUPERSEDED_KEYWORDS.iter().any(|kw| b_lower.contains(kw)) {
-                    "superseded_by"
-                } else if RESOLVED_KEYWORDS.iter().any(|kw| b_lower.contains(kw)) {
-                    "resolved_by"
-                } else if INFORMED_KEYWORDS.iter().any(|kw| b_lower.contains(kw)) {
-                    "informed_by"
-                } else {
-                    "led_to"
-                };
+            let relation = if SUPERSEDED_KEYWORDS.iter().any(|kw| b_lower.contains(kw)) {
+                "superseded_by"
+            } else if RESOLVED_KEYWORDS.iter().any(|kw| b_lower.contains(kw)) {
+                "resolved_by"
+            } else if INFORMED_KEYWORDS.iter().any(|kw| b_lower.contains(kw)) {
+                "informed_by"
+            } else {
+                "led_to"
+            };
 
             chains.push(CausalFactLink {
                 from_fact_id: a.id.clone(),
