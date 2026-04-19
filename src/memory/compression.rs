@@ -1225,6 +1225,29 @@ impl SemanticConsolidator {
             return false;
         }
 
+        // System output / structured markup that leaked into fact extraction.
+        // XML tags, agent output fragments, and assistant-prefixed entries are
+        // not domain knowledge — they're internal protocol noise.
+        const SYSTEM_OUTPUT_NOISE: &[&str] = &[
+            "<task-notification>",
+            "</output-file>",
+            "<status>killed</status>",
+            "<status>completed</status>",
+            "[assistant: codeedit]",
+            "[assistant: observation]",
+            "[assistant: search]",
+            "[assistant: decision]",
+            "[assistant: pattern]",
+            "reconnected after",
+            "oom crash",
+            "surfaced 5 memories",
+            "surfaced 3 memories",
+            "agent \"",
+        ];
+        if SYSTEM_OUTPUT_NOISE.iter().any(|s| lower.contains(s)) {
+            return false;
+        }
+
         // Bare file paths as standalone "facts" (e.g. "src/memory/mod.rs")
         // Heuristic: short text with path separators and few words is not knowledge
         let path_chars = lower.chars().filter(|c| *c == '/' || *c == '\\').count();
