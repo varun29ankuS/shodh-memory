@@ -756,6 +756,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               items: { type: "string" },
               description: "Filter by tags (any match)",
             },
+            debug: {
+              type: "boolean",
+              description: "Enable retrieval diagnostics. Returns per-stage timing breakdown and per-memory score attribution showing exactly why each memory ranked where it did. Useful for debugging bad recalls.",
+            },
           },
           required: ["query"],
         },
@@ -1734,14 +1738,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           query, limit: rawLimit = 5, mode = "hybrid", session_id,
           robot_id, mission_id, geo_lat, geo_lon, geo_radius_meters,
           action_type, reward_min, reward_max, outcome_type, failures_only,
-          terrain_type, tags,
+          terrain_type, tags, debug: debugMode,
         } = args as {
           query: string; limit?: number; mode?: string; session_id?: string;
           robot_id?: string; mission_id?: string;
           geo_lat?: number; geo_lon?: number; geo_radius_meters?: number;
           action_type?: string; reward_min?: number; reward_max?: number;
           outcome_type?: string; failures_only?: boolean;
-          terrain_type?: string; tags?: string[];
+          terrain_type?: string; tags?: string[]; debug?: boolean;
         };
 
         if (!query || query.length === 0) {
@@ -1767,6 +1771,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: "text", text: `Error: reward_min (${reward_min}) must be <= reward_max (${reward_max})` }], isError: true };
         }
 
+        interface StageTiming {
+          query_analysis_us: number;
+          embedding_us: number;
+          graph_expansion_us: number;
+          vector_search_us: number;
+          fusion_us: number;
+          scoring_us: number;
+          total_us: number;
+        }
+
+        interface ScoreAttribution {
+          memory_id: string;
+          rrf_base: number;
+          graph_rrf: number;
+          hybrid_rrf: number;
+          hebbian_boost: number;
+          attribute_boost: number;
+          temporal_prefilter_boost: number;
+          temporal_fact_boost: number;
+          interference_adjustment: number;
+          prospective_boost: number;
+          fact_source_boost: number;
+          ontological_boost: number;
+          importance_factor: number;
+          recency_factor: number;
+          arousal_factor: number;
+          credibility_factor: number;
+          feedback_multiplier: number;
+          quality_gate: number;
+          final_score: number;
+          sources: string[];
+        }
+
         interface RetrievalStats {
           mode: string;
           semantic_candidates: number;
@@ -1777,6 +1814,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           graph_hops: number;
           entities_activated: number;
           retrieval_time_us: number;
+          stage_timings?: StageTiming;
+          score_attributions?: ScoreAttribution[];
         }
 
         interface RecallTodo {
@@ -1825,6 +1864,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...(failures_only !== undefined ? { failures_only } : {}),
           ...(terrain_type ? { terrain_type } : {}),
           ...(tags && tags.length > 0 ? { tags } : {}),
+          ...(debugMode ? { debug: true } : {}),
         });
 
         const memories = result.memories || [];
@@ -1947,6 +1987,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const conf = (edge.confidence * 100).toFixed(0);
             response += `  ${idShort(edge.from)} ──${edge.relation}──▶ ${idShort(edge.to)}  (${conf}%)\n`;
             response += `    "${fromLabel}..." → "${toLabel}..."\n`;
+          }
+        }
+
+        // Debug diagnostics: stage timings + per-memory score attribution
+        if (debugMode && stats) {
+          response += `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+          response += `🔬 RETRIEVAL DIAGNOSTICS\n`;
+
+          if (stats.stage_timings) {
+            const t = stats.stage_timings;
+            response += `\n⏱️ Stage Timings:\n`;
+            response += `  Query analysis:  ${(t.query_analysis_us / 1000).toFixed(1)}ms\n`;
+            response += `  Embedding:       ${(t.embedding_us / 1000).toFixed(1)}ms\n`;
+            response += `  Graph expansion: ${(t.graph_expansion_us / 1000).toFixed(1)}ms\n`;
+            response += `  Vector search:   ${(t.vector_search_us / 1000).toFixed(1)}ms\n`;
+            response += `  RRF fusion:      ${(t.fusion_us / 1000).toFixed(1)}ms\n`;
+            response += `  Scoring:         ${(t.scoring_us / 1000).toFixed(1)}ms\n`;
+            response += `  ─────────────────────────\n`;
+            response += `  Total:           ${(t.total_us / 1000).toFixed(1)}ms\n`;
+          }
+
+          if (stats.score_attributions && stats.score_attributions.length > 0) {
+            response += `\n📊 Score Attribution (top ${Math.min(stats.score_attributions.length, 5)}):\n`;
+            for (const attr of stats.score_attributions.slice(0, 5)) {
+              const shortId = attr.memory_id.slice(0, 8);
+              response += `\n  ${shortId}… (final: ${attr.final_score.toFixed(4)})\n`;
+              response += `    Sources: ${attr.sources.join(", ")}\n`;
+              response += `    RRF base: ${attr.rrf_base.toFixed(4)} │ Graph: ${attr.graph_rrf.toFixed(4)} │ Hybrid: ${attr.hybrid_rrf.toFixed(4)}\n`;
+
+              // Show non-neutral boosts only (neutral = 1.0 for multiplicative, 0.0 for additive)
+              const boosts: string[] = [];
+              if (attr.hebbian_boost !== 1.0) boosts.push(`hebbian: ${attr.hebbian_boost.toFixed(3)}`);
+              if (attr.attribute_boost !== 1.0) boosts.push(`attribute: ${attr.attribute_boost.toFixed(3)}`);
+              if (attr.temporal_prefilter_boost !== 1.0) boosts.push(`temporal: ${attr.temporal_prefilter_boost.toFixed(3)}`);
+              if (attr.temporal_fact_boost !== 1.0) boosts.push(`fact-temporal: ${attr.temporal_fact_boost.toFixed(3)}`);
+              if (attr.interference_adjustment !== 1.0) boosts.push(`interference: ${attr.interference_adjustment.toFixed(3)}`);
+              if (attr.prospective_boost !== 1.0) boosts.push(`prospective: ${attr.prospective_boost.toFixed(3)}`);
+              if (attr.fact_source_boost !== 1.0) boosts.push(`fact-source: ${attr.fact_source_boost.toFixed(3)}`);
+              if (attr.ontological_boost !== 1.0) boosts.push(`ontological: ${attr.ontological_boost.toFixed(3)}`);
+              if (boosts.length > 0) {
+                response += `    Boosts: ${boosts.join(" │ ")}\n`;
+              }
+
+              response += `    L5 factors: imp=${attr.importance_factor.toFixed(3)} rec=${attr.recency_factor.toFixed(3)} aro=${attr.arousal_factor.toFixed(3)} cred=${attr.credibility_factor.toFixed(3)} fb=${attr.feedback_multiplier.toFixed(3)}\n`;
+              if (attr.quality_gate !== 1.0) {
+                response += `    Quality gate: ${attr.quality_gate.toFixed(3)}\n`;
+              }
+            }
           }
         }
 

@@ -14,6 +14,7 @@
   <a href="https://www.npmjs.com/package/@shodh/memory-mcp"><img src="https://img.shields.io/npm/v/@shodh/memory-mcp.svg?logo=npm" alt="npm"></a>
   <a href="https://pypi.org/project/shodh-memory/"><img src="https://img.shields.io/pypi/v/shodh-memory.svg" alt="PyPI"></a>
   <a href="https://hub.docker.com/r/varunshodh/shodh-memory"><img src="https://img.shields.io/docker/pulls/varunshodh/shodh-memory.svg?logo=docker" alt="Docker"></a>
+  <a href="#robotics--ros2"><img src="https://img.shields.io/badge/Zenoh%20%2F%20ROS2-ready-orange" alt="Zenoh/ROS2"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
   <a href="https://discord.gg/HrpzXqTtEp"><img src="https://img.shields.io/discord/1471830549818642432?logo=discord&label=Discord&color=5865F2" alt="Discord"></a>
 </p>
@@ -239,7 +240,7 @@ curl -X POST http://localhost:3030/api/recall \
 
 ## Robotics & ROS2
 
-Shodh-Memory isn't just for chat agents. It's persistent memory for robots — Spot, drones, humanoids, any system running ROS2 or Zenoh.
+Shodh-Memory isn't just for chat agents. It's persistent memory for robots — Spot, drones, humanoids, any system running ROS2 or Zenoh. No cloud, survives power cycles, learns from rewards, speaks Zenoh natively.
 
 ```bash
 # Enable Zenoh transport (compile with --features zenoh)
@@ -248,6 +249,8 @@ SHODH_ZENOH_ENABLED=true SHODH_ZENOH_LISTEN=tcp/0.0.0.0:7447 shodh server
 # ROS2 robots connect via zenoh-bridge-ros2dds or rmw_zenoh — zero code changes
 ros2 run zenoh_bridge_ros2dds zenoh_bridge_ros2dds
 ```
+
+See [Robotics Quickstart](docs/robotics-quickstart.md) for full setup and examples.
 
 **What robots can do over Zenoh:**
 

@@ -1251,9 +1251,22 @@ impl MemorySystem {
     /// - Non-semantic search: Uses importance * temporal decay
     /// - Zero shortcuts, no TODOs, enterprise-grade
     pub fn recall(&self, query: &Query) -> Result<Vec<SharedMemory>> {
+        Ok(self.recall_inner(query, false)?.memories)
+    }
+
+    /// Recall with full retrieval diagnostics (per-stage timing, per-memory score attribution).
+    ///
+    /// Same as `recall()` but returns a `RetrievalResult` with an optional `RetrievalStats`
+    /// sidecar containing per-stage timing and per-memory score attribution.
+    /// Used by the API handler when `debug=true` is requested.
+    pub fn recall_with_diagnostics(&self, query: &Query) -> Result<RetrievalResult> {
+        self.recall_inner(query, true)
+    }
+
+    fn recall_inner(&self, query: &Query, collect_diagnostics: bool) -> Result<RetrievalResult> {
         // Semantic search requires special handling
         if let Some(query_text) = &query.query_text {
-            return self.semantic_retrieve(query_text, query);
+            return self.semantic_retrieve_inner(query_text, query, collect_diagnostics);
         }
 
         // Non-semantic search: filter-based retrieval
@@ -1354,7 +1367,10 @@ impl MemorySystem {
             self.stats.write().total_retrievals = count;
         }
 
-        Ok(memories)
+        Ok(RetrievalResult {
+            memories,
+            stats: None, // Non-semantic path has no per-stage diagnostics
+        })
     }
 
     /// Paginated memory recall with "has_more" indicator (SHO-69)
@@ -1435,8 +1451,30 @@ impl MemorySystem {
     /// 3. If not found, check session memory (instant Arc clone)
     /// 4. Only fetch from RocksDB storage as last resort
     /// 5. This eliminates deserialization overhead for cached memories
-    fn semantic_retrieve(&self, query_text: &str, query: &Query) -> Result<Vec<SharedMemory>> {
+    fn semantic_retrieve_inner(
+        &self,
+        query_text: &str,
+        query: &Query,
+        collect_diagnostics: bool,
+    ) -> Result<RetrievalResult> {
         let recall_start = std::time::Instant::now();
+
+        // Diagnostic accumulators — only allocated when collect_diagnostics=true
+        let mut stats = if collect_diagnostics {
+            Some(RetrievalStats {
+                mode: format!("{:?}", query.retrieval_mode),
+                ..Default::default()
+            })
+        } else {
+            None
+        };
+        // Per-memory score attribution map (memory_id → ScoreAttribution)
+        let mut attributions: Option<std::collections::HashMap<MemoryId, ScoreAttribution>> =
+            if collect_diagnostics {
+                Some(std::collections::HashMap::new())
+            } else {
+                None
+            };
 
         // ===========================================================================
         // ROBOTICS MODE DELEGATION
@@ -1455,7 +1493,10 @@ impl MemorySystem {
                 if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
                     tracing::debug!("Retrieval count: {count}");
                 }
-                return Ok(results);
+                return Ok(RetrievalResult {
+                    memories: results,
+                    stats: None, // Robotics index-based modes have no diagnostic pipeline
+                });
             }
             _ => {}
         }
@@ -1821,6 +1862,11 @@ impl MemorySystem {
             query_analysis_ms = format!("{:.2}", t_query_analysis.as_secs_f64() * 1000.0),
             "recall [layer:0.5-0.7] query analysis + attribute + temporal fact + fact source lookup"
         );
+        if let Some(ref mut s) = stats {
+            s.stage_timings
+                .get_or_insert_with(StageTiming::default)
+                .query_analysis_us = t_query_analysis.as_micros() as u64;
+        }
 
         // TEMPORAL PREFIX INJECTION: When the query has high-confidence temporal
         // references, prepend a temporal context string to give MiniLM textual
@@ -1890,6 +1936,12 @@ impl MemorySystem {
             cumulative_ms = format!("{:.2}", t_embedding.as_secs_f64() * 1000.0),
             "recall [layer:embedding] query embedding (cache miss logged above if any)"
         );
+        if let Some(ref mut s) = stats {
+            s.stage_timings
+                .get_or_insert_with(StageTiming::default)
+                .embedding_us = (t_embedding - t_query_analysis).as_micros() as u64;
+            s.embedding_time_us = (t_embedding - t_query_analysis).as_micros() as u64;
+        }
 
         // ===========================================================================
         // LAYER 1: TEMPORAL PRE-FILTER (Episode Coherence)
@@ -2188,6 +2240,14 @@ impl MemorySystem {
             graph_results = graph_results.len(),
             "recall [layer:1-2] episode filter + graph expansion"
         );
+        if let Some(ref mut s) = stats {
+            let timings = s.stage_timings.get_or_insert_with(StageTiming::default);
+            timings.graph_expansion_us = (t_graph - t_embedding).as_micros() as u64;
+            s.graph_time_us = (t_graph - t_embedding).as_micros() as u64;
+            s.graph_candidates = graph_results.len();
+            s.graph_density = graph_density.unwrap_or(0.0);
+            s.entities_activated = query_entity_count;
+        }
 
         // Create a modified query with the embedding for vector search
         let vector_query = Query {
@@ -2239,6 +2299,12 @@ impl MemorySystem {
             vector_results = vector_results.len(),
             "recall [layer:3] Vamana vector search"
         );
+        if let Some(ref mut s) = stats {
+            s.stage_timings
+                .get_or_insert_with(StageTiming::default)
+                .vector_search_us = (t_vector - t_graph).as_micros() as u64;
+            s.semantic_candidates = vector_results.len();
+        }
 
         // ===========================================================================
         // LAYER 4: BM25 + RRF FUSION
@@ -2337,6 +2403,13 @@ impl MemorySystem {
                 query_entity_count
             );
 
+            // Capture density weights for diagnostics
+            if let Some(ref mut s) = stats {
+                s.graph_weight = graph_w;
+                s.semantic_weight = semantic_w;
+                s.linguistic_weight = linguistic_w;
+            }
+
             // Graph results: pure RRF with density weight
             for (r, (id, activation, h)) in graph_results.iter().enumerate() {
                 // Standard RRF: weight / (k + rank), rank is 1-indexed
@@ -2353,11 +2426,59 @@ impl MemorySystem {
                 if let Some(score) = fused.get_mut(id) {
                     *score *= activation_factor;
                 }
+
+                // Track per-memory graph RRF contribution
+                if let Some(ref mut attr_map) = attributions {
+                    let attr = attr_map
+                        .entry(id.clone())
+                        .or_insert_with(|| ScoreAttribution {
+                            memory_id: id.0.to_string(),
+                            attribute_boost: 1.0,
+                            temporal_prefilter_boost: 1.0,
+                            temporal_fact_boost: 1.0,
+                            interference_adjustment: 1.0,
+                            prospective_boost: 1.0,
+                            fact_source_boost: 1.0,
+                            ontological_boost: 1.0,
+                            importance_factor: 1.0,
+                            feedback_multiplier: 1.0,
+                            quality_gate: 1.0,
+                            ..Default::default()
+                        });
+                    attr.graph_rrf = rrf_score * activation_factor;
+                    attr.hebbian_boost = *h;
+                    attr.sources.push("graph".to_string());
+                }
             }
 
             // Hybrid (BM25+vector) results: pure RRF with density weight
             for (r, (id, _)) in hybrid_ids.iter().enumerate() {
-                *fused.entry(id.clone()).or_insert(0.0) += hybrid_w / (k + (r + 1) as f32);
+                let hybrid_rrf = hybrid_w / (k + (r + 1) as f32);
+                *fused.entry(id.clone()).or_insert(0.0) += hybrid_rrf;
+
+                // Track per-memory hybrid RRF contribution
+                if let Some(ref mut attr_map) = attributions {
+                    let attr = attr_map
+                        .entry(id.clone())
+                        .or_insert_with(|| ScoreAttribution {
+                            memory_id: id.0.to_string(),
+                            attribute_boost: 1.0,
+                            temporal_prefilter_boost: 1.0,
+                            temporal_fact_boost: 1.0,
+                            interference_adjustment: 1.0,
+                            prospective_boost: 1.0,
+                            fact_source_boost: 1.0,
+                            ontological_boost: 1.0,
+                            importance_factor: 1.0,
+                            feedback_multiplier: 1.0,
+                            quality_gate: 1.0,
+                            ..Default::default()
+                        });
+                    attr.hybrid_rrf += hybrid_rrf;
+                    if !attr.sources.contains(&"vector".to_string()) {
+                        attr.sources.push("vector".to_string());
+                    }
+                }
             }
 
             // ===========================================================================
@@ -2368,14 +2489,17 @@ impl MemorySystem {
             // high for "What is Caroline's relationship status?".
             if !attribute_boost_ids.is_empty() {
                 let mut boosted_count = 0;
+                let boost_factor = 1.0 + crate::constants::ATTRIBUTE_QUERY_BOOST;
                 for id in &attribute_boost_ids {
                     if let Some(score) = fused.get_mut(id) {
-                        // Multiplicative: preserve base ranking while amplifying attribute matches
-                        *score *= 1.0 + crate::constants::ATTRIBUTE_QUERY_BOOST;
+                        *score *= boost_factor;
                         boosted_count += 1;
+                        if let Some(ref mut attr_map) = attributions {
+                            if let Some(attr) = attr_map.get_mut(id) {
+                                attr.attribute_boost = boost_factor;
+                            }
+                        }
                     }
-                    // Don't insert memories absent from fusion — attribute match alone
-                    // without semantic/graph support is insufficient evidence
                 }
                 if boosted_count > 0 {
                     tracing::info!(
@@ -2393,13 +2517,17 @@ impl MemorySystem {
             // above semantically similar but temporally wrong results.
             if !temporal_prefilter_ids.is_empty() {
                 let mut boosted_count = 0;
+                let boost_factor = 1.0 + crate::constants::TEMPORAL_PREFILTER_BOOST;
                 for id in &temporal_prefilter_ids {
                     if let Some(score) = fused.get_mut(id) {
-                        *score *= 1.0 + crate::constants::TEMPORAL_PREFILTER_BOOST;
+                        *score *= boost_factor;
                         boosted_count += 1;
+                        if let Some(ref mut attr_map) = attributions {
+                            if let Some(attr) = attr_map.get_mut(id) {
+                                attr.temporal_prefilter_boost = boost_factor;
+                            }
+                        }
                     }
-                    // Don't insert memories absent from fusion — date range alone
-                    // without semantic/graph support is insufficient evidence
                 }
                 if boosted_count > 0 {
                     tracing::info!(
@@ -2417,11 +2545,16 @@ impl MemorySystem {
             // recorded the event, not just memories with temporal_refs.
             if !temporal_fact_boost_ids.is_empty() {
                 let mut boosted_count = 0;
+                let boost_factor = 1.0 + crate::constants::TEMPORAL_FACT_BOOST;
                 for id in &temporal_fact_boost_ids {
                     if let Some(score) = fused.get_mut(id) {
-                        // Multiplicative: temporal fact match amplifies base score
-                        *score *= 1.0 + crate::constants::TEMPORAL_FACT_BOOST;
+                        *score *= boost_factor;
                         boosted_count += 1;
+                        if let Some(ref mut attr_map) = attributions {
+                            if let Some(attr) = attr_map.get_mut(id) {
+                                attr.temporal_fact_boost = boost_factor;
+                            }
+                        }
                     }
                     // Don't insert absent memories — temporal fact match alone is insufficient
                 }
@@ -2473,6 +2606,11 @@ impl MemorySystem {
                 for (id, adjustment) in adjustments {
                     if let Some(score) = fused.get_mut(&id) {
                         *score *= adjustment;
+                    }
+                    if let Some(ref mut attr_map) = attributions {
+                        if let Some(attr) = attr_map.get_mut(&id) {
+                            attr.interference_adjustment = adjustment;
+                        }
                     }
                 }
 
@@ -2534,6 +2672,11 @@ impl MemorySystem {
                                     if let Some(score) = fused.get_mut(id) {
                                         *score *= boost_factor;
                                         boosted_count += 1;
+                                        if let Some(ref mut attr_map) = attributions {
+                                            if let Some(attr) = attr_map.get_mut(id) {
+                                                attr.prospective_boost = boost_factor;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2563,9 +2706,14 @@ impl MemorySystem {
                 let mut boosted_count = 0;
                 for (id, boost) in &fact_source_boosts {
                     if let Some(score) = fused.get_mut(id) {
-                        // Multiplicative: fact source validation amplifies base score
-                        *score *= 1.0 + boost;
+                        let boost_factor = 1.0 + boost;
+                        *score *= boost_factor;
                         boosted_count += 1;
+                        if let Some(ref mut attr_map) = attributions {
+                            if let Some(attr) = attr_map.get_mut(id) {
+                                attr.fact_source_boost = boost_factor;
+                            }
+                        }
                     }
                 }
                 if boosted_count > 0 {
@@ -2618,10 +2766,16 @@ impl MemorySystem {
                                 let boost = (type_matches as f32
                                     * crate::constants::ONTOLOGICAL_RERANK_BOOST)
                                     .min(crate::constants::ONTOLOGICAL_RERANK_MAX);
-                                *fused_score *= 1.0 + boost;
+                                let boost_factor = 1.0 + boost;
+                                *fused_score *= boost_factor;
                                 boosted_count += 1;
                                 crate::metrics::ONTOLOGICAL_RERANK_BOOST_APPLIED
                                     .observe(boost as f64);
+                                if let Some(ref mut attr_map) = attributions {
+                                    if let Some(attr) = attr_map.get_mut(_mem_id) {
+                                        attr.ontological_boost = boost_factor;
+                                    }
+                                }
                             }
                         }
                     }
@@ -2640,6 +2794,16 @@ impl MemorySystem {
 
             res.truncate(query.max_results);
             tracing::debug!("Layer 4: {} fused results", res.len());
+
+            // Capture RRF base scores for attribution
+            if let Some(ref mut attr_map) = attributions {
+                for (id, score) in &res {
+                    if let Some(attr) = attr_map.get_mut(id) {
+                        attr.rrf_base = *score;
+                    }
+                }
+            }
+
             (res, heb)
         };
 
@@ -2650,6 +2814,11 @@ impl MemorySystem {
             fused_results = memory_ids.len(),
             "recall [layer:4] BM25 + RRF fusion + boosts + interference"
         );
+        if let Some(ref mut s) = stats {
+            s.stage_timings
+                .get_or_insert_with(StageTiming::default)
+                .fusion_us = (t_fusion - t_vector).as_micros() as u64;
+        }
 
         // Fetch memories with cache-aware strategy
         // CRITICAL: Apply filters after fetching to ensure mission_id, robot_id etc. are respected
@@ -2800,11 +2969,66 @@ impl MemorySystem {
                 Arc::new(cloned)
             };
 
+            // Diagnostic helper: capture Layer 5 scoring factors for a memory
+            let capture_l5_diagnostics = |mem: &SharedMemory,
+                                          memory_id: &MemoryId,
+                                          base_score: f32,
+                                          attributions: &mut Option<
+                std::collections::HashMap<MemoryId, ScoreAttribution>,
+            >| {
+                if let Some(ref mut attr_map) = attributions {
+                    if let Some(attr) = attr_map.get_mut(memory_id) {
+                        use crate::constants::*;
+                        let hours_old = (now - mem.created_at).num_hours().max(0) as f32;
+                        let recency_scale = recency_scale_override.unwrap_or(RECENCY_BOOST_SCALE);
+                        attr.recency_factor =
+                            (-RECENCY_DECAY_RATE * hours_old).exp() * recency_scale;
+                        attr.arousal_factor = mem
+                            .experience
+                            .context
+                            .as_ref()
+                            .map(|c| c.emotional.arousal * AROUSAL_BOOST_SCALE)
+                            .unwrap_or(0.0);
+                        attr.credibility_factor = mem
+                            .experience
+                            .context
+                            .as_ref()
+                            .map(|c| {
+                                (c.source.credibility - 0.5).max(0.0) * CREDIBILITY_BOOST_SCALE
+                            })
+                            .unwrap_or(0.0);
+                        attr.importance_factor =
+                            SCORING_IMPORTANCE_FLOOR + mem.importance() * SCORING_IMPORTANCE_RANGE;
+                        // Feedback multiplier
+                        attr.feedback_multiplier = if let Some(ref guard) = feedback_guard {
+                            if let Some(fm) = guard.get_momentum(&mem.id) {
+                                let momentum = fm.ema_with_decay();
+                                if momentum < 0.0 {
+                                    1.0 + (momentum * FEEDBACK_MOMENTUM_SCALE)
+                                        .max(-FEEDBACK_MOMENTUM_SCALE)
+                                } else {
+                                    1.0 + (momentum * FEEDBACK_MOMENTUM_SCALE)
+                                        .min(FEEDBACK_MOMENTUM_SCALE)
+                                }
+                            } else {
+                                1.0
+                            }
+                        } else {
+                            1.0
+                        };
+                        attr.hebbian_boost = hebbian_scores.get(memory_id).copied().unwrap_or(0.0);
+                        attr.final_score = mem.score.unwrap_or(base_score);
+                    }
+                }
+            };
+
             // Try working memory first (hot cache)
             if let Some(memory) = self.working_memory.read().get(&memory_id) {
                 // CRITICAL FIX: Apply filters before adding to results
                 if self.retriever.matches_filters(&memory, &vector_query) {
-                    memories.push(with_unified_score(&memory, base_score));
+                    let scored = with_unified_score(&memory, base_score);
+                    capture_l5_diagnostics(&scored, &memory_id, base_score, &mut attributions);
+                    memories.push(scored);
                     if !sources.contains(&"working") {
                         sources.push("working");
                     }
@@ -2819,7 +3043,9 @@ impl MemorySystem {
             if let Some(memory) = self.session_memory.read().get(&memory_id) {
                 // CRITICAL FIX: Apply filters before adding to results
                 if self.retriever.matches_filters(&memory, &vector_query) {
-                    memories.push(with_unified_score(&memory, base_score));
+                    let scored = with_unified_score(&memory, base_score);
+                    capture_l5_diagnostics(&scored, &memory_id, base_score, &mut attributions);
+                    memories.push(scored);
                     if !sources.contains(&"session") {
                         sources.push("session");
                     }
@@ -2837,7 +3063,9 @@ impl MemorySystem {
                     if self.retriever.matches_filters(&memory, &vector_query) {
                         // Reuse unified scoring (includes feedback_multiplier)
                         let shared = Arc::new(memory);
-                        memories.push(with_unified_score(&shared, base_score));
+                        let scored = with_unified_score(&shared, base_score);
+                        capture_l5_diagnostics(&scored, &memory_id, base_score, &mut attributions);
+                        memories.push(scored);
                         if !sources.contains(&"longterm") {
                             sources.push("longterm");
                         }
@@ -2885,6 +3113,11 @@ impl MemorySystem {
             filtered_out,
             "recall [layer:5] memory fetch + unified scoring"
         );
+        if let Some(ref mut s) = stats {
+            s.stage_timings
+                .get_or_insert_with(StageTiming::default)
+                .scoring_us = (t_fetch - t_fusion).as_micros() as u64;
+        }
 
         // Quality gate: multiplicative factor based on content richness.
         // Prevents empty/trivial memories from surfacing on recency or graph boost alone.
@@ -2902,6 +3135,14 @@ impl MemorySystem {
                 let mut cloned: Memory = mem.as_ref().clone();
                 cloned.set_score(score * quality_factor);
                 *mem = Arc::new(cloned);
+
+                // Track quality gate in attribution
+                if let Some(ref mut attr_map) = attributions {
+                    if let Some(attr) = attr_map.get_mut(&mem.id) {
+                        attr.quality_gate = quality_factor;
+                        attr.final_score = score * quality_factor;
+                    }
+                }
             }
         }
 
@@ -3051,7 +3292,27 @@ impl MemorySystem {
             "recall [layer:post] linguistic + competition + coactivation + hierarchy === RECALL COMPLETE ==="
         );
 
-        Ok(memories)
+        // Finalize diagnostics
+        if let Some(ref mut s) = stats {
+            let timings = s.stage_timings.get_or_insert_with(StageTiming::default);
+            timings.total_us = t_total.as_micros() as u64;
+            s.retrieval_time_us = t_total.as_micros() as u64;
+
+            // Convert per-memory attributions to vec, ordered by final score
+            if let Some(attr_map) = attributions.take() {
+                let final_ids: std::collections::HashSet<MemoryId> =
+                    memories.iter().map(|m| m.id.clone()).collect();
+                let mut attrs: Vec<ScoreAttribution> = attr_map
+                    .into_iter()
+                    .filter(|(id, _)| final_ids.contains(id))
+                    .map(|(_, attr)| attr)
+                    .collect();
+                attrs.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
+                s.score_attributions = Some(attrs);
+            }
+        }
+
+        Ok(RetrievalResult { memories, stats })
     }
 
     /// Get learning velocity statistics for a memory
@@ -7207,8 +7468,7 @@ impl MemorySystem {
                     continue;
                 }
                 // Check existing edges from candidate → new_memory
-                let existing_edges =
-                    self.lineage_graph.get_edges_from(user_id, &candidate.id)?;
+                let existing_edges = self.lineage_graph.get_edges_from(user_id, &candidate.id)?;
                 let existing_edge = existing_edges.iter().find(|e| e.to == new_memory.id);
                 match existing_edge {
                     Some(old) if confidence > old.confidence => {
@@ -7245,8 +7505,7 @@ impl MemorySystem {
                 if confidence < crate::constants::LINEAGE_MIN_STORE_CONFIDENCE {
                     continue;
                 }
-                let existing_edges =
-                    self.lineage_graph.get_edges_from(user_id, &new_memory.id)?;
+                let existing_edges = self.lineage_graph.get_edges_from(user_id, &new_memory.id)?;
                 let existing_edge = existing_edges.iter().find(|e| e.to == candidate.id);
                 match existing_edge {
                     Some(old) if confidence > old.confidence => {
