@@ -933,16 +933,25 @@ fn test_reward_edge_modulation_constant() {
 
     // Positive reward should increase strength
     let positive = base * (1.0 + 1.0 * REWARD_EDGE_MODULATION);
-    assert!(positive > base, "Positive reward should increase edge strength");
+    assert!(
+        positive > base,
+        "Positive reward should increase edge strength"
+    );
 
     // Negative reward should decrease strength
     let negative = base * (1.0 + (-1.0) * REWARD_EDGE_MODULATION);
-    assert!(negative < base, "Negative reward should decrease edge strength");
+    assert!(
+        negative < base,
+        "Negative reward should decrease edge strength"
+    );
     assert!(negative > 0.0, "Negative reward should not zero out edges");
 
     // Zero reward should leave strength unchanged
     let neutral = base * (1.0 + 0.0 * REWARD_EDGE_MODULATION);
-    assert!((neutral - base).abs() < f32::EPSILON, "Zero reward should not change edges");
+    assert!(
+        (neutral - base).abs() < f32::EPSILON,
+        "Zero reward should not change edges"
+    );
 }
 
 #[test]
@@ -995,8 +1004,5 @@ fn test_geo_filter_haversine_distance() {
 
     // Same point (zero distance)
     let dist_same = filter.haversine_distance(37.7749, -122.4194);
-    assert!(
-        dist_same < 1.0,
-        "Same point should have near-zero distance"
-    );
+    assert!(dist_same < 1.0, "Same point should have near-zero distance");
 }
