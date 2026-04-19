@@ -392,9 +392,12 @@ fn start_maintenance_scheduler(manager: AppState, interval_secs: u64) {
 
             // Run maintenance in blocking thread pool
             let manager_clone = Arc::clone(&manager);
-            tokio::task::spawn_blocking(move || {
+            let handle = tokio::task::spawn_blocking(move || {
                 manager_clone.run_maintenance_all_users();
             });
+            if let Err(e) = handle.await {
+                tracing::error!("Maintenance task panicked: {}", e);
+            }
         }
     });
 
@@ -416,11 +419,17 @@ fn start_backup_scheduler(manager: AppState, interval_secs: u64, max_backups: us
 
             info!("Starting scheduled backup run...");
             let manager_clone = Arc::clone(&manager);
-            let backed_up = tokio::task::spawn_blocking(move || {
+            let backed_up = match tokio::task::spawn_blocking(move || {
                 manager_clone.run_backup_all_users(max_backups)
             })
             .await
-            .unwrap_or(0);
+            {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::error!("Backup scheduler task panicked: {}", e);
+                    0
+                }
+            };
 
             if backed_up > 0 {
                 info!("Scheduled backup completed: {} users backed up", backed_up);

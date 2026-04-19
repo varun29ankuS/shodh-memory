@@ -1136,9 +1136,12 @@ impl MultiUserMemoryManager {
             let key_bytes = key.into_bytes();
 
             tokio::task::spawn_blocking(move || {
-                let audit = db.cf_handle(CF_AUDIT).expect("audit CF must exist");
-                if let Err(e) = db.put_cf(&audit, &key_bytes, &serialized) {
-                    tracing::error!("Failed to persist audit log: {}", e);
+                if let Some(audit) = db.cf_handle(CF_AUDIT) {
+                    if let Err(e) = db.put_cf(&audit, &key_bytes, &serialized) {
+                        tracing::error!("Failed to persist audit log: {}", e);
+                    }
+                } else {
+                    tracing::error!("audit CF missing from shared DB — audit event dropped");
                 }
             });
         }
@@ -1177,7 +1180,11 @@ impl MultiUserMemoryManager {
                     audit_max_entries,
                 };
                 if let Err(e) = manager.rotate_user_audit_logs(&user_id_clone) {
-                    tracing::debug!("Audit log rotation check for user {}: {}", user_id_clone, e);
+                    tracing::warn!(
+                        "Audit log rotation failed for user {}: {}",
+                        user_id_clone,
+                        e
+                    );
                 }
             });
         }

@@ -2351,7 +2351,9 @@ impl MemorySystem {
                     + graph_w
                         * crate::constants::ACTIVATION_BONUS_SCALE
                         * activation.clamp(0.0, 1.0);
-                *fused.get_mut(id).unwrap() *= activation_factor;
+                if let Some(score) = fused.get_mut(id) {
+                    *score *= activation_factor;
+                }
             }
 
             // Hybrid (BM25+vector) results: pure RRF with density weight
@@ -2530,8 +2532,10 @@ impl MemorySystem {
                                         + (PROSPECTIVE_BOOST_PER_MATCH
                                             * (match_count as f32).sqrt())
                                         .min(PROSPECTIVE_BOOST_MAX);
-                                    *fused.get_mut(id).unwrap() *= boost_factor;
-                                    boosted_count += 1;
+                                    if let Some(score) = fused.get_mut(id) {
+                                        *score *= boost_factor;
+                                        boosted_count += 1;
+                                    }
                                 }
                             }
                         }

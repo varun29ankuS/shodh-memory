@@ -30,6 +30,7 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 // ============================================================================
 // SHALLOW PARSING / CHUNKING MODULE
@@ -454,16 +455,10 @@ fn split_temporal_phrases(text: &str) -> Vec<String> {
 
 /// Extract explicit date patterns that date_time_parser might miss
 fn extract_explicit_dates(text: &str) -> Vec<(NaiveDate, String, usize)> {
-    use regex::Regex;
-
     let mut results = Vec::new();
 
     // Pattern: "Month Day, Year" (e.g., "May 7, 2023")
-    let month_day_year =
-        Regex::new(r"(?i)(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})")
-            .unwrap();
-
-    for cap in month_day_year.captures_iter(text) {
+    for cap in MONTH_DAY_YEAR_RE.captures_iter(text) {
         let month_str = &cap[1];
         let day: u32 = cap[2].parse().unwrap_or(1);
         let year: i32 = cap[3].parse().unwrap_or(2000);
@@ -476,8 +471,7 @@ fn extract_explicit_dates(text: &str) -> Vec<(NaiveDate, String, usize)> {
     }
 
     // Pattern: "YYYY-MM-DD"
-    let iso_date = Regex::new(r"(\d{4})-(\d{2})-(\d{2})").unwrap();
-    for cap in iso_date.captures_iter(text) {
+    for cap in ISO_DATE_RE.captures_iter(text) {
         let year: i32 = cap[1].parse().unwrap_or(2000);
         let month: u32 = cap[2].parse().unwrap_or(1);
         let day: u32 = cap[3].parse().unwrap_or(1);
@@ -489,8 +483,7 @@ fn extract_explicit_dates(text: &str) -> Vec<(NaiveDate, String, usize)> {
     }
 
     // Pattern: "MM/DD/YYYY" or "DD/MM/YYYY" (assume US format MM/DD)
-    let slash_date = Regex::new(r"(\d{1,2})/(\d{1,2})/(\d{4})").unwrap();
-    for cap in slash_date.captures_iter(text) {
+    for cap in SLASH_DATE_RE.captures_iter(text) {
         let month: u32 = cap[1].parse().unwrap_or(1);
         let day: u32 = cap[2].parse().unwrap_or(1);
         let year: i32 = cap[3].parse().unwrap_or(2000);
@@ -504,6 +497,30 @@ fn extract_explicit_dates(text: &str) -> Vec<(NaiveDate, String, usize)> {
     results
 }
 
+// Pre-compiled regex patterns for temporal extraction (avoid per-call allocation)
+static MONTH_DAY_YEAR_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?i)(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})",
+    )
+    .unwrap()
+});
+static ISO_DATE_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(\d{4})-(\d{2})-(\d{2})").unwrap());
+static SLASH_DATE_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(\d{1,2})/(\d{1,2})/(\d{4})").unwrap());
+static AGO_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)(\d+)\s+(day|week|month|year)s?\s+ago").unwrap());
+static LAST_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)last\s+(week|month|year)").unwrap());
+static THIS_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)this\s+(week|month|year)").unwrap());
+static MONTH_YEAR_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?i)(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})",
+    )
+    .unwrap()
+});
+
 /// Extract relative temporal keywords from text.
 ///
 /// Handles patterns that dateparser misses when embedded in longer text:
@@ -513,8 +530,6 @@ fn extract_relative_dates(
     text: &str,
     now: &DateTime<Utc>,
 ) -> Vec<(NaiveDate, String, usize, TemporalRefType)> {
-    use regex::Regex;
-
     let text_lower = text.to_lowercase();
     let today = now.date_naive();
     let mut results = Vec::new();
@@ -536,8 +551,7 @@ fn extract_relative_dates(
     }
 
     // "N days/weeks/months ago"
-    let ago_re = Regex::new(r"(?i)(\d+)\s+(day|week|month|year)s?\s+ago").unwrap();
-    for cap in ago_re.captures_iter(text) {
+    for cap in AGO_RE.captures_iter(text) {
         let n: i64 = cap[1].parse().unwrap_or(1);
         let unit = cap[2].to_lowercase();
         let date = match unit.as_str() {
@@ -555,8 +569,7 @@ fn extract_relative_dates(
     }
 
     // "last week/month/year"
-    let last_re = Regex::new(r"(?i)last\s+(week|month|year)").unwrap();
-    for cap in last_re.captures_iter(text) {
+    for cap in LAST_RE.captures_iter(text) {
         let unit = cap[1].to_lowercase();
         let date = match unit.as_str() {
             "week" => today - chrono::Duration::weeks(1),
@@ -573,8 +586,7 @@ fn extract_relative_dates(
     }
 
     // "this week/month/year"
-    let this_re = Regex::new(r"(?i)this\s+(week|month|year)").unwrap();
-    for cap in this_re.captures_iter(text) {
+    for cap in THIS_RE.captures_iter(text) {
         let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
         if results.iter().any(|r| r.0 == today) {
             continue;
@@ -590,16 +602,10 @@ fn extract_relative_dates(
 /// Handles: "March 2026", "in May 2023", "last March"
 /// Returns the first day of the month as the date.
 fn extract_month_year_dates(text: &str) -> Vec<(NaiveDate, String, usize)> {
-    use regex::Regex;
-
     let mut results = Vec::new();
 
     // "Month Year" (e.g., "March 2026", "in September 2025")
-    let month_year_re = Regex::new(
-        r"(?i)(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})"
-    ).unwrap();
-
-    for cap in month_year_re.captures_iter(text) {
+    for cap in MONTH_YEAR_RE.captures_iter(text) {
         let month = month_to_num(&cap[1]);
         let year: i32 = cap[2].parse().unwrap_or(2000);
         if let Some(date) = NaiveDate::from_ymd_opt(year, month, 1) {
