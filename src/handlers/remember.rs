@@ -249,26 +249,42 @@ pub struct UpsertResponse {
 // HELPER FUNCTIONS
 // =============================================================================
 
-/// Parse memory type from string
-pub fn parse_experience_type(s: Option<&String>) -> ExperienceType {
-    s.and_then(|s| match s.to_lowercase().as_str() {
-        "observation" => Some(ExperienceType::Observation),
-        "decision" => Some(ExperienceType::Decision),
-        "learning" => Some(ExperienceType::Learning),
-        "error" => Some(ExperienceType::Error),
-        "discovery" => Some(ExperienceType::Discovery),
-        "pattern" => Some(ExperienceType::Pattern),
-        "context" => Some(ExperienceType::Context),
-        "task" => Some(ExperienceType::Task),
-        "codeedit" | "code_edit" => Some(ExperienceType::CodeEdit),
-        "fileaccess" | "file_access" => Some(ExperienceType::FileAccess),
-        "search" => Some(ExperienceType::Search),
-        "command" => Some(ExperienceType::Command),
-        "conversation" => Some(ExperienceType::Conversation),
-        "intention" => Some(ExperienceType::Intention),
-        _ => None,
-    })
-    .unwrap_or(ExperienceType::Observation)
+/// Parse memory type from string.
+///
+/// Returns `Ok(Observation)` when no type is provided (default).
+/// Returns `Err` when an explicit type string doesn't match any known type,
+/// preventing silent data corruption from typos.
+pub fn parse_experience_type(
+    s: Option<&String>,
+) -> Result<ExperienceType, crate::errors::AppError> {
+    match s {
+        None => Ok(ExperienceType::Observation),
+        Some(s) => match s.to_lowercase().as_str() {
+            "observation" => Ok(ExperienceType::Observation),
+            "decision" => Ok(ExperienceType::Decision),
+            "learning" => Ok(ExperienceType::Learning),
+            "error" => Ok(ExperienceType::Error),
+            "discovery" => Ok(ExperienceType::Discovery),
+            "pattern" => Ok(ExperienceType::Pattern),
+            "context" => Ok(ExperienceType::Context),
+            "task" => Ok(ExperienceType::Task),
+            "codeedit" | "code_edit" => Ok(ExperienceType::CodeEdit),
+            "fileaccess" | "file_access" => Ok(ExperienceType::FileAccess),
+            "search" => Ok(ExperienceType::Search),
+            "command" => Ok(ExperienceType::Command),
+            "conversation" => Ok(ExperienceType::Conversation),
+            "intention" => Ok(ExperienceType::Intention),
+            unknown => Err(crate::errors::AppError::InvalidInput {
+                field: "type".to_string(),
+                reason: format!(
+                    "Unknown memory type '{}'. Valid types: Observation, Decision, Learning, Error, \
+                     Discovery, Pattern, Context, Task, CodeEdit, FileAccess, Search, Command, \
+                     Conversation, Intention",
+                    unknown
+                ),
+            }),
+        },
+    }
 }
 
 /// Parse source type from string
@@ -372,7 +388,7 @@ pub async fn remember(
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
     validation::validate_content(&req.content, false).map_validation_err("content")?;
 
-    let experience_type = parse_experience_type(req.memory_type.as_ref());
+    let experience_type = parse_experience_type(req.memory_type.as_ref())?;
 
     // PERF: Run NER and YAKE extraction in parallel using spawn_blocking
     // Both are CPU-bound and independent - parallelization reduces latency by ~40%
@@ -817,7 +833,7 @@ pub async fn batch_remember(
     )> = Vec::with_capacity(valid_items.len());
 
     for (index, item) in valid_items {
-        let experience_type = parse_experience_type(item.memory_type.as_ref());
+        let experience_type = parse_experience_type(item.memory_type.as_ref())?;
 
         let (merged_entities, ner_records) = if extract_entities {
             // NER for named entities (Person, Org, Location, Misc)
@@ -984,7 +1000,7 @@ pub async fn upsert_memory(
         });
     }
 
-    let experience_type = parse_experience_type(req.memory_type.as_ref());
+    let experience_type = parse_experience_type(req.memory_type.as_ref())?;
 
     let change_type = match req.change_type.to_lowercase().as_str() {
         "created" => ChangeType::Created,

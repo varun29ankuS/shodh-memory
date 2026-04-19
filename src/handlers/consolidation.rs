@@ -397,7 +397,17 @@ pub async fn create_backup(
         .collect();
 
     // Get graph DB reference for backup (per-user graph at {user_id}/graph/)
-    let graph_lock = state.get_user_graph(&req.user_id).ok();
+    let graph_lock = match state.get_user_graph(&req.user_id) {
+        Ok(g) => Some(g),
+        Err(e) => {
+            tracing::warn!(
+                user_id = %req.user_id,
+                error = %e,
+                "Graph DB unavailable during backup — backup will exclude knowledge graph"
+            );
+            None
+        }
+    };
     let graph_guard = graph_lock.as_ref().map(|g| g.read());
     let graph_db_ref = graph_guard.as_ref().map(|g| g.get_db());
 

@@ -382,14 +382,39 @@ pub async fn recall(
     let mode = req.mode.clone();
     let retrieval_mode_for_recall = parse_retrieval_mode(&mode);
 
+    // Pre-flight validation for robotics retrieval modes.
+    // Catch missing required parameters here (400) instead of deep in the retrieval
+    // engine where errors get wrapped as INTERNAL_ERROR (500).
+    match retrieval_mode_for_recall {
+        RetrievalMode::Spatial if geo_filter.is_none() => {
+            return Err(AppError::InvalidInput {
+                field: "geo_filter".to_string(),
+                reason: "spatial mode requires geo_lat, geo_lon, and geo_radius_meters".to_string(),
+            });
+        }
+        RetrievalMode::Mission if req.mission_id.is_none() => {
+            return Err(AppError::InvalidInput {
+                field: "mission_id".to_string(),
+                reason: "mission mode requires mission_id parameter".to_string(),
+            });
+        }
+        _ => {}
+    }
+
     // SESSION-SCOPED RETRIEVAL: resolve session_id → time_range before spawn_blocking.
     // When session_id is provided, look up the session's time window and set
     // retrieval_mode to Temporal so temporal_search() uses the date range.
-    let session_time_range = req.session_id.as_ref().and_then(|sid| {
+    let session_time_range = if let Some(sid) = req.session_id.as_ref() {
         use crate::memory::sessions::SessionId;
-        let session_id = SessionId(uuid::Uuid::parse_str(sid).ok()?);
+        let parsed_uuid = uuid::Uuid::parse_str(sid).map_err(|_| AppError::InvalidInput {
+            field: "session_id".to_string(),
+            reason: format!("invalid UUID format: '{}'", sid),
+        })?;
+        let session_id = SessionId(parsed_uuid);
         state.session_store().get_session_time_range(&session_id)
-    });
+    } else {
+        None
+    };
     let session_id_for_recall = req.session_id.clone();
 
     // If session_id resolved to a time range, force Temporal mode
@@ -816,7 +841,10 @@ pub async fn recall(
                 facts
             })
             .await
-            .unwrap_or_default()
+            .unwrap_or_else(|e| {
+                tracing::warn!("Fact fetch task panicked: {e} — facts excluded from recall");
+                Vec::new()
+            })
         };
 
         // Deduplicate by fact ID and take top 5 by confidence
@@ -884,7 +912,12 @@ pub async fn recall(
                 edges
             })
             .await
-            .unwrap_or_default()
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Lineage edge fetch task panicked: {e} — lineage excluded from recall"
+                );
+                Vec::new()
+            })
         } else {
             Vec::new()
         }
@@ -1875,7 +1908,13 @@ pub async fn proactive_context(
     let memory_type_filter: Vec<ExperienceType> = req
         .memory_types
         .iter()
-        .map(|s| super::remember::parse_experience_type(Some(s)))
+        .filter_map(|s| match super::remember::parse_experience_type(Some(s)) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!("Ignoring invalid memory_type filter '{}': {}", s, e);
+                None
+            }
+        })
         .collect();
     let memories: Vec<ProactiveSurfacedMemory> = {
         let memory = memory_system.clone();

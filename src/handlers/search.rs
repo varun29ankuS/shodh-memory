@@ -147,6 +147,22 @@ pub async fn multimodal_search(
         }
     };
 
+    // Pre-flight validation for robotics modes
+    if matches!(retrieval_mode, memory::RetrievalMode::Spatial) {
+        return Err(AppError::InvalidInput {
+            field: "mode".to_string(),
+            reason: "spatial mode requires geo parameters — use /api/search/robotics instead"
+                .to_string(),
+        });
+    }
+    if matches!(retrieval_mode, memory::RetrievalMode::Mission) {
+        return Err(AppError::InvalidInput {
+            field: "mode".to_string(),
+            reason: "mission mode requires mission_id — use /api/search/robotics instead"
+                .to_string(),
+        });
+    }
+
     let query = MemoryQuery {
         query_text: Some(req.query_text.clone()),
         max_results: req.limit.unwrap_or(10),

@@ -424,14 +424,20 @@ pub struct ListProjectsRequest {
 // =============================================================================
 
 /// Parse recurrence string to Recurrence enum
-fn parse_recurrence(s: &str) -> Option<Recurrence> {
+fn parse_recurrence(s: &str) -> Result<Recurrence, AppError> {
     match s.to_lowercase().as_str() {
-        "daily" => Some(Recurrence::Daily),
-        "weekly" => Some(Recurrence::Weekly {
+        "daily" => Ok(Recurrence::Daily),
+        "weekly" => Ok(Recurrence::Weekly {
             days: vec![1, 2, 3, 4, 5],
         }),
-        "monthly" => Some(Recurrence::Monthly { day: 1 }),
-        _ => None,
+        "monthly" => Ok(Recurrence::Monthly { day: 1 }),
+        unknown => Err(AppError::InvalidInput {
+            field: "recurrence".to_string(),
+            reason: format!(
+                "Unknown recurrence '{}'. Valid values: daily, weekly, monthly",
+                unknown
+            ),
+        }),
     }
 }
 
@@ -555,13 +561,22 @@ pub async fn list_reminders(
 ) -> Result<Json<ListRemindersResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
 
-    let status_filter = req.status.as_ref().and_then(|s| match s.as_str() {
-        "pending" => Some(ProspectiveTaskStatus::Pending),
-        "triggered" => Some(ProspectiveTaskStatus::Triggered),
-        "dismissed" => Some(ProspectiveTaskStatus::Dismissed),
-        "expired" => Some(ProspectiveTaskStatus::Expired),
-        _ => None,
-    });
+    let status_filter = match req.status.as_deref() {
+        Some("pending") => Some(ProspectiveTaskStatus::Pending),
+        Some("triggered") => Some(ProspectiveTaskStatus::Triggered),
+        Some("dismissed") => Some(ProspectiveTaskStatus::Dismissed),
+        Some("expired") => Some(ProspectiveTaskStatus::Expired),
+        Some("all") | None => None,
+        Some(unknown) => {
+            return Err(AppError::InvalidInput {
+                field: "status".to_string(),
+                reason: format!(
+                    "Unknown reminder status '{}'. Valid values: pending, triggered, dismissed, expired, all",
+                    unknown
+                ),
+            });
+        }
+    };
 
     let tasks = state
         .prospective_store
@@ -896,11 +911,26 @@ pub async fn create_todo(
     let mut todo = Todo::new(req.user_id.clone(), req.content.clone());
 
     if let Some(ref status_str) = req.status {
-        todo.status = TodoStatus::from_str_loose(status_str).unwrap_or_default();
+        todo.status = TodoStatus::from_str_loose(status_str).ok_or_else(|| {
+            AppError::InvalidInput {
+                field: "status".to_string(),
+                reason: format!(
+                    "Unknown todo status '{}'. Valid values: backlog, todo, in_progress, blocked, done, cancelled",
+                    status_str
+                ),
+            }
+        })?;
     }
 
     if let Some(ref priority_str) = req.priority {
-        todo.priority = TodoPriority::from_str_loose(priority_str).unwrap_or_default();
+        todo.priority =
+            TodoPriority::from_str_loose(priority_str).ok_or_else(|| AppError::InvalidInput {
+                field: "priority".to_string(),
+                reason: format!(
+                    "Unknown priority '{}'. Valid values: urgent, high, medium, low, none",
+                    priority_str
+                ),
+            })?;
     }
 
     let mut project_name = None;
@@ -948,7 +978,7 @@ pub async fn create_todo(
     todo.external_id = req.external_id;
 
     if let Some(ref recurrence_str) = req.recurrence {
-        todo.recurrence = parse_recurrence(recurrence_str);
+        todo.recurrence = Some(parse_recurrence(recurrence_str)?);
     }
 
     // Compute embedding for semantic search
@@ -972,14 +1002,30 @@ pub async fn create_todo(
         {
             todo.embedding = Some(embedding.clone());
 
-            if let Ok(vector_id) =
-                state
-                    .todo_store
-                    .index_todo_embedding(&req.user_id, &todo.id, &embedding)
+            match state
+                .todo_store
+                .index_todo_embedding(&req.user_id, &todo.id, &embedding)
             {
-                let _ = state
-                    .todo_store
-                    .store_vector_id_mapping(&req.user_id, vector_id, &todo.id);
+                Ok(vector_id) => {
+                    if let Err(e) =
+                        state
+                            .todo_store
+                            .store_vector_id_mapping(&req.user_id, vector_id, &todo.id)
+                    {
+                        tracing::warn!(
+                            todo_id = %todo.id,
+                            error = %e,
+                            "Failed to store vector ID mapping — todo will not be findable via semantic search"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        todo_id = %todo.id,
+                        error = %e,
+                        "Failed to index todo embedding — todo will not be findable via semantic search"
+                    );
+                }
             }
         }
     }
@@ -1117,12 +1163,21 @@ pub async fn list_todos(
         validation::validate_limit(limit, "limit").map_validation_err("limit")?;
     }
 
-    let status_filter: Option<Vec<TodoStatus>> = req.status.as_ref().map(|statuses| {
-        statuses
-            .iter()
-            .filter_map(|s| TodoStatus::from_str_loose(s))
-            .collect()
-    });
+    let status_filter: Option<Vec<TodoStatus>> = if let Some(ref statuses) = req.status {
+        let mut parsed = Vec::with_capacity(statuses.len());
+        for s in statuses {
+            parsed.push(TodoStatus::from_str_loose(s).ok_or_else(|| AppError::InvalidInput {
+                field: "status".to_string(),
+                reason: format!(
+                    "Unknown todo status '{}'. Valid values: backlog, todo, in_progress, blocked, done, cancelled",
+                    s
+                ),
+            })?);
+        }
+        Some(parsed)
+    } else {
+        None
+    };
 
     let mut todos = if let Some(ref query) = req.query {
         if query.trim().is_empty() {
@@ -1247,17 +1302,30 @@ pub async fn list_todos(
                         .unwrap_or(false)
                 });
             }
-            _ => {}
+            "all" => {} // No filtering
+            unknown => {
+                return Err(AppError::InvalidInput {
+                    field: "due".to_string(),
+                    reason: format!(
+                        "Unknown due filter '{}'. Valid values: today, overdue, this_week, all",
+                        unknown
+                    ),
+                });
+            }
         }
     }
 
     // Filter by priority
     if let Some(ref priority_str) = req.priority {
-        if let Some(target_priority) =
-            crate::memory::types::TodoPriority::from_str_loose(priority_str)
-        {
-            todos.retain(|t| t.priority == target_priority);
-        }
+        let target_priority = crate::memory::types::TodoPriority::from_str_loose(priority_str)
+            .ok_or_else(|| AppError::InvalidInput {
+                field: "priority".to_string(),
+                reason: format!(
+                    "Unknown priority '{}'. Valid values: urgent, high, medium, low, none",
+                    priority_str
+                ),
+            })?;
+        todos.retain(|t| t.priority == target_priority);
     }
 
     // Apply pagination
@@ -1371,14 +1439,25 @@ pub async fn update_todo(
         todo.content = content.clone();
     }
     if let Some(ref status_str) = req.status {
-        if let Some(status) = TodoStatus::from_str_loose(status_str) {
-            todo.status = status;
-        }
+        todo.status = TodoStatus::from_str_loose(status_str).ok_or_else(|| {
+            AppError::InvalidInput {
+                field: "status".to_string(),
+                reason: format!(
+                    "Unknown todo status '{}'. Valid values: backlog, todo, in_progress, blocked, done, cancelled",
+                    status_str
+                ),
+            }
+        })?;
     }
     if let Some(ref priority_str) = req.priority {
-        if let Some(priority) = TodoPriority::from_str_loose(priority_str) {
-            todo.priority = priority;
-        }
+        todo.priority =
+            TodoPriority::from_str_loose(priority_str).ok_or_else(|| AppError::InvalidInput {
+                field: "priority".to_string(),
+                reason: format!(
+                    "Unknown priority '{}'. Valid values: urgent, high, medium, low, none",
+                    priority_str
+                ),
+            })?;
     }
     if let Some(ref contexts) = req.contexts {
         todo.contexts = contexts.clone();
@@ -1944,16 +2023,27 @@ pub async fn add_todo_comment(
         .map_err(AppError::Internal)?
         .ok_or_else(|| AppError::TodoNotFound(todo_id.clone()))?;
 
-    let comment_type = req
-        .comment_type
-        .as_ref()
-        .and_then(|ct| match ct.to_lowercase().as_str() {
-            "comment" => Some(TodoCommentType::Comment),
-            "progress" => Some(TodoCommentType::Progress),
-            "resolution" => Some(TodoCommentType::Resolution),
-            "activity" => Some(TodoCommentType::Activity),
-            _ => None,
-        });
+    let comment_type = match req.comment_type.as_deref() {
+        Some(ct) => {
+            let parsed = match ct.to_lowercase().as_str() {
+                "comment" => TodoCommentType::Comment,
+                "progress" => TodoCommentType::Progress,
+                "resolution" => TodoCommentType::Resolution,
+                "activity" => TodoCommentType::Activity,
+                unknown => {
+                    return Err(AppError::InvalidInput {
+                        field: "comment_type".to_string(),
+                        reason: format!(
+                            "Unknown comment type '{}'. Valid values: comment, progress, resolution, activity",
+                            unknown
+                        ),
+                    });
+                }
+            };
+            Some(parsed)
+        }
+        None => None,
+    };
 
     let author = req.author.unwrap_or_else(|| req.user_id.clone());
 
