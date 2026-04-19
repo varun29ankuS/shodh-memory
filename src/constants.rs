@@ -638,10 +638,12 @@ pub const FACT_DEDUP_JACCARD_FLOOR: f32 = 0.30;
 /// Legacy Jaccard-only threshold (fallback when embedder is unavailable)
 ///
 /// Justification:
-/// - Original threshold for pure Jaccard dedup (preserved for graceful degradation)
+/// - Fallback threshold for Jaccard-only dedup when embeddings unavailable
 /// - Used when embedder fails (circuit breaker open, model load failure)
 /// - Also used per-candidate when an existing fact has no stored embedding
-pub const FACT_DEDUP_JACCARD_FALLBACK: f32 = 0.70;
+/// - Raised from 0.70 to 0.75 to reduce asymmetry with the cosine path
+///   (cosine 0.80 + Jaccard 0.30 is roughly equivalent to Jaccard 0.75 alone)
+pub const FACT_DEDUP_JACCARD_FALLBACK: f32 = 0.75;
 
 /// Negation markers for polarity detection in fact deduplication
 ///
