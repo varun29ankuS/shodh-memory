@@ -516,6 +516,88 @@ impl SemanticFactStore {
 
         Ok(users.into_iter().collect())
     }
+
+    /// Purge duplicate facts — analogous to synaptic consolidation where
+    /// redundant traces merge into a single strong engram (Tononi & Cirelli 2014,
+    /// synaptic homeostasis hypothesis: sleep prunes redundant synapses while
+    /// strengthening unique traces).
+    ///
+    /// Groups facts by normalized text, keeps highest-support version,
+    /// merges source_memories from duplicates into the survivor.
+    pub fn purge_duplicates(&self, user_id: &str) -> Result<usize> {
+        let all_facts = self.list(user_id, 10_000)?;
+        if all_facts.is_empty() {
+            return Ok(0);
+        }
+
+        // Group by normalized text: lowercase, trimmed, collapsed whitespace
+        let mut groups: std::collections::HashMap<String, Vec<SemanticFact>> =
+            std::collections::HashMap::new();
+        for fact in all_facts {
+            let normalized: String = fact
+                .fact
+                .to_lowercase()
+                .split_whitespace()
+                .collect::<Vec<&str>>()
+                .join(" ");
+            groups.entry(normalized).or_default().push(fact);
+        }
+
+        let mut purged = 0;
+        for (_key, mut group) in groups {
+            if group.len() < 2 {
+                continue;
+            }
+
+            // Keep the fact with highest support_count (strongest trace)
+            group.sort_by(|a, b| b.support_count.cmp(&a.support_count));
+            let mut survivor = group.remove(0);
+
+            // Merge source_memories from duplicates into survivor
+            let mut all_sources: std::collections::HashSet<crate::memory::types::MemoryId> =
+                survivor.source_memories.iter().cloned().collect();
+            for dup in &group {
+                for src in &dup.source_memories {
+                    all_sources.insert(src.clone());
+                }
+                survivor.support_count += dup.support_count;
+            }
+            survivor.source_memories = all_sources.into_iter().collect();
+            survivor.last_reinforced = chrono::Utc::now();
+            self.update(user_id, &survivor)?;
+
+            // Delete duplicates
+            for dup in &group {
+                self.delete(user_id, &dup.id)?;
+                purged += 1;
+            }
+        }
+
+        Ok(purged)
+    }
+
+    /// Purge noise facts that predate the quality filter — analogous to
+    /// retroactive interference cleanup: the brain's consolidation process
+    /// revisits existing traces and prunes those that no longer pass the
+    /// hippocampal quality gate (Frankland & Bontempi 2005).
+    ///
+    /// Runs each stored fact through `is_knowledge_worthy()` and deletes
+    /// facts that fail (noise that was stored before the filter existed).
+    pub fn purge_noise_facts(&self, user_id: &str) -> Result<usize> {
+        use super::compression::SemanticConsolidator;
+
+        let all_facts = self.list(user_id, 10_000)?;
+        let mut purged = 0;
+
+        for fact in &all_facts {
+            if !SemanticConsolidator::is_knowledge_worthy(&fact.fact) {
+                self.delete(user_id, &fact.id)?;
+                purged += 1;
+            }
+        }
+
+        Ok(purged)
+    }
 }
 
 /// Detect negation polarity of a fact statement.

@@ -6815,26 +6815,79 @@ impl MemorySystem {
         // Run consolidation
         let result = consolidator.consolidate(&memories);
 
-        // Store extracted facts
-        if !result.new_facts.is_empty() {
-            let stored = self.fact_store.store_batch(user_id, &result.new_facts)?;
+        // Pattern separation gate (dentate gyrus analogy): before storing new
+        // facts, check if each one matches an existing engram. If so, reinforce
+        // the existing trace (pattern completion) instead of creating a duplicate.
+        // This prevents within-batch duplicates that bypass the find_similar() gate
+        // because both members are stored in the same consolidation cycle.
+        let mut deduplicated_facts: Vec<SemanticFact> = Vec::new();
+        let mut merged_count: usize = 0;
+
+        // Pre-encode all new facts to enable hybrid dedup with cosine gate
+        let new_texts: Vec<&str> = result.new_facts.iter().map(|f| f.fact.as_str()).collect();
+        let new_embeddings: Vec<Option<Vec<f32>>> = match self.embedder.encode_batch(&new_texts) {
+            Ok(embs) => embs.into_iter().map(Some).collect(),
+            Err(_) => vec![None; result.new_facts.len()],
+        };
+
+        for (fact, embedding) in result.new_facts.iter().zip(new_embeddings.iter()) {
+            let emb_ref = embedding.as_deref();
+            match self
+                .fact_store
+                .find_similar(user_id, &fact.fact, &fact.related_entities, emb_ref)
+            {
+                Ok(Some(mut existing)) => {
+                    // Pattern completion: reinforce existing trace
+                    existing.support_count += fact.support_count;
+                    let mut all_sources: std::collections::HashSet<MemoryId> =
+                        existing.source_memories.iter().cloned().collect();
+                    for src in &fact.source_memories {
+                        all_sources.insert(src.clone());
+                    }
+                    existing.source_memories = all_sources.into_iter().collect();
+                    existing.last_reinforced = chrono::Utc::now();
+                    let _ = self.fact_store.update(user_id, &existing);
+                    merged_count += 1;
+                }
+                _ => {
+                    deduplicated_facts.push(fact.clone());
+                }
+            }
+        }
+
+        if merged_count > 0 {
+            tracing::info!(
+                user_id = %user_id,
+                merged = merged_count,
+                "Pattern separation: merged new facts into existing engrams"
+            );
+        }
+
+        // Store genuinely new facts (passed pattern separation gate)
+        if !deduplicated_facts.is_empty() {
+            let stored = self
+                .fact_store
+                .store_batch(user_id, &deduplicated_facts)?;
             tracing::info!(
                 user_id = %user_id,
                 facts_extracted = result.facts_extracted,
                 facts_stored = stored,
+                facts_merged = merged_count,
                 "Semantic distillation complete"
             );
 
-            // Batch-encode and store embeddings for distilled facts
-            let texts: Vec<&str> = result.new_facts.iter().map(|f| f.fact.as_str()).collect();
-            if let Ok(batch_embs) = self.embedder.encode_batch(&texts) {
-                for (fact, emb) in result.new_facts.iter().zip(batch_embs.iter()) {
-                    let _ = self.fact_store.store_embedding(user_id, &fact.id, emb);
+            // Store embeddings for the genuinely new facts
+            for fact in &deduplicated_facts {
+                // Find the matching embedding from the pre-encoded batch
+                if let Some(pos) = result.new_facts.iter().position(|f| f.id == fact.id) {
+                    if let Some(Some(emb)) = new_embeddings.get(pos) {
+                        let _ = self.fact_store.store_embedding(user_id, &fact.id, emb);
+                    }
                 }
             }
 
-            // Record consolidation event for each fact (persists significant events)
-            for fact in &result.new_facts {
+            // Record consolidation event for each stored fact
+            for fact in &deduplicated_facts {
                 self.record_consolidation_event_for_user(
                     user_id,
                     ConsolidationEvent::FactExtracted {
@@ -6859,6 +6912,16 @@ impl MemorySystem {
         }
 
         Ok(result)
+    }
+
+    /// Purge duplicate facts for a user (delegates to SemanticFactStore).
+    pub fn purge_duplicate_facts(&self, user_id: &str) -> Result<usize> {
+        self.fact_store.purge_duplicates(user_id)
+    }
+
+    /// Purge noise facts for a user (delegates to SemanticFactStore).
+    pub fn purge_noise_facts(&self, user_id: &str) -> Result<usize> {
+        self.fact_store.purge_noise_facts(user_id)
     }
 
     /// Get semantic facts for a user
@@ -7125,6 +7188,12 @@ impl MemorySystem {
             if let Some((relation, confidence)) =
                 self.lineage_graph.infer_relation(candidate, new_memory)
             {
+                // BCM LTP threshold: sub-threshold stimulation produces LTD, not LTP.
+                // Weak inferences below the confidence floor are noise that would
+                // drown out genuine causal structure if persisted.
+                if confidence < crate::constants::LINEAGE_MIN_STORE_CONFIDENCE {
+                    continue;
+                }
                 if !self
                     .lineage_graph
                     .edge_exists(user_id, &candidate.id, &new_memory.id)?
@@ -7148,6 +7217,10 @@ impl MemorySystem {
             if let Some((relation, confidence)) =
                 self.lineage_graph.infer_relation(new_memory, candidate)
             {
+                // BCM LTP threshold (forward pass)
+                if confidence < crate::constants::LINEAGE_MIN_STORE_CONFIDENCE {
+                    continue;
+                }
                 if !self
                     .lineage_graph
                     .edge_exists(user_id, &new_memory.id, &candidate.id)?
@@ -7390,31 +7463,80 @@ fn build_single_cluster(all_facts: &[SemanticFact], indices: &[usize]) -> FactCl
 
 /// Detect causal relationships between temporally ordered facts sharing entities.
 ///
-/// Uses keyword heuristics on the later fact to infer relationship type:
-/// - "replaced", "instead", "no longer" → superseded_by
-/// - "fixed", "resolved" → resolved_by
-/// - Other evolution keywords → led_to
+/// Analogous to hippocampal trace conditioning — the hippocampus bridges temporal
+/// gaps to form associations between events that share contextual features (entities).
+/// The keyword vocabulary defines the temporal receptive field: broader vocabulary
+/// detects more of the causal structure that actually exists in the fact timeline.
+///
+/// Relationship types:
+/// - superseded_by: fact B replaced/obsoleted fact A
+/// - resolved_by: fact B fixed/patched an issue described in fact A
+/// - informed_by: fact B was based on or learned from fact A
+/// - led_to: fact A generally caused or prompted fact B
 fn detect_causal_chains(sorted_facts: &[SemanticFact]) -> Vec<CausalFactLink> {
-    const EVOLUTION_KEYWORDS: &[&str] = &[
-        "migrated",
+    // Supersession signals: the later fact explicitly obsoletes the earlier one
+    const SUPERSEDED_KEYWORDS: &[&str] = &[
         "replaced",
+        "instead",
+        "no longer",
+        "removed",
+        "upgraded",
+        "converted",
+        "refactored",
+        "deprecated",
+    ];
+
+    // Resolution signals: the later fact fixed a problem in the earlier one
+    const RESOLVED_KEYWORDS: &[&str] = &[
         "fixed",
+        "resolved",
+        "patched",
+        "corrected",
+        "addressed",
+        "eliminated",
+    ];
+
+    // Informed-by signals: the later fact was derived from the earlier one
+    const INFORMED_KEYWORDS: &[&str] = &[
+        "based on",
+        "learned from",
+        "following",
+        "after discovering",
+        "informed by",
+        "derived from",
+    ];
+
+    // General evolution signals: any causal linkage between temporally ordered facts
+    const GENERAL_EVOLUTION: &[&str] = &[
+        "migrated",
         "updated",
         "changed",
         "now uses",
         "switched",
-        "deprecated",
-        "removed",
         "added",
-        "resolved",
-        "instead",
-        "no longer",
+        "resulted in",
+        "prompted",
+        "triggered",
+        "spawned",
+        "caused",
+        "introduced",
+        "implemented",
+        "enabled",
     ];
 
     let mut chains = Vec::new();
 
     // Pre-compute lowercase facts to avoid repeated allocations in O(n²) loop.
     let lowered: Vec<String> = sorted_facts.iter().map(|f| f.fact.to_lowercase()).collect();
+
+    // All keyword lists combined for the initial has-any-evolution check
+    let all_keywords: Vec<&str> = SUPERSEDED_KEYWORDS
+        .iter()
+        .chain(RESOLVED_KEYWORDS.iter())
+        .chain(INFORMED_KEYWORDS.iter())
+        .chain(GENERAL_EVOLUTION.iter())
+        .copied()
+        .collect();
 
     for i in 0..sorted_facts.len() {
         for j in (i + 1)..sorted_facts.len() {
@@ -7431,21 +7553,22 @@ fn detect_causal_chains(sorted_facts: &[SemanticFact]) -> Vec<CausalFactLink> {
             }
 
             let b_lower = &lowered[j];
-            let has_evolution = EVOLUTION_KEYWORDS.iter().any(|kw| b_lower.contains(kw));
+            let has_evolution = all_keywords.iter().any(|kw| b_lower.contains(kw));
             if !has_evolution {
                 continue;
             }
 
-            let relation = if b_lower.contains("replaced")
-                || b_lower.contains("instead")
-                || b_lower.contains("no longer")
-            {
-                "superseded_by"
-            } else if b_lower.contains("fixed") || b_lower.contains("resolved") {
-                "resolved_by"
-            } else {
-                "led_to"
-            };
+            // Classify by most specific match (superseded > resolved > informed > led_to)
+            let relation =
+                if SUPERSEDED_KEYWORDS.iter().any(|kw| b_lower.contains(kw)) {
+                    "superseded_by"
+                } else if RESOLVED_KEYWORDS.iter().any(|kw| b_lower.contains(kw)) {
+                    "resolved_by"
+                } else if INFORMED_KEYWORDS.iter().any(|kw| b_lower.contains(kw)) {
+                    "informed_by"
+                } else {
+                    "led_to"
+                };
 
             chains.push(CausalFactLink {
                 from_fact_id: a.id.clone(),

@@ -88,6 +88,41 @@ pub async fn consolidate_memories(
             }
         };
 
+        // Step 0: Synaptic pruning — purge duplicate and noise facts before extraction.
+        // Analogous to sleep consolidation (Tononi & Cirelli 2014): revisit existing
+        // engrams, merge redundant traces, and prune noise that predates quality filters.
+        // This runs as both a one-time cleanup (for pre-filter garbage) and ongoing
+        // garbage collection (for duplicates created by race conditions).
+        {
+            let memory = memory.clone();
+            let uid = user_id.clone();
+            match tokio::task::spawn_blocking(move || {
+                let memory_guard = memory.read();
+                let purged_dupes = memory_guard.purge_duplicate_facts(&uid);
+                let purged_noise = memory_guard.purge_noise_facts(&uid);
+                (purged_dupes, purged_noise)
+            })
+            .await
+            {
+                Ok((Ok(dupes), Ok(noise))) => {
+                    if dupes > 0 || noise > 0 {
+                        tracing::info!(
+                            user_id = %user_id,
+                            duplicate_facts_purged = dupes,
+                            noise_facts_purged = noise,
+                            "Synaptic pruning complete"
+                        );
+                    }
+                }
+                Ok((Err(e), _)) | Ok((_, Err(e))) => {
+                    tracing::warn!(user_id = %user_id, "Fact pruning partial failure: {e}");
+                }
+                Err(e) => {
+                    tracing::warn!(user_id = %user_id, "Fact pruning panicked: {e}");
+                }
+            }
+        }
+
         // Step 1: Fact extraction
         let result = {
             let memory = memory.clone();
