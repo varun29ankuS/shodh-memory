@@ -1149,7 +1149,7 @@ impl SemanticConsolidator {
     /// Reject operational noise that shouldn't become semantic facts.
     /// Facts should capture domain knowledge, decisions, and patterns —
     /// not session lifecycle events, tool invocations, or status updates.
-    fn is_knowledge_worthy(text: &str) -> bool {
+    pub(crate) fn is_knowledge_worthy(text: &str) -> bool {
         let lower = text.to_lowercase();
         let len = text.trim().len();
 
@@ -1158,11 +1158,15 @@ impl SemanticConsolidator {
             return false;
         }
 
-        // Session lifecycle noise
+        // Session lifecycle noise — analogous to hippocampal filtering during
+        // consolidation: routine maintenance signals are pruned before entering
+        // long-term cortical storage (Dudai 2004, systems consolidation).
         const SESSION_NOISE: &[&str] = &[
             "session started",
             "session ended",
+            "session ended:",
             "session summary",
+            "session in ",
             "context compressed",
             "context window",
             "token budget",
@@ -1173,6 +1177,10 @@ impl SemanticConsolidator {
             "memories surfaced",
             "memory stored",
             "memories stored",
+            "hit rate",
+            "topics changed",
+            "entities extracted",
+            "compressions ran",
         ];
         if SESSION_NOISE.iter().any(|s| lower.contains(s)) {
             return false;
@@ -1193,11 +1201,13 @@ impl SemanticConsolidator {
             return false;
         }
 
-        // Todo/task status chatter
+        // Todo/task status chatter — task state transitions are operational
+        // metadata, not semantic knowledge worth encoding into long-term memory.
         const TODO_NOISE: &[&str] = &[
             "todo created",
             "todo completed",
             "todo updated",
+            "todo updated (status",
             "task created",
             "task completed",
             "task updated",
@@ -1205,6 +1215,11 @@ impl SemanticConsolidator {
             "marked as complete",
             "moved to backlog",
             "moved to in_progress",
+            "status → done",
+            "status → inprogress",
+            "status → in_progress",
+            "status → cancelled",
+            "status → blocked",
         ];
         if TODO_NOISE.iter().any(|s| lower.contains(s)) {
             return false;

@@ -467,11 +467,43 @@ pub async fn session_history(
 fn compute_project_threads(entries: &[SessionHistoryEntry]) -> Vec<ProjectThread> {
     use std::collections::HashSet;
 
-    const MIN_OVERLAP: usize = 3;
+    // Jaccard threshold for entity overlap — analogous to the thalamic reticular
+    // nucleus gating irrelevant stimuli before cortical processing. Raw count
+    // overlap (e.g., 3/30 entities = 10%) causes sessions with many entities to
+    // trivially match. Jaccard normalizes by set union, requiring genuine semantic
+    // overlap to cluster sessions together.
+    const JACCARD_THRESHOLD: f32 = 0.15;
 
-    // System tags appear in every entry and would inflate overlap counts,
-    // causing unrelated sessions to cluster together.
-    const SYSTEM_TAGS: &[&str] = &["session-summary", "session-digest", "source:hook"];
+    // Noise entities filtered before clustering — the attentional gate.
+    // These appear in every session (system boilerplate, auto-extraction artifacts,
+    // generic terms) and would inflate overlap counts if not filtered, causing
+    // every session to cluster together. Analogous to how the PFC suppresses
+    // habitual/background stimuli (e.g., the hum of a fridge) to focus on signal.
+    const NOISE_ENTITIES: &[&str] = &[
+        // System tags
+        "session-summary",
+        "session-digest",
+        "source:hook",
+        // Auto-extraction artifacts
+        "auto-extract",
+        "source:transcript",
+        // Session summary boilerplate entities
+        "completed entities",
+        "topics changed",
+        "hit rate",
+        "created",
+        "memories",
+        "todos",
+        "compressions",
+        "context",
+        "proactive",
+        "ended",
+        "tools",
+        // Generic terms appearing in most sessions
+        "file",
+        "source",
+        "cargo.toml",
+    ];
 
     if entries.len() < 2 {
         return vec![];
@@ -480,14 +512,14 @@ fn compute_project_threads(entries: &[SessionHistoryEntry]) -> Vec<ProjectThread
     let n = entries.len();
     let mut parent: Vec<usize> = (0..n).collect();
 
-    // Build entity sets once, filtering out system tags
+    // Build entity sets once, filtering out noise entities (attentional gate)
     let entity_sets: Vec<HashSet<&str>> = entries
         .iter()
         .map(|e| {
             e.entities
                 .iter()
                 .map(|s| s.as_str())
-                .filter(|s| !SYSTEM_TAGS.contains(s))
+                .filter(|s| !NOISE_ENTITIES.contains(s))
                 .collect()
         })
         .collect();
@@ -495,7 +527,13 @@ fn compute_project_threads(entries: &[SessionHistoryEntry]) -> Vec<ProjectThread
     for i in 0..n {
         for j in (i + 1)..n {
             let overlap = entity_sets[i].intersection(&entity_sets[j]).count();
-            if overlap >= MIN_OVERLAP {
+            let union = entity_sets[i].union(&entity_sets[j]).count();
+            let jaccard = if union > 0 {
+                overlap as f32 / union as f32
+            } else {
+                0.0
+            };
+            if jaccard >= JACCARD_THRESHOLD {
                 let ri = uf_find_root(&parent, i);
                 let rj = uf_find_root(&parent, j);
                 if ri != rj {
@@ -519,7 +557,7 @@ fn compute_project_threads(entries: &[SessionHistoryEntry]) -> Vec<ProjectThread
             let mut entity_counts: HashMap<&str, usize> = HashMap::new();
             for &i in &indices {
                 for e in &entries[i].entities {
-                    if !SYSTEM_TAGS.contains(&e.as_str()) {
+                    if !NOISE_ENTITIES.contains(&e.as_str()) {
                         *entity_counts.entry(e.as_str()).or_default() += 1;
                     }
                 }
@@ -532,8 +570,12 @@ fn compute_project_threads(entries: &[SessionHistoryEntry]) -> Vec<ProjectThread
                 .collect();
             shared.sort();
 
+            // Thread naming: pick the most-frequent entity that is semantically
+            // meaningful (>= 4 chars, not noise). Short fragments like "sho",
+            // "dh", "mem" are typically entity extraction artifacts, not topics.
             let name = entity_counts
                 .iter()
+                .filter(|(&e, _)| e.len() >= 4 && !NOISE_ENTITIES.contains(&e))
                 .max_by_key(|(_, c)| *c)
                 .map(|(&e, _)| e.to_string())
                 .unwrap_or_else(|| "Unknown".to_string());

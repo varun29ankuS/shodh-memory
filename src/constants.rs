@@ -2553,6 +2553,21 @@ pub const LINEAGE_CONFIDENCE_BRANCHED_FROM: f32 = 0.9;
 /// Base confidence for RelatedTo relation (same-group fallback).
 pub const LINEAGE_CONFIDENCE_RELATED_TO: f32 = 0.5;
 
+/// Minimum confidence to persist an inferred lineage edge — the LTP induction
+/// threshold. In Bienenstock-Cooper-Munro (BCM) theory, synaptic stimulation
+/// below the modification threshold θ produces long-term depression (weakening),
+/// not long-term potentiation. Similarly, inferred edges below this threshold
+/// are noise that would drown out genuine causal structure if stored.
+///
+/// At 0.20, this retains edges where confidence = base × entity_overlap ×
+/// temporal_factor is non-trivial (e.g., RelatedTo at 0.5 base needs ≥40%
+/// effective overlap × temporal proximity), while pruning the 0.075-level
+/// noise that constitutes ~99% of weak RelatedTo edges.
+///
+/// Reference: Bienenstock, Cooper & Munro (1982) "Theory for the development of
+/// neuron selectivity: orientation specificity and binocular interaction"
+pub const LINEAGE_MIN_STORE_CONFIDENCE: f32 = 0.20;
+
 /// Scale factor for propagating lineage confidence into graph edge weights.
 ///
 /// When a causal lineage edge is inferred between two memories with confidence C,
