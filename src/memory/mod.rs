@@ -7207,8 +7207,7 @@ impl MemorySystem {
                     continue;
                 }
                 // Check existing edges from candidate → new_memory
-                let existing_edges =
-                    self.lineage_graph.get_edges_from(user_id, &candidate.id)?;
+                let existing_edges = self.lineage_graph.get_edges_from(user_id, &candidate.id)?;
                 let existing_edge = existing_edges.iter().find(|e| e.to == new_memory.id);
                 match existing_edge {
                     Some(old) if confidence > old.confidence => {
@@ -7245,8 +7244,7 @@ impl MemorySystem {
                 if confidence < crate::constants::LINEAGE_MIN_STORE_CONFIDENCE {
                     continue;
                 }
-                let existing_edges =
-                    self.lineage_graph.get_edges_from(user_id, &new_memory.id)?;
+                let existing_edges = self.lineage_graph.get_edges_from(user_id, &new_memory.id)?;
                 let existing_edge = existing_edges.iter().find(|e| e.to == candidate.id);
                 match existing_edge {
                     Some(old) if confidence > old.confidence => {
