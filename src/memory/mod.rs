@@ -6944,41 +6944,52 @@ impl MemorySystem {
             return Ok(vec![]);
         }
 
-        // Union-find clustering: merge facts sharing >= 1 entity
+        // Step 1: Compute entity document frequency to identify hub entities
         let n = facts.len();
-        let mut parent: Vec<usize> = (0..n).collect();
-
-        for i in 0..n {
-            let entities_i: std::collections::HashSet<&str> = facts[i]
-                .related_entities
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
-            for j in (i + 1)..n {
-                let shared = facts[j]
-                    .related_entities
-                    .iter()
-                    .any(|e| entities_i.contains(e.as_str()));
-                if shared {
-                    let ri = uf_find(&parent, i);
-                    let rj = uf_find(&parent, j);
-                    if ri != rj {
-                        parent[rj] = ri;
-                    }
+        let mut entity_df: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for f in &facts {
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for e in &f.related_entities {
+                if seen.insert(e.as_str()) {
+                    *entity_df.entry(e.as_str()).or_default() += 1;
                 }
             }
         }
+        let hub_threshold = (n as f32 * 0.20).max(5.0) as usize;
+        let hub_entities: std::collections::HashSet<&str> = entity_df
+            .iter()
+            .filter(|(_, count)| **count >= hub_threshold)
+            .map(|(e, _)| *e)
+            .collect();
 
-        // Group indices by cluster root
-        let mut groups: std::collections::HashMap<usize, Vec<usize>> =
+        // Step 2: For each fact, find its most specific (lowest-DF) entity = topic
+        // Facts with no discriminative entity go into an "uncategorized" bucket
+        let mut topic_groups: std::collections::HashMap<String, Vec<usize>> =
             std::collections::HashMap::new();
-        for i in 0..n {
-            groups.entry(uf_find(&parent, i)).or_default().push(i);
+
+        for (i, f) in facts.iter().enumerate() {
+            let best_entity = f
+                .related_entities
+                .iter()
+                .filter(|e| !hub_entities.contains(e.as_str()))
+                .min_by_key(|e| entity_df.get(e.as_str()).copied().unwrap_or(usize::MAX));
+
+            let topic = match best_entity {
+                Some(e) => e.clone(),
+                None => "__uncategorized__".to_string(),
+            };
+            topic_groups.entry(topic).or_default().push(i);
         }
 
-        let mut clusters: Vec<FactCluster> = groups
-            .into_values()
-            .map(|indices| build_single_cluster(&facts, &indices))
+        // Step 3: Build clusters from topic groups (skip uncategorized singletons)
+        let mut clusters: Vec<FactCluster> = topic_groups
+            .into_iter()
+            .filter(|(topic, indices)| {
+                // Keep groups with 2+ facts, or single facts if they have a real topic
+                indices.len() >= 2 || (indices.len() == 1 && topic != "__uncategorized__")
+            })
+            .map(|(_, indices)| build_single_cluster(&facts, &indices))
             .collect();
 
         clusters.sort_by(|a, b| b.total_support.cmp(&a.total_support));
@@ -7281,14 +7292,6 @@ impl MemorySystem {
 // =============================================================================
 // Fact Narrative Helpers (private, used by MemorySystem::build_fact_narratives)
 // =============================================================================
-
-/// Union-find: find root (no path compression — immutable slice, N≤500).
-fn uf_find(parent: &[usize], mut i: usize) -> usize {
-    while parent[i] != i {
-        i = parent[i];
-    }
-    i
-}
 
 /// Build a single FactCluster from a set of fact indices.
 fn build_single_cluster(all_facts: &[SemanticFact], indices: &[usize]) -> FactCluster {
