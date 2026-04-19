@@ -534,12 +534,33 @@ pub const IMPORTANCE_RECENCY_DAYS: f64 = 7.0;
 // SEMANTIC CONSOLIDATION THRESHOLDS
 // =============================================================================
 
-/// Minimum supporting memories to extract a semantic fact
+/// Minimum supporting memories to extract a semantic fact (base value).
 ///
 /// Justification:
 /// - 2 minimum ensures pattern isn't a one-off
 /// - Higher values (3-5) for more confidence but slower learning
+/// - Overridden by adaptive thresholds when corpus is large
 pub const CONSOLIDATION_MIN_SUPPORT: usize = 2;
+
+/// Adaptive min_support thresholds based on eligible memory count.
+///
+/// Models the LTP induction threshold from neuroscience: as overall neural
+/// activity increases (more memories), the threshold for long-term potentiation
+/// rises to prevent noise from being encoded as durable knowledge.
+///
+/// Reference: Bienenstock, Cooper & Munro (1982) "Theory for the development
+/// of neuron selectivity" — the BCM sliding threshold.
+pub const CONSOLIDATION_MIN_SUPPORT_SMALL: usize = 2; // <= 100 eligible memories
+pub const CONSOLIDATION_MIN_SUPPORT_MEDIUM: usize = 3; // <= 1000 eligible memories
+pub const CONSOLIDATION_MIN_SUPPORT_LARGE: usize = 4; // > 1000 eligible memories
+
+/// Maximum members in a single consolidation cluster.
+///
+/// Prevents semantic drift in greedy clustering: once a cluster reaches this
+/// size, new candidates start fresh clusters instead of being absorbed.
+/// Models dentate gyrus pattern separation — sparse, non-overlapping
+/// representations that resist interference.
+pub const CONSOLIDATION_CLUSTER_SIZE_CAP: usize = 20;
 
 /// Minimum age in days before consolidation
 ///
@@ -617,10 +638,12 @@ pub const FACT_DEDUP_JACCARD_FLOOR: f32 = 0.30;
 /// Legacy Jaccard-only threshold (fallback when embedder is unavailable)
 ///
 /// Justification:
-/// - Original threshold for pure Jaccard dedup (preserved for graceful degradation)
+/// - Fallback threshold for Jaccard-only dedup when embeddings unavailable
 /// - Used when embedder fails (circuit breaker open, model load failure)
 /// - Also used per-candidate when an existing fact has no stored embedding
-pub const FACT_DEDUP_JACCARD_FALLBACK: f32 = 0.70;
+/// - Raised from 0.70 to 0.75 to reduce asymmetry with the cosine path
+///   (cosine 0.80 + Jaccard 0.30 is roughly equivalent to Jaccard 0.75 alone)
+pub const FACT_DEDUP_JACCARD_FALLBACK: f32 = 0.75;
 
 /// Negation markers for polarity detection in fact deduplication
 ///

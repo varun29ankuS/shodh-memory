@@ -6286,19 +6286,25 @@ impl MemorySystem {
                             embedding.as_deref(),
                         ) {
                             Ok(Some(mut existing)) => {
-                                // Reinforce the existing fact
-                                existing.support_count += 1;
+                                // Extend source memories — track if any genuinely new
+                                let mut new_sources_added = false;
+                                for src in &fact.source_memories {
+                                    if !existing.source_memories.contains(src) {
+                                        existing.source_memories.push(src.clone());
+                                        new_sources_added = true;
+                                    }
+                                }
+
+                                // Only increment support_count when new source evidence
+                                // is contributed. Prevents same memories from inflating
+                                // the count on every maintenance cycle.
+                                if new_sources_added {
+                                    existing.support_count += 1;
+                                }
                                 existing.last_reinforced = now;
                                 let confidence_before = existing.confidence;
                                 let boost = 0.1 * (1.0 - existing.confidence);
                                 existing.confidence = (existing.confidence + boost).min(1.0);
-
-                                // Extend source memories and related entities
-                                for src in &fact.source_memories {
-                                    if !existing.source_memories.contains(src) {
-                                        existing.source_memories.push(src.clone());
-                                    }
-                                }
                                 for entity in &fact.related_entities {
                                     if !existing.related_entities.contains(entity) {
                                         existing.related_entities.push(entity.clone());
@@ -6837,14 +6843,22 @@ impl MemorySystem {
                 .find_similar(user_id, &fact.fact, &fact.related_entities, emb_ref)
             {
                 Ok(Some(mut existing)) => {
-                    // Pattern completion: reinforce existing trace
-                    existing.support_count += fact.support_count;
-                    let mut all_sources: std::collections::HashSet<MemoryId> =
+                    // Pattern completion: reinforce existing trace.
+                    // Only increment support_count when genuinely new source
+                    // memories contribute evidence. Prevents same memories
+                    // from inflating the count across consolidation cycles.
+                    let existing_sources: std::collections::HashSet<MemoryId> =
                         existing.source_memories.iter().cloned().collect();
+                    let mut new_sources_added = false;
                     for src in &fact.source_memories {
-                        all_sources.insert(src.clone());
+                        if !existing_sources.contains(src) {
+                            existing.source_memories.push(src.clone());
+                            new_sources_added = true;
+                        }
                     }
-                    existing.source_memories = all_sources.into_iter().collect();
+                    if new_sources_added {
+                        existing.support_count += 1;
+                    }
                     existing.last_reinforced = chrono::Utc::now();
                     let _ = self.fact_store.update(user_id, &existing);
                     merged_count += 1;
@@ -7192,18 +7206,29 @@ impl MemorySystem {
                 if confidence < crate::constants::LINEAGE_MIN_STORE_CONFIDENCE {
                     continue;
                 }
-                if !self
-                    .lineage_graph
-                    .edge_exists(user_id, &candidate.id, &new_memory.id)?
-                {
-                    let edge = LineageEdge::inferred(
-                        candidate.id.clone(),
-                        new_memory.id.clone(),
-                        relation,
-                        confidence,
-                    );
-                    self.lineage_graph.store_edge(user_id, &edge)?;
-                    inferred_edges.push(edge);
+                // Check existing edges from candidate → new_memory
+                let existing_edges = self.lineage_graph.get_edges_from(user_id, &candidate.id)?;
+                let existing_edge = existing_edges.iter().find(|e| e.to == new_memory.id);
+                match existing_edge {
+                    Some(old) if confidence > old.confidence => {
+                        // Reinference produced stronger confidence — update edge
+                        let mut updated = old.clone();
+                        updated.confidence = confidence;
+                        updated.relation = relation;
+                        self.lineage_graph.store_edge(user_id, &updated)?;
+                    }
+                    None => {
+                        // No existing edge — create new
+                        let edge = LineageEdge::inferred(
+                            candidate.id.clone(),
+                            new_memory.id.clone(),
+                            relation,
+                            confidence,
+                        );
+                        self.lineage_graph.store_edge(user_id, &edge)?;
+                        inferred_edges.push(edge);
+                    }
+                    _ => {} // Existing edge has equal/higher confidence, skip
                 }
             }
 
@@ -7219,18 +7244,26 @@ impl MemorySystem {
                 if confidence < crate::constants::LINEAGE_MIN_STORE_CONFIDENCE {
                     continue;
                 }
-                if !self
-                    .lineage_graph
-                    .edge_exists(user_id, &new_memory.id, &candidate.id)?
-                {
-                    let edge = LineageEdge::inferred(
-                        new_memory.id.clone(),
-                        candidate.id.clone(),
-                        relation,
-                        confidence,
-                    );
-                    self.lineage_graph.store_edge(user_id, &edge)?;
-                    inferred_edges.push(edge);
+                let existing_edges = self.lineage_graph.get_edges_from(user_id, &new_memory.id)?;
+                let existing_edge = existing_edges.iter().find(|e| e.to == candidate.id);
+                match existing_edge {
+                    Some(old) if confidence > old.confidence => {
+                        let mut updated = old.clone();
+                        updated.confidence = confidence;
+                        updated.relation = relation;
+                        self.lineage_graph.store_edge(user_id, &updated)?;
+                    }
+                    None => {
+                        let edge = LineageEdge::inferred(
+                            new_memory.id.clone(),
+                            candidate.id.clone(),
+                            relation,
+                            confidence,
+                        );
+                        self.lineage_graph.store_edge(user_id, &edge)?;
+                        inferred_edges.push(edge);
+                    }
+                    _ => {}
                 }
             }
         }
