@@ -888,12 +888,9 @@ pub async fn create_todo(
     Json(req): Json<CreateTodoRequest>,
 ) -> Result<Json<TodoResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
-
-    if req.content.trim().is_empty() {
-        return Err(AppError::InvalidInput {
-            field: "content".to_string(),
-            reason: "Content cannot be empty".to_string(),
-        });
+    validation::validate_short_string(&req.content, "content").map_validation_err("content")?;
+    if let Some(ref tags) = req.tags {
+        validation::validate_tags(tags).map_validation_err("tags")?;
     }
 
     let mut todo = Todo::new(req.user_id.clone(), req.content.clone());
@@ -1116,6 +1113,9 @@ pub async fn list_todos(
     Json(req): Json<ListTodosRequest>,
 ) -> Result<Json<TodoListResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+    if let Some(limit) = req.limit {
+        validation::validate_limit(limit, "limit").map_validation_err("limit")?;
+    }
 
     let status_filter: Option<Vec<TodoStatus>> = req.status.as_ref().map(|statuses| {
         statuses
@@ -1936,13 +1936,7 @@ pub async fn add_todo_comment(
     Json(req): Json<AddCommentRequest>,
 ) -> Result<Json<CommentResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
-
-    if req.content.trim().is_empty() {
-        return Err(AppError::InvalidInput {
-            field: "content".to_string(),
-            reason: "Comment content cannot be empty".to_string(),
-        });
-    }
+    validation::validate_short_string(&req.content, "content").map_validation_err("content")?;
 
     let todo = state
         .todo_store
@@ -2147,13 +2141,7 @@ pub async fn update_todo_comment(
     Json(req): Json<UpdateCommentRequest>,
 ) -> Result<Json<CommentResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
-
-    if req.content.trim().is_empty() {
-        return Err(AppError::InvalidInput {
-            field: "content".to_string(),
-            reason: "Comment content cannot be empty".to_string(),
-        });
-    }
+    validation::validate_short_string(&req.content, "content").map_validation_err("content")?;
 
     let todo = state
         .todo_store

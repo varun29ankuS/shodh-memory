@@ -57,6 +57,7 @@ pub async fn list_facts(
     Json(req): Json<FactsListRequest>,
 ) -> Result<Json<FactsResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+    validation::validate_limit(req.limit, "limit").map_validation_err("limit")?;
 
     let memory = state
         .get_user_memory(&req.user_id)
@@ -84,6 +85,8 @@ pub async fn search_facts(
     Json(req): Json<FactsSearchRequest>,
 ) -> Result<Json<FactsResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+    validation::validate_limit(req.limit, "limit").map_validation_err("limit")?;
+    validation::validate_query_text(&req.query).map_validation_err("query")?;
 
     let memory = state
         .get_user_memory(&req.user_id)
@@ -112,6 +115,8 @@ pub async fn facts_by_entity(
     Json(req): Json<FactsByEntityRequest>,
 ) -> Result<Json<FactsResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+    validation::validate_limit(req.limit, "limit").map_validation_err("limit")?;
+    validation::validate_short_string(&req.entity, "entity").map_validation_err("entity")?;
 
     let memory = state
         .get_user_memory(&req.user_id)

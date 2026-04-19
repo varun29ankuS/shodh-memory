@@ -116,6 +116,10 @@ pub async fn multimodal_search(
     Json(req): Json<MultiModalSearchRequest>,
 ) -> Result<Json<RetrieveResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+    validation::validate_query_text(&req.query_text).map_validation_err("query_text")?;
+    if let Some(limit) = req.limit {
+        validation::validate_limit(limit, "limit").map_validation_err("limit")?;
+    }
 
     let memory_sys = state
         .get_user_memory(&req.user_id)
@@ -194,6 +198,19 @@ pub async fn robotics_search(
     Json(req): Json<RoboticsSearchRequest>,
 ) -> Result<Json<RetrieveResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+    if let Some(limit) = req.limit {
+        validation::validate_limit(limit, "limit").map_validation_err("limit")?;
+    }
+    if let Some(reward) = req.min_reward {
+        validation::validate_reward(reward).map_validation_err("min_reward")?;
+    }
+    if let Some(reward) = req.max_reward {
+        validation::validate_reward(reward).map_validation_err("max_reward")?;
+    }
+    if let (Some(min), Some(max)) = (req.min_reward, req.max_reward) {
+        validation::validate_range(min as f64, max as f64, "reward")
+            .map_validation_err("reward")?;
+    }
 
     let memory_sys = state
         .get_user_memory(&req.user_id)
