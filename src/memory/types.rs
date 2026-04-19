@@ -2857,6 +2857,94 @@ pub struct RetrievalStats {
     /// Not serialized - internal use only for wiring strengthening calls
     #[serde(skip)]
     pub traversed_edges: Vec<uuid::Uuid>,
+
+    /// Per-stage timing breakdown (only when debug=true)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_timings: Option<StageTiming>,
+
+    /// Per-memory score attribution (only when debug=true)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_attributions: Option<Vec<ScoreAttribution>>,
+}
+
+/// Per-stage timing breakdown in microseconds.
+///
+/// Covers the full retrieval pipeline from query analysis through final scoring.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StageTiming {
+    /// Layers 0.4-0.7: temporal analysis, attribute detection, fact lookups
+    pub query_analysis_us: u64,
+    /// Embedding generation (cache hit = ~0, miss = ~80ms)
+    pub embedding_us: u64,
+    /// Layers 1-2: episode coherence + graph spreading activation
+    pub graph_expansion_us: u64,
+    /// Layer 3: Vamana ANN vector search
+    pub vector_search_us: u64,
+    /// Layer 4: BM25 + RRF fusion + all sub-boosts (4.5-4.9)
+    pub fusion_us: u64,
+    /// Layer 5: memory fetch + unified scoring + quality gate
+    pub scoring_us: u64,
+    /// Total end-to-end retrieval time
+    pub total_us: u64,
+}
+
+/// Per-memory score attribution — explains WHY a memory ranked where it did.
+///
+/// Each field represents a multiplicative factor applied to the base RRF score.
+/// A value of 1.0 means no effect; >1.0 means boost; <1.0 means suppression.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScoreAttribution {
+    /// Memory ID (UUID string)
+    pub memory_id: String,
+    /// Base RRF fusion score (graph + hybrid combined)
+    pub rrf_base: f32,
+    /// Graph RRF contribution to the base score
+    pub graph_rrf: f32,
+    /// Hybrid (BM25 + vector) RRF contribution
+    pub hybrid_rrf: f32,
+    /// Hebbian boost from learned graph weights
+    pub hebbian_boost: f32,
+    /// Layer 4.5: attribute query boost multiplier
+    pub attribute_boost: f32,
+    /// Layer 4.45: temporal pre-filter boost multiplier
+    pub temporal_prefilter_boost: f32,
+    /// Layer 4.55: temporal fact boost multiplier
+    pub temporal_fact_boost: f32,
+    /// Layer 4.6: interference adjustment multiplier
+    pub interference_adjustment: f32,
+    /// Layer 4.7: prospective signal boost multiplier
+    pub prospective_boost: f32,
+    /// Layer 4.8: semantic fact source boost multiplier
+    pub fact_source_boost: f32,
+    /// Layer 4.9: ontological re-rank boost multiplier
+    pub ontological_boost: f32,
+    /// Layer 5: importance factor
+    pub importance_factor: f32,
+    /// Layer 5: recency decay factor
+    pub recency_factor: f32,
+    /// Layer 5: emotional arousal factor
+    pub arousal_factor: f32,
+    /// Layer 5: source credibility factor
+    pub credibility_factor: f32,
+    /// Layer 5: feedback momentum multiplier
+    pub feedback_multiplier: f32,
+    /// Quality gate factor (content richness)
+    pub quality_gate: f32,
+    /// Final computed score (after all multiplicative factors)
+    pub final_score: f32,
+    /// Which retrieval sources contributed this memory
+    pub sources: Vec<String>,
+}
+
+/// Result of semantic retrieval with optional diagnostics sidecar.
+///
+/// Used by `recall_with_diagnostics()` to return both memories and per-stage stats
+/// without breaking the 12+ callers of the existing `recall()` API.
+pub struct RetrievalResult {
+    /// Retrieved memories, scored and ranked
+    pub memories: Vec<SharedMemory>,
+    /// Retrieval diagnostics (populated when debug=true)
+    pub stats: Option<RetrievalStats>,
 }
 
 // =============================================================================

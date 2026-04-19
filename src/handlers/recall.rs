@@ -461,8 +461,9 @@ pub async fn recall(
     let memory_for_recall = memory.clone();
     let user_id_for_recall = req.user_id.clone();
     let query_for_recall = req.query.clone();
+    let debug_mode = req.debug;
 
-    let (mut memories, triggered_reminders, _prospective_signals) =
+    let (mut memories, triggered_reminders, _prospective_signals, retrieval_stats) =
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory_for_recall.read();
 
@@ -550,11 +551,19 @@ pub async fn recall(
                 ..Default::default()
             };
 
-            let memories = memory_guard
-                .recall(&query)
-                .map_err(|e| anyhow::anyhow!("Recall failed: {e}"))?;
+            let (memories, retrieval_stats) = if debug_mode {
+                let result = memory_guard
+                    .recall_with_diagnostics(&query)
+                    .map_err(|e| anyhow::anyhow!("Recall failed: {e}"))?;
+                (result.memories, result.stats)
+            } else {
+                let memories = memory_guard
+                    .recall(&query)
+                    .map_err(|e| anyhow::anyhow!("Recall failed: {e}"))?;
+                (memories, None)
+            };
 
-            Ok::<_, anyhow::Error>((memories, reminders, prospective_signals))
+            Ok::<_, anyhow::Error>((memories, reminders, prospective_signals, retrieval_stats))
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
@@ -735,6 +744,19 @@ pub async fn recall(
 
     let top_score = raw_scores.iter().cloned().fold(0.0_f32, f32::max);
 
+    // Build attribution lookup from retrieval stats (only populated when debug=true)
+    let attribution_map: std::collections::HashMap<String, crate::memory::types::ScoreAttribution> =
+        retrieval_stats
+            .as_ref()
+            .and_then(|s| s.score_attributions.as_ref())
+            .map(|attrs| {
+                attrs
+                    .iter()
+                    .map(|a| (a.memory_id.clone(), a.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
     let recall_memories: Vec<RecallMemory> = memories
         .iter()
         .zip(raw_scores.iter())
@@ -744,8 +766,10 @@ pub async fn recall(
             } else {
                 0.0
             };
+            let id_str = m.id.0.to_string();
+            let attribution = attribution_map.get(&id_str).cloned();
             RecallMemory {
-                id: m.id.0.to_string(),
+                id: id_str,
                 experience: RecallExperience {
                     content: m.experience.content.clone(),
                     memory_type: Some(format!("{:?}", m.experience.experience_type)),
@@ -755,6 +779,7 @@ pub async fn recall(
                 created_at: m.created_at.to_rfc3339(),
                 score,
                 tier: format!("{:?}", m.tier),
+                score_attribution: attribution,
             }
         })
         .collect();
@@ -1054,7 +1079,7 @@ pub async fn recall(
     Ok(Json(RecallResponse {
         memories: recall_memories,
         count,
-        retrieval_stats: None, // Retrieval stats not exposed in new API
+        retrieval_stats,
         todos,
         todo_count,
         facts,
@@ -3069,6 +3094,7 @@ pub async fn recall_tracked(
                 created_at: m.created_at.to_rfc3339(),
                 score,
                 tier: format!("{:?}", m.tier),
+                score_attribution: None,
             }
         })
         .collect();

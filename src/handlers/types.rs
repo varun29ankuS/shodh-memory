@@ -137,6 +137,9 @@ pub struct RecallRequest {
     /// Filter by tags (any match)
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// Enable retrieval diagnostics (per-stage timing, per-memory score attribution)
+    #[serde(default)]
+    pub debug: bool,
 }
 
 pub fn default_recall_limit() -> usize {
@@ -235,6 +238,9 @@ pub struct RecallMemory {
     pub created_at: String,
     pub score: f32,
     pub tier: String,
+    /// Per-memory score attribution (only when debug=true)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score_attribution: Option<crate::memory::types::ScoreAttribution>,
 }
 
 #[derive(Serialize)]
