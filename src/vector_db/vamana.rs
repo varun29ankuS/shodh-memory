@@ -1586,12 +1586,16 @@ impl VamanaIndex {
             );
             *self.vectors.write() = VectorStorage::Memory(data.vectors);
         } else {
-            match &mut *self.vectors.write() {
-                VectorStorage::Memory(vecs) => {
-                    *vecs = data.vectors;
-                }
-                VectorStorage::Mmap { .. } => unreachable!(),
+            let is_mmap_variant = matches!(&*self.vectors.read(), VectorStorage::Mmap { .. });
+            if is_mmap_variant {
+                warn!(
+                    "Unexpected mmap storage with use_mmap=false during apply_persisted_data; \
+                     converting {} vectors to in-memory storage",
+                    data.num_vectors
+                );
             }
+            // Both branches set to Memory storage — safe assignment without match borrow
+            *self.vectors.write() = VectorStorage::Memory(data.vectors);
         }
 
         // Restore soft-deleted IDs
