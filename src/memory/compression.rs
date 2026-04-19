@@ -571,7 +571,7 @@ pub struct SemanticFact {
 }
 
 /// Types of semantic facts
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum FactType {
     /// User preference: "prefers concise code"
     Preference,
@@ -584,13 +584,8 @@ pub enum FactType {
     /// Definition: "MemoryId is a UUID wrapper"
     Definition,
     /// Pattern: "errors often occur after deployment"
+    #[default]
     Pattern,
-}
-
-impl Default for FactType {
-    fn default() -> Self {
-        Self::Pattern
-    }
 }
 
 /// A cluster of related facts grouped by shared entities, with a template-generated
@@ -1024,8 +1019,7 @@ impl SemanticConsolidator {
                 let subject = &content[subject_start..pos];
 
                 if subject.len() >= 2 {
-                    let def_end = content[pos + marker.len()..]
-                        .find(|c| c == '.' || c == '!' || c == '?' || c == ',');
+                    let def_end = content[pos + marker.len()..].find(['.', '!', '?', ',']);
                     let def_end = def_end
                         .map(|i| pos + marker.len() + i)
                         .unwrap_or(content.len().min(pos + marker.len() + 100));
@@ -1142,7 +1136,7 @@ impl SemanticConsolidator {
 
             let score = content_words as f32 + entity_bonus;
 
-            if best.as_ref().map_or(true, |(_, s)| score > *s) {
+            if best.as_ref().is_none_or(|(_, s)| score > *s) {
                 best = Some((trimmed.to_string(), score));
             }
         }
@@ -1231,10 +1225,10 @@ impl SemanticConsolidator {
 
     /// Extract the sentence containing a character position
     fn extract_sentence(content: &str, pos: usize) -> Option<String> {
-        let start = content[..pos].rfind(|c| c == '.' || c == '!' || c == '?');
+        let start = content[..pos].rfind(['.', '!', '?']);
         let start = start.map(|i| i + 1).unwrap_or(0);
 
-        let end = content[pos..].find(|c| c == '.' || c == '!' || c == '?');
+        let end = content[pos..].find(['.', '!', '?']);
         let end = end.map(|i| pos + i).unwrap_or(content.len());
 
         let sentence = content[start..end].trim();

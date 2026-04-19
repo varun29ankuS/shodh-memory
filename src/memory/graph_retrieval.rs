@@ -1061,8 +1061,8 @@ fn calculate_lateral_inhibition(scored: &[ActivatedMemory]) -> Vec<f32> {
 
         let mut total_penalty = 0.0f32;
 
-        for j in 0..i {
-            let emb_j = match &scored[j].memory.experience.embeddings {
+        for prev in &scored[..i] {
+            let emb_j = match &prev.memory.experience.embeddings {
                 Some(e) => e,
                 None => continue,
             };
@@ -1070,7 +1070,7 @@ fn calculate_lateral_inhibition(scored: &[ActivatedMemory]) -> Vec<f32> {
             let sim = cosine_similarity(emb_i, emb_j);
             if sim > GRAPH_LATERAL_INHIBITION_THRESHOLD {
                 // Higher-ranked memory suppresses this one proportional to similarity
-                total_penalty += scored[j].final_score * GRAPH_LATERAL_INHIBITION_STRENGTH * sim;
+                total_penalty += prev.final_score * GRAPH_LATERAL_INHIBITION_STRENGTH * sim;
             }
         }
 

@@ -97,6 +97,7 @@ impl ReplayManager {
     /// - Important (above REPLAY_IMPORTANCE_THRESHOLD)
     /// - Connected (at least REPLAY_MIN_CONNECTIONS)
     /// - Optionally: high emotional arousal for priority
+    #[allow(clippy::type_complexity)]
     pub fn identify_replay_candidates(
         &self,
         memories: &[(String, f32, f32, DateTime<Utc>, Vec<String>, String)], // (id, importance, arousal, created_at, connections, content_preview)
@@ -160,6 +161,7 @@ impl ReplayManager {
     /// Execute replay for a batch of candidates
     ///
     /// Returns strength boosts to apply to memories and edges
+    #[allow(clippy::type_complexity)]
     pub fn execute_replay(
         &mut self,
         candidates: &[ReplayCandidate],

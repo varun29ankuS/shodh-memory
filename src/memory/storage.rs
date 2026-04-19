@@ -804,15 +804,13 @@ fn deserialize_with_fallback(data: &[u8]) -> Result<(Memory, bool)> {
     // Try current format first (bincode 2.x with current Memory/Experience)
     // This is the hot path — avoid any allocations before this check.
     match bincode::serde::decode_from_slice::<Memory, _>(data, crate::bincode_safe_config()) {
-        Ok((memory, _)) => {
-            return Ok((memory, false));
-        } // Current format, no migration needed
+        Ok((memory, _)) => Ok((memory, false)), // Current format, no migration needed
         Err(e) => {
             // Current format failed — enter fallback chain.
             // Bincode 1.x paths use with_limit() to cap allocations.
             // MessagePack paths use try_msgpack_deserialize() which scans for
             // oversized length prefixes before calling rmp_serde::from_slice.
-            return deserialize_legacy_fallback(data, e, record_branch);
+            deserialize_legacy_fallback(data, e, record_branch)
         }
     }
 }
@@ -999,13 +997,10 @@ fn deserialize_legacy_fallback(
     }
 
     // Try bincode 1.x format (used in versions prior to bincode 2.0 migration)
-    match bincode1_safe.deserialize::<LegacyMemoryV1>(data) {
-        Ok(legacy) => {
-            tracing::debug!("Migrated memory from bincode 1.x format");
-            record_branch("bincode1_legacy_v1_repeat");
-            return Ok((legacy.into_memory(), true));
-        }
-        Err(_) => {} // Already tried above
+    if let Ok(legacy) = bincode1_safe.deserialize::<LegacyMemoryV1>(data) {
+        tracing::debug!("Migrated memory from bincode 1.x format");
+        record_branch("bincode1_legacy_v1_repeat");
+        return Ok((legacy.into_memory(), true));
     }
 
     // Try legacy v2 format with bincode 1.x (cognitive extensions era)
@@ -1084,16 +1079,16 @@ pub(crate) fn crc32_simple(data: &[u8]) -> u32 {
 /// Column family name for secondary indices (tags, types, timestamps, etc.)
 const CF_INDEX: &str = "memory_index";
 
-/// Storage engine for long-term memory persistence
-///
-/// Uses a single RocksDB instance with 2 column families:
-/// - default: main memory data (also shared by LearningHistoryStore, TemporalFactStore, etc. via key prefixes)
-/// - `memory_index`: secondary indices for tag/type/timestamp queries
 /// Maximum number of failed writes to buffer for retry.
 /// Small enough to bound memory usage (~100 memories × ~2KB ≈ 200KB)
 /// but large enough to absorb transient RocksDB contention bursts.
 const WRITE_RETRY_BUFFER_CAPACITY: usize = 100;
 
+/// Storage engine for long-term memory persistence
+///
+/// Uses a single RocksDB instance with 2 column families:
+/// - default: main memory data (also shared by LearningHistoryStore, TemporalFactStore, etc. via key prefixes)
+/// - `memory_index`: secondary indices for tag/type/timestamp queries
 pub struct MemoryStorage {
     db: Arc<DB>,
     /// Base storage path for all memory data
@@ -1286,13 +1281,14 @@ impl MemoryStorage {
                     let mut batch = WriteBatch::default();
                     let mut count = 0usize;
                     for item in old_db.iterator(IteratorMode::Start) {
-                        if let Ok((key, value)) = item {
-                            batch.put(&key, &value);
-                            count += 1;
-                            if count % 10_000 == 0 {
-                                db.write(std::mem::take(&mut batch))?;
-                                tracing::info!("  memories: migrated {count} entries...");
-                            }
+                        let (key, value) = item.map_err(|e| {
+                            anyhow::anyhow!("RocksDB iterator error during memory migration: {e}")
+                        })?;
+                        batch.put(&key, &value);
+                        count += 1;
+                        if count.is_multiple_of(10_000) {
+                            db.write(std::mem::take(&mut batch))?;
+                            tracing::info!("  memories: migrated {count} entries...");
                         }
                     }
                     if !batch.is_empty() {
@@ -1328,13 +1324,14 @@ impl MemoryStorage {
                     let mut batch = WriteBatch::default();
                     let mut count = 0usize;
                     for item in old_db.iterator(IteratorMode::Start) {
-                        if let Ok((key, value)) = item {
-                            batch.put_cf(&index_cf, &key, &value);
-                            count += 1;
-                            if count % 10_000 == 0 {
-                                db.write(std::mem::take(&mut batch))?;
-                                tracing::info!("  index: migrated {count} entries...");
-                            }
+                        let (key, value) = item.map_err(|e| {
+                            anyhow::anyhow!("RocksDB iterator error during index migration: {e}")
+                        })?;
+                        batch.put_cf(&index_cf, &key, &value);
+                        count += 1;
+                        if count.is_multiple_of(10_000) {
+                            db.write(std::mem::take(&mut batch))?;
+                            tracing::info!("  index: migrated {count} entries...");
                         }
                     }
                     if !batch.is_empty() {
@@ -2211,8 +2208,8 @@ impl MemoryStorage {
                         (parts[0].parse::<u32>(), uuid::Uuid::parse_str(parts[1]))
                     {
                         // Apply sequence filters
-                        let passes_min = min_sequence.map_or(true, |min| seq >= min);
-                        let passes_max = max_sequence.map_or(true, |max| seq <= max);
+                        let passes_min = min_sequence.is_none_or(|min| seq >= min);
+                        let passes_max = max_sequence.is_none_or(|max| seq <= max);
 
                         if passes_min && passes_max {
                             results.push((seq, MemoryId(uuid)));
@@ -2431,15 +2428,13 @@ impl MemoryStorage {
 
         // Iterate all memories and check for parent_id = None
         let iter = self.db.iterator(IteratorMode::Start);
-        for item in iter {
-            if let Ok((key, value)) = item {
-                if key.len() != 16 {
-                    continue;
-                }
-                if let Ok((memory, _)) = deserialize_memory(&value) {
-                    if memory.parent_id.is_none() {
-                        roots.push(memory.id);
-                    }
+        for (key, value) in iter.flatten() {
+            if key.len() != 16 {
+                continue;
+            }
+            if let Ok((memory, _)) = deserialize_memory(&value) {
+                if memory.parent_id.is_none() {
+                    roots.push(memory.id);
                 }
             }
         }
@@ -2524,12 +2519,10 @@ impl MemoryStorage {
         let mut read_opts = rocksdb::ReadOptions::default();
         read_opts.fill_cache(false);
         let iter = self.db.iterator_opt(IteratorMode::Start, read_opts);
-        for item in iter {
-            if let Ok((key, _)) = item {
-                if key.len() == 16 {
-                    let uuid_bytes: [u8; 16] = key[..16].try_into().unwrap();
-                    ids.push(MemoryId(uuid::Uuid::from_bytes(uuid_bytes)));
-                }
+        for (key, _) in iter.flatten() {
+            if key.len() == 16 {
+                let uuid_bytes: [u8; 16] = key[..16].try_into().unwrap();
+                ids.push(MemoryId(uuid::Uuid::from_bytes(uuid_bytes)));
             }
         }
         Ok(ids)
@@ -2546,16 +2539,14 @@ impl MemoryStorage {
         let mut read_opts = rocksdb::ReadOptions::default();
         read_opts.fill_cache(false);
         let iter = self.db.iterator_opt(IteratorMode::Start, read_opts);
-        for item in iter {
-            if let Ok((key, value)) = item {
-                // Only process valid 16-byte UUID keys (consistent with get_stats)
-                if key.len() != 16 {
-                    continue;
-                }
-                if let Ok((memory, _)) = deserialize_memory(&value) {
-                    if !memory.is_forgotten() {
-                        memories.push(memory);
-                    }
+        for (key, value) in iter.flatten() {
+            // Only process valid 16-byte UUID keys (consistent with get_stats)
+            if key.len() != 16 {
+                continue;
+            }
+            if let Ok((memory, _)) = deserialize_memory(&value) {
+                if !memory.is_forgotten() {
+                    memories.push(memory);
                 }
             }
         }
@@ -2568,16 +2559,13 @@ impl MemoryStorage {
 
         // Iterate through all memories
         let iter = self.db.iterator(IteratorMode::Start);
-        for item in iter {
-            if let Ok((key, value)) = item {
-                // Only process valid 16-byte UUID keys
-                if key.len() != 16 {
-                    continue;
-                }
-                if let Ok((memory, _)) = deserialize_memory(&value) {
-                    if !memory.compressed && !memory.is_forgotten() && memory.created_at < cutoff {
-                        memories.push(memory);
-                    }
+        for (key, value) in iter.flatten() {
+            if key.len() != 16 {
+                continue;
+            }
+            if let Ok((memory, _)) = deserialize_memory(&value) {
+                if !memory.compressed && !memory.is_forgotten() && memory.created_at < cutoff {
+                    memories.push(memory);
                 }
             }
         }
@@ -2594,29 +2582,27 @@ impl MemoryStorage {
         let now = Utc::now().to_rfc3339();
 
         let iter = self.db.iterator(IteratorMode::Start);
-        for item in iter {
-            if let Ok((key, value)) = item {
-                if key.len() != 16 {
+        for (key, value) in iter.flatten() {
+            if key.len() != 16 {
+                continue;
+            }
+            if let Ok((mut memory, _)) = deserialize_memory(&value) {
+                if memory.is_forgotten() {
                     continue;
                 }
-                if let Ok((mut memory, _)) = deserialize_memory(&value) {
-                    if memory.is_forgotten() {
-                        continue;
-                    }
-                    if memory.created_at < cutoff {
-                        flagged_ids.push(memory.id.clone());
-                        memory
-                            .experience
-                            .metadata
-                            .insert("forgotten".to_string(), "true".to_string());
-                        memory
-                            .experience
-                            .metadata
-                            .insert("forgotten_at".to_string(), now.clone());
+                if memory.created_at < cutoff {
+                    flagged_ids.push(memory.id.clone());
+                    memory
+                        .experience
+                        .metadata
+                        .insert("forgotten".to_string(), "true".to_string());
+                    memory
+                        .experience
+                        .metadata
+                        .insert("forgotten_at".to_string(), now.clone());
 
-                        let updated_value = crate::serialization::encode_sho(&memory)?;
-                        batch.put(&key, updated_value);
-                    }
+                    let updated_value = crate::serialization::encode_sho(&memory)?;
+                    batch.put(&key, updated_value);
                 }
             }
         }
@@ -2639,29 +2625,27 @@ impl MemoryStorage {
         let now = Utc::now().to_rfc3339();
 
         let iter = self.db.iterator(IteratorMode::Start);
-        for item in iter {
-            if let Ok((key, value)) = item {
-                if key.len() != 16 {
+        for (key, value) in iter.flatten() {
+            if key.len() != 16 {
+                continue;
+            }
+            if let Ok((mut memory, _)) = deserialize_memory(&value) {
+                if memory.is_forgotten() {
                     continue;
                 }
-                if let Ok((mut memory, _)) = deserialize_memory(&value) {
-                    if memory.is_forgotten() {
-                        continue;
-                    }
-                    if memory.importance() < threshold {
-                        flagged_ids.push(memory.id.clone());
-                        memory
-                            .experience
-                            .metadata
-                            .insert("forgotten".to_string(), "true".to_string());
-                        memory
-                            .experience
-                            .metadata
-                            .insert("forgotten_at".to_string(), now.clone());
+                if memory.importance() < threshold {
+                    flagged_ids.push(memory.id.clone());
+                    memory
+                        .experience
+                        .metadata
+                        .insert("forgotten".to_string(), "true".to_string());
+                    memory
+                        .experience
+                        .metadata
+                        .insert("forgotten_at".to_string(), now.clone());
 
-                        let updated_value = crate::serialization::encode_sho(&memory)?;
-                        batch.put(&key, updated_value);
-                    }
+                    let updated_value = crate::serialization::encode_sho(&memory)?;
+                    batch.put(&key, updated_value);
                 }
             }
         }
@@ -2681,17 +2665,14 @@ impl MemoryStorage {
         let mut to_delete: Vec<MemoryId> = Vec::new();
 
         let iter = self.db.iterator(IteratorMode::Start);
-        for item in iter {
-            if let Ok((key, value)) = item {
-                // Only process valid 16-byte UUID keys
-                if key.len() != 16 {
-                    continue;
-                }
-                if let Ok((memory, _)) = deserialize_memory(&value) {
-                    if regex.is_match(&memory.experience.content) {
-                        to_delete.push(memory.id);
-                        count += 1;
-                    }
+        for (key, value) in iter.flatten() {
+            if key.len() != 16 {
+                continue;
+            }
+            if let Ok((memory, _)) = deserialize_memory(&value) {
+                if regex.is_match(&memory.experience.content) {
+                    to_delete.push(memory.id);
+                    count += 1;
                 }
             }
         }
@@ -2851,31 +2832,27 @@ impl MemoryStorage {
         ];
 
         let iter = self.db.iterator(IteratorMode::Start);
-        for item in iter {
-            if let Ok((key, value)) = item {
-                // Skip known non-memory prefixed entries
-                if skip_prefixes.iter().any(|p| key.starts_with(p)) {
-                    continue;
-                }
+        for (key, value) in iter.flatten() {
+            // Skip known non-memory prefixed entries
+            if skip_prefixes.iter().any(|p| key.starts_with(p)) {
+                continue;
+            }
 
-                // Valid memory keys should be exactly 16 bytes (UUID bytes)
-                let is_valid_memory_key = key.len() == 16;
+            // Valid memory keys should be exactly 16 bytes (UUID bytes)
+            let is_valid_memory_key = key.len() == 16;
 
-                if !is_valid_memory_key {
-                    // Key is not a valid UUID - this is a corrupted or misplaced entry
-                    tracing::debug!(
-                        "Marking for deletion: invalid key length {} (expected 16)",
-                        key.len()
-                    );
-                    to_delete.push(key.to_vec());
-                } else if deserialize_memory(&value).is_err() {
-                    // Key is valid but value fails all format fallbacks - truly corrupted
-                    tracing::debug!(
-                        "Marking for deletion: valid key but corrupted value ({} bytes)",
-                        value.len()
-                    );
-                    to_delete.push(key.to_vec());
-                }
+            if !is_valid_memory_key {
+                tracing::debug!(
+                    "Marking for deletion: invalid key length {} (expected 16)",
+                    key.len()
+                );
+                to_delete.push(key.to_vec());
+            } else if deserialize_memory(&value).is_err() {
+                tracing::debug!(
+                    "Marking for deletion: valid key but corrupted value ({} bytes)",
+                    value.len()
+                );
+                to_delete.push(key.to_vec());
             }
         }
 
@@ -2916,35 +2893,32 @@ impl MemoryStorage {
         let iter = self.db.iterator(IteratorMode::Start);
         let mut to_migrate = Vec::new();
 
-        for item in iter {
-            if let Ok((key, value)) = item {
-                // Skip stats entries
-                if key.starts_with(stats_prefix) {
-                    continue;
+        for (key, value) in iter.flatten() {
+            // Skip stats entries
+            if key.starts_with(stats_prefix) {
+                continue;
+            }
+
+            // Skip non-UUID keys
+            if key.len() != 16 {
+                continue;
+            }
+
+            // Try current format first (quick check) — postcard or bincode
+            let is_current = deserialize_memory(&value).is_ok();
+
+            if is_current {
+                already_current += 1;
+                continue;
+            }
+
+            // Not current format - try with fallback
+            match deserialize_memory(&value) {
+                Ok((memory, _)) => {
+                    to_migrate.push((key.to_vec(), memory));
                 }
-
-                // Skip non-UUID keys
-                if key.len() != 16 {
-                    continue;
-                }
-
-                // Try current format first (quick check) — postcard or bincode
-                let is_current = deserialize_memory(&value).is_ok();
-
-                if is_current {
-                    already_current += 1;
-                    continue;
-                }
-
-                // Not current format - try with fallback
-                match deserialize_memory(&value) {
-                    Ok((memory, _)) => {
-                        // Successfully deserialized legacy format - queue for migration
-                        to_migrate.push((key.to_vec(), memory));
-                    }
-                    Err(_) => {
-                        failed += 1;
-                    }
+                Err(_) => {
+                    failed += 1;
                 }
             }
         }
@@ -3467,13 +3441,11 @@ impl MemoryStorage {
             .iterator(IteratorMode::From(prefix, rocksdb::Direction::Forward));
 
         let mut count = 0;
-        for item in iter {
-            if let Ok((key, _)) = item {
-                if key.starts_with(prefix) {
-                    count += 1;
-                } else {
-                    break;
-                }
+        for (key, _) in iter.flatten() {
+            if key.starts_with(prefix) {
+                count += 1;
+            } else {
+                break;
             }
         }
         count
@@ -3487,25 +3459,19 @@ impl MemoryStorage {
         let mut orphans = Vec::new();
 
         let iter = self.db.iterator(IteratorMode::Start);
-        for item in iter {
-            if let Ok((key, value)) = item {
-                // Skip non-memory keys
-                if key.len() != 16 {
-                    continue;
-                }
+        for (key, value) in iter.flatten() {
+            if key.len() != 16 {
+                continue;
+            }
 
-                // Try to deserialize as memory
-                if let Ok((memory, _)) = deserialize_memory(&value) {
-                    // Check if vector mapping exists and has text vectors
-                    let has_mapping = match self.get_vector_mapping(&memory.id) {
-                        Ok(Some(entry)) => entry.text_vectors().is_some_and(|v| !v.is_empty()),
-                        _ => false,
-                    };
+            if let Ok((memory, _)) = deserialize_memory(&value) {
+                let has_mapping = match self.get_vector_mapping(&memory.id) {
+                    Ok(Some(entry)) => entry.text_vectors().is_some_and(|v| !v.is_empty()),
+                    _ => false,
+                };
 
-                    // Memory has embeddings but no mapping - needs reindex
-                    if !has_mapping && memory.experience.embeddings.is_some() {
-                        orphans.push(memory.id);
-                    }
+                if !has_mapping && memory.experience.embeddings.is_some() {
+                    orphans.push(memory.id);
                 }
             }
         }
@@ -3654,7 +3620,7 @@ impl MemoryStorage {
         self.db
             .put_opt(
                 b"interference_meta:total",
-                &(count as u64).to_le_bytes(),
+                (count as u64).to_le_bytes(),
                 &write_opts,
             )
             .context("Failed to persist interference event count")?;
@@ -3682,9 +3648,9 @@ impl MemoryStorage {
         let key = format!("_watermark:fact_extraction:{user_id}");
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(self.write_mode == WriteMode::Sync);
-        if let Err(e) =
-            self.db
-                .put_opt(key.as_bytes(), &timestamp_millis.to_le_bytes(), &write_opts)
+        if let Err(e) = self
+            .db
+            .put_opt(key.as_bytes(), timestamp_millis.to_le_bytes(), &write_opts)
         {
             tracing::warn!("Failed to persist fact extraction watermark: {e}");
         }

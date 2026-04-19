@@ -525,6 +525,7 @@ impl LearnedWeights {
     /// - `momentum_ema`: Feedback momentum EMA (-1.0 to 1.0, 0.0 = neutral)
     /// - `access_count`: Number of times this memory has been retrieved
     /// - `graph_strength`: Hebbian edge strength from knowledge graph (0.0 to 1.0)
+    #[allow(clippy::too_many_arguments)]
     pub fn fuse_scores_full(
         &self,
         semantic_score: f32,

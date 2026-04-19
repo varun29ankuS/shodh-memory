@@ -612,8 +612,10 @@ impl LearningHistoryStore {
         // Get all events (could be optimized with counters)
         let all_events = self.events_since(user_id, now - Duration::days(365))?;
 
-        let mut stats = LearningStats::default();
-        stats.total_events = all_events.len();
+        let mut stats = LearningStats {
+            total_events: all_events.len(),
+            ..Default::default()
+        };
 
         let mut memory_event_counts: HashMap<String, usize> = HashMap::new();
 

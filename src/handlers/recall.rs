@@ -1644,13 +1644,14 @@ pub async fn proactive_context(
                         for edges in [
                             lineage.get_edges_from(&user_id, memory_id),
                             lineage.get_edges_to(&user_id, memory_id),
-                        ] {
-                            if let Ok(edges) = edges {
-                                for mut edge in edges {
-                                    if reinforced_edge_ids.insert(edge.id.clone()) {
-                                        edge.reinforce();
-                                        let _ = lineage.store_edge(&user_id, &edge);
-                                    }
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            for mut edge in edges {
+                                if reinforced_edge_ids.insert(edge.id.clone()) {
+                                    edge.reinforce();
+                                    let _ = lineage.store_edge(&user_id, &edge);
                                 }
                             }
                         }
@@ -1661,16 +1662,17 @@ pub async fn proactive_context(
                         for edges in [
                             lineage.get_edges_from(&user_id, memory_id),
                             lineage.get_edges_to(&user_id, memory_id),
-                        ] {
-                            if let Ok(edges) = edges {
-                                for mut edge in edges {
-                                    if reinforced_edge_ids.insert(edge.id.clone()) {
-                                        let should_prune = edge.weaken();
-                                        if should_prune {
-                                            let _ = lineage.delete_edge(&user_id, &edge.id);
-                                        } else {
-                                            let _ = lineage.store_edge(&user_id, &edge);
-                                        }
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            for mut edge in edges {
+                                if reinforced_edge_ids.insert(edge.id.clone()) {
+                                    let should_prune = edge.weaken();
+                                    if should_prune {
+                                        let _ = lineage.delete_edge(&user_id, &edge.id);
+                                    } else {
+                                        let _ = lineage.store_edge(&user_id, &edge);
                                     }
                                 }
                             }

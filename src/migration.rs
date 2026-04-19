@@ -340,7 +340,7 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
         let (key, value) = item?;
 
         total_processed += 1;
-        if total_processed % 1000 == 0 {
+        if total_processed.is_multiple_of(1000) {
             eprintln!("  ... processed {total_processed} records");
         }
 

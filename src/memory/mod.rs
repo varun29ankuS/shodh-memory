@@ -1112,7 +1112,7 @@ impl MemorySystem {
                 .experience
                 .entities
                 .iter()
-                .zip(entity_embeddings.into_iter())
+                .zip(entity_embeddings)
                 .map(|(entity_name, embedding)| {
                     let (label, salience) = resolve_entity_label(entity_name, &ner_lookup);
                     crate::graph_memory::EntityNode {
@@ -1921,6 +1921,7 @@ impl MemorySystem {
             query.retrieval_mode,
             RetrievalMode::Hybrid | RetrievalMode::Associative | RetrievalMode::Causal
         );
+        #[allow(clippy::type_complexity)]
         let (
             graph_results,
             graph_density,
@@ -2066,7 +2067,7 @@ impl MemorySystem {
                                             let mid = MemoryId(ep.uuid);
                                             if episode_candidates
                                                 .as_ref()
-                                                .map_or(true, |c| c.contains(&mid))
+                                                .is_none_or(|c| c.contains(&mid))
                                             {
                                                 ids.push((
                                                     mid,
@@ -2125,9 +2126,7 @@ impl MemorySystem {
                                 eps.truncate(50);
                                 for ep in eps {
                                     let mid = MemoryId(ep.uuid);
-                                    if episode_candidates
-                                        .as_ref()
-                                        .map_or(true, |c| c.contains(&mid))
+                                    if episode_candidates.as_ref().is_none_or(|c| c.contains(&mid))
                                     {
                                         ids.push((
                                             mid,
@@ -3237,7 +3236,7 @@ impl MemorySystem {
                 }
 
                 // Clean up interference records
-                self.cleanup_interference_for_ids(&[memory_id.clone()]);
+                self.cleanup_interference_for_ids(std::slice::from_ref(&memory_id));
 
                 // Update stats - decrement each tier count that had this memory
                 if deleted_from_any {
@@ -4703,27 +4702,23 @@ impl MemorySystem {
                 "facts_embedding:",
             ] {
                 let iter = db.prefix_iterator(prefix.as_bytes());
-                for item in iter {
-                    if let Ok((key, _)) = item {
-                        if !key.starts_with(prefix.as_bytes()) {
-                            break;
-                        }
-                        batch.delete(&key);
-                        if *prefix == "facts:" {
-                            facts_deleted += 1;
-                        }
+                for (key, _) in iter.flatten() {
+                    if !key.starts_with(prefix.as_bytes()) {
+                        break;
+                    }
+                    batch.delete(&key);
+                    if *prefix == "facts:" {
+                        facts_deleted += 1;
                     }
                 }
             }
             // Clear temporal facts
             let iter = db.prefix_iterator(b"temporal_facts:");
-            for item in iter {
-                if let Ok((key, _)) = item {
-                    if !key.starts_with(b"temporal_facts:") {
-                        break;
-                    }
-                    batch.delete(&key);
+            for (key, _) in iter.flatten() {
+                if !key.starts_with(b"temporal_facts:") {
+                    break;
                 }
+                batch.delete(&key);
             }
             if facts_deleted > 0 || !batch.is_empty() {
                 if let Err(e) = db.write(batch) {
@@ -5039,10 +5034,8 @@ impl MemorySystem {
 
         let mut orphaned_ids = Vec::new();
         for memory in &all_memories {
-            if !indexed_ids.contains(&memory.id) {
-                if orphaned_ids.len() < 100 {
-                    orphaned_ids.push(memory.id.clone());
-                }
+            if !indexed_ids.contains(&memory.id) && orphaned_ids.len() < 100 {
+                orphaned_ids.push(memory.id.clone());
             }
         }
 
@@ -5264,7 +5257,7 @@ impl MemorySystem {
 
         let mut stats = ReinforcementStats {
             memories_processed: memory_ids.len(),
-            outcome: outcome.clone(),
+            outcome,
             ..Default::default()
         };
 
@@ -5872,7 +5865,7 @@ impl MemorySystem {
                     .experience
                     .entities
                     .iter()
-                    .zip(entity_embeddings.into_iter())
+                    .zip(entity_embeddings)
                     .map(|(entity_name, embedding)| {
                         let (label, salience) = resolve_entity_label(entity_name, &ner_lookup);
                         crate::graph_memory::EntityNode {
@@ -6682,7 +6675,7 @@ impl MemorySystem {
         }
 
         // Sort by timestamp
-        all_events.sort_by(|a, b| a.timestamp().cmp(&b.timestamp()));
+        all_events.sort_by_key(|a| a.timestamp());
 
         // Generate report from combined events
         let report =
@@ -7094,10 +7087,8 @@ impl MemorySystem {
         let total = all_facts.len();
         let mut deleted = 0;
         for fact in &all_facts {
-            if predicate(fact) {
-                if self.fact_store.delete(user_id, &fact.id)? {
-                    deleted += 1;
-                }
+            if predicate(fact) && self.fact_store.delete(user_id, &fact.id)? {
+                deleted += 1;
             }
         }
         Ok((deleted, total))
@@ -7320,9 +7311,10 @@ impl MemorySystem {
     }
 }
 
-/// Automatic persistence on drop - ensures vector index and ID mappings survive restarts
-///
-/// This is CRITICAL for local memory: when the system shuts down (gracefully or via drop),
+// Automatic persistence on drop - ensures vector index and ID mappings survive restarts
+//
+// This is CRITICAL for local memory: when the system shuts down (gracefully or via drop),
+
 // =============================================================================
 // Fact Narrative Helpers (private, used by MemorySystem::build_fact_narratives)
 // =============================================================================

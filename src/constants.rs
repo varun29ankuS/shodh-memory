@@ -602,6 +602,7 @@ pub const FACT_DECAY_HALF_LIFE_PER_SUPPORT_DAYS: f64 = 30.0;
 /// - MiniLM-L6-v2 cosine > 0.80 indicates near-paraphrase for short factual statements
 /// - Below 0.80 risks merging topically related but semantically distinct facts
 /// - Combined with entity + polarity gates for high precision
+///
 /// Reference: Reimers & Gurevych 2019 (Sentence-BERT)
 pub const FACT_DEDUP_COSINE_THRESHOLD: f32 = 0.80;
 

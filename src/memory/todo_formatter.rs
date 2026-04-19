@@ -72,7 +72,7 @@ pub fn format_todo_line(todo: &Todo, project_name: Option<&str>, show_meta: bool
 /// Format due date relative to now
 pub fn format_due_date(due: &DateTime<Utc>) -> String {
     let now = Utc::now();
-    let diff_secs = (due.timestamp() - now.timestamp()) as i64;
+    let diff_secs = due.timestamp() - now.timestamp();
     let diff_hours = diff_secs / 3600;
     let diff_days = diff_secs / 86400;
 
@@ -299,17 +299,17 @@ pub fn format_todo_created(todo: &Todo, project_name: Option<&str>) -> String {
 pub fn format_todo_completed(todo: &Todo, next: Option<&Todo>) -> String {
     let duration = todo
         .completed_at
-        .and_then(|completed| {
+        .map(|completed| {
             let created = todo.created_at;
             let diff = completed - created;
             let hours = diff.num_hours();
             let mins = diff.num_minutes() % 60;
             if hours > 0 {
-                Some(format!("{}h {}m", hours, mins))
+                format!("{}h {}m", hours, mins)
             } else if mins > 0 {
-                Some(format!("{}m", mins))
+                format!("{}m", mins)
             } else {
-                Some("< 1m".to_string())
+                "< 1m".to_string()
             }
         })
         .unwrap_or_default();

@@ -379,8 +379,8 @@ unsafe fn l2_norm_squared_avx2_inline(a: &[f32]) -> f32 {
         + sum_array[6]
         + sum_array[7];
 
-    for j in simd_len..len {
-        result += a[j] * a[j];
+    for val in &a[simd_len..] {
+        result += val * val;
     }
 
     result
@@ -423,8 +423,8 @@ fn l2_norm_squared_scalar_inline(a: &[f32]) -> f32 {
         i += 4;
     }
 
-    for j in unroll_len..len {
-        sum += a[j] * a[j];
+    for val in &a[unroll_len..] {
+        sum += val * val;
     }
 
     sum

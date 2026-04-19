@@ -109,19 +109,15 @@ pub fn content_hash(content: &str) -> u64 {
 /// Stream processing modes - determines extraction behavior
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum StreamMode {
     /// Agent-user dialogue - extract semantic concepts, entities, decisions
+    #[default]
     Conversation,
     /// IoT/robotics sensor data - aggregate readings, detect anomalies
     Sensor,
     /// Discrete system events - logs, errors, state changes
     Event,
-}
-
-impl Default for StreamMode {
-    fn default() -> Self {
-        StreamMode::Conversation
-    }
 }
 
 /// Configuration for automatic memory extraction from streams

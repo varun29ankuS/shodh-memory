@@ -422,14 +422,14 @@ impl SemanticFactStore {
                         }
 
                         // Passed all gates — rank by cosine
-                        if best_match.as_ref().map_or(true, |(s, _)| cosine > *s) {
+                        if best_match.as_ref().is_none_or(|(s, _)| cosine > *s) {
                             best_match = Some((cosine, fact));
                         }
                     }
                     _ => {
                         // No stored embedding — fall back to Jaccard-only for this candidate
                         if jaccard >= FACT_DEDUP_JACCARD_FALLBACK
-                            && best_match.as_ref().map_or(true, |(s, _)| jaccard > *s)
+                            && best_match.as_ref().is_none_or(|(s, _)| jaccard > *s)
                         {
                             best_match = Some((jaccard, fact));
                         }
