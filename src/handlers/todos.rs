@@ -972,14 +972,30 @@ pub async fn create_todo(
         {
             todo.embedding = Some(embedding.clone());
 
-            if let Ok(vector_id) =
-                state
-                    .todo_store
-                    .index_todo_embedding(&req.user_id, &todo.id, &embedding)
+            match state
+                .todo_store
+                .index_todo_embedding(&req.user_id, &todo.id, &embedding)
             {
-                let _ = state
-                    .todo_store
-                    .store_vector_id_mapping(&req.user_id, vector_id, &todo.id);
+                Ok(vector_id) => {
+                    if let Err(e) =
+                        state
+                            .todo_store
+                            .store_vector_id_mapping(&req.user_id, vector_id, &todo.id)
+                    {
+                        tracing::warn!(
+                            todo_id = %todo.id,
+                            error = %e,
+                            "Failed to store vector ID mapping — todo will not be findable via semantic search"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        todo_id = %todo.id,
+                        error = %e,
+                        "Failed to index todo embedding — todo will not be findable via semantic search"
+                    );
+                }
             }
         }
     }
