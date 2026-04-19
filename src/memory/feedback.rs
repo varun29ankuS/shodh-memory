@@ -1487,6 +1487,7 @@ pub struct PreviousContext {
 }
 
 /// Persistent store for feedback momentum with in-memory cache
+#[derive(Default)]
 pub struct FeedbackStore {
     /// In-memory cache: memory_id -> FeedbackMomentum
     pub momentum: HashMap<MemoryId, FeedbackMomentum>,
@@ -1523,19 +1524,6 @@ impl std::fmt::Debug for FeedbackStore {
     }
 }
 
-impl Default for FeedbackStore {
-    fn default() -> Self {
-        Self {
-            momentum: HashMap::new(),
-            pending: HashMap::new(),
-            windows: HashMap::new(),
-            previous_context: HashMap::new(),
-            db: None,
-            dirty: HashSet::new(),
-        }
-    }
-}
-
 impl FeedbackStore {
     /// Create in-memory only store (no persistence)
     pub fn new() -> Self {
@@ -1561,33 +1549,29 @@ impl FeedbackStore {
         // Load all momentum entries from the feedback CF
         let mut momentum = HashMap::new();
         let iter = db.prefix_iterator_cf(cf, b"momentum:");
-        for item in iter {
-            if let Ok((key, value)) = item {
-                if let Ok(key_str) = std::str::from_utf8(&key) {
-                    if !key_str.starts_with("momentum:") {
-                        break;
-                    }
-                    if let Ok(m) = serde_json::from_slice::<FeedbackMomentum>(&value) {
-                        momentum.insert(m.memory_id.clone(), m);
-                    }
+        for (key, value) in iter.flatten() {
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                if !key_str.starts_with("momentum:") {
+                    break;
+                }
+                if let Ok(m) = serde_json::from_slice::<FeedbackMomentum>(&value) {
+                    momentum.insert(m.memory_id.clone(), m);
                 }
             }
         }
 
         let mut pending = HashMap::new();
         let iter = db.prefix_iterator_cf(cf, b"pending:");
-        for item in iter {
-            if let Ok((key, value)) = item {
-                if let Ok(key_str) = std::str::from_utf8(&key) {
-                    if !key_str.starts_with("pending:") {
-                        break;
-                    }
-                    if let Ok(p) = serde_json::from_slice::<PendingFeedback>(&value) {
-                        if !p.is_expired() {
-                            pending.insert(p.user_id.clone(), p);
-                        } else {
-                            let _ = db.delete_cf(cf, key_str.as_bytes());
-                        }
+        for (key, value) in iter.flatten() {
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                if !key_str.starts_with("pending:") {
+                    break;
+                }
+                if let Ok(p) = serde_json::from_slice::<PendingFeedback>(&value) {
+                    if !p.is_expired() {
+                        pending.insert(p.user_id.clone(), p);
+                    } else {
+                        let _ = db.delete_cf(cf, key_str.as_bytes());
                     }
                 }
             }
@@ -1595,16 +1579,14 @@ impl FeedbackStore {
 
         let mut previous_context = HashMap::new();
         let iter = db.prefix_iterator_cf(cf, b"prev_ctx:");
-        for item in iter {
-            if let Ok((key, value)) = item {
-                if let Ok(key_str) = std::str::from_utf8(&key) {
-                    if !key_str.starts_with("prev_ctx:") {
-                        break;
-                    }
-                    if let Ok(ctx) = serde_json::from_slice::<PreviousContext>(&value) {
-                        let user_id = key_str.strip_prefix("prev_ctx:").unwrap_or("");
-                        previous_context.insert(user_id.to_string(), ctx);
-                    }
+        for (key, value) in iter.flatten() {
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                if !key_str.starts_with("prev_ctx:") {
+                    break;
+                }
+                if let Ok(ctx) = serde_json::from_slice::<PreviousContext>(&value) {
+                    let user_id = key_str.strip_prefix("prev_ctx:").unwrap_or("");
+                    previous_context.insert(user_id.to_string(), ctx);
                 }
             }
         }
@@ -1612,18 +1594,16 @@ impl FeedbackStore {
         // Load feedback windows (discard stale ones older than 2 hours)
         let mut windows = HashMap::new();
         let iter = db.prefix_iterator_cf(cf, b"window:");
-        for item in iter {
-            if let Ok((key, value)) = item {
-                if let Ok(key_str) = std::str::from_utf8(&key) {
-                    if !key_str.starts_with("window:") {
-                        break;
-                    }
-                    if let Ok(w) = serde_json::from_slice::<FeedbackWindow>(&value) {
-                        if !w.is_expired() {
-                            windows.insert(w.user_id.clone(), w);
-                        } else {
-                            let _ = db.delete_cf(cf, key_str.as_bytes());
-                        }
+        for (key, value) in iter.flatten() {
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                if !key_str.starts_with("window:") {
+                    break;
+                }
+                if let Ok(w) = serde_json::from_slice::<FeedbackWindow>(&value) {
+                    if !w.is_expired() {
+                        windows.insert(w.user_id.clone(), w);
+                    } else {
+                        let _ = db.delete_cf(cf, key_str.as_bytes());
                     }
                 }
             }
@@ -1665,12 +1645,13 @@ impl FeedbackStore {
                 let mut batch = WriteBatch::default();
                 let mut count = 0usize;
                 for item in old_db.iterator(IteratorMode::Start) {
-                    if let Ok((key, value)) = item {
-                        batch.put_cf(cf, &key, &value);
-                        count += 1;
-                        if count % 10_000 == 0 {
-                            db.write(std::mem::take(&mut batch))?;
-                        }
+                    let (key, value) = item.map_err(|e| {
+                        anyhow::anyhow!("RocksDB iterator error during feedback migration: {e}")
+                    })?;
+                    batch.put_cf(cf, &key, &value);
+                    count += 1;
+                    if count.is_multiple_of(10_000) {
+                        db.write(std::mem::take(&mut batch))?;
                     }
                 }
                 if !batch.is_empty() {
@@ -1718,15 +1699,13 @@ impl FeedbackStore {
         // Load all momentum entries from the feedback CF
         let mut momentum = HashMap::new();
         let iter = db.prefix_iterator_cf(cf, b"momentum:");
-        for item in iter {
-            if let Ok((key, value)) = item {
-                if let Ok(key_str) = std::str::from_utf8(&key) {
-                    if !key_str.starts_with("momentum:") {
-                        break;
-                    }
-                    if let Ok(m) = serde_json::from_slice::<FeedbackMomentum>(&value) {
-                        momentum.insert(m.memory_id.clone(), m);
-                    }
+        for (key, value) in iter.flatten() {
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                if !key_str.starts_with("momentum:") {
+                    break;
+                }
+                if let Ok(m) = serde_json::from_slice::<FeedbackMomentum>(&value) {
+                    momentum.insert(m.memory_id.clone(), m);
                 }
             }
         }
@@ -1734,19 +1713,16 @@ impl FeedbackStore {
         // Also load pending feedback entries (filter expired ones)
         let mut pending = HashMap::new();
         let iter = db.prefix_iterator_cf(cf, b"pending:");
-        for item in iter {
-            if let Ok((key, value)) = item {
-                if let Ok(key_str) = std::str::from_utf8(&key) {
-                    if !key_str.starts_with("pending:") {
-                        break;
-                    }
-                    if let Ok(p) = serde_json::from_slice::<PendingFeedback>(&value) {
-                        if !p.is_expired() {
-                            pending.insert(p.user_id.clone(), p);
-                        } else {
-                            // Clean up expired pending feedback from disk
-                            let _ = db.delete_cf(cf, key_str.as_bytes());
-                        }
+        for (key, value) in iter.flatten() {
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                if !key_str.starts_with("pending:") {
+                    break;
+                }
+                if let Ok(p) = serde_json::from_slice::<PendingFeedback>(&value) {
+                    if !p.is_expired() {
+                        pending.insert(p.user_id.clone(), p);
+                    } else {
+                        let _ = db.delete_cf(cf, key_str.as_bytes());
                     }
                 }
             }
@@ -1755,16 +1731,14 @@ impl FeedbackStore {
         // Load previous context entries
         let mut previous_context = HashMap::new();
         let iter = db.prefix_iterator_cf(cf, b"prev_ctx:");
-        for item in iter {
-            if let Ok((key, value)) = item {
-                if let Ok(key_str) = std::str::from_utf8(&key) {
-                    if !key_str.starts_with("prev_ctx:") {
-                        break;
-                    }
-                    if let Ok(ctx) = serde_json::from_slice::<PreviousContext>(&value) {
-                        let user_id = key_str.strip_prefix("prev_ctx:").unwrap_or("");
-                        previous_context.insert(user_id.to_string(), ctx);
-                    }
+        for (key, value) in iter.flatten() {
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                if !key_str.starts_with("prev_ctx:") {
+                    break;
+                }
+                if let Ok(ctx) = serde_json::from_slice::<PreviousContext>(&value) {
+                    let user_id = key_str.strip_prefix("prev_ctx:").unwrap_or("");
+                    previous_context.insert(user_id.to_string(), ctx);
                 }
             }
         }

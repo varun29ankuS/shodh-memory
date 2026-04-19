@@ -368,7 +368,7 @@ impl MiniLMEmbedder {
                 |downloaded, total| {
                     if total > 0 {
                         let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
-                        if percent % 10 == 0 {
+                        if percent.is_multiple_of(10) {
                             tracing::info!(
                                 "Downloading models: {}% ({}/{})",
                                 percent,

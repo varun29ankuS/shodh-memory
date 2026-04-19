@@ -103,6 +103,7 @@ pub enum VectorIndexBackend {
 impl VectorIndexBackend {
     /// Create backend with auto-selection based on expected vector count
     pub fn auto(config: BackendConfig, expected_vectors: usize) -> Result<Self> {
+        #[allow(clippy::unnecessary_lazy_evaluations)] // Intentionally lazy: default depends on expected_vectors
         let backend_type = config.force_backend.unwrap_or_else(|| {
             if expected_vectors >= SPANN_AUTO_THRESHOLD {
                 BackendType::Spann

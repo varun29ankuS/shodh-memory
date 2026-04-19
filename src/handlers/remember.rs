@@ -303,6 +303,7 @@ pub fn parse_source_type(s: Option<&String>) -> SourceType {
 }
 
 /// Build RichContext from request fields
+#[allow(clippy::too_many_arguments)]
 pub fn build_rich_context(
     emotional_valence: Option<f32>,
     emotional_arousal: Option<f32>,

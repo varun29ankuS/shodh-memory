@@ -94,12 +94,13 @@ impl FileMemoryStore {
                     let mut batch = WriteBatch::default();
                     let mut count = 0usize;
                     for item in old_db.iterator(rocksdb::IteratorMode::Start) {
-                        if let Ok((key, value)) = item {
-                            batch.put_cf(cf, &key, &value);
-                            count += 1;
-                            if count % 10_000 == 0 {
-                                db.write(std::mem::take(&mut batch))?;
-                            }
+                        let (key, value) = item.map_err(|e| {
+                            anyhow::anyhow!("RocksDB iterator error during files migration: {e}")
+                        })?;
+                        batch.put_cf(cf, &key, &value);
+                        count += 1;
+                        if count.is_multiple_of(10_000) {
+                            db.write(std::mem::take(&mut batch))?;
                         }
                     }
                     if !batch.is_empty() {
@@ -889,19 +890,19 @@ impl FileMemoryStore {
 
         if line.starts_with("fn ") {
             let rest = line.strip_prefix("fn ")?;
-            let name = rest.split(|c| c == '(' || c == '<').next()?;
+            let name = rest.split(['(', '<']).next()?;
             Some(name.trim().to_string())
         } else if line.starts_with("struct ") {
             let rest = line.strip_prefix("struct ")?;
-            let name = rest.split(|c| c == '{' || c == '<' || c == '(').next()?;
+            let name = rest.split(['{', '<', '(']).next()?;
             Some(name.trim().to_string())
         } else if line.starts_with("enum ") {
             let rest = line.strip_prefix("enum ")?;
-            let name = rest.split(|c| c == '{' || c == '<').next()?;
+            let name = rest.split(['{', '<']).next()?;
             Some(name.trim().to_string())
         } else if line.starts_with("trait ") {
             let rest = line.strip_prefix("trait ")?;
-            let name = rest.split(|c| c == '{' || c == '<' || c == ':').next()?;
+            let name = rest.split(['{', '<', ':']).next()?;
             Some(name.trim().to_string())
         } else if line.starts_with("impl ") {
             let rest = line.strip_prefix("impl ")?;
@@ -926,15 +927,15 @@ impl FileMemoryStore {
             Some(name.trim().to_string())
         } else if line.starts_with("class ") {
             let rest = line.strip_prefix("class ")?;
-            let name = rest.split(|c| c == '{' || c == ' ').next()?;
+            let name = rest.split(['{', ' ']).next()?;
             Some(name.trim().to_string())
         } else if line.starts_with("interface ") {
             let rest = line.strip_prefix("interface ")?;
-            let name = rest.split(|c| c == '{' || c == ' ' || c == '<').next()?;
+            let name = rest.split(['{', ' ', '<']).next()?;
             Some(name.trim().to_string())
         } else if line.starts_with("const ") {
             let rest = line.strip_prefix("const ")?;
-            let name = rest.split(|c| c == '=' || c == ':').next()?;
+            let name = rest.split(['=', ':']).next()?;
             Some(name.trim().to_string())
         } else {
             None
@@ -952,7 +953,7 @@ impl FileMemoryStore {
             Some(name.trim().to_string())
         } else if line.starts_with("class ") {
             let rest = line.strip_prefix("class ")?;
-            let name = rest.split(|c| c == '(' || c == ':').next()?;
+            let name = rest.split(['(', ':']).next()?;
             Some(name.trim().to_string())
         } else {
             None

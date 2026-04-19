@@ -343,7 +343,7 @@ impl VamanaIndex {
             }
 
             // SAFETY CHECK: Verify size is properly aligned for f32 (4-byte alignment)
-            if file_size % std::mem::align_of::<f32>() != 0 {
+            if !file_size.is_multiple_of(std::mem::align_of::<f32>()) {
                 anyhow::bail!(
                     "File size {} is not aligned to f32 alignment ({})",
                     file_size,
@@ -978,7 +978,7 @@ impl VamanaIndex {
         let inserts = self
             .incremental_inserts
             .load(std::sync::atomic::Ordering::Relaxed);
-        inserts >= REPAIR_THRESHOLD && inserts < REBUILD_THRESHOLD
+        (REPAIR_THRESHOLD..REBUILD_THRESHOLD).contains(&inserts)
     }
 
     /// Perform incremental repair on recently inserted nodes

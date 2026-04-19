@@ -244,7 +244,7 @@ pub fn extract_temporal_refs(text: &str) -> TemporalExtraction {
     // Helper to validate date is in reasonable range (1900-2100)
     let is_valid_date = |date: &NaiveDate| -> bool {
         let year = date.year();
-        year >= 1900 && year <= 2100
+        (1900..=2100).contains(&year)
     };
 
     // Try dateparser on the full text (returns Result, never panics)
@@ -1044,7 +1044,7 @@ pub fn detect_attribute_query(query: &str) -> Option<AttributeQuery> {
                 if let Some(pos) = after_is.find(status) {
                     let entity = after_is[..pos].trim().to_string();
                     if !entity.is_empty()
-                        && entity.chars().next().map_or(false, |c| c.is_alphabetic())
+                        && entity.chars().next().is_some_and(|c| c.is_alphabetic())
                     {
                         return Some(AttributeQuery {
                             entity: capitalize_first(&entity),
@@ -1156,10 +1156,7 @@ fn extract_entity_after_verb(query: &str) -> Option<String> {
 
 /// Normalize an attribute name (e.g., "relationship status" → "relationship_status")
 fn normalize_attribute(attr: &str) -> String {
-    attr.trim()
-        .to_lowercase()
-        .replace(' ', "_")
-        .replace('-', "_")
+    attr.trim().to_lowercase().replace([' ', '-'], "_")
 }
 
 /// Get synonyms for common attributes
@@ -2117,7 +2114,7 @@ pub struct Relation {
 /// - Needle: Looking for specific facts → favor BM25/Vector (high precision)
 /// - Exploratory: Seeking related concepts → favor Graph (high recall)
 /// - Hybrid: Balanced query → use all retrieval methods equally
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QueryIntent {
     /// Needle query: Seeking specific information
     /// Examples: "What is John's email?", "When did we deploy v2.0?"
@@ -2132,13 +2129,8 @@ pub enum QueryIntent {
     /// Hybrid query: Balanced between specific and exploratory
     /// Examples: "How does authentication work?", "What are the deployment options?"
     /// Strategy: Balanced weights for all retrieval methods
+    #[default]
     Hybrid,
-}
-
-impl Default for QueryIntent {
-    fn default() -> Self {
-        QueryIntent::Hybrid
-    }
 }
 
 /// Complete linguistic analysis of a query

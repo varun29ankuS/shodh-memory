@@ -217,6 +217,7 @@ impl SpannHeader {
         }
     }
 
+    #[allow(clippy::wrong_self_convention)] // &self avoids copying 128-byte header struct
     fn to_bytes(&self) -> [u8; HEADER_SIZE] {
         let mut bytes = [0u8; HEADER_SIZE];
         let mut offset = 0;
@@ -500,8 +501,8 @@ impl SpannIndex {
 
             for c in 0..k {
                 if counts[c] > 0 {
-                    for j in 0..dim {
-                        new_centroids[c][j] /= counts[c] as f32;
+                    for elem in new_centroids[c].iter_mut().take(dim) {
+                        *elem /= counts[c] as f32;
                     }
                     centroids[c] = new_centroids[c].clone();
                 }

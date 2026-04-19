@@ -1223,6 +1223,7 @@ pub struct GraphMemory {
     /// Maps entity UUID → embedding vector. Loaded on startup, updated on add.
     /// Used when string-based dedup (exact/case/stemmed) fails — catches synonyms
     /// like "authentication" ↔ "auth" via cosine similarity.
+    #[allow(clippy::type_complexity)]
     entity_embedding_cache: Arc<parking_lot::RwLock<Vec<(Uuid, Vec<f32>)>>>,
 
     /// Edges found below prune threshold during lazy-decay reads.
@@ -1453,7 +1454,7 @@ impl GraphMemory {
                                 batch.put_cf(cf, &key, &value);
                                 count += 1;
                                 // Flush in chunks to limit memory usage
-                                if count % 10_000 == 0 {
+                                if count.is_multiple_of(10_000) {
                                     db.write(std::mem::take(&mut batch))?;
                                     batch = WriteBatch::default();
                                 }
@@ -1706,10 +1707,10 @@ impl GraphMemory {
                 let mut best_match: Option<(Uuid, f32)> = None;
                 for (uuid, existing_emb) in cache.iter() {
                     let sim = crate::similarity::cosine_similarity(new_emb, existing_emb);
-                    if sim >= ENTITY_CONCEPT_MERGE_THRESHOLD {
-                        if best_match.map_or(true, |(_, best_sim)| sim > best_sim) {
-                            best_match = Some((*uuid, sim));
-                        }
+                    if sim >= ENTITY_CONCEPT_MERGE_THRESHOLD
+                        && best_match.is_none_or(|(_, best_sim)| sim > best_sim)
+                    {
+                        best_match = Some((*uuid, sim));
                     }
                 }
                 if let Some((matched_uuid, sim)) = best_match {
@@ -3704,7 +3705,7 @@ impl GraphMemory {
                     let _ = edge.strengthen();
                     match crate::serialization::encode(&edge) {
                         Ok(encoded) => {
-                            batch.put_cf(self.relationships_cf(), &keys[i], encoded);
+                            batch.put_cf(self.relationships_cf(), keys[i], encoded);
                             strengthened += 1;
                         }
                         Err(e) => {
@@ -4982,7 +4983,7 @@ impl GraphMemory {
                     }
 
                     if let Ok(encoded) = crate::serialization::encode(&entity) {
-                        batch.put_cf(self.entities_cf(), &keys[i], encoded);
+                        batch.put_cf(self.entities_cf(), keys[i], encoded);
                         adjusted += 1;
                     }
                 }

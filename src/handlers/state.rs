@@ -548,7 +548,7 @@ impl MultiUserMemoryManagerRotationHelper {
                 batch.delete_cf(audit, &key);
                 removed_count += 1;
 
-                if removed_count % BATCH_FLUSH_SIZE == 0 {
+                if removed_count.is_multiple_of(BATCH_FLUSH_SIZE) {
                     self.shared_db
                         .write(std::mem::take(&mut batch))
                         .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
@@ -560,7 +560,7 @@ impl MultiUserMemoryManagerRotationHelper {
         }
 
         // Flush remaining
-        if removed_count % BATCH_FLUSH_SIZE != 0 {
+        if !removed_count.is_multiple_of(BATCH_FLUSH_SIZE) {
             self.shared_db
                 .write(batch)
                 .map_err(|e| anyhow::anyhow!("Failed to write rotation batch: {e}"))?;
@@ -729,7 +729,7 @@ impl MultiUserMemoryManager {
             match download_ner_models(Some(std::sync::Arc::new(|downloaded, total| {
                 if total > 0 {
                     let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
-                    if percent % 20 == 0 {
+                    if percent.is_multiple_of(20) {
                         tracing::info!("NER model download: {}%", percent);
                     }
                 }
@@ -1082,7 +1082,7 @@ impl MultiUserMemoryManager {
             batch.put_cf(audit_cf, &key, &value);
             count += 1;
 
-            if count % BATCH_SIZE == 0 {
+            if count.is_multiple_of(BATCH_SIZE) {
                 shared_db
                     .write(std::mem::take(&mut batch))
                     .map_err(|e| anyhow::anyhow!("audit migration batch write error: {e}"))?;
@@ -1090,7 +1090,7 @@ impl MultiUserMemoryManager {
             }
         }
 
-        if count % BATCH_SIZE != 0 {
+        if !count.is_multiple_of(BATCH_SIZE) {
             shared_db
                 .write(batch)
                 .map_err(|e| anyhow::anyhow!("audit migration final batch error: {e}"))?;
@@ -1164,7 +1164,7 @@ impl MultiUserMemoryManager {
             .audit_log_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        if count % self.server_config.audit_rotation_check_interval == 0 && count > 0 {
+        if count.is_multiple_of(self.server_config.audit_rotation_check_interval) && count > 0 {
             let shared_db = self.shared_db.clone();
             let audit_logs = self.audit_logs.clone();
             let user_id_clone = user_id.to_string();
@@ -1903,7 +1903,7 @@ impl MultiUserMemoryManager {
         // Heavy cycle every 6th iteration (6 hours at 3600s intervals).
         // Heavy cycles run replay, entity-entity strengthening, fact extraction (full memory scan),
         // and flush databases (triggers compaction). Light cycles only touch in-memory data.
-        let is_heavy = cycle % 6 == 0;
+        let is_heavy = cycle.is_multiple_of(6);
 
         if is_heavy {
             tracing::info!(

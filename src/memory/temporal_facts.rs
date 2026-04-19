@@ -216,7 +216,7 @@ impl TemporalFactStore {
                 // Check if any event stem matches
                 let has_event_match = f.event_stems.iter().any(|s| event_stems.contains(s));
                 // Check event type if specified
-                let type_matches = event_type.map_or(true, |t| f.event_type == t);
+                let type_matches = event_type.is_none_or(|t| f.event_type == t);
                 has_event_match && type_matches
             })
             .collect();
@@ -309,7 +309,7 @@ pub fn extract_temporal_facts(
 
     // Split into sentences
     let sentences: Vec<&str> = content
-        .split(|c| c == '.' || c == '!' || c == '?')
+        .split(['.', '!', '?'])
         .filter(|s| !s.trim().is_empty())
         .collect();
 
@@ -542,7 +542,7 @@ fn extract_event_and_time(sentence: &str, patterns: &[&str]) -> (String, String)
     let _matched_pattern = patterns
         .iter()
         .find(|p| sentence_lower.contains(*p))
-        .map(|s| *s)
+        .copied()
         .unwrap_or("");
 
     // Extract time expression

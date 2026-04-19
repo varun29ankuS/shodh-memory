@@ -41,7 +41,7 @@ impl PQConfig {
         let num_subvectors = dimension / subvec_dim;
 
         assert!(
-            dimension % subvec_dim == 0,
+            dimension.is_multiple_of(subvec_dim),
             "Dimension {} must be divisible by subvec_dim {}",
             dimension,
             subvec_dim
@@ -204,8 +204,8 @@ impl ProductQuantizer {
             // Average and handle empty clusters
             for c in 0..k {
                 if counts[c] > 0 {
-                    for j in 0..dim {
-                        new_centroids[c][j] /= counts[c] as f32;
+                    for elem in new_centroids[c].iter_mut().take(dim) {
+                        *elem /= counts[c] as f32;
                     }
                     centroids[c] = new_centroids[c].clone();
                 }

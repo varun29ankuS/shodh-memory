@@ -547,17 +547,6 @@ pub enum RelationshipType {
     Opposite,  // Antonym/opposite
 }
 
-/// Raw experience data to be stored (ENHANCED with smart defaults)
-///
-/// Only `content` is required. All other fields have intelligent defaults:
-/// - experience_type: Defaults to Observation
-/// - context: Optional (null by default)
-/// - entities: Empty vector (auto-extracted if empty)
-/// - metadata: Empty HashMap
-/// - embeddings: Optional (auto-generated)
-/// - related_memories: Empty vector
-/// - causal_chain: Empty vector
-/// - outcomes: Empty vector
 /// Structured NER entity record preserving type classification and confidence.
 /// Used to carry NER results from handler through to graph insertion
 /// without losing type information (Person, Organization, Location, Misc).
@@ -575,6 +564,17 @@ pub struct NerEntityRecord {
     pub end_char: Option<usize>,
 }
 
+/// Raw experience data to be stored (ENHANCED with smart defaults)
+///
+/// Only `content` is required. All other fields have intelligent defaults:
+/// - experience_type: Defaults to Observation
+/// - context: Optional (null by default)
+/// - entities: Empty vector (auto-extracted if empty)
+/// - metadata: Empty HashMap
+/// - embeddings: Optional (auto-generated)
+/// - related_memories: Empty vector
+/// - causal_chain: Empty vector
+/// - outcomes: Empty vector
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Experience {
     /// Type of experience (defaults to Observation)
@@ -879,9 +879,10 @@ pub struct EntityRef {
 }
 
 /// Memory tier in the cognitive hierarchy
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MemoryTier {
     /// Active, immediate context (Cowan's focus of attention)
+    #[default]
     Working,
     /// Current task/session context
     Session,
@@ -889,12 +890,6 @@ pub enum MemoryTier {
     LongTerm,
     /// Compressed archival storage
     Archive,
-}
-
-impl Default for MemoryTier {
-    fn default() -> Self {
-        MemoryTier::Working
-    }
 }
 
 /// Type of change made to a memory
@@ -1078,6 +1073,7 @@ impl Memory {
     }
 
     /// Create a new memory linked to an external system (enables upsert)
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_external_id(
         id: MemoryId,
         experience: Experience,
@@ -2203,10 +2199,8 @@ impl Query {
         }
 
         // Anomalies only filter
-        if self.anomalies_only {
-            if !memory.experience.is_anomaly {
-                return false;
-            }
+        if self.anomalies_only && !memory.experience.is_anomaly {
+            return false;
         }
 
         // Severity filter
@@ -2963,8 +2957,10 @@ impl ProspectiveTrigger {
 /// Status of a prospective task
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ProspectiveTaskStatus {
     /// Waiting for trigger condition
+    #[default]
     Pending,
     /// Trigger condition met, shown to user
     Triggered,
@@ -2972,12 +2968,6 @@ pub enum ProspectiveTaskStatus {
     Dismissed,
     /// Task expired without being triggered (optional cleanup)
     Expired,
-}
-
-impl Default for ProspectiveTaskStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 /// A prospective memory task (reminder/intention)
@@ -3903,9 +3893,10 @@ impl Default for FileType {
 }
 
 /// How we learned about this file
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum LearnedFrom {
     /// User triggered batch indexing
+    #[default]
     ManualIndex,
     /// AI read the file content
     ReadAccess,
@@ -3913,12 +3904,6 @@ pub enum LearnedFrom {
     EditAccess,
     /// File was mentioned in conversation
     Mentioned,
-}
-
-impl Default for LearnedFrom {
-    fn default() -> Self {
-        LearnedFrom::ManualIndex
-    }
 }
 
 /// Learned knowledge about a file in a codebase
@@ -4003,6 +3988,7 @@ pub struct FileMemory {
 
 impl FileMemory {
     /// Create a new FileMemory from a file path
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         project_id: ProjectId,
         user_id: String,
@@ -4044,12 +4030,15 @@ impl FileMemory {
         self.updated_at = Utc::now();
         // Upgrade the learned_from if more meaningful
         // EditAccess > ReadAccess > Mentioned > ManualIndex
-        let should_upgrade = match (&self.learned_from, &learned_from) {
-            (LearnedFrom::ManualIndex, _) => true,
-            (LearnedFrom::Mentioned, LearnedFrom::ReadAccess | LearnedFrom::EditAccess) => true,
-            (LearnedFrom::ReadAccess, LearnedFrom::EditAccess) => true,
-            _ => false,
-        };
+        let should_upgrade = matches!(
+            (&self.learned_from, &learned_from),
+            (LearnedFrom::ManualIndex, _)
+                | (
+                    LearnedFrom::Mentioned,
+                    LearnedFrom::ReadAccess | LearnedFrom::EditAccess
+                )
+                | (LearnedFrom::ReadAccess, LearnedFrom::EditAccess)
+        );
         if should_upgrade {
             self.learned_from = learned_from;
         }
