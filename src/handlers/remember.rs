@@ -533,6 +533,13 @@ pub async fn remember(
         ];
         validation::validate_local_position(&pos_f64).map_validation_err("local_position")?;
     }
+    if let Some(ref robot_id) = req.robot_id {
+        validation::validate_short_string(robot_id, "robot_id").map_validation_err("robot_id")?;
+    }
+    if let Some(ref mission_id) = req.mission_id {
+        validation::validate_short_string(mission_id, "mission_id")
+            .map_validation_err("mission_id")?;
+    }
     if let Some(ref action_type) = req.action_type {
         validation::validate_short_string(action_type, "action_type")
             .map_validation_err("action_type")?;

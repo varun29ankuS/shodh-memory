@@ -334,6 +334,27 @@ pub async fn recall(
     validation::validate_max_results(req.limit).map_validation_err("limit")?;
     validation::validate_query_text(&req.query).map_validation_err("query")?;
 
+    // Validate robotics string fields
+    if let Some(ref robot_id) = req.robot_id {
+        validation::validate_short_string(robot_id, "robot_id").map_validation_err("robot_id")?;
+    }
+    if let Some(ref mission_id) = req.mission_id {
+        validation::validate_short_string(mission_id, "mission_id")
+            .map_validation_err("mission_id")?;
+    }
+    if let Some(ref action_type) = req.action_type {
+        validation::validate_short_string(action_type, "action_type")
+            .map_validation_err("action_type")?;
+    }
+    if let Some(ref outcome_type) = req.outcome_type {
+        validation::validate_short_string(outcome_type, "outcome_type")
+            .map_validation_err("outcome_type")?;
+    }
+    if let Some(ref terrain_type) = req.terrain_type {
+        validation::validate_short_string(terrain_type, "terrain_type")
+            .map_validation_err("terrain_type")?;
+    }
+
     // Validate reward range
     if let (Some(min), Some(max)) = (req.reward_min, req.reward_max) {
         validation::validate_range(min as f64, max as f64, "reward_range")

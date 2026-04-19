@@ -700,7 +700,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             mode: {
               type: "string",
               enum: ["semantic", "associative", "temporal", "hybrid", "spatial", "mission", "action_outcome"],
-              description: "Retrieval mode: 'semantic' for pure vector similarity, 'associative' for graph-based traversal (follows learned connections), 'temporal' for time-based retrieval, 'hybrid' for density-dependent combination (default), 'spatial' for geo-location based, 'mission' for mission context, 'action_outcome' for reward-based learning",
+              description: "Retrieval mode: 'semantic' for pure vector similarity, 'associative' for graph-based traversal (follows learned connections), 'temporal' for time-based retrieval, 'hybrid' for density-dependent combination (default), 'spatial' for geo-location based (REQUIRES geo_lat, geo_lon, geo_radius_meters), 'mission' for mission context (REQUIRES mission_id), 'action_outcome' for reward-based learning (uses reward_min/reward_max, defaults to positive rewards)",
               default: "hybrid",
             },
             session_id: {
@@ -1667,6 +1667,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (content.length > MAX_CONTENT_LENGTH) {
           return { content: [{ type: "text", text: `Error: 'content' exceeds maximum length of ${MAX_CONTENT_LENGTH} characters` }], isError: true };
         }
+        // Validate robotics fields
+        if (geo_location && geo_location.length !== 3) {
+          return { content: [{ type: "text", text: "Error: 'geo_location' must be exactly [latitude, longitude, altitude]" }], isError: true };
+        }
+        if (local_position && local_position.length !== 3) {
+          return { content: [{ type: "text", text: "Error: 'local_position' must be exactly [x, y, z]" }], isError: true };
+        }
+        if (reward !== undefined && (reward < -1.0 || reward > 1.0)) {
+          return { content: [{ type: "text", text: `Error: 'reward' must be between -1.0 and 1.0, got: ${reward}` }], isError: true };
+        }
+        if (heading !== undefined && (heading < 0 || heading > 360)) {
+          return { content: [{ type: "text", text: `Error: 'heading' must be between 0 and 360 degrees, got: ${heading}` }], isError: true };
+        }
 
         const result = await apiCall<{ id: string }>("/api/remember", "POST", {
           user_id: USER_ID,
@@ -1742,6 +1755,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: "text", text: `Error: 'mode' must be one of: ${validModes.join(", ")}` }], isError: true };
         }
         const limit = Math.max(1, Math.min(Math.floor(rawLimit), MAX_LIMIT));
+
+        // Mode-specific required parameter validation
+        if (mode === "spatial" && (geo_lat === undefined || geo_lon === undefined || geo_radius_meters === undefined)) {
+          return { content: [{ type: "text", text: "Error: 'spatial' mode requires geo_lat, geo_lon, and geo_radius_meters" }], isError: true };
+        }
+        if (mode === "mission" && !mission_id) {
+          return { content: [{ type: "text", text: "Error: 'mission' mode requires mission_id" }], isError: true };
+        }
+        if (reward_min !== undefined && reward_max !== undefined && reward_min > reward_max) {
+          return { content: [{ type: "text", text: `Error: reward_min (${reward_min}) must be <= reward_max (${reward_max})` }], isError: true };
+        }
 
         interface RetrievalStats {
           mode: string;
