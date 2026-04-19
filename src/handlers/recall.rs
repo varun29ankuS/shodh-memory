@@ -1908,7 +1908,13 @@ pub async fn proactive_context(
     let memory_type_filter: Vec<ExperienceType> = req
         .memory_types
         .iter()
-        .map(|s| super::remember::parse_experience_type(Some(s)))
+        .filter_map(|s| match super::remember::parse_experience_type(Some(s)) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!("Ignoring invalid memory_type filter '{}': {}", s, e);
+                None
+            }
+        })
         .collect();
     let memories: Vec<ProactiveSurfacedMemory> = {
         let memory = memory_system.clone();
