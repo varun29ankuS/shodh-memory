@@ -923,15 +923,14 @@ pub async fn create_todo(
     }
 
     if let Some(ref priority_str) = req.priority {
-        todo.priority = TodoPriority::from_str_loose(priority_str).ok_or_else(|| {
-            AppError::InvalidInput {
+        todo.priority =
+            TodoPriority::from_str_loose(priority_str).ok_or_else(|| AppError::InvalidInput {
                 field: "priority".to_string(),
                 reason: format!(
                     "Unknown priority '{}'. Valid values: urgent, high, medium, low, none",
                     priority_str
                 ),
-            }
-        })?;
+            })?;
     }
 
     let mut project_name = None;
@@ -1318,15 +1317,13 @@ pub async fn list_todos(
 
     // Filter by priority
     if let Some(ref priority_str) = req.priority {
-        let target_priority =
-            crate::memory::types::TodoPriority::from_str_loose(priority_str).ok_or_else(|| {
-                AppError::InvalidInput {
-                    field: "priority".to_string(),
-                    reason: format!(
-                        "Unknown priority '{}'. Valid values: urgent, high, medium, low, none",
-                        priority_str
-                    ),
-                }
+        let target_priority = crate::memory::types::TodoPriority::from_str_loose(priority_str)
+            .ok_or_else(|| AppError::InvalidInput {
+                field: "priority".to_string(),
+                reason: format!(
+                    "Unknown priority '{}'. Valid values: urgent, high, medium, low, none",
+                    priority_str
+                ),
             })?;
         todos.retain(|t| t.priority == target_priority);
     }
@@ -1453,15 +1450,14 @@ pub async fn update_todo(
         })?;
     }
     if let Some(ref priority_str) = req.priority {
-        todo.priority = TodoPriority::from_str_loose(priority_str).ok_or_else(|| {
-            AppError::InvalidInput {
+        todo.priority =
+            TodoPriority::from_str_loose(priority_str).ok_or_else(|| AppError::InvalidInput {
                 field: "priority".to_string(),
                 reason: format!(
                     "Unknown priority '{}'. Valid values: urgent, high, medium, low, none",
                     priority_str
                 ),
-            }
-        })?;
+            })?;
     }
     if let Some(ref contexts) = req.contexts {
         todo.contexts = contexts.clone();
