@@ -1080,6 +1080,14 @@ function drawRecallLine(fromX, fromY, toX, toY, label) {
   });
 }
 
+// ── Keyboard shortcuts ─────────────────────────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+  if (document.getElementById('setup').style.display !== 'none') return;
+  if (e.code === 'Space') { e.preventDefault(); storyPlay(); }
+  if (e.code === 'ArrowRight') { e.preventDefault(); storyNext(); }
+  if (e.code === 'KeyR') { e.preventDefault(); clearWarehouse(); storyIdx = -1; storyStop(); }
+});
+
 </script>
 </body>
 </html>
