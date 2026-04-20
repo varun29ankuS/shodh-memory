@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Interactive demo: watch robots share knowledge across missions using shodh-memory's spatial recall and causal lineage.">
+<meta property="og:title" content="Shodh-Memory | Warehouse Robot Demo">
+<meta property="og:description" content="Two robots, one warehouse. Watch cross-mission memory in action.">
+<title>Shodh-Memory | Warehouse Robot Demo</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0a0f; color: #e0e0e0; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+
+/* ═══ TOP BAR ═══ */
+.topbar { display: flex; align-items: center; gap: 16px; padding: 10px 20px; border-bottom: 1px solid #1a1a2a; background: #0d0d14; flex-shrink: 0; }
+.topbar .logo { font-size: 14px; font-weight: 800; letter-spacing: 1px; color: #00ff88; }
+.topbar .sep { width: 1px; height: 20px; background: #2a2a3a; }
+.mission-toggle { display: flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 6px; border: 1px solid #2a2a3a; background: transparent; color: #888; font-size: 11px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+.mission-toggle.active { color: #fff; border-color: var(--mc); }
+.mission-toggle .dot { width: 8px; height: 8px; border-radius: 50%; }
+.controls { display: flex; gap: 6px; margin-left: auto; align-items: center; }
+.ctrl-btn { padding: 5px 14px; border-radius: 5px; border: 1px solid #333; background: transparent; color: #ccc; font-size: 11px; font-weight: 700; cursor: pointer; transition: all 0.15s; }
+.ctrl-btn:hover { border-color: #ff6644; color: #ff6644; }
+.ctrl-btn.play { background: #ff6644; color: #fff; border-color: #ff6644; }
+.ctrl-btn.play:hover { background: #ff4422; }
+.step-label { font-size: 11px; color: #666; min-width: 50px; text-align: center; }
+.conn-dot { width: 7px; height: 7px; border-radius: 50%; background: #444; }
+.conn-dot.live { background: #00ff88; box-shadow: 0 0 6px #00ff88; }
+
+/* ═══ WAREHOUSE SVG ═══ */
+.warehouse-wrap { flex: 1; display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden; }
+.warehouse-wrap svg { width: 90%; max-width: 900px; height: auto; }
+
+/* ═══ HEADLINE BAR ═══ */
+.headline-bar { padding: 12px 20px; border-top: 1px solid #1a1a2a; background: #0d0d14; text-align: center; flex-shrink: 0; min-height: 64px; display: flex; flex-direction: column; justify-content: center; transition: all 0.3s; }
+.headline-bar .hl { font-size: 18px; font-weight: 800; color: #fff; }
+.headline-bar .sub { font-size: 12px; color: #888; margin-top: 2px; }
+.headline-bar.alert .hl { color: #ff4444; }
+.headline-bar.recall .hl { color: #44ccff; }
+.headline-bar.success .hl { color: #00ff88; }
+
+/* ═══ BOTTOM PANELS ═══ */
+.bottom-panels { display: flex; gap: 12px; padding: 10px 20px; border-top: 1px solid #1a1a2a; background: #0a0a0f; flex-shrink: 0; min-height: 100px; }
+.panel { flex: 1; background: #111118; border: 1px solid #1a1a2a; border-radius: 8px; padding: 10px 14px; font-size: 11px; }
+.panel h4 { font-size: 9px; text-transform: uppercase; letter-spacing: 1.5px; color: #666; margin-bottom: 6px; }
+.panel .empty { color: #333; font-style: italic; }
+
+/* Waypoint panel */
+.wp-label { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+.wp-content { color: #aaa; line-height: 1.4; margin-bottom: 6px; }
+.wp-meta { display: flex; gap: 8px; flex-wrap: wrap; }
+.wp-tag { padding: 2px 6px; border-radius: 3px; font-size: 9px; font-weight: 600; }
+
+/* Lineage legend */
+.lineage-legend { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; padding-top: 6px; border-top: 1px solid #1a1a2a; }
+.lineage-legend .leg { display: flex; align-items: center; gap: 4px; font-size: 8px; color: #888; }
+.lineage-legend .leg-line { width: 14px; height: 2px; }
+
+/* Recall panel */
+.recall-match { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 6px; background: rgba(68,204,255,0.05); border: 1px solid rgba(68,204,255,0.15); margin-bottom: 6px; }
+.recall-match .icon { font-size: 18px; }
+.recall-match .info { flex: 1; }
+.recall-match .info .title { font-size: 12px; font-weight: 700; color: #44ccff; }
+.recall-match .info .detail { font-size: 10px; color: #888; margin-top: 2px; }
+.recall-match .score { font-size: 18px; font-weight: 800; color: #44ccff; font-family: monospace; }
+.recall-bar { width: 100%; height: 4px; background: #1a1a2a; border-radius: 2px; margin-top: 4px; overflow: hidden; }
+.recall-bar-fill { height: 100%; background: #44ccff; border-radius: 2px; transition: width 0.6s ease-out; }
+
+/* Setup overlay */
+.setup-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+.setup-box { background: #1a1a2e; border: 1px solid #2a2a3a; border-radius: 12px; padding: 32px; max-width: 400px; width: 90%; }
+.setup-box h2 { color: #00ff88; margin-bottom: 8px; font-size: 18px; }
+.setup-box p { color: #888; font-size: 12px; margin-bottom: 16px; line-height: 1.5; }
+.setup-box input { width: 100%; padding: 10px 14px; background: #0a0a14; border: 1px solid #333; border-radius: 6px; color: #e0e0e0; font-size: 13px; margin-bottom: 10px; }
+.setup-box button { width: 100%; padding: 10px; background: #00ff88; color: #0a0a0f; border: none; border-radius: 6px; font-weight: 700; cursor: pointer; font-size: 13px; }
+
+/* Animations */
+@keyframes pulse { 0%, 100% { r: 8; opacity: 0.8; } 50% { r: 14; opacity: 0.3; } }
+@keyframes dash { to { stroke-dashoffset: -20; } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes recallGlow { 0% { opacity: 0; stroke-dashoffset: 60; } 50% { opacity: 1; } 100% { opacity: 1; stroke-dashoffset: 0; } }
+</style>
+</head>
+<body>
+
+<!-- Setup -->
+<div class="setup-overlay" id="setup">
+  <div class="setup-box">
+    <h2>Warehouse Robot Memory</h2>
+    <p>Watch two robots inspect a warehouse. Robot Alpha finds hazards. Robot Beta enters weeks later — and remembers.</p>
+    <input type="text" id="inpHost" placeholder="http://localhost:3030" />
+    <input type="text" id="inpKey" placeholder="API Key" />
+    <button onclick="connect()">Connect</button>
+    <p style="margin-top:10px;font-size:10px;color:#555;">Run <code>node seed.js --api-key &lt;key&gt;</code> first.</p>
+  </div>
+</div>
+
+<!-- Top bar -->
+<div class="topbar">
+  <span class="logo">SHODH-MEMORY</span>
+  <div class="sep"></div>
+  <button class="mission-toggle active" id="togAlpha" style="--mc:#4488ff" onclick="toggleMission('alpha')">
+    <div class="dot" style="background:#4488ff"></div> Alpha
+  </button>
+  <button class="mission-toggle active" id="togBeta" style="--mc:#00ff88" onclick="toggleMission('beta')">
+    <div class="dot" style="background:#00ff88"></div> Beta
+  </button>
+  <div class="controls">
+    <button class="ctrl-btn play" id="btnPlay" onclick="storyPlay()">PLAY</button>
+    <button class="ctrl-btn" onclick="storyNext()">NEXT</button>
+    <span class="step-label" id="stepLabel">—</span>
+  </div>
+  <div class="conn-dot" id="connDot"></div>
+</div>
+
+<!-- Warehouse SVG -->
+<div class="warehouse-wrap">
+<svg id="warehouseSvg" viewBox="0 0 800 500" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="800" height="500" fill="#0e0e16" rx="8"/>
+
+  <!-- Floor grid -->
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1a1a24" stroke-width="0.5"/>
+    </pattern>
+  </defs>
+  <rect width="800" height="500" fill="url(#grid)"/>
+
+  <!-- Loading dock (left) -->
+  <rect x="10" y="180" width="80" height="140" fill="none" stroke="#333" stroke-width="1.5" stroke-dasharray="6,3" rx="4"/>
+  <text x="50" y="256" text-anchor="middle" fill="#444" font-size="9" font-weight="700">DOCK</text>
+  <!-- Dock bay lines -->
+  <line x1="10" y1="220" x2="90" y2="220" stroke="#2a2a3a" stroke-width="0.5"/>
+  <line x1="10" y1="260" x2="90" y2="260" stroke="#2a2a3a" stroke-width="0.5"/>
+  <line x1="10" y1="300" x2="90" y2="300" stroke="#2a2a3a" stroke-width="0.5"/>
+
+  <!-- Office (right) -->
+  <rect x="720" y="30" width="70" height="90" fill="none" stroke="#333" stroke-width="1" rx="3"/>
+  <text x="755" y="80" text-anchor="middle" fill="#444" font-size="9" font-weight="700">OFFICE</text>
+
+  <!-- Aisle shelving — top row (y=60-140) and bottom row (y=340-420) -->
+  <!-- Aisle 1 shelves -->
+  <rect x="140" y="50" width="60" height="130" fill="#1a1a24" stroke="#252530" stroke-width="0.5" rx="2"/>
+  <rect x="140" y="320" width="60" height="130" fill="#1a1a24" stroke="#252530" stroke-width="0.5" rx="2"/>
+  <text x="170" y="25" text-anchor="middle" fill="#555" font-size="10" font-weight="600">A1</text>
+
+  <!-- Aisle 2 shelves -->
+  <rect x="240" y="50" width="60" height="130" fill="#1a1a24" stroke="#252530" stroke-width="0.5" rx="2"/>
+  <rect x="240" y="320" width="60" height="130" fill="#1a1a24" stroke="#252530" stroke-width="0.5" rx="2"/>
+  <text x="270" y="25" text-anchor="middle" fill="#555" font-size="10" font-weight="600">A2</text>
+
+  <!-- Aisle 3 shelves -->
+  <rect x="340" y="50" width="60" height="130" fill="#1a1a24" stroke="#252530" stroke-width="0.5" rx="2"/>
+  <rect x="340" y="320" width="60" height="130" fill="#1a1a24" stroke="#252530" stroke-width="0.5" rx="2"/>
+  <text x="370" y="25" text-anchor="middle" fill="#555" font-size="10" font-weight="600">A3</text>
+
+  <!-- Aisle 4 shelves -->
+  <rect x="440" y="50" width="60" height="130" fill="#1a1a24" stroke="#252530" stroke-width="0.5" rx="2"/>
+  <rect x="440" y="320" width="60" height="130" fill="#1a1a24" stroke="#252530" stroke-width="0.5" rx="2"/>
+  <text x="470" y="25" text-anchor="middle" fill="#555" font-size="10" font-weight="600">A4</text>
+
+  <!-- Aisle 5 shelves -->
+  <rect x="540" y="50" width="60" height="130" fill="#1a1a24" stroke="#252530" stroke-width="0.5" rx="2"/>
+  <rect x="540" y="320" width="60" height="130" fill="#1a1a24" stroke="#252530" stroke-width="0.5" rx="2"/>
+  <text x="570" y="25" text-anchor="middle" fill="#555" font-size="10" font-weight="600">A5</text>
+
+  <!-- Aisle 6 shelves -->
+  <rect x="640" y="50" width="60" height="130" fill="#1a1a24" stroke="#252530" stroke-width="0.5" rx="2"/>
+  <rect x="640" y="320" width="60" height="130" fill="#1a1a24" stroke="#252530" stroke-width="0.5" rx="2"/>
+  <text x="670" y="25" text-anchor="middle" fill="#555" font-size="10" font-weight="600">A6</text>
+
+  <!-- Main corridor (center horizontal) -->
+  <line x1="100" y1="250" x2="720" y2="250" stroke="#1a1a24" stroke-width="0.5" stroke-dasharray="4,8"/>
+
+  <!-- Dynamic layers — trails, hazards, robots drawn here by JS -->
+  <g id="layerTrails"></g>
+  <g id="layerHazards"></g>
+  <g id="layerRecallLines"></g>
+  <g id="layerRobots"></g>
+</svg>
+</div>
+
+<!-- Headline -->
+<div class="headline-bar" id="headline">
+  <div class="hl" id="hlText">Press PLAY to begin</div>
+  <div class="sub" id="hlSub">2 robots, 1 warehouse, cross-mission memory</div>
+</div>
+
+<!-- Bottom panels -->
+<div class="bottom-panels">
+  <div class="panel" id="wpPanel">
+    <h4>Current Waypoint</h4>
+    <div class="empty" id="wpEmpty">Click a waypoint or press PLAY</div>
+    <div id="wpContent" style="display:none"></div>
+    <div class="lineage-legend" id="lineageLegend" style="display:none">
+      <div class="leg"><div class="leg-line" style="background:#44ccff"></div>InformedBy</div>
+      <div class="leg"><div class="leg-line" style="background:#ffaa00"></div>TriggeredBy</div>
+      <div class="leg"><div class="leg-line" style="background:#ff8844"></div>Caused</div>
+      <div class="leg"><div class="leg-line" style="background:#00ff88"></div>ResolvedBy</div>
+      <span id="edgeCount" style="font-size:8px;color:#555;margin-left:auto;"></span>
+    </div>
+  </div>
+  <div class="panel" id="recallPanel">
+    <h4>Memory Recall</h4>
+    <div class="empty" id="recallEmpty">No active recall</div>
+    <div id="recallContent" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+// ── Config ──────────────────────────────────────────────────────────────────────
+let API_KEY = localStorage.getItem('shodh_api_key') || '';
+let HOST = localStorage.getItem('shodh_host') || 'http://localhost:3030';
+
+const MISSIONS = {
+  warehouse_alpha_2026_03: { key: 'alpha', label: 'Alpha', color: '#4488ff', userId: 'spot-alpha', robot: 'alpha-bot' },
+  warehouse_beta_2026_04:  { key: 'beta',  label: 'Beta',  color: '#00ff88', userId: 'spot-beta',  robot: 'beta-bot' },
+};
+
+// Warehouse waypoint positions (SVG coords) — must match seed.js
+// These are the memory storage positions (1 per waypoint).
+const WP_POS = {
+  alpha: [
+    [60,250],[170,60],[270,440],[370,300],[470,60],[570,300],[670,440],[60,250],
+  ],
+  beta: [
+    [60,250],[170,440],[270,60],[340,250],[470,440],[540,250],[670,60],[60,250],
+  ],
+};
+
+// Corridor-following animation paths between waypoints.
+// Each entry is an array of [x,y] intermediate positions the robot moves through
+// to get from one waypoint to the next, following corridors (y=250 is main corridor).
+const ANIM_PATH = {
+  alpha: [
+    // WP0→WP1: dock → corridor → turn into A1 north end
+    [[60,250],[170,250],[170,60]],
+    // WP1→WP2: A1 north → back to corridor → turn into A2 south end
+    [[170,60],[170,250],[270,250],[270,440]],
+    // WP2→WP3: A2 south → back to corridor → turn into A3 center (HAZARD)
+    [[270,440],[270,250],[370,250],[370,300]],
+    // WP3→WP4: A3 hazard → back to corridor → turn into A4 north end
+    [[370,300],[370,250],[470,250],[470,60]],
+    // WP4→WP5: A4 north → back to corridor → turn into A5 center (HAZARD)
+    [[470,60],[470,250],[570,250],[570,300]],
+    // WP5→WP6: A5 hazard → back to corridor → turn into A6 south end
+    [[570,300],[570,250],[670,250],[670,440]],
+    // WP6→WP7: A6 south → back to corridor → return to dock
+    [[670,440],[670,250],[60,250]],
+  ],
+  beta: [
+    // WP0→WP1: dock → corridor → turn into A1 south end
+    [[60,250],[170,250],[170,440]],
+    // WP1→WP2: A1 south → back to corridor → turn into A2 north end
+    [[170,440],[170,250],[270,250],[270,60]],
+    // WP2→WP3: A2 north → back to corridor → approach A3 (RECALL fires at corridor)
+    [[270,60],[270,250],[340,250]],
+    // WP3→WP4: A3 recall → SKIP A3, continue corridor → turn into A4 south end
+    [[340,250],[470,250],[470,440]],
+    // WP4→WP5: A4 south → back to corridor → approach A5 (RECALL fires at corridor)
+    [[470,440],[470,250],[540,250]],
+    // WP5→WP6: A5 recall → cautious enter A6 north end
+    [[540,250],[670,250],[670,60]],
+    // WP6→WP7: A6 north → back to corridor → return to dock
+    [[670,60],[670,250],[60,250]],
+  ],
+};
+
+const state = {
+  missions: {},       // missionId -> { memories:[], visible:true, cfg }
+  memoryMap: new Map(),
+  lineageEdges: [],
+  visible: { alpha: true, beta: true },
+};
+
+// ── Setup ───────────────────────────────────────────────────────────────────────
+if (API_KEY) {
+  document.getElementById('inpHost').value = HOST;
+  document.getElementById('inpKey').value = API_KEY;
+}
+
+function connect() {
+  HOST = document.getElementById('inpHost').value.trim() || 'http://localhost:3030';
+  API_KEY = document.getElementById('inpKey').value.trim();
+  if (!API_KEY) return;
+  localStorage.setItem('shodh_host', HOST);
+  localStorage.setItem('shodh_api_key', API_KEY);
+  document.getElementById('setup').style.display = 'none';
+  loadAll();
+}
+
+async function apiPost(path, body) {
+  const resp = await fetch(`${HOST}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error(`${path}: ${resp.status}`);
+  return resp.json();
+}
+
+// ── Load data ───────────────────────────────────────────────────────────────────
+async function loadAll() {
+  try {
+    await fetch(`${HOST}/api/health`, { headers: { 'X-API-Key': API_KEY } });
+    document.getElementById('connDot').classList.add('live');
+  } catch { }
+
+  for (const [missionId, cfg] of Object.entries(MISSIONS)) {
+    try {
+      const result = await apiPost('/api/search/robotics', {
+        user_id: cfg.userId, mode: 'mission', mission_id: missionId, query_text: 'warehouse', limit: 20,
+      });
+      const memories = (result.memories || []).sort((a, b) => {
+        const sa = (a.experience || a).sequence_number || (a.experience?.context?.episode?.sequence_number) || 0;
+        const sb = (b.experience || b).sequence_number || (b.experience?.context?.episode?.sequence_number) || 0;
+        return sa - sb;
+      });
+      state.missions[missionId] = { memories, visible: true, cfg };
+      memories.forEach(m => state.memoryMap.set(m.id, { memory: m, missionId }));
+    } catch (err) { console.error(`Load ${missionId}:`, err); }
+  }
+
+  // Load lineage
+  try {
+    const [r1, r2] = await Promise.all([
+      apiPost('/api/lineage/edges', { user_id: 'spot-alpha', limit: 100 }),
+      apiPost('/api/lineage/edges', { user_id: 'spot-beta', limit: 100 }),
+    ]);
+    state.lineageEdges = [...(r1.edges || []), ...(r2.edges || [])];
+  } catch (e) { console.warn('Lineage:', e.message); }
+
+  drawWaypointDots();
+}
+
+// ── SVG helpers ─────────────────────────────────────────────────────────────────
+const svg = () => document.getElementById('warehouseSvg');
+const svgNS = 'http://www.w3.org/2000/svg';
+
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(svgNS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+
+function drawWaypointDots() {
+  const layer = document.getElementById('layerTrails');
+  for (const [missionId, ms] of Object.entries(state.missions)) {
+    const key = ms.cfg.key;
+    const positions = WP_POS[key];
+    if (!positions) continue;
+    ms.memories.forEach((m, i) => {
+      if (i >= positions.length) return;
+      const [x, y] = positions[i];
+      const exp = m.experience || m;
+      const outcome = exp.outcome_type || 'success';
+      const isHazard = outcome === 'failure';
+      const isDecision = (exp.memory_type || exp.type) === 'Decision';
+      const color = isHazard ? '#ff4444' : ms.cfg.color;
+
+      const g = document.createElementNS(svgNS, 'g');
+      g.style.cursor = 'pointer';
+      g.addEventListener('click', () => selectWaypoint(missionId, i));
+
+      // Outer ring for hazard/decision waypoints
+      if (isHazard || isDecision) {
+        const ring = svgEl('circle', {
+          cx: x, cy: y, r: 12,
+          fill: 'none', stroke: isHazard ? '#ff4444' : '#44ccff',
+          'stroke-width': 1.5, opacity: 0.4, 'stroke-dasharray': isDecision ? '3,2' : 'none',
+        });
+        g.appendChild(ring);
+      }
+
+      // Memory dot
+      g.appendChild(svgEl('circle', {
+        cx: x, cy: y, r: isHazard ? 7 : 5,
+        fill: color, opacity: isHazard ? 0.85 : 0.6,
+        stroke: '#fff', 'stroke-width': 0.5, 'stroke-opacity': 0.3,
+      }));
+
+      // Sequence number label
+      const label = document.createElementNS(svgNS, 'text');
+      label.setAttribute('x', x);
+      label.setAttribute('y', y + 3);
+      label.setAttribute('text-anchor', 'middle');
+      label.setAttribute('fill', isHazard ? '#fff' : '#fff');
+      label.setAttribute('font-size', '7');
+      label.setAttribute('font-weight', '700');
+      label.setAttribute('opacity', '0.8');
+      label.textContent = i + 1;
+      g.appendChild(label);
+
+      // Short description below dot (only for hazard/decision points)
+      if (isHazard || isDecision) {
+        const content = (exp.content || '').replace(/^\[[^\]]+\]\s*/, '');
+        const shortLabel = isHazard
+          ? content.match(/HAZARD:\s*([^.]+)/)?.[1]?.slice(0, 25) || 'Hazard'
+          : content.match(/Decision:\s*([^.]+)/)?.[1]?.slice(0, 25) || 'Recall';
+        const desc = document.createElementNS(svgNS, 'text');
+        desc.setAttribute('x', x);
+        desc.setAttribute('y', y + 22);
+        desc.setAttribute('text-anchor', 'middle');
+        desc.setAttribute('fill', isHazard ? '#ff6666' : '#44ccff');
+        desc.setAttribute('font-size', '7');
+        desc.setAttribute('font-weight', '600');
+        desc.setAttribute('opacity', '0.7');
+        desc.textContent = shortLabel;
+        g.appendChild(desc);
+      }
+
+      layer.appendChild(g);
+    });
+  }
+
+  // Draw faint path lines connecting waypoints per mission
+  for (const [missionId, ms] of Object.entries(state.missions)) {
+    const key = ms.cfg.key;
+    const positions = WP_POS[key];
+    if (!positions || positions.length < 2) continue;
+    const paths = ANIM_PATH[key];
+    if (!paths) continue;
+    // Build full path from all segments
+    const allPts = [positions[0]];
+    for (const seg of paths) {
+      allPts.push(...seg);
+    }
+    const pathStr = allPts.map(([x, y]) => `${x},${y}`).join(' ');
+    const line = svgEl('polyline', {
+      points: pathStr, fill: 'none', stroke: ms.cfg.color,
+      'stroke-width': 1, opacity: 0.12, 'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+    });
+    layer.insertBefore(line, layer.firstChild);
+  }
+}
+
+// ── Select waypoint ─────────────────────────────────────────────────────────────
+let selectedRing = null;
+function selectWaypoint(missionId, idx) {
+  const ms = state.missions[missionId];
+  if (!ms || !ms.memories[idx]) return;
+  const m = ms.memories[idx];
+  const exp = m.experience || m;
+  const cfg = ms.cfg;
+  const positions = WP_POS[cfg.key];
+
+  // Draw selection ring
+  if (selectedRing) selectedRing.remove();
+  if (positions && positions[idx]) {
+    const [sx, sy] = positions[idx];
+    selectedRing = svgEl('circle', {
+      cx: sx, cy: sy, r: 16, fill: 'none', stroke: '#fff',
+      'stroke-width': 2, 'stroke-dasharray': '4,3', opacity: 0.8,
+    });
+    document.getElementById('layerRobots').appendChild(selectedRing);
+  }
+
+  // Update waypoint panel
+  document.getElementById('wpEmpty').style.display = 'none';
+  const wp = document.getElementById('wpContent');
+  wp.style.display = 'block';
+  const outcome = exp.outcome_type || 'success';
+  const outcomeColor = outcome === 'failure' ? '#ff4444' : outcome === 'partial' ? '#ffaa00' : '#00ff88';
+  const sensors = exp.sensor_data || {};
+  const tier = m.tier || 'Unknown';
+  const importance = (m.importance || 0).toFixed(2);
+  const memType = exp.memory_type || exp.type || 'Observation';
+  const memId = m.id ? m.id.slice(0, 8) : '?';
+  const created = m.created_at ? new Date(m.created_at).toLocaleString() : '';
+  const sensorHtml = Object.entries(sensors)
+    .filter(([k]) => !['battery', 'temperature', 'humidity'].includes(k))
+    .map(([k, v]) =>
+      `<span class="wp-tag" style="background:#1a1a2a;color:#888;">${k.replace(/_/g,' ')}: ${typeof v === 'number' ? v.toFixed(1) : v}</span>`
+    ).join('');
+  const baseSensorHtml = Object.entries(sensors)
+    .filter(([k]) => ['battery', 'temperature', 'humidity'].includes(k))
+    .map(([k, v]) =>
+      `<span class="wp-tag" style="background:#0a0a14;color:#555;">${k}: ${typeof v === 'number' ? v.toFixed(1) : v}</span>`
+    ).join('');
+
+  wp.innerHTML = `
+    <div class="wp-label" style="color:${cfg.color}">${cfg.label} WP${idx + 1}
+      <span style="float:right;font-size:9px;color:#555;font-weight:400;">${memId}</span>
+    </div>
+    <div class="wp-content">${(exp.content || '').replace(/^\[[^\]]+\]\s*/, '')}</div>
+    <div class="wp-meta">
+      <span class="wp-tag" style="background:${outcomeColor}22;color:${outcomeColor};">${outcome}</span>
+      <span class="wp-tag" style="background:#44ccff15;color:#44ccff;">${memType}</span>
+      <span class="wp-tag" style="background:#1a1a2a;color:#aaa;">tier: ${tier}</span>
+      <span class="wp-tag" style="background:#1a1a2a;color:#aaa;">imp: ${importance}</span>
+      ${sensorHtml}
+    </div>
+    <div class="wp-meta" style="margin-top:3px">
+      ${baseSensorHtml}
+      <span class="wp-tag" style="background:#0a0a14;color:#444;">${created}</span>
+    </div>`;
+
+  // Draw lineage edges for this memory + run recall
+  const edgeCount = drawLineage(m.id);
+  const legend = document.getElementById('lineageLegend');
+  if (edgeCount > 0) {
+    legend.style.display = 'flex';
+    document.getElementById('edgeCount').textContent = `${edgeCount} edges`;
+  } else {
+    legend.style.display = 'none';
+  }
+  runRecall(m, missionId);
+}
+
+// ── Lineage visualization ────────────────────────────────────────────────────────
+const RELATION_COLORS = {
+  InformedBy: '#44ccff',   // cyan
+  TriggeredBy: '#ffaa00',  // amber
+  Caused: '#ff8844',       // orange
+  ResolvedBy: '#00ff88',   // green
+  SupersededBy: '#aa88ff', // purple
+  RelatedTo: '#888888',    // gray
+};
+
+function getMemoryPosition(memId) {
+  const entry = state.memoryMap.get(memId);
+  if (!entry) return null;
+  const ms = state.missions[entry.missionId];
+  if (!ms) return null;
+  const key = ms.cfg.key;
+  const idx = ms.memories.findIndex(m => m.id === memId);
+  if (idx < 0 || !WP_POS[key][idx]) return null;
+  return { pos: WP_POS[key][idx], missionId: entry.missionId, idx };
+}
+
+function drawLineage(memId) {
+  // Clear previous lineage lines
+  const layer = document.getElementById('layerRecallLines');
+  layer.querySelectorAll('.lineage-edge').forEach(el => el.remove());
+
+  const fromPos = getMemoryPosition(memId);
+  if (!fromPos) return 0;
+
+  // Find all edges connected to this memory (as source or target)
+  const connected = state.lineageEdges.filter(e => e.from === memId || e.to === memId);
+  if (connected.length === 0) return 0;
+
+  for (const edge of connected) {
+    const otherId = edge.from === memId ? edge.to : edge.from;
+    const otherPos = getMemoryPosition(otherId);
+    if (!otherPos) continue;
+
+    const [x1, y1] = fromPos.pos;
+    const [x2, y2] = otherPos.pos;
+    const color = RELATION_COLORS[edge.relation] || '#888';
+    const isCross = fromPos.missionId !== otherPos.missionId;
+
+    // Draw edge line
+    const line = svgEl('line', {
+      x1, y1, x2, y2,
+      stroke: color, 'stroke-width': isCross ? 2 : 1.2,
+      'stroke-dasharray': isCross ? '6,3' : '3,3',
+      opacity: isCross ? 0.8 : 0.4,
+      class: 'lineage-edge',
+    });
+    layer.appendChild(line);
+
+    // Small relation label at midpoint
+    const mx = (x1 + x2) / 2;
+    const my = (x1 + x2) / 2 === x1 ? (y1 + y2) / 2 - 8 : (y1 + y2) / 2 - 6;
+    const label = document.createElementNS(svgNS, 'text');
+    label.setAttribute('x', mx);
+    label.setAttribute('y', (y1 + y2) / 2 - 6);
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('fill', color);
+    label.setAttribute('font-size', '7');
+    label.setAttribute('font-weight', '600');
+    label.setAttribute('opacity', isCross ? '0.9' : '0.5');
+    label.setAttribute('class', 'lineage-edge');
+    label.textContent = edge.relation;
+    layer.appendChild(label);
+
+    // Arrow indicator at target end
+    if (isCross) {
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const arrowX = x2 - 14 * Math.cos(angle);
+      const arrowY = y2 - 14 * Math.sin(angle);
+      const arrow = svgEl('polygon', {
+        points: `0,-3 7,0 0,3`,
+        fill: color, opacity: 0.8, class: 'lineage-edge',
+        transform: `translate(${arrowX},${arrowY}) rotate(${angle * 180 / Math.PI})`,
+      });
+      layer.appendChild(arrow);
+    }
+  }
+  return connected.length;
+}
+
+async function runRecall(m, missionId) {
+  const exp = m.experience || m;
+  const cfg = MISSIONS[missionId];
+  document.getElementById('recallEmpty').style.display = 'none';
+  const rc = document.getElementById('recallContent');
+  rc.style.display = 'block';
+  rc.innerHTML = '<div style="color:#555">Querying memory...</div>';
+
+  try {
+    const queryText = (exp.content || '').replace(/^\[[^\]]+\]\s*/, '').slice(0, 150);
+    // Query ALL users — self for same-mission recall, others for cross-mission
+    const allUserIds = [...new Set(Object.values(MISSIONS).map(c => c.userId))];
+
+    const promises = allUserIds.map(uid =>
+      apiPost('/api/recall', { user_id: uid, query: queryText, mode: 'hybrid', limit: 5 }).catch(() => ({ memories: [] }))
+    );
+    const results = await Promise.all(promises);
+    const allMatches = results.flatMap(r => (r.memories || [])).filter(rm => rm.id !== m.id);
+    allMatches.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+    // Separate cross-mission from same-mission
+    const cross = allMatches.filter(rm => {
+      const e = state.memoryMap.get(rm.id);
+      return e && e.missionId !== missionId;
+    });
+    const same = allMatches.filter(rm => {
+      const e = state.memoryMap.get(rm.id);
+      return e && e.missionId === missionId;
+    });
+
+    let html = '';
+
+    // Cross-mission matches (most important — different robot recalled)
+    if (cross.length > 0) {
+      const best = cross[0];
+      const bestExp = best.experience || best;
+      const bestEntry = state.memoryMap.get(best.id);
+      const bestCfg = bestEntry ? MISSIONS[bestEntry.missionId] : null;
+      const pct = Math.min(99, Math.max(1, ((best.score || 0.5) * 100))).toFixed(0);
+      const content = (bestExp.content || '').replace(/^\[[^\]]+\]\s*/, '');
+      html += `
+        <div class="recall-match">
+          <div class="icon">&#9888;</div>
+          <div class="info">
+            <div class="title" style="color:#44ccff">${content.slice(0, 80)}</div>
+            <div class="detail">${bestCfg ? bestCfg.label : 'Other robot'} · ${bestEntry ? getAge(bestEntry.memory) : '?'} · cross-mission · tier: ${best.tier || '?'}</div>
+            <div class="recall-bar"><div class="recall-bar-fill" style="width:${pct}%"></div></div>
+          </div>
+          <div class="score">${pct}%</div>
+        </div>`;
+    }
+
+    // Same-mission match (own prior memory recalled)
+    if (same.length > 0) {
+      const best = same[0];
+      const bestExp = best.experience || best;
+      const bestEntry = state.memoryMap.get(best.id);
+      const bestCfg = bestEntry ? MISSIONS[bestEntry.missionId] : null;
+      const pct = Math.min(99, Math.max(1, ((best.score || 0.5) * 100))).toFixed(0);
+      const content = (bestExp.content || '').replace(/^\[[^\]]+\]\s*/, '');
+      const isCross = false;
+      html += `
+        <div class="recall-match" style="border-color:rgba(${cfg.color === '#4488ff' ? '68,136,255' : '0,255,136'},0.2);background:rgba(${cfg.color === '#4488ff' ? '68,136,255' : '0,255,136'},0.03)">
+          <div class="icon" style="opacity:0.5">&#128065;</div>
+          <div class="info">
+            <div class="title" style="color:${cfg.color}">${content.slice(0, 70)}</div>
+            <div class="detail">same mission · ${bestEntry ? getAge(bestEntry.memory) : '?'} · tier: ${best.tier || '?'} · imp: ${(best.importance||0).toFixed(2)}</div>
+            <div class="recall-bar"><div class="recall-bar-fill" style="width:${pct}%;background:${cfg.color}"></div></div>
+          </div>
+          <div class="score" style="color:${cfg.color}">${pct}%</div>
+        </div>`;
+    }
+
+    if (!html) {
+      html = '<div style="color:#555">No relevant memories recalled</div>';
+    }
+
+    rc.innerHTML = html;
+  } catch (err) {
+    rc.innerHTML = `<div style="color:#ff4444">${err.message}</div>`;
+  }
+}
+
+function getAge(m) {
+  const created = new Date(m.created_at || 0);
+  const hours = (Date.now() - created.getTime()) / 3600000;
+  if (hours < 1) return 'just now';
+  if (hours < 24) return `${Math.round(hours)}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+// ── Toggle missions ─────────────────────────────────────────────────────────────
+function toggleMission(key) {
+  state.visible[key] = !state.visible[key];
+  const btnId = key === 'alpha' ? 'togAlpha' : 'togBeta';
+  document.getElementById(btnId).classList.toggle('active', state.visible[key]);
+}
+
+// ── STORY MODE ──────────────────────────────────────────────────────────────────
+let storyRunning = false;
+let storyIdx = -1;
+let storyTimeout = null;
+let robotEl = null; // current robot SVG element
+let trailEl = null; // current trail polyline
+
+// Story steps — headlines/subs are derived from actual memory data at runtime.
+// 'recall: true' means the step will call the recall API live and show real results.
+const STORY = [
+  { mission: 'alpha', action: 'appear', wpIdx: 0, cls: '',
+    fallbackHl: 'Warehouse Inspection — Robot Alpha', fallbackSub: '14 days ago — routine safety check' },
+  { mission: 'alpha', action: 'move', wpIdx: 2, fromWp: 0, cls: 'success',
+    fallbackHl: 'Aisles 1-2 scanned', fallbackSub: 'No hazards detected' },
+  { mission: 'alpha', action: 'move', wpIdx: 3, fromWp: 2, hazard: true, cls: 'alert',
+    fallbackHl: 'Hazard detected in Aisle 3', fallbackSub: '' },
+  { mission: 'alpha', action: 'move', wpIdx: 5, fromWp: 3, hazard: true, cls: 'alert',
+    fallbackHl: 'Hazard detected in Aisle 5', fallbackSub: '' },
+  { mission: 'alpha', action: 'move', wpIdx: 7, fromWp: 5, fadeTrail: true, cls: 'success',
+    fallbackHl: 'Mission complete — hazards stored in memory', fallbackSub: '' },
+  { mission: 'beta', action: 'appear', wpIdx: 0, cls: '',
+    fallbackHl: '14 days later — Robot Beta enters', fallbackSub: 'Different robot, same warehouse' },
+  { mission: 'beta', action: 'move', wpIdx: 3, fromWp: 0, recall: true, cls: 'recall',
+    fallbackHl: 'Memory recall near Aisle 3', fallbackSub: '' },
+  { mission: 'beta', action: 'move', wpIdx: 5, fromWp: 3, recall: true, cls: 'recall',
+    fallbackHl: 'Memory recall near Aisle 5', fallbackSub: '' },
+  { mission: 'beta', action: 'move', wpIdx: 7, fromWp: 5, cls: 'success',
+    fallbackHl: 'Mission complete — zero incidents', fallbackSub: '' },
+];
+
+function storyPlay() {
+  if (storyRunning) { storyStop(); return; }
+  storyRunning = true;
+  document.getElementById('btnPlay').textContent = 'STOP';
+  storyIdx = -1;
+  clearWarehouse();
+  storyAdvance();
+}
+
+function storyStop() {
+  storyRunning = false;
+  clearTimeout(storyTimeout);
+  document.getElementById('btnPlay').textContent = 'PLAY';
+}
+
+function storyNext() {
+  if (!storyRunning) { storyPlay(); return; }
+  clearTimeout(storyTimeout);
+  storyAdvance();
+}
+
+function clearWarehouse() {
+  document.getElementById('layerTrails').innerHTML = '';
+  document.getElementById('layerHazards').innerHTML = '';
+  document.getElementById('layerRecallLines').innerHTML = '';
+  document.getElementById('layerRobots').innerHTML = '';
+  robotEl = null;
+  trailEl = null;
+  drawWaypointDots();
+}
+
+// Extract clean content from a memory object (strip run token prefix)
+function memContent(m) {
+  const exp = m.experience || m;
+  return (exp.content || '').replace(/^\[[^\]]+\]\s*/, '');
+}
+
+// Build headline + sub from actual loaded memory data
+function deriveHeadline(step) {
+  const missionId = step.mission === 'alpha' ? 'warehouse_alpha_2026_03' : 'warehouse_beta_2026_04';
+  const ms = state.missions[missionId];
+  const mem = ms && ms.memories[step.wpIdx];
+  if (!mem) return { hl: step.fallbackHl, sub: step.fallbackSub };
+
+  const content = memContent(mem);
+  const exp = mem.experience || mem;
+  const outcome = exp.outcome_type || 'success';
+  const sensors = exp.sensor_data || {};
+
+  if (step.hazard) {
+    // For hazards, show actual memory content as headline, sensor data as sub
+    const firstSentence = content.split(/\.\s/)[0];
+    const sensorBits = Object.entries(sensors)
+      .filter(([k]) => !['battery', 'temperature', 'humidity'].includes(k))
+      .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${typeof v === 'number' ? v.toFixed(1) : v}`)
+      .join(' · ');
+    return { hl: firstSentence, sub: sensorBits || content.slice(firstSentence.length + 2, firstSentence.length + 100) };
+  }
+
+  if (step.fadeTrail) {
+    // Mission summary — show actual summary content
+    const sensorStr = sensors.battery !== undefined ? `Battery: ${sensors.battery}%` : '';
+    return { hl: content.split(/\.\s/)[0], sub: sensorStr };
+  }
+
+  if (step.action === 'appear') {
+    return { hl: step.fallbackHl, sub: content.slice(0, 90) };
+  }
+
+  // Default: show actual memory content
+  return { hl: content.split(/\.\s/)[0], sub: content.slice(content.indexOf('.') + 2, 120) || '' };
+}
+
+async function storyAdvance() {
+  if (!storyRunning) return;
+  storyIdx++;
+  if (storyIdx >= STORY.length) { storyStop(); return; }
+
+  const step = STORY[storyIdx];
+  const positions = WP_POS[step.mission];
+  const color = step.mission === 'alpha' ? '#4488ff' : '#00ff88';
+  const missionId = step.mission === 'alpha' ? 'warehouse_alpha_2026_03' : 'warehouse_beta_2026_04';
+
+  document.getElementById('stepLabel').textContent = `${storyIdx + 1} / ${STORY.length}`;
+
+  // ── PHASE 1: Show headline from actual memory data ──
+  const { hl, sub } = deriveHeadline(step);
+  const hlBar = document.getElementById('headline');
+  hlBar.className = 'headline-bar ' + (step.cls || '');
+  document.getElementById('hlText').textContent = hl;
+  document.getElementById('hlSub').textContent = sub;
+
+  // Update waypoint panel with actual memory
+  const ms = state.missions[missionId];
+  if (ms && ms.memories[step.wpIdx]) {
+    selectWaypoint(missionId, step.wpIdx);
+  }
+
+  // ── PHASE 2: Execute action ──
+  if (step.action === 'appear') {
+    const [x, y] = positions[step.wpIdx];
+    robotEl = createRobot(x, y, color);
+    trailEl = svgEl('polyline', {
+      points: `${x},${y}`, fill: 'none', stroke: color, 'stroke-width': 2.5,
+      'stroke-linecap': 'round', 'stroke-linejoin': 'round', opacity: 0.7,
+    });
+    document.getElementById('layerTrails').appendChild(trailEl);
+  }
+
+  if (step.action === 'move' && robotEl) {
+    const pathKey = step.mission;
+    const fromSeg = step.fromWp !== undefined ? step.fromWp : step.wpIdx - 1;
+    const toSeg = step.wpIdx - 1;
+
+    const allPoints = [];
+    for (let s = fromSeg; s <= toSeg; s++) {
+      const seg = ANIM_PATH[pathKey] && ANIM_PATH[pathKey][s];
+      if (seg) allPoints.push(...seg);
+      else allPoints.push(positions[s + 1]);
+    }
+
+    const totalDuration = Math.min(4000, 1200 * (toSeg - fromSeg + 1));
+    const perPoint = totalDuration / allPoints.length;
+    for (const [px, py] of allPoints) {
+      await animateRobotTo(px, py, color, perPoint);
+    }
+
+    const [tx, ty] = positions[step.wpIdx];
+
+    if (step.hazard) {
+      spawnHazard(tx, ty);
+    }
+
+    // ── LIVE RECALL: call API, show real matched memory with real score ──
+    if (step.recall) {
+      const mem = ms && ms.memories[step.wpIdx];
+      const recallResult = await runLiveRecall(mem, missionId);
+      if (recallResult) {
+        // Find the hazard position on the map from the matched memory
+        const matchedEntry = state.memoryMap.get(recallResult.id);
+        let hazX = tx, hazY = ty;
+        if (matchedEntry) {
+          const matchedMs = state.missions[matchedEntry.missionId];
+          const matchedKey = matchedMs?.cfg?.key;
+          const matchedIdx = matchedMs?.memories?.findIndex(mm => mm.id === recallResult.id);
+          if (matchedKey && matchedIdx >= 0 && WP_POS[matchedKey][matchedIdx]) {
+            [hazX, hazY] = WP_POS[matchedKey][matchedIdx];
+          }
+        }
+
+        // Build label from actual recalled content + real score
+        const recContent = memContent(recallResult);
+        const pct = Math.min(99, Math.max(1, (recallResult.score || 0.5) * 100)).toFixed(0);
+        const shortContent = recContent.split(/\.\s/)[0].slice(0, 40);
+        const recallLabel = `${pct}% match: ${shortContent}`;
+
+        // Update headline to show what was recalled
+        hlBar.className = 'headline-bar recall';
+        document.getElementById('hlText').textContent = `Memory recalled: ${shortContent}`;
+        const matchedCfg = matchedEntry ? MISSIONS[matchedEntry.missionId] : null;
+        const age = matchedEntry ? getAge(matchedEntry.memory) : '';
+        document.getElementById('hlSub').textContent = `${pct}% match from ${matchedCfg?.label || 'other robot'} ${age ? '(' + age + ')' : ''}`;
+
+        await drawRecallLine(tx, ty, hazX, hazY, recallLabel);
+      }
+    }
+
+    if (step.fadeTrail && trailEl) {
+      trailEl.setAttribute('opacity', '0.15');
+      if (robotEl) { robotEl.remove(); robotEl = null; }
+    }
+  }
+
+  // ── PHASE 3: Wait then advance ──
+  const waitMs = step.hazard ? 4000 : step.recall ? 5500 : 3500;
+  storyTimeout = setTimeout(() => storyAdvance(), waitMs);
+}
+
+// Run a live recall against all other robots and return best cross-mission match
+async function runLiveRecall(currentMem, currentMissionId) {
+  if (!currentMem) return null;
+  const exp = currentMem.experience || currentMem;
+  const cfg = MISSIONS[currentMissionId];
+  const queryText = memContent(currentMem).slice(0, 150);
+  const allUserIds = [...new Set(Object.values(MISSIONS).map(c => c.userId))];
+  const otherUsers = allUserIds.filter(uid => uid !== cfg.userId);
+
+  try {
+    const promises = otherUsers.map(uid =>
+      apiPost('/api/recall', { user_id: uid, query: queryText, mode: 'hybrid', limit: 5 }).catch(() => ({ memories: [] }))
+    );
+    const results = await Promise.all(promises);
+    const cross = results.flatMap(r => (r.memories || [])).filter(rm => rm.id !== currentMem.id);
+    cross.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+    // Also update the recall panel with the actual result
+    const rc = document.getElementById('recallContent');
+    document.getElementById('recallEmpty').style.display = 'none';
+    rc.style.display = 'block';
+
+    if (cross.length > 0) {
+      const best = cross[0];
+      const bestExp = best.experience || best;
+      const bestEntry = state.memoryMap.get(best.id);
+      const bestCfg = bestEntry ? MISSIONS[bestEntry.missionId] : null;
+      const pct = Math.min(99, Math.max(1, ((best.score || 0.5) * 100))).toFixed(0);
+      const content = memContent(best);
+      const tier = best.tier || 'Unknown';
+      const importance = (best.importance || 0).toFixed(2);
+      rc.innerHTML = `
+        <div class="recall-match">
+          <div class="icon">&#9888;</div>
+          <div class="info">
+            <div class="title">${content.slice(0, 90)}</div>
+            <div class="detail">
+              ${bestCfg ? bestCfg.label : 'Other robot'} · ${bestEntry ? getAge(bestEntry.memory) : '?'}
+              · tier: ${tier} · importance: ${importance}
+            </div>
+            <div class="recall-bar"><div class="recall-bar-fill" style="width:${pct}%"></div></div>
+          </div>
+          <div class="score">${pct}%</div>
+        </div>`;
+      return best;
+    } else {
+      rc.innerHTML = '<div style="color:#555">No cross-mission memories found</div>';
+      return null;
+    }
+  } catch (err) {
+    return null;
+  }
+}
+
+function createRobot(x, y, color) {
+  const g = document.createElementNS(svgNS, 'g');
+  g.setAttribute('transform', `translate(${x},${y})`);
+
+  // Outer glow
+  g.appendChild(svgEl('circle', { cx: 0, cy: 0, r: 14, fill: color, opacity: 0.15 }));
+  // Body
+  g.appendChild(svgEl('circle', { cx: 0, cy: 0, r: 8, fill: color, opacity: 0.9, stroke: '#fff', 'stroke-width': 1.5 }));
+  // Direction arrow
+  g.appendChild(svgEl('polygon', { points: '0,-12 -4,-6 4,-6', fill: '#fff', opacity: 0.8 }));
+
+  document.getElementById('layerRobots').appendChild(g);
+  return g;
+}
+
+function animateRobotTo(tx, ty, color, durationMs) {
+  return new Promise(resolve => {
+    if (!robotEl) { resolve(); return; }
+    const transform = robotEl.getAttribute('transform');
+    const match = transform.match(/translate\(([^,]+),([^)]+)\)/);
+    const fx = parseFloat(match[1]);
+    const fy = parseFloat(match[2]);
+
+    // Build intermediate points for trail
+    const steps = 30;
+    const start = performance.now();
+
+    function tick(now) {
+      const elapsed = now - start;
+      const t = Math.min(elapsed / durationMs, 1);
+      const eased = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; // ease in-out quad
+      const cx = fx + (tx - fx) * eased;
+      const cy = fy + (ty - fy) * eased;
+
+      robotEl.setAttribute('transform', `translate(${cx.toFixed(1)},${cy.toFixed(1)})`);
+
+      // Extend trail
+      if (trailEl) {
+        const pts = trailEl.getAttribute('points');
+        trailEl.setAttribute('points', pts + ` ${cx.toFixed(1)},${cy.toFixed(1)}`);
+      }
+
+      if (t < 1) {
+        requestAnimationFrame(tick);
+      } else {
+        resolve();
+      }
+    }
+    requestAnimationFrame(tick);
+  });
+}
+
+function spawnHazard(x, y) {
+  const g = document.createElementNS(svgNS, 'g');
+
+  // Pulsing ring
+  const pulse = svgEl('circle', { cx: x, cy: y, r: 8, fill: 'none', stroke: '#ff4444', 'stroke-width': 2, opacity: 0.8 });
+  pulse.style.animation = 'pulse 1.5s ease-in-out infinite';
+  g.appendChild(pulse);
+
+  // Solid hazard dot
+  g.appendChild(svgEl('circle', { cx: x, cy: y, r: 6, fill: '#ff4444', opacity: 0.9 }));
+
+  // Warning triangle text
+  const txt = document.createElementNS(svgNS, 'text');
+  txt.setAttribute('x', x);
+  txt.setAttribute('y', y + 4);
+  txt.setAttribute('text-anchor', 'middle');
+  txt.setAttribute('fill', '#fff');
+  txt.setAttribute('font-size', '9');
+  txt.setAttribute('font-weight', '800');
+  txt.textContent = '!';
+  g.appendChild(txt);
+
+  document.getElementById('layerHazards').appendChild(g);
+}
+
+function drawRecallLine(fromX, fromY, toX, toY, label) {
+  return new Promise(resolve => {
+    const layer = document.getElementById('layerRecallLines');
+
+    // Glowing dashed line from robot to hazard
+    const line = svgEl('line', {
+      x1: fromX, y1: fromY, x2: toX, y2: toY,
+      stroke: '#44ccff', 'stroke-width': 2.5, 'stroke-dasharray': '8,5',
+      opacity: 0, filter: 'url(#glowFilter)',
+    });
+    line.style.animation = 'recallGlow 1s ease-out forwards';
+    layer.appendChild(line);
+
+    // Add glow filter if not exists
+    if (!document.getElementById('glowFilter')) {
+      const defs = svg().querySelector('defs') || svg().insertBefore(document.createElementNS(svgNS, 'defs'), svg().firstChild);
+      const filter = svgEl('filter', { id: 'glowFilter', x: '-50%', y: '-50%', width: '200%', height: '200%' });
+      const blur = svgEl('feGaussianBlur', { stdDeviation: '3', result: 'coloredBlur' });
+      const merge = document.createElementNS(svgNS, 'feMerge');
+      merge.appendChild(svgEl('feMergeNode', { in: 'coloredBlur' }));
+      merge.appendChild(svgEl('feMergeNode', { in: 'SourceGraphic' }));
+      filter.appendChild(blur);
+      filter.appendChild(merge);
+      defs.appendChild(filter);
+    }
+
+    // Label at midpoint — sized to content
+    const mx = (fromX + toX) / 2;
+    const my = (fromY + toY) / 2 - 14;
+    const labelWidth = Math.min(300, Math.max(160, label.length * 5 + 20));
+    const rect = svgEl('rect', {
+      x: mx - labelWidth / 2, y: my - 11, width: labelWidth, height: 22,
+      fill: '#0d0d14', stroke: '#44ccff', 'stroke-width': 1, rx: 4, opacity: 0.95,
+    });
+    layer.appendChild(rect);
+
+    const txt = document.createElementNS(svgNS, 'text');
+    txt.setAttribute('x', mx);
+    txt.setAttribute('y', my + 4);
+    txt.setAttribute('text-anchor', 'middle');
+    txt.setAttribute('fill', '#44ccff');
+    txt.setAttribute('font-size', '8');
+    txt.setAttribute('font-weight', '700');
+    txt.textContent = label.length > 55 ? label.slice(0, 52) + '...' : label;
+    layer.appendChild(txt);
+
+    // Resolve after animation
+    setTimeout(resolve, 1500);
+  });
+}
+
+// ── Keyboard shortcuts ─────────────────────────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+  if (document.getElementById('setup').style.display !== 'none') return;
+  if (e.code === 'Space') { e.preventDefault(); storyPlay(); }
+  if (e.code === 'ArrowRight') { e.preventDefault(); storyNext(); }
+  if (e.code === 'KeyR') { e.preventDefault(); clearWarehouse(); storyIdx = -1; storyStop(); }
+});
+
+</script>
+</body>
+</html>
