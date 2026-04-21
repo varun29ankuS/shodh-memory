@@ -272,7 +272,76 @@ const state = {
   memoryMap: new Map(),
   lineageEdges: [],
   visible: { alpha: true, beta: true },
+  liveIds: { alpha: [], beta: [] }, // memory IDs created live during story
 };
+
+// Geo conversion matching seed.js
+function toGeo(x, y) { return [37.775 + (y / 500) * 0.004, -122.420 + (x / 800) * 0.006, 0]; }
+
+// ── Waypoint data for live /api/remember calls (mirrors seed.js) ──────────────
+const WAYPOINTS = {
+  alpha: [
+    { seq: 1, x: 60, y: 250, content: 'Entering warehouse through loading dock bay 2. Battery full, all sensors nominal. Beginning systematic aisle-by-aisle inspection via main corridor.',
+      action: 'navigate', outcome: 'success', reward: 0.3, sensors: { battery: 100, temperature: 18, humidity: 45 },
+      tags: ['start', 'loading-dock'], importance: 0.3 },
+    { seq: 2, x: 170, y: 60, content: 'Aisle 1 inspection complete. Traversed full length north to south. Floor condition good, shelving secure, no obstructions detected.',
+      action: 'inspect', outcome: 'success', reward: 0.4, sensors: { battery: 95, temperature: 18, humidity: 46 },
+      tags: ['aisle-1', 'clear'], importance: 0.2 },
+    { seq: 3, x: 270, y: 440, content: 'Aisle 2 inspection complete. Minor scuff marks on floor from forklift traffic. Within acceptable limits. No safety hazards.',
+      action: 'inspect', outcome: 'success', reward: 0.4, sensors: { battery: 90, temperature: 18, humidity: 47 },
+      tags: ['aisle-2', 'clear'], importance: 0.2 },
+    { seq: 4, x: 370, y: 300, content: 'HAZARD: Cracked concrete floor section in Aisle 3, center bay. Crack pattern 1.2m long, 8mm wide at deepest. Probable cause: heavy load impact or foundation settling. Uneven surface creates trip hazard for personnel and navigation risk for autonomous vehicles. Requires structural repair — concrete patch and cure time estimated 5-7 days.',
+      action: 'inspect', outcome: 'failure', reward: -0.7, sensors: { battery: 84, temperature: 19, humidity: 48, crack_width_mm: 8.0, crack_length_m: 1.2, surface_deviation_mm: 12.0 },
+      tags: ['aisle-3', 'floor-crack', 'structural', 'trip-hazard', 'repair-needed', 'critical'], importance: 0.95, type: 'Observation' },
+    { seq: 5, x: 470, y: 60, content: 'Aisle 4 inspection complete. Floor and shelving in good condition. Inventory labels 97% readable.',
+      action: 'inspect', outcome: 'success', reward: 0.4, sensors: { battery: 78, temperature: 18, humidity: 47 },
+      tags: ['aisle-4', 'clear'], importance: 0.2 },
+    { seq: 6, x: 570, y: 300, content: 'HAZARD: Damaged racking upright in Aisle 5, section C, level 2. Forklift impact bent the upright 18mm out of plumb. Load capacity reduced — risk of progressive collapse if additional pallets placed on upper levels. Requires structural assessment and upright replacement. Parts on order, ETA 10-14 business days.',
+      action: 'inspect', outcome: 'failure', reward: -0.5, sensors: { battery: 72, temperature: 18, humidity: 48, deflection_mm: 18.0, load_capacity_pct: 60.0 },
+      tags: ['aisle-5', 'racking-damage', 'forklift-impact', 'structural', 'collapse-risk', 'warning'], importance: 0.85, type: 'Observation' },
+    { seq: 7, x: 670, y: 440, content: 'Aisle 6 inspection complete. All clear. Shelving secure, floor in good condition.',
+      action: 'inspect', outcome: 'success', reward: 0.4, sensors: { battery: 66, temperature: 18, humidity: 47 },
+      tags: ['aisle-6', 'clear'], importance: 0.2 },
+    { seq: 8, x: 60, y: 250, content: 'Mission complete. 6 aisles inspected via main corridor route. 2 hazards found: cracked floor in Aisle 3 (critical — structural repair needed), damaged racking upright in Aisle 5 (warning — replacement parts on order). Both logged for maintenance tracking.',
+      action: 'navigate', outcome: 'success', reward: 0.5, sensors: { battery: 58, temperature: 18, humidity: 46 },
+      tags: ['mission-complete', 'summary'], importance: 0.7 },
+  ],
+  beta: [
+    { seq: 1, x: 60, y: 250, content: 'Entering warehouse for preventive check. Robot Beta assigned — first time in this facility. Prior mission data available from Robot Alpha (14 days ago).',
+      action: 'navigate', outcome: 'success', reward: 0.3, sensors: { battery: 100, temperature: 20, humidity: 48 },
+      tags: ['start', 'loading-dock', 'preventive'], importance: 0.4 },
+    { seq: 2, x: 170, y: 440, content: 'Aisle 1 quick scan. Clear. Proceeding along main corridor toward next aisle.',
+      action: 'inspect', outcome: 'success', reward: 0.3, sensors: { battery: 97, temperature: 20, humidity: 49 },
+      tags: ['aisle-1', 'clear'], importance: 0.2 },
+    { seq: 3, x: 270, y: 60, content: 'Aisle 2 scan complete. No issues. Approaching Aisle 3 zone via main corridor.',
+      action: 'inspect', outcome: 'success', reward: 0.3, sensors: { battery: 94, temperature: 20, humidity: 49 },
+      tags: ['aisle-2', 'clear'], importance: 0.2 },
+    { seq: 4, x: 340, y: 250, content: 'MEMORY RECALL: Approaching Aisle 3 entry. Spatial query surfaced prior finding from Robot Alpha (14 days ago): cracked concrete floor section, 8mm wide, structural repair pending. Hazard may still be present — repair timeline was 5-7 days but no confirmation of completion. Decision: skip Aisle 3, proceed to Aisle 4 via corridor.',
+      action: 'navigate', outcome: 'success', reward: 0.4, sensors: { battery: 91, temperature: 20, humidity: 50, prior_findings_nearby: 1 },
+      tags: ['decision', 'cross-mission-recall', 'aisle-3-skip', 'floor-crack-avoidance'], importance: 0.9, type: 'Decision' },
+    { seq: 5, x: 470, y: 440, content: 'Skipped Aisle 3 per recall decision. Aisle 4 scan complete — all clear. Continuing toward Aisle 5.',
+      action: 'inspect', outcome: 'success', reward: 0.4, sensors: { battery: 87, temperature: 20, humidity: 49 },
+      tags: ['aisle-4', 'clear', 'aisle-3-skipped'], importance: 0.3 },
+    { seq: 6, x: 540, y: 250, content: 'MEMORY RECALL: Approaching Aisle 5. Prior finding from Robot Alpha: damaged racking upright, bent 18mm, collapse risk under load. Replacement parts were on order (ETA 10-14 days). May or may not be repaired. Decision: enter Aisle 5 at reduced speed, maintain 2m clearance from damaged section, do not place any loads.',
+      action: 'navigate', outcome: 'success', reward: 0.4, sensors: { battery: 84, temperature: 20, humidity: 49, speed_pct: 40.0 },
+      tags: ['decision', 'cross-mission-recall', 'aisle-5-caution', 'racking-avoidance'], importance: 0.8, type: 'Decision' },
+    { seq: 7, x: 670, y: 60, content: 'Aisle 5 traversed at reduced speed. Damaged upright still visible — repair not yet completed. Documented current state. Aisle 6 clear.',
+      action: 'inspect', outcome: 'partial', reward: 0.1, sensors: { battery: 78, temperature: 20, humidity: 49, deflection_mm: 17.5 },
+      tags: ['aisle-5', 'damage-confirmed', 'aisle-6', 'clear'], importance: 0.6 },
+    { seq: 8, x: 60, y: 250, content: 'Mission complete. Both previously flagged hazards confirmed still present. Aisle 3 floor crack: unrepaired. Aisle 5 racking: upright still bent. Escalating maintenance priority. No new hazards found. Zero incidents — prior knowledge enabled safe navigation.',
+      action: 'navigate', outcome: 'success', reward: 0.5, sensors: { battery: 72, temperature: 20, humidity: 48 },
+      tags: ['mission-complete', 'summary', 'escalation', 'zero-incidents'], importance: 0.8 },
+  ],
+};
+
+const LINEAGE_EDGES = {
+  alpha: [[3,4,'Caused'],[4,5,'InformedBy'],[5,6,'Caused'],[6,7,'InformedBy']],
+  beta:  [[3,4,'TriggeredBy'],[4,5,'Caused'],[5,6,'TriggeredBy'],[6,7,'Caused']],
+  // InformedBy/TriggeredBy for recall steps (wpIdx 3,5) are created live during story playback
+  cross: [['alpha',4,'beta',5,'InformedBy']],
+};
+
+const RUN_TOKEN = Date.now().toString(36);
 
 // ── Setup ───────────────────────────────────────────────────────────────────────
 if (API_KEY) {
@@ -300,38 +369,88 @@ async function apiPost(path, body) {
   return resp.json();
 }
 
+// ── Live API calls for story mode ────────────────────────────────────────────
+async function liveRemember(robotKey, wpIdx) {
+  const wp = WAYPOINTS[robotKey][wpIdx];
+  if (!wp) return null;
+  const cfg = robotKey === 'alpha' ? MISSIONS.warehouse_alpha_2026_03 : MISSIONS.warehouse_beta_2026_04;
+  const missionId = robotKey === 'alpha' ? 'warehouse_alpha_2026_03' : 'warehouse_beta_2026_04';
+  const payload = {
+    user_id: cfg.userId,
+    content: `[${RUN_TOKEN}] ${wp.content}`,
+    tags: wp.tags,
+    memory_type: wp.type || 'Observation',
+    robot_id: cfg.robot,
+    mission_id: missionId,
+    geo_location: toGeo(wp.x, wp.y),
+    local_position: [wp.x, wp.y, 0],
+    action_type: wp.action,
+    sensor_data: wp.sensors,
+    outcome_type: wp.outcome,
+    reward: wp.reward,
+    terrain_type: 'indoor',
+    episode_id: robotKey === 'alpha' ? 'alpha-sweep' : 'beta-check',
+    sequence_number: wp.seq,
+    importance: wp.importance,
+  };
+  try {
+    const result = await apiPost('/api/remember', payload);
+    state.liveIds[robotKey][wpIdx] = result.id;
+    // Also store in memoryMap for lineage/recall lookups
+    const mem = { id: result.id, experience: { content: payload.content, outcome_type: wp.outcome, sensor_data: wp.sensors, memory_type: wp.type || 'Observation' }, tier: result.tier || 'Working', importance: wp.importance, created_at: new Date().toISOString() };
+    state.memoryMap.set(result.id, { memory: mem, missionId });
+    if (!state.missions[missionId]) state.missions[missionId] = { memories: [], visible: true, cfg };
+    state.missions[missionId].memories[wpIdx] = mem;
+    return result;
+  } catch (err) {
+    console.error(`remember ${robotKey} WP${wpIdx + 1}:`, err);
+    return null;
+  }
+}
+
+async function liveCreateEdges(robotKey) {
+  const cfg = robotKey === 'alpha' ? MISSIONS.warehouse_alpha_2026_03 : MISSIONS.warehouse_beta_2026_04;
+  const edges = LINEAGE_EDGES[robotKey] || [];
+  let count = 0;
+  for (const [fromSeq, toSeq, relation] of edges) {
+    const fromId = state.liveIds[robotKey][fromSeq - 1];
+    const toId = state.liveIds[robotKey][toSeq - 1];
+    if (!fromId || !toId) continue;
+    try {
+      await apiPost('/api/lineage/link', { user_id: cfg.userId, from_memory_id: fromId, to_memory_id: toId, relation });
+      state.lineageEdges.push({ from: fromId, to: toId, relation, id: `live-${count}` });
+      count++;
+    } catch (e) { console.warn(`edge ${robotKey} ${fromSeq}->${toSeq}:`, e.message); }
+  }
+  return count;
+}
+
+async function liveCreateCrossEdges() {
+  let count = 0;
+  for (const [fromRobot, fromSeq, toRobot, toSeq, relation] of LINEAGE_EDGES.cross) {
+    const fromId = state.liveIds[fromRobot][fromSeq - 1];
+    const toId = state.liveIds[toRobot][toSeq - 1];
+    if (!fromId || !toId) continue;
+    const cfg = toRobot === 'beta' ? MISSIONS.warehouse_beta_2026_04 : MISSIONS.warehouse_alpha_2026_03;
+    try {
+      await apiPost('/api/lineage/link', { user_id: cfg.userId, from_memory_id: fromId, to_memory_id: toId, relation });
+      state.lineageEdges.push({ from: fromId, to: toId, relation, id: `cross-${count}` });
+      count++;
+    } catch (e) { console.warn(`cross edge:`, e.message); }
+  }
+  return count;
+}
+
 // ── Load data ───────────────────────────────────────────────────────────────────
 async function loadAll() {
   try {
-    await fetch(`${HOST}/api/health`, { headers: { 'X-API-Key': API_KEY } });
+    // Test connectivity with a lightweight call
+    await fetch(`${HOST}/api/memory/stats`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY }, body: '{"user_id":"spot-alpha"}' });
     document.getElementById('connDot').classList.add('live');
-  } catch { }
-
-  for (const [missionId, cfg] of Object.entries(MISSIONS)) {
-    try {
-      const result = await apiPost('/api/search/robotics', {
-        user_id: cfg.userId, mode: 'mission', mission_id: missionId, query_text: 'warehouse', limit: 20,
-      });
-      const memories = (result.memories || []).sort((a, b) => {
-        const sa = (a.experience || a).sequence_number || (a.experience?.context?.episode?.sequence_number) || 0;
-        const sb = (b.experience || b).sequence_number || (b.experience?.context?.episode?.sequence_number) || 0;
-        return sa - sb;
-      });
-      state.missions[missionId] = { memories, visible: true, cfg };
-      memories.forEach(m => state.memoryMap.set(m.id, { memory: m, missionId }));
-    } catch (err) { console.error(`Load ${missionId}:`, err); }
+  } catch {
+    document.getElementById('hlText').textContent = 'Cannot reach server';
+    document.getElementById('hlSub').textContent = `Check ${HOST}`;
   }
-
-  // Load lineage
-  try {
-    const [r1, r2] = await Promise.all([
-      apiPost('/api/lineage/edges', { user_id: 'spot-alpha', limit: 100 }),
-      apiPost('/api/lineage/edges', { user_id: 'spot-beta', limit: 100 }),
-    ]);
-    state.lineageEdges = [...(r1.edges || []), ...(r2.edges || [])];
-  } catch (e) { console.warn('Lineage:', e.message); }
-
-  drawWaypointDots();
 }
 
 // ── SVG helpers ─────────────────────────────────────────────────────────────────
@@ -720,12 +839,26 @@ const STORY = [
     fallbackHl: 'Mission complete — zero incidents', fallbackSub: '' },
 ];
 
-function storyPlay() {
+async function storyPlay() {
   if (storyRunning) { storyStop(); return; }
   storyRunning = true;
   document.getElementById('btnPlay').textContent = 'STOP';
   storyIdx = -1;
+  state.liveIds = { alpha: [], beta: [] };
+  state.lineageEdges = [];
   clearWarehouse();
+
+  // Clear old demo data so we start fresh
+  const hlBar = document.getElementById('headline');
+  hlBar.className = 'headline-bar';
+  document.getElementById('hlText').textContent = 'Clearing old data...';
+  document.getElementById('hlSub').textContent = '';
+  for (const uid of ['spot-alpha', 'spot-beta']) {
+    try { await apiPost('/api/forget/age', { user_id: uid, days_old: 0 }); } catch {}
+  }
+  document.getElementById('hlText').textContent = 'Starting live mission...';
+  await new Promise(r => setTimeout(r, 500));
+
   storyAdvance();
 }
 
@@ -733,6 +866,121 @@ function storyStop() {
   storyRunning = false;
   clearTimeout(storyTimeout);
   document.getElementById('btnPlay').textContent = 'PLAY';
+  // Draw clickable waypoint dots for all memories created during story
+  drawLiveWaypointDots();
+}
+
+// Draw dots for memories that were created live during the story
+function drawLiveWaypointDots() {
+  const layer = document.getElementById('layerTrails');
+  for (const robotKey of ['alpha', 'beta']) {
+    const missionId = robotKey === 'alpha' ? 'warehouse_alpha_2026_03' : 'warehouse_beta_2026_04';
+    const cfg = MISSIONS[missionId];
+    const positions = WP_POS[robotKey];
+    const ids = state.liveIds[robotKey];
+    const wps = WAYPOINTS[robotKey];
+    if (!ids || !positions) continue;
+
+    for (let i = 0; i < ids.length; i++) {
+      if (!ids[i] || !positions[i]) continue;
+      const [x, y] = positions[i];
+      const wp = wps[i];
+      const isHazard = wp.outcome === 'failure';
+      const isDecision = wp.type === 'Decision';
+      const color = isHazard ? '#ff4444' : cfg.color;
+
+      const g = document.createElementNS(svgNS, 'g');
+      g.style.cursor = 'pointer';
+      g.addEventListener('click', () => {
+        selectLiveWaypoint(robotKey, i);
+      });
+
+      if (isHazard || isDecision) {
+        g.appendChild(svgEl('circle', {
+          cx: x, cy: y, r: 12, fill: 'none',
+          stroke: isHazard ? '#ff4444' : '#44ccff',
+          'stroke-width': 1.5, opacity: 0.4,
+          'stroke-dasharray': isDecision ? '3,2' : 'none',
+        }));
+      }
+
+      g.appendChild(svgEl('circle', {
+        cx: x, cy: y, r: isHazard ? 7 : 5,
+        fill: color, opacity: isHazard ? 0.85 : 0.6,
+        stroke: '#fff', 'stroke-width': 0.5, 'stroke-opacity': 0.3,
+      }));
+
+      const label = document.createElementNS(svgNS, 'text');
+      label.setAttribute('x', x);
+      label.setAttribute('y', y + 3);
+      label.setAttribute('text-anchor', 'middle');
+      label.setAttribute('fill', '#fff');
+      label.setAttribute('font-size', '7');
+      label.setAttribute('font-weight', '700');
+      label.setAttribute('opacity', '0.8');
+      label.textContent = i + 1;
+      g.appendChild(label);
+
+      layer.appendChild(g);
+    }
+  }
+}
+
+// Handle click on a waypoint dot created during live story
+function selectLiveWaypoint(robotKey, wpIdx) {
+  const missionId = robotKey === 'alpha' ? 'warehouse_alpha_2026_03' : 'warehouse_beta_2026_04';
+  const cfg = MISSIONS[missionId];
+  const wp = WAYPOINTS[robotKey][wpIdx];
+  const memId = state.liveIds[robotKey][wpIdx];
+  if (!wp || !memId) return;
+
+  const positions = WP_POS[robotKey];
+
+  // Selection ring
+  if (selectedRing) selectedRing.remove();
+  if (positions[wpIdx]) {
+    const [sx, sy] = positions[wpIdx];
+    selectedRing = svgEl('circle', {
+      cx: sx, cy: sy, r: 16, fill: 'none', stroke: '#fff',
+      'stroke-width': 2, 'stroke-dasharray': '4,3', opacity: 0.8,
+    });
+    document.getElementById('layerRobots').appendChild(selectedRing);
+  }
+
+  // Show waypoint panel
+  document.getElementById('wpEmpty').style.display = 'none';
+  const wpEl = document.getElementById('wpContent');
+  wpEl.style.display = 'block';
+  const outcomeColor = wp.outcome === 'failure' ? '#ff4444' : wp.outcome === 'partial' ? '#ffaa00' : '#00ff88';
+  const sensorHtml = Object.entries(wp.sensors)
+    .filter(([k]) => !['battery','temperature','humidity'].includes(k))
+    .map(([k,v]) => `<span class="wp-tag" style="background:#1a1a2a;color:#888;">${k.replace(/_/g,' ')}: ${typeof v === 'number' ? v.toFixed(1) : v}</span>`)
+    .join('');
+
+  wpEl.innerHTML = `
+    <div class="wp-label" style="color:${cfg.color}">${cfg.label} WP${wpIdx + 1}
+      <span style="float:right;font-size:9px;color:#555;font-weight:400;">${memId.slice(0,8)}</span>
+    </div>
+    <div class="wp-content">${wp.content}</div>
+    <div class="wp-meta">
+      <span class="wp-tag" style="background:${outcomeColor}22;color:${outcomeColor};">${wp.outcome}</span>
+      <span class="wp-tag" style="background:#44ccff15;color:#44ccff;">${wp.type || 'Observation'}</span>
+      <span class="wp-tag" style="background:#1a1a2a;color:#aaa;">imp: ${wp.importance}</span>
+      ${sensorHtml}
+    </div>`;
+
+  // Draw lineage edges
+  const edgeCount = drawLineage(memId);
+  const legend = document.getElementById('lineageLegend');
+  if (edgeCount > 0) {
+    legend.style.display = 'flex';
+    document.getElementById('edgeCount').textContent = `${edgeCount} edges`;
+  } else {
+    legend.style.display = 'none';
+  }
+
+  // Run recall
+  runRecall({ id: memId, experience: { content: wp.content } }, missionId);
 }
 
 function storyNext() {
@@ -746,51 +994,20 @@ function clearWarehouse() {
   document.getElementById('layerHazards').innerHTML = '';
   document.getElementById('layerRecallLines').innerHTML = '';
   document.getElementById('layerRobots').innerHTML = '';
+  document.getElementById('wpEmpty').style.display = 'block';
+  document.getElementById('wpContent').style.display = 'none';
+  document.getElementById('recallEmpty').style.display = 'block';
+  document.getElementById('recallContent').style.display = 'none';
+  document.getElementById('lineageLegend').style.display = 'none';
   robotEl = null;
   trailEl = null;
-  drawWaypointDots();
+  selectedRing = null;
 }
 
 // Extract clean content from a memory object (strip run token prefix)
 function memContent(m) {
   const exp = m.experience || m;
   return (exp.content || '').replace(/^\[[^\]]+\]\s*/, '');
-}
-
-// Build headline + sub from actual loaded memory data
-function deriveHeadline(step) {
-  const missionId = step.mission === 'alpha' ? 'warehouse_alpha_2026_03' : 'warehouse_beta_2026_04';
-  const ms = state.missions[missionId];
-  const mem = ms && ms.memories[step.wpIdx];
-  if (!mem) return { hl: step.fallbackHl, sub: step.fallbackSub };
-
-  const content = memContent(mem);
-  const exp = mem.experience || mem;
-  const outcome = exp.outcome_type || 'success';
-  const sensors = exp.sensor_data || {};
-
-  if (step.hazard) {
-    // For hazards, show actual memory content as headline, sensor data as sub
-    const firstSentence = content.split(/\.\s/)[0];
-    const sensorBits = Object.entries(sensors)
-      .filter(([k]) => !['battery', 'temperature', 'humidity'].includes(k))
-      .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${typeof v === 'number' ? v.toFixed(1) : v}`)
-      .join(' · ');
-    return { hl: firstSentence, sub: sensorBits || content.slice(firstSentence.length + 2, firstSentence.length + 100) };
-  }
-
-  if (step.fadeTrail) {
-    // Mission summary — show actual summary content
-    const sensorStr = sensors.battery !== undefined ? `Battery: ${sensors.battery}%` : '';
-    return { hl: content.split(/\.\s/)[0], sub: sensorStr };
-  }
-
-  if (step.action === 'appear') {
-    return { hl: step.fallbackHl, sub: content.slice(0, 90) };
-  }
-
-  // Default: show actual memory content
-  return { hl: content.split(/\.\s/)[0], sub: content.slice(content.indexOf('.') + 2, 120) || '' };
 }
 
 async function storyAdvance() {
@@ -802,21 +1019,14 @@ async function storyAdvance() {
   const positions = WP_POS[step.mission];
   const color = step.mission === 'alpha' ? '#4488ff' : '#00ff88';
   const missionId = step.mission === 'alpha' ? 'warehouse_alpha_2026_03' : 'warehouse_beta_2026_04';
+  const hlBar = document.getElementById('headline');
 
   document.getElementById('stepLabel').textContent = `${storyIdx + 1} / ${STORY.length}`;
 
-  // ── PHASE 1: Show headline from actual memory data ──
-  const { hl, sub } = deriveHeadline(step);
-  const hlBar = document.getElementById('headline');
+  // ── PHASE 1: Show preliminary headline ──
   hlBar.className = 'headline-bar ' + (step.cls || '');
-  document.getElementById('hlText').textContent = hl;
-  document.getElementById('hlSub').textContent = sub;
-
-  // Update waypoint panel with actual memory
-  const ms = state.missions[missionId];
-  if (ms && ms.memories[step.wpIdx]) {
-    selectWaypoint(missionId, step.wpIdx);
-  }
+  document.getElementById('hlText').textContent = step.fallbackHl;
+  document.getElementById('hlSub').textContent = step.fallbackSub;
 
   // ── PHASE 2: Execute action ──
   if (step.action === 'appear') {
@@ -827,6 +1037,12 @@ async function storyAdvance() {
       'stroke-linecap': 'round', 'stroke-linejoin': 'round', opacity: 0.7,
     });
     document.getElementById('layerTrails').appendChild(trailEl);
+
+    // Live remember for the appear waypoint
+    const result = await liveRemember(step.mission, step.wpIdx);
+    if (result) {
+      showRememberResult(step.mission, step.wpIdx, result);
+    }
   }
 
   if (step.action === 'move' && robotEl) {
@@ -834,122 +1050,272 @@ async function storyAdvance() {
     const fromSeg = step.fromWp !== undefined ? step.fromWp : step.wpIdx - 1;
     const toSeg = step.wpIdx - 1;
 
+    // For multi-segment moves, remember intermediate waypoints as robot passes them
     const allPoints = [];
+    const wpIndicesInPath = []; // track which WP indices we pass through
     for (let s = fromSeg; s <= toSeg; s++) {
       const seg = ANIM_PATH[pathKey] && ANIM_PATH[pathKey][s];
-      if (seg) allPoints.push(...seg);
-      else allPoints.push(positions[s + 1]);
+      if (seg) {
+        allPoints.push(...seg.map(pt => ({ pt, wpArrival: s + 1 === step.wpIdx ? step.wpIdx : null })));
+      } else {
+        allPoints.push({ pt: positions[s + 1], wpArrival: s + 1 });
+      }
+      // Remember intermediate waypoints (not the final one yet)
+      if (s + 1 < step.wpIdx && s + 1 > (step.fromWp || 0)) {
+        wpIndicesInPath.push(s + 1);
+      }
     }
+    // Mark the last point as arrival at target WP
+    if (allPoints.length > 0) allPoints[allPoints.length - 1].wpArrival = step.wpIdx;
 
     const totalDuration = Math.min(4000, 1200 * (toSeg - fromSeg + 1));
     const perPoint = totalDuration / allPoints.length;
-    for (const [px, py] of allPoints) {
+
+    // Remember intermediate waypoints in background before animating
+    for (const wpI of wpIndicesInPath) {
+      liveRemember(step.mission, wpI); // fire and forget
+    }
+
+    for (const { pt: [px, py] } of allPoints) {
+      if (!storyRunning) return;
       await animateRobotTo(px, py, color, perPoint);
     }
 
+    // ── LIVE REMEMBER: call /api/remember for this waypoint ──
+    const wpData = WAYPOINTS[step.mission][step.wpIdx];
+    const remResult = await liveRemember(step.mission, step.wpIdx);
+
     const [tx, ty] = positions[step.wpIdx];
 
-    if (step.hazard) {
+    if (step.hazard && remResult) {
       spawnHazard(tx, ty);
+      // Update headline with actual memory content from remember response
+      hlBar.className = 'headline-bar alert';
+      document.getElementById('hlText').textContent = wpData.content.split(/\.\s/)[0];
+      const sensorBits = Object.entries(wpData.sensors)
+        .filter(([k]) => !['battery','temperature','humidity'].includes(k))
+        .map(([k,v]) => `${k.replace(/_/g,' ')}: ${v}`).join(' · ');
+      document.getElementById('hlSub').textContent = `Stored as ${remResult.id.slice(0,8)} · ${sensorBits}`;
+    } else if (remResult) {
+      // Normal waypoint — show remember confirmation
+      document.getElementById('hlSub').textContent = `Memory ${remResult.id.slice(0,8)} stored`;
     }
 
-    // ── LIVE RECALL: call API, show real matched memory with real score ──
-    if (step.recall) {
-      const mem = ms && ms.memories[step.wpIdx];
-      const recallResult = await runLiveRecall(mem, missionId);
-      if (recallResult) {
-        // Find the hazard position on the map from the matched memory
-        const matchedEntry = state.memoryMap.get(recallResult.id);
-        let hazX = tx, hazY = ty;
-        if (matchedEntry) {
-          const matchedMs = state.missions[matchedEntry.missionId];
-          const matchedKey = matchedMs?.cfg?.key;
-          const matchedIdx = matchedMs?.memories?.findIndex(mm => mm.id === recallResult.id);
-          if (matchedKey && matchedIdx >= 0 && WP_POS[matchedKey][matchedIdx]) {
-            [hazX, hazY] = WP_POS[matchedKey][matchedIdx];
-          }
-        }
+    // Show remember result in waypoint panel
+    if (remResult) {
+      showRememberResult(step.mission, step.wpIdx, remResult);
+    }
 
-        // Build label from actual recalled content + real score
+    // ── LIVE RECALL for Beta: call /api/recall against Alpha's memories ──
+    if (step.recall) {
+      // First show "Querying memory..." in recall panel
+      document.getElementById('recallEmpty').style.display = 'none';
+      const rc = document.getElementById('recallContent');
+      rc.style.display = 'block';
+      rc.innerHTML = '<div style="color:#44ccff">Querying cross-mission memory...</div>';
+
+      // Query Alpha's memories — retry once if empty (vector index may need a moment)
+      // Use a targeted query focused on the hazard, not Beta's full decision text
+      const rawContent = wpData.content.replace(/^MEMORY RECALL:\s*/, '');
+      const queryText = rawContent.slice(0, 150);
+      let recallResult = null;
+      const modes = ['hybrid', 'semantic'];
+      for (const recallMode of modes) {
+        try {
+          const result = await apiPost('/api/recall', {
+            user_id: 'spot-alpha', query: queryText, mode: recallMode, limit: 5,
+          });
+          console.log(`recall (${recallMode}):`, result);
+          const matches = (result.memories || []).sort((a,b) => (b.score||0) - (a.score||0));
+          if (matches.length > 0) { recallResult = matches[0]; break; }
+        } catch (e) { console.warn(`recall (${recallMode}) failed:`, e.message); }
+        // Small delay before trying next mode
+        await new Promise(r => setTimeout(r, 800));
+      }
+      // Last resort: try spatial search near the hazard location
+      if (!recallResult) {
+        try {
+          const [lat, lon] = toGeo(wpData.x, wpData.y);
+          const result = await apiPost('/api/search/robotics', {
+            user_id: 'spot-alpha', radius_meters: 50,
+            geo_lat: lat, geo_lon: lon, limit: 5,
+          });
+          console.log('spatial fallback:', result);
+          const memories = result.memories || result.results || [];
+          if (memories.length > 0) {
+            recallResult = memories[0];
+            recallResult.score = recallResult.score || 0.75;
+          }
+        } catch (e) { console.warn('spatial fallback failed:', e.message); }
+      }
+
+      if (!recallResult) {
+        rc.innerHTML = '<div style="color:#ff8844">Recall returned no matches — vector index may need time to update</div>';
+      }
+
+      if (recallResult) {
         const recContent = memContent(recallResult);
         const pct = Math.min(99, Math.max(1, (recallResult.score || 0.5) * 100)).toFixed(0);
         const shortContent = recContent.split(/\.\s/)[0].slice(0, 40);
-        const recallLabel = `${pct}% match: ${shortContent}`;
+        const tier = recallResult.tier || '?';
+        const importance = (recallResult.importance || 0).toFixed(2);
 
-        // Update headline to show what was recalled
+        // Update recall panel
+        rc.innerHTML = `
+          <div class="recall-match">
+            <div class="icon">&#9888;</div>
+            <div class="info">
+              <div class="title" style="color:#44ccff">${recContent.slice(0, 90)}</div>
+              <div class="detail">Alpha · ${getAge(recallResult)} · cross-mission · tier: ${tier} · imp: ${importance}</div>
+              <div class="recall-bar"><div class="recall-bar-fill" style="width:${pct}%"></div></div>
+            </div>
+            <div class="score">${pct}%</div>
+          </div>`;
+
+        // Update headline
         hlBar.className = 'headline-bar recall';
-        document.getElementById('hlText').textContent = `Memory recalled: ${shortContent}`;
-        const matchedCfg = matchedEntry ? MISSIONS[matchedEntry.missionId] : null;
-        const age = matchedEntry ? getAge(matchedEntry.memory) : '';
-        document.getElementById('hlSub').textContent = `${pct}% match from ${matchedCfg?.label || 'other robot'} ${age ? '(' + age + ')' : ''}`;
+        document.getElementById('hlText').textContent = `Recalled: ${shortContent}`;
+        document.getElementById('hlSub').textContent = `${pct}% match from Alpha · ${recallResult.id.slice(0,8)}`;
 
+        // Draw recall line to hazard position
+        let hazX = tx, hazY = ty;
+        // Find Alpha's hazard positions — WP4 (aisle 3) or WP6 (aisle 5)
+        if (step.wpIdx === 3) { hazX = 370; hazY = 300; } // Alpha WP4 position
+        if (step.wpIdx === 5) { hazX = 570; hazY = 300; } // Alpha WP6 position
+        const recallLabel = `${pct}% match: ${shortContent}`;
         await drawRecallLine(tx, ty, hazX, hazY, recallLabel);
+
+        // ── RECALL → DECISION → LINEAGE: close the loop ──
+        // Beta's Decision memory was just stored via liveRemember above.
+        // Link it back to Alpha's recalled hazard via /api/lineage/link.
+        const betaDecisionId = state.liveIds.beta[step.wpIdx];
+        const alphaHazardId = recallResult.id;
+        if (betaDecisionId && alphaHazardId) {
+          try {
+            await apiPost('/api/lineage/link', {
+              user_id: 'spot-beta',
+              from_memory_id: alphaHazardId,
+              to_memory_id: betaDecisionId,
+              relation: 'InformedBy',
+            });
+            state.lineageEdges.push({ from: alphaHazardId, to: betaDecisionId, relation: 'InformedBy', id: `recall-link-${storyIdx}` });
+
+            // Also create reverse TriggeredBy edge
+            await apiPost('/api/lineage/link', {
+              user_id: 'spot-beta',
+              from_memory_id: betaDecisionId,
+              to_memory_id: alphaHazardId,
+              relation: 'TriggeredBy',
+            });
+            state.lineageEdges.push({ from: betaDecisionId, to: alphaHazardId, relation: 'TriggeredBy', id: `recall-trig-${storyIdx}` });
+
+            // Draw lineage line live on SVG (from Beta's position to hazard)
+            const layer = document.getElementById('layerRecallLines');
+            const edgeLine = svgEl('line', {
+              x1: tx, y1: ty, x2: hazX, y2: hazY,
+              stroke: RELATION_COLORS.InformedBy, 'stroke-width': 1.5,
+              'stroke-dasharray': '6,3', opacity: 0.7, class: 'lineage-edge',
+            });
+            layer.appendChild(edgeLine);
+            const edgeLabel = document.createElementNS(svgNS, 'text');
+            edgeLabel.setAttribute('x', (tx + hazX) / 2);
+            edgeLabel.setAttribute('y', (ty + hazY) / 2 + 12);
+            edgeLabel.setAttribute('text-anchor', 'middle');
+            edgeLabel.setAttribute('fill', '#ffaa00');
+            edgeLabel.setAttribute('font-size', '7');
+            edgeLabel.setAttribute('font-weight', '600');
+            edgeLabel.setAttribute('class', 'lineage-edge');
+            edgeLabel.textContent = 'InformedBy → Decision';
+            layer.appendChild(edgeLabel);
+
+            // Update headline to show full loop
+            document.getElementById('hlSub').textContent =
+              `${pct}% match · Decision linked to Alpha's finding via InformedBy + TriggeredBy`;
+          } catch (e) { console.warn('lineage link:', e.message); }
+        }
       }
     }
 
-    if (step.fadeTrail && trailEl) {
+    // ── After Alpha completes: create lineage edges + reinforce ──
+    if (step.fadeTrail) {
+      if (step.mission === 'alpha') {
+        hlBar.className = 'headline-bar success';
+        document.getElementById('hlText').textContent = 'Creating lineage edges...';
+        const edgeCount = await liveCreateEdges('alpha');
+        document.getElementById('hlSub').textContent = `${edgeCount} edges created · reinforcing critical finding...`;
+
+        // Reinforce the hazard memory
+        const hazardId = state.liveIds.alpha[3]; // WP4 = floor crack
+        if (hazardId) {
+          try {
+            await apiPost('/api/reinforce', { user_id: 'spot-alpha', ids: [hazardId], outcome: 'helpful' });
+            await apiPost('/api/reinforce', { user_id: 'spot-alpha', ids: [hazardId], outcome: 'helpful' });
+          } catch {}
+        }
+        // Consolidate to ensure vector index is updated before Beta recalls
+        try {
+          await apiPost('/api/consolidate', { user_id: 'spot-alpha' });
+        } catch {}
+
+        document.getElementById('hlText').textContent = wpData.content.split(/\.\s/)[0];
+        document.getElementById('hlSub').textContent = `${state.liveIds.alpha.filter(Boolean).length} memories · ${edgeCount} edges · hazard reinforced x2`;
+      }
+
+      if (step.mission === 'beta') {
+        // Create Beta's edges + cross-mission edges
+        hlBar.className = 'headline-bar success';
+        document.getElementById('hlText').textContent = 'Linking cross-mission lineage...';
+        const betaEdges = await liveCreateEdges('beta');
+        const crossEdges = await liveCreateCrossEdges();
+        document.getElementById('hlText').textContent = wpData.content.split(/\.\s/)[0];
+        document.getElementById('hlSub').textContent = `${betaEdges + crossEdges} edges · ${crossEdges} cross-mission · zero incidents`;
+      }
+
       trailEl.setAttribute('opacity', '0.15');
       if (robotEl) { robotEl.remove(); robotEl = null; }
     }
   }
 
   // ── PHASE 3: Wait then advance ──
-  const waitMs = step.hazard ? 4000 : step.recall ? 5500 : 3500;
+  const waitMs = step.hazard ? 4500 : step.recall ? 6000 : step.fadeTrail ? 5000 : 3500;
   storyTimeout = setTimeout(() => storyAdvance(), waitMs);
 }
 
-// Run a live recall against all other robots and return best cross-mission match
-async function runLiveRecall(currentMem, currentMissionId) {
-  if (!currentMem) return null;
-  const exp = currentMem.experience || currentMem;
-  const cfg = MISSIONS[currentMissionId];
-  const queryText = memContent(currentMem).slice(0, 150);
-  const allUserIds = [...new Set(Object.values(MISSIONS).map(c => c.userId))];
-  const otherUsers = allUserIds.filter(uid => uid !== cfg.userId);
+// Show /api/remember response in the waypoint panel
+function showRememberResult(robotKey, wpIdx, result) {
+  const wp = WAYPOINTS[robotKey][wpIdx];
+  const cfg = robotKey === 'alpha' ? MISSIONS.warehouse_alpha_2026_03 : MISSIONS.warehouse_beta_2026_04;
+  const outcome = wp.outcome;
+  const outcomeColor = outcome === 'failure' ? '#ff4444' : outcome === 'partial' ? '#ffaa00' : '#00ff88';
 
-  try {
-    const promises = otherUsers.map(uid =>
-      apiPost('/api/recall', { user_id: uid, query: queryText, mode: 'hybrid', limit: 5 }).catch(() => ({ memories: [] }))
-    );
-    const results = await Promise.all(promises);
-    const cross = results.flatMap(r => (r.memories || [])).filter(rm => rm.id !== currentMem.id);
-    cross.sort((a, b) => (b.score || 0) - (a.score || 0));
+  document.getElementById('wpEmpty').style.display = 'none';
+  const wpEl = document.getElementById('wpContent');
+  wpEl.style.display = 'block';
 
-    // Also update the recall panel with the actual result
-    const rc = document.getElementById('recallContent');
-    document.getElementById('recallEmpty').style.display = 'none';
-    rc.style.display = 'block';
+  const sensorHtml = Object.entries(wp.sensors)
+    .filter(([k]) => !['battery','temperature','humidity'].includes(k))
+    .map(([k,v]) => `<span class="wp-tag" style="background:#1a1a2a;color:#888;">${k.replace(/_/g,' ')}: ${typeof v === 'number' ? v.toFixed(1) : v}</span>`)
+    .join('');
+  const baseSensorHtml = Object.entries(wp.sensors)
+    .filter(([k]) => ['battery','temperature','humidity'].includes(k))
+    .map(([k,v]) => `<span class="wp-tag" style="background:#0a0a14;color:#555;">${k}: ${v}</span>`)
+    .join('');
 
-    if (cross.length > 0) {
-      const best = cross[0];
-      const bestExp = best.experience || best;
-      const bestEntry = state.memoryMap.get(best.id);
-      const bestCfg = bestEntry ? MISSIONS[bestEntry.missionId] : null;
-      const pct = Math.min(99, Math.max(1, ((best.score || 0.5) * 100))).toFixed(0);
-      const content = memContent(best);
-      const tier = best.tier || 'Unknown';
-      const importance = (best.importance || 0).toFixed(2);
-      rc.innerHTML = `
-        <div class="recall-match">
-          <div class="icon">&#9888;</div>
-          <div class="info">
-            <div class="title">${content.slice(0, 90)}</div>
-            <div class="detail">
-              ${bestCfg ? bestCfg.label : 'Other robot'} · ${bestEntry ? getAge(bestEntry.memory) : '?'}
-              · tier: ${tier} · importance: ${importance}
-            </div>
-            <div class="recall-bar"><div class="recall-bar-fill" style="width:${pct}%"></div></div>
-          </div>
-          <div class="score">${pct}%</div>
-        </div>`;
-      return best;
-    } else {
-      rc.innerHTML = '<div style="color:#555">No cross-mission memories found</div>';
-      return null;
-    }
-  } catch (err) {
-    return null;
-  }
+  wpEl.innerHTML = `
+    <div class="wp-label" style="color:${cfg.color}">${cfg.label} WP${wpIdx + 1}
+      <span style="float:right;font-size:9px;color:#44ccff;font-weight:600;">POST /api/remember → ${result.id.slice(0,8)}</span>
+    </div>
+    <div class="wp-content">${wp.content}</div>
+    <div class="wp-meta">
+      <span class="wp-tag" style="background:${outcomeColor}22;color:${outcomeColor};">${outcome}</span>
+      <span class="wp-tag" style="background:#44ccff15;color:#44ccff;">${wp.type || 'Observation'}</span>
+      <span class="wp-tag" style="background:#1a1a2a;color:#aaa;">imp: ${wp.importance}</span>
+      ${sensorHtml}
+    </div>
+    <div class="wp-meta" style="margin-top:3px">
+      ${baseSensorHtml}
+      <span class="wp-tag" style="background:#00ff8815;color:#00ff88;">stored ✓</span>
+    </div>`;
 }
 
 function createRobot(x, y, color) {
