@@ -65,6 +65,7 @@ impl Default for CorsConfig {
             allowed_headers: vec![
                 "Content-Type".to_string(),
                 "Authorization".to_string(),
+                "X-API-Key".to_string(),
                 "X-Request-ID".to_string(),
             ],
             allow_credentials: false,
