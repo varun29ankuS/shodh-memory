@@ -1114,16 +1114,44 @@ async function storyAdvance() {
       rc.style.display = 'block';
       rc.innerHTML = '<div style="color:#44ccff">Querying cross-mission memory...</div>';
 
-      // Query Alpha's memories
-      const queryText = wpData.content.slice(0, 150);
+      // Query Alpha's memories — retry once if empty (vector index may need a moment)
+      // Use a targeted query focused on the hazard, not Beta's full decision text
+      const rawContent = wpData.content.replace(/^MEMORY RECALL:\s*/, '');
+      const queryText = rawContent.slice(0, 150);
       let recallResult = null;
-      try {
-        const result = await apiPost('/api/recall', {
-          user_id: 'spot-alpha', query: queryText, mode: 'hybrid', limit: 5,
-        });
-        const matches = (result.memories || []).sort((a,b) => (b.score||0) - (a.score||0));
-        if (matches.length > 0) recallResult = matches[0];
-      } catch {}
+      const modes = ['hybrid', 'semantic'];
+      for (const recallMode of modes) {
+        try {
+          const result = await apiPost('/api/recall', {
+            user_id: 'spot-alpha', query: queryText, mode: recallMode, limit: 5,
+          });
+          console.log(`recall (${recallMode}):`, result);
+          const matches = (result.memories || []).sort((a,b) => (b.score||0) - (a.score||0));
+          if (matches.length > 0) { recallResult = matches[0]; break; }
+        } catch (e) { console.warn(`recall (${recallMode}) failed:`, e.message); }
+        // Small delay before trying next mode
+        await new Promise(r => setTimeout(r, 800));
+      }
+      // Last resort: try spatial search near the hazard location
+      if (!recallResult) {
+        try {
+          const [lat, lon] = toGeo(wpData.x, wpData.y);
+          const result = await apiPost('/api/search/robotics', {
+            user_id: 'spot-alpha', radius_meters: 50,
+            geo_lat: lat, geo_lon: lon, limit: 5,
+          });
+          console.log('spatial fallback:', result);
+          const memories = result.memories || result.results || [];
+          if (memories.length > 0) {
+            recallResult = memories[0];
+            recallResult.score = recallResult.score || 0.75;
+          }
+        } catch (e) { console.warn('spatial fallback failed:', e.message); }
+      }
+
+      if (!recallResult) {
+        rc.innerHTML = '<div style="color:#ff8844">Recall returned no matches — vector index may need time to update</div>';
+      }
 
       if (recallResult) {
         const recContent = memContent(recallResult);
@@ -1224,6 +1252,11 @@ async function storyAdvance() {
             await apiPost('/api/reinforce', { user_id: 'spot-alpha', ids: [hazardId], outcome: 'helpful' });
           } catch {}
         }
+        // Consolidate to ensure vector index is updated before Beta recalls
+        try {
+          await apiPost('/api/consolidate', { user_id: 'spot-alpha' });
+        } catch {}
+
         document.getElementById('hlText').textContent = wpData.content.split(/\.\s/)[0];
         document.getElementById('hlSub').textContent = `${state.liveIds.alpha.filter(Boolean).length} memories · ${edgeCount} edges · hazard reinforced x2`;
       }
