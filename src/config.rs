@@ -304,6 +304,17 @@ pub struct ServerConfig {
     /// Caps the number of NER/tag/regex entities to prevent O(n²) edge explosion
     /// in the knowledge graph. 10 entities → max 45 co-occurrence edges.
     pub max_entities_per_memory: usize,
+
+    /// Whether opt-in telemetry heartbeat is enabled (default: false)
+    /// Sends anonymous aggregate stats (version, OS, user count, memory count) once per day.
+    /// No PII, no memory content, no queries. Set SHODH_TELEMETRY=true to opt in.
+    pub telemetry_enabled: bool,
+
+    /// Telemetry endpoint URL
+    pub telemetry_url: String,
+
+    /// Telemetry heartbeat interval in seconds (default: 86400 = 24 hours)
+    pub telemetry_interval_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -328,6 +339,9 @@ impl Default for ServerConfig {
             backup_max_count: 7,           // Keep 7 backups (1 week of daily backups)
             backup_enabled: false,         // Disabled by default, auto-enabled in production
             max_entities_per_memory: 10,   // Cap entities per memory (10 → max 45 edges)
+            telemetry_enabled: false,
+            telemetry_url: "https://shodh-memory.com/api/telemetry".to_string(),
+            telemetry_interval_secs: 86400, // 24 hours
         }
     }
 }
@@ -475,6 +489,23 @@ impl ServerConfig {
             }
         }
 
+        // Telemetry (opt-in)
+        if let Ok(val) = env::var("SHODH_TELEMETRY") {
+            config.telemetry_enabled = val.to_lowercase() == "true" || val == "1";
+        }
+
+        if let Ok(val) = env::var("SHODH_TELEMETRY_URL") {
+            if !val.is_empty() {
+                config.telemetry_url = val;
+            }
+        }
+
+        if let Ok(val) = env::var("SHODH_TELEMETRY_INTERVAL") {
+            if let Ok(n) = val.parse::<u64>() {
+                config.telemetry_interval_secs = n.max(60); // minimum 60 seconds
+            }
+        }
+
         config
     }
 
@@ -520,6 +551,15 @@ impl ServerConfig {
             );
         } else {
             info!("   Backup: disabled");
+        }
+        if self.telemetry_enabled {
+            let interval_hours = self.telemetry_interval_secs / 3600;
+            info!(
+                "   Telemetry: enabled (→ {}, every {}h)",
+                self.telemetry_url, interval_hours
+            );
+        } else {
+            info!("   Telemetry: disabled (set SHODH_TELEMETRY=true to opt in)");
         }
     }
 }

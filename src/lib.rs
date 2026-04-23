@@ -37,6 +37,7 @@ pub mod serialization;
 pub mod server;
 pub mod similarity;
 pub mod streaming;
+pub mod telemetry;
 pub mod token_estimation;
 pub mod tracing_setup;
 pub mod validation;
