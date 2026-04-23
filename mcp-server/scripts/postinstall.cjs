@@ -3,7 +3,7 @@
  * Postinstall script for @shodh/memory-mcp
  *
  * Downloads the appropriate shodh-memory-server binary for the current platform
- * from GitHub releases.
+ * from GitHub releases with a visual progress bar.
  */
 
 const fs = require('fs');
@@ -15,7 +15,74 @@ const VERSION = require('../package.json').version;
 const REPO = 'varun29ankuS/shodh-memory';
 const BIN_DIR = path.join(__dirname, '..', 'bin');
 
-// Platform detection
+// ─── Visual helpers ──────────────────────────────────────────────────────────
+
+const BAR_WIDTH = 30;
+const FILLED = '\u2588'; // █
+const EMPTY = '\u2591';  // ░
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTime(seconds) {
+  if (seconds < 1) return '<1s';
+  if (seconds < 60) return `${Math.ceil(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.ceil(seconds % 60);
+  return `${m}m ${s}s`;
+}
+
+function drawProgress(downloaded, total, startTime) {
+  if (total === 0) {
+    process.stderr.write(`\r  Downloading... ${formatBytes(downloaded)}`);
+    return;
+  }
+
+  const pct = Math.min(downloaded / total, 1);
+  const filled = Math.round(pct * BAR_WIDTH);
+  const bar = FILLED.repeat(filled) + EMPTY.repeat(BAR_WIDTH - filled);
+  const pctStr = `${Math.round(pct * 100)}%`.padStart(4);
+
+  const elapsed = (Date.now() - startTime) / 1000;
+  let eta = '';
+  if (pct > 0.01 && pct < 1) {
+    const remaining = (elapsed / pct) * (1 - pct);
+    eta = ` | ${formatTime(remaining)} remaining`;
+  }
+
+  process.stderr.write(
+    `\r  ${bar}  ${pctStr} | ${formatBytes(downloaded)} / ${formatBytes(total)}${eta}   `
+  );
+}
+
+function printHeader() {
+  process.stderr.write('\n');
+  process.stderr.write('  \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557\n');
+  process.stderr.write(`  \u2551   \uD83D\uDC18 shodh-memory v${VERSION}`.padEnd(50) + '\u2551\n');
+  process.stderr.write('  \u2551   Cognitive Memory for AI Agents'.padEnd(50) + '\u2551\n');
+  process.stderr.write('  \u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D\n');
+  process.stderr.write('\n');
+}
+
+function printSuccess(binaryPath) {
+  process.stderr.write('\n');
+  process.stderr.write(`  \u2713 Binary installed at ${binaryPath}\n`);
+  process.stderr.write('\n');
+  process.stderr.write('  Next step \u2014 enable automatic memory:\n');
+  process.stderr.write('    npx shodh-setup-hooks\n');
+  process.stderr.write('\n');
+}
+
+function printAlreadyInstalled() {
+  process.stderr.write(`  \u2713 Server binary already installed\n`);
+  process.stderr.write('\n');
+}
+
+// ─── Platform detection ──────────────────────────────────────────────────────
+
 function getPlatformInfo() {
   const platform = process.platform;
   const arch = process.arch;
@@ -35,27 +102,41 @@ function getPlatformInfo() {
   }
 }
 
-// Download file with redirect following
+// ─── Download with progress ──────────────────────────────────────────────────
+
 function download(url, dest) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
+    const startTime = Date.now();
 
     const request = (url) => {
       https.get(url, (response) => {
         if (response.statusCode === 302 || response.statusCode === 301) {
-          // Follow redirect
           request(response.headers.location);
           return;
         }
 
         if (response.statusCode !== 200) {
-          reject(new Error(`Failed to download: ${response.statusCode}`));
+          reject(new Error(`HTTP ${response.statusCode}`));
           return;
         }
+
+        const totalSize = parseInt(response.headers['content-length'] || '0', 10);
+        let downloaded = 0;
+
+        response.on('data', (chunk) => {
+          downloaded += chunk.length;
+          drawProgress(downloaded, totalSize, startTime);
+        });
 
         response.pipe(file);
         file.on('finish', () => {
           file.close();
+          // Clear the progress line and show completion
+          if (totalSize > 0) {
+            drawProgress(totalSize, totalSize, startTime);
+          }
+          process.stderr.write(' \u2713\n');
           resolve();
         });
       }).on('error', (err) => {
@@ -68,26 +149,32 @@ function download(url, dest) {
   });
 }
 
-// Extract archive
+// ─── Extract archive ─────────────────────────────────────────────────────────
+
 function extract(archive, dest, platformInfo) {
   if (platformInfo.ext === '.tar.gz') {
-    execFileSync('tar', ['-xzf', archive, '-C', dest], { stdio: 'inherit' });
+    execFileSync('tar', ['-xzf', archive, '-C', dest], { stdio: 'pipe' });
   } else if (platformInfo.ext === '.zip') {
-    // Use PowerShell on Windows
-    execFileSync('powershell', ['-Command', `Expand-Archive -Path '${archive}' -DestinationPath '${dest}' -Force`], { stdio: 'inherit' });
+    execFileSync('powershell', [
+      '-Command',
+      `Expand-Archive -Path '${archive}' -DestinationPath '${dest}' -Force`,
+    ], { stdio: 'pipe' });
   }
 }
+
+// ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
   const platformInfo = getPlatformInfo();
 
+  printHeader();
+
   if (!platformInfo) {
-    console.log('[shodh-memory] Unsupported platform:', process.platform, process.arch);
-    console.log('[shodh-memory] You will need to run the server manually.');
+    process.stderr.write(`  \u2717 Unsupported platform: ${process.platform} ${process.arch}\n`);
+    process.stderr.write('  You will need to run the server manually.\n');
+    process.stderr.write(`  Download from: https://github.com/${REPO}/releases\n\n`);
     return;
   }
-
-  console.log('[shodh-memory] Installing server binary for', process.platform, process.arch);
 
   // Create bin directory
   if (!fs.existsSync(BIN_DIR)) {
@@ -98,23 +185,23 @@ async function main() {
 
   // Check if already installed
   if (fs.existsSync(binaryPath)) {
-    console.log('[shodh-memory] Binary already installed at', binaryPath);
+    printAlreadyInstalled();
     return;
   }
 
-  // Download URL
+  // Download
   const downloadUrl = `https://github.com/${REPO}/releases/download/v${VERSION}/${platformInfo.name}${platformInfo.ext}`;
   const archivePath = path.join(BIN_DIR, `${platformInfo.name}${platformInfo.ext}`);
 
-  console.log('[shodh-memory] Downloading from', downloadUrl);
+  process.stderr.write(`  Downloading server binary for ${process.platform} ${process.arch}...\n`);
 
   try {
     await download(downloadUrl, archivePath);
-    console.log('[shodh-memory] Downloaded archive');
 
     // Extract
+    process.stderr.write('  Extracting...');
     extract(archivePath, BIN_DIR, platformInfo);
-    console.log('[shodh-memory] Extracted binary');
+    process.stderr.write(' \u2713\n');
 
     // Clean up archive
     fs.unlinkSync(archivePath);
@@ -124,10 +211,11 @@ async function main() {
       fs.chmodSync(binaryPath, 0o755);
     }
 
-    console.log('[shodh-memory] Server binary installed at', binaryPath);
+    printSuccess(binaryPath);
   } catch (err) {
-    console.error('[shodh-memory] Failed to install binary:', err.message);
-    console.log('[shodh-memory] You can manually download from:', `https://github.com/${REPO}/releases`);
+    process.stderr.write('\n');
+    process.stderr.write(`  \u2717 Failed to install binary: ${err.message}\n`);
+    process.stderr.write(`  Manual download: https://github.com/${REPO}/releases\n\n`);
   }
 }
 

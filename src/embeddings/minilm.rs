@@ -264,10 +264,12 @@ impl MiniLMEmbedder {
             return Err("ONNX Runtime not found and SHODH_OFFLINE=true".to_string());
         }
 
-        eprintln!("[shodh] ONNX Runtime not found. Downloading...");
+        eprintln!();
+        eprintln!("  \u{1F4E6} Downloading runtime (first run only)...");
+        let progress = super::downloader::make_stderr_progress("ONNX Runtime".to_string());
         let onnx_path =
-            super::downloader::download_onnx_runtime(None).map_err(|e| e.to_string())?;
-        eprintln!("[shodh] Downloaded ONNX Runtime to: {:?}", onnx_path);
+            super::downloader::download_onnx_runtime(Some(progress)).map_err(|e| e.to_string())?;
+        eprintln!();
         // SAFETY: This is called once via OnceLock, before other threads start
         std::env::set_var("ORT_DYLIB_PATH", &onnx_path);
         Ok(onnx_path)
@@ -364,21 +366,11 @@ impl MiniLMEmbedder {
                 config.model_path.parent().unwrap_or(&config.model_path)
             );
 
-            match super::downloader::download_models(Some(std::sync::Arc::new(
-                |downloaded, total| {
-                    if total > 0 {
-                        let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
-                        if percent.is_multiple_of(10) {
-                            tracing::info!(
-                                "Downloading models: {}% ({}/{})",
-                                percent,
-                                downloaded,
-                                total
-                            );
-                        }
-                    }
-                },
-            ))) {
+            eprintln!();
+            eprintln!("  \u{1F4E6} Downloading models (first run only)...");
+            match super::downloader::download_models(Some(
+                super::downloader::make_stderr_progress("MiniLM-L6 (23 MB)".to_string()),
+            )) {
                 Ok(models_dir) => {
                     tracing::info!("Models downloaded to {:?}", models_dir);
 

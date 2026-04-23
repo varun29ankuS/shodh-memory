@@ -257,6 +257,66 @@ pub fn get_onnx_runtime_path() -> Option<PathBuf> {
 /// Download progress callback type (Arc for clonability)
 pub type ProgressCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
+// ─── Visual progress bar for stderr ─────────────────────────────────────────
+
+const BAR_WIDTH: usize = 30;
+const FILLED: char = '\u{2588}'; // █
+const EMPTY: char = '\u{2591}'; // ░
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Create a progress callback that renders a visual progress bar to stderr.
+///
+/// The `label` is printed once before the bar starts (e.g. "MiniLM-L6 (23 MB)").
+/// The bar updates in-place using `\r` carriage return.
+pub fn make_stderr_progress(label: String) -> ProgressCallback {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let header_printed = Arc::new(AtomicBool::new(false));
+
+    Arc::new(move |downloaded: u64, total: u64| {
+        // Print label once
+        if !header_printed.swap(true, Ordering::Relaxed) {
+            eprint!("     {label:<24}");
+        }
+
+        if total == 0 {
+            eprint!("\r     {:<24} {}...", label, format_bytes(downloaded));
+            return;
+        }
+
+        let pct = (downloaded as f64 / total as f64).min(1.0);
+        let filled = (pct * BAR_WIDTH as f64).round() as usize;
+        let bar: String = std::iter::repeat_n(FILLED, filled)
+            .chain(std::iter::repeat_n(EMPTY, BAR_WIDTH - filled))
+            .collect();
+        let pct_str = format!("{:>3}%", (pct * 100.0).round() as u32);
+
+        if downloaded >= total {
+            // Completion — overwrite with checkmark
+            eprint!(
+                "\r     {:<24}{bar}  {pct_str} | {} \u{2713}\n",
+                label,
+                format_bytes(total)
+            );
+        } else {
+            eprint!(
+                "\r     {:<24}{bar}  {pct_str} | {} / {}",
+                label,
+                format_bytes(downloaded),
+                format_bytes(total)
+            );
+        }
+    })
+}
+
 /// Verify SHA-256 checksum of a file
 /// Used for model integrity verification when checksum values are provided
 fn verify_checksum(path: &Path, expected: &str) -> Result<bool> {
@@ -451,13 +511,18 @@ pub fn download_models_internal(
         model_checksum,
     )?;
 
-    // Download tokenizer (~700KB)
+    // Download tokenizer (~700KB) — use a separate progress bar
     let tokenizer_path = models_dir.join("tokenizer.json");
     tracing::info!("Downloading tokenizer.json");
+    let tokenizer_progress: Option<ProgressCallback> = if progress.is_some() {
+        Some(make_stderr_progress("Tokenizer (700 KB)".to_string()))
+    } else {
+        None
+    };
     download_file_with_checksum(
         TOKENIZER_URL,
         &tokenizer_path,
-        progress.as_ref().map(|p| p.as_ref()),
+        tokenizer_progress.as_ref().map(|p| p.as_ref()),
         ModelChecksums::TOKENIZER,
     )?;
 

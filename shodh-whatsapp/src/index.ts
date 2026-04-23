@@ -48,7 +48,7 @@ async function connectToWhatsApp(): Promise<WASocket> {
 
   console.log(`\n🙏 Keshav starting...`);
   console.log(`📱 WhatsApp Web version: ${version.join(".")} (latest: ${isLatest})`);
-  console.log(`🧠 Memory: ${config.shodh.apiUrl}`);
+  console.log(`🐘 Memory: ${config.shodh.apiUrl}`);
   console.log(`🤖 LLM: ${config.llm.provider}`);
 
   if (config.whatsapp.autoReplyAll) {

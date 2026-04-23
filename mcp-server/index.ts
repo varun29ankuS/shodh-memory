@@ -2759,7 +2759,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           if (uniqueReminders.length > 0) {
             reminderBlock = `\n\n`;
-            reminderBlock += `🐘━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━🧠\n`;
+            reminderBlock += `🐘━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━🐘\n`;
             reminderBlock += `┃  SHODH MEMORY                    REMINDERS (${String(uniqueReminders.length).padStart(2)})  ┃\n`;
             reminderBlock += `┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\n`;
 
@@ -2807,7 +2807,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const facts = (result.relevant_facts || [])
             .filter((f: ProactiveFact) => f.confidence >= 0.4);
           if (facts.length > 0) {
-            factsBlock = "\n\n🧠 Known Facts:\n";
+            factsBlock = "\n\n🐘 Known Facts:\n";
             for (const f of facts) {
               const conf = (f.confidence * 100).toFixed(0);
               const entities = f.related_entities.length > 0 ? ` [${f.related_entities.slice(0, 3).join(', ')}]` : '';
@@ -2978,7 +2978,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Backend session data (memories, entities, etc.)
         if (digestResult && typeof digestResult === "object" && "digest" in digestResult && digestResult.digest) {
           const d = digestResult.digest as Record<string, unknown>;
-          digestResponse += `🧠 Memory: ${d.memories_created ?? 0} created, ${d.memories_surfaced ?? 0} surfaced, ${d.memories_used ?? 0} used`;
+          digestResponse += `🐘 Memory: ${d.memories_created ?? 0} created, ${d.memories_surfaced ?? 0} surfaced, ${d.memories_used ?? 0} used`;
           const hitRate = d.memory_hit_rate as number;
           if (hitRate > 0) digestResponse += ` (${Math.round(hitRate * 100)}% hit rate)`;
           digestResponse += `\n`;
@@ -3283,7 +3283,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         // Memory changes
         if (stats.memories_strengthened > 0 || stats.memories_decayed > 0 || stats.memories_at_risk > 0) {
-          response += `🧠 MEMORY DYNAMICS\n`;
+          response += `🐘 MEMORY DYNAMICS\n`;
           if (stats.memories_strengthened > 0) response += `   ↑ ${stats.memories_strengthened} strengthened\n`;
           if (stats.memories_decayed > 0) response += `   ↓ ${stats.memories_decayed} decayed\n`;
           if (stats.memories_at_risk > 0) response += `   ⚠️ ${stats.memories_at_risk} at risk\n`;

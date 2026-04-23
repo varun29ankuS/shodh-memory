@@ -1610,7 +1610,7 @@ async fn handle_claude_launch(port: u16, args: Vec<String>) -> Result<()> {
     let server_running = client.get(&health_url).send().await.is_ok();
 
     if !server_running {
-        eprintln!("🧠 Starting shodh-memory server on port {port}...");
+        eprintln!("🐘 Starting shodh-memory server on port {port}...");
 
         // Start server in background
         let exe_path = std::env::current_exe()?;
@@ -1664,7 +1664,7 @@ async fn handle_claude_launch(port: u16, args: Vec<String>) -> Result<()> {
             std::process::exit(1);
         }
     } else {
-        eprintln!("🧠 Shodh-memory server already running on port {port}");
+        eprintln!("🐘 Shodh-memory server already running on port {port}");
     }
 
     // Launch claude with ANTHROPIC_API_BASE pointing to Cortex proxy

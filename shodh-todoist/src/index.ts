@@ -27,7 +27,7 @@ async function showOverview(): Promise<void> {
 async function startDaemon(): Promise<void> {
   console.log("\n✅ shodh-todoist starting...");
   console.log(`🔑 Todoist: Connected`);
-  console.log(`🧠 Memory: ${config.shodh.apiUrl}`);
+  console.log(`🐘 Memory: ${config.shodh.apiUrl}`);
   console.log(`⏱️  Sync interval: ${config.sync.intervalMs / 1000}s`);
 
   await showOverview();

@@ -6,7 +6,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "shodh-memory-mcp": "dist/index.js"
+    "shodh-memory-mcp": "dist/index.js",
+    "shodh-setup-hooks": "scripts/setup-hooks.cjs"
   },
   "scripts": {
     "start": "bun run index.ts",

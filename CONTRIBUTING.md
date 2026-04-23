@@ -351,4 +351,4 @@ Contributors will be:
 - Mentioned in release notes
 - Given credit in documentation
 
-Thank you for contributing to Shodh-Memory! 🧠
+Thank you for contributing to Shodh-Memory! 🐘

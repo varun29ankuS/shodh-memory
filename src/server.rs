@@ -589,7 +589,7 @@ fn print_banner() {
     eprintln!();
     eprintln!("  ╔═══════════════════════════════════════════════════╗");
     eprintln!(
-        "  ║         🧠 Shodh-Memory Server v{}          ║",
+        "  ║         🐘 Shodh-Memory Server v{}          ║",
         env!("CARGO_PKG_VERSION")
     );
     eprintln!("  ║       Cognitive Memory for AI Agents              ║");
