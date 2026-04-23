@@ -59,10 +59,12 @@ function drawProgress(downloaded, total, startTime) {
 }
 
 function printHeader() {
+  // Box inner width = 42. Full line before trailing ║ = 2(indent) + 1(║) + 42 = 45.
+  // 🐘 surrogate pair is 2 JS chars and 2 visual columns — no special handling needed.
   process.stderr.write('\n');
   process.stderr.write('  \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557\n');
-  process.stderr.write(`  \u2551   \uD83D\uDC18 shodh-memory v${VERSION}`.padEnd(50) + '\u2551\n');
-  process.stderr.write('  \u2551   Cognitive Memory for AI Agents'.padEnd(50) + '\u2551\n');
+  process.stderr.write(`  \u2551   \uD83D\uDC18 shodh-memory v${VERSION}`.padEnd(45) + '\u2551\n');
+  process.stderr.write('  \u2551   Cognitive Memory for AI Agents         \u2551\n');
   process.stderr.write('  \u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D\n');
   process.stderr.write('\n');
 }

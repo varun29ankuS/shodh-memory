@@ -86,8 +86,8 @@ function buildHookConfig() {
 function printHeader() {
   process.stderr.write('\n');
   process.stderr.write('  \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557\n');
-  process.stderr.write('  \u2551   \uD83D\uDC18 shodh-memory hooks setup              \u2551\n');
-  process.stderr.write('  \u2551   Automatic memory for Claude Code          \u2551\n');
+  process.stderr.write('  \u2551   \uD83D\uDC18 shodh-memory hooks setup             \u2551\n');
+  process.stderr.write('  \u2551   Automatic memory for Claude Code         \u2551\n');
   process.stderr.write('  \u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D\n');
   process.stderr.write('\n');
 }
