@@ -16,11 +16,12 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "postinstall": "node scripts/postinstall.cjs",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build && node -e \"require('fs').mkdirSync('hooks',{recursive:true});require('fs').copyFileSync('../hooks/memory-hook.ts','hooks/memory-hook.ts')\""
   },
   "files": [
     "dist",
     "scripts",
+    "hooks",
     "README.md"
   ],
   "dependencies": {

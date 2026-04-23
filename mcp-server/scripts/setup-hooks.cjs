@@ -22,7 +22,10 @@ const HOME = os.homedir();
 const CLAUDE_DIR = path.join(HOME, '.claude');
 const HOOKS_DEST = path.join(CLAUDE_DIR, 'hooks', 'shodh-memory');
 const SETTINGS_PATH = path.join(CLAUDE_DIR, 'settings.json');
-const HOOK_SOURCE = path.join(__dirname, '..', '..', 'hooks', 'memory-hook.ts');
+// Look for hook in package first (npm install), then repo root (dev)
+const HOOK_SOURCE_PKG = path.join(__dirname, '..', 'hooks', 'memory-hook.ts');
+const HOOK_SOURCE_REPO = path.join(__dirname, '..', '..', 'hooks', 'memory-hook.ts');
+const HOOK_SOURCE = fs.existsSync(HOOK_SOURCE_PKG) ? HOOK_SOURCE_PKG : HOOK_SOURCE_REPO;
 // Fallback: when installed via npm, hooks/ is not in the package.
 // In that case, we download it from GitHub.
 const REPO = 'varun29ankuS/shodh-memory';
