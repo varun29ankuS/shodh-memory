@@ -696,9 +696,7 @@ fn extract_onnx_runtime(archive_path: &Path, dest_dir: &Path) -> Result<()> {
 
             // Final sanity check: the canonical file must be >1MB.
             // If it's a stub, something went wrong — fail loudly.
-            let final_size = fs::metadata(&canonical_path)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let final_size = fs::metadata(&canonical_path).map(|m| m.len()).unwrap_or(0);
             if final_size < 1_000_000 {
                 let _ = fs::remove_file(&canonical_path);
                 anyhow::bail!(
@@ -819,7 +817,10 @@ mod tests {
         let real_path = tmp.join("real_lib");
         fs::write(&real_path, vec![0u8; 2_000_000]).unwrap();
         let real_meta = fs::metadata(&real_path).unwrap();
-        assert!(real_meta.len() >= 1_000_000, "real lib should pass size check");
+        assert!(
+            real_meta.len() >= 1_000_000,
+            "real lib should pass size check"
+        );
 
         // Clean up
         let _ = fs::remove_dir_all(&tmp);
