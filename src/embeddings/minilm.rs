@@ -368,9 +368,9 @@ impl MiniLMEmbedder {
 
             eprintln!();
             eprintln!("  \u{1F4E6} Downloading models (first run only)...");
-            match super::downloader::download_models(Some(
-                super::downloader::make_stderr_progress("MiniLM-L6 (23 MB)".to_string()),
-            )) {
+            match super::downloader::download_models(Some(super::downloader::make_stderr_progress(
+                "MiniLM-L6 (23 MB)".to_string(),
+            ))) {
                 Ok(models_dir) => {
                     tracing::info!("Models downloaded to {:?}", models_dir);
 

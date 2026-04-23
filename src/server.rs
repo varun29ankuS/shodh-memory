@@ -600,7 +600,12 @@ fn print_banner() {
     let right_pad = inner_width.saturating_sub(left_pad + content_visual);
 
     eprintln!("  ╔{}╗", "═".repeat(inner_width));
-    eprintln!("  ║{}{}{}║", " ".repeat(left_pad), title_content, " ".repeat(right_pad));
+    eprintln!(
+        "  ║{}{}{}║",
+        " ".repeat(left_pad),
+        title_content,
+        " ".repeat(right_pad)
+    );
     eprintln!("  ║       Cognitive Memory for AI Agents              ║");
     eprintln!("  ╚{}╝", "═".repeat(inner_width));
     eprintln!();
