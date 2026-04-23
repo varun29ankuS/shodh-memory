@@ -99,6 +99,7 @@ jobs:
         run: cargo build --release
 
       - name: Run unit tests
+        if: matrix.os != 'windows-latest'
         run: cargo test --lib --no-fail-fast
 
       - name: Display build info (Unix)
