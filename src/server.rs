@@ -153,6 +153,17 @@ async fn async_main() -> Result<()> {
         );
     }
 
+    // Start telemetry heartbeat if opted in
+    if server_config.telemetry_enabled {
+        crate::telemetry::start_telemetry_loop(
+            Arc::clone(&manager),
+            &server_config,
+            std::time::Instant::now(),
+        );
+    } else {
+        info!("Telemetry: disabled (set SHODH_TELEMETRY=true to opt in)");
+    }
+
     // Start Zenoh transport if feature-enabled and configured
     #[cfg(feature = "zenoh")]
     let zenoh_handle = {
