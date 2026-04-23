@@ -589,14 +589,11 @@ fn print_banner() {
     eprintln!();
     let version = env!("CARGO_PKG_VERSION");
     // Box inner width = 49 visual columns.
-    // 🐘 is 1 Rust char but 2 visual columns — need 1 extra pad space to compensate.
+    // 🐘 is 1 Rust char but 2 terminal columns — add 1 to visual width to compensate.
     let title_content = format!("🐘 Shodh-Memory Server v{version}");
-    // visual width: 2 (emoji) + 1 (space) + 22 + ver_len = 25 + ver_len
-    // Rust .len() on the format string counts bytes (emoji = 4 bytes), but we need char-based padding.
-    // Simpler: compute pad from known visual widths.
-    let content_visual = 2 + 1 + 22 + version.len(); // emoji(2) + " Shodh-Memory Server v" + version
+    let content_visual = 2 + 1 + 22 + version.len() + 1; // +1 for wide emoji
     let inner_width: usize = 49;
-    let left_pad: usize = 9; // spaces before emoji
+    let left_pad: usize = 9;
     let right_pad = inner_width.saturating_sub(left_pad + content_visual);
 
     eprintln!("  ╔{}╗", "═".repeat(inner_width));
@@ -606,7 +603,7 @@ fn print_banner() {
         title_content,
         " ".repeat(right_pad)
     );
-    eprintln!("  ║       Cognitive Memory for AI Agents              ║");
+    eprintln!("  ║       Cognitive Memory for AI Agents            ║");
     eprintln!("  ╚{}╝", "═".repeat(inner_width));
     eprintln!();
 }
