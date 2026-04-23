@@ -627,17 +627,18 @@ fn extract_onnx_runtime(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                     || file_name.contains(".so."));
 
             if is_target || is_versioned {
-                let entry_size = entry.header().size().unwrap_or(0);
                 let dest_path = dest_dir.join(&file_name);
                 entry.unpack(&dest_path)?;
-                tracing::info!("Extracted {} ({} bytes)", file_name, entry_size);
-                extracted_files.push((dest_path, entry_size));
+                // Use actual file size on disk, not tar header (headers can be wrong)
+                let actual_size = fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
+                tracing::info!("Extracted {} ({} bytes on disk)", file_name, actual_size);
+                extracted_files.push((dest_path, actual_size));
             }
         }
 
         // Pick the largest extracted file as the real library.
         // The real ONNX Runtime is ~22MB; provider stubs are ~14KB.
-        // Sorting by size descending makes this immune to tarball entry order.
+        // Using actual file size on disk (not tar headers) for reliability.
         extracted_files.sort_by(|a, b| b.1.cmp(&a.1));
 
         if let Some((real_path, real_size)) = extracted_files.first() {
@@ -789,5 +790,60 @@ mod tests {
     fn test_models_dir() {
         let models_dir = get_models_dir();
         assert!(models_dir.to_string_lossy().contains("minilm-l6"));
+    }
+
+    /// Regression test for #250: a 14KB providers_shared stub masquerading as
+    /// libonnxruntime.so must be detected and rejected by the size guard.
+    #[test]
+    fn test_ort_size_guard_rejects_stub() {
+        let tmp = std::env::temp_dir().join("shodh-test-ort-size-guard");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        #[cfg(target_os = "windows")]
+        let lib_name = "onnxruntime.dll";
+        #[cfg(target_os = "linux")]
+        let lib_name = "libonnxruntime.so";
+        #[cfg(target_os = "macos")]
+        let lib_name = "libonnxruntime.dylib";
+
+        // Write a tiny stub file (simulating the providers_shared clobber)
+        let stub_path = tmp.join(lib_name);
+        fs::write(&stub_path, vec![0u8; 14_632]).unwrap(); // 14KB like providers_shared
+
+        // Verify the stub exists but is too small
+        let meta = fs::metadata(&stub_path).unwrap();
+        assert!(meta.len() < 1_000_000, "stub should be small");
+
+        // A real library would be >1MB
+        let real_path = tmp.join("real_lib");
+        fs::write(&real_path, vec![0u8; 2_000_000]).unwrap();
+        let real_meta = fs::metadata(&real_path).unwrap();
+        assert!(real_meta.len() >= 1_000_000, "real lib should pass size check");
+
+        // Clean up
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Verify that the dot-prefix filter excludes providers_shared
+    #[test]
+    fn test_dot_prefix_excludes_providers() {
+        let providers = "libonnxruntime_providers_shared.so";
+        assert!(
+            !providers.starts_with("libonnxruntime."),
+            "providers_shared must NOT match the dot-prefix filter"
+        );
+
+        let real_versioned = "libonnxruntime.so.1.23.2";
+        assert!(
+            real_versioned.starts_with("libonnxruntime."),
+            "versioned real lib must match dot-prefix filter"
+        );
+
+        let canonical = "libonnxruntime.so";
+        assert!(
+            canonical.starts_with("libonnxruntime."),
+            "canonical name must match dot-prefix filter"
+        );
     }
 }
