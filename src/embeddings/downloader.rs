@@ -208,6 +208,30 @@ pub fn is_onnx_runtime_downloaded() -> bool {
         }
         return false;
     }
+
+    // Size guard: the real ONNX Runtime library is >1MB. If we find a tiny
+    // stub (e.g., libonnxruntime_providers_shared.so was copied over the
+    // real lib — see issue #250), delete it and force re-download.
+    const MIN_ORT_SIZE: u64 = 1_000_000; // 1MB — real lib is ~22MB
+    match fs::metadata(&path) {
+        Ok(meta) if meta.len() < MIN_ORT_SIZE => {
+            tracing::warn!(
+                "ONNX Runtime at {:?} is only {} bytes (expected >{}). \
+                 Likely clobbered by providers_shared stub — deleting for re-download.",
+                path,
+                meta.len(),
+                MIN_ORT_SIZE
+            );
+            let _ = fs::remove_file(&path);
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!("Cannot stat ONNX Runtime at {:?}: {}", path, e);
+            return false;
+        }
+        _ => {}
+    }
+
     true
 }
 
@@ -562,12 +586,14 @@ fn extract_onnx_runtime(archive_path: &Path, dest_dir: &Path) -> Result<()> {
         #[cfg(target_os = "macos")]
         let lib_name = "libonnxruntime.dylib";
 
-        // The ONNX Runtime tgz contains both a symlink (libonnxruntime.dylib)
-        // and the real versioned file (libonnxruntime.1.23.2.dylib). If we
-        // extract the symlink first, it dangles because the target doesn't
-        // exist yet. Fix: extract only the real (non-symlink) file that
-        // matches the library name pattern, then copy it to the canonical name.
-        let mut extracted_real_path: Option<std::path::PathBuf> = None;
+        // The ONNX Runtime tgz contains a symlink (libonnxruntime.so →
+        // libonnxruntime.so.1.23.2), the real versioned library (~22MB), and
+        // provider stubs like libonnxruntime_providers_shared.so (~14KB).
+        //
+        // Strategy: extract all matching files, then pick the LARGEST one as
+        // the real library. This is immune to entry ordering and prevents
+        // provider stubs from clobbering the real lib. Fixes #223, #250.
+        let mut extracted_files: Vec<(std::path::PathBuf, u64)> = Vec::new();
 
         for entry in archive.entries()? {
             let mut entry = entry?;
@@ -584,35 +610,44 @@ fn extract_onnx_runtime(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                 continue;
             }
 
-            // Match the real library file (e.g., libonnxruntime.1.23.2.dylib or libonnxruntime.so.1.23.2)
             let file_name = path
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_default();
 
-            // Use "libonnxruntime." (with dot) to exclude provider libraries like
-            // libonnxruntime_providers_shared.so which would otherwise match and
-            // overwrite the real library (last-match-wins). Fixes #223.
+            // Match libonnxruntime.* but NOT libonnxruntime_* (providers_shared, etc.)
+            // The dot after "libonnxruntime" is the key discriminator. Fixes #223.
             let is_target = file_name == lib_name
                 || (file_name.starts_with("libonnxruntime.")
                     && file_name.contains(lib_name.trim_start_matches("libonnxruntime")));
 
-            // Also match versioned variants: libonnxruntime.1.23.2.dylib / libonnxruntime.so.1.23.2
             let is_versioned = file_name.starts_with("libonnxruntime.")
                 && (file_name.ends_with(".dylib")
                     || file_name.ends_with(".so")
                     || file_name.contains(".so."));
 
             if is_target || is_versioned {
+                let entry_size = entry.header().size().unwrap_or(0);
                 let dest_path = dest_dir.join(&file_name);
                 entry.unpack(&dest_path)?;
-                tracing::info!("Extracted {}", file_name);
-                extracted_real_path = Some(dest_path);
+                tracing::info!("Extracted {} ({} bytes)", file_name, entry_size);
+                extracted_files.push((dest_path, entry_size));
             }
         }
 
-        // Copy the extracted real file to the canonical name if needed
-        if let Some(real_path) = extracted_real_path {
+        // Pick the largest extracted file as the real library.
+        // The real ONNX Runtime is ~22MB; provider stubs are ~14KB.
+        // Sorting by size descending makes this immune to tarball entry order.
+        extracted_files.sort_by(|a, b| b.1.cmp(&a.1));
+
+        if let Some((real_path, real_size)) = extracted_files.first() {
+            tracing::info!(
+                "Selected {} ({} bytes) as ONNX Runtime library (largest of {} candidates)",
+                real_path.display(),
+                real_size,
+                extracted_files.len()
+            );
+            let real_path = real_path.clone();
             let canonical_path = dest_dir.join(lib_name);
             if real_path != canonical_path {
                 // Copy the real file to the canonical name (not symlink)
@@ -656,6 +691,22 @@ fn extract_onnx_runtime(archive_path: &Path, dest_dir: &Path) -> Result<()> {
                         tracing::warn!("codesign not available ({}), dlopen may fail on macOS", e);
                     }
                 }
+            }
+
+            // Final sanity check: the canonical file must be >1MB.
+            // If it's a stub, something went wrong — fail loudly.
+            let final_size = fs::metadata(&canonical_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if final_size < 1_000_000 {
+                let _ = fs::remove_file(&canonical_path);
+                anyhow::bail!(
+                    "Extracted {} is only {} bytes — expected the real ONNX Runtime (>1MB). \
+                     This usually means a provider stub was extracted instead. \
+                     Please report this at https://github.com/varun29ankuS/shodh-memory/issues",
+                    canonical_path.display(),
+                    final_size
+                );
             }
 
             return Ok(());
