@@ -50,22 +50,27 @@ Every other memory system delegates intelligence to LLM API calls — that's why
 
 ```bash
 # Download from GitHub Releases (or brew tap varun29ankuS/shodh-memory && brew install shodh-memory)
-shodh init       # First-time setup — creates config, generates API key, downloads AI model
-shodh server     # Start the memory server on :3030
-shodh tui        # Launch the TUI dashboard
-shodh status     # Check server health
-shodh doctor     # Diagnose issues
+shodh init          # First-time setup — creates config, generates API key, downloads AI model
+shodh server        # Start the memory server on :3030
+shodh setup-hooks   # Print instructions to set up Claude Code hooks
+shodh tui           # Launch the TUI dashboard
+shodh status        # Check server health
+shodh doctor        # Diagnose issues
 ```
 
 One binary, all functionality. No Docker, no API keys, no external dependencies.
 
-### Claude Code (one command)
+### Claude Code
 
 ```bash
+# 1. Add the MCP server (auto-downloads the backend binary)
 claude mcp add shodh-memory -- npx -y @shodh/memory-mcp
+
+# 2. Enable automatic memory capture (optional but recommended)
+npx @shodh/memory-mcp setup-hooks
 ```
 
-That's it. The MCP server auto-downloads the backend binary and starts it. No Docker, no API keys, no configuration. Claude now has persistent memory across sessions.
+Step 1 gives Claude persistent memory tools. Step 2 installs [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) that automatically capture context from every session — memories surface without you having to ask.
 
 <details>
 <summary>Or with Docker (for production / shared servers)</summary>
