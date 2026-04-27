@@ -73,7 +73,8 @@ pub use crate::memory::feedback::{
 };
 pub use crate::memory::files::{FileMemoryStats, FileMemoryStore, IndexingResult};
 pub use crate::memory::graph_retrieval::{
-    calculate_density_weights, spreading_activation_retrieve, ActivatedMemory,
+    calculate_density_weights, spreading_activation_retrieve,
+    spreading_activation_retrieve_with_stats, ActivatedMemory,
 };
 pub use crate::memory::hybrid_search::{
     BM25Index, HybridSearchConfig, HybridSearchEngine, HybridSearchResult, RRFusion,
@@ -1928,167 +1929,68 @@ impl MemorySystem {
                     None
                 };
 
-                let mut ids = Vec::new();
+                // Spreading activation retrieval (Anderson & Pirolli 1984)
+                // Density-adaptive: Associative/Causal pass density for graph-heavy weights,
+                // Hybrid passes None for fixed balanced weights.
+                let sa_density = match query.retrieval_mode {
+                    RetrievalMode::Associative | RetrievalMode::Causal => d,
+                    _ => None,
+                };
 
-                // Density-adaptive traversal: dense graphs get shallower depth
-                // and stricter strength filters to avoid exploring noisy L1 edges.
-                // Dense graph results are already downweighted in RRF fusion
-                // (graph_w=0.1 at density>2.0), so deep traversals add I/O cost
-                // for results that contribute <0.01% to the fused score.
-                let density_val = d.unwrap_or(0.0);
-                let (bidir_depth, bidir_min_str, weighted_depth, weighted_min_str) =
-                    if density_val > 15.0 {
-                        (3usize, 0.12f32, 3usize, 0.15f32)
-                    } else if density_val > 8.0 {
-                        (4, 0.08, 4, 0.12)
-                    } else {
-                        (6, 0.05, 5, 0.10)
+                let episode_to_memory =
+                    |ep: &crate::graph_memory::EpisodicNode| -> anyhow::Result<Option<SharedMemory>> {
+                        match self.long_term_memory.get(&MemoryId(ep.uuid)) {
+                            Ok(mem) => Ok(Some(Arc::new(mem))),
+                            Err(_) => Ok(None),
+                        }
                     };
 
-                if density_val > 0.0 {
-                    tracing::debug!(
-                        "Layer 2: density={:.1}, bidir_depth={}, bidir_min_str={:.2}, weighted_depth={}, weighted_min_str={:.2}",
-                        density_val, bidir_depth, bidir_min_str, weighted_depth, weighted_min_str
-                    );
-                }
+                let (activated_memories, sa_stats) =
+                    crate::memory::graph_retrieval::spreading_activation_retrieve_with_stats(
+                        query_text,
+                        query,
+                        &g,
+                        self.embedder.as_ref(),
+                        sa_density,
+                        Some(&onto_intent),
+                        Some(&query_embedding),
+                        episode_to_memory,
+                    )?;
 
-                // Multi-hop: Use bidirectional search between entity pairs
-                // Cap to top 3 pairs from first 4 entities to avoid O(n²) explosion.
-                // Entities are ordered by query analysis salience, so top pairs
-                // capture dominant relationships.
-                if query_entities.len() >= 2 {
-                    let max_pairs = 3usize;
-                    let max_ents = query_entities.len().min(4);
-                    let mut pair_count = 0usize;
-                    'bidir: for i in 0..max_ents {
-                        for j in (i + 1)..max_ents {
-                            if pair_count >= max_pairs {
-                                break 'bidir;
-                            }
-                            if let Ok(path) = g.traverse_bidirectional(
-                                &query_entities[i],
-                                &query_entities[j],
-                                bidir_depth,
-                                bidir_min_str,
-                            ) {
-                                // Curvature-weighted path boost: positive curvature
-                                // (community interior) increases boost, negative
-                                // (bridge/bottleneck) decreases it.
-                                let path_boost = {
-                                    let curvatures: Vec<f32> = path
-                                        .relationships
-                                        .iter()
-                                        .filter_map(|e| e.forman_curvature)
-                                        .collect();
-                                    if curvatures.is_empty() {
-                                        1.5
-                                    } else {
-                                        let mean = curvatures.iter().sum::<f32>()
-                                            / curvatures.len() as f32;
-                                        (1.5 + mean * crate::constants::CURVATURE_PATH_BOOST_SCALE)
-                                            .clamp(0.8, 2.5)
-                                    }
-                                };
-                                for tr in &path.entities {
-                                    if let Ok(mut eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
-                                        eps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                                        eps.truncate(50);
-                                        for ep in eps {
-                                            let mid = MemoryId(ep.uuid);
-                                            if episode_candidates
-                                                .as_ref()
-                                                .is_none_or(|c| c.contains(&mid))
-                                            {
-                                                ids.push((
-                                                    mid,
-                                                    tr.entity.salience
-                                                        * tr.decay_factor
-                                                        * path_boost,
-                                                    tr.decay_factor,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            pair_count += 1;
-                        }
-                    }
-                }
+                tracing::debug!(
+                    "Layer 2 SA: {} activated, mode={}, entities_activated={}, hops={}",
+                    activated_memories.len(),
+                    sa_stats.mode,
+                    sa_stats.entities_activated,
+                    sa_stats.graph_candidates,
+                );
 
-                // Single-hop or supplement multi-hop: Weighted traversal from each entity.
-                // When ontological intent has sufficient confidence, pass relation types
-                // as a filter to traverse_weighted for type-aware graph expansion.
-                let use_onto_filter = onto_intent.confidence
-                    >= crate::constants::ONTOLOGICAL_MIN_CONFIDENCE
-                    && !onto_intent.relation_types.is_empty();
-                let relation_filter: Option<Vec<crate::graph_memory::RelationType>> =
-                    if use_onto_filter {
-                        Some(onto_intent.relation_types.clone())
-                    } else {
-                        None
-                    };
-
-                for entity_uuid in &query_entities {
-                    if let Ok(t) = g.traverse_weighted(
-                        entity_uuid,
-                        weighted_depth,
-                        relation_filter.as_deref(),
-                        weighted_min_str,
-                    ) {
-                        let weighted_boost = {
-                            let curvatures: Vec<f32> = t
-                                .relationships
-                                .iter()
-                                .filter_map(|e| e.forman_curvature)
-                                .collect();
-                            if curvatures.is_empty() {
-                                1.0
-                            } else {
-                                let mean = curvatures.iter().sum::<f32>() / curvatures.len() as f32;
-                                (1.0 + mean * crate::constants::CURVATURE_PATH_BOOST_SCALE)
-                                    .clamp(0.6, 2.0)
-                            }
-                        };
-                        for tr in &t.entities {
-                            if let Ok(mut eps) = g.get_episodes_by_entity(&tr.entity.uuid) {
-                                eps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                                eps.truncate(50);
-                                for ep in eps {
-                                    let mid = MemoryId(ep.uuid);
-                                    if episode_candidates.as_ref().is_none_or(|c| c.contains(&mid))
-                                    {
-                                        ids.push((
-                                            mid,
-                                            tr.entity.salience * tr.decay_factor * weighted_boost,
-                                            tr.decay_factor,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let mut seen: std::collections::HashMap<MemoryId, (f32, f32)> =
-                    std::collections::HashMap::new();
-                for (id, act, heb) in ids {
-                    seen.entry(id)
-                        .and_modify(|(a, h)| {
-                            *a = a.max(act);
-                            *h = h.max(heb);
-                        })
-                        .or_insert((act, heb));
-                }
-                let mut r: Vec<_> = seen.into_iter().map(|(id, (a, h))| (id, a, h)).collect();
-                // CRITICAL: Sort by activation score so RRF rank is meaningful
+                // Map ActivatedMemory → (MemoryId, activation, hebbian_factor) for RRF fusion
+                let mut r: Vec<(MemoryId, f32, f32)> = activated_memories
+                    .into_iter()
+                    .filter(|am| {
+                        // Respect episode scoping from Layer 1
+                        episode_candidates
+                            .as_ref()
+                            .is_none_or(|c| c.contains(&am.memory.id))
+                    })
+                    .map(|am| {
+                        (
+                            am.memory.id.clone(),
+                            am.activation_score,
+                            am.activation_score, // hebbian = activation for graph-sourced memories
+                        )
+                    })
+                    .collect();
                 r.sort_by(|a, b| b.1.total_cmp(&a.1));
-                let pre_cap = r.len();
-                // Cap total graph candidates to prevent flooding RRF fusion
                 r.truncate(200);
                 if !r.is_empty() {
-                    tracing::debug!("Layer 2: {} graph results (capped from {}), {} query entities, bidirectional={}, top_activation={:.3}",
-                        r.len(), pre_cap, entity_count, query_entities.len() >= 2, r.first().map(|x| x.1).unwrap_or(0.0));
+                    tracing::debug!(
+                        "Layer 2: {} graph results, {} query entities, top_activation={:.3}",
+                        r.len(),
+                        entity_count,
+                        r.first().map(|x| x.1).unwrap_or(0.0)
+                    );
                 }
                 (r, d, entity_count, weights, phrases, disc)
             } else {
@@ -5741,8 +5643,7 @@ impl MemorySystem {
                             context: fact.fact.chars().take(100).collect(),
                             last_activated: now,
                             activation_count: 1,
-                            ltp_status: if fact.confidence >= 0.8
-                                && fact.source_memories.len() >= 3
+                            ltp_status: if fact.confidence >= 0.8 && fact.source_memories.len() >= 3
                             {
                                 crate::graph_memory::LtpStatus::Weekly
                             } else {

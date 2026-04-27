@@ -867,8 +867,7 @@ impl RelationshipEdge {
                 } else {
                     720.0
                 };
-                let should_prune =
-                    decay < prune_threshold && hours_elapsed > min_prune_hours;
+                let should_prune = decay < prune_threshold && hours_elapsed > min_prune_hours;
                 (decay, should_prune)
             }
         };
@@ -932,7 +931,10 @@ impl RelationshipEdge {
                 // Wixted 2004 hybrid: exponential consolidation → power-law long-term
                 let days = hours_elapsed / 24.0;
                 let is_potentiated = ltp_factor < 0.5;
-                (crate::decay::hybrid_decay_factor(days, is_potentiated), false)
+                (
+                    crate::decay::hybrid_decay_factor(days, is_potentiated),
+                    false,
+                )
             }
         };
         (self.strength * decay_factor).max(LTP_MIN_STRENGTH)
