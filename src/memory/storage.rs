@@ -2530,7 +2530,8 @@ impl MemoryStorage {
 
     /// Get all memories from long-term storage
     ///
-    /// Only returns entries with valid 16-byte UUID keys (consistent with get_stats)
+    /// Only returns entries with valid 16-byte UUID keys (consistent with get_stats).
+    /// WARNING: Loads entire DB into memory. For large stores, prefer `for_each_memory`.
     pub fn get_all(&self) -> Result<Vec<Memory>> {
         let mut memories = Vec::new();
 
@@ -2552,6 +2553,30 @@ impl MemoryStorage {
         }
 
         Ok(memories)
+    }
+
+    /// Iterate over all memories without loading them all into memory at once.
+    ///
+    /// Calls `f` for each non-forgotten memory. Returns early if `f` returns an error.
+    /// Use this instead of `get_all()` when you don't need all memories simultaneously.
+    pub fn for_each_memory<F>(&self, mut f: F) -> Result<()>
+    where
+        F: FnMut(Memory) -> Result<()>,
+    {
+        let mut read_opts = rocksdb::ReadOptions::default();
+        read_opts.fill_cache(false);
+        let iter = self.db.iterator_opt(IteratorMode::Start, read_opts);
+        for (key, value) in iter.flatten() {
+            if key.len() != 16 {
+                continue;
+            }
+            if let Ok((memory, _)) = deserialize_memory(&value) {
+                if !memory.is_forgotten() {
+                    f(memory)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn get_uncompressed_older_than(&self, cutoff: DateTime<Utc>) -> Result<Vec<Memory>> {

@@ -994,6 +994,23 @@ impl SpannIndex {
         };
 
         let mut partitions = self.partitions.write();
+
+        // Lazily materialize empty partitions for mmap-loaded indices
+        if partitions.is_empty() {
+            let centroids = self.centroids.read();
+            if !centroids.is_empty() {
+                *partitions = centroids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| Partition {
+                        id: i as u32,
+                        centroid: c.clone(),
+                        entries: Vec::new(),
+                    })
+                    .collect();
+            }
+        }
+
         if partition_id < partitions.len() {
             partitions[partition_id].entries.push(PostingEntry {
                 vector_id,

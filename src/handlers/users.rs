@@ -37,6 +37,7 @@ pub async fn get_stats_query(
     State(state): State<AppState>,
     Query(query): Query<StatsQuery>,
 ) -> Result<Json<MemoryStats>, AppError> {
+    validation::validate_user_id(&query.user_id).map_validation_err("user_id")?;
     let stats = state
         .get_stats(&query.user_id)
         .map_err(AppError::Internal)?;

@@ -98,12 +98,27 @@ impl SemanticFactStore {
     }
 
     /// Update an existing fact (for reinforcement)
+    ///
+    /// Rebuilds entity and type indices in case content/entities changed.
     pub fn update(&self, user_id: &str, fact: &SemanticFact) -> Result<()> {
-        // Simply overwrite - indices stay valid since ID doesn't change
-        let key = format!("facts:{}:{}", user_id, fact.id);
-        let value = crate::serialization::encode(fact)?;
-        self.db.put(key.as_bytes(), &value)?;
-        Ok(())
+        // Clean up old indices if the fact existed (entities/type may have changed)
+        if let Some(old_fact) = self.get(user_id, &fact.id)? {
+            for entity in &old_fact.related_entities {
+                let entity_key = format!(
+                    "facts_by_entity:{}:{}:{}",
+                    user_id,
+                    entity.to_lowercase(),
+                    fact.id
+                );
+                let _ = self.db.delete(entity_key.as_bytes());
+            }
+            let old_type_name = format!("{:?}", old_fact.fact_type);
+            let old_type_key = format!("facts_by_type:{}:{}:{}", user_id, old_type_name, fact.id);
+            let _ = self.db.delete(old_type_key.as_bytes());
+        }
+
+        // Re-store with fresh indices
+        self.store(user_id, fact)
     }
 
     /// Delete a fact

@@ -2932,8 +2932,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         resetTokenSession();
 
         // Signal context compression to backend session tracker
-        callBrain("/api/sessions/context-compressed", {
-          user_id: userId,
+        apiCall("/api/sessions/context-compressed", "POST", {
+          user_id: USER_ID,
           tokens_before: previousTokens,
           tokens_after: 0,
         }).catch(() => {});
@@ -2953,8 +2953,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "session_digest": {
         // Fetch backend session digest
-        const digestResult = await callBrain("/api/sessions/digest", {
-          user_id: userId,
+        const digestResult = await apiCall("/api/sessions/digest", "POST", {
+          user_id: USER_ID,
           token_budget: TOKEN_BUDGET,
         });
 
@@ -3025,8 +3025,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           group_by_project?: boolean;
         };
 
-        const histResult = await callBrain("/api/sessions/history", {
-          user_id: userId,
+        const histResult = await apiCall("/api/sessions/history", "POST", {
+          user_id: USER_ID,
           limit: histLimit,
           group_by_project,
         }) as {
@@ -3106,8 +3106,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           entity_filter?: string;
         };
 
-        const narResult = await callBrain("/api/facts/narratives", {
-          user_id: userId,
+        const narResult = await apiCall("/api/facts/narratives", "POST", {
+          user_id: USER_ID,
           limit: narLimit,
           entity_filter: entity_filter || null,
         }) as {
@@ -3172,8 +3172,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        const purgeResult = await callBrain("/api/facts/purge", {
-          user_id: userId,
+        const purgeResult = await apiCall("/api/facts/purge", "POST", {
+          user_id: USER_ID,
           pattern,
           dry_run,
         }) as {

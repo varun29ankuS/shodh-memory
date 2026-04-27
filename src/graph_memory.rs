@@ -3758,7 +3758,12 @@ impl GraphMemory {
                 if let Ok((mut edge, _)) =
                     crate::serialization::try_decode::<RelationshipEdge>(&value)
                 {
+                    // Fully potentiated edges are protected from batch weakening
+                    if matches!(edge.ltp_status, LtpStatus::Full) {
+                        continue;
+                    }
                     edge.strength *= 1.0 - clamped_decay;
+                    edge.strength = edge.strength.max(crate::constants::LTP_MIN_STRENGTH);
                     // Queue for pruning if below tier threshold
                     if edge.strength < edge.tier.prune_threshold() {
                         self.pending_prune.lock().push(edge.uuid);
@@ -3919,7 +3924,7 @@ impl GraphMemory {
                     if let Ok(value) = crate::serialization::encode(&edge) {
                         batch.put_cf(self.relationships_cf(), key, value);
 
-                        // Also index in the reverse direction for lookup
+                        // Index in mem_edge: for fast pair lookup
                         let idx_key_fwd = format!("mem_edge:{mem_a}:{mem_b}");
                         let idx_key_rev = format!("mem_edge:{mem_b}:{mem_a}");
                         batch.put_cf(
@@ -3932,6 +3937,12 @@ impl GraphMemory {
                             idx_key_rev.as_bytes(),
                             edge.uuid.as_bytes(),
                         );
+
+                        // Index in entity_edges_cf for graph traversal visibility
+                        let ee_key_a = format!("{mem_a}:{}", edge.uuid);
+                        let ee_key_b = format!("{mem_b}:{}", edge.uuid);
+                        batch.put_cf(self.entity_edges_cf(), ee_key_a.as_bytes(), b"1");
+                        batch.put_cf(self.entity_edges_cf(), ee_key_b.as_bytes(), b"1");
 
                         edges_updated += 1;
                         new_edges += 1;
@@ -4318,19 +4329,28 @@ impl GraphMemory {
                 let entity_a = &refs[i];
                 let entity_b = &refs[j];
 
-                // Find existing edge between this entity pair
-                if let Ok(Some(mut edge)) = self.find_edge_between_entities(entity_a, entity_b) {
-                    if edge.invalidated_at.is_some() {
-                        continue;
-                    }
-                    let _ = edge.strengthen();
-                    let key = edge.uuid.as_bytes();
-                    if let Ok(value) = crate::serialization::encode(&edge) {
-                        batch.put_cf(self.relationships_cf(), key, value);
-                        strengthened += 1;
+                // Find existing entity-entity edge via entity_edges_cf index
+                // (find_edge_between_entities uses mem_edge: prefix which is memory-to-memory only)
+                let edges = match self.get_entity_relationships(entity_a) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for mut edge in edges {
+                    if (edge.from_entity == *entity_a && edge.to_entity == *entity_b)
+                        || (edge.from_entity == *entity_b && edge.to_entity == *entity_a)
+                    {
+                        if edge.invalidated_at.is_some() {
+                            continue;
+                        }
+                        let _ = edge.strengthen();
+                        let key = edge.uuid.as_bytes();
+                        if let Ok(value) = crate::serialization::encode(&edge) {
+                            batch.put_cf(self.relationships_cf(), key, value);
+                            strengthened += 1;
+                        }
+                        break; // Only strengthen one edge per pair
                     }
                 }
-                // Don't create new edges — only strengthen existing ones from NER
             }
         }
 

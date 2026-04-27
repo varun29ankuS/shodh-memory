@@ -449,23 +449,31 @@ impl ShodhBackupEngine {
                     continue;
                 }
 
-                // Copy succeeded — now swap: remove original, rename temp to target
-                if target_path.exists() {
-                    if let Err(e) = fs::remove_dir_all(target_path) {
-                        // Can't remove original — roll back by removing temp
+                // Copy succeeded — atomic swap via rename-aside pattern:
+                // 1. Rename original → .old  (preserves data if swap fails)
+                // 2. Rename temp → target
+                // 3. Delete .old on success, or restore .old on failure
+                let old_path = target_path.with_extension("pre_restore");
+                let had_original = target_path.exists();
+
+                if had_original {
+                    if let Err(e) = fs::rename(target_path, &old_path) {
                         let _ = fs::remove_dir_all(&temp_path);
                         return Err(anyhow!(
-                            "Failed to remove existing {} directory at {:?}: {}",
+                            "Failed to rename existing {} to backup: {}",
                             store_name,
-                            target_path,
                             e
                         ));
                     }
                 }
 
                 if let Err(e) = fs::rename(&temp_path, target_path) {
-                    // Rename failed (cross-device?), fall back to copy + remove temp
+                    // Rename failed — try copy fallback
                     if let Err(copy_err) = copy_dir_recursive(&temp_path, target_path) {
+                        // Both failed — restore original from .old
+                        if had_original {
+                            let _ = fs::rename(&old_path, target_path);
+                        }
                         let _ = fs::remove_dir_all(&temp_path);
                         return Err(anyhow!(
                             "Failed to finalize restore for {}: rename={}, copy={}",
@@ -475,6 +483,11 @@ impl ShodhBackupEngine {
                         ));
                     }
                     let _ = fs::remove_dir_all(&temp_path);
+                }
+
+                // Swap succeeded — clean up old data
+                if had_original {
+                    let _ = fs::remove_dir_all(&old_path);
                 }
 
                 restored_stores.push(store_name.to_string());
