@@ -59,11 +59,8 @@ use crate::similarity::cosine_similarity;
 #[derive(Debug, Clone)]
 pub struct ActivatedMemory {
     pub memory: SharedMemory,
-    #[allow(dead_code)] // Useful for debugging score breakdown
     pub activation_score: f32,
-    #[allow(dead_code)] // Useful for debugging score breakdown
     pub semantic_score: f32,
-    #[allow(dead_code)] // Useful for debugging score breakdown
     pub linguistic_score: f32,
     pub final_score: f32,
 }
@@ -431,6 +428,7 @@ pub fn spreading_activation_retrieve(
         embedder,
         None, // No density = use legacy fixed weights
         None, // No pre-computed intent = compute internally
+        None, // No pre-computed embedding
         episode_to_memory_fn,
     )?;
     Ok(memories)
@@ -454,6 +452,7 @@ pub fn spreading_activation_retrieve(
 ///
 /// # Returns
 /// (Vec<ActivatedMemory>, RetrievalStats)
+#[allow(clippy::too_many_arguments)]
 pub fn spreading_activation_retrieve_with_stats(
     query_text: &str,
     query: &Query,
@@ -461,6 +460,7 @@ pub fn spreading_activation_retrieve_with_stats(
     embedder: &dyn Embedder,
     graph_density: Option<f32>,
     ontological_intent: Option<&OntologicalIntent>,
+    pre_computed_embedding: Option<&[f32]>,
     episode_to_memory_fn: impl Fn(&EpisodicNode) -> Result<Option<SharedMemory>>,
 ) -> Result<(Vec<ActivatedMemory>, RetrievalStats)> {
     let start_time = Instant::now();
@@ -868,10 +868,15 @@ pub fn spreading_activation_retrieve_with_stats(
     // Step 5: Convert episodes to memories and calculate scores using UNIFIED scoring
     let mut scored_memories = Vec::new();
 
-    // Generate query embedding once (for semantic scoring)
-    let embedding_start = Instant::now();
-    let query_embedding = embedder.encode(query_text)?;
-    stats.embedding_time_us = embedding_start.elapsed().as_micros() as u64;
+    // Use pre-computed embedding if available; otherwise encode fresh
+    let query_embedding = if let Some(emb) = pre_computed_embedding {
+        emb.to_vec()
+    } else {
+        let embedding_start = Instant::now();
+        let emb = embedder.encode(query_text)?;
+        stats.embedding_time_us = embedding_start.elapsed().as_micros() as u64;
+        emb
+    };
 
     let now = chrono::Utc::now();
 

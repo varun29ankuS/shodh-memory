@@ -9,7 +9,7 @@ use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB};
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -289,16 +289,6 @@ impl EdgeTier {
             Self::L1Working => Some(Self::L2Episodic),
             Self::L2Episodic => Some(Self::L3Semantic),
             Self::L3Semantic => None,
-        }
-    }
-
-    /// Get target density for this tier
-    pub fn target_density(&self) -> f32 {
-        use crate::constants::*;
-        match self {
-            Self::L1Working => L1_TARGET_DENSITY,
-            Self::L2Episodic => L2_TARGET_DENSITY,
-            Self::L3Semantic => L3_TARGET_DENSITY,
         }
     }
 }
@@ -774,27 +764,6 @@ impl RelationshipEdge {
         }
     }
 
-    /// Check if edge was active at similar time of day (for temporal retrieval)
-    pub fn time_of_day_match(&self, target_hour: u32, window_hours: u32) -> usize {
-        use chrono::Timelike;
-
-        match &self.activation_timestamps {
-            Some(ts) => ts
-                .iter()
-                .filter(|t| {
-                    let hour = t.hour();
-                    let diff = if hour > target_hour {
-                        (hour - target_hour).min(24 + target_hour - hour)
-                    } else {
-                        (target_hour - hour).min(24 + hour - target_hour)
-                    };
-                    diff <= window_hours
-                })
-                .count(),
-            None => 0,
-        }
-    }
-
     /// Apply time-based decay to this synapse
     ///
     /// Uses tier-aware decay model (3-tier memory consolidation):
@@ -826,11 +795,6 @@ impl RelationshipEdge {
         let hours_elapsed = hours_elapsed.min(8760.0);
 
         // Tier-aware decay with PIPE-4 multi-scale LTP
-        let tier_num = match self.tier {
-            EdgeTier::L1Working => 0,
-            EdgeTier::L2Episodic => 1,
-            EdgeTier::L3Semantic => 2,
-        };
         let raw_ltp_factor = self.ltp_status.decay_factor();
 
         // Gate LTP protection by endpoint selectivity (habituation mechanism).
@@ -855,8 +819,27 @@ impl RelationshipEdge {
             _ => raw_ltp_factor, // Not computed yet or above threshold: full protection
         };
 
-        let (decay_factor, exceeded_max_age) =
-            tier_decay_factor(hours_elapsed, tier_num, ltp_factor);
+        let (decay_factor, exceeded_max_age) = match self.tier {
+            EdgeTier::L1Working => {
+                // L1: aggressive exponential — correct for working memory
+                tier_decay_factor(hours_elapsed, 0, ltp_factor)
+            }
+            EdgeTier::L2Episodic | EdgeTier::L3Semantic => {
+                // L2/L3: Wixted 2004 hybrid (exponential consolidation → power-law long-term)
+                let days = hours_elapsed / 24.0;
+                let is_potentiated = ltp_factor < 0.5; // Weekly or Full LTP
+                let decay = crate::decay::hybrid_decay_factor(days, is_potentiated);
+                let prune_threshold = self.tier.prune_threshold();
+                // Min age before pruning: 30 days for L2, 90 days for L3
+                let min_prune_hours = if matches!(self.tier, EdgeTier::L3Semantic) {
+                    2160.0
+                } else {
+                    720.0
+                };
+                let should_prune = decay < prune_threshold && hours_elapsed > min_prune_hours;
+                (decay, should_prune)
+            }
+        };
         self.strength *= decay_factor;
 
         // Update last_activated to prevent double-decay on repeated calls
@@ -910,13 +893,19 @@ impl RelationshipEdge {
             return self.strength;
         }
 
-        let tier_num = match self.tier {
-            EdgeTier::L1Working => 0,
-            EdgeTier::L2Episodic => 1,
-            EdgeTier::L3Semantic => 2,
-        };
         let ltp_factor = self.ltp_status.decay_factor();
-        let (decay_factor, _) = tier_decay_factor(hours_elapsed, tier_num, ltp_factor);
+        let (decay_factor, _) = match self.tier {
+            EdgeTier::L1Working => tier_decay_factor(hours_elapsed, 0, ltp_factor),
+            EdgeTier::L2Episodic | EdgeTier::L3Semantic => {
+                // Wixted 2004 hybrid: exponential consolidation → power-law long-term
+                let days = hours_elapsed / 24.0;
+                let is_potentiated = ltp_factor < 0.5;
+                (
+                    crate::decay::hybrid_decay_factor(days, is_potentiated),
+                    false,
+                )
+            }
+        };
         (self.strength * decay_factor).max(LTP_MIN_STRENGTH)
     }
 
@@ -1751,6 +1740,19 @@ impl GraphMemory {
                     entity.name_embedding = existing.name_embedding;
                 }
 
+                // Merge summary: first non-empty wins, preserve existing
+                if !existing.summary.is_empty() {
+                    entity.summary = existing.summary.clone();
+                }
+
+                // Merge attributes: add new keys without overwriting existing
+                for (k, v) in &existing.attributes {
+                    entity
+                        .attributes
+                        .entry(k.clone())
+                        .or_insert_with(|| v.clone());
+                }
+
                 // Update salience with frequency boost
                 // Formula: salience = base_salience * (1 + 0.1 * ln(mention_count))
                 // This caps at about 1.3x boost at 20 mentions
@@ -2080,67 +2082,6 @@ impl GraphMemory {
         })
     }
 
-    /// Find all entities matching a name with fuzzy matching
-    ///
-    /// Returns multiple matches ranked by match quality.
-    /// Useful for spreading activation across related entities.
-    pub fn find_entities_fuzzy(&self, name: &str, max_results: usize) -> Result<Vec<EntityNode>> {
-        let mut results = Vec::new();
-        let name_lower = name.to_lowercase();
-
-        // Skip very short queries
-        if name.len() < 2 {
-            return Ok(results);
-        }
-
-        let lowercase_index = self.entity_lowercase_index.read();
-
-        // Score and collect matches
-        let mut scored: Vec<(Uuid, f32)> = Vec::new();
-
-        for (entity_name, uuid) in lowercase_index.iter() {
-            let score = if entity_name == &name_lower {
-                1.0 // Exact match
-            } else if entity_name.starts_with(&name_lower) {
-                0.9 // Prefix match
-            } else if entity_name.contains(&name_lower) {
-                0.7 // Substring match
-            } else {
-                // Word-level match
-                let entity_words: Vec<&str> = entity_name.split_whitespace().collect();
-                let query_words: Vec<&str> = name_lower.split_whitespace().collect();
-
-                let mut word_score: f32 = 0.0;
-                for qw in &query_words {
-                    for ew in &entity_words {
-                        if ew == qw {
-                            word_score += 0.5;
-                        } else if ew.starts_with(qw) {
-                            word_score += 0.3;
-                        }
-                    }
-                }
-                word_score.min(0.6) // Cap word-level score
-            };
-
-            if score > 0.0 {
-                scored.push((*uuid, score));
-            }
-        }
-
-        // Sort by score descending
-        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-        // Take top results
-        for (uuid, _score) in scored.into_iter().take(max_results) {
-            if let Some(entity) = self.get_entity(&uuid)? {
-                results.push(entity);
-            }
-        }
-
-        Ok(results)
-    }
-
     /// Canonical pair key for the entity-pair index.
     /// Uses min/max UUID ordering so A→B and B→A produce the same key.
     fn pair_key(entity_a: &Uuid, entity_b: &Uuid) -> String {
@@ -2151,9 +2092,24 @@ impl GraphMemory {
         }
     }
 
-    /// Index an entity pair → edge UUID for O(1) dedup lookups
-    fn index_entity_pair(&self, entity_a: &Uuid, entity_b: &Uuid, edge_uuid: &Uuid) -> Result<()> {
-        let key = Self::pair_key(entity_a, entity_b);
+    /// Typed pair key: includes relation type to support multiple edges per pair
+    fn typed_pair_key(entity_a: &Uuid, entity_b: &Uuid, relation_type: &RelationType) -> String {
+        format!(
+            "{}:{}",
+            Self::pair_key(entity_a, entity_b),
+            relation_type.as_str()
+        )
+    }
+
+    /// Index an entity pair + relation type → edge UUID for O(1) dedup lookups
+    fn index_entity_pair(
+        &self,
+        entity_a: &Uuid,
+        entity_b: &Uuid,
+        edge_uuid: &Uuid,
+        relation_type: &RelationType,
+    ) -> Result<()> {
+        let key = Self::typed_pair_key(entity_a, entity_b, relation_type);
         self.db.put_cf(
             self.entity_pair_index_cf(),
             key.as_bytes(),
@@ -2162,25 +2118,32 @@ impl GraphMemory {
         Ok(())
     }
 
-    /// Remove entity pair from the pair index
-    fn remove_entity_pair_index(&self, entity_a: &Uuid, entity_b: &Uuid) -> Result<()> {
-        let key = Self::pair_key(entity_a, entity_b);
+    /// Remove entity pair + relation type from the pair index
+    fn remove_entity_pair_index(
+        &self,
+        entity_a: &Uuid,
+        entity_b: &Uuid,
+        relation_type: &RelationType,
+    ) -> Result<()> {
+        let key = Self::typed_pair_key(entity_a, entity_b, relation_type);
         self.db
             .delete_cf(self.entity_pair_index_cf(), key.as_bytes())?;
         Ok(())
     }
 
-    /// Find existing relationship between two entities (either direction)
+    /// Find existing relationship between two entities with a specific relation type.
     ///
-    /// O(1) lookup via entity-pair index, with fallback to linear scan
-    /// for edges created before the pair index existed (migration path).
-    pub fn find_relationship_between(
+    /// O(1) lookup via typed pair index, with fallback to linear scan for pre-index edges.
+    /// Matches only edges with the same `RelationType`, allowing multiple semantically
+    /// distinct edges (e.g. WorksWith + PartOf) between the same entity pair.
+    pub fn find_relationship_between_typed(
         &self,
         entity_a: &Uuid,
         entity_b: &Uuid,
+        relation_type: &RelationType,
     ) -> Result<Option<RelationshipEdge>> {
-        // Fast path: O(1) pair index lookup
-        let key = Self::pair_key(entity_a, entity_b);
+        // Fast path: direct typed key lookup
+        let key = Self::typed_pair_key(entity_a, entity_b, relation_type);
         if let Some(edge_uuid_bytes) = self
             .db
             .get_cf(self.entity_pair_index_cf(), key.as_bytes())?
@@ -2190,48 +2153,22 @@ impl GraphMemory {
                 if let Some(edge) = self.get_relationship(&edge_uuid)? {
                     return Ok(Some(edge));
                 }
-                // Edge was deleted but pair index is stale — clean up and fall through
+                // Stale index entry — clean up
                 let _ = self
                     .db
                     .delete_cf(self.entity_pair_index_cf(), key.as_bytes());
             }
         }
 
-        // Slow path: linear scan for pre-index edges (backward compatibility)
-        // This path is only hit for edges created before the pair index existed.
-        // Once all old edges are either strengthened (which updates the index) or
-        // pruned, this path becomes dead code.
-        let edges_a = self.get_entity_relationships(entity_a)?;
-        for edge in edges_a {
-            if (edge.from_entity == *entity_a && edge.to_entity == *entity_b)
-                || (edge.from_entity == *entity_b && edge.to_entity == *entity_a)
-            {
-                // Backfill pair index for this legacy edge
-                let _ = self.index_entity_pair(entity_a, entity_b, &edge.uuid);
-                return Ok(Some(edge));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Find existing relationship between two entities with a specific relation type.
-    ///
-    /// Unlike `find_relationship_between` which returns any edge between the pair,
-    /// this method only matches edges with the same `RelationType`. This allows
-    /// multiple semantically distinct edges (e.g. WorksWith + PartOf) between
-    /// the same entity pair.
-    pub fn find_relationship_between_typed(
-        &self,
-        entity_a: &Uuid,
-        entity_b: &Uuid,
-        relation_type: &RelationType,
-    ) -> Result<Option<RelationshipEdge>> {
+        // Slow path: linear scan for pre-index edges
         let edges = self.get_entity_relationships(entity_a)?;
         for edge in edges {
             if edge.relation_type == *relation_type
                 && ((edge.from_entity == *entity_a && edge.to_entity == *entity_b)
                     || (edge.from_entity == *entity_b && edge.to_entity == *entity_a))
             {
+                // Backfill typed pair index
+                let _ = self.index_entity_pair(entity_a, entity_b, &edge.uuid, relation_type);
                 return Ok(Some(edge));
             }
         }
@@ -2285,8 +2222,13 @@ impl GraphMemory {
         self.index_entity_edge(&edge.from_entity, &edge.uuid)?;
         self.index_entity_edge(&edge.to_entity, &edge.uuid)?;
 
-        // Update entity-pair index for O(1) dedup lookups
-        self.index_entity_pair(&edge.from_entity, &edge.to_entity, &edge.uuid)?;
+        // Update entity-pair index for O(1) dedup lookups (typed key supports multi-edge)
+        self.index_entity_pair(
+            &edge.from_entity,
+            &edge.to_entity,
+            &edge.uuid,
+            &edge.relation_type,
+        )?;
 
         // Insert-time degree pruning: cap edges per entity to prevent O(n²) explosion.
         // If either entity exceeds MAX_ENTITY_DEGREE, prune the weakest edges.
@@ -2564,55 +2506,6 @@ impl GraphMemory {
         Ok(Some(total_edges as f32 / entity_uuids.len() as f32))
     }
 
-    /// Calculate edge density per tier for a specific entity (SHO-D5)
-    ///
-    /// Returns counts of edges by tier: (L1_count, L2_count, L3_count, LTP_count)
-    /// Useful for understanding if an entity's graph is consolidated (mostly L3/LTP)
-    /// or still noisy (mostly L1).
-    pub fn entity_density_by_tier(
-        &self,
-        entity_uuid: &Uuid,
-    ) -> Result<(usize, usize, usize, usize)> {
-        let edges = self.get_entity_relationships(entity_uuid)?;
-
-        let mut l1_count = 0;
-        let mut l2_count = 0;
-        let mut l3_count = 0;
-        let mut ltp_count = 0;
-
-        for edge in edges {
-            if edge.is_potentiated() {
-                ltp_count += 1;
-            } else {
-                match edge.tier {
-                    EdgeTier::L1Working => l1_count += 1,
-                    EdgeTier::L2Episodic => l2_count += 1,
-                    EdgeTier::L3Semantic => l3_count += 1,
-                }
-            }
-        }
-
-        Ok((l1_count, l2_count, l3_count, ltp_count))
-    }
-
-    /// Calculate consolidated ratio for an entity (SHO-D5)
-    ///
-    /// Returns the ratio of consolidated edges (L2 + L3 + LTP) to total edges.
-    /// High ratio (>0.7) = trust graph search, Low ratio (<0.3) = trust vector search.
-    ///
-    /// Returns None if entity has no edges.
-    pub fn entity_consolidation_ratio(&self, entity_uuid: &Uuid) -> Result<Option<f32>> {
-        let (l1, l2, l3, ltp) = self.entity_density_by_tier(entity_uuid)?;
-        let total = l1 + l2 + l3 + ltp;
-
-        if total == 0 {
-            return Ok(None);
-        }
-
-        let consolidated = l2 + l3 + ltp;
-        Ok(Some(consolidated as f32 / total as f32))
-    }
-
     /// Get relationship by UUID (raw, without decay applied)
     pub fn get_relationship(&self, uuid: &Uuid) -> Result<Option<RelationshipEdge>> {
         let key = uuid.as_bytes();
@@ -2677,8 +2570,10 @@ impl GraphMemory {
             tracing::warn!(edge = %uuid, key = %to_key, error = %e, "Failed to delete from entity_edges index");
         }
 
-        // Remove from entity-pair index
-        if let Err(e) = self.remove_entity_pair_index(&edge.from_entity, &edge.to_entity) {
+        // Remove from entity-pair index (typed key)
+        if let Err(e) =
+            self.remove_entity_pair_index(&edge.from_entity, &edge.to_entity, &edge.relation_type)
+        {
             tracing::warn!(edge = %uuid, "Failed to delete from entity_pair index: {}", e);
         }
 
@@ -3038,406 +2933,6 @@ impl GraphMemory {
         })
     }
 
-    /// Weighted graph traversal with filtering (Dijkstra-style best-first)
-    ///
-    /// Unlike BFS traverse_from_entity, this uses edge weights to prioritize
-    /// stronger connections. Enables Cypher-like pattern matching:
-    /// - Filter by relationship types
-    /// - Filter by minimum edge strength
-    /// - Score paths by cumulative weight
-    ///
-    /// Returns entities sorted by path score (strongest connections first).
-    ///
-    /// Performance: Uses batch edge reading and early termination to handle
-    /// large graphs (10000+ edges) efficiently.
-    pub fn traverse_weighted(
-        &self,
-        start_uuid: &Uuid,
-        max_depth: usize,
-        relation_types: Option<&[RelationType]>,
-        min_strength: f32,
-    ) -> Result<GraphTraversal> {
-        // Performance limits - prevents exponential blowup on dense graphs
-        const MAX_ENTITIES: usize = 200; // Stop after finding this many entities
-        const MAX_EDGES_PER_NODE: usize = 100; // Limit edges loaded per node
-        const MAX_ITERATIONS: usize = 500; // Prevent infinite loops
-
-        // Priority queue entry: (negative score for max-heap, uuid, depth, path_score)
-        #[derive(Clone)]
-        struct PQEntry {
-            score: f32,
-            uuid: Uuid,
-            depth: usize,
-        }
-        impl PartialEq for PQEntry {
-            fn eq(&self, other: &Self) -> bool {
-                self.score == other.score
-            }
-        }
-        impl Eq for PQEntry {}
-        impl PartialOrd for PQEntry {
-            fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
-                Some(self.cmp(other))
-            }
-        }
-        impl Ord for PQEntry {
-            fn cmp(&self, other: &Self) -> CmpOrdering {
-                // BinaryHeap is a max-heap: higher score = popped first = explored first
-                self.score.total_cmp(&other.score)
-            }
-        }
-
-        let mut visited: HashMap<Uuid, f32> = HashMap::new(); // uuid -> best path score
-        let mut heap: BinaryHeap<PQEntry> = BinaryHeap::new();
-        let mut all_entities: Vec<TraversedEntity> = Vec::new();
-        let mut all_edges: Vec<RelationshipEdge> = Vec::new();
-        let mut edges_to_strengthen: Vec<Uuid> = Vec::new();
-        let mut iterations = 0;
-
-        // Start node
-        heap.push(PQEntry {
-            score: 1.0,
-            uuid: *start_uuid,
-            depth: 0,
-        });
-        visited.insert(*start_uuid, 1.0);
-
-        if let Some(entity) = self.get_entity(start_uuid)? {
-            all_entities.push(TraversedEntity {
-                entity,
-                hop_distance: 0,
-                decay_factor: 1.0,
-            });
-        }
-
-        while let Some(PQEntry { score, uuid, depth }) = heap.pop() {
-            iterations += 1;
-
-            // Early termination: entity/iteration limits reached, stop draining heap
-            if all_entities.len() >= MAX_ENTITIES || iterations >= MAX_ITERATIONS {
-                break;
-            }
-
-            // Depth limit: skip this node's children but keep processing others
-            if depth >= max_depth {
-                continue;
-            }
-
-            // Skip if we've found a better path to this node
-            if let Some(&best) = visited.get(&uuid) {
-                if score < best * 0.99 {
-                    continue;
-                }
-            }
-
-            // Use limited edge reading to avoid loading 10000+ edges
-            let edges = self.get_entity_relationships_limited(&uuid, Some(MAX_EDGES_PER_NODE))?;
-
-            for edge in edges {
-                // Skip invalidated edges
-                if edge.invalidated_at.is_some() {
-                    continue;
-                }
-
-                // Filter by relationship type if specified
-                if let Some(types) = relation_types {
-                    if !types.contains(&edge.relation_type) {
-                        continue;
-                    }
-                }
-
-                // Filter by minimum strength
-                let effective = edge.effective_strength();
-                if effective < min_strength {
-                    continue;
-                }
-
-                let connected_uuid = if edge.from_entity == uuid {
-                    edge.to_entity
-                } else {
-                    edge.from_entity
-                };
-
-                // Path score = parent_score * edge_strength (multiplicative decay)
-                let new_score = score * effective;
-
-                // Only visit if this is a better path
-                let dominated = visited
-                    .get(&connected_uuid)
-                    .is_some_and(|&best| new_score <= best);
-                if dominated {
-                    continue;
-                }
-
-                // Track edge for Hebbian strengthening AFTER domination check
-                // so only edges on optimal paths are strengthened
-                edges_to_strengthen.push(edge.uuid);
-
-                let is_new_entity = !visited.contains_key(&connected_uuid);
-                visited.insert(connected_uuid, new_score);
-
-                // Add edge to results
-                let mut edge_with_strength = edge.clone();
-                edge_with_strength.strength = effective;
-                all_edges.push(edge_with_strength);
-
-                // Only add entity once (first discovery); better-path rediscovery
-                // updates visited score but doesn't duplicate the entity in results
-                if is_new_entity {
-                    if let Some(entity) = self.get_entity(&connected_uuid)? {
-                        all_entities.push(TraversedEntity {
-                            entity,
-                            hop_distance: depth + 1,
-                            decay_factor: new_score,
-                        });
-                    }
-                }
-
-                heap.push(PQEntry {
-                    score: new_score,
-                    uuid: connected_uuid,
-                    depth: depth + 1,
-                });
-            }
-        }
-
-        // Sort entities by path score (decay_factor) descending
-        all_entities.sort_by(|a, b| b.decay_factor.total_cmp(&a.decay_factor));
-
-        // Hebbian strengthening (deduplicate: same edge may appear on multiple paths)
-        edges_to_strengthen.sort();
-        edges_to_strengthen.dedup();
-        if !edges_to_strengthen.is_empty() {
-            if let Err(e) = self.batch_strengthen_synapses(&edges_to_strengthen) {
-                tracing::debug!("Failed to strengthen synapses: {}", e);
-            }
-        }
-
-        tracing::debug!(
-            "traverse_weighted: {} entities, {} edges (min_strength={:.2})",
-            all_entities.len(),
-            all_edges.len(),
-            min_strength
-        );
-
-        Ok(GraphTraversal {
-            entities: all_entities,
-            relationships: all_edges,
-        })
-    }
-
-    /// Bidirectional search between two entities (meet-in-middle)
-    ///
-    /// Complexity: O(b^(d/2)) instead of O(b^d) for unidirectional search.
-    /// Finds the shortest weighted path between start and goal.
-    /// Returns entities along the path with their path scores.
-    ///
-    /// Performance: Uses batch edge reading with limits.
-    pub fn traverse_bidirectional(
-        &self,
-        start_uuid: &Uuid,
-        goal_uuid: &Uuid,
-        max_depth: usize,
-        min_strength: f32,
-    ) -> Result<GraphTraversal> {
-        const MAX_EDGES_PER_NODE: usize = 100;
-
-        // Track forward search from start
-        let mut forward_visited: HashMap<Uuid, (f32, usize)> = HashMap::new(); // uuid -> (score, depth)
-        let mut forward_parents: HashMap<Uuid, (Uuid, Uuid)> = HashMap::new(); // child -> (parent, edge_uuid)
-        let mut forward_frontier: Vec<(Uuid, f32, usize)> = vec![(*start_uuid, 1.0, 0)];
-        forward_visited.insert(*start_uuid, (1.0, 0));
-
-        // Track backward search from goal
-        let mut backward_visited: HashMap<Uuid, (f32, usize)> = HashMap::new();
-        let mut backward_parents: HashMap<Uuid, (Uuid, Uuid)> = HashMap::new();
-        let mut backward_frontier: Vec<(Uuid, f32, usize)> = vec![(*goal_uuid, 1.0, 0)];
-        backward_visited.insert(*goal_uuid, (1.0, 0));
-
-        let mut meeting_node: Option<Uuid> = None;
-        let mut best_path_score: f32 = 0.0;
-        let half_depth = max_depth / 2 + 1;
-
-        // Alternate forward and backward expansion
-        for _round in 0..half_depth {
-            // Expand forward frontier
-            let mut new_forward: Vec<(Uuid, f32, usize)> = Vec::new();
-            for (uuid, score, depth) in forward_frontier.drain(..) {
-                if depth >= half_depth {
-                    continue;
-                }
-
-                let edges =
-                    self.get_entity_relationships_limited(&uuid, Some(MAX_EDGES_PER_NODE))?;
-                for edge in edges {
-                    if edge.invalidated_at.is_some() {
-                        continue;
-                    }
-                    let effective = edge.effective_strength();
-                    if effective < min_strength {
-                        continue;
-                    }
-
-                    let connected = if edge.from_entity == uuid {
-                        edge.to_entity
-                    } else {
-                        edge.from_entity
-                    };
-                    let new_score = score * effective;
-
-                    // Check if we meet backward search
-                    if let Some(&(back_score, _)) = backward_visited.get(&connected) {
-                        let combined = new_score * back_score;
-                        if combined > best_path_score {
-                            best_path_score = combined;
-                            meeting_node = Some(connected);
-                        }
-                    }
-
-                    // Update forward frontier
-                    let dominated = forward_visited
-                        .get(&connected)
-                        .is_some_and(|&(best, _)| new_score <= best);
-                    if !dominated {
-                        forward_visited.insert(connected, (new_score, depth + 1));
-                        forward_parents.insert(connected, (uuid, edge.uuid));
-                        new_forward.push((connected, new_score, depth + 1));
-                    }
-                }
-            }
-            forward_frontier = new_forward;
-
-            // Expand backward frontier
-            let mut new_backward: Vec<(Uuid, f32, usize)> = Vec::new();
-            for (uuid, score, depth) in backward_frontier.drain(..) {
-                if depth >= half_depth {
-                    continue;
-                }
-
-                let edges =
-                    self.get_entity_relationships_limited(&uuid, Some(MAX_EDGES_PER_NODE))?;
-                for edge in edges {
-                    if edge.invalidated_at.is_some() {
-                        continue;
-                    }
-                    let effective = edge.effective_strength();
-                    if effective < min_strength {
-                        continue;
-                    }
-
-                    let connected = if edge.from_entity == uuid {
-                        edge.to_entity
-                    } else {
-                        edge.from_entity
-                    };
-                    let new_score = score * effective;
-
-                    // Check if we meet forward search
-                    if let Some(&(fwd_score, _)) = forward_visited.get(&connected) {
-                        let combined = fwd_score * new_score;
-                        if combined > best_path_score {
-                            best_path_score = combined;
-                            meeting_node = Some(connected);
-                        }
-                    }
-
-                    // Update backward frontier
-                    let dominated = backward_visited
-                        .get(&connected)
-                        .is_some_and(|&(best, _)| new_score <= best);
-                    if !dominated {
-                        backward_visited.insert(connected, (new_score, depth + 1));
-                        backward_parents.insert(connected, (uuid, edge.uuid));
-                        new_backward.push((connected, new_score, depth + 1));
-                    }
-                }
-            }
-            backward_frontier = new_backward;
-
-            // Early termination if we found a meeting point
-            if meeting_node.is_some() {
-                break;
-            }
-        }
-
-        // Reconstruct path from meeting node
-        let mut all_entities: Vec<TraversedEntity> = Vec::new();
-        let mut all_edges: Vec<RelationshipEdge> = Vec::new();
-        let mut edges_to_strengthen: Vec<Uuid> = Vec::new();
-
-        if let Some(meeting) = meeting_node {
-            // Forward path: start -> meeting
-            let mut path_forward: Vec<Uuid> = vec![meeting];
-            let mut current = meeting;
-            while let Some(&(parent, edge_uuid)) = forward_parents.get(&current) {
-                path_forward.push(parent);
-                edges_to_strengthen.push(edge_uuid);
-                if let Some(edge) = self.get_relationship(&edge_uuid)? {
-                    all_edges.push(edge);
-                }
-                current = parent;
-            }
-            path_forward.reverse();
-
-            // Backward path: meeting -> goal
-            let mut path_backward: Vec<Uuid> = Vec::new();
-            current = meeting;
-            while let Some(&(parent, edge_uuid)) = backward_parents.get(&current) {
-                path_backward.push(parent);
-                edges_to_strengthen.push(edge_uuid);
-                if let Some(edge) = self.get_relationship(&edge_uuid)? {
-                    all_edges.push(edge);
-                }
-                current = parent;
-            }
-
-            // Combine paths
-            let full_path: Vec<Uuid> = path_forward.into_iter().chain(path_backward).collect();
-
-            // Build entities with scores
-            for (i, uuid) in full_path.iter().enumerate() {
-                if let Some(entity) = self.get_entity(uuid)? {
-                    let score = forward_visited
-                        .get(uuid)
-                        .map(|&(s, _)| s)
-                        .or_else(|| backward_visited.get(uuid).map(|&(s, _)| s))
-                        .unwrap_or(0.5);
-                    all_entities.push(TraversedEntity {
-                        entity,
-                        hop_distance: i,
-                        decay_factor: score,
-                    });
-                }
-            }
-        } else {
-            // No path found - return empty traversal
-            tracing::debug!(
-                "traverse_bidirectional: no path between {:?} and {:?}",
-                start_uuid,
-                goal_uuid
-            );
-        }
-
-        // Hebbian strengthening for traversed edges
-        if !edges_to_strengthen.is_empty() {
-            if let Err(e) = self.batch_strengthen_synapses(&edges_to_strengthen) {
-                tracing::debug!("Failed to strengthen synapses: {}", e);
-            }
-        }
-
-        tracing::debug!(
-            "traverse_bidirectional: {} entities, {} edges, path_score={:.4}",
-            all_entities.len(),
-            all_edges.len(),
-            best_path_score
-        );
-
-        Ok(GraphTraversal {
-            entities: all_entities,
-            relationships: all_edges,
-        })
-    }
-
     /// Subgraph pattern matching (Cypher-like MATCH patterns)
     ///
     /// Pattern format: Vec of (relation_type, direction) tuples
@@ -3447,6 +2942,7 @@ impl GraphMemory {
     /// Pattern: vec![(WorksAt, true), (LocatedIn, true)]
     ///
     /// Returns all entities that match the pattern starting from start_uuid.
+    #[cfg(test)]
     pub fn match_pattern(
         &self,
         start_uuid: &Uuid,
@@ -3487,6 +2983,7 @@ impl GraphMemory {
         Ok(matches)
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn match_pattern_recursive(
         &self,
@@ -3584,6 +3081,7 @@ impl GraphMemory {
     ///
     /// Pattern: Vec of (relation_type, is_outgoing) tuples
     /// Returns: All complete pattern matches with their paths.
+    #[cfg(test)]
     pub fn find_pattern_matches(
         &self,
         pattern: &[(RelationType, bool)],
@@ -4459,50 +3957,6 @@ impl GraphMemory {
         }
 
         Ok(false)
-    }
-
-    /// Batch decay multiple synapses atomically
-    ///
-    /// Returns a vector of edge UUIDs that should be pruned.
-    pub fn batch_decay_synapses(&self, edge_uuids: &[Uuid]) -> Result<Vec<Uuid>> {
-        if edge_uuids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Single lock acquisition for entire batch, with timeout
-        let _guard = self
-            .synapse_update_lock
-            .try_lock_for(std::time::Duration::from_secs(5))
-            .ok_or_else(|| {
-                anyhow::anyhow!("synapse_update_lock timeout in batch_decay_synapses")
-            })?;
-
-        let mut batch = WriteBatch::default();
-        let mut to_prune = Vec::new();
-
-        for edge_uuid in edge_uuids {
-            if let Some(mut edge) = self.get_relationship(edge_uuid)? {
-                let should_prune = edge.decay();
-
-                let key = edge.uuid.as_bytes();
-                match crate::serialization::encode(&edge) {
-                    Ok(value) => {
-                        batch.put_cf(self.relationships_cf(), key, value);
-                        if should_prune {
-                            to_prune.push(*edge_uuid);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("Failed to serialize edge {}: {}", edge_uuid, e);
-                    }
-                }
-            }
-        }
-
-        // Atomic write of all updates
-        self.db.write(batch)?;
-
-        Ok(to_prune)
     }
 
     /// Apply decay to already-loaded edges in-place, avoiding double deserialization.
@@ -7282,22 +6736,24 @@ mod tests {
 
     #[test]
     fn test_decay_tier_aware() {
-        // Test tier-aware decay: L2 episodic with exponential decay (λ=0.031/day) over 7 days
-        // Expected: e^(-0.031 * 7) ≈ 0.805, so strength decays to ~80%
+        // Test tier-aware decay: L2 episodic with Wixted 2004 hybrid decay over 7 days
+        // 7 days > crossover (3 days), so power-law phase applies:
+        //   value_at_crossover = exp(-0.693 * 3) ≈ 0.125
+        //   power_law = (7/3)^(-0.5) ≈ 0.655
+        //   decay ≈ 0.125 * 0.655 ≈ 0.082
         let mut edge = create_test_edge_with_tier(1.0, 7, EdgeTier::L2Episodic);
 
         edge.decay();
 
-        // After 7 days with L2 exponential decay, expect moderate reduction (~80% retained)
-        // but well above floor since within max age
+        // Hybrid decay is aggressive for non-potentiated edges: ~8% retained at 7 days
         assert!(
-            edge.strength < 0.85,
-            "After 7 days with L2 decay, strength should be below 0.85, got {}",
+            edge.strength < 0.15,
+            "After 7 days with hybrid decay, strength should be below 0.15, got {}",
             edge.strength
         );
         assert!(
-            edge.strength > 0.75,
-            "After 7 days with L2 decay, strength should be above 0.75, got {}",
+            edge.strength > 0.05,
+            "After 7 days with hybrid decay, strength should be above 0.05, got {}",
             edge.strength
         );
         assert!(
@@ -7370,7 +6826,10 @@ mod tests {
     #[test]
     fn test_potentiated_above_floor_never_pruned() {
         // Potentiated edge above LTP_PRUNE_FLOOR should be protected
-        let mut edge = create_test_edge_with_tier(0.1, 30, EdgeTier::L2Episodic);
+        // With hybrid decay at 30 days (potentiated): decay ≈ 0.177
+        // Need initial strength high enough that final > LTP_PRUNE_FLOOR (0.05)
+        // 0.5 * 0.177 ≈ 0.089 > 0.05 ✓
+        let mut edge = create_test_edge_with_tier(0.5, 30, EdgeTier::L2Episodic);
         edge.ltp_status = LtpStatus::Full;
 
         let should_prune = edge.decay();
