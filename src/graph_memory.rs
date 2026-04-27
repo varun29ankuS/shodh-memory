@@ -4323,19 +4323,28 @@ impl GraphMemory {
                 let entity_a = &refs[i];
                 let entity_b = &refs[j];
 
-                // Find existing edge between this entity pair
-                if let Ok(Some(mut edge)) = self.find_edge_between_entities(entity_a, entity_b) {
-                    if edge.invalidated_at.is_some() {
-                        continue;
-                    }
-                    let _ = edge.strengthen();
-                    let key = edge.uuid.as_bytes();
-                    if let Ok(value) = crate::serialization::encode(&edge) {
-                        batch.put_cf(self.relationships_cf(), key, value);
-                        strengthened += 1;
+                // Find existing entity-entity edge via entity_edges_cf index
+                // (find_edge_between_entities uses mem_edge: prefix which is memory-to-memory only)
+                let edges = match self.get_entity_relationships(entity_a) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for mut edge in edges {
+                    if (edge.from_entity == *entity_a && edge.to_entity == *entity_b)
+                        || (edge.from_entity == *entity_b && edge.to_entity == *entity_a)
+                    {
+                        if edge.invalidated_at.is_some() {
+                            continue;
+                        }
+                        let _ = edge.strengthen();
+                        let key = edge.uuid.as_bytes();
+                        if let Ok(value) = crate::serialization::encode(&edge) {
+                            batch.put_cf(self.relationships_cf(), key, value);
+                            strengthened += 1;
+                        }
+                        break; // Only strengthen one edge per pair
                     }
                 }
-                // Don't create new edges — only strengthen existing ones from NER
             }
         }
 
