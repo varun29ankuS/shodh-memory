@@ -2772,10 +2772,7 @@ impl MultiUserMemoryManager {
                     attributes: {
                         let mut a = HashMap::new();
                         a.insert("source".into(), "ner".into());
-                        a.insert(
-                            "confidence".into(),
-                            format!("{:.2}", ner_entity.confidence),
-                        );
+                        a.insert("confidence".into(), format!("{:.2}", ner_entity.confidence));
                         a
                     },
                     name_embedding: None,
