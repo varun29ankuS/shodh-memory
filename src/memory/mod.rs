@@ -73,8 +73,7 @@ pub use crate::memory::feedback::{
 };
 pub use crate::memory::files::{FileMemoryStats, FileMemoryStore, IndexingResult};
 pub use crate::memory::graph_retrieval::{
-    calculate_density_weights, spreading_activation_retrieve,
-    spreading_activation_retrieve_with_stats, ActivatedMemory,
+    calculate_density_weights, spreading_activation_retrieve_with_stats, ActivatedMemory,
 };
 pub use crate::memory::hybrid_search::{
     BM25Index, HybridSearchConfig, HybridSearchEngine, HybridSearchResult, RRFusion,
@@ -1977,8 +1976,8 @@ impl MemorySystem {
                     .map(|am| {
                         (
                             am.memory.id.clone(),
-                            am.activation_score,
-                            am.activation_score, // hebbian = activation for graph-sourced memories
+                            am.final_score,
+                            am.activation_score, // hebbian factor = raw graph activation
                         )
                     })
                     .collect();
