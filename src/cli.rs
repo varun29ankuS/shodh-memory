@@ -10,6 +10,7 @@
 //!   shodh hook session-start  - Output session start hook JSON
 //!   shodh hook prompt <msg>   - Output prompt submit hook JSON
 //!   shodh claude [args...]    - Launch Claude Code with Shodh memory
+//!   shodh setup-hooks         - Print instructions for Claude Code hooks
 //!   shodh version             - Print version and build info
 
 #[global_allocator]
@@ -200,6 +201,13 @@ enum Commands {
             default_value = "sk-shodh-dev-local-testing-key"
         )]
         api_key: String,
+    },
+
+    /// Print instructions to set up Claude Code hooks for automatic memory
+    SetupHooks {
+        /// Also print the settings.json snippet as raw JSON (for piping)
+        #[arg(long)]
+        json: bool,
     },
 
     /// Print version and build information
@@ -420,6 +428,13 @@ async fn main() -> Result<()> {
         // =====================================================================
         // NEW: shodh version — version and build info
         // =====================================================================
+        // =====================================================================
+        // NEW: shodh setup-hooks — print Claude Code hooks setup guide
+        // =====================================================================
+        Commands::SetupHooks { json } => {
+            handle_setup_hooks(json);
+        }
+
         Commands::Version => {
             handle_version();
         }
@@ -718,6 +733,122 @@ fn handle_version() {
     eprintln!("  Arch:     {}", std::env::consts::ARCH);
     eprintln!("  License:  Apache-2.0");
     eprintln!("  Repo:     https://github.com/varun29ankuS/shodh-memory");
+}
+
+fn handle_setup_hooks(json: bool) {
+    let version = env!("CARGO_PKG_VERSION");
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+    let claude_dir = home.join(".claude");
+    let hooks_dest = claude_dir
+        .join("hooks")
+        .join("shodh-memory")
+        .join("memory-hook.ts");
+    let settings_path = claude_dir.join("settings.json");
+
+    // Use forward slashes everywhere for cross-platform hook commands
+    let hook_path_str = hooks_dest.to_string_lossy().replace('\\', "/");
+
+    let hook_url = format!(
+        "https://raw.githubusercontent.com/varun29ankuS/shodh-memory/v{version}/hooks/memory-hook.ts"
+    );
+
+    if json {
+        // Machine-readable: print just the settings.json hooks snippet
+        let snippet = build_hooks_json(&hook_path_str);
+        println!("{snippet}");
+        return;
+    }
+
+    eprintln!();
+    eprintln!("  Shodh-Memory — Claude Code Hooks Setup");
+    eprintln!("  ═══════════════════════════════════════");
+    eprintln!();
+    eprintln!("  Follow these steps to enable automatic memory capture.");
+    eprintln!();
+
+    // Step 1: Prerequisites
+    eprintln!("  1. Install bun (needed to run the hook script):");
+    eprintln!();
+    if cfg!(target_os = "windows") {
+        eprintln!("     powershell -c \"irm bun.sh/install.ps1 | iex\"");
+    } else {
+        eprintln!("     curl -fsSL https://bun.sh/install | bash");
+    }
+    eprintln!();
+
+    // Step 2: Download hook file
+    eprintln!("  2. Download the hook script:");
+    eprintln!();
+    eprintln!("     mkdir -p {}", hooks_dest.parent().unwrap().display());
+    if cfg!(target_os = "windows") {
+        eprintln!("     curl -fsSL -o \"{}\" \\", hooks_dest.to_string_lossy());
+    } else {
+        eprintln!("     curl -fsSL -o {} \\", hooks_dest.display());
+    }
+    eprintln!("       {hook_url}");
+    eprintln!();
+
+    // Step 3: settings.json
+    eprintln!("  3. Add hooks to {}", settings_path.display());
+    eprintln!();
+    eprintln!("     Merge the following into your settings.json \"hooks\" object.");
+    eprintln!("     (Run `shodh setup-hooks --json` for copy-paste JSON.)");
+    eprintln!();
+
+    // Print compact hook overview
+    let events = [
+        "SessionStart",
+        "UserPromptSubmit",
+        "Stop",
+        "PreToolUse",
+        "PostToolUse",
+        "SubagentStop",
+    ];
+    for event in &events {
+        eprintln!("     {event}: bun run {hook_path_str} {event}");
+    }
+    eprintln!();
+
+    // Step 4: Verify
+    eprintln!("  4. Verify:");
+    eprintln!();
+    eprintln!("     Start a new Claude Code session — you should see");
+    eprintln!("     \"SessionStart hook success\" in the system output.");
+    eprintln!();
+
+    // Quick path
+    eprintln!("  ─── Or use the npm installer (does all steps automatically) ───");
+    eprintln!();
+    eprintln!("     npx @shodh/memory-mcp setup-hooks");
+    eprintln!();
+}
+
+fn build_hooks_json(hook_path: &str) -> String {
+    let events = [
+        ("SessionStart", "{}"),
+        ("UserPromptSubmit", "{}"),
+        ("Stop", "{}"),
+        ("PreToolUse", r#"{"tool_name": ["Edit", "Write", "Bash"]}"#),
+        (
+            "PostToolUse",
+            r#"{"tool_name": ["Edit", "Write", "Bash", "TodoWrite", "Read", "Task"]}"#,
+        ),
+        ("SubagentStop", "{}"),
+    ];
+
+    let mut entries = Vec::new();
+    for (event, matcher) in &events {
+        entries.push(format!(
+            r#"    "{event}": [
+      {{
+        "matcher": {matcher},
+        "hooks": [{{"type": "command", "command": "bun run {hook_path} {event}"}}]
+      }}
+    ]"#
+        ));
+    }
+
+    format!("{{\n  \"hooks\": {{\n{}\n  }}\n}}", entries.join(",\n"))
 }
 
 // =============================================================================
@@ -1610,7 +1741,7 @@ async fn handle_claude_launch(port: u16, args: Vec<String>) -> Result<()> {
     let server_running = client.get(&health_url).send().await.is_ok();
 
     if !server_running {
-        eprintln!("🧠 Starting shodh-memory server on port {port}...");
+        eprintln!("🐘 Starting shodh-memory server on port {port}...");
 
         // Start server in background
         let exe_path = std::env::current_exe()?;
@@ -1664,7 +1795,7 @@ async fn handle_claude_launch(port: u16, args: Vec<String>) -> Result<()> {
             std::process::exit(1);
         }
     } else {
-        eprintln!("🧠 Shodh-memory server already running on port {port}");
+        eprintln!("🐘 Shodh-memory server already running on port {port}");
     }
 
     // Launch claude with ANTHROPIC_API_BASE pointing to Cortex proxy
