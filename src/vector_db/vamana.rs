@@ -285,17 +285,22 @@ impl VamanaIndex {
 
     /// Initialize random graph
     fn initialize_graph(&mut self, n: usize) -> Result<()> {
-        use rand::seq::SliceRandom;
         let mut rng = rand::thread_rng();
+        let degree = self.config.max_degree.min(n.saturating_sub(1));
 
         let mut graph = Vec::with_capacity(n);
 
         for i in 0..n {
-            // Create random edges
-            let mut neighbors: Vec<u32> = (0..n as u32).filter(|&j| j != i as u32).collect();
-
-            neighbors.shuffle(&mut rng);
-            neighbors.truncate(self.config.max_degree);
+            // Sample `degree` random neighbors (excluding self) in O(degree) time
+            let mut neighbors = Vec::with_capacity(degree);
+            if degree > 0 && n > 1 {
+                let sample = rand::seq::index::sample(&mut rng, n - 1, degree);
+                for idx in sample.into_vec() {
+                    // Map sampled indices to node IDs, skipping self
+                    let j = if idx >= i { idx + 1 } else { idx };
+                    neighbors.push(j as u32);
+                }
+            }
 
             graph.push(VamanaNode {
                 id: i as u32,
