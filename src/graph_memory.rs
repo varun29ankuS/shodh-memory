@@ -1751,6 +1751,19 @@ impl GraphMemory {
                     entity.name_embedding = existing.name_embedding;
                 }
 
+                // Merge summary: first non-empty wins, preserve existing
+                if !existing.summary.is_empty() {
+                    entity.summary = existing.summary.clone();
+                }
+
+                // Merge attributes: add new keys without overwriting existing
+                for (k, v) in &existing.attributes {
+                    entity
+                        .attributes
+                        .entry(k.clone())
+                        .or_insert_with(|| v.clone());
+                }
+
                 // Update salience with frequency boost
                 // Formula: salience = base_salience * (1 + 0.1 * ln(mention_count))
                 // This caps at about 1.3x boost at 20 mentions

@@ -5670,15 +5670,32 @@ impl MemorySystem {
         for fact in facts {
             // Ensure all related entities exist as graph nodes
             for entity_name in &fact.related_entities {
+                // Resolve entity type from graph (preserves NER-derived labels)
+                let labels =
+                    if let Ok(Some(existing)) = graph_guard.find_entity_by_name(entity_name) {
+                        existing.labels
+                    } else {
+                        vec![crate::graph_memory::EntityLabel::Concept]
+                    };
+
                 let entity = crate::graph_memory::EntityNode {
                     uuid: Uuid::new_v4(),
                     name: entity_name.clone(),
-                    labels: vec![crate::graph_memory::EntityLabel::Concept],
+                    labels,
                     created_at: now,
                     last_seen_at: now,
                     mention_count: 1,
-                    summary: String::new(),
-                    attributes: std::collections::HashMap::new(),
+                    summary: fact.fact.chars().take(200).collect(),
+                    attributes: {
+                        let mut a = std::collections::HashMap::new();
+                        a.insert("source".into(), "fact_consolidation".into());
+                        a.insert("confidence".into(), format!("{:.2}", fact.confidence));
+                        a.insert(
+                            "support_count".into(),
+                            fact.source_memories.len().to_string(),
+                        );
+                        a
+                    },
                     name_embedding: embedding_map.get(entity_name).cloned(),
                     salience: fact.confidence * 0.5,
                     is_proper_noun: entity_name
@@ -5724,7 +5741,13 @@ impl MemorySystem {
                             context: fact.fact.chars().take(100).collect(),
                             last_activated: now,
                             activation_count: 1,
-                            ltp_status: crate::graph_memory::LtpStatus::None,
+                            ltp_status: if fact.confidence >= 0.8
+                                && fact.source_memories.len() >= 3
+                            {
+                                crate::graph_memory::LtpStatus::Weekly
+                            } else {
+                                crate::graph_memory::LtpStatus::Burst { detected_at: now }
+                            },
                             tier: crate::graph_memory::EdgeTier::L2Episodic,
                             activation_timestamps: None,
                             entity_confidence: Some(fact.confidence),

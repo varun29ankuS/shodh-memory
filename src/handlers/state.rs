@@ -2769,7 +2769,15 @@ impl MultiUserMemoryManager {
                     last_seen_at: now,
                     mention_count: 1,
                     summary: String::new(),
-                    attributes: HashMap::new(),
+                    attributes: {
+                        let mut a = HashMap::new();
+                        a.insert("source".into(), "ner".into());
+                        a.insert(
+                            "confidence".into(),
+                            format!("{:.2}", ner_entity.confidence),
+                        );
+                        a
+                    },
                     name_embedding: None,
                     salience: ner_entity.confidence,
                     // Only PER, ORG, LOC are proper nouns; MISC includes non-proper
