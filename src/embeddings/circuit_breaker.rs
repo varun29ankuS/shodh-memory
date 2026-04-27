@@ -312,33 +312,28 @@ impl Embedder for ResilientEmbedder {
             return Ok(texts.iter().map(|t| self.generate_fallback(t)).collect());
         }
 
-        // Process batch with individual tracking
-        let mut results = Vec::with_capacity(texts.len());
-        let mut any_success = false;
-        let mut any_failure = false;
+        self.total_calls
+            .fetch_add(texts.len() as u64, Ordering::Relaxed);
 
-        for text in texts {
-            self.total_calls.fetch_add(1, Ordering::Relaxed);
-            match self.inner.encode(text) {
-                Ok(embedding) => {
-                    any_success = true;
-                    results.push(embedding);
+        // Delegate to inner's batch method for ONNX batch inference
+        match self.inner.encode_batch(texts) {
+            Ok(embeddings) => {
+                self.record_success();
+                Ok(embeddings)
+            }
+            Err(_) => {
+                // Batch failed — fall back to individual encoding with fallbacks
+                self.record_failure();
+                let mut results = Vec::with_capacity(texts.len());
+                for text in texts {
+                    match self.inner.encode(text) {
+                        Ok(embedding) => results.push(embedding),
+                        Err(_) => results.push(self.generate_fallback(text)),
+                    }
                 }
-                Err(_) => {
-                    any_failure = true;
-                    results.push(self.generate_fallback(text));
-                }
+                Ok(results)
             }
         }
-
-        // Update circuit state based on batch results
-        if any_failure && !any_success {
-            self.record_failure();
-        } else if any_success {
-            self.record_success();
-        }
-
-        Ok(results)
     }
 }
 
