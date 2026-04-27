@@ -3924,7 +3924,7 @@ impl GraphMemory {
                     if let Ok(value) = crate::serialization::encode(&edge) {
                         batch.put_cf(self.relationships_cf(), key, value);
 
-                        // Also index in the reverse direction for lookup
+                        // Index in mem_edge: for fast pair lookup
                         let idx_key_fwd = format!("mem_edge:{mem_a}:{mem_b}");
                         let idx_key_rev = format!("mem_edge:{mem_b}:{mem_a}");
                         batch.put_cf(
@@ -3937,6 +3937,12 @@ impl GraphMemory {
                             idx_key_rev.as_bytes(),
                             edge.uuid.as_bytes(),
                         );
+
+                        // Index in entity_edges_cf for graph traversal visibility
+                        let ee_key_a = format!("{mem_a}:{}", edge.uuid);
+                        let ee_key_b = format!("{mem_b}:{}", edge.uuid);
+                        batch.put_cf(self.entity_edges_cf(), ee_key_a.as_bytes(), b"1");
+                        batch.put_cf(self.entity_edges_cf(), ee_key_b.as_bytes(), b"1");
 
                         edges_updated += 1;
                         new_edges += 1;
