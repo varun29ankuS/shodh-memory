@@ -6736,22 +6736,24 @@ mod tests {
 
     #[test]
     fn test_decay_tier_aware() {
-        // Test tier-aware decay: L2 episodic with exponential decay (λ=0.031/day) over 7 days
-        // Expected: e^(-0.031 * 7) ≈ 0.805, so strength decays to ~80%
+        // Test tier-aware decay: L2 episodic with Wixted 2004 hybrid decay over 7 days
+        // 7 days > crossover (3 days), so power-law phase applies:
+        //   value_at_crossover = exp(-0.693 * 3) ≈ 0.125
+        //   power_law = (7/3)^(-0.5) ≈ 0.655
+        //   decay ≈ 0.125 * 0.655 ≈ 0.082
         let mut edge = create_test_edge_with_tier(1.0, 7, EdgeTier::L2Episodic);
 
         edge.decay();
 
-        // After 7 days with L2 exponential decay, expect moderate reduction (~80% retained)
-        // but well above floor since within max age
+        // Hybrid decay is aggressive for non-potentiated edges: ~8% retained at 7 days
         assert!(
-            edge.strength < 0.85,
-            "After 7 days with L2 decay, strength should be below 0.85, got {}",
+            edge.strength < 0.15,
+            "After 7 days with hybrid decay, strength should be below 0.15, got {}",
             edge.strength
         );
         assert!(
-            edge.strength > 0.75,
-            "After 7 days with L2 decay, strength should be above 0.75, got {}",
+            edge.strength > 0.05,
+            "After 7 days with hybrid decay, strength should be above 0.05, got {}",
             edge.strength
         );
         assert!(
@@ -6824,7 +6826,10 @@ mod tests {
     #[test]
     fn test_potentiated_above_floor_never_pruned() {
         // Potentiated edge above LTP_PRUNE_FLOOR should be protected
-        let mut edge = create_test_edge_with_tier(0.1, 30, EdgeTier::L2Episodic);
+        // With hybrid decay at 30 days (potentiated): decay ≈ 0.177
+        // Need initial strength high enough that final > LTP_PRUNE_FLOOR (0.05)
+        // 0.5 * 0.177 ≈ 0.089 > 0.05 ✓
+        let mut edge = create_test_edge_with_tier(0.5, 30, EdgeTier::L2Episodic);
         edge.ltp_status = LtpStatus::Full;
 
         let should_prune = edge.decay();
