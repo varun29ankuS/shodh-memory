@@ -59,11 +59,8 @@ use crate::similarity::cosine_similarity;
 #[derive(Debug, Clone)]
 pub struct ActivatedMemory {
     pub memory: SharedMemory,
-    #[allow(dead_code)] // Useful for debugging score breakdown
     pub activation_score: f32,
-    #[allow(dead_code)] // Useful for debugging score breakdown
     pub semantic_score: f32,
-    #[allow(dead_code)] // Useful for debugging score breakdown
     pub linguistic_score: f32,
     pub final_score: f32,
 }

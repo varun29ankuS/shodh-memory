@@ -2184,9 +2184,24 @@ impl GraphMemory {
         }
     }
 
-    /// Index an entity pair → edge UUID for O(1) dedup lookups
-    fn index_entity_pair(&self, entity_a: &Uuid, entity_b: &Uuid, edge_uuid: &Uuid) -> Result<()> {
-        let key = Self::pair_key(entity_a, entity_b);
+    /// Typed pair key: includes relation type to support multiple edges per pair
+    fn typed_pair_key(entity_a: &Uuid, entity_b: &Uuid, relation_type: &RelationType) -> String {
+        format!(
+            "{}:{}",
+            Self::pair_key(entity_a, entity_b),
+            relation_type.as_str()
+        )
+    }
+
+    /// Index an entity pair + relation type → edge UUID for O(1) dedup lookups
+    fn index_entity_pair(
+        &self,
+        entity_a: &Uuid,
+        entity_b: &Uuid,
+        edge_uuid: &Uuid,
+        relation_type: &RelationType,
+    ) -> Result<()> {
+        let key = Self::typed_pair_key(entity_a, entity_b, relation_type);
         self.db.put_cf(
             self.entity_pair_index_cf(),
             key.as_bytes(),
@@ -2195,9 +2210,14 @@ impl GraphMemory {
         Ok(())
     }
 
-    /// Remove entity pair from the pair index
-    fn remove_entity_pair_index(&self, entity_a: &Uuid, entity_b: &Uuid) -> Result<()> {
-        let key = Self::pair_key(entity_a, entity_b);
+    /// Remove entity pair + relation type from the pair index
+    fn remove_entity_pair_index(
+        &self,
+        entity_a: &Uuid,
+        entity_b: &Uuid,
+        relation_type: &RelationType,
+    ) -> Result<()> {
+        let key = Self::typed_pair_key(entity_a, entity_b, relation_type);
         self.db
             .delete_cf(self.entity_pair_index_cf(), key.as_bytes())?;
         Ok(())
@@ -2205,42 +2225,43 @@ impl GraphMemory {
 
     /// Find existing relationship between two entities (either direction)
     ///
-    /// O(1) lookup via entity-pair index, with fallback to linear scan
-    /// for edges created before the pair index existed (migration path).
+    /// Prefix scan on entity-pair index to find all typed edges between the pair,
+    /// with fallback to linear scan for pre-index edges (migration path).
+    /// Returns the first (strongest) edge found.
     pub fn find_relationship_between(
         &self,
         entity_a: &Uuid,
         entity_b: &Uuid,
     ) -> Result<Option<RelationshipEdge>> {
-        // Fast path: O(1) pair index lookup
-        let key = Self::pair_key(entity_a, entity_b);
-        if let Some(edge_uuid_bytes) = self
+        // Fast path: prefix scan on pair index (covers both old untyped and new typed keys)
+        let prefix = Self::pair_key(entity_a, entity_b);
+        let prefix_bytes = prefix.as_bytes();
+        let iter = self
             .db
-            .get_cf(self.entity_pair_index_cf(), key.as_bytes())?
-        {
-            if edge_uuid_bytes.len() == 16 {
-                let edge_uuid = Uuid::from_slice(&edge_uuid_bytes)?;
+            .prefix_iterator_cf(self.entity_pair_index_cf(), prefix_bytes);
+        for item in iter {
+            let (key, value) = item?;
+            if !key.starts_with(prefix_bytes) {
+                break;
+            }
+            if value.len() == 16 {
+                let edge_uuid = Uuid::from_slice(&value)?;
                 if let Some(edge) = self.get_relationship(&edge_uuid)? {
                     return Ok(Some(edge));
                 }
-                // Edge was deleted but pair index is stale — clean up and fall through
-                let _ = self
-                    .db
-                    .delete_cf(self.entity_pair_index_cf(), key.as_bytes());
+                // Stale index entry — clean up
+                let _ = self.db.delete_cf(self.entity_pair_index_cf(), &*key);
             }
         }
 
         // Slow path: linear scan for pre-index edges (backward compatibility)
-        // This path is only hit for edges created before the pair index existed.
-        // Once all old edges are either strengthened (which updates the index) or
-        // pruned, this path becomes dead code.
         let edges_a = self.get_entity_relationships(entity_a)?;
         for edge in edges_a {
             if (edge.from_entity == *entity_a && edge.to_entity == *entity_b)
                 || (edge.from_entity == *entity_b && edge.to_entity == *entity_a)
             {
-                // Backfill pair index for this legacy edge
-                let _ = self.index_entity_pair(entity_a, entity_b, &edge.uuid);
+                // Backfill typed pair index for this legacy edge
+                let _ = self.index_entity_pair(entity_a, entity_b, &edge.uuid, &edge.relation_type);
                 return Ok(Some(edge));
             }
         }
@@ -2249,6 +2270,7 @@ impl GraphMemory {
 
     /// Find existing relationship between two entities with a specific relation type.
     ///
+    /// O(1) lookup via typed pair index, with fallback to linear scan for pre-index edges.
     /// Unlike `find_relationship_between` which returns any edge between the pair,
     /// this method only matches edges with the same `RelationType`. This allows
     /// multiple semantically distinct edges (e.g. WorksWith + PartOf) between
@@ -2259,12 +2281,33 @@ impl GraphMemory {
         entity_b: &Uuid,
         relation_type: &RelationType,
     ) -> Result<Option<RelationshipEdge>> {
+        // Fast path: direct typed key lookup
+        let key = Self::typed_pair_key(entity_a, entity_b, relation_type);
+        if let Some(edge_uuid_bytes) = self
+            .db
+            .get_cf(self.entity_pair_index_cf(), key.as_bytes())?
+        {
+            if edge_uuid_bytes.len() == 16 {
+                let edge_uuid = Uuid::from_slice(&edge_uuid_bytes)?;
+                if let Some(edge) = self.get_relationship(&edge_uuid)? {
+                    return Ok(Some(edge));
+                }
+                // Stale index entry — clean up
+                let _ = self
+                    .db
+                    .delete_cf(self.entity_pair_index_cf(), key.as_bytes());
+            }
+        }
+
+        // Slow path: linear scan for pre-index edges
         let edges = self.get_entity_relationships(entity_a)?;
         for edge in edges {
             if edge.relation_type == *relation_type
                 && ((edge.from_entity == *entity_a && edge.to_entity == *entity_b)
                     || (edge.from_entity == *entity_b && edge.to_entity == *entity_a))
             {
+                // Backfill typed pair index
+                let _ = self.index_entity_pair(entity_a, entity_b, &edge.uuid, relation_type);
                 return Ok(Some(edge));
             }
         }
@@ -2318,8 +2361,13 @@ impl GraphMemory {
         self.index_entity_edge(&edge.from_entity, &edge.uuid)?;
         self.index_entity_edge(&edge.to_entity, &edge.uuid)?;
 
-        // Update entity-pair index for O(1) dedup lookups
-        self.index_entity_pair(&edge.from_entity, &edge.to_entity, &edge.uuid)?;
+        // Update entity-pair index for O(1) dedup lookups (typed key supports multi-edge)
+        self.index_entity_pair(
+            &edge.from_entity,
+            &edge.to_entity,
+            &edge.uuid,
+            &edge.relation_type,
+        )?;
 
         // Insert-time degree pruning: cap edges per entity to prevent O(n²) explosion.
         // If either entity exceeds MAX_ENTITY_DEGREE, prune the weakest edges.
@@ -2710,8 +2758,10 @@ impl GraphMemory {
             tracing::warn!(edge = %uuid, key = %to_key, error = %e, "Failed to delete from entity_edges index");
         }
 
-        // Remove from entity-pair index
-        if let Err(e) = self.remove_entity_pair_index(&edge.from_entity, &edge.to_entity) {
+        // Remove from entity-pair index (typed key)
+        if let Err(e) =
+            self.remove_entity_pair_index(&edge.from_entity, &edge.to_entity, &edge.relation_type)
+        {
             tracing::warn!(edge = %uuid, "Failed to delete from entity_pair index: {}", e);
         }
 
@@ -3480,6 +3530,7 @@ impl GraphMemory {
     /// Pattern: vec![(WorksAt, true), (LocatedIn, true)]
     ///
     /// Returns all entities that match the pattern starting from start_uuid.
+    #[cfg(test)]
     pub fn match_pattern(
         &self,
         start_uuid: &Uuid,
@@ -3520,6 +3571,7 @@ impl GraphMemory {
         Ok(matches)
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn match_pattern_recursive(
         &self,
@@ -3617,6 +3669,7 @@ impl GraphMemory {
     ///
     /// Pattern: Vec of (relation_type, is_outgoing) tuples
     /// Returns: All complete pattern matches with their paths.
+    #[cfg(test)]
     pub fn find_pattern_matches(
         &self,
         pattern: &[(RelationType, bool)],
