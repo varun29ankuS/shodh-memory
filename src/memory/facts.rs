@@ -113,8 +113,7 @@ impl SemanticFactStore {
                 let _ = self.db.delete(entity_key.as_bytes());
             }
             let old_type_name = format!("{:?}", old_fact.fact_type);
-            let old_type_key =
-                format!("facts_by_type:{}:{}:{}", user_id, old_type_name, fact.id);
+            let old_type_key = format!("facts_by_type:{}:{}:{}", user_id, old_type_name, fact.id);
             let _ = self.db.delete(old_type_key.as_bytes());
         }
 

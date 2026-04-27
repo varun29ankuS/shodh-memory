@@ -4325,7 +4325,10 @@ impl MemorySystem {
 
         // Persist the updated metadata to RocksDB so importance boosts survive restarts
         if let Err(e) = self.long_term_memory.update(memory) {
-            tracing::warn!("Failed to persist access update for {}: {e}", &memory.id.0.to_string()[..8]);
+            tracing::warn!(
+                "Failed to persist access update for {}: {e}",
+                &memory.id.0.to_string()[..8]
+            );
         }
 
         // Capture activation after update
