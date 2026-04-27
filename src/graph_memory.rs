@@ -3758,7 +3758,12 @@ impl GraphMemory {
                 if let Ok((mut edge, _)) =
                     crate::serialization::try_decode::<RelationshipEdge>(&value)
                 {
+                    // Fully potentiated edges are protected from batch weakening
+                    if matches!(edge.ltp_status, LtpStatus::Full) {
+                        continue;
+                    }
                     edge.strength *= 1.0 - clamped_decay;
+                    edge.strength = edge.strength.max(crate::constants::LTP_MIN_STRENGTH);
                     // Queue for pruning if below tier threshold
                     if edge.strength < edge.tier.prune_threshold() {
                         self.pending_prune.lock().push(edge.uuid);
