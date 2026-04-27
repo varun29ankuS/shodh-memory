@@ -826,11 +826,6 @@ impl RelationshipEdge {
         let hours_elapsed = hours_elapsed.min(8760.0);
 
         // Tier-aware decay with PIPE-4 multi-scale LTP
-        let tier_num = match self.tier {
-            EdgeTier::L1Working => 0,
-            EdgeTier::L2Episodic => 1,
-            EdgeTier::L3Semantic => 2,
-        };
         let raw_ltp_factor = self.ltp_status.decay_factor();
 
         // Gate LTP protection by endpoint selectivity (habituation mechanism).
@@ -855,8 +850,28 @@ impl RelationshipEdge {
             _ => raw_ltp_factor, // Not computed yet or above threshold: full protection
         };
 
-        let (decay_factor, exceeded_max_age) =
-            tier_decay_factor(hours_elapsed, tier_num, ltp_factor);
+        let (decay_factor, exceeded_max_age) = match self.tier {
+            EdgeTier::L1Working => {
+                // L1: aggressive exponential — correct for working memory
+                tier_decay_factor(hours_elapsed, 0, ltp_factor)
+            }
+            EdgeTier::L2Episodic | EdgeTier::L3Semantic => {
+                // L2/L3: Wixted 2004 hybrid (exponential consolidation → power-law long-term)
+                let days = hours_elapsed / 24.0;
+                let is_potentiated = ltp_factor < 0.5; // Weekly or Full LTP
+                let decay = crate::decay::hybrid_decay_factor(days, is_potentiated);
+                let prune_threshold = self.tier.prune_threshold();
+                // Min age before pruning: 30 days for L2, 90 days for L3
+                let min_prune_hours = if matches!(self.tier, EdgeTier::L3Semantic) {
+                    2160.0
+                } else {
+                    720.0
+                };
+                let should_prune =
+                    decay < prune_threshold && hours_elapsed > min_prune_hours;
+                (decay, should_prune)
+            }
+        };
         self.strength *= decay_factor;
 
         // Update last_activated to prevent double-decay on repeated calls
@@ -910,13 +925,16 @@ impl RelationshipEdge {
             return self.strength;
         }
 
-        let tier_num = match self.tier {
-            EdgeTier::L1Working => 0,
-            EdgeTier::L2Episodic => 1,
-            EdgeTier::L3Semantic => 2,
-        };
         let ltp_factor = self.ltp_status.decay_factor();
-        let (decay_factor, _) = tier_decay_factor(hours_elapsed, tier_num, ltp_factor);
+        let (decay_factor, _) = match self.tier {
+            EdgeTier::L1Working => tier_decay_factor(hours_elapsed, 0, ltp_factor),
+            EdgeTier::L2Episodic | EdgeTier::L3Semantic => {
+                // Wixted 2004 hybrid: exponential consolidation → power-law long-term
+                let days = hours_elapsed / 24.0;
+                let is_potentiated = ltp_factor < 0.5;
+                (crate::decay::hybrid_decay_factor(days, is_potentiated), false)
+            }
+        };
         (self.strength * decay_factor).max(LTP_MIN_STRENGTH)
     }
 
