@@ -5347,7 +5347,29 @@ impl MemorySystem {
                 Ok(edge_uuids) if !edge_uuids.is_empty() => {
                     let result = match outcome {
                         RetrievalOutcome::Helpful => {
-                            graph.read().batch_strengthen_synapses(&edge_uuids)
+                            // Importance-gated strengthening: high-importance recalled
+                            // memories get stronger Hebbian boosts on their graph edges.
+                            let avg_importance = {
+                                let mut total = 0.0_f32;
+                                let mut count = 0_usize;
+                                for id in memory_ids {
+                                    if let Ok(mem) = self.long_term_memory.get(id) {
+                                        total += mem.importance();
+                                        count += 1;
+                                    }
+                                }
+                                if count > 0 {
+                                    total / count as f32
+                                } else {
+                                    0.5
+                                }
+                            };
+                            graph
+                                .read()
+                                .batch_strengthen_synapses_with_importance(
+                                    &edge_uuids,
+                                    avg_importance,
+                                )
                         }
                         RetrievalOutcome::Misleading => graph
                             .read()
