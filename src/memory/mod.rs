@@ -2741,7 +2741,29 @@ impl MemorySystem {
                 // on the base. This preserves RRF ranking while allowing signals to modulate.
                 let combined_boost =
                     1.0 + recency_factor + arousal_factor + credibility_factor + temporal_factor;
-                let final_score = base * importance_factor * combined_boost * feedback_multiplier;
+
+                // AUTO-CAPTURED TAG PENALTY (PIPE-8)
+                // Hook-ingested memories carry "auto-captured" tag; assistant responses
+                // carry "assistant-response". Apply multiplicative penalty so they don't
+                // outrank intentional memories when volume gives them a ranking edge.
+                let tag_penalty = {
+                    let mut penalty = 1.0_f32;
+                    for tag in &mem.experience.tags {
+                        match tag.as_str() {
+                            "auto-captured" => {
+                                penalty *= crate::constants::AUTO_CAPTURED_TAG_PENALTY
+                            }
+                            "assistant-response" => {
+                                penalty *= crate::constants::ASSISTANT_RESPONSE_TAG_PENALTY
+                            }
+                            _ => {}
+                        }
+                    }
+                    penalty
+                };
+
+                let final_score =
+                    base * importance_factor * combined_boost * feedback_multiplier * tag_penalty;
 
                 let mut cloned: Memory = mem.as_ref().clone();
                 cloned.set_score(final_score);
