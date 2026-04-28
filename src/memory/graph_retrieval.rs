@@ -940,7 +940,12 @@ pub fn spreading_activation_retrieve_with_stats(
                 .map(|c| (c.source.credibility - 0.5).max(0.0) * 0.1)
                 .unwrap_or(0.0);
 
-            let final_score = hybrid_score + recency_boost + arousal_boost + credibility_boost;
+            // Type-aware activation dampening: noise types (CodeEdit, Command, etc.)
+            // get reduced activation scores so intentional memories rank higher.
+            // This is the read-time complement to write-time edge dampening.
+            let type_dampening = memory.experience.experience_type.activation_multiplier();
+            let final_score =
+                (hybrid_score + recency_boost + arousal_boost + credibility_boost) * type_dampening;
 
             scored_memories.push(ActivatedMemory {
                 memory,
