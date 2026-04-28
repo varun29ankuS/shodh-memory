@@ -3064,6 +3064,11 @@ impl MultiUserMemoryManager {
             base_strength
         };
 
+        // Type-aware edge dampening: noise types (CodeEdit, Command, FileAccess, Search)
+        // create weaker edges to prevent their ~6:1 volume advantage over intentional
+        // memories from dominating graph traversal. Stacks with reward modulation above.
+        let edge_strength = edge_strength * experience.experience_type.edge_weight_multiplier();
+
         for i in 0..entity_uuids.len() {
             for j in (i + 1)..entity_uuids.len() {
                 // Edge quality gate using graph reputation
