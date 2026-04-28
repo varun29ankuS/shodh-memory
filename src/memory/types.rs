@@ -4533,4 +4533,59 @@ mod tests {
         );
         assert_eq!(decision_combined, 1.0);
     }
+
+    #[test]
+    fn test_auto_captured_tag_penalty_bounds() {
+        use crate::constants::{AUTO_CAPTURED_TAG_PENALTY, ASSISTANT_RESPONSE_TAG_PENALTY};
+
+        // Individual penalties should be in (0.8, 1.0) — meaningful but not devastating
+        assert!(
+            AUTO_CAPTURED_TAG_PENALTY > 0.80 && AUTO_CAPTURED_TAG_PENALTY < 1.0,
+            "AUTO_CAPTURED_TAG_PENALTY should be in (0.80, 1.0), got {}",
+            AUTO_CAPTURED_TAG_PENALTY
+        );
+        assert!(
+            ASSISTANT_RESPONSE_TAG_PENALTY > 0.80 && ASSISTANT_RESPONSE_TAG_PENALTY < 1.0,
+            "ASSISTANT_RESPONSE_TAG_PENALTY should be in (0.80, 1.0), got {}",
+            ASSISTANT_RESPONSE_TAG_PENALTY
+        );
+
+        // Combined penalty (both tags) should still be >= 0.5 — no cliff
+        let combined = AUTO_CAPTURED_TAG_PENALTY * ASSISTANT_RESPONSE_TAG_PENALTY;
+        assert!(
+            combined >= 0.5,
+            "Combined tag penalty should be >= 0.5, got {}",
+            combined
+        );
+    }
+
+    #[test]
+    fn test_full_pipeline_signal_reduction() {
+        // End-to-end: CodeEdit through graph + tag penalty vs Decision
+        // CodeEdit: edge_weight(0.3) × activation(0.4) × tag(0.85) = ~0.102
+        // Decision: edge_weight(1.0) × activation(1.0) × tag(1.0) = 1.0
+        use crate::constants::AUTO_CAPTURED_TAG_PENALTY;
+
+        let code_edit_full = ExperienceType::CodeEdit.edge_weight_multiplier()
+            * ExperienceType::CodeEdit.activation_multiplier()
+            * AUTO_CAPTURED_TAG_PENALTY;
+        let decision_full = ExperienceType::Decision.edge_weight_multiplier()
+            * ExperienceType::Decision.activation_multiplier()
+            * 1.0; // Decision has no auto-captured tag
+
+        assert!(
+            code_edit_full < 0.15,
+            "CodeEdit full pipeline should be < 0.15x, got {:.4}",
+            code_edit_full
+        );
+        assert_eq!(decision_full, 1.0);
+
+        // Signal ratio: Decision should be at least 6x stronger than CodeEdit
+        let ratio = decision_full / code_edit_full;
+        assert!(
+            ratio > 6.0,
+            "Decision/CodeEdit signal ratio should be > 6x, got {:.1}x",
+            ratio
+        );
+    }
 }
