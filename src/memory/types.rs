@@ -4536,7 +4536,7 @@ mod tests {
 
     #[test]
     fn test_auto_captured_tag_penalty_bounds() {
-        use crate::constants::{AUTO_CAPTURED_TAG_PENALTY, ASSISTANT_RESPONSE_TAG_PENALTY};
+        use crate::constants::{ASSISTANT_RESPONSE_TAG_PENALTY, AUTO_CAPTURED_TAG_PENALTY};
 
         // Individual penalties should be in (0.8, 1.0) — meaningful but not devastating
         assert!(

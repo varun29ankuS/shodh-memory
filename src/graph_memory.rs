@@ -7395,10 +7395,19 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
 
-        let from_uuid = Uuid::new_v4();
-        let to_uuid = Uuid::new_v4();
+        // Use separate entity pairs so add_relationship doesn't dedup
+        // (same from+to+relation_type gets merged into existing edge)
+        let high_from = Uuid::new_v4();
+        let high_to = Uuid::new_v4();
+        let low_from = Uuid::new_v4();
+        let low_to = Uuid::new_v4();
 
-        for (uuid, name) in [(from_uuid, "ImportanceFrom"), (to_uuid, "ImportanceTo")] {
+        for (uuid, name) in [
+            (high_from, "HighFrom"),
+            (high_to, "HighTo"),
+            (low_from, "LowFrom"),
+            (low_to, "LowTo"),
+        ] {
             let entity = EntityNode {
                 uuid,
                 name: name.to_string(),
@@ -7418,11 +7427,10 @@ mod tests {
 
         let initial_strength = 0.3;
 
-        // Create two identical edges — one will get high-importance, one low-importance
-        let mut make_edge = || RelationshipEdge {
+        let make_edge = |from: Uuid, to: Uuid| RelationshipEdge {
             uuid: Uuid::new_v4(),
-            from_entity: from_uuid,
-            to_entity: to_uuid,
+            from_entity: from,
+            to_entity: to,
             relation_type: RelationType::RelatedTo,
             strength: initial_strength,
             created_at: Utc::now(),
@@ -7440,8 +7448,8 @@ mod tests {
             endpoint_selectivity: None,
         };
 
-        let high_edge_uuid = graph.add_relationship(make_edge()).unwrap();
-        let low_edge_uuid = graph.add_relationship(make_edge()).unwrap();
+        let high_edge_uuid = graph.add_relationship(make_edge(high_from, high_to)).unwrap();
+        let low_edge_uuid = graph.add_relationship(make_edge(low_from, low_to)).unwrap();
 
         // Strengthen with high importance (1.0) — should get full boost
         graph

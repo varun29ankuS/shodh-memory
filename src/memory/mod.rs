@@ -5386,12 +5386,10 @@ impl MemorySystem {
                                     0.5
                                 }
                             };
-                            graph
-                                .read()
-                                .batch_strengthen_synapses_with_importance(
-                                    &edge_uuids,
-                                    avg_importance,
-                                )
+                            graph.read().batch_strengthen_synapses_with_importance(
+                                &edge_uuids,
+                                avg_importance,
+                            )
                         }
                         RetrievalOutcome::Misleading => graph
                             .read()
