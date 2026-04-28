@@ -52,6 +52,63 @@ pub enum ExperienceType {
     Intention,
 }
 
+impl ExperienceType {
+    /// Write-time edge weight multiplier for graph ingestion.
+    ///
+    /// Intentional types (Decision, Learning, Discovery) get full weight.
+    /// Auto-generated noise types (CodeEdit, Command, FileAccess, Search) get
+    /// dampened to prevent their 6:1 volume advantage from dominating graph
+    /// traversal over intentional memories.
+    ///
+    /// Applied multiplicatively to `L1Working.initial_weight()` in
+    /// `process_experience_into_graph`.
+    pub fn edge_weight_multiplier(&self) -> f32 {
+        use crate::constants::*;
+        match self {
+            Self::Decision => EDGE_WEIGHT_MULT_DECISION,
+            Self::Learning => EDGE_WEIGHT_MULT_LEARNING,
+            Self::Discovery => EDGE_WEIGHT_MULT_DISCOVERY,
+            Self::Error => EDGE_WEIGHT_MULT_ERROR,
+            Self::Pattern => EDGE_WEIGHT_MULT_PATTERN,
+            Self::Observation => EDGE_WEIGHT_MULT_OBSERVATION,
+            Self::Context => EDGE_WEIGHT_MULT_CONTEXT,
+            Self::Task => EDGE_WEIGHT_MULT_TASK,
+            Self::Conversation => EDGE_WEIGHT_MULT_CONVERSATION,
+            Self::CodeEdit => EDGE_WEIGHT_MULT_CODE_EDIT,
+            Self::FileAccess => EDGE_WEIGHT_MULT_FILE_ACCESS,
+            Self::Search => EDGE_WEIGHT_MULT_SEARCH,
+            Self::Command => EDGE_WEIGHT_MULT_COMMAND,
+            Self::Intention => EDGE_WEIGHT_MULT_INTENTION,
+        }
+    }
+
+    /// Retrieval-time activation multiplier for spreading activation.
+    ///
+    /// Applied to `final_score` when resolving episodes to memories during
+    /// graph-based retrieval. Complementary to write-time dampening — stacks
+    /// multiplicatively. CodeEdit memories still surface through vector search
+    /// (Layers 1/3) when semantically relevant; only the graph path is dampened.
+    pub fn activation_multiplier(&self) -> f32 {
+        use crate::constants::*;
+        match self {
+            Self::Decision => ACTIVATION_MULT_DECISION,
+            Self::Learning => ACTIVATION_MULT_LEARNING,
+            Self::Discovery => ACTIVATION_MULT_DISCOVERY,
+            Self::Error => ACTIVATION_MULT_ERROR,
+            Self::Pattern => ACTIVATION_MULT_PATTERN,
+            Self::Observation => ACTIVATION_MULT_OBSERVATION,
+            Self::Context => ACTIVATION_MULT_CONTEXT,
+            Self::Task => ACTIVATION_MULT_TASK,
+            Self::Conversation => ACTIVATION_MULT_CONVERSATION,
+            Self::CodeEdit => ACTIVATION_MULT_CODE_EDIT,
+            Self::FileAccess => ACTIVATION_MULT_FILE_ACCESS,
+            Self::Search => ACTIVATION_MULT_SEARCH,
+            Self::Command => ACTIVATION_MULT_COMMAND,
+            Self::Intention => ACTIVATION_MULT_INTENTION,
+        }
+    }
+}
+
 /// Default experience type for minimal API calls
 fn default_experience_type() -> ExperienceType {
     ExperienceType::Observation
@@ -4397,5 +4454,83 @@ mod tests {
         assert!(query.geo_filter.is_some());
         assert_eq!(query.action_type, Some("landing".to_string()));
         assert_eq!(query.reward_range, Some((0.5, 1.0)));
+    }
+
+    #[test]
+    fn test_edge_weight_multiplier_intentional_types_full_weight() {
+        assert_eq!(ExperienceType::Decision.edge_weight_multiplier(), 1.0);
+        assert_eq!(ExperienceType::Learning.edge_weight_multiplier(), 1.0);
+        assert_eq!(ExperienceType::Discovery.edge_weight_multiplier(), 1.0);
+        assert_eq!(ExperienceType::Pattern.edge_weight_multiplier(), 1.0);
+    }
+
+    #[test]
+    fn test_edge_weight_multiplier_noise_types_dampened() {
+        let noise_types = [
+            ExperienceType::CodeEdit,
+            ExperienceType::Command,
+            ExperienceType::FileAccess,
+            ExperienceType::Search,
+        ];
+        for t in &noise_types {
+            let m = t.edge_weight_multiplier();
+            assert!(
+                m > 0.0 && m < 0.5,
+                "{:?} edge_weight_multiplier should be in (0.0, 0.5), got {}",
+                t,
+                m
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_weight_multiplier_mid_tier_types() {
+        // Conversation, Observation, Context, Task: intermediate dampening
+        assert!(ExperienceType::Conversation.edge_weight_multiplier() >= 0.4);
+        assert!(ExperienceType::Conversation.edge_weight_multiplier() <= 0.6);
+        assert!(ExperienceType::Observation.edge_weight_multiplier() >= 0.7);
+        assert!(ExperienceType::Task.edge_weight_multiplier() >= 0.7);
+    }
+
+    #[test]
+    fn test_activation_multiplier_intentional_types_full() {
+        assert_eq!(ExperienceType::Decision.activation_multiplier(), 1.0);
+        assert_eq!(ExperienceType::Learning.activation_multiplier(), 1.0);
+        assert_eq!(ExperienceType::Discovery.activation_multiplier(), 1.0);
+        assert_eq!(ExperienceType::Pattern.activation_multiplier(), 1.0);
+    }
+
+    #[test]
+    fn test_activation_multiplier_noise_types_dampened() {
+        let noise_types = [
+            ExperienceType::CodeEdit,
+            ExperienceType::Command,
+            ExperienceType::FileAccess,
+            ExperienceType::Search,
+        ];
+        for t in &noise_types {
+            let m = t.activation_multiplier();
+            assert!(
+                m > 0.0 && m < 0.5,
+                "{:?} activation_multiplier should be in (0.0, 0.5), got {}",
+                t,
+                m
+            );
+        }
+    }
+
+    #[test]
+    fn test_combined_dampening_effective() {
+        // Combined write × read dampening for CodeEdit should be < 0.15x of Decision
+        let code_edit_combined = ExperienceType::CodeEdit.edge_weight_multiplier()
+            * ExperienceType::CodeEdit.activation_multiplier();
+        let decision_combined = ExperienceType::Decision.edge_weight_multiplier()
+            * ExperienceType::Decision.activation_multiplier();
+        assert!(
+            code_edit_combined < 0.15,
+            "CodeEdit combined dampening should be < 0.15x, got {}",
+            code_edit_combined
+        );
+        assert_eq!(decision_combined, 1.0);
     }
 }
