@@ -622,6 +622,112 @@ impl RelationshipEdge {
         promotion_result
     }
 
+    /// Importance-gated Hebbian strengthening.
+    ///
+    /// Identical to `strengthen()` but scales the Hebbian boost by source memory
+    /// importance. The importance is mapped to [`STRENGTHEN_IMPORTANCE_FLOOR`, 1.0],
+    /// so even low-importance memories still strengthen edges (preventing starvation),
+    /// but high-importance memories get disproportionately stronger edges — making
+    /// them win during spreading activation traversal.
+    ///
+    /// Use this instead of `strengthen()` when the source memory importance is known
+    /// (e.g., in `reinforce_recall` where recalled memory IDs are available).
+    pub fn strengthen_with_importance(&mut self, importance: f32) -> Option<(String, String)> {
+        use crate::constants::*;
+
+        let scale =
+            STRENGTHEN_IMPORTANCE_FLOOR + importance * (1.0 - STRENGTHEN_IMPORTANCE_FLOOR);
+
+        let now = Utc::now();
+        self.activation_count += 1;
+        self.last_activated = now;
+
+        self.record_activation_timestamp(now);
+
+        let tier_boost = match self.tier {
+            EdgeTier::L1Working => TIER_CO_ACCESS_BOOST,
+            EdgeTier::L2Episodic => TIER_CO_ACCESS_BOOST * 0.8,
+            EdgeTier::L3Semantic => TIER_CO_ACCESS_BOOST * 0.5,
+        };
+        // Scale the boost by importance: high-importance → full boost, low → 20% floor
+        let boost = (LTP_LEARNING_RATE + tier_boost) * (1.0 - self.strength) * scale;
+        self.strength = (self.strength + boost).min(1.0);
+
+        // LTP detection (same as strengthen — only upgrade, never downgrade)
+        let new_ltp_status = self.detect_ltp_status(now);
+        if new_ltp_status.priority() > self.ltp_status.priority() {
+            let old_status = self.ltp_status;
+            self.ltp_status = new_ltp_status;
+
+            let bonus = match new_ltp_status {
+                LtpStatus::Burst { .. } => 0.05,
+                LtpStatus::Weekly => 0.1,
+                LtpStatus::Full => 0.2,
+                LtpStatus::None => 0.0,
+            };
+            self.strength = (self.strength + bonus).min(1.0);
+
+            tracing::debug!(
+                "Edge {} LTP upgrade: {:?} → {:?} (activations: {}, age: {} days)",
+                self.uuid,
+                old_status,
+                self.ltp_status,
+                self.activation_count,
+                (now - self.created_at).num_days()
+            );
+        }
+
+        if self.ltp_status.is_burst_expired() {
+            let weekly_check = self.detect_weekly_pattern();
+            if weekly_check {
+                self.ltp_status = LtpStatus::Weekly;
+            } else {
+                self.ltp_status = LtpStatus::None;
+            }
+        }
+
+        // Tier promotion
+        let mut promotion_result = None;
+        if let Some(threshold) = self.tier.promotion_threshold() {
+            if self.strength >= threshold {
+                if let Some(next_tier) = self.tier.next_tier() {
+                    let old_tier = self.tier;
+                    self.tier = next_tier;
+                    self.strength = self.strength.max(next_tier.initial_weight());
+
+                    if old_tier == EdgeTier::L1Working {
+                        self.activation_timestamps =
+                            Some(VecDeque::with_capacity(ACTIVATION_HISTORY_L2_CAPACITY));
+                        if let Some(ref mut ts) = self.activation_timestamps {
+                            ts.push_back(now);
+                        }
+                    }
+
+                    if old_tier == EdgeTier::L2Episodic {
+                        if let Some(ref mut ts) = self.activation_timestamps {
+                            let current = ts.capacity();
+                            if current < ACTIVATION_HISTORY_L3_CAPACITY {
+                                ts.reserve(ACTIVATION_HISTORY_L3_CAPACITY - current);
+                            }
+                        }
+                    }
+
+                    tracing::debug!(
+                        "Edge {} promoted: {:?} → {:?}",
+                        self.uuid,
+                        old_tier,
+                        self.tier
+                    );
+
+                    promotion_result =
+                        Some((format!("{:?}", old_tier), format!("{:?}", self.tier)));
+                }
+            }
+        }
+
+        promotion_result
+    }
+
     /// Record an activation timestamp (PIPE-4)
     ///
     /// Only records for L2+ edges. Maintains capacity limits.
@@ -3215,6 +3321,64 @@ impl GraphMemory {
         }
 
         // Atomic write of all updates
+        if strengthened > 0 {
+            self.db.write(batch)?;
+        }
+
+        Ok(strengthened)
+    }
+
+    /// Importance-gated batch strengthening.
+    ///
+    /// Same as `batch_strengthen_synapses` but calls `strengthen_with_importance(importance)`
+    /// instead of `strengthen()`. The importance value scales the Hebbian boost
+    /// from [`STRENGTHEN_IMPORTANCE_FLOOR`, 1.0].
+    pub fn batch_strengthen_synapses_with_importance(
+        &self,
+        edge_uuids: &[Uuid],
+        importance: f32,
+    ) -> Result<usize> {
+        if edge_uuids.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self
+            .synapse_update_lock
+            .try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "synapse_update_lock timeout in batch_strengthen_synapses_with_importance"
+                )
+            })?;
+
+        let keys: Vec<[u8; 16]> = edge_uuids.iter().map(|u| *u.as_bytes()).collect();
+        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let results = self
+            .db
+            .batched_multi_get_cf(self.relationships_cf(), &key_refs, false);
+
+        let mut batch = WriteBatch::default();
+        let mut strengthened = 0;
+
+        for (i, result) in results.into_iter().enumerate() {
+            if let Ok(Some(value)) = result {
+                if let Ok((mut edge, _)) =
+                    crate::serialization::try_decode::<RelationshipEdge>(&value)
+                {
+                    let _ = edge.strengthen_with_importance(importance);
+                    match crate::serialization::encode(&edge) {
+                        Ok(encoded) => {
+                            batch.put_cf(self.relationships_cf(), keys[i], encoded);
+                            strengthened += 1;
+                        }
+                        Err(e) => {
+                            tracing::debug!("Failed to serialize edge {}: {}", edge_uuids[i], e);
+                        }
+                    }
+                }
+            }
+        }
+
         if strengthened > 0 {
             self.db.write(batch)?;
         }
