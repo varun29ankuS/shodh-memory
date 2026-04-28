@@ -7388,6 +7388,111 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_strengthen_with_importance_scales_boost() {
+        // Verify: high-importance strengthening produces stronger edges than low-importance,
+        // and low-importance still strengthens (floor = STRENGTHEN_IMPORTANCE_FLOOR = 0.2).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let from_uuid = Uuid::new_v4();
+        let to_uuid = Uuid::new_v4();
+
+        for (uuid, name) in [(from_uuid, "ImportanceFrom"), (to_uuid, "ImportanceTo")] {
+            let entity = EntityNode {
+                uuid,
+                name: name.to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: Utc::now(),
+                last_seen_at: Utc::now(),
+                mention_count: 1,
+                summary: String::new(),
+                attributes: std::collections::HashMap::new(),
+                name_embedding: None,
+                salience: 0.5,
+                is_proper_noun: false,
+                selectivity: None,
+            };
+            graph.add_entity(entity).unwrap();
+        }
+
+        let initial_strength = 0.3;
+
+        // Create two identical edges — one will get high-importance, one low-importance
+        let mut make_edge = || RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: from_uuid,
+            to_entity: to_uuid,
+            relation_type: RelationType::RelatedTo,
+            strength: initial_strength,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: "importance test".to_string(),
+            last_activated: Utc::now(),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+        };
+
+        let high_edge_uuid = graph.add_relationship(make_edge()).unwrap();
+        let low_edge_uuid = graph.add_relationship(make_edge()).unwrap();
+
+        // Strengthen with high importance (1.0) — should get full boost
+        graph
+            .batch_strengthen_synapses_with_importance(&[high_edge_uuid], 1.0)
+            .unwrap();
+
+        // Strengthen with low importance (0.0) — should get floor boost (0.2x)
+        graph
+            .batch_strengthen_synapses_with_importance(&[low_edge_uuid], 0.0)
+            .unwrap();
+
+        let high_edge = graph.get_relationship(&high_edge_uuid).unwrap().unwrap();
+        let low_edge = graph.get_relationship(&low_edge_uuid).unwrap().unwrap();
+
+        // Both should be stronger than initial
+        assert!(
+            high_edge.strength > initial_strength,
+            "High-importance edge should strengthen: {} > {}",
+            high_edge.strength,
+            initial_strength
+        );
+        assert!(
+            low_edge.strength > initial_strength,
+            "Low-importance edge should still strengthen (floor=0.2): {} > {}",
+            low_edge.strength,
+            initial_strength
+        );
+
+        // High-importance should be stronger than low-importance
+        assert!(
+            high_edge.strength > low_edge.strength,
+            "High-importance edge should be stronger: {} > {}",
+            high_edge.strength,
+            low_edge.strength
+        );
+
+        // Verify the ratio roughly matches expected scaling:
+        // high boost ≈ base * 1.0, low boost ≈ base * 0.2
+        let high_delta = high_edge.strength - initial_strength;
+        let low_delta = low_edge.strength - initial_strength;
+        let ratio = high_delta / low_delta;
+        // Expected ratio ≈ 1.0 / 0.2 = 5.0 (not exact due to (1-strength) term)
+        assert!(
+            ratio > 3.0 && ratio < 7.0,
+            "Boost ratio should be ~5x (floor=0.2), got {:.2}x (high_delta={:.4}, low_delta={:.4})",
+            ratio,
+            high_delta,
+            low_delta
+        );
+    }
+
     // =========================================================================
     // Forman-Ricci Curvature Tests
     // Reference: Leal, Restrepo, Stadler, Jost (2018) arXiv:1811.07825
