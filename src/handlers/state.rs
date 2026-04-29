@@ -2931,7 +2931,7 @@ impl MultiUserMemoryManager {
                 let node = EntityNode {
                     uuid: uuid::Uuid::new_v4(),
                     name: ner_entity.text.clone(),
-                    labels: vec![label],
+                    labels: vec![label.clone()],
                     created_at: now,
                     last_seen_at: now,
                     mention_count: 1,
@@ -2943,9 +2943,13 @@ impl MultiUserMemoryManager {
                         a
                     },
                     name_embedding: None,
-                    salience: ner_entity.confidence,
-                    // Only PER, ORG, LOC are proper nouns; MISC includes non-proper
-                    // nouns like nationalities, events, etc.
+                    // Use ontological salience as the base, scaled by NER confidence
+                    salience: {
+                        let is_pn = !matches!(ner_entity.entity_type, NerEntityType::Misc);
+                        let base = crate::graph_memory::EntityExtractor::calculate_base_salience(&label, is_pn);
+                        // NER confidence modulates: high-confidence entities get full base salience
+                        base * (0.5 + 0.5 * ner_entity.confidence)
+                    },
                     is_proper_noun: !matches!(ner_entity.entity_type, NerEntityType::Misc),
                     selectivity: None,
                 };
@@ -3045,7 +3049,10 @@ impl MultiUserMemoryManager {
                         summary: String::new(),
                         attributes: HashMap::new(),
                         name_embedding: None,
-                        salience: 0.5,
+                        salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
+                            &EntityLabel::Technology,
+                            true,
+                        ),
                         is_proper_noun: true,
                         selectivity: None,
                     },
@@ -3074,7 +3081,10 @@ impl MultiUserMemoryManager {
                         summary: String::new(),
                         attributes: HashMap::new(),
                         name_embedding: None,
-                        salience: 0.7,
+                        salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
+                            &EntityLabel::Task,
+                            true,
+                        ),
                         is_proper_noun: true,
                         selectivity: None,
                     },
