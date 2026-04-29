@@ -2741,7 +2741,29 @@ impl MemorySystem {
                 // on the base. This preserves RRF ranking while allowing signals to modulate.
                 let combined_boost =
                     1.0 + recency_factor + arousal_factor + credibility_factor + temporal_factor;
-                let final_score = base * importance_factor * combined_boost * feedback_multiplier;
+
+                // AUTO-CAPTURED TAG PENALTY (PIPE-8)
+                // Hook-ingested memories carry "auto-captured" tag; assistant responses
+                // carry "assistant-response". Apply multiplicative penalty so they don't
+                // outrank intentional memories when volume gives them a ranking edge.
+                let tag_penalty = {
+                    let mut penalty = 1.0_f32;
+                    for tag in &mem.experience.tags {
+                        match tag.as_str() {
+                            "auto-captured" => {
+                                penalty *= crate::constants::AUTO_CAPTURED_TAG_PENALTY
+                            }
+                            "assistant-response" => {
+                                penalty *= crate::constants::ASSISTANT_RESPONSE_TAG_PENALTY
+                            }
+                            _ => {}
+                        }
+                    }
+                    penalty
+                };
+
+                let final_score =
+                    base * importance_factor * combined_boost * feedback_multiplier * tag_penalty;
 
                 let mut cloned: Memory = mem.as_ref().clone();
                 cloned.set_score(final_score);
@@ -5347,7 +5369,27 @@ impl MemorySystem {
                 Ok(edge_uuids) if !edge_uuids.is_empty() => {
                     let result = match outcome {
                         RetrievalOutcome::Helpful => {
-                            graph.read().batch_strengthen_synapses(&edge_uuids)
+                            // Importance-gated strengthening: high-importance recalled
+                            // memories get stronger Hebbian boosts on their graph edges.
+                            let avg_importance = {
+                                let mut total = 0.0_f32;
+                                let mut count = 0_usize;
+                                for id in memory_ids {
+                                    if let Ok(mem) = self.long_term_memory.get(id) {
+                                        total += mem.importance();
+                                        count += 1;
+                                    }
+                                }
+                                if count > 0 {
+                                    total / count as f32
+                                } else {
+                                    0.5
+                                }
+                            };
+                            graph.read().batch_strengthen_synapses_with_importance(
+                                &edge_uuids,
+                                avg_importance,
+                            )
                         }
                         RetrievalOutcome::Misleading => graph
                             .read()

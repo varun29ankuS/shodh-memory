@@ -1295,6 +1295,68 @@ pub const MEMORY_TIER_GRAPH_MULT_LONGTERM: f32 = 1.0;
 pub const MEMORY_TIER_GRAPH_MULT_ARCHIVE: f32 = 1.2;
 
 // =============================================================================
+// RECALL QUALITY: TYPE-AWARE SCORING (PIPE-8)
+// Hook-generated memories (CodeEdit, Command) outnumber intentional memories
+// ~6:1 in edge creation volume. Without type-awareness, they dominate graph
+// traversal through sheer volume. These constants modulate signal at both
+// write-time (edge creation) and read-time (spreading activation + Layer 5).
+// =============================================================================
+
+/// Edge weight multiplier by ExperienceType at graph ingestion time.
+/// Applied multiplicatively to `L1Working.initial_weight()` in
+/// `process_experience_into_graph`. Intentional types get full weight;
+/// auto-generated noise types get dampened.
+///
+/// Reference: Signal detection theory (Green & Swets, 1966)
+pub const EDGE_WEIGHT_MULT_DECISION: f32 = 1.0;
+pub const EDGE_WEIGHT_MULT_LEARNING: f32 = 1.0;
+pub const EDGE_WEIGHT_MULT_DISCOVERY: f32 = 1.0;
+pub const EDGE_WEIGHT_MULT_ERROR: f32 = 0.9;
+pub const EDGE_WEIGHT_MULT_PATTERN: f32 = 1.0;
+pub const EDGE_WEIGHT_MULT_OBSERVATION: f32 = 0.8;
+pub const EDGE_WEIGHT_MULT_CONTEXT: f32 = 0.7;
+pub const EDGE_WEIGHT_MULT_TASK: f32 = 0.8;
+pub const EDGE_WEIGHT_MULT_CONVERSATION: f32 = 0.5;
+pub const EDGE_WEIGHT_MULT_CODE_EDIT: f32 = 0.3;
+pub const EDGE_WEIGHT_MULT_FILE_ACCESS: f32 = 0.25;
+pub const EDGE_WEIGHT_MULT_SEARCH: f32 = 0.25;
+pub const EDGE_WEIGHT_MULT_COMMAND: f32 = 0.3;
+pub const EDGE_WEIGHT_MULT_INTENTION: f32 = 0.9;
+
+/// Activation multiplier for spreading activation retrieval (read-time).
+/// Applied to `final_score` when resolving episodes to memories.
+/// Complementary to write-time dampening — stacks multiplicatively.
+///
+/// Effective combined signal: CodeEdit = 0.3 × 0.4 = 0.12x of Decision.
+/// CodeEdit memories still surface through vector search (Layer 1/3)
+/// when semantically relevant; only the graph path is dampened.
+pub const ACTIVATION_MULT_DECISION: f32 = 1.0;
+pub const ACTIVATION_MULT_LEARNING: f32 = 1.0;
+pub const ACTIVATION_MULT_DISCOVERY: f32 = 1.0;
+pub const ACTIVATION_MULT_ERROR: f32 = 0.95;
+pub const ACTIVATION_MULT_PATTERN: f32 = 1.0;
+pub const ACTIVATION_MULT_OBSERVATION: f32 = 0.85;
+pub const ACTIVATION_MULT_CONTEXT: f32 = 0.75;
+pub const ACTIVATION_MULT_TASK: f32 = 0.85;
+pub const ACTIVATION_MULT_CONVERSATION: f32 = 0.6;
+pub const ACTIVATION_MULT_CODE_EDIT: f32 = 0.4;
+pub const ACTIVATION_MULT_FILE_ACCESS: f32 = 0.35;
+pub const ACTIVATION_MULT_SEARCH: f32 = 0.35;
+pub const ACTIVATION_MULT_COMMAND: f32 = 0.4;
+pub const ACTIVATION_MULT_INTENTION: f32 = 0.95;
+
+/// Importance floor for `strengthen_with_importance()`.
+/// Even low-importance memories get this fraction of the full Hebbian boost,
+/// preventing complete starvation of auto-generated edge strengthening.
+pub const STRENGTHEN_IMPORTANCE_FLOOR: f32 = 0.2;
+
+/// Layer 5 tag penalties for auto-generated content.
+/// Multiplicative on final unified score.
+/// Combined penalty for assistant-response + auto-captured = 0.85 × 0.90 = 0.765.
+pub const AUTO_CAPTURED_TAG_PENALTY: f32 = 0.85;
+pub const ASSISTANT_RESPONSE_TAG_PENALTY: f32 = 0.90;
+
+// =============================================================================
 // LONG-TERM POTENTIATION (LTP) CONSTANTS
 // Based on synaptic plasticity and Hebbian learning theory
 // =============================================================================

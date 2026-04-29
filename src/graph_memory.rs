@@ -622,6 +622,111 @@ impl RelationshipEdge {
         promotion_result
     }
 
+    /// Importance-gated Hebbian strengthening.
+    ///
+    /// Identical to `strengthen()` but scales the Hebbian boost by source memory
+    /// importance. The importance is mapped to [`STRENGTHEN_IMPORTANCE_FLOOR`, 1.0],
+    /// so even low-importance memories still strengthen edges (preventing starvation),
+    /// but high-importance memories get disproportionately stronger edges — making
+    /// them win during spreading activation traversal.
+    ///
+    /// Use this instead of `strengthen()` when the source memory importance is known
+    /// (e.g., in `reinforce_recall` where recalled memory IDs are available).
+    pub fn strengthen_with_importance(&mut self, importance: f32) -> Option<(String, String)> {
+        use crate::constants::*;
+
+        let scale = STRENGTHEN_IMPORTANCE_FLOOR + importance * (1.0 - STRENGTHEN_IMPORTANCE_FLOOR);
+
+        let now = Utc::now();
+        self.activation_count += 1;
+        self.last_activated = now;
+
+        self.record_activation_timestamp(now);
+
+        let tier_boost = match self.tier {
+            EdgeTier::L1Working => TIER_CO_ACCESS_BOOST,
+            EdgeTier::L2Episodic => TIER_CO_ACCESS_BOOST * 0.8,
+            EdgeTier::L3Semantic => TIER_CO_ACCESS_BOOST * 0.5,
+        };
+        // Scale the boost by importance: high-importance → full boost, low → 20% floor
+        let boost = (LTP_LEARNING_RATE + tier_boost) * (1.0 - self.strength) * scale;
+        self.strength = (self.strength + boost).min(1.0);
+
+        // LTP detection (same as strengthen — only upgrade, never downgrade)
+        let new_ltp_status = self.detect_ltp_status(now);
+        if new_ltp_status.priority() > self.ltp_status.priority() {
+            let old_status = self.ltp_status;
+            self.ltp_status = new_ltp_status;
+
+            let bonus = match new_ltp_status {
+                LtpStatus::Burst { .. } => 0.05,
+                LtpStatus::Weekly => 0.1,
+                LtpStatus::Full => 0.2,
+                LtpStatus::None => 0.0,
+            };
+            self.strength = (self.strength + bonus).min(1.0);
+
+            tracing::debug!(
+                "Edge {} LTP upgrade: {:?} → {:?} (activations: {}, age: {} days)",
+                self.uuid,
+                old_status,
+                self.ltp_status,
+                self.activation_count,
+                (now - self.created_at).num_days()
+            );
+        }
+
+        if self.ltp_status.is_burst_expired() {
+            let weekly_check = self.detect_weekly_pattern();
+            if weekly_check {
+                self.ltp_status = LtpStatus::Weekly;
+            } else {
+                self.ltp_status = LtpStatus::None;
+            }
+        }
+
+        // Tier promotion
+        let mut promotion_result = None;
+        if let Some(threshold) = self.tier.promotion_threshold() {
+            if self.strength >= threshold {
+                if let Some(next_tier) = self.tier.next_tier() {
+                    let old_tier = self.tier;
+                    self.tier = next_tier;
+                    self.strength = self.strength.max(next_tier.initial_weight());
+
+                    if old_tier == EdgeTier::L1Working {
+                        self.activation_timestamps =
+                            Some(VecDeque::with_capacity(ACTIVATION_HISTORY_L2_CAPACITY));
+                        if let Some(ref mut ts) = self.activation_timestamps {
+                            ts.push_back(now);
+                        }
+                    }
+
+                    if old_tier == EdgeTier::L2Episodic {
+                        if let Some(ref mut ts) = self.activation_timestamps {
+                            let current = ts.capacity();
+                            if current < ACTIVATION_HISTORY_L3_CAPACITY {
+                                ts.reserve(ACTIVATION_HISTORY_L3_CAPACITY - current);
+                            }
+                        }
+                    }
+
+                    tracing::debug!(
+                        "Edge {} promoted: {:?} → {:?}",
+                        self.uuid,
+                        old_tier,
+                        self.tier
+                    );
+
+                    promotion_result =
+                        Some((format!("{:?}", old_tier), format!("{:?}", self.tier)));
+                }
+            }
+        }
+
+        promotion_result
+    }
+
     /// Record an activation timestamp (PIPE-4)
     ///
     /// Only records for L2+ edges. Maintains capacity limits.
@@ -3215,6 +3320,64 @@ impl GraphMemory {
         }
 
         // Atomic write of all updates
+        if strengthened > 0 {
+            self.db.write(batch)?;
+        }
+
+        Ok(strengthened)
+    }
+
+    /// Importance-gated batch strengthening.
+    ///
+    /// Same as `batch_strengthen_synapses` but calls `strengthen_with_importance(importance)`
+    /// instead of `strengthen()`. The importance value scales the Hebbian boost
+    /// from [`STRENGTHEN_IMPORTANCE_FLOOR`, 1.0].
+    pub fn batch_strengthen_synapses_with_importance(
+        &self,
+        edge_uuids: &[Uuid],
+        importance: f32,
+    ) -> Result<usize> {
+        if edge_uuids.is_empty() {
+            return Ok(0);
+        }
+
+        let _guard = self
+            .synapse_update_lock
+            .try_lock_for(std::time::Duration::from_secs(5))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "synapse_update_lock timeout in batch_strengthen_synapses_with_importance"
+                )
+            })?;
+
+        let keys: Vec<[u8; 16]> = edge_uuids.iter().map(|u| *u.as_bytes()).collect();
+        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
+        let results = self
+            .db
+            .batched_multi_get_cf(self.relationships_cf(), &key_refs, false);
+
+        let mut batch = WriteBatch::default();
+        let mut strengthened = 0;
+
+        for (i, result) in results.into_iter().enumerate() {
+            if let Ok(Some(value)) = result {
+                if let Ok((mut edge, _)) =
+                    crate::serialization::try_decode::<RelationshipEdge>(&value)
+                {
+                    let _ = edge.strengthen_with_importance(importance);
+                    match crate::serialization::encode(&edge) {
+                        Ok(encoded) => {
+                            batch.put_cf(self.relationships_cf(), keys[i], encoded);
+                            strengthened += 1;
+                        }
+                        Err(e) => {
+                            tracing::debug!("Failed to serialize edge {}: {}", edge_uuids[i], e);
+                        }
+                    }
+                }
+            }
+        }
+
         if strengthened > 0 {
             self.db.write(batch)?;
         }
@@ -7221,6 +7384,121 @@ mod tests {
             "Edge strength should increase after Helpful feedback: {} -> {}",
             initial_strength,
             updated.strength
+        );
+    }
+
+    #[test]
+    fn test_strengthen_with_importance_scales_boost() {
+        // Verify: high-importance strengthening produces stronger edges than low-importance,
+        // and low-importance still strengthens (floor = STRENGTHEN_IMPORTANCE_FLOOR = 0.2).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        // Use separate entity pairs so add_relationship doesn't dedup
+        // (same from+to+relation_type gets merged into existing edge)
+        let high_from = Uuid::new_v4();
+        let high_to = Uuid::new_v4();
+        let low_from = Uuid::new_v4();
+        let low_to = Uuid::new_v4();
+
+        for (uuid, name) in [
+            (high_from, "HighFrom"),
+            (high_to, "HighTo"),
+            (low_from, "LowFrom"),
+            (low_to, "LowTo"),
+        ] {
+            let entity = EntityNode {
+                uuid,
+                name: name.to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: Utc::now(),
+                last_seen_at: Utc::now(),
+                mention_count: 1,
+                summary: String::new(),
+                attributes: std::collections::HashMap::new(),
+                name_embedding: None,
+                salience: 0.5,
+                is_proper_noun: false,
+                selectivity: None,
+            };
+            graph.add_entity(entity).unwrap();
+        }
+
+        let initial_strength = 0.3;
+
+        let make_edge = |from: Uuid, to: Uuid| RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type: RelationType::RelatedTo,
+            strength: initial_strength,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: "importance test".to_string(),
+            last_activated: Utc::now(),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+        };
+
+        let high_edge_uuid = graph
+            .add_relationship(make_edge(high_from, high_to))
+            .unwrap();
+        let low_edge_uuid = graph.add_relationship(make_edge(low_from, low_to)).unwrap();
+
+        // Strengthen with high importance (1.0) — should get full boost
+        graph
+            .batch_strengthen_synapses_with_importance(&[high_edge_uuid], 1.0)
+            .unwrap();
+
+        // Strengthen with low importance (0.0) — should get floor boost (0.2x)
+        graph
+            .batch_strengthen_synapses_with_importance(&[low_edge_uuid], 0.0)
+            .unwrap();
+
+        let high_edge = graph.get_relationship(&high_edge_uuid).unwrap().unwrap();
+        let low_edge = graph.get_relationship(&low_edge_uuid).unwrap().unwrap();
+
+        // Both should be stronger than initial
+        assert!(
+            high_edge.strength > initial_strength,
+            "High-importance edge should strengthen: {} > {}",
+            high_edge.strength,
+            initial_strength
+        );
+        assert!(
+            low_edge.strength > initial_strength,
+            "Low-importance edge should still strengthen (floor=0.2): {} > {}",
+            low_edge.strength,
+            initial_strength
+        );
+
+        // High-importance should be stronger than low-importance
+        assert!(
+            high_edge.strength > low_edge.strength,
+            "High-importance edge should be stronger: {} > {}",
+            high_edge.strength,
+            low_edge.strength
+        );
+
+        // Verify the ratio roughly matches expected scaling:
+        // high boost ≈ base * 1.0, low boost ≈ base * 0.2
+        let high_delta = high_edge.strength - initial_strength;
+        let low_delta = low_edge.strength - initial_strength;
+        let ratio = high_delta / low_delta;
+        // Expected ratio ≈ 1.0 / 0.2 = 5.0 (not exact due to (1-strength) term)
+        assert!(
+            ratio > 3.0 && ratio < 7.0,
+            "Boost ratio should be ~5x (floor=0.2), got {:.2}x (high_delta={:.4}, low_delta={:.4})",
+            ratio,
+            high_delta,
+            low_delta
         );
     }
 
