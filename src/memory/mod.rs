@@ -756,6 +756,49 @@ impl MemorySystem {
             true
         };
 
+        // Record non-text modalities in VectorMappingEntry metadata.
+        // Embeddings are persisted on the Memory struct via RocksDB; Vamana insertion
+        // is deferred until per-modality indexes exist (cross-modal search PR).
+        {
+            use storage::Modality;
+            let modalities_to_record: Vec<Modality> = [
+                memory
+                    .experience
+                    .image_embeddings
+                    .as_ref()
+                    .map(|_| Modality::Image),
+                memory
+                    .experience
+                    .audio_embeddings
+                    .as_ref()
+                    .map(|_| Modality::Audio),
+                memory
+                    .experience
+                    .video_embeddings
+                    .as_ref()
+                    .map(|_| Modality::Video),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+
+            for modality in modalities_to_record {
+                // Empty vector_ids: no Vamana index yet, but the mapping records that
+                // this memory HAS embeddings for this modality.
+                if let Err(e) = self
+                    .long_term_memory
+                    .update_modality_vectors(&memory.id, modality, Vec::new())
+                {
+                    tracing::warn!(
+                        "Failed to record {} modality for {}: {}",
+                        modality,
+                        memory.id.0,
+                        e
+                    );
+                }
+            }
+        }
+
         // NOTE: Graph processing (entities + co-occurrence edges) is handled by
         // process_experience_into_graph() at the handler layer (remember.rs, recall.rs).
         // That path creates richer EpisodicNodes with temporal context and does proper

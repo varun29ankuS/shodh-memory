@@ -3255,22 +3255,19 @@ impl VectorMappingEntry {
         );
     }
 
-    /// Future: Add image vectors
-    #[allow(dead_code)]
+    /// Add image vectors
     pub fn with_image(mut self, vector_ids: Vec<u32>) -> Self {
         self.add_modality(Modality::Image, vector_ids);
         self
     }
 
-    /// Future: Add audio vectors
-    #[allow(dead_code)]
+    /// Add audio vectors
     pub fn with_audio(mut self, vector_ids: Vec<u32>) -> Self {
         self.add_modality(Modality::Audio, vector_ids);
         self
     }
 
-    /// Future: Add video vectors
-    #[allow(dead_code)]
+    /// Add video vectors
     pub fn with_video(mut self, vector_ids: Vec<u32>) -> Self {
         self.add_modality(Modality::Video, vector_ids);
         self
