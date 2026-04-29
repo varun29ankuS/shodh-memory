@@ -1231,6 +1231,7 @@ impl PyMemorySystem {
             let mut dict = HashMap::new();
             dict.insert("node_count".to_string(), stats.node_count.into_py(py));
             dict.insert("edge_count".to_string(), stats.edge_count.into_py(py));
+            dict.insert("episode_count".to_string(), stats.episode_count.into_py(py));
             dict.insert("avg_strength".to_string(), stats.avg_strength.into_py(py));
             dict.insert(
                 "potentiated_count".to_string(),

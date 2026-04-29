@@ -1452,6 +1452,7 @@ impl RetrievalEngine {
         MemoryGraphStats {
             node_count: 0,
             edge_count: 0,
+            episode_count: 0,
             avg_strength: 0.0,
             potentiated_count: 0,
         }
@@ -1744,6 +1745,7 @@ pub struct ReinforcementStats {
 pub struct MemoryGraphStats {
     pub node_count: usize,
     pub edge_count: usize,
+    pub episode_count: usize,
     pub avg_strength: f32,
     pub potentiated_count: usize,
 }
@@ -2149,6 +2151,7 @@ mod tests {
 
         assert_eq!(stats.node_count, 0);
         assert_eq!(stats.edge_count, 0);
+        assert_eq!(stats.episode_count, 0);
         assert_eq!(stats.avg_strength, 0.0);
         assert_eq!(stats.potentiated_count, 0);
     }

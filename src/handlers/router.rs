@@ -83,6 +83,7 @@ pub fn build_protected_routes(state: AppState) -> Router {
         .route("/api/recall/tags", post(recall::recall_by_tags))
         .route("/api/recall/by-tags", post(recall::recall_by_tags)) // OpenAPI alias
         .route("/api/recall/date", post(recall::recall_by_date))
+        .route("/api/recall/paginated", post(recall::paginated_recall))
         // =================================================================
         // PROACTIVE CONTEXT & RELEVANCE
         // =================================================================
@@ -196,6 +197,7 @@ pub fn build_protected_routes(state: AppState) -> Router {
             post(lineage::lineage_list_branches),
         )
         .route("/api/lineage/branch", post(lineage::lineage_create_branch))
+        .route("/api/lineage/root-cause", post(lineage::lineage_root_cause))
         // =================================================================
         // KNOWLEDGE GRAPH (ADVANCED)
         // =================================================================

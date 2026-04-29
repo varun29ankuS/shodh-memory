@@ -140,6 +140,9 @@ pub struct RecallRequest {
     /// Enable retrieval diagnostics (per-stage timing, per-memory score attribution)
     #[serde(default)]
     pub debug: bool,
+    /// Offset for pagination (skip first N results, default 0)
+    #[serde(default)]
+    pub offset: usize,
 }
 
 pub fn default_recall_limit() -> usize {

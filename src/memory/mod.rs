@@ -756,6 +756,49 @@ impl MemorySystem {
             true
         };
 
+        // Record non-text modalities in VectorMappingEntry metadata.
+        // Embeddings are persisted on the Memory struct via RocksDB; Vamana insertion
+        // is deferred until per-modality indexes exist (cross-modal search PR).
+        {
+            use storage::Modality;
+            let modalities_to_record: Vec<Modality> = [
+                memory
+                    .experience
+                    .image_embeddings
+                    .as_ref()
+                    .map(|_| Modality::Image),
+                memory
+                    .experience
+                    .audio_embeddings
+                    .as_ref()
+                    .map(|_| Modality::Audio),
+                memory
+                    .experience
+                    .video_embeddings
+                    .as_ref()
+                    .map(|_| Modality::Video),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+
+            for modality in modalities_to_record {
+                // Empty vector_ids: no Vamana index yet, but the mapping records that
+                // this memory HAS embeddings for this modality.
+                if let Err(e) =
+                    self.long_term_memory
+                        .update_modality_vectors(&memory.id, modality, Vec::new())
+                {
+                    tracing::warn!(
+                        "Failed to record {} modality for {}: {}",
+                        modality,
+                        memory.id.0,
+                        e
+                    );
+                }
+            }
+        }
+
         // NOTE: Graph processing (entities + co-occurrence edges) is handled by
         // process_experience_into_graph() at the handler layer (remember.rs, recall.rs).
         // That path creates richer EpisodicNodes with temporal context and does proper
@@ -5745,6 +5788,7 @@ impl MemorySystem {
                 return MemoryGraphStats {
                     node_count: stats.entity_count,
                     edge_count: stats.relationship_count,
+                    episode_count: stats.episode_count,
                     avg_strength,
                     potentiated_count,
                 };
@@ -5754,6 +5798,7 @@ impl MemorySystem {
         MemoryGraphStats {
             node_count: 0,
             edge_count: 0,
+            episode_count: 0,
             avg_strength: 0.0,
             potentiated_count: 0,
         }
@@ -6536,7 +6581,63 @@ impl MemorySystem {
         let mut replay_result = replay::ReplayCycleResult::default();
         {
             // PIPE-2: Check for pattern-triggered replay first
-            let pattern_result = self.pattern_detector.write().detect_patterns();
+            let mut pattern_result = self.pattern_detector.write().detect_patterns();
+
+            // PIPE-3: Semantic clustering — feed similarity triples from Vamana into
+            // detect_semantic_clusters(). Heavy-only because it requires vector searches.
+            if is_heavy && !all_memories_for_heavy.is_empty() {
+                let sample_size = crate::constants::SEMANTIC_CLUSTER_SAMPLE_SIZE;
+                let neighbor_k = crate::constants::SEMANTIC_CLUSTER_NEIGHBOR_K;
+
+                // Sample the most recent memories (tail of the vec, sorted by creation time)
+                let start = all_memories_for_heavy.len().saturating_sub(sample_size);
+                let sample = &all_memories_for_heavy[start..];
+
+                let mut similarity_triples: Vec<(String, String, f32)> = Vec::new();
+
+                for mem in sample {
+                    let emb = match mem.experience.embeddings.as_ref() {
+                        Some(e) => e,
+                        None => continue,
+                    };
+
+                    let neighbors =
+                        match self
+                            .retriever
+                            .search_by_embedding(emb, neighbor_k, Some(&mem.id))
+                        {
+                            Ok(n) => n,
+                            Err(_) => continue,
+                        };
+
+                    let source_id = mem.id.0.to_string();
+                    for (neighbor_id, similarity) in neighbors {
+                        similarity_triples.push((
+                            source_id.clone(),
+                            neighbor_id.0.to_string(),
+                            similarity,
+                        ));
+                    }
+                }
+
+                if !similarity_triples.is_empty() {
+                    let semantic_triggers = self
+                        .pattern_detector
+                        .write()
+                        .detect_semantic_clusters(&similarity_triples);
+
+                    if !semantic_triggers.is_empty() {
+                        tracing::info!(
+                            count = semantic_triggers.len(),
+                            triples = similarity_triples.len(),
+                            "Semantic clustering found clusters during heavy maintenance"
+                        );
+                        pattern_result.semantic_clusters_found = semantic_triggers.len();
+                        pattern_result.triggers.extend(semantic_triggers);
+                    }
+                }
+            }
+
             let has_pattern_triggers = !pattern_result.triggers.is_empty();
 
             // Log pattern detection results

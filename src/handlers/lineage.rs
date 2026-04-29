@@ -393,3 +393,50 @@ pub async fn lineage_create_branch(
 
     Ok(Json(branch))
 }
+
+/// Request to find the root cause of a decision chain
+#[derive(Debug, Deserialize)]
+pub struct LineageRootCauseRequest {
+    pub user_id: String,
+    pub memory_id: String,
+}
+
+/// Response for root cause lookup
+#[derive(Debug, Serialize)]
+pub struct LineageRootCauseResponse {
+    pub memory_id: String,
+    pub root_cause_id: Option<String>,
+}
+
+/// POST /api/lineage/root-cause - Find the oldest ancestor in a causal chain
+#[tracing::instrument(skip(state), fields(user_id = %req.user_id, memory_id = %req.memory_id))]
+pub async fn lineage_root_cause(
+    State(state): State<AppState>,
+    Json(req): Json<LineageRootCauseRequest>,
+) -> Result<Json<LineageRootCauseResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let user_id = req.user_id.clone();
+    let memory_id_str = req.memory_id.clone();
+
+    let root_cause_id = tokio::task::spawn_blocking(move || {
+        let memory_guard = memory.read();
+        let memory_id = MemoryId(
+            uuid::Uuid::parse_str(&memory_id_str)
+                .map_err(|e| anyhow::anyhow!("Invalid memory_id: {e}"))?,
+        );
+        memory_guard.find_root_cause(&user_id, &memory_id)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    Ok(Json(LineageRootCauseResponse {
+        memory_id: req.memory_id,
+        root_cause_id: root_cause_id.map(|id| id.0.to_string()),
+    }))
+}

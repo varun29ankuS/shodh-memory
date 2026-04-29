@@ -135,6 +135,11 @@ impl KeywordExtractor {
         self.extract(text).into_iter().map(|k| k.text).collect()
     }
 
+    /// Check if a word is a stop word (delegates to YAKE's language-aware stop word list)
+    pub fn is_stop_word(&self, word: &str) -> bool {
+        self.stopwords.contains(word)
+    }
+
     /// Extract keywords with minimum importance threshold
     pub fn extract_filtered(&self, text: &str, min_importance: f32) -> Vec<Keyword> {
         self.extract(text)
