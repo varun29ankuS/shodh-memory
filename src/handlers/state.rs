@@ -515,6 +515,66 @@ fn classify_tag_label(tag: &str) -> EntityLabel {
     EntityLabel::Technology
 }
 
+/// Classify a MISC NER entity into a more specific EntityLabel.
+///
+/// The NER model only outputs PER/ORG/LOC/MISC. For MISC entities that pass
+/// quality gates, we use heuristic rules to assign a richer ontological type.
+/// This activates type-aware spreading activation and matches_with_hierarchy()
+/// in retrieval — `Concept` entities participate in the type hierarchy while
+/// `Other("MISC")` is invisible to it.
+fn classify_misc_entity(name: &str) -> EntityLabel {
+    let lower = name.to_lowercase();
+
+    // Concept suffixes — abstract ideas, methodologies, qualities
+    const CONCEPT_SUFFIXES: &[&str] = &[
+        "ism", "ology", "ity", "ness", "ment", "ance", "ence", "tion", "sion",
+    ];
+    if CONCEPT_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
+        return EntityLabel::Concept;
+    }
+
+    // Event-like terms
+    const EVENT_WORDS: &[&str] = &[
+        "conference",
+        "summit",
+        "meetup",
+        "hackathon",
+        "sprint",
+        "launch",
+        "release",
+        "incident",
+        "outage",
+        "postmortem",
+    ];
+    if EVENT_WORDS.iter().any(|w| lower.contains(w)) {
+        return EntityLabel::Event;
+    }
+
+    // Skill / role indicators
+    const SKILL_WORDS: &[&str] = &[
+        "engineer",
+        "architect",
+        "developer",
+        "designer",
+        "analyst",
+        "programming",
+        "scripting",
+    ];
+    if SKILL_WORDS.iter().any(|w| lower.contains(w)) {
+        return EntityLabel::Skill;
+    }
+
+    // PascalCase proper nouns without spaces/hyphens → likely a Product
+    // (e.g., "JavaScript", "PostgreSQL", "FastAPI", "ChatGPT")
+    let has_internal_upper = name.chars().skip(1).any(|c| c.is_uppercase());
+    if has_internal_upper && !name.contains(' ') && !name.contains('-') && name.len() > 2 {
+        return EntityLabel::Product;
+    }
+
+    // Default: Concept (participates in type hierarchy via Role→Concept parent)
+    EntityLabel::Concept
+}
+
 use crate::ab_testing;
 use crate::backup;
 use crate::config::ServerConfig;
@@ -2866,7 +2926,7 @@ impl MultiUserMemoryManager {
                     NerEntityType::Person => EntityLabel::Person,
                     NerEntityType::Organization => EntityLabel::Organization,
                     NerEntityType::Location => EntityLabel::Location,
-                    NerEntityType::Misc => EntityLabel::Other("MISC".to_string()),
+                    NerEntityType::Misc => classify_misc_entity(&ner_entity.text),
                 };
                 let node = EntityNode {
                     uuid: uuid::Uuid::new_v4(),
@@ -3007,7 +3067,7 @@ impl MultiUserMemoryManager {
                     EntityNode {
                         uuid: uuid::Uuid::new_v4(),
                         name: issue_id.to_string(),
-                        labels: vec![EntityLabel::Other("Issue".to_string())],
+                        labels: vec![EntityLabel::Task],
                         created_at: now,
                         last_seen_at: now,
                         mention_count: 1,
