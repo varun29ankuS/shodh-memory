@@ -1243,6 +1243,64 @@ impl RelationType {
     }
 }
 
+/// Infer a typed relation between two entities based on their labels.
+///
+/// Uses ontological rules to assign semantically meaningful edge types
+/// instead of the default `RelatedTo`. Falls back to `CoOccurs` for
+/// co-mentioned entity pairs with no specific ontological relationship.
+///
+/// `add_relationship()` deduplicates by (from, to, relation_type) — same
+/// typed pair strengthens the existing edge rather than creating a duplicate.
+pub fn infer_relation_type_for_pair(from: &EntityLabel, to: &EntityLabel) -> RelationType {
+    use EntityLabel::*;
+    use RelationType::*;
+
+    match (from, to) {
+        // Person relationships
+        (Person, Organization) | (Person, Team) => WorksAt,
+        (Person, Technology) | (Person, Service) | (Person, Database) => Uses,
+        (Person, Skill) => Learned,
+
+        // Task relationships
+        (Task, Person) | (Task, Team) => AssignedTo,
+        (Task, Technology) | (Task, Service) => Requires,
+
+        // Service/Module dependencies
+        (Service, Database) => Uses,
+        (Module, Module) | (Service, Service) | (Module, Service) | (Service, Module) => DependsOn,
+
+        // Pipeline / deployment
+        (Pipeline, Service) | (Pipeline, Environment) => DeploysTo,
+
+        // Monitoring
+        (Metric, Service) | (Metric, Pipeline) => Monitors,
+
+        // Configuration
+        (Configuration, Service) | (Configuration, Environment) => Configures,
+
+        // Documentation
+        (Document, Service) | (Document, Module) | (Document, Pipeline) | (Document, Project) => {
+            Documents
+        }
+
+        // Part-of / containment
+        (Task, Project)
+        | (Document, Repository)
+        | (Repository, Project)
+        | (Module, Project)
+        | (Service, Project) => PartOf,
+
+        // Technology alternatives
+        (Technology, Technology) => AlternativeTo,
+
+        // Location relationships (either direction)
+        (_, Location) | (Location, _) => LocatedIn,
+
+        // Default: co-occurrence (neutral bridge weight in spreading activation)
+        _ => CoOccurs,
+    }
+}
+
 /// Episodic node representing a discrete experience/memory
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpisodicNode {
