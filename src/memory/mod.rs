@@ -5683,7 +5683,7 @@ impl MemorySystem {
                             created_at: now,
                             valid_at: now,
                             invalidated_at: None,
-                            source_episode_id: None,
+                            source_episode_id: fact.source_memories.first().map(|mid| mid.0),
                             context: fact.fact.chars().take(100).collect(),
                             last_activated: now,
                             activation_count: 1,
