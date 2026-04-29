@@ -635,8 +635,7 @@ impl RelationshipEdge {
     pub fn strengthen_with_importance(&mut self, importance: f32) -> Option<(String, String)> {
         use crate::constants::*;
 
-        let scale =
-            STRENGTHEN_IMPORTANCE_FLOOR + importance * (1.0 - STRENGTHEN_IMPORTANCE_FLOOR);
+        let scale = STRENGTHEN_IMPORTANCE_FLOOR + importance * (1.0 - STRENGTHEN_IMPORTANCE_FLOOR);
 
         let now = Utc::now();
         self.activation_count += 1;
@@ -7448,7 +7447,9 @@ mod tests {
             endpoint_selectivity: None,
         };
 
-        let high_edge_uuid = graph.add_relationship(make_edge(high_from, high_to)).unwrap();
+        let high_edge_uuid = graph
+            .add_relationship(make_edge(high_from, high_to))
+            .unwrap();
         let low_edge_uuid = graph.add_relationship(make_edge(low_from, low_to)).unwrap();
 
         // Strengthen with high importance (1.0) — should get full boost
