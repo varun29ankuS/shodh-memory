@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 use super::types::*;
-use crate::embeddings::keywords::KeywordExtractor;
 use crate::constants::{
     COMPRESSION_ACCESS_THRESHOLD, COMPRESSION_AGE_DAYS, COMPRESSION_IMPORTANCE_HIGH,
     COMPRESSION_IMPORTANCE_LOW, CONSOLIDATION_CLUSTER_SIZE_CAP, CONSOLIDATION_JACCARD_THRESHOLD,
@@ -16,6 +15,7 @@ use crate::constants::{
     CONSOLIDATION_MIN_SUPPORT_LARGE, CONSOLIDATION_MIN_SUPPORT_MEDIUM,
     CONSOLIDATION_MIN_SUPPORT_SMALL, MAX_COMPRESSION_RATIO, MAX_DECOMPRESSED_SIZE,
 };
+use crate::embeddings::keywords::KeywordExtractor;
 
 /// Compression strategy for memories
 #[derive(Debug, Clone)]
@@ -132,7 +132,9 @@ impl CompressionPipeline {
         let mut compressed_memory = memory.clone();
 
         // Extract keywords
-        let keywords = self.keyword_extractor.extract_texts(&memory.experience.content);
+        let keywords = self
+            .keyword_extractor
+            .extract_texts(&memory.experience.content);
 
         // Create summary (simplified - in production would use LLM)
         let summary = self.create_summary(&memory.experience.content, 50);
@@ -313,7 +315,6 @@ impl CompressionPipeline {
         format!("{}...", summary_words.join(" "))
     }
 }
-
 
 /// Compression statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]

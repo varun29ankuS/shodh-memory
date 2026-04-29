@@ -785,9 +785,9 @@ impl MemorySystem {
             for modality in modalities_to_record {
                 // Empty vector_ids: no Vamana index yet, but the mapping records that
                 // this memory HAS embeddings for this modality.
-                if let Err(e) = self
-                    .long_term_memory
-                    .update_modality_vectors(&memory.id, modality, Vec::new())
+                if let Err(e) =
+                    self.long_term_memory
+                        .update_modality_vectors(&memory.id, modality, Vec::new())
                 {
                     tracing::warn!(
                         "Failed to record {} modality for {}: {}",
@@ -6601,14 +6601,14 @@ impl MemorySystem {
                         None => continue,
                     };
 
-                    let neighbors = match self.retriever.search_by_embedding(
-                        emb,
-                        neighbor_k,
-                        Some(&mem.id),
-                    ) {
-                        Ok(n) => n,
-                        Err(_) => continue,
-                    };
+                    let neighbors =
+                        match self
+                            .retriever
+                            .search_by_embedding(emb, neighbor_k, Some(&mem.id))
+                        {
+                            Ok(n) => n,
+                            Err(_) => continue,
+                        };
 
                     let source_id = mem.id.0.to_string();
                     for (neighbor_id, similarity) in neighbors {
