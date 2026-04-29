@@ -1384,8 +1384,10 @@ fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::m
                     );
 
                     // Propagate lineage confidence into graph edge weights
+                    // AND create typed causal edges visible to spreading activation
                     let boost_scale = crate::constants::LINEAGE_GRAPH_BOOST_SCALE;
                     let mut total_strengthened = 0usize;
+                    let mut total_typed_edges = 0usize;
                     for edge in &edges {
                         let boost = edge.confidence * boost_scale;
                         match graph.strengthen_lineage_connection(
@@ -1398,12 +1400,27 @@ fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::m
                                 "Lineage→graph strengthening failed (non-fatal): {}", e
                             ),
                         }
+
+                        // Create typed causal edges (Causes, Triggers, SupersededBy, etc.)
+                        let graph_rel = edge.relation.to_graph_relation_type();
+                        match graph.create_lineage_graph_edges(
+                            &edge.from.0,
+                            &edge.to.0,
+                            graph_rel,
+                            edge.confidence,
+                        ) {
+                            Ok(n) => total_typed_edges += n,
+                            Err(e) => tracing::debug!(
+                                "Lineage→graph typed edge creation failed (non-fatal): {}", e
+                            ),
+                        }
                     }
-                    if total_strengthened > 0 {
+                    if total_strengthened > 0 || total_typed_edges > 0 {
                         tracing::debug!(
                             user_id = %uid,
                             lineage_edges = edges.len(),
                             graph_edges_strengthened = total_strengthened,
+                            graph_typed_edges_created = total_typed_edges,
                             "Lineage→graph integration complete"
                         );
                     }
