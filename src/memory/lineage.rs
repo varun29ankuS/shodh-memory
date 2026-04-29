@@ -61,6 +61,22 @@ impl CausalRelation {
         }
     }
 
+    /// Map lineage causal relations to graph relation types.
+    /// This bridges the lineage namespace into the knowledge graph so that
+    /// spreading activation can traverse causal chains.
+    pub fn to_graph_relation_type(&self) -> crate::graph_memory::RelationType {
+        use crate::graph_memory::RelationType;
+        match self {
+            CausalRelation::Caused => RelationType::Causes,
+            CausalRelation::ResolvedBy => RelationType::ResultsIn,
+            CausalRelation::InformedBy => RelationType::RelatedTo,
+            CausalRelation::SupersededBy => RelationType::SupersededBy,
+            CausalRelation::TriggeredBy => RelationType::Triggers,
+            CausalRelation::BranchedFrom => RelationType::RelatedTo,
+            CausalRelation::RelatedTo => RelationType::RelatedTo,
+        }
+    }
+
     /// Human-readable description of the relationship
     pub fn description(&self) -> &'static str {
         match self {
@@ -1194,14 +1210,15 @@ impl LineageGraph {
             || (in_context(a) && in_context(b))
     }
 
-    /// Calculate entity overlap using Jaccard similarity
+    /// Calculate entity overlap using Jaccard similarity.
+    /// Case-normalized: "RocksDB" and "rocksdb" are treated as the same entity.
     fn calculate_entity_overlap(tags_a: &[String], tags_b: &[String]) -> f32 {
         if tags_a.is_empty() && tags_b.is_empty() {
             return 0.0;
         }
 
-        let set_a: HashSet<&str> = tags_a.iter().map(|s| s.as_str()).collect();
-        let set_b: HashSet<&str> = tags_b.iter().map(|s| s.as_str()).collect();
+        let set_a: HashSet<String> = tags_a.iter().map(|s| s.to_lowercase()).collect();
+        let set_b: HashSet<String> = tags_b.iter().map(|s| s.to_lowercase()).collect();
 
         let intersection = set_a.intersection(&set_b).count();
         let union = set_a.union(&set_b).count();
@@ -1939,6 +1956,56 @@ mod tests {
         assert!(
             edge.confidence < 0.05,
             "should be below prune threshold after 50 weakenings"
+        );
+    }
+
+    #[test]
+    fn test_entity_overlap_case_insensitive() {
+        let tags_a = vec!["RocksDB".to_string(), "Rust".to_string()];
+        let tags_b = vec!["rocksdb".to_string(), "Python".to_string()];
+        let overlap = LineageGraph::calculate_entity_overlap(&tags_a, &tags_b);
+        // "rocksdb" matches (case-insensitive), union = {rocksdb, rust, python} = 3
+        let expected = 1.0 / 3.0;
+        assert!(
+            (overlap - expected).abs() < 0.01,
+            "Case-insensitive overlap should be ~0.33, got {}",
+            overlap
+        );
+    }
+
+    #[test]
+    fn test_entity_overlap_exact_match() {
+        let tags = vec!["auth".to_string(), "login".to_string()];
+        let overlap = LineageGraph::calculate_entity_overlap(&tags, &tags);
+        assert!(
+            (overlap - 1.0).abs() < f32::EPSILON,
+            "Identical tags should have overlap 1.0, got {}",
+            overlap
+        );
+    }
+
+    #[test]
+    fn test_causal_relation_to_graph_type() {
+        use crate::graph_memory::RelationType;
+        assert_eq!(
+            CausalRelation::Caused.to_graph_relation_type(),
+            RelationType::Causes
+        );
+        assert_eq!(
+            CausalRelation::ResolvedBy.to_graph_relation_type(),
+            RelationType::ResultsIn
+        );
+        assert_eq!(
+            CausalRelation::SupersededBy.to_graph_relation_type(),
+            RelationType::SupersededBy
+        );
+        assert_eq!(
+            CausalRelation::TriggeredBy.to_graph_relation_type(),
+            RelationType::Triggers
+        );
+        assert_eq!(
+            CausalRelation::InformedBy.to_graph_relation_type(),
+            RelationType::RelatedTo
         );
     }
 }

@@ -5675,12 +5675,19 @@ impl MemorySystem {
                             uuid: Uuid::new_v4(),
                             from_entity: e1.uuid,
                             to_entity: e2.uuid,
-                            relation_type: crate::graph_memory::RelationType::RelatedTo,
+                            relation_type: crate::graph_memory::infer_relation_type_for_pair(
+                                e1.labels
+                                    .first()
+                                    .unwrap_or(&crate::graph_memory::EntityLabel::Concept),
+                                e2.labels
+                                    .first()
+                                    .unwrap_or(&crate::graph_memory::EntityLabel::Concept),
+                            ),
                             strength: l2_base_weight * semantic_weight,
                             created_at: now,
                             valid_at: now,
                             invalidated_at: None,
-                            source_episode_id: None,
+                            source_episode_id: fact.source_memories.first().map(|mid| mid.0),
                             context: fact.fact.chars().take(100).collect(),
                             last_activated: now,
                             activation_count: 1,

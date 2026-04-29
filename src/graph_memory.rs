@@ -1243,6 +1243,64 @@ impl RelationType {
     }
 }
 
+/// Infer a typed relation between two entities based on their labels.
+///
+/// Uses ontological rules to assign semantically meaningful edge types
+/// instead of the default `RelatedTo`. Falls back to `CoOccurs` for
+/// co-mentioned entity pairs with no specific ontological relationship.
+///
+/// `add_relationship()` deduplicates by (from, to, relation_type) — same
+/// typed pair strengthens the existing edge rather than creating a duplicate.
+pub fn infer_relation_type_for_pair(from: &EntityLabel, to: &EntityLabel) -> RelationType {
+    use EntityLabel::*;
+    use RelationType::*;
+
+    match (from, to) {
+        // Person relationships
+        (Person, Organization) | (Person, Team) => WorksAt,
+        (Person, Technology) | (Person, Service) | (Person, Database) => Uses,
+        (Person, Skill) => Learned,
+
+        // Task relationships
+        (Task, Person) | (Task, Team) => AssignedTo,
+        (Task, Technology) | (Task, Service) => Requires,
+
+        // Service/Module dependencies
+        (Service, Database) => Uses,
+        (Module, Module) | (Service, Service) | (Module, Service) | (Service, Module) => DependsOn,
+
+        // Pipeline / deployment
+        (Pipeline, Service) | (Pipeline, Environment) => DeploysTo,
+
+        // Monitoring
+        (Metric, Service) | (Metric, Pipeline) => Monitors,
+
+        // Configuration
+        (Configuration, Service) | (Configuration, Environment) => Configures,
+
+        // Documentation
+        (Document, Service) | (Document, Module) | (Document, Pipeline) | (Document, Project) => {
+            Documents
+        }
+
+        // Part-of / containment
+        (Task, Project)
+        | (Document, Repository)
+        | (Repository, Project)
+        | (Module, Project)
+        | (Service, Project) => PartOf,
+
+        // Technology alternatives
+        (Technology, Technology) => AlternativeTo,
+
+        // Location relationships (either direction)
+        (_, Location) | (Location, _) => LocatedIn,
+
+        // Default: co-occurrence (neutral bridge weight in spreading activation)
+        _ => CoOccurs,
+    }
+}
+
 /// Episodic node representing a discrete experience/memory
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpisodicNode {
@@ -3895,6 +3953,90 @@ impl GraphMemory {
         );
 
         Ok(strengthened)
+    }
+
+    /// Create typed graph edges between entity pairs of two causally-linked episodes.
+    ///
+    /// This bridges the lineage namespace into the knowledge graph: lineage edges
+    /// (stored in plain RocksDB keys) become typed RelationshipEdge entries visible
+    /// to spreading activation. The `CausalRelation::to_graph_relation_type()`
+    /// mapping provides the edge type (Causes, Triggers, SupersededBy, etc.).
+    ///
+    /// `add_relationship()` deduplicates by (from, to, type) — repeat calls
+    /// strengthen existing edges rather than creating duplicates.
+    pub fn create_lineage_graph_edges(
+        &self,
+        from_memory_uuid: &Uuid,
+        to_memory_uuid: &Uuid,
+        relation_type: RelationType,
+        confidence: f32,
+    ) -> Result<usize> {
+        if confidence < crate::constants::LINEAGE_GRAPH_BRIDGE_MIN_CONFIDENCE {
+            return Ok(0);
+        }
+
+        let from_episode = self.get_episode(from_memory_uuid)?;
+        let to_episode = self.get_episode(to_memory_uuid)?;
+
+        let (from_entities, to_entities) = match (from_episode, to_episode) {
+            (Some(fe), Some(te)) if !fe.entity_refs.is_empty() && !te.entity_refs.is_empty() => {
+                (fe.entity_refs, te.entity_refs)
+            }
+            _ => return Ok(0),
+        };
+
+        const MAX_PER_SIDE: usize = 8;
+        let from_capped = &from_entities[..from_entities.len().min(MAX_PER_SIDE)];
+        let to_capped = &to_entities[..to_entities.len().min(MAX_PER_SIDE)];
+
+        let now = chrono::Utc::now();
+        let base_strength = EdgeTier::L2Episodic.initial_weight()
+            * confidence
+            * crate::constants::LINEAGE_GRAPH_BRIDGE_BOOST;
+        let mut created = 0usize;
+
+        for &from_entity in from_capped {
+            for &to_entity in to_capped {
+                if from_entity == to_entity {
+                    continue;
+                }
+                let edge = RelationshipEdge {
+                    uuid: Uuid::new_v4(),
+                    from_entity,
+                    to_entity,
+                    relation_type: relation_type.clone(),
+                    strength: base_strength,
+                    created_at: now,
+                    valid_at: now,
+                    invalidated_at: None,
+                    source_episode_id: Some(*from_memory_uuid),
+                    context: String::new(),
+                    last_activated: now,
+                    activation_count: 1,
+                    ltp_status: LtpStatus::None,
+                    tier: EdgeTier::L2Episodic,
+                    activation_timestamps: None,
+                    entity_confidence: Some(confidence),
+                    forman_curvature: None,
+                    endpoint_selectivity: None,
+                };
+                if self.add_relationship(edge).is_ok() {
+                    created += 1;
+                }
+            }
+        }
+
+        if created > 0 {
+            tracing::debug!(
+                from_memory = %&from_memory_uuid.to_string()[..8],
+                to_memory = %&to_memory_uuid.to_string()[..8],
+                relation = ?relation_type,
+                created,
+                "Lineage→graph typed edge creation"
+            );
+        }
+
+        Ok(created)
     }
 
     /// Find memories associated with a given memory through co-retrieval
@@ -8031,5 +8173,69 @@ mod tests {
         assert_eq!(returned.name, episode_name);
         assert_eq!(returned.content, episode_content);
         assert_eq!(returned.source, EpisodeSource::Message);
+    }
+
+    #[test]
+    fn test_infer_relation_person_org() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Person, &EntityLabel::Organization),
+            RelationType::WorksAt
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_person_technology() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Person, &EntityLabel::Technology),
+            RelationType::Uses
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_service_database() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Service, &EntityLabel::Database),
+            RelationType::Uses
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_module_module() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Module, &EntityLabel::Module),
+            RelationType::DependsOn
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_pipeline_env() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Pipeline, &EntityLabel::Environment),
+            RelationType::DeploysTo
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_config_service() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Configuration, &EntityLabel::Service),
+            RelationType::Configures
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_task_project() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Task, &EntityLabel::Project),
+            RelationType::PartOf
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_default_cooccurs() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Concept, &EntityLabel::Event),
+            RelationType::CoOccurs
+        );
     }
 }

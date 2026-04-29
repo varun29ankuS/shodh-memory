@@ -408,6 +408,173 @@ fn issue_regex() -> &'static regex::Regex {
     RE.get_or_init(|| regex::Regex::new(r"\b([A-Z]{2,10}-\d+)\b").unwrap())
 }
 
+/// Classify a tag into a specific EntityLabel based on naming patterns.
+///
+/// Tags enter the graph as entities. Instead of defaulting everything to
+/// `Technology`, this uses suffix/keyword matching to assign the correct
+/// ontological type — enabling type-aware spreading activation and
+/// `matches_with_hierarchy()` in retrieval.
+fn classify_tag_label(tag: &str) -> EntityLabel {
+    let lower = tag.to_lowercase();
+
+    // Deployment / environment indicators
+    if matches!(
+        lower.as_str(),
+        "production"
+            | "staging"
+            | "dev"
+            | "development"
+            | "ci"
+            | "cd"
+            | "kubernetes"
+            | "k8s"
+            | "docker"
+            | "container"
+            | "aws"
+            | "gcp"
+            | "azure"
+    ) {
+        return EntityLabel::Environment;
+    }
+
+    // Pipeline / workflow indicators
+    if lower.contains("pipeline")
+        || lower.contains("workflow")
+        || lower.contains("ci-cd")
+        || lower.contains("cicd")
+    {
+        return EntityLabel::Pipeline;
+    }
+
+    // Database / storage indicators
+    if matches!(
+        lower.as_str(),
+        "rocksdb"
+            | "postgres"
+            | "postgresql"
+            | "redis"
+            | "sqlite"
+            | "mongodb"
+            | "mysql"
+            | "dynamodb"
+            | "s3"
+            | "cassandra"
+            | "elasticsearch"
+    ) || lower.ends_with("db")
+        || lower.ends_with("-db")
+        || lower.ends_with("_db")
+    {
+        return EntityLabel::Database;
+    }
+
+    // Service / API indicators (suffix-only to avoid "my-api-docs" false positives)
+    if lower.ends_with("-service")
+        || lower.ends_with("_service")
+        || lower.ends_with("-api")
+        || lower.ends_with("_api")
+        || lower.ends_with("-server")
+        || lower.ends_with("_server")
+        || lower.ends_with("-daemon")
+    {
+        return EntityLabel::Service;
+    }
+
+    // Documentation indicators (check before module — README.md is a doc, not a module)
+    if lower.ends_with(".md")
+        || lower.contains("readme")
+        || lower.contains("runbook")
+        || lower.ends_with("-rfc")
+        || lower.ends_with("-spec")
+    {
+        return EntityLabel::Document;
+    }
+
+    // Configuration indicators
+    if lower.ends_with(".toml")
+        || lower.ends_with(".yaml")
+        || lower.ends_with(".yml")
+        || lower.ends_with(".env")
+        || lower.ends_with(".json")
+        || lower.contains("config")
+    {
+        return EntityLabel::Configuration;
+    }
+
+    // Module / library indicators
+    if lower.ends_with(".rs")
+        || lower.ends_with(".ts")
+        || lower.ends_with(".js")
+        || lower.ends_with(".py")
+        || lower.ends_with("-lib")
+        || lower.ends_with("_lib")
+    {
+        return EntityLabel::Module;
+    }
+
+    // Default: Technology (reasonable fallback for unknown tags)
+    EntityLabel::Technology
+}
+
+/// Classify a MISC NER entity into a more specific EntityLabel.
+///
+/// The NER model only outputs PER/ORG/LOC/MISC. For MISC entities that pass
+/// quality gates, we use heuristic rules to assign a richer ontological type.
+/// This activates type-aware spreading activation and matches_with_hierarchy()
+/// in retrieval — `Concept` entities participate in the type hierarchy while
+/// `Other("MISC")` is invisible to it.
+fn classify_misc_entity(name: &str) -> EntityLabel {
+    let lower = name.to_lowercase();
+
+    // Event-like terms (checked first — "conference" ends with "ence" concept suffix)
+    const EVENT_WORDS: &[&str] = &[
+        "conference",
+        "summit",
+        "meetup",
+        "hackathon",
+        "sprint",
+        "launch",
+        "release",
+        "incident",
+        "outage",
+        "postmortem",
+    ];
+    if EVENT_WORDS.iter().any(|w| lower.contains(w)) {
+        return EntityLabel::Event;
+    }
+
+    // Skill / role indicators (before concept — "engineer" ends with suffix-like patterns)
+    const SKILL_WORDS: &[&str] = &[
+        "engineer",
+        "architect",
+        "developer",
+        "designer",
+        "analyst",
+        "programming",
+        "scripting",
+    ];
+    if SKILL_WORDS.iter().any(|w| lower.contains(w)) {
+        return EntityLabel::Skill;
+    }
+
+    // Concept suffixes — abstract ideas, methodologies, qualities
+    const CONCEPT_SUFFIXES: &[&str] = &[
+        "ism", "ology", "ity", "ness", "ment", "ance", "ence", "tion", "sion",
+    ];
+    if CONCEPT_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
+        return EntityLabel::Concept;
+    }
+
+    // PascalCase proper nouns without spaces/hyphens → likely a Product
+    // (e.g., "JavaScript", "PostgreSQL", "FastAPI", "ChatGPT")
+    let has_internal_upper = name.chars().skip(1).any(|c| c.is_uppercase());
+    if has_internal_upper && !name.contains(' ') && !name.contains('-') && name.len() > 2 {
+        return EntityLabel::Product;
+    }
+
+    // Default: Concept (participates in type hierarchy via Role→Concept parent)
+    EntityLabel::Concept
+}
+
 use crate::ab_testing;
 use crate::backup;
 use crate::config::ServerConfig;
@@ -417,11 +584,11 @@ use crate::embeddings::{
 };
 use crate::graph_memory::{
     EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, GraphStats,
-    LtpStatus, RelationType, RelationshipEdge,
+    LtpStatus, RelationshipEdge,
 };
 use crate::memory::{
-    query_parser, Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats,
-    MemorySystem, ProspectiveStore, SessionStore, TodoStore,
+    Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats, MemorySystem,
+    ProspectiveStore, SessionStore, TodoStore,
 };
 use crate::relevance::RelevanceEngine;
 use crate::streaming;
@@ -2510,6 +2677,7 @@ impl MultiUserMemoryManager {
         user_id: &str,
         experience: &Experience,
         memory_id: &MemoryId,
+        entity_name_embeddings: Option<&HashMap<String, Vec<f32>>>,
     ) -> Result<()> {
         let graph = self.get_user_graph(user_id)?;
 
@@ -2759,12 +2927,12 @@ impl MultiUserMemoryManager {
                     NerEntityType::Person => EntityLabel::Person,
                     NerEntityType::Organization => EntityLabel::Organization,
                     NerEntityType::Location => EntityLabel::Location,
-                    NerEntityType::Misc => EntityLabel::Other("MISC".to_string()),
+                    NerEntityType::Misc => classify_misc_entity(&ner_entity.text),
                 };
                 let node = EntityNode {
                     uuid: uuid::Uuid::new_v4(),
                     name: ner_entity.text.clone(),
-                    labels: vec![label],
+                    labels: vec![label.clone()],
                     created_at: now,
                     last_seen_at: now,
                     mention_count: 1,
@@ -2775,10 +2943,18 @@ impl MultiUserMemoryManager {
                         a.insert("confidence".into(), format!("{:.2}", ner_entity.confidence));
                         a
                     },
-                    name_embedding: None,
-                    salience: ner_entity.confidence,
-                    // Only PER, ORG, LOC are proper nouns; MISC includes non-proper
-                    // nouns like nationalities, events, etc.
+                    name_embedding: entity_name_embeddings
+                        .and_then(|map| map.get(&ner_entity.text))
+                        .cloned(),
+                    // Use ontological salience as the base, scaled by NER confidence
+                    salience: {
+                        let is_pn = !matches!(ner_entity.entity_type, NerEntityType::Misc);
+                        let base = crate::graph_memory::EntityExtractor::calculate_base_salience(
+                            &label, is_pn,
+                        );
+                        // NER confidence modulates: high-confidence entities get full base salience
+                        base * (0.5 + 0.5 * ner_entity.confidence)
+                    },
                     is_proper_noun: !matches!(ner_entity.entity_type, NerEntityType::Misc),
                     selectivity: None,
                 };
@@ -2800,19 +2976,24 @@ impl MultiUserMemoryManager {
                     && !tag_name.contains(". ")
                     && !tag_name.ends_with('.')
                 {
+                    let label = classify_tag_label(tag_name);
                     Some((
                         tag_name.to_string(),
                         EntityNode {
                             uuid: uuid::Uuid::new_v4(),
                             name: tag_name.to_string(),
-                            labels: vec![EntityLabel::Technology],
+                            labels: vec![label.clone()],
                             created_at: now,
                             last_seen_at: now,
                             mention_count: 1,
                             summary: String::new(),
                             attributes: HashMap::new(),
-                            name_embedding: None,
-                            salience: 0.6,
+                            name_embedding: entity_name_embeddings
+                                .and_then(|map| map.get(tag_name))
+                                .cloned(),
+                            salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
+                                &label, false,
+                            ),
                             is_proper_noun: false,
                             selectivity: None,
                         },
@@ -2865,6 +3046,9 @@ impl MultiUserMemoryManager {
                     return None;
                 }
                 known_names.push(term.clone());
+                let emb = entity_name_embeddings
+                    .and_then(|map| map.get(&term))
+                    .cloned();
                 Some((
                     term.clone(),
                     EntityNode {
@@ -2876,8 +3060,11 @@ impl MultiUserMemoryManager {
                         mention_count: 1,
                         summary: String::new(),
                         attributes: HashMap::new(),
-                        name_embedding: None,
-                        salience: 0.5,
+                        name_embedding: emb,
+                        salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
+                            &EntityLabel::Technology,
+                            true,
+                        ),
                         is_proper_noun: true,
                         selectivity: None,
                     },
@@ -2899,68 +3086,25 @@ impl MultiUserMemoryManager {
                     EntityNode {
                         uuid: uuid::Uuid::new_v4(),
                         name: issue_id.to_string(),
-                        labels: vec![EntityLabel::Other("Issue".to_string())],
+                        labels: vec![EntityLabel::Task],
                         created_at: now,
                         last_seen_at: now,
                         mention_count: 1,
                         summary: String::new(),
                         attributes: HashMap::new(),
-                        name_embedding: None,
-                        salience: 0.7,
+                        name_embedding: entity_name_embeddings
+                            .and_then(|map| map.get(issue_id))
+                            .cloned(),
+                        salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
+                            &EntityLabel::Task,
+                            true,
+                        ),
                         is_proper_noun: true,
                         selectivity: None,
                     },
                 ))
             })
             .collect();
-
-        // Extract verbs for multi-hop reasoning
-        let analysis = query_parser::analyze_query(&experience.content);
-        let mut verb_entities: Vec<(String, EntityNode)> = Vec::new();
-        for verb in &analysis.relational_context {
-            let verb_text = verb.text.as_str();
-            let verb_stem = verb.stem.as_str();
-
-            if known_names
-                .iter()
-                .any(|name| name.eq_ignore_ascii_case(verb_text))
-            {
-                continue;
-            }
-            if blocklist.contains(verb_text.to_lowercase().as_str()) {
-                continue;
-            }
-            if verb_text.len() < 4 {
-                continue; // Skip short verbs: is, do, be, go, get, set, run, put, etc.
-            }
-
-            for name in [verb_text, verb_stem] {
-                if name.len() < 4 {
-                    continue;
-                }
-                if known_names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
-                    continue;
-                }
-                known_names.push(name.to_string());
-                verb_entities.push((
-                    name.to_string(),
-                    EntityNode {
-                        uuid: uuid::Uuid::new_v4(),
-                        name: name.to_string(),
-                        labels: vec![EntityLabel::Other("Verb".to_string())],
-                        created_at: now,
-                        last_seen_at: now,
-                        mention_count: 1,
-                        summary: String::new(),
-                        attributes: HashMap::new(),
-                        name_embedding: None,
-                        salience: 0.3, // Low salience: verbs decay faster than named entities
-                        is_proper_noun: false,
-                        selectivity: None,
-                    },
-                ));
-            }
-        }
 
         // Combine all entity groups for insertion, capped at 10 to prevent
         // O(n²) edge explosion (10 entities → max 45 edges)
@@ -2969,7 +3113,6 @@ impl MultiUserMemoryManager {
             .chain(tag_entities)
             .chain(allcaps_entities)
             .chain(issue_entities)
-            .chain(verb_entities)
             .collect();
         all_entities.sort_by(|a, b| b.1.salience.total_cmp(&a.1.salience));
         let entity_cap = self.server_config.max_entities_per_memory;
@@ -2993,12 +3136,17 @@ impl MultiUserMemoryManager {
             return Ok(());
         }
 
-        let mut entity_uuids = Vec::new();
+        let mut entity_uuids: Vec<(String, uuid::Uuid, EntityLabel)> = Vec::new();
 
         // Insert all pre-built entities
         for (name, entity) in all_entities {
+            let primary_label = entity
+                .labels
+                .first()
+                .cloned()
+                .unwrap_or(EntityLabel::Concept);
             match graph_guard.add_entity(entity) {
-                Ok(uuid) => entity_uuids.push((name, uuid)),
+                Ok(uuid) => entity_uuids.push((name, uuid, primary_label)),
                 Err(e) => tracing::debug!("Failed to add entity {}: {}", name, e),
             }
         }
@@ -3010,7 +3158,7 @@ impl MultiUserMemoryManager {
             entity_uuids.len(),
             entity_uuids
                 .iter()
-                .map(|(name, _)| name.as_str())
+                .map(|(name, _, _): &(String, uuid::Uuid, EntityLabel)| name.as_str())
                 .collect::<Vec<_>>()
         );
 
@@ -3020,7 +3168,7 @@ impl MultiUserMemoryManager {
             content: experience.content.clone(),
             valid_at: now,
             created_at: now,
-            entity_refs: entity_uuids.iter().map(|(_, uuid)| *uuid).collect(),
+            entity_refs: entity_uuids.iter().map(|(_, uuid, _)| *uuid).collect(),
             source: EpisodeSource::Message,
             metadata: experience.metadata.clone(),
         };
@@ -3107,7 +3255,10 @@ impl MultiUserMemoryManager {
                     uuid: uuid::Uuid::new_v4(),
                     from_entity: entity_uuids[i].1,
                     to_entity: entity_uuids[j].1,
-                    relation_type: RelationType::RelatedTo,
+                    relation_type: crate::graph_memory::infer_relation_type_for_pair(
+                        &entity_uuids[i].2,
+                        &entity_uuids[j].2,
+                    ),
                     strength: edge_strength,
                     created_at: now,
                     valid_at: now,
@@ -3210,5 +3361,96 @@ mod tests {
         let a = entity_blocklist() as *const _;
         let b = entity_blocklist() as *const _;
         assert_eq!(a, b, "Blocklist should be a singleton via OnceLock");
+    }
+
+    #[test]
+    fn test_classify_tag_label_database() {
+        assert_eq!(classify_tag_label("rocksdb"), EntityLabel::Database);
+        assert_eq!(classify_tag_label("PostgreSQL"), EntityLabel::Database);
+        assert_eq!(classify_tag_label("redis"), EntityLabel::Database);
+        assert_eq!(classify_tag_label("my-db"), EntityLabel::Database);
+        assert_eq!(classify_tag_label("user-db"), EntityLabel::Database);
+    }
+
+    #[test]
+    fn test_classify_tag_label_service() {
+        assert_eq!(classify_tag_label("auth-service"), EntityLabel::Service);
+        assert_eq!(classify_tag_label("memory-api"), EntityLabel::Service);
+        assert_eq!(classify_tag_label("grpc-server"), EntityLabel::Service);
+    }
+
+    #[test]
+    fn test_classify_tag_label_environment() {
+        assert_eq!(classify_tag_label("production"), EntityLabel::Environment);
+        assert_eq!(classify_tag_label("staging"), EntityLabel::Environment);
+        assert_eq!(classify_tag_label("kubernetes"), EntityLabel::Environment);
+        assert_eq!(classify_tag_label("docker"), EntityLabel::Environment);
+    }
+
+    #[test]
+    fn test_classify_tag_label_pipeline() {
+        assert_eq!(classify_tag_label("ci-pipeline"), EntityLabel::Pipeline);
+        assert_eq!(classify_tag_label("deploy-workflow"), EntityLabel::Pipeline);
+    }
+
+    #[test]
+    fn test_classify_tag_label_document() {
+        assert_eq!(classify_tag_label("README.md"), EntityLabel::Document);
+        assert_eq!(classify_tag_label("api-spec"), EntityLabel::Document);
+    }
+
+    #[test]
+    fn test_classify_tag_label_configuration() {
+        assert_eq!(
+            classify_tag_label("settings.toml"),
+            EntityLabel::Configuration
+        );
+        assert_eq!(classify_tag_label("app-config"), EntityLabel::Configuration);
+        assert_eq!(classify_tag_label(".env"), EntityLabel::Configuration);
+    }
+
+    #[test]
+    fn test_classify_tag_label_module() {
+        assert_eq!(classify_tag_label("graph_memory.rs"), EntityLabel::Module);
+        assert_eq!(classify_tag_label("index.ts"), EntityLabel::Module);
+        assert_eq!(classify_tag_label("utils-lib"), EntityLabel::Module);
+    }
+
+    #[test]
+    fn test_classify_tag_label_fallback() {
+        assert_eq!(classify_tag_label("react"), EntityLabel::Technology);
+        assert_eq!(classify_tag_label("rust"), EntityLabel::Technology);
+    }
+
+    #[test]
+    fn test_classify_misc_entity_concept_suffixes() {
+        assert_eq!(classify_misc_entity("capitalism"), EntityLabel::Concept);
+        assert_eq!(classify_misc_entity("neurology"), EntityLabel::Concept);
+        assert_eq!(classify_misc_entity("complexity"), EntityLabel::Concept);
+        assert_eq!(classify_misc_entity("authentication"), EntityLabel::Concept);
+    }
+
+    #[test]
+    fn test_classify_misc_entity_events() {
+        assert_eq!(classify_misc_entity("conference"), EntityLabel::Event);
+        assert_eq!(classify_misc_entity("hackathon"), EntityLabel::Event);
+    }
+
+    #[test]
+    fn test_classify_misc_entity_skills() {
+        assert_eq!(classify_misc_entity("developer"), EntityLabel::Skill);
+        assert_eq!(classify_misc_entity("engineering"), EntityLabel::Skill);
+    }
+
+    #[test]
+    fn test_classify_misc_entity_product_camelcase() {
+        assert_eq!(classify_misc_entity("RocksDB"), EntityLabel::Product);
+        assert_eq!(classify_misc_entity("GitHub"), EntityLabel::Product);
+    }
+
+    #[test]
+    fn test_classify_misc_entity_default() {
+        // Single lowercase word with no special suffix → Concept
+        assert_eq!(classify_misc_entity("memory"), EntityLabel::Concept);
     }
 }

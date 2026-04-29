@@ -687,8 +687,50 @@ pub async fn remember(
         let created_at = req.created_at;
 
         tracker.spawn(async move {
+            // Pre-compute entity name embeddings for Tier 4 concept merge
+            let entity_embeddings = {
+                let mem = memory.clone();
+                let names: Vec<String> = experience
+                    .ner_entities
+                    .iter()
+                    .map(|e| e.text.clone())
+                    .chain(experience.tags.iter().cloned())
+                    .collect();
+                if names.is_empty() {
+                    None
+                } else {
+                    match tokio::task::spawn_blocking(move || {
+                        let guard = mem.read();
+                        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+                        guard.get_embedder().encode_batch(&refs).map(|vecs| {
+                            names
+                                .into_iter()
+                                .zip(vecs)
+                                .collect::<std::collections::HashMap<String, Vec<f32>>>()
+                        })
+                    })
+                    .await
+                    {
+                        Ok(Ok(map)) => Some(map),
+                        Ok(Err(e)) => {
+                            tracing::debug!("Entity name embedding failed (non-fatal): {}", e);
+                            None
+                        }
+                        Err(e) => {
+                            tracing::debug!("Entity name embedding task panicked: {}", e);
+                            None
+                        }
+                    }
+                }
+            };
+
             // Task 1: Build episodic graph (entities + episode + relationships)
-            if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id) {
+            if let Err(e) = state.process_experience_into_graph(
+                &user_id,
+                &experience,
+                &memory_id,
+                entity_embeddings.as_ref(),
+            ) {
                 tracing::debug!("Graph processing failed (non-fatal): {}", e);
             }
 
@@ -959,7 +1001,7 @@ pub async fn batch_remember(
         if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
             let memory_id = crate::memory::MemoryId(uuid);
             if let Err(e) =
-                state.process_experience_into_graph(&req.user_id, experience, &memory_id)
+                state.process_experience_into_graph(&req.user_id, experience, &memory_id, None)
             {
                 tracing::debug!("Graph processing failed for {} (non-fatal): {}", id_str, e);
             }
@@ -1137,7 +1179,8 @@ pub async fn upsert_memory(
             }
         }
     }
-    if let Err(e) = state.process_experience_into_graph(&req.user_id, &experience, &memory_id) {
+    if let Err(e) = state.process_experience_into_graph(&req.user_id, &experience, &memory_id, None)
+    {
         tracing::debug!("Graph processing failed (non-fatal): {}", e);
     }
 
@@ -1333,8 +1376,10 @@ fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::m
                     );
 
                     // Propagate lineage confidence into graph edge weights
+                    // AND create typed causal edges visible to spreading activation
                     let boost_scale = crate::constants::LINEAGE_GRAPH_BOOST_SCALE;
                     let mut total_strengthened = 0usize;
+                    let mut total_typed_edges = 0usize;
                     for edge in &edges {
                         let boost = edge.confidence * boost_scale;
                         match graph.strengthen_lineage_connection(
@@ -1347,12 +1392,27 @@ fn spawn_lineage_inference(state: AppState, user_id: String, memory_id: crate::m
                                 "Lineage→graph strengthening failed (non-fatal): {}", e
                             ),
                         }
+
+                        // Create typed causal edges (Causes, Triggers, SupersededBy, etc.)
+                        let graph_rel = edge.relation.to_graph_relation_type();
+                        match graph.create_lineage_graph_edges(
+                            &edge.from.0,
+                            &edge.to.0,
+                            graph_rel,
+                            edge.confidence,
+                        ) {
+                            Ok(n) => total_typed_edges += n,
+                            Err(e) => tracing::debug!(
+                                "Lineage→graph typed edge creation failed (non-fatal): {}", e
+                            ),
+                        }
                     }
-                    if total_strengthened > 0 {
+                    if total_strengthened > 0 || total_typed_edges > 0 {
                         tracing::debug!(
                             user_id = %uid,
                             lineage_edges = edges.len(),
                             graph_edges_strengthened = total_strengthened,
+                            graph_typed_edges_created = total_typed_edges,
                             "Lineage→graph integration complete"
                         );
                     }

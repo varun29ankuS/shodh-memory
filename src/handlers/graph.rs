@@ -306,7 +306,8 @@ pub async fn rebuild_user_graph(
 
     // Re-process each memory through entity extraction
     for (memory_id, experience) in memories {
-        if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id) {
+        if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id, None)
+        {
             tracing::debug!("Failed to process memory {}: {}", memory_id.0, e);
         } else {
             processed += 1;

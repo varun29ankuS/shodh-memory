@@ -1085,9 +1085,12 @@ pub async fn create_todo(
             .await;
 
             if let Ok(Ok(memory_id)) = memory_result {
-                if let Err(e) =
-                    state_clone.process_experience_into_graph(&user_id, &experience, &memory_id)
-                {
+                if let Err(e) = state_clone.process_experience_into_graph(
+                    &user_id,
+                    &experience,
+                    &memory_id,
+                    None,
+                ) {
                     tracing::debug!(
                         "Graph processing failed for todo memory {}: {}",
                         memory_id.0,
@@ -1623,9 +1626,12 @@ pub async fn update_todo(
                 .await;
 
                 if let Ok(Ok(memory_id)) = memory_result {
-                    if let Err(e) =
-                        state_clone.process_experience_into_graph(&user_id, &experience, &memory_id)
-                    {
+                    if let Err(e) = state_clone.process_experience_into_graph(
+                        &user_id,
+                        &experience,
+                        &memory_id,
+                        None,
+                    ) {
                         tracing::debug!(
                             "Graph processing failed for todo update memory {}: {}",
                             memory_id.0,
@@ -1747,9 +1753,12 @@ pub async fn complete_todo(
                 .await;
 
                 if let Ok(Ok(memory_id)) = memory_result {
-                    if let Err(e) =
-                        state_clone.process_experience_into_graph(&user_id, &experience, &memory_id)
-                    {
+                    if let Err(e) = state_clone.process_experience_into_graph(
+                        &user_id,
+                        &experience,
+                        &memory_id,
+                        None,
+                    ) {
                         tracing::debug!(
                             "Graph processing failed for todo completion memory {}: {}",
                             memory_id.0,
@@ -2107,7 +2116,7 @@ pub async fn add_todo_comment(
 
         if let Ok(Ok(memory_id)) = memory_result {
             if let Err(e) =
-                state.process_experience_into_graph(&req.user_id, &experience, &memory_id)
+                state.process_experience_into_graph(&req.user_id, &experience, &memory_id, None)
             {
                 tracing::debug!(
                     "Graph processing failed for todo comment memory {}: {}",
