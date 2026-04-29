@@ -2991,3 +2991,26 @@ pub const NER_GRAPH_CONFIDENCE_FLOOR: f32 = 0.6;
 /// Minimum surfacings without utility before habituation penalty kicks in.
 /// Below this threshold, we assume the memory might still be useful in the right context.
 pub const ENTITY_SALIENCE_HABITUATION_THRESHOLD: u32 = 3;
+
+// =============================================================================
+// SEMANTIC CLUSTERING (MAINTENANCE)
+// Controls how many memories are sampled and how many neighbors are searched
+// during heavy maintenance to feed `detect_semantic_clusters()`.
+// =============================================================================
+
+/// Number of recent memories to sample for semantic clustering during heavy maintenance.
+///
+/// Justification:
+/// - 50 samples × 10 neighbors = 500 Vamana lookups, each O(log N) ~1ms.
+/// - Total budget ~0.5s, well within the 6-hour heavy maintenance window.
+/// - Sampling recent memories biases toward active knowledge, which is where
+///   emerging clusters are most valuable.
+pub const SEMANTIC_CLUSTER_SAMPLE_SIZE: usize = 50;
+
+/// Number of nearest neighbors to retrieve per sampled memory for clustering.
+///
+/// Justification:
+/// - k=10 strikes a balance: high enough to find cluster structure, low enough
+///   to keep the similarity triple count manageable (≤500 pairs).
+/// - Matches typical HNSW ef_search defaults for recall-oriented searches.
+pub const SEMANTIC_CLUSTER_NEIGHBOR_K: usize = 10;

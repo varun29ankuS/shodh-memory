@@ -6538,7 +6538,63 @@ impl MemorySystem {
         let mut replay_result = replay::ReplayCycleResult::default();
         {
             // PIPE-2: Check for pattern-triggered replay first
-            let pattern_result = self.pattern_detector.write().detect_patterns();
+            let mut pattern_result = self.pattern_detector.write().detect_patterns();
+
+            // PIPE-3: Semantic clustering — feed similarity triples from Vamana into
+            // detect_semantic_clusters(). Heavy-only because it requires vector searches.
+            if is_heavy && !all_memories_for_heavy.is_empty() {
+                let sample_size = crate::constants::SEMANTIC_CLUSTER_SAMPLE_SIZE;
+                let neighbor_k = crate::constants::SEMANTIC_CLUSTER_NEIGHBOR_K;
+
+                // Sample the most recent memories (tail of the vec, sorted by creation time)
+                let start = all_memories_for_heavy.len().saturating_sub(sample_size);
+                let sample = &all_memories_for_heavy[start..];
+
+                let mut similarity_triples: Vec<(String, String, f32)> = Vec::new();
+
+                for mem in sample {
+                    let emb = match mem.experience.embeddings.as_ref() {
+                        Some(e) => e,
+                        None => continue,
+                    };
+
+                    let neighbors = match self.retriever.search_by_embedding(
+                        emb,
+                        neighbor_k,
+                        Some(&mem.id),
+                    ) {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+
+                    let source_id = mem.id.0.to_string();
+                    for (neighbor_id, similarity) in neighbors {
+                        similarity_triples.push((
+                            source_id.clone(),
+                            neighbor_id.0.to_string(),
+                            similarity,
+                        ));
+                    }
+                }
+
+                if !similarity_triples.is_empty() {
+                    let semantic_triggers = self
+                        .pattern_detector
+                        .write()
+                        .detect_semantic_clusters(&similarity_triples);
+
+                    if !semantic_triggers.is_empty() {
+                        tracing::info!(
+                            count = semantic_triggers.len(),
+                            triples = similarity_triples.len(),
+                            "Semantic clustering found clusters during heavy maintenance"
+                        );
+                        pattern_result.semantic_clusters_found = semantic_triggers.len();
+                        pattern_result.triggers.extend(semantic_triggers);
+                    }
+                }
+            }
+
             let has_pattern_triggers = !pattern_result.triggers.is_empty();
 
             // Log pattern detection results
