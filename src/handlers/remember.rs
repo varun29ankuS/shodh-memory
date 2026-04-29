@@ -687,8 +687,59 @@ pub async fn remember(
         let created_at = req.created_at;
 
         tracker.spawn(async move {
+            // Pre-compute entity name embeddings for Tier 4 concept merge
+            let entity_embeddings = {
+                let mem = memory.clone();
+                let names: Vec<String> = experience
+                    .ner_entities
+                    .iter()
+                    .map(|e| e.text.clone())
+                    .chain(experience.tags.iter().cloned())
+                    .collect();
+                if names.is_empty() {
+                    None
+                } else {
+                    match tokio::task::spawn_blocking(move || {
+                        let guard = mem.read();
+                        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+                        guard
+                            .get_embedder()
+                            .encode_batch(&refs)
+                            .map(|vecs| {
+                                names
+                                    .into_iter()
+                                    .zip(vecs)
+                                    .collect::<std::collections::HashMap<String, Vec<f32>>>()
+                            })
+                    })
+                    .await
+                    {
+                        Ok(Ok(map)) => Some(map),
+                        Ok(Err(e)) => {
+                            tracing::debug!(
+                                "Entity name embedding failed (non-fatal): {}",
+                                e
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "Entity name embedding task panicked: {}",
+                                e
+                            );
+                            None
+                        }
+                    }
+                }
+            };
+
             // Task 1: Build episodic graph (entities + episode + relationships)
-            if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id, None) {
+            if let Err(e) = state.process_experience_into_graph(
+                &user_id,
+                &experience,
+                &memory_id,
+                entity_embeddings.as_ref(),
+            ) {
                 tracing::debug!("Graph processing failed (non-fatal): {}", e);
             }
 
