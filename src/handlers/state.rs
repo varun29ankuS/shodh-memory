@@ -408,6 +408,113 @@ fn issue_regex() -> &'static regex::Regex {
     RE.get_or_init(|| regex::Regex::new(r"\b([A-Z]{2,10}-\d+)\b").unwrap())
 }
 
+/// Classify a tag into a specific EntityLabel based on naming patterns.
+///
+/// Tags enter the graph as entities. Instead of defaulting everything to
+/// `Technology`, this uses suffix/keyword matching to assign the correct
+/// ontological type — enabling type-aware spreading activation and
+/// `matches_with_hierarchy()` in retrieval.
+fn classify_tag_label(tag: &str) -> EntityLabel {
+    let lower = tag.to_lowercase();
+
+    // Deployment / environment indicators
+    if matches!(
+        lower.as_str(),
+        "production"
+            | "staging"
+            | "dev"
+            | "development"
+            | "ci"
+            | "cd"
+            | "kubernetes"
+            | "k8s"
+            | "docker"
+            | "container"
+            | "aws"
+            | "gcp"
+            | "azure"
+    ) {
+        return EntityLabel::Environment;
+    }
+
+    // Pipeline / workflow indicators
+    if lower.contains("pipeline")
+        || lower.contains("workflow")
+        || lower.contains("ci-cd")
+        || lower.contains("cicd")
+    {
+        return EntityLabel::Pipeline;
+    }
+
+    // Database / storage indicators
+    if matches!(
+        lower.as_str(),
+        "rocksdb"
+            | "postgres"
+            | "postgresql"
+            | "redis"
+            | "sqlite"
+            | "mongodb"
+            | "mysql"
+            | "dynamodb"
+            | "s3"
+            | "cassandra"
+            | "elasticsearch"
+    ) || lower.ends_with("db")
+        || lower.ends_with("-db")
+        || lower.ends_with("_db")
+    {
+        return EntityLabel::Database;
+    }
+
+    // Service / API indicators (suffix-only to avoid "my-api-docs" false positives)
+    if lower.ends_with("-service")
+        || lower.ends_with("_service")
+        || lower.ends_with("-api")
+        || lower.ends_with("_api")
+        || lower.ends_with("-server")
+        || lower.ends_with("_server")
+        || lower.ends_with("-daemon")
+    {
+        return EntityLabel::Service;
+    }
+
+    // Documentation indicators (check before module — README.md is a doc, not a module)
+    if lower.ends_with(".md")
+        || lower.contains("readme")
+        || lower.contains("runbook")
+        || lower.ends_with("-rfc")
+        || lower.ends_with("-spec")
+    {
+        return EntityLabel::Document;
+    }
+
+    // Configuration indicators
+    if lower.ends_with(".toml")
+        || lower.ends_with(".yaml")
+        || lower.ends_with(".yml")
+        || lower.ends_with(".env")
+        || lower.ends_with(".json")
+        || lower.contains("config")
+    {
+        return EntityLabel::Configuration;
+    }
+
+    // Module / library indicators
+    if lower.ends_with(".rs")
+        || lower.ends_with(".ts")
+        || lower.ends_with(".js")
+        || lower.ends_with(".py")
+        || lower.ends_with("-lib")
+        || lower.ends_with("_lib")
+    {
+        return EntityLabel::Module;
+    }
+
+    // Default: Technology (reasonable fallback for unknown tags)
+    EntityLabel::Technology
+}
+
 use crate::ab_testing;
 use crate::backup;
 use crate::config::ServerConfig;
@@ -420,7 +527,7 @@ use crate::graph_memory::{
     LtpStatus, RelationType, RelationshipEdge,
 };
 use crate::memory::{
-    query_parser, Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats,
+    Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats,
     MemorySystem, ProspectiveStore, SessionStore, TodoStore,
 };
 use crate::relevance::RelevanceEngine;
@@ -2800,19 +2907,20 @@ impl MultiUserMemoryManager {
                     && !tag_name.contains(". ")
                     && !tag_name.ends_with('.')
                 {
+                    let label = classify_tag_label(tag_name);
                     Some((
                         tag_name.to_string(),
                         EntityNode {
                             uuid: uuid::Uuid::new_v4(),
                             name: tag_name.to_string(),
-                            labels: vec![EntityLabel::Technology],
+                            labels: vec![label.clone()],
                             created_at: now,
                             last_seen_at: now,
                             mention_count: 1,
                             summary: String::new(),
                             attributes: HashMap::new(),
                             name_embedding: None,
-                            salience: 0.6,
+                            salience: crate::graph_memory::EntityExtractor::calculate_base_salience(&label, false),
                             is_proper_noun: false,
                             selectivity: None,
                         },
@@ -2914,54 +3022,6 @@ impl MultiUserMemoryManager {
             })
             .collect();
 
-        // Extract verbs for multi-hop reasoning
-        let analysis = query_parser::analyze_query(&experience.content);
-        let mut verb_entities: Vec<(String, EntityNode)> = Vec::new();
-        for verb in &analysis.relational_context {
-            let verb_text = verb.text.as_str();
-            let verb_stem = verb.stem.as_str();
-
-            if known_names
-                .iter()
-                .any(|name| name.eq_ignore_ascii_case(verb_text))
-            {
-                continue;
-            }
-            if blocklist.contains(verb_text.to_lowercase().as_str()) {
-                continue;
-            }
-            if verb_text.len() < 4 {
-                continue; // Skip short verbs: is, do, be, go, get, set, run, put, etc.
-            }
-
-            for name in [verb_text, verb_stem] {
-                if name.len() < 4 {
-                    continue;
-                }
-                if known_names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
-                    continue;
-                }
-                known_names.push(name.to_string());
-                verb_entities.push((
-                    name.to_string(),
-                    EntityNode {
-                        uuid: uuid::Uuid::new_v4(),
-                        name: name.to_string(),
-                        labels: vec![EntityLabel::Other("Verb".to_string())],
-                        created_at: now,
-                        last_seen_at: now,
-                        mention_count: 1,
-                        summary: String::new(),
-                        attributes: HashMap::new(),
-                        name_embedding: None,
-                        salience: 0.3, // Low salience: verbs decay faster than named entities
-                        is_proper_noun: false,
-                        selectivity: None,
-                    },
-                ));
-            }
-        }
-
         // Combine all entity groups for insertion, capped at 10 to prevent
         // O(n²) edge explosion (10 entities → max 45 edges)
         let mut all_entities: Vec<(String, EntityNode)> = ner_entities
@@ -2969,7 +3029,6 @@ impl MultiUserMemoryManager {
             .chain(tag_entities)
             .chain(allcaps_entities)
             .chain(issue_entities)
-            .chain(verb_entities)
             .collect();
         all_entities.sort_by(|a, b| b.1.salience.total_cmp(&a.1.salience));
         let entity_cap = self.server_config.max_entities_per_memory;
