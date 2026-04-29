@@ -3386,3 +3386,125 @@ pub async fn recall_by_date(
 
     Ok(Json(RetrieveResponse { memories, count }))
 }
+
+/// Response for paginated recall
+#[derive(Serialize)]
+pub struct PaginatedRecallResponse {
+    pub memories: Vec<RecallMemory>,
+    pub has_more: bool,
+    pub total_count: Option<usize>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+/// POST /api/recall/paginated - Paginated memory recall
+///
+/// Like /api/recall but returns pagination metadata (has_more, offset, limit).
+/// Useful for large memory stores where results need to be paged through.
+pub async fn paginated_recall(
+    State(state): State<AppState>,
+    Json(req): Json<RecallRequest>,
+) -> Result<Json<PaginatedRecallResponse>, AppError> {
+    validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
+    validation::validate_max_results(req.limit).map_validation_err("limit")?;
+    validation::validate_query_text(&req.query).map_validation_err("query")?;
+
+    let retrieval_mode = parse_retrieval_mode(&req.mode);
+
+    // Validate and build geo_filter
+    let geo_filter = match (req.geo_lat, req.geo_lon, req.geo_radius_meters) {
+        (Some(lat), Some(lon), Some(radius)) => {
+            validation::validate_geo_filter(lat, lon, radius).map_validation_err("geo_filter")?;
+            Some(GeoFilter::new(lat, lon, radius))
+        }
+        (None, None, None) => None,
+        _ => {
+            return Err(AppError::InvalidInput {
+                field: "geo_filter".to_string(),
+                reason: "geo_lat, geo_lon, and geo_radius_meters must all be provided together"
+                    .to_string(),
+            });
+        }
+    };
+
+    let reward_range = match (req.reward_min, req.reward_max) {
+        (Some(min), Some(max)) => Some((min, max)),
+        (Some(min), None) => Some((min, 1.0)),
+        (None, Some(max)) => Some((-1.0, max)),
+        (None, None) => None,
+    };
+
+    let memory = state
+        .get_user_memory(&req.user_id)
+        .map_err(AppError::Internal)?;
+
+    let user_id = req.user_id.clone();
+    let query_text = req.query.clone();
+    let limit = req.limit;
+    let offset = req.offset;
+    let session_id = req.session_id.clone();
+    let robot_id = req.robot_id.clone();
+    let mission_id = req.mission_id.clone();
+    let action_type = req.action_type.clone();
+    let outcome_type = req.outcome_type.clone();
+    let terrain_type = req.terrain_type.clone();
+    let tags = req.tags.clone();
+    let failures_only = req.failures_only.unwrap_or(false);
+
+    let paginated = tokio::task::spawn_blocking(move || {
+        let memory_guard = memory.read();
+
+        let query = MemoryQuery {
+            user_id: Some(user_id),
+            query_text: Some(query_text),
+            max_results: limit,
+            offset,
+            retrieval_mode,
+            session_id,
+            robot_id,
+            mission_id,
+            geo_filter,
+            action_type,
+            reward_range,
+            outcome_type,
+            failures_only,
+            terrain_type,
+            tags,
+            ..Default::default()
+        };
+
+        memory_guard.paginated_recall(&query)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    let memories: Vec<RecallMemory> = paginated
+        .results
+        .into_iter()
+        .map(|m| {
+            let score = m.score.unwrap_or_else(|| m.salience_score_with_access());
+            RecallMemory {
+                id: m.id.0.to_string(),
+                experience: RecallExperience {
+                    content: m.experience.content.clone(),
+                    memory_type: Some(format!("{:?}", m.experience.experience_type)),
+                    tags: m.experience.entities.clone(),
+                },
+                importance: m.importance(),
+                created_at: m.created_at.to_rfc3339(),
+                score,
+                tier: format!("{:?}", m.tier),
+                score_attribution: None,
+            }
+        })
+        .collect();
+
+    Ok(Json(PaginatedRecallResponse {
+        memories,
+        has_more: paginated.has_more,
+        total_count: paginated.total_count,
+        offset: paginated.offset,
+        limit: paginated.limit,
+    }))
+}

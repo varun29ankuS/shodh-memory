@@ -83,6 +83,10 @@ pub fn build_protected_routes(state: AppState) -> Router {
         .route("/api/recall/tags", post(recall::recall_by_tags))
         .route("/api/recall/by-tags", post(recall::recall_by_tags)) // OpenAPI alias
         .route("/api/recall/date", post(recall::recall_by_date))
+        .route(
+            "/api/recall/paginated",
+            post(recall::paginated_recall),
+        )
         // =================================================================
         // PROACTIVE CONTEXT & RELEVANCE
         // =================================================================
