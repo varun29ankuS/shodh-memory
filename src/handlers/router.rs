@@ -196,6 +196,10 @@ pub fn build_protected_routes(state: AppState) -> Router {
             post(lineage::lineage_list_branches),
         )
         .route("/api/lineage/branch", post(lineage::lineage_create_branch))
+        .route(
+            "/api/lineage/root-cause",
+            post(lineage::lineage_root_cause),
+        )
         // =================================================================
         // KNOWLEDGE GRAPH (ADVANCED)
         // =================================================================
