@@ -61,6 +61,22 @@ impl CausalRelation {
         }
     }
 
+    /// Map lineage causal relations to graph relation types.
+    /// This bridges the lineage namespace into the knowledge graph so that
+    /// spreading activation can traverse causal chains.
+    pub fn to_graph_relation_type(&self) -> crate::graph_memory::RelationType {
+        use crate::graph_memory::RelationType;
+        match self {
+            CausalRelation::Caused => RelationType::Causes,
+            CausalRelation::ResolvedBy => RelationType::ResultsIn,
+            CausalRelation::InformedBy => RelationType::RelatedTo,
+            CausalRelation::SupersededBy => RelationType::SupersededBy,
+            CausalRelation::TriggeredBy => RelationType::Triggers,
+            CausalRelation::BranchedFrom => RelationType::RelatedTo,
+            CausalRelation::RelatedTo => RelationType::RelatedTo,
+        }
+    }
+
     /// Human-readable description of the relationship
     pub fn description(&self) -> &'static str {
         match self {
