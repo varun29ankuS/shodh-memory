@@ -5745,6 +5745,7 @@ impl MemorySystem {
                 return MemoryGraphStats {
                     node_count: stats.entity_count,
                     edge_count: stats.relationship_count,
+                    episode_count: stats.episode_count,
                     avg_strength,
                     potentiated_count,
                 };
@@ -5754,6 +5755,7 @@ impl MemorySystem {
         MemoryGraphStats {
             node_count: 0,
             edge_count: 0,
+            episode_count: 0,
             avg_strength: 0.0,
             potentiated_count: 0,
         }
