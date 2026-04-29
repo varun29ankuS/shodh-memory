@@ -688,7 +688,7 @@ pub async fn remember(
 
         tracker.spawn(async move {
             // Task 1: Build episodic graph (entities + episode + relationships)
-            if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id) {
+            if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id, None) {
                 tracing::debug!("Graph processing failed (non-fatal): {}", e);
             }
 
@@ -959,7 +959,7 @@ pub async fn batch_remember(
         if let Ok(uuid) = uuid::Uuid::parse_str(id_str) {
             let memory_id = crate::memory::MemoryId(uuid);
             if let Err(e) =
-                state.process_experience_into_graph(&req.user_id, experience, &memory_id)
+                state.process_experience_into_graph(&req.user_id, experience, &memory_id, None)
             {
                 tracing::debug!("Graph processing failed for {} (non-fatal): {}", id_str, e);
             }
@@ -1137,7 +1137,7 @@ pub async fn upsert_memory(
             }
         }
     }
-    if let Err(e) = state.process_experience_into_graph(&req.user_id, &experience, &memory_id) {
+    if let Err(e) = state.process_experience_into_graph(&req.user_id, &experience, &memory_id, None) {
         tracing::debug!("Graph processing failed (non-fatal): {}", e);
     }
 

@@ -2677,6 +2677,7 @@ impl MultiUserMemoryManager {
         user_id: &str,
         experience: &Experience,
         memory_id: &MemoryId,
+        entity_name_embeddings: Option<&HashMap<String, Vec<f32>>>,
     ) -> Result<()> {
         let graph = self.get_user_graph(user_id)?;
 
@@ -2942,7 +2943,9 @@ impl MultiUserMemoryManager {
                         a.insert("confidence".into(), format!("{:.2}", ner_entity.confidence));
                         a
                     },
-                    name_embedding: None,
+                    name_embedding: entity_name_embeddings
+                        .and_then(|map| map.get(&ner_entity.text))
+                        .cloned(),
                     // Use ontological salience as the base, scaled by NER confidence
                     salience: {
                         let is_pn = !matches!(ner_entity.entity_type, NerEntityType::Misc);
@@ -2983,7 +2986,9 @@ impl MultiUserMemoryManager {
                             mention_count: 1,
                             summary: String::new(),
                             attributes: HashMap::new(),
-                            name_embedding: None,
+                            name_embedding: entity_name_embeddings
+                                .and_then(|map| map.get(tag_name))
+                                .cloned(),
                             salience: crate::graph_memory::EntityExtractor::calculate_base_salience(&label, false),
                             is_proper_noun: false,
                             selectivity: None,
@@ -3037,6 +3042,9 @@ impl MultiUserMemoryManager {
                     return None;
                 }
                 known_names.push(term.clone());
+                let emb = entity_name_embeddings
+                    .and_then(|map| map.get(&term))
+                    .cloned();
                 Some((
                     term.clone(),
                     EntityNode {
@@ -3048,7 +3056,7 @@ impl MultiUserMemoryManager {
                         mention_count: 1,
                         summary: String::new(),
                         attributes: HashMap::new(),
-                        name_embedding: None,
+                        name_embedding: emb,
                         salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
                             &EntityLabel::Technology,
                             true,
@@ -3080,7 +3088,9 @@ impl MultiUserMemoryManager {
                         mention_count: 1,
                         summary: String::new(),
                         attributes: HashMap::new(),
-                        name_embedding: None,
+                        name_embedding: entity_name_embeddings
+                            .and_then(|map| map.get(issue_id))
+                            .cloned(),
                         salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
                             &EntityLabel::Task,
                             true,

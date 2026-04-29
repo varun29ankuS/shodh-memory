@@ -558,7 +558,7 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
     let user_id = req.user_id.clone();
     let parent_id = req.parent_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id) {
+        if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id, None) {
             debug!("Graph processing failed (non-fatal): {}", e);
         }
 
