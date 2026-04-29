@@ -525,15 +525,7 @@ fn classify_tag_label(tag: &str) -> EntityLabel {
 fn classify_misc_entity(name: &str) -> EntityLabel {
     let lower = name.to_lowercase();
 
-    // Concept suffixes — abstract ideas, methodologies, qualities
-    const CONCEPT_SUFFIXES: &[&str] = &[
-        "ism", "ology", "ity", "ness", "ment", "ance", "ence", "tion", "sion",
-    ];
-    if CONCEPT_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
-        return EntityLabel::Concept;
-    }
-
-    // Event-like terms
+    // Event-like terms (checked first — "conference" ends with "ence" concept suffix)
     const EVENT_WORDS: &[&str] = &[
         "conference",
         "summit",
@@ -550,7 +542,7 @@ fn classify_misc_entity(name: &str) -> EntityLabel {
         return EntityLabel::Event;
     }
 
-    // Skill / role indicators
+    // Skill / role indicators (before concept — "engineer" ends with suffix-like patterns)
     const SKILL_WORDS: &[&str] = &[
         "engineer",
         "architect",
@@ -562,6 +554,14 @@ fn classify_misc_entity(name: &str) -> EntityLabel {
     ];
     if SKILL_WORDS.iter().any(|w| lower.contains(w)) {
         return EntityLabel::Skill;
+    }
+
+    // Concept suffixes — abstract ideas, methodologies, qualities
+    const CONCEPT_SUFFIXES: &[&str] = &[
+        "ism", "ology", "ity", "ness", "ment", "ance", "ence", "tion", "sion",
+    ];
+    if CONCEPT_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
+        return EntityLabel::Concept;
     }
 
     // PascalCase proper nouns without spaces/hyphens → likely a Product
@@ -3349,5 +3349,138 @@ mod tests {
         let a = entity_blocklist() as *const _;
         let b = entity_blocklist() as *const _;
         assert_eq!(a, b, "Blocklist should be a singleton via OnceLock");
+    }
+
+    #[test]
+    fn test_classify_tag_label_database() {
+        assert_eq!(classify_tag_label("rocksdb"), EntityLabel::Database);
+        assert_eq!(classify_tag_label("PostgreSQL"), EntityLabel::Database);
+        assert_eq!(classify_tag_label("redis"), EntityLabel::Database);
+        assert_eq!(classify_tag_label("my-db"), EntityLabel::Database);
+        assert_eq!(classify_tag_label("user-db"), EntityLabel::Database);
+    }
+
+    #[test]
+    fn test_classify_tag_label_service() {
+        assert_eq!(classify_tag_label("auth-service"), EntityLabel::Service);
+        assert_eq!(classify_tag_label("memory-api"), EntityLabel::Service);
+        assert_eq!(classify_tag_label("grpc-server"), EntityLabel::Service);
+    }
+
+    #[test]
+    fn test_classify_tag_label_environment() {
+        assert_eq!(
+            classify_tag_label("production"),
+            EntityLabel::Environment
+        );
+        assert_eq!(classify_tag_label("staging"), EntityLabel::Environment);
+        assert_eq!(classify_tag_label("kubernetes"), EntityLabel::Environment);
+        assert_eq!(classify_tag_label("docker"), EntityLabel::Environment);
+    }
+
+    #[test]
+    fn test_classify_tag_label_pipeline() {
+        assert_eq!(classify_tag_label("ci-pipeline"), EntityLabel::Pipeline);
+        assert_eq!(
+            classify_tag_label("deploy-workflow"),
+            EntityLabel::Pipeline
+        );
+    }
+
+    #[test]
+    fn test_classify_tag_label_document() {
+        assert_eq!(classify_tag_label("README.md"), EntityLabel::Document);
+        assert_eq!(classify_tag_label("api-spec"), EntityLabel::Document);
+    }
+
+    #[test]
+    fn test_classify_tag_label_configuration() {
+        assert_eq!(
+            classify_tag_label("settings.toml"),
+            EntityLabel::Configuration
+        );
+        assert_eq!(
+            classify_tag_label("app-config"),
+            EntityLabel::Configuration
+        );
+        assert_eq!(classify_tag_label(".env"), EntityLabel::Configuration);
+    }
+
+    #[test]
+    fn test_classify_tag_label_module() {
+        assert_eq!(classify_tag_label("graph_memory.rs"), EntityLabel::Module);
+        assert_eq!(classify_tag_label("index.ts"), EntityLabel::Module);
+        assert_eq!(classify_tag_label("utils-lib"), EntityLabel::Module);
+    }
+
+    #[test]
+    fn test_classify_tag_label_fallback() {
+        assert_eq!(classify_tag_label("react"), EntityLabel::Technology);
+        assert_eq!(classify_tag_label("rust"), EntityLabel::Technology);
+    }
+
+    #[test]
+    fn test_classify_misc_entity_concept_suffixes() {
+        assert_eq!(
+            classify_misc_entity("capitalism"),
+            EntityLabel::Concept
+        );
+        assert_eq!(
+            classify_misc_entity("neurology"),
+            EntityLabel::Concept
+        );
+        assert_eq!(
+            classify_misc_entity("complexity"),
+            EntityLabel::Concept
+        );
+        assert_eq!(
+            classify_misc_entity("authentication"),
+            EntityLabel::Concept
+        );
+    }
+
+    #[test]
+    fn test_classify_misc_entity_events() {
+        assert_eq!(
+            classify_misc_entity("conference"),
+            EntityLabel::Event
+        );
+        assert_eq!(
+            classify_misc_entity("hackathon"),
+            EntityLabel::Event
+        );
+    }
+
+    #[test]
+    fn test_classify_misc_entity_skills() {
+        assert_eq!(
+            classify_misc_entity("developer"),
+            EntityLabel::Skill
+        );
+        assert_eq!(
+            classify_misc_entity("engineering"),
+            EntityLabel::Skill
+        );
+    }
+
+    #[test]
+    fn test_classify_misc_entity_product_camelcase() {
+        assert_eq!(
+            classify_misc_entity("RocksDB"),
+            EntityLabel::Product
+        );
+        assert_eq!(
+            classify_misc_entity("GitHub"),
+            EntityLabel::Product
+        );
+    }
+
+    #[test]
+    fn test_classify_misc_entity_default() {
+        // Single lowercase word with no special suffix → Concept
+        assert_eq!(
+            classify_misc_entity("memory"),
+            EntityLabel::Concept
+        );
     }
 }
