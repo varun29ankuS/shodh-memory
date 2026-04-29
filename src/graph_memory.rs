@@ -8090,4 +8090,68 @@ mod tests {
         assert_eq!(returned.content, episode_content);
         assert_eq!(returned.source, EpisodeSource::Message);
     }
+
+    #[test]
+    fn test_infer_relation_person_org() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Person, &EntityLabel::Organization),
+            RelationType::WorksAt
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_person_technology() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Person, &EntityLabel::Technology),
+            RelationType::Uses
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_service_database() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Service, &EntityLabel::Database),
+            RelationType::Uses
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_module_module() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Module, &EntityLabel::Module),
+            RelationType::DependsOn
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_pipeline_env() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Pipeline, &EntityLabel::Environment),
+            RelationType::DeploysTo
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_config_service() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Configuration, &EntityLabel::Service),
+            RelationType::Configures
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_task_project() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Task, &EntityLabel::Project),
+            RelationType::PartOf
+        );
+    }
+
+    #[test]
+    fn test_infer_relation_default_cooccurs() {
+        assert_eq!(
+            infer_relation_type_for_pair(&EntityLabel::Concept, &EntityLabel::Event),
+            RelationType::CoOccurs
+        );
+    }
 }

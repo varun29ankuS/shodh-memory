@@ -584,7 +584,7 @@ use crate::embeddings::{
 };
 use crate::graph_memory::{
     EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, GraphStats,
-    LtpStatus, RelationType, RelationshipEdge,
+    LtpStatus, RelationshipEdge,
 };
 use crate::memory::{
     Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats,
@@ -3132,12 +3132,13 @@ impl MultiUserMemoryManager {
             return Ok(());
         }
 
-        let mut entity_uuids = Vec::new();
+        let mut entity_uuids: Vec<(String, uuid::Uuid, EntityLabel)> = Vec::new();
 
         // Insert all pre-built entities
         for (name, entity) in all_entities {
+            let primary_label = entity.labels.first().cloned().unwrap_or(EntityLabel::Concept);
             match graph_guard.add_entity(entity) {
-                Ok(uuid) => entity_uuids.push((name, uuid)),
+                Ok(uuid) => entity_uuids.push((name, uuid, primary_label)),
                 Err(e) => tracing::debug!("Failed to add entity {}: {}", name, e),
             }
         }
@@ -3149,7 +3150,7 @@ impl MultiUserMemoryManager {
             entity_uuids.len(),
             entity_uuids
                 .iter()
-                .map(|(name, _)| name.as_str())
+                .map(|(name, _, _): &(String, uuid::Uuid, EntityLabel)| name.as_str())
                 .collect::<Vec<_>>()
         );
 
@@ -3159,7 +3160,7 @@ impl MultiUserMemoryManager {
             content: experience.content.clone(),
             valid_at: now,
             created_at: now,
-            entity_refs: entity_uuids.iter().map(|(_, uuid)| *uuid).collect(),
+            entity_refs: entity_uuids.iter().map(|(_, uuid, _)| *uuid).collect(),
             source: EpisodeSource::Message,
             metadata: experience.metadata.clone(),
         };
@@ -3246,7 +3247,10 @@ impl MultiUserMemoryManager {
                     uuid: uuid::Uuid::new_v4(),
                     from_entity: entity_uuids[i].1,
                     to_entity: entity_uuids[j].1,
-                    relation_type: RelationType::RelatedTo,
+                    relation_type: crate::graph_memory::infer_relation_type_for_pair(
+                        &entity_uuids[i].2,
+                        &entity_uuids[j].2,
+                    ),
                     strength: edge_strength,
                     created_at: now,
                     valid_at: now,
