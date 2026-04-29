@@ -2668,6 +2668,22 @@ pub const LINEAGE_MIN_STORE_CONFIDENCE: f32 = 0.20;
 /// strength should reflect the reliability of the association source.
 pub const LINEAGE_GRAPH_BOOST_SCALE: f32 = 0.15;
 
+/// Minimum confidence for a lineage edge to generate typed graph edges.
+///
+/// Sub-threshold lineage inferences are too noisy to bridge into the graph.
+/// Only edges above this floor create Causes/Triggers/SupersededBy edges
+/// visible to spreading activation. Below this, only Hebbian strengthening
+/// (via strengthen_lineage_connection) applies — a softer signal.
+pub const LINEAGE_GRAPH_BRIDGE_MIN_CONFIDENCE: f32 = 0.4;
+
+/// Strength multiplier for lineage→graph bridge edges.
+///
+/// Applied as `L2_initial_weight * confidence * BRIDGE_BOOST`. At confidence=0.7
+/// and L2 base weight 0.6, this produces edges of strength 0.6 * 0.7 * 0.3 = 0.126.
+/// Strong enough to be discovered by spreading activation but not so strong
+/// that uncertain causal inferences dominate entity-level co-occurrence edges.
+pub const LINEAGE_GRAPH_BRIDGE_BOOST: f32 = 0.3;
+
 /// Boost applied when a user explicitly confirms a lineage edge.
 ///
 /// Confirmation is a strong signal — the user validated the causal relationship.

@@ -3955,6 +3955,90 @@ impl GraphMemory {
         Ok(strengthened)
     }
 
+    /// Create typed graph edges between entity pairs of two causally-linked episodes.
+    ///
+    /// This bridges the lineage namespace into the knowledge graph: lineage edges
+    /// (stored in plain RocksDB keys) become typed RelationshipEdge entries visible
+    /// to spreading activation. The `CausalRelation::to_graph_relation_type()`
+    /// mapping provides the edge type (Causes, Triggers, SupersededBy, etc.).
+    ///
+    /// `add_relationship()` deduplicates by (from, to, type) — repeat calls
+    /// strengthen existing edges rather than creating duplicates.
+    pub fn create_lineage_graph_edges(
+        &self,
+        from_memory_uuid: &Uuid,
+        to_memory_uuid: &Uuid,
+        relation_type: RelationType,
+        confidence: f32,
+    ) -> Result<usize> {
+        if confidence < crate::constants::LINEAGE_GRAPH_BRIDGE_MIN_CONFIDENCE {
+            return Ok(0);
+        }
+
+        let from_episode = self.get_episode(from_memory_uuid)?;
+        let to_episode = self.get_episode(to_memory_uuid)?;
+
+        let (from_entities, to_entities) = match (from_episode, to_episode) {
+            (Some(fe), Some(te)) if !fe.entity_refs.is_empty() && !te.entity_refs.is_empty() => {
+                (fe.entity_refs, te.entity_refs)
+            }
+            _ => return Ok(0),
+        };
+
+        const MAX_PER_SIDE: usize = 8;
+        let from_capped = &from_entities[..from_entities.len().min(MAX_PER_SIDE)];
+        let to_capped = &to_entities[..to_entities.len().min(MAX_PER_SIDE)];
+
+        let now = chrono::Utc::now();
+        let base_strength = EdgeTier::L2Episodic.initial_weight()
+            * confidence
+            * crate::constants::LINEAGE_GRAPH_BRIDGE_BOOST;
+        let mut created = 0usize;
+
+        for &from_entity in from_capped {
+            for &to_entity in to_capped {
+                if from_entity == to_entity {
+                    continue;
+                }
+                let edge = RelationshipEdge {
+                    uuid: Uuid::new_v4(),
+                    from_entity,
+                    to_entity,
+                    relation_type: relation_type.clone(),
+                    strength: base_strength,
+                    created_at: now,
+                    valid_at: now,
+                    invalidated_at: None,
+                    source_episode_id: Some(*from_memory_uuid),
+                    context: String::new(),
+                    last_activated: now,
+                    activation_count: 1,
+                    ltp_status: LtpStatus::None,
+                    tier: EdgeTier::L2Episodic,
+                    activation_timestamps: None,
+                    entity_confidence: Some(confidence),
+                    forman_curvature: None,
+                    endpoint_selectivity: None,
+                };
+                if self.add_relationship(edge).is_ok() {
+                    created += 1;
+                }
+            }
+        }
+
+        if created > 0 {
+            tracing::debug!(
+                from_memory = %&from_memory_uuid.to_string()[..8],
+                to_memory = %&to_memory_uuid.to_string()[..8],
+                relation = ?relation_type,
+                created,
+                "Lineage→graph typed edge creation"
+            );
+        }
+
+        Ok(created)
+    }
+
     /// Find memories associated with a given memory through co-retrieval
     ///
     /// Uses weighted graph traversal prioritizing stronger associations.
