@@ -5676,8 +5676,12 @@ impl MemorySystem {
                             from_entity: e1.uuid,
                             to_entity: e2.uuid,
                             relation_type: crate::graph_memory::infer_relation_type_for_pair(
-                                e1.labels.first().unwrap_or(&crate::graph_memory::EntityLabel::Concept),
-                                e2.labels.first().unwrap_or(&crate::graph_memory::EntityLabel::Concept),
+                                e1.labels
+                                    .first()
+                                    .unwrap_or(&crate::graph_memory::EntityLabel::Concept),
+                                e2.labels
+                                    .first()
+                                    .unwrap_or(&crate::graph_memory::EntityLabel::Concept),
                             ),
                             strength: l2_base_weight * semantic_weight,
                             created_at: now,

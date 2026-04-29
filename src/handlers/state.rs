@@ -587,8 +587,8 @@ use crate::graph_memory::{
     LtpStatus, RelationshipEdge,
 };
 use crate::memory::{
-    Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats,
-    MemorySystem, ProspectiveStore, SessionStore, TodoStore,
+    Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats, MemorySystem,
+    ProspectiveStore, SessionStore, TodoStore,
 };
 use crate::relevance::RelevanceEngine;
 use crate::streaming;
@@ -2949,7 +2949,9 @@ impl MultiUserMemoryManager {
                     // Use ontological salience as the base, scaled by NER confidence
                     salience: {
                         let is_pn = !matches!(ner_entity.entity_type, NerEntityType::Misc);
-                        let base = crate::graph_memory::EntityExtractor::calculate_base_salience(&label, is_pn);
+                        let base = crate::graph_memory::EntityExtractor::calculate_base_salience(
+                            &label, is_pn,
+                        );
                         // NER confidence modulates: high-confidence entities get full base salience
                         base * (0.5 + 0.5 * ner_entity.confidence)
                     },
@@ -2989,7 +2991,9 @@ impl MultiUserMemoryManager {
                             name_embedding: entity_name_embeddings
                                 .and_then(|map| map.get(tag_name))
                                 .cloned(),
-                            salience: crate::graph_memory::EntityExtractor::calculate_base_salience(&label, false),
+                            salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
+                                &label, false,
+                            ),
                             is_proper_noun: false,
                             selectivity: None,
                         },
@@ -3136,7 +3140,11 @@ impl MultiUserMemoryManager {
 
         // Insert all pre-built entities
         for (name, entity) in all_entities {
-            let primary_label = entity.labels.first().cloned().unwrap_or(EntityLabel::Concept);
+            let primary_label = entity
+                .labels
+                .first()
+                .cloned()
+                .unwrap_or(EntityLabel::Concept);
             match graph_guard.add_entity(entity) {
                 Ok(uuid) => entity_uuids.push((name, uuid, primary_label)),
                 Err(e) => tracing::debug!("Failed to add entity {}: {}", name, e),
@@ -3373,10 +3381,7 @@ mod tests {
 
     #[test]
     fn test_classify_tag_label_environment() {
-        assert_eq!(
-            classify_tag_label("production"),
-            EntityLabel::Environment
-        );
+        assert_eq!(classify_tag_label("production"), EntityLabel::Environment);
         assert_eq!(classify_tag_label("staging"), EntityLabel::Environment);
         assert_eq!(classify_tag_label("kubernetes"), EntityLabel::Environment);
         assert_eq!(classify_tag_label("docker"), EntityLabel::Environment);
@@ -3385,10 +3390,7 @@ mod tests {
     #[test]
     fn test_classify_tag_label_pipeline() {
         assert_eq!(classify_tag_label("ci-pipeline"), EntityLabel::Pipeline);
-        assert_eq!(
-            classify_tag_label("deploy-workflow"),
-            EntityLabel::Pipeline
-        );
+        assert_eq!(classify_tag_label("deploy-workflow"), EntityLabel::Pipeline);
     }
 
     #[test]
@@ -3403,10 +3405,7 @@ mod tests {
             classify_tag_label("settings.toml"),
             EntityLabel::Configuration
         );
-        assert_eq!(
-            classify_tag_label("app-config"),
-            EntityLabel::Configuration
-        );
+        assert_eq!(classify_tag_label("app-config"), EntityLabel::Configuration);
         assert_eq!(classify_tag_label(".env"), EntityLabel::Configuration);
     }
 
@@ -3425,66 +3424,33 @@ mod tests {
 
     #[test]
     fn test_classify_misc_entity_concept_suffixes() {
-        assert_eq!(
-            classify_misc_entity("capitalism"),
-            EntityLabel::Concept
-        );
-        assert_eq!(
-            classify_misc_entity("neurology"),
-            EntityLabel::Concept
-        );
-        assert_eq!(
-            classify_misc_entity("complexity"),
-            EntityLabel::Concept
-        );
-        assert_eq!(
-            classify_misc_entity("authentication"),
-            EntityLabel::Concept
-        );
+        assert_eq!(classify_misc_entity("capitalism"), EntityLabel::Concept);
+        assert_eq!(classify_misc_entity("neurology"), EntityLabel::Concept);
+        assert_eq!(classify_misc_entity("complexity"), EntityLabel::Concept);
+        assert_eq!(classify_misc_entity("authentication"), EntityLabel::Concept);
     }
 
     #[test]
     fn test_classify_misc_entity_events() {
-        assert_eq!(
-            classify_misc_entity("conference"),
-            EntityLabel::Event
-        );
-        assert_eq!(
-            classify_misc_entity("hackathon"),
-            EntityLabel::Event
-        );
+        assert_eq!(classify_misc_entity("conference"), EntityLabel::Event);
+        assert_eq!(classify_misc_entity("hackathon"), EntityLabel::Event);
     }
 
     #[test]
     fn test_classify_misc_entity_skills() {
-        assert_eq!(
-            classify_misc_entity("developer"),
-            EntityLabel::Skill
-        );
-        assert_eq!(
-            classify_misc_entity("engineering"),
-            EntityLabel::Skill
-        );
+        assert_eq!(classify_misc_entity("developer"), EntityLabel::Skill);
+        assert_eq!(classify_misc_entity("engineering"), EntityLabel::Skill);
     }
 
     #[test]
     fn test_classify_misc_entity_product_camelcase() {
-        assert_eq!(
-            classify_misc_entity("RocksDB"),
-            EntityLabel::Product
-        );
-        assert_eq!(
-            classify_misc_entity("GitHub"),
-            EntityLabel::Product
-        );
+        assert_eq!(classify_misc_entity("RocksDB"), EntityLabel::Product);
+        assert_eq!(classify_misc_entity("GitHub"), EntityLabel::Product);
     }
 
     #[test]
     fn test_classify_misc_entity_default() {
         // Single lowercase word with no special suffix → Concept
-        assert_eq!(
-            classify_misc_entity("memory"),
-            EntityLabel::Concept
-        );
+        assert_eq!(classify_misc_entity("memory"), EntityLabel::Concept);
     }
 }

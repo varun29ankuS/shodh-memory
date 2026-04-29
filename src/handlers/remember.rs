@@ -702,31 +702,22 @@ pub async fn remember(
                     match tokio::task::spawn_blocking(move || {
                         let guard = mem.read();
                         let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-                        guard
-                            .get_embedder()
-                            .encode_batch(&refs)
-                            .map(|vecs| {
-                                names
-                                    .into_iter()
-                                    .zip(vecs)
-                                    .collect::<std::collections::HashMap<String, Vec<f32>>>()
-                            })
+                        guard.get_embedder().encode_batch(&refs).map(|vecs| {
+                            names
+                                .into_iter()
+                                .zip(vecs)
+                                .collect::<std::collections::HashMap<String, Vec<f32>>>()
+                        })
                     })
                     .await
                     {
                         Ok(Ok(map)) => Some(map),
                         Ok(Err(e)) => {
-                            tracing::debug!(
-                                "Entity name embedding failed (non-fatal): {}",
-                                e
-                            );
+                            tracing::debug!("Entity name embedding failed (non-fatal): {}", e);
                             None
                         }
                         Err(e) => {
-                            tracing::debug!(
-                                "Entity name embedding task panicked: {}",
-                                e
-                            );
+                            tracing::debug!("Entity name embedding task panicked: {}", e);
                             None
                         }
                     }
@@ -1188,7 +1179,8 @@ pub async fn upsert_memory(
             }
         }
     }
-    if let Err(e) = state.process_experience_into_graph(&req.user_id, &experience, &memory_id, None) {
+    if let Err(e) = state.process_experience_into_graph(&req.user_id, &experience, &memory_id, None)
+    {
         tracing::debug!("Graph processing failed (non-fatal): {}", e);
     }
 
