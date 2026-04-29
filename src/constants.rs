@@ -2972,6 +2972,22 @@ pub const ENTITY_SALIENCE_FILTER_FLOOR: f32 = 0.15;
 /// An entity must have been seen 5+ times before its salience is trusted as a quality signal.
 pub const ENTITY_SALIENCE_FILTER_MIN_MENTIONS: usize = 5;
 
+/// Minimum character length for NER entities to enter the graph.
+///
+/// BERT-tiny-NER produces 2-char token fragments ("au", "th") from BPE
+/// tokenizer misalignment. These are high-confidence garbage — the model
+/// is confident about the BIO tag but the underlying text is meaningless.
+/// Raised from 2 to 3 after observing systematic token fragment pollution.
+pub const NER_ENTITY_MIN_LENGTH: usize = 3;
+
+/// Confidence floor for NER entities at graph insertion time.
+///
+/// The NER model filters at 0.7 during extraction (SHODH_NER_CONFIDENCE env),
+/// but some garbage entities ("decided", common verbs) pass at 0.7-0.8 confidence.
+/// This second gate at graph insertion catches marginal entities that shouldn't
+/// become graph nodes. Raised from 0.5 to 0.6 after observing verb noise.
+pub const NER_GRAPH_CONFIDENCE_FLOOR: f32 = 0.6;
+
 /// Minimum surfacings without utility before habituation penalty kicks in.
 /// Below this threshold, we assume the memory might still be useful in the right context.
 pub const ENTITY_SALIENCE_HABITUATION_THRESHOLD: u32 = 3;

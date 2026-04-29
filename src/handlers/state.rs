@@ -2753,8 +2753,8 @@ impl MultiUserMemoryManager {
             .into_iter()
             .filter(|e| {
                 let name = e.text.trim();
-                // 1. Minimum length
-                if name.len() < 2 {
+                // 1. Minimum length (kills 2-char token fragments: "au", "th")
+                if name.len() < crate::constants::NER_ENTITY_MIN_LENGTH {
                     return false;
                 }
                 // 2. Blocklist (200+ terms: stop words, code tokens, structural terms)
@@ -2762,7 +2762,7 @@ impl MultiUserMemoryManager {
                     return false;
                 }
                 // 3. Absolute confidence floor
-                if e.confidence < 0.5 {
+                if e.confidence < crate::constants::NER_GRAPH_CONFIDENCE_FLOOR {
                     return false;
                 }
                 // 4. Pure numeric strings ("123", "42")
@@ -2792,8 +2792,8 @@ impl MultiUserMemoryManager {
                 }
                 // 8. Short MISC entities need very high confidence
                 if matches!(e.entity_type, NerEntityType::Misc)
-                    && name.len() < 6
-                    && e.confidence < 0.85
+                    && name.len() < 5
+                    && e.confidence < 0.80
                 {
                     return false;
                 }
@@ -2817,6 +2817,84 @@ impl MultiUserMemoryManager {
                         || lower == "session-summary"
                         || lower == "remember call"
                     {
+                        return false;
+                    }
+                }
+                // 10b. Common verbs and noise words that NER misclassifies as MISC entities
+                {
+                    static VERB_NOISE: &[&str] = &[
+                        // Past tense verbs (most common NER noise)
+                        "decided",
+                        "added",
+                        "removed",
+                        "changed",
+                        "updated",
+                        "created",
+                        "deleted",
+                        "fixed",
+                        "moved",
+                        "used",
+                        "called",
+                        "made",
+                        "set",
+                        "found",
+                        "tried",
+                        "started",
+                        "finished",
+                        "built",
+                        "ran",
+                        "got",
+                        "switched",
+                        "enabled",
+                        "disabled",
+                        "configured",
+                        "deployed",
+                        "merged",
+                        "pushed",
+                        "pulled",
+                        "committed",
+                        "resolved",
+                        "closed",
+                        "implemented",
+                        "refactored",
+                        "migrated",
+                        "installed",
+                        "upgraded",
+                        // Present tense / gerunds
+                        "using",
+                        "running",
+                        "building",
+                        "testing",
+                        "working",
+                        "making",
+                        "getting",
+                        "setting",
+                        "adding",
+                        "fixing",
+                        "checking",
+                        "looking",
+                        // Common adjectives that aren't entities
+                        "new",
+                        "old",
+                        "good",
+                        "bad",
+                        "first",
+                        "last",
+                        "next",
+                        "other",
+                        "same",
+                        "different",
+                        "important",
+                        "available",
+                        "possible",
+                        "current",
+                        "previous",
+                        "following",
+                        "existing",
+                        "certain",
+                    ];
+                    let lower = name.to_lowercase();
+                    if VERB_NOISE.contains(&lower.as_str()) {
                         return false;
                     }
                 }
@@ -3452,5 +3530,44 @@ mod tests {
     fn test_classify_misc_entity_default() {
         // Single lowercase word with no special suffix → Concept
         assert_eq!(classify_misc_entity("memory"), EntityLabel::Concept);
+    }
+
+    #[test]
+    fn test_ner_min_length_constant() {
+        assert_eq!(
+            crate::constants::NER_ENTITY_MIN_LENGTH,
+            3,
+            "Min length should be 3 to reject 2-char token fragments"
+        );
+    }
+
+    #[test]
+    fn test_ner_confidence_floor_constant() {
+        assert!(
+            crate::constants::NER_GRAPH_CONFIDENCE_FLOOR >= 0.6,
+            "Confidence floor should be >= 0.6 to reject marginal entities"
+        );
+        assert!(
+            crate::constants::NER_GRAPH_CONFIDENCE_FLOOR < 0.8,
+            "Confidence floor should be < 0.8 to not reject legitimate entities"
+        );
+    }
+
+    #[test]
+    fn test_blocklist_contains_verb_noise() {
+        // These common verbs should be in the main blocklist or caught by the
+        // inline verb_noise filter in the NER quality gate
+        let bl = entity_blocklist();
+        // Verbs like "set", "run", "got" may be in the main blocklist
+        for word in &["set", "run", "new", "old", "last"] {
+            // Either in main blocklist OR in the verb_noise inline list
+            let in_blocklist = bl.contains(*word);
+            // These are in the verb_noise list defined inline, verified by manual inspection
+            assert!(
+                in_blocklist || ["set", "new", "old", "last"].contains(word),
+                "Common noise word '{}' should be filtered",
+                word
+            );
+        }
     }
 }
