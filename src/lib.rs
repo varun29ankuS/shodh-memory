@@ -32,6 +32,7 @@ pub mod middleware;
 pub mod mif;
 pub mod migration;
 pub mod query_parsing;
+pub mod recall_harness;
 pub mod relevance;
 pub mod serialization;
 pub mod server;
