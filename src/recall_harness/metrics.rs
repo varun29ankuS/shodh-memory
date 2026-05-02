@@ -70,7 +70,10 @@ pub fn precision_at_k(retrieved: &[Uuid], relevant: &HashSet<Uuid>, k: usize) ->
         return 0.0;
     }
     let cap = retrieved.len().min(k);
-    let hits = retrieved[..cap].iter().filter(|id| relevant.contains(id)).count();
+    let hits = retrieved[..cap]
+        .iter()
+        .filter(|id| relevant.contains(id))
+        .count();
     hits as f64 / k as f64
 }
 
@@ -80,7 +83,10 @@ pub fn recall_at_k(retrieved: &[Uuid], relevant: &HashSet<Uuid>, k: usize) -> f6
         return 0.0;
     }
     let cap = retrieved.len().min(k);
-    let hits = retrieved[..cap].iter().filter(|id| relevant.contains(id)).count();
+    let hits = retrieved[..cap]
+        .iter()
+        .filter(|id| relevant.contains(id))
+        .count();
     hits as f64 / relevant.len() as f64
 }
 
@@ -160,10 +166,7 @@ pub fn ndcg_at_k(retrieved: &[Uuid], relevance: &HashMap<Uuid, f32>, k: usize) -
         .sum();
 
     // IDCG: sort relevance values descending, take top-k, apply same discount.
-    let mut sorted: Vec<f64> = relevance
-        .values()
-        .map(|&v| (v as f64).max(0.0))
-        .collect();
+    let mut sorted: Vec<f64> = relevance.values().map(|&v| (v as f64).max(0.0)).collect();
     sorted.sort_by(|a, b| b.partial_cmp(a).expect("relevance scores are finite"));
 
     let idcg_cap = sorted.len().min(k);
@@ -348,8 +351,7 @@ mod tests {
         let r5 = extra[4];
         let retrieved = vec![r, n, r2, n2, r3, n3, n4, n5, r4, r5];
         let rel = binary(&[r, r2, r3, r4, r5]);
-        let expected =
-            (1.0 / 5.0) * (1.0 / 1.0 + 2.0 / 3.0 + 3.0 / 5.0 + 4.0 / 9.0 + 5.0 / 10.0);
+        let expected = (1.0 / 5.0) * (1.0 / 1.0 + 2.0 / 3.0 + 3.0 / 5.0 + 4.0 / 9.0 + 5.0 / 10.0);
         approx(map(&retrieved, &rel), expected);
     }
 
@@ -379,12 +381,8 @@ mod tests {
         let retrieved = vec![id[2], id[1], id[0]];
         let grad = graded(&[(id[0], 3.0), (id[1], 2.0), (id[2], 1.0)]);
 
-        let dcg = 1.0_f64 / 2.0_f64.log2()
-            + 2.0_f64 / 3.0_f64.log2()
-            + 3.0_f64 / 4.0_f64.log2();
-        let idcg = 3.0_f64 / 2.0_f64.log2()
-            + 2.0_f64 / 3.0_f64.log2()
-            + 1.0_f64 / 4.0_f64.log2();
+        let dcg = 1.0_f64 / 2.0_f64.log2() + 2.0_f64 / 3.0_f64.log2() + 3.0_f64 / 4.0_f64.log2();
+        let idcg = 3.0_f64 / 2.0_f64.log2() + 2.0_f64 / 3.0_f64.log2() + 1.0_f64 / 4.0_f64.log2();
         approx(ndcg_at_k(&retrieved, &grad, 3), dcg / idcg);
     }
 
@@ -448,13 +446,16 @@ mod tests {
     #[test]
     fn compute_default_is_all_zero() {
         let m = Metrics::default();
-        assert_eq!(m, Metrics {
-            ndcg_at_k: 0.0,
-            recall_at_k: 0.0,
-            precision_at_k: 0.0,
-            mrr: 0.0,
-            p_at_1: 0.0,
-            map: 0.0,
-        });
+        assert_eq!(
+            m,
+            Metrics {
+                ndcg_at_k: 0.0,
+                recall_at_k: 0.0,
+                precision_at_k: 0.0,
+                mrr: 0.0,
+                p_at_1: 0.0,
+                map: 0.0,
+            }
+        );
     }
 }
