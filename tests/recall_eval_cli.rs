@@ -39,7 +39,13 @@ fn help_lists_every_public_flag() {
     );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    for flag in ["--suite", "--output", "--baseline", "--tolerance", "--storage"] {
+    for flag in [
+        "--suite",
+        "--output",
+        "--baseline",
+        "--tolerance",
+        "--storage",
+    ] {
         assert!(
             stdout.contains(flag),
             "--help output is missing {flag}\nfull stdout:\n{stdout}"
@@ -75,7 +81,12 @@ fn missing_output_flag_is_a_parse_error() {
 #[test]
 fn unknown_suite_is_a_parse_error() {
     let out = Command::new(recall_eval_bin())
-        .args(["--suite", "definitely-not-a-suite", "--output", "ignored.json"])
+        .args([
+            "--suite",
+            "definitely-not-a-suite",
+            "--output",
+            "ignored.json",
+        ])
         .output()
         .expect("spawning recall-eval with bogus suite");
 
@@ -97,12 +108,7 @@ fn unknown_suite_is_a_parse_error() {
 #[test]
 fn non_numeric_tolerance_is_a_parse_error() {
     let out = Command::new(recall_eval_bin())
-        .args([
-            "--output",
-            "ignored.json",
-            "--tolerance",
-            "not-a-number",
-        ])
+        .args(["--output", "ignored.json", "--tolerance", "not-a-number"])
         .output()
         .expect("spawning recall-eval with bogus tolerance");
 
