@@ -7,7 +7,10 @@
 //! Submodules are added incrementally as the project lands:
 //! - `metrics` — NDCG@k, recall@k, precision@k, MRR, P@1, MAP (RH-2)
 //! - `fixtures` — L1 smoke suite loader + structural validation (RH-3)
-//! - Future: `runner` (RH-4), `report` (RH-4)
+//! - `runner` — end-to-end smoke runner against `MemorySystem` (RH-4)
+//! - `report` — JSON schema + baseline comparison (RH-4)
 
 pub mod fixtures;
 pub mod metrics;
+pub mod report;
+pub mod runner;

@@ -94,6 +94,10 @@ path = "src/main.rs"
 name = "shodh"
 path = "src/cli.rs"
 
+[[bin]]
+name = "recall-eval"
+path = "src/bin/recall_eval.rs"
+
 [dependencies]
 # MCP Protocol
 rmcp = { version = "0.12", features = ["server", "macros", "transport-io"] }
