@@ -27,10 +27,13 @@ pub const SMOKE_CORPUS_ID: &str = "shodh-smoke";
 
 /// Required category counts in the L1 suite.
 ///
-/// Five cases per category, six categories — total 30. The constants are
+/// Eighteen cases per category, six categories — total 108. Grown from
+/// the original 5/cat to drop the per-case quantum (one rank flip in one
+/// case) from 3.33% to 0.93%, which is well below the 2% gate threshold.
+/// See RH-9 (issue #267 follow-up) for the rationale. The constants are
 /// asserted by `validate_smoke_suite` so adding or removing cases without
 /// rebalancing the categories fails CI.
-pub const CASES_PER_CATEGORY: usize = 5;
+pub const CASES_PER_CATEGORY: usize = 18;
 pub const TOTAL_SMOKE_CASES: usize = CASES_PER_CATEGORY * 6;
 
 /// One memory in the smoke corpus.
