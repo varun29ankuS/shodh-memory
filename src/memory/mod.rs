@@ -1249,7 +1249,11 @@ impl MemorySystem {
             let temporal_b = Self::calculate_temporal_relevance(age_days_b);
             let score_b = b.importance() * temporal_b;
 
-            score_b.total_cmp(&score_a)
+            // Score desc → recency desc → MemoryId asc for deterministic ordering.
+            score_b
+                .total_cmp(&score_a)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+                .then_with(|| a.id.cmp(&b.id))
         });
 
         memories.truncate(query.max_results);
@@ -2024,7 +2028,8 @@ impl MemorySystem {
                         )
                     })
                     .collect();
-                r.sort_by(|a, b| b.1.total_cmp(&a.1));
+                // Score desc; tie-break by MemoryId asc for deterministic graph candidate order.
+                r.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 r.truncate(200);
                 if !r.is_empty() {
                     tracing::debug!(
@@ -2557,7 +2562,11 @@ impl MemorySystem {
             // Only look up graph entities for the top 2x max_results candidates,
             // not all fused results (avoids 100s of RocksDB reads).
             let mut res: Vec<_> = fused.into_iter().collect();
-            res.sort_by(|a, b| b.1.total_cmp(&a.1));
+            // Score desc; tie-break by MemoryId for stable rerank-budget cutoff.
+            // The cutoff at `rerank_budget` makes order at the boundary semantically
+            // important — without tie-break, equal-score boundary candidates can swap
+            // in/out of the rerank window across runs.
+            res.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             let rerank_budget = query.max_results * 2;
 
             if use_ontology_rerank && !onto_intent.expected_labels.is_empty() {
@@ -2609,8 +2618,9 @@ impl MemorySystem {
                             onto_intent.expected_labels
                         );
                     }
-                    // Re-sort after boosting since ranks may have changed
-                    res.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    // Re-sort after boosting since ranks may have changed.
+                    // Tie-break by MemoryId — same rationale as the pre-rerank sort above.
+                    res.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 }
             }
 
@@ -2997,7 +3007,11 @@ impl MemorySystem {
                     + Self::linguistic_boost(&a.experience.content, &query_analysis) * 0.05;
                 let score_b = b.score.unwrap_or(0.0)
                     + Self::linguistic_boost(&b.experience.content, &query_analysis) * 0.05;
-                score_b.total_cmp(&score_a)
+                // Score desc → recency desc → MemoryId asc for stable rank order.
+                score_b
+                    .total_cmp(&score_a)
+                    .then_with(|| b.created_at.cmp(&a.created_at))
+                    .then_with(|| a.id.cmp(&b.id))
             });
         }
 
@@ -3124,7 +3138,14 @@ impl MemorySystem {
         // Re-sort by score and trim to max_results after expansion.
         // Expanded memories must compete on score, not get a free pass.
         if memories.len() > query.max_results {
-            memories.sort_by(|a, b| b.score.unwrap_or(0.0).total_cmp(&a.score.unwrap_or(0.0)));
+            // Score desc → recency desc → MemoryId asc — deterministic competition cutoff.
+            memories.sort_by(|a, b| {
+                b.score
+                    .unwrap_or(0.0)
+                    .total_cmp(&a.score.unwrap_or(0.0))
+                    .then_with(|| b.created_at.cmp(&a.created_at))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
             memories.truncate(query.max_results);
         }
 
@@ -3151,7 +3172,12 @@ impl MemorySystem {
                     .filter(|(id, _)| final_ids.contains(id))
                     .map(|(_, attr)| attr)
                     .collect();
-                attrs.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
+                // Tie-break by memory_id so attribution rows have a stable order across runs.
+                attrs.sort_by(|a, b| {
+                    b.final_score
+                        .total_cmp(&a.final_score)
+                        .then_with(|| a.memory_id.cmp(&b.memory_id))
+                });
                 s.score_attributions = Some(attrs);
             }
         }

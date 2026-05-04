@@ -908,9 +908,11 @@ impl RetrievalEngine {
             }
         }
 
-        // Convert to vec and sort by similarity descending (highest first)
+        // Convert to vec and sort by similarity descending (highest first).
+        // Tie-break by MemoryId for deterministic rank order across runs/CPUs.
+        // (created_at is unavailable here — we only have ids + scores.)
         let mut memory_ids: Vec<(MemoryId, f32)> = best_scores.into_iter().collect();
-        memory_ids.sort_by(|a, b| b.1.total_cmp(&a.1));
+        memory_ids.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         memory_ids.truncate(limit);
 
         Ok(memory_ids)
@@ -974,9 +976,10 @@ impl RetrievalEngine {
             }
         }
 
-        // Convert to vec and sort by similarity descending (highest first)
+        // Convert to vec and sort by similarity descending (highest first).
+        // Tie-break by MemoryId for deterministic rank order across runs/CPUs.
         let mut memory_ids: Vec<(MemoryId, f32)> = best_scores.into_iter().collect();
-        memory_ids.sort_by(|a, b| b.1.total_cmp(&a.1));
+        memory_ids.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         memory_ids.truncate(limit);
 
         Ok(memory_ids)
@@ -1109,10 +1112,13 @@ impl RetrievalEngine {
                     .as_ref()
                     .and_then(|c| c.episode.sequence_number)
                     .unwrap_or(0);
-                seq_a.cmp(&seq_b)
+                // Tie-break by MemoryId so memories without sequence_number
+                // (both unwrap to 0) still produce a stable order.
+                seq_a.cmp(&seq_b).then_with(|| a.id.cmp(&b.id))
             });
         } else {
-            memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            // Newest first; tie-break by MemoryId on identical timestamps.
+            memories.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
         }
 
         memories.truncate(limit);
@@ -1211,7 +1217,14 @@ impl RetrievalEngine {
             })
             .collect();
 
-        sorted.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // Score desc → recency desc → MemoryId asc. Two layers of tie-break:
+        // recency carries product meaning ("newer wins on equal score"), id is the
+        // deterministic backstop for nanosecond-collision timestamps.
+        sorted.sort_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then_with(|| b.1.created_at.cmp(&a.1.created_at))
+                .then_with(|| a.1.id.cmp(&b.1.id))
+        });
 
         Ok(sorted.into_iter().take(limit).map(|(_, m)| m).collect())
     }
@@ -1244,7 +1257,7 @@ impl RetrievalEngine {
         // Apply additional filters
         memories.retain(|m| self.matches_filters(m, query));
 
-        // Sort by distance (closest first)
+        // Sort by distance (closest first), tie-break by recency then id for determinism.
         memories.sort_by(|a, b| {
             let dist_a = match a.experience.geo_location {
                 Some(geo) => geo_filter.haversine_distance(geo[0], geo[1]),
@@ -1254,7 +1267,10 @@ impl RetrievalEngine {
                 Some(geo) => geo_filter.haversine_distance(geo[0], geo[1]),
                 None => f64::MAX,
             };
-            dist_a.total_cmp(&dist_b)
+            dist_a
+                .total_cmp(&dist_b)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+                .then_with(|| a.id.cmp(&b.id))
         });
 
         memories.truncate(limit);
@@ -1281,8 +1297,8 @@ impl RetrievalEngine {
         // Apply additional filters
         memories.retain(|m| self.matches_filters(m, query));
 
-        // Sort by timestamp (chronological order for mission replay)
-        memories.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        // Sort by timestamp (chronological order for mission replay), tie-break by id.
+        memories.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
 
         memories.truncate(limit);
         Ok(memories)
@@ -1309,11 +1325,15 @@ impl RetrievalEngine {
         // Apply additional filters (action_type, robot_id, etc.)
         memories.retain(|m| self.matches_filters(m, query));
 
-        // Sort by reward (highest first for learning from best outcomes)
+        // Sort by reward (highest first for learning from best outcomes).
+        // Tie-break: recency desc, then id asc — deterministic across runs.
         memories.sort_by(|a, b| {
             let reward_a = a.experience.reward.unwrap_or(0.0);
             let reward_b = b.experience.reward.unwrap_or(0.0);
-            reward_b.total_cmp(&reward_a)
+            reward_b
+                .total_cmp(&reward_a)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+                .then_with(|| a.id.cmp(&b.id))
         });
 
         memories.truncate(limit);
