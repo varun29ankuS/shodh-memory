@@ -457,8 +457,9 @@ impl CompressedVectorStore {
             .map(|(&id, codes)| (id, self.quantizer.distance_with_table(&table, codes)))
             .collect();
 
-        // Sort by distance and take top k
-        distances.sort_by(|a, b| a.1.total_cmp(&b.1));
+        // Sort by distance and take top k. Tie-break by id makes order deterministic
+        // even though `self.codes` (HashMap) yields entries in arbitrary order.
+        distances.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         distances.truncate(k);
 
         Ok(distances)
