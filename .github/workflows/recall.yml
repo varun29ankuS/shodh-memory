@@ -1,0 +1,182 @@
+name: Recall Harness
+
+# RH-5 (#267): gate PRs on retrieval-quality regressions against the
+# checked-in `tests/recall/baseline.json`. The `recall-eval` binary owns
+# the comparison and exit code; this workflow's job is just to:
+#
+#   1. Build the binary (release).
+#   2. Run the smoke suite with `--baseline tests/recall/baseline.json`.
+#   3. Render a markdown diff table.
+#   4. Post that table as a PR comment (idempotent — edits its own prior
+#      comment instead of stacking).
+#   5. Upload the JSON report as an artifact for offline inspection.
+#
+# Runtime budget: cold ~12 min (LLVM + cold release build), warm ~3-4 min.
+# The "<2 min" target in #267 is unrealistic without building on a
+# dedicated runner — flagged in the PR description.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/recall/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/recall.yml'
+      - 'scripts/recall_diff.py'
+  workflow_dispatch:
+    inputs:
+      tolerance:
+        description: 'Allowed regression in percent of baseline'
+        required: false
+        default: '2.0'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: recall-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  TOLERANCE: ${{ github.event.inputs.tolerance || '2.0' }}
+
+jobs:
+  smoke:
+    name: L1 Smoke Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+          # Cache the recall-eval binary specifically; debug profile is unused here.
+          cache-targets: 'true'
+          cache-on-failure: 'true'
+
+      - name: Install LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Verify baseline is checked in
+        run: |
+          if [ ! -f tests/recall/baseline.json ]; then
+            echo "::error::tests/recall/baseline.json is missing — see tests/recall/README.md to regenerate."
+            exit 1
+          fi
+          BASELINE_SHA=$(jq -r '.git_sha' tests/recall/baseline.json)
+          BASELINE_EMBEDDER=$(jq -r '.embedder' tests/recall/baseline.json)
+          echo "Baseline: sha=$BASELINE_SHA embedder=$BASELINE_EMBEDDER"
+          echo "BASELINE_SHA=$BASELINE_SHA" >> $GITHUB_ENV
+          echo "BASELINE_EMBEDDER=$BASELINE_EMBEDDER" >> $GITHUB_ENV
+
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+
+      - name: Run L1 smoke suite vs. baseline
+        id: run_eval
+        run: |
+          set +e
+          ./target/release/recall-eval \
+            --suite smoke \
+            --output current.json \
+            --baseline tests/recall/baseline.json \
+            --tolerance "${TOLERANCE}" \
+            --storage ./recall-storage 2>&1 | tee recall-eval.log
+          EXIT=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$EXIT" >> $GITHUB_OUTPUT
+          # Don't fail the job yet — we want the comment-posting step to run first
+          # so reviewers see the diff even on regression.
+          exit 0
+
+      - name: Render diff table
+        id: render
+        if: always() && hashFiles('current.json') != ''
+        run: |
+          python3 scripts/recall_diff.py \
+            tests/recall/baseline.json \
+            current.json \
+            --tolerance "${TOLERANCE}" > recall-diff.md
+          {
+            echo 'body<<RECALL_DIFF_EOF'
+            cat recall-diff.md
+            echo 'RECALL_DIFF_EOF'
+          } >> "$GITHUB_OUTPUT"
+          cat recall-diff.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload JSON report
+        if: always() && hashFiles('current.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: recall-eval-report
+          path: |
+            current.json
+            recall-eval.log
+            recall-diff.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Post or update PR comment
+        if: |
+          always()
+          && github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && hashFiles('recall-diff.md') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Stable HTML-comment marker rendered by `scripts/recall_diff.py`
+          # (kept in sync with `COMMENT_MARKER` in that file). Plain ASCII
+          # so it survives shell quoting unchanged.
+          MARKER: '<!-- recall-harness-comment-marker:rh-5 -->'
+        run: |
+          # Find an existing comment by this workflow (identified by the
+          # marker line) and edit it; otherwise create a new one. Keeps
+          # noisy PRs from accumulating one comment per push.
+          EXISTING_ID=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --paginate \
+            | jq --arg marker "$MARKER" '.[] | select(.body | contains($marker)) | .id' \
+            | head -n1)
+          if [ -n "$EXISTING_ID" ]; then
+            echo "Editing existing comment $EXISTING_ID"
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING_ID}" \
+              -F body="@recall-diff.md"
+          else
+            echo "Creating new PR comment"
+            gh pr comment "$PR_NUMBER" --body-file recall-diff.md
+          fi
+
+      - name: Enforce gate
+        if: always()
+        env:
+          EXIT: ${{ steps.run_eval.outputs.exit_code }}
+        run: |
+          case "$EXIT" in
+            0)
+              echo "::notice::Recall gate passed within ${TOLERANCE}% tolerance."
+              ;;
+            1)
+              echo "::error::Recall regression detected — see PR comment / artifact for details."
+              exit 1
+              ;;
+            2)
+              echo "::error::Recall harness infrastructure failure — see recall-eval.log artifact."
+              exit 1
+              ;;
+            *)
+              echo "::error::recall-eval exited with unexpected code $EXIT."
+              exit 1
+              ;;
+          esac
