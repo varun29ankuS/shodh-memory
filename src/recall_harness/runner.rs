@@ -239,9 +239,20 @@ mod tests {
 
     /// Smoke test the full runner end-to-end against the canonical fixtures.
     ///
-    /// Asserts only that the report is well-formed: 30 cases, six categories
-    /// represented, full layer present. Quality numbers themselves are
-    /// captured by RH-6 baseline runs, not by unit tests.
+    /// Asserts only that the report is well-formed: a non-trivial number of
+    /// cases (>=100, as required by RH-9 to drive the per-case quantum
+    /// below 1%), six categories represented with balanced membership, and
+    /// the `full` layer present. Quality numbers themselves are captured
+    /// by RH-6 baseline runs, not by unit tests.
+    ///
+    /// We deliberately avoid hard-coding the corpus size (e.g. `== 108`)
+    /// because the fixture is expected to grow. Instead we assert the
+    /// structural invariants that gate downstream tooling:
+    ///
+    /// 1. `case_count` is at least the RH-9 floor of 100.
+    /// 2. The runner walked every fixture case (no silent drops).
+    /// 3. Per-category counts are balanced — `case_count / 6` per
+    ///    category, ±0 — so per-category aggregates remain comparable.
     #[test]
     fn runner_executes_smoke_suite_and_produces_well_formed_report() {
         let storage = unique_storage_dir("runner");
@@ -255,23 +266,48 @@ mod tests {
         let report = run_smoke_suite(&inputs).expect("runner must succeed");
         let _ = std::fs::remove_dir_all(&storage);
 
-        assert_eq!(report.case_count, 30);
+        // RH-9 floor: corpus must be ≥100 cases so per-case quantum
+        // (1/N) is < 1%. Anything smaller and a single case flip
+        // dominates the noise floor, defeating the gating signal.
+        assert!(
+            report.case_count >= 100,
+            "RH-9 requires ≥100 smoke cases (got {})",
+            report.case_count
+        );
         assert_eq!(report.suite, "smoke");
         assert_eq!(report.embedder, EMBEDDER_ID);
         assert!(report.layers.contains_key("full"));
-        for cat in [
+
+        let categories = [
             "decision",
             "code",
             "temporal",
             "entity",
             "multi_hop",
             "negation",
-        ] {
+        ];
+        // Balanced fixture: total / 6 per category, exact. If the fixture
+        // ever becomes uneven this asserts deliberately so the imbalance
+        // is reviewed (uneven categories skew per-category aggregates).
+        assert_eq!(
+            report.case_count % categories.len(),
+            0,
+            "case_count ({}) must be divisible by category count ({}) — \
+             fixture is unbalanced",
+            report.case_count,
+            categories.len()
+        );
+        let per_category = report.case_count / categories.len();
+        for cat in categories {
             let cr = report
                 .by_category
                 .get(cat)
                 .expect("category must be present");
-            assert_eq!(cr.case_count, 5, "category {cat} must have 5 cases");
+            assert_eq!(
+                cr.case_count, per_category,
+                "category {cat} must have {per_category} cases (got {})",
+                cr.case_count
+            );
         }
         // No infrastructure-level failures expected on the canonical fixtures.
         assert!(
