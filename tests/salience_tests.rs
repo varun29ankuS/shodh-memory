@@ -62,6 +62,7 @@ fn create_entity(
         name_embedding: None,
         salience: base_salience,
         is_proper_noun: is_proper,
+        selectivity: None,
     }
 }
 
