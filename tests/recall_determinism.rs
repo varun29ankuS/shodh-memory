@@ -54,10 +54,10 @@ fn run_inputs(tag: &str) -> RunInputs {
 /// patch the assertion — find the source of non-determinism and fix it.
 #[test]
 fn smoke_suite_produces_byte_identical_rank_lists_across_runs() {
-    let run1 = run_smoke_suite_with_ranks(&run_inputs("a"))
-        .expect("first smoke run should succeed");
-    let run2 = run_smoke_suite_with_ranks(&run_inputs("b"))
-        .expect("second smoke run should succeed");
+    let run1 =
+        run_smoke_suite_with_ranks(&run_inputs("a")).expect("first smoke run should succeed");
+    let run2 =
+        run_smoke_suite_with_ranks(&run_inputs("b")).expect("second smoke run should succeed");
 
     assert_eq!(
         run1.ranks.len(),
@@ -108,10 +108,10 @@ fn smoke_suite_produces_byte_identical_rank_lists_across_runs() {
 /// `HashMap` iteration order instead of fixture order.
 #[test]
 fn smoke_suite_produces_byte_identical_metrics_across_runs() {
-    let run1 = run_smoke_suite_with_ranks(&run_inputs("m1"))
-        .expect("first smoke run should succeed");
-    let run2 = run_smoke_suite_with_ranks(&run_inputs("m2"))
-        .expect("second smoke run should succeed");
+    let run1 =
+        run_smoke_suite_with_ranks(&run_inputs("m1")).expect("first smoke run should succeed");
+    let run2 =
+        run_smoke_suite_with_ranks(&run_inputs("m2")).expect("second smoke run should succeed");
 
     // Compare every gating metric of the `full` layer with bit-exact
     // equality. Latency and timestamp are excluded — they are wall-clock
@@ -127,8 +127,16 @@ fn smoke_suite_produces_byte_identical_metrics_across_runs() {
         .get("full")
         .expect("run2 must emit a `full` layer");
 
-    assert_eq!(full1.ndcg_at_10.to_bits(), full2.ndcg_at_10.to_bits(), "ndcg@10");
-    assert_eq!(full1.recall_at_10.to_bits(), full2.recall_at_10.to_bits(), "recall@10");
+    assert_eq!(
+        full1.ndcg_at_10.to_bits(),
+        full2.ndcg_at_10.to_bits(),
+        "ndcg@10"
+    );
+    assert_eq!(
+        full1.recall_at_10.to_bits(),
+        full2.recall_at_10.to_bits(),
+        "recall@10"
+    );
     assert_eq!(
         full1.precision_at_10.to_bits(),
         full2.precision_at_10.to_bits(),
@@ -150,8 +158,18 @@ fn smoke_suite_produces_byte_identical_metrics_across_runs() {
             .by_category
             .get(cat)
             .unwrap_or_else(|| panic!("run2 missing category `{}`", cat));
-        assert_eq!(c1.ndcg_at_10.to_bits(), c2.ndcg_at_10.to_bits(), "{} ndcg@10", cat);
-        assert_eq!(c1.recall_at_10.to_bits(), c2.recall_at_10.to_bits(), "{} recall@10", cat);
+        assert_eq!(
+            c1.ndcg_at_10.to_bits(),
+            c2.ndcg_at_10.to_bits(),
+            "{} ndcg@10",
+            cat
+        );
+        assert_eq!(
+            c1.recall_at_10.to_bits(),
+            c2.recall_at_10.to_bits(),
+            "{} recall@10",
+            cat
+        );
         assert_eq!(c1.mrr.to_bits(), c2.mrr.to_bits(), "{} mrr", cat);
         assert_eq!(c1.p_at_1.to_bits(), c2.p_at_1.to_bits(), "{} p@1", cat);
         assert_eq!(c1.map.to_bits(), c2.map.to_bits(), "{} map", cat);

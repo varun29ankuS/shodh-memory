@@ -1118,7 +1118,11 @@ impl RetrievalEngine {
             });
         } else {
             // Newest first; tie-break by MemoryId on identical timestamps.
-            memories.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+            memories.sort_by(|a, b| {
+                b.created_at
+                    .cmp(&a.created_at)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
         }
 
         memories.truncate(limit);
@@ -1298,7 +1302,11 @@ impl RetrievalEngine {
         memories.retain(|m| self.matches_filters(m, query));
 
         // Sort by timestamp (chronological order for mission replay), tie-break by id.
-        memories.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+        memories.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
 
         memories.truncate(limit);
         Ok(memories)
