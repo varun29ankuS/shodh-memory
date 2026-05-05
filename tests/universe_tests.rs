@@ -51,6 +51,7 @@ fn create_entity_from_ner(
         name_embedding: None,
         salience,
         is_proper_noun: is_proper,
+        selectivity: None,
     }
 }
 
@@ -80,6 +81,7 @@ fn create_entity(
         name_embedding: None,
         salience,
         is_proper_noun: is_proper,
+        selectivity: None,
     }
 }
 
@@ -108,6 +110,8 @@ fn create_relationship(
         tier: EdgeTier::L1Working,
         activation_timestamps: None,
         entity_confidence: None,
+        endpoint_selectivity: None,
+        forman_curvature: None,
     }
 }
 
