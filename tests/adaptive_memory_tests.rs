@@ -985,10 +985,12 @@ fn test_reinforcement_stats_structure() {
     let stats = ReinforcementStats {
         memories_processed: 5,
         associations_strengthened: 10,
+        entity_edges_reinforced: 0,
         importance_boosts: 3,
         importance_decays: 2,
         outcome: RetrievalOutcome::Helpful,
         persist_failures: 0,
+        prediction_error_multiplier: 1.0,
     };
 
     assert_eq!(stats.memories_processed, 5);
