@@ -47,6 +47,34 @@ pub struct RunInputs {
     pub git_sha: String,
 }
 
+/// One case's retrieved rank list, in score-descending order.
+///
+/// Used by the determinism gate (RH-11) to assert byte-identical
+/// rank lists across consecutive runs of the same suite.
+///
+/// `retrieved` holds **corpus item IDs** (stable string handles from the
+/// fixture), not the random UUIDs assigned by `MemorySystem::remember`.
+/// UUIDs are freshly generated per ingest and therefore differ across
+/// runs even when the rank order is byte-identical; comparing them would
+/// guarantee a false negative. Items that were retrieved but do not
+/// belong to the corpus (e.g. system-injected memories) are emitted as
+/// `"<unknown:...>"` sentinels so divergence in those slots is still
+/// observable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseRankList {
+    pub case_id: String,
+    pub retrieved: Vec<String>,
+}
+
+/// Wrapper around [`Report`] plus the per-case rank lists. Returned by
+/// [`run_smoke_suite_with_ranks`]; the ranks are stripped by the public
+/// [`run_smoke_suite`] wrapper to preserve the simpler caller contract.
+#[derive(Debug, Clone)]
+pub struct ReportWithRanks {
+    pub report: Report,
+    pub ranks: Vec<CaseRankList>,
+}
+
 /// Run the smoke suite end-to-end and return a populated [`Report`].
 ///
 /// On infrastructure errors (corpus parse failure, system init failure,
@@ -54,6 +82,16 @@ pub struct RunInputs {
 /// recorded as `Failure { kind = "case", .. }` entries so a single broken
 /// query does not abort the whole run.
 pub fn run_smoke_suite(inputs: &RunInputs) -> Result<Report> {
+    run_smoke_suite_with_ranks(inputs).map(|rwr| rwr.report)
+}
+
+/// Same as [`run_smoke_suite`] but also returns the per-case rank lists.
+///
+/// Exists for the RH-11 determinism gate: two consecutive calls with
+/// identical inputs must return byte-identical [`CaseRankList`]s. If they
+/// don't, there is a non-deterministic source somewhere in the retrieval
+/// pipeline that the tie-break + thread pinning failed to cover.
+pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks> {
     // ------------------------------------------------------------------
     // Determinism: pin every parallel runtime to a single thread before
     // any work touches ONNX or rayon. Multi-threaded float reductions
@@ -89,11 +127,20 @@ pub fn run_smoke_suite(inputs: &RunInputs) -> Result<Report> {
 
     let system = build_system(&inputs.storage_path)?;
     let id_map = ingest_corpus(&system, &corpus)?;
+    // Reverse map: random per-run UUIDs → stable corpus item IDs. The
+    // determinism gate (RH-11) compares rank lists across runs, so we MUST
+    // emit stable handles. Comparing UUIDs would always diverge because
+    // each ingest assigns a fresh `Uuid::new_v4()`.
+    let uuid_to_corpus_id: HashMap<Uuid, String> = id_map
+        .iter()
+        .map(|(corpus_id, uuid)| (*uuid, corpus_id.clone()))
+        .collect();
 
     let mut per_case = Vec::with_capacity(cases.len());
     let mut latencies_ms = Vec::with_capacity(cases.len());
     let mut by_category_cases: HashMap<SmokeCategory, Vec<Metrics>> = HashMap::new();
     let mut failures: Vec<Failure> = Vec::new();
+    let mut ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
 
     for case in &cases {
         let query = Query {
@@ -120,6 +167,24 @@ pub fn run_smoke_suite(inputs: &RunInputs) -> Result<Report> {
         };
 
         let retrieved_uuids: Vec<Uuid> = memories.iter().map(|m| m.id.0).collect();
+        // Translate to stable corpus IDs for the determinism gate. Items
+        // that were not part of the ingested corpus (defensive: should
+        // never happen on a fresh harness storage dir) are surfaced as
+        // `<unknown:UUID>` so any divergence in those slots is still
+        // observable instead of silently masked by a string fallback.
+        let retrieved_corpus_ids: Vec<String> = retrieved_uuids
+            .iter()
+            .map(|u| {
+                uuid_to_corpus_id
+                    .get(u)
+                    .cloned()
+                    .unwrap_or_else(|| format!("<unknown:{u}>"))
+            })
+            .collect();
+        ranks.push(CaseRankList {
+            case_id: case.id.clone(),
+            retrieved: retrieved_corpus_ids,
+        });
         let relevance = build_relevance_map(case, &id_map);
 
         if relevance.is_empty() {
@@ -153,7 +218,7 @@ pub fn run_smoke_suite(inputs: &RunInputs) -> Result<Report> {
         );
     }
 
-    Ok(Report {
+    let report = Report {
         suite: inputs.suite.clone(),
         embedder: EMBEDDER_ID.to_string(),
         git_sha: inputs.git_sha.clone(),
@@ -162,7 +227,9 @@ pub fn run_smoke_suite(inputs: &RunInputs) -> Result<Report> {
         by_category,
         case_count: cases.len(),
         failures,
-    })
+    };
+
+    Ok(ReportWithRanks { report, ranks })
 }
 
 /// Pin parallel runtimes to a single thread for the harness process.
