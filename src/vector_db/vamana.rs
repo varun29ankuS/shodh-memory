@@ -923,7 +923,8 @@ impl VamanaIndex {
                         .collect();
 
                     // Sort by distance (lower = closer for all metrics), tie-break by id
-                    neighbor_distances.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+                    neighbor_distances
+                        .sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
                     // Keep only max_degree closest neighbors
                     graph[neighbor_id as usize].neighbors = neighbor_distances
