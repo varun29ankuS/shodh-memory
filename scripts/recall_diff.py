@@ -23,6 +23,9 @@ from typing import Any
 GATING_METRICS = ("ndcg@10", "recall@10", "mrr", "p@1")
 INFO_METRICS = ("map", "precision@10")
 LATENCY_METRICS = ("latency_p50_ms", "latency_p95_ms", "latency_p99_ms")
+# RH-12 (#272): per-case median latency distribution stats. Absent on
+# pre-RH-12 reports, so the renderer skips them when both sides are zero.
+LATENCY_DIST_METRICS = ("latency_min_ms", "latency_max_ms", "latency_iqr_ms")
 
 
 def load_report(path: Path) -> dict[str, Any]:
@@ -71,6 +74,13 @@ def render(baseline: dict[str, Any], current: dict[str, Any], tolerance_pct: flo
         f"current `{current.get('git_sha', '?')[:7]}` "
         f"({current.get('embedder', '?')}) · tolerance **{tolerance_pct:.1f}%**"
     )
+    base_repeats = baseline.get("repeats", 1)
+    cur_repeats = current.get("repeats", 1)
+    lines.append(
+        f"Repeats: baseline **{base_repeats}** → current **{cur_repeats}** "
+        f"(per-case latency is the median across repeats; rank lists must "
+        f"be byte-identical across all repeats — see RH-12, #272)"
+    )
     lines.append("")
 
     base_full = baseline.get("layers", {}).get("full", {})
@@ -99,6 +109,17 @@ def render(baseline: dict[str, Any], current: dict[str, Any], tolerance_pct: flo
     lines.append("| ------ | ------------------------- |")
     for m in LATENCY_METRICS:
         lines.append(f"| `{m}` | {fmt_latency(base_full.get(m, 0.0), cur_full.get(m, 0.0))} |")
+    # RH-12 distribution stats: only render when at least one side reports
+    # them, so old baselines (all zeros) don't pollute the table.
+    has_dist_stats = any(
+        base_full.get(m, 0.0) != 0.0 or cur_full.get(m, 0.0) != 0.0
+        for m in LATENCY_DIST_METRICS
+    )
+    if has_dist_stats:
+        for m in LATENCY_DIST_METRICS:
+            lines.append(
+                f"| `{m}` | {fmt_latency(base_full.get(m, 0.0), cur_full.get(m, 0.0))} |"
+            )
     lines.append("")
 
     base_cats = baseline.get("by_category", {})

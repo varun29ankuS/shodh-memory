@@ -48,7 +48,10 @@ jobs:
   smoke:
     name: L1 Smoke Suite
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # RH-12 (#272): with --repeats 5 the suite runs 5 independent
+    # ingest+query passes (~5-6min each on a warm runner) plus build.
+    # 60min keeps headroom for cold builds and unusually slow runners.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -85,8 +88,12 @@ jobs:
         id: run_eval
         run: |
           set +e
+          # RH-12 (#272): --repeats 5 → per-case latency is the median
+          # across 5 independent ingest+query passes; rank-list divergence
+          # across passes is hard-failed as `infrastructure`.
           ./target/release/recall-eval \
             --suite smoke \
+            --repeats 5 \
             --output current.json \
             --baseline tests/recall/baseline.json \
             --tolerance "${TOLERANCE}" \

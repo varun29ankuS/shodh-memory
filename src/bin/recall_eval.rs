@@ -71,6 +71,17 @@ struct Args {
     /// kept on disk so a failed run can be inspected.
     #[arg(long)]
     storage: Option<PathBuf>,
+
+    /// Number of independent ingest+query repeats. RH-12 (#272). Each
+    /// repeat stands up its own `MemorySystem` against a fresh storage
+    /// subdirectory, ingests the corpus, and runs every case. Per-case
+    /// latency in the report is the median across repeats; quality
+    /// metrics (ndcg/recall/mrr/p@1/map) MUST be byte-identical across
+    /// repeats — any divergence fails the run with `EXIT_INFRASTRUCTURE`.
+    /// Default `5` is the smallest N that survives a single outlier and
+    /// still produces a true median for IQR calculation.
+    #[arg(long, default_value_t = 5)]
+    repeats: usize,
 }
 
 fn main() {
@@ -99,6 +110,7 @@ fn run(args: &Args) -> Result<i32> {
         cases_path: None,
         suite: args.suite.as_str().to_string(),
         git_sha,
+        repeats: args.repeats,
     };
 
     let mut report = run_smoke_suite(&inputs).context("running smoke suite")?;
@@ -156,8 +168,8 @@ fn write_report(path: &std::path::Path, report: &Report) -> Result<()> {
 fn summarise(report: &Report) {
     let full = report.layers.get("full");
     eprintln!(
-        "recall-eval: suite={} cases={} embedder={} sha={}",
-        report.suite, report.case_count, report.embedder, report.git_sha
+        "recall-eval: suite={} cases={} repeats={} embedder={} sha={}",
+        report.suite, report.case_count, report.repeats, report.embedder, report.git_sha
     );
     if let Some(layer) = full {
         eprintln!(
@@ -165,8 +177,12 @@ fn summarise(report: &Report) {
             layer.ndcg_at_10, layer.recall_at_10, layer.mrr, layer.p_at_1, layer.map
         );
         eprintln!(
-            "  latency p50={:.1}ms p95={:.1}ms p99={:.1}ms",
+            "  latency p50={:.1}ms p95={:.1}ms p99={:.1}ms (per-case median)",
             layer.latency_p50_ms, layer.latency_p95_ms, layer.latency_p99_ms
+        );
+        eprintln!(
+            "  latency min={:.1}ms max={:.1}ms iqr={:.1}ms",
+            layer.latency_min_ms, layer.latency_max_ms, layer.latency_iqr_ms
         );
     }
     for (name, cat) in &report.by_category {

@@ -34,8 +34,20 @@ pub struct Report {
     pub by_category: BTreeMap<String, CategoryReport>,
     /// Total number of cases run.
     pub case_count: usize,
+    /// Number of independent ingest+query passes the report aggregates over.
+    /// RH-12 (#272). For each case, latency is the median across this many
+    /// samples; quality metrics are taken from the first repeat after a
+    /// determinism check confirms identical rank lists across all repeats.
+    /// Defaults to `1` when reading reports written before RH-12 landed so
+    /// older baselines remain parseable.
+    #[serde(default = "default_repeats")]
+    pub repeats: usize,
     /// Cases or metrics that failed validation or regression.
     pub failures: Vec<Failure>,
+}
+
+fn default_repeats() -> usize {
+    1
 }
 
 /// Aggregate metrics for one pipeline layer across all cases.
@@ -54,6 +66,20 @@ pub struct LayerReport {
     pub latency_p50_ms: f64,
     pub latency_p95_ms: f64,
     pub latency_p99_ms: f64,
+    /// Smallest per-case median latency (ms) across the suite.
+    /// Defaults to `0.0` for back-compat with pre-RH-12 reports where
+    /// the field was absent. RH-12 (#272).
+    #[serde(default)]
+    pub latency_min_ms: f64,
+    /// Largest per-case median latency (ms) across the suite.
+    /// Defaults to `0.0` for back-compat. RH-12 (#272).
+    #[serde(default)]
+    pub latency_max_ms: f64,
+    /// Inter-quartile range (p75 − p25) of per-case median latencies.
+    /// A small IQR with stable medians is the signal we want; a wide IQR
+    /// means our timing is dominated by hardware noise. RH-12 (#272).
+    #[serde(default)]
+    pub latency_iqr_ms: f64,
 }
 
 /// Aggregate metrics for one category — same fields as `LayerReport` minus
@@ -103,6 +129,44 @@ pub fn latency_percentiles(samples: &[f64]) -> (f64, f64, f64) {
     )
 }
 
+/// Compute the median of a slice of f64 samples.
+///
+/// For odd-length slices returns the middle element. For even-length slices
+/// returns the arithmetic mean of the two middle elements (continuous
+/// median). Returns `0.0` for empty input — callers that care about
+/// emptiness handle it before calling.
+pub fn median(samples: &[f64]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let n = sorted.len();
+    if n.is_multiple_of(2) {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    } else {
+        sorted[n / 2]
+    }
+}
+
+/// Compute (min, max, iqr) over per-case median latencies.
+///
+/// IQR is `p75 − p25` using nearest-rank, matching the rest of the harness.
+/// Returns `(0.0, 0.0, 0.0)` for empty input. The trio is reported alongside
+/// p50/p95/p99 so reviewers can spot a tight median masking a wide spread —
+/// the exact failure mode RH-12 was opened to surface (issue #272).
+pub fn latency_distribution_stats(per_case_medians: &[f64]) -> (f64, f64, f64) {
+    if per_case_medians.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let mut sorted = per_case_medians.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let min = sorted[0];
+    let max = sorted[sorted.len() - 1];
+    let iqr = nearest_rank(&sorted, 0.75) - nearest_rank(&sorted, 0.25);
+    (min, max, iqr)
+}
+
 fn nearest_rank(sorted: &[f64], p: f64) -> f64 {
     debug_assert!(!sorted.is_empty(), "caller checks emptiness");
     debug_assert!((0.0..=1.0).contains(&p), "p must be in [0,1]");
@@ -115,6 +179,10 @@ fn nearest_rank(sorted: &[f64], p: f64) -> f64 {
 }
 
 /// Aggregate per-case metrics into a [`LayerReport`] (mean of each metric).
+///
+/// `latencies_ms` is the per-case representative latency — under RH-12 this
+/// is the median across `repeats` independent runs, not a raw sample. The
+/// percentile and distribution stats are computed over the same slice.
 pub fn aggregate_layer(per_case: &[Metrics], latencies_ms: &[f64]) -> LayerReport {
     let n = per_case.len() as f64;
     let mean = |sel: fn(&Metrics) -> f64| -> f64 {
@@ -125,6 +193,7 @@ pub fn aggregate_layer(per_case: &[Metrics], latencies_ms: &[f64]) -> LayerRepor
         }
     };
     let (p50, p95, p99) = latency_percentiles(latencies_ms);
+    let (lat_min, lat_max, lat_iqr) = latency_distribution_stats(latencies_ms);
     LayerReport {
         ndcg_at_10: mean(|m| m.ndcg_at_k),
         recall_at_10: mean(|m| m.recall_at_k),
@@ -135,6 +204,9 @@ pub fn aggregate_layer(per_case: &[Metrics], latencies_ms: &[f64]) -> LayerRepor
         latency_p50_ms: p50,
         latency_p95_ms: p95,
         latency_p99_ms: p99,
+        latency_min_ms: lat_min,
+        latency_max_ms: lat_max,
+        latency_iqr_ms: lat_iqr,
     }
 }
 
@@ -285,6 +357,9 @@ mod tests {
                 latency_p50_ms: 0.0,
                 latency_p95_ms: 0.0,
                 latency_p99_ms: 0.0,
+                latency_min_ms: 0.0,
+                latency_max_ms: 0.0,
+                latency_iqr_ms: 0.0,
             },
         );
         Report {
@@ -295,6 +370,7 @@ mod tests {
             layers,
             by_category: BTreeMap::new(),
             case_count: 30,
+            repeats: 1,
             failures: vec![],
         }
     }
@@ -340,5 +416,94 @@ mod tests {
         let failures = compare_to_baseline(&baseline, &current, 2.0);
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].kind, "infrastructure");
+    }
+
+    // -------------------- RH-12 (#272) -------------------------------------
+    //
+    // The harness now reports per-case median latency aggregated over N
+    // independent ingest+query repeats. These tests pin the median helper,
+    // the distribution-stats helper, and the back-compat parser path so a
+    // stale baseline.json keeps loading after RH-12 ships.
+
+    #[test]
+    fn median_of_odd_length_picks_middle_element() {
+        assert!((median(&[10.0, 20.0, 30.0, 40.0, 50.0]) - 30.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn median_of_even_length_averages_middle_pair() {
+        assert!((median(&[10.0, 20.0, 30.0, 40.0]) - 25.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn median_of_unsorted_input_handles_order() {
+        assert!((median(&[40.0, 10.0, 30.0, 20.0, 50.0]) - 30.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn median_empty_is_zero() {
+        assert_eq!(median(&[]), 0.0);
+    }
+
+    #[test]
+    fn latency_distribution_stats_known_values() {
+        let s: Vec<f64> = (1..=100).map(|x| x as f64).collect();
+        let (min, max, iqr) = latency_distribution_stats(&s);
+        assert_eq!(min, 1.0);
+        assert_eq!(max, 100.0);
+        // Nearest-rank p75 = 75, p25 = 25 → IQR = 50.
+        assert_eq!(iqr, 50.0);
+    }
+
+    #[test]
+    fn latency_distribution_stats_empty_is_zero_triple() {
+        assert_eq!(latency_distribution_stats(&[]), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn report_serde_back_compat_old_baseline_has_no_repeats_field() {
+        // Mimic a pre-RH-12 baseline.json: no `repeats`, no latency_min/max/iqr.
+        // Must parse with default repeats=1 and zeroed latency stats.
+        let json = r#"{
+            "suite": "smoke",
+            "embedder": "minilm-l6-v2",
+            "git_sha": "abc123",
+            "timestamp": "2026-05-03T14:36:36.058394900Z",
+            "layers": {
+                "full": {
+                    "ndcg@10": 0.8,
+                    "recall@10": 0.85,
+                    "precision@10": 0.17,
+                    "mrr": 0.88,
+                    "p@1": 0.83,
+                    "map": 0.75,
+                    "latency_p50_ms": 130.0,
+                    "latency_p95_ms": 143.0,
+                    "latency_p99_ms": 145.0
+                }
+            },
+            "by_category": {},
+            "case_count": 30,
+            "failures": []
+        }"#;
+        let report: Report =
+            serde_json::from_str(json).expect("old baseline.json must still parse");
+        assert_eq!(report.repeats, 1);
+        let full = report.layers.get("full").expect("full layer present");
+        assert_eq!(full.latency_min_ms, 0.0);
+        assert_eq!(full.latency_max_ms, 0.0);
+        assert_eq!(full.latency_iqr_ms, 0.0);
+    }
+
+    #[test]
+    fn aggregate_layer_populates_latency_distribution_stats() {
+        let cases = [metrics(0.5), metrics(0.5), metrics(0.5), metrics(0.5)];
+        // Per-case median latencies: 10, 20, 30, 40 (already sorted).
+        let r = aggregate_layer(&cases, &[10.0, 20.0, 30.0, 40.0]);
+        assert_eq!(r.latency_min_ms, 10.0);
+        assert_eq!(r.latency_max_ms, 40.0);
+        // p75 = 30 (nearest-rank, ceil(0.75*4)-1 = 2 → 30)
+        // p25 = 10 (ceil(0.25*4)-1 = 0 → 10) → IQR = 20.
+        assert_eq!(r.latency_iqr_ms, 20.0);
     }
 }
