@@ -49,6 +49,10 @@ fn run_inputs(tag: &str) -> RunInputs {
         // `runner_repeats_*` tests in `src/recall_harness/runner.rs`;
         // keep this test single-pass so it stays under the CI budget.
         repeats: 1,
+        // RH-8 (#270): determinism gate runs Full-only — per-mode
+        // determinism is exercised by dedicated unit tests so this gate
+        // stays focused on the production pipeline path.
+        layer_modes: vec![shodh_memory::memory::types::LayerMode::Full],
     }
 }
 

@@ -18,6 +18,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 
+use shodh_memory::memory::types::LayerMode;
 use shodh_memory::recall_harness::report::{compare_to_baseline, Report};
 use shodh_memory::recall_harness::runner::{run_smoke_suite, RunInputs};
 
@@ -37,6 +38,48 @@ impl Suite {
     fn as_str(self) -> &'static str {
         match self {
             Suite::Smoke => "smoke",
+        }
+    }
+}
+
+/// Per-pipeline-layer attribution selector. RH-8 (#270).
+///
+/// `all` runs the full ladder of cumulative modes (vamana-only → full),
+/// emitting one entry per mode in the report's `layers` map. CI gating
+/// remains keyed on `full` so per-layer numbers are diagnostic, not gated.
+///
+/// Naming note: the `+rerank` mode in the spec is a misnomer for this
+/// codebase — there is no cross-encoder. The gate covers the ontological
+/// re-ranker at Layer 4.9 instead. The label is preserved for spec fidelity.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum LayerArg {
+    /// All six modes, ascending. Use for diagnostic per-layer attribution.
+    All,
+    /// Layer 3 vector ANN only.
+    VamanaOnly,
+    /// + Layer 2 graph spreading activation.
+    PlusSpreading,
+    /// + Layer 4 BM25/RRF fusion.
+    PlusBm25,
+    /// + Layer 4.9 ontological rerank (spec calls this `+rerank`).
+    PlusRerank,
+    /// + Layer 0.7/4.8 fact-source boost.
+    PlusFacts,
+    /// Production pipeline — every stage on. CI gates on this mode only.
+    Full,
+}
+
+impl LayerArg {
+    fn to_modes(self) -> Vec<LayerMode> {
+        match self {
+            LayerArg::All => LayerMode::ALL.to_vec(),
+            LayerArg::VamanaOnly => vec![LayerMode::VamanaOnly],
+            LayerArg::PlusSpreading => vec![LayerMode::PlusSpreading],
+            LayerArg::PlusBm25 => vec![LayerMode::PlusBm25],
+            LayerArg::PlusRerank => vec![LayerMode::PlusRerank],
+            LayerArg::PlusFacts => vec![LayerMode::PlusFacts],
+            LayerArg::Full => vec![LayerMode::Full],
         }
     }
 }
@@ -82,6 +125,14 @@ struct Args {
     /// still produces a true median for IQR calculation.
     #[arg(long, default_value_t = 5)]
     repeats: usize,
+
+    /// Per-pipeline-layer attribution mode. RH-8 (#270). `full` (default)
+    /// runs only the production pipeline and reproduces the pre-RH-8
+    /// behavior bit-for-bit. `all` runs every mode and emits one entry
+    /// per mode in the report's `layers` map for diagnostic attribution.
+    /// CI keys on `full` only — per-layer numbers are not gated.
+    #[arg(long, value_enum, default_value_t = LayerArg::Full)]
+    layer: LayerArg,
 }
 
 fn main() {
@@ -111,6 +162,7 @@ fn run(args: &Args) -> Result<i32> {
         suite: args.suite.as_str().to_string(),
         git_sha,
         repeats: args.repeats,
+        layer_modes: args.layer.to_modes(),
     };
 
     let mut report = run_smoke_suite(&inputs).context("running smoke suite")?;
@@ -166,18 +218,32 @@ fn write_report(path: &std::path::Path, report: &Report) -> Result<()> {
 }
 
 fn summarise(report: &Report) {
-    let full = report.layers.get("full");
     eprintln!(
         "recall-eval: suite={} cases={} repeats={} embedder={} sha={}",
         report.suite, report.case_count, report.repeats, report.embedder, report.git_sha
     );
-    if let Some(layer) = full {
+    // Print modes in pipeline order (vamana_only → full), not BTreeMap order.
+    // Match against the canonical mode keys so any unknown key just falls
+    // through to the BTreeMap iteration at the bottom.
+    let mode_order = [
+        "vamana_only",
+        "+spreading",
+        "+bm25",
+        "+rerank",
+        "+facts",
+        "full",
+    ];
+    for name in mode_order {
+        if let Some(layer) = report.layers.get(name) {
+            eprintln!(
+                "  {:<12} ndcg@10={:.4} recall@10={:.4} mrr={:.4} p@1={:.4} map={:.4}",
+                name, layer.ndcg_at_10, layer.recall_at_10, layer.mrr, layer.p_at_1, layer.map
+            );
+        }
+    }
+    if let Some(layer) = report.layers.get("full") {
         eprintln!(
-            "  full   ndcg@10={:.4} recall@10={:.4} mrr={:.4} p@1={:.4} map={:.4}",
-            layer.ndcg_at_10, layer.recall_at_10, layer.mrr, layer.p_at_1, layer.map
-        );
-        eprintln!(
-            "  latency p50={:.1}ms p95={:.1}ms p99={:.1}ms (per-case median)",
+            "  latency p50={:.1}ms p95={:.1}ms p99={:.1}ms (per-case median, full mode)",
             layer.latency_p50_ms, layer.latency_p95_ms, layer.latency_p99_ms
         );
         eprintln!(
