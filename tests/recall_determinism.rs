@@ -44,6 +44,11 @@ fn run_inputs(tag: &str) -> RunInputs {
         cases_path: None,
         suite: "smoke".to_string(),
         git_sha: "determinism-test".to_string(),
+        // RH-11 (Rig 1) compares two consecutive single-pass runs. The
+        // RH-12 cross-repeat check is exercised separately by the
+        // `runner_repeats_*` tests in `src/recall_harness/runner.rs`;
+        // keep this test single-pass so it stays under the CI budget.
+        repeats: 1,
     }
 }
 
