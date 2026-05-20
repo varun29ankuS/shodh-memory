@@ -204,11 +204,27 @@ impl AppError {
         }
     }
 
+    /// Client-facing message.
+    ///
+    /// 4xx errors are returned verbatim — they are client-actionable and carry
+    /// no internal detail. 5xx errors may embed internal specifics (database
+    /// paths, `anyhow` chains, lock state); in production those are replaced
+    /// with a generic message, and the full detail is logged server-side
+    /// (see the `IntoResponse` impl). In development the full message is kept
+    /// to aid debugging.
+    pub fn client_message(&self) -> String {
+        if self.status_code().is_server_error() && crate::auth::is_production_mode() {
+            "An internal server error occurred; details have been logged server-side.".to_string()
+        } else {
+            self.message()
+        }
+    }
+
     /// Convert to structured error response
     pub fn to_response(&self) -> ErrorResponse {
         ErrorResponse {
             code: self.code().to_string(),
-            message: self.message(),
+            message: self.client_message(),
             details: None,
             request_id: None,
         }
@@ -218,7 +234,7 @@ impl AppError {
     pub fn to_response_with_request_id(&self, request_id: Option<String>) -> ErrorResponse {
         ErrorResponse {
             code: self.code().to_string(),
-            message: self.message(),
+            message: self.client_message(),
             details: None,
             request_id,
         }
@@ -244,8 +260,19 @@ impl From<anyhow::Error> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status_code();
-        let body = self.to_response();
 
+        // Log server-side (5xx) errors at full detail BEFORE the response body
+        // is sanitised. In production the client only sees a generic message,
+        // so this log line is the sole record of what actually went wrong.
+        if status.is_server_error() {
+            tracing::error!(
+                error_code = self.code(),
+                "Request failed with internal error: {}",
+                self.message()
+            );
+        }
+
+        let body = self.to_response();
         (status, Json(body)).into_response()
     }
 }

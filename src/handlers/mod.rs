@@ -56,6 +56,8 @@ pub mod ab_testing;
 pub mod test_helpers;
 
 // Re-export commonly used items
-pub use router::{build_protected_routes, build_public_routes, build_router, AppState};
+pub use router::{
+    build_probe_routes, build_protected_routes, build_public_routes, build_router, AppState,
+};
 pub use state::MultiUserMemoryManager;
 pub use types::*;

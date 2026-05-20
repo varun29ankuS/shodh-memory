@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::time::Duration;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -252,7 +253,15 @@ impl GitHubWebhook {
         // GitHub signature format: "sha256=<hex>"
         let expected_sig = signature.strip_prefix("sha256=").unwrap_or(signature);
 
-        let expected_bytes = hex::decode(expected_sig).context("Invalid signature format")?;
+        // A malformed (non-hex) signature is simply an invalid signature, not a
+        // server error — return false so the caller responds 400, not 500.
+        let expected_bytes = match hex::decode(expected_sig) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                tracing::warn!("GitHub webhook signature is not valid hex — rejecting");
+                return Ok(false);
+            }
+        };
 
         Ok(mac.verify_slice(&expected_bytes).is_ok())
     }
@@ -621,13 +630,20 @@ pub struct GitHubClient {
 impl GitHubClient {
     const DEFAULT_API_URL: &'static str = "https://api.github.com";
 
+    /// Timeout for a single GitHub API request. Without it, a hung upstream
+    /// connection would only be bounded by the global axum request timeout.
+    const HTTP_TIMEOUT_SECS: u64 = 30;
+
     pub fn new(token: String) -> Self {
         let api_url =
-            std::env::var("GITHUB_API_URL").unwrap_or_else(|_| Self::DEFAULT_API_URL.to_string());
+            crate::integrations::resolve_api_url_override("GITHUB_API_URL", Self::DEFAULT_API_URL);
         Self {
             token,
             api_url,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(Self::HTTP_TIMEOUT_SECS))
+                .build()
+                .expect("Failed to build GitHub HTTP client"),
         }
     }
 

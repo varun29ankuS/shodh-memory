@@ -35,6 +35,26 @@ import { TokenTracker } from "./token-tracking";
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
 
+// Resolve the package version from package.json so it cannot drift from the
+// published version. Tries the build layout (dist/index.js -> ../package.json)
+// then the dev layout (index.ts -> ./package.json); falls back to "unknown".
+function resolveVersion(): string {
+  const candidates = [
+    path.join(__dirname, "..", "package.json"),
+    path.join(__dirname, "package.json"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(candidate, "utf-8"));
+      if (typeof pkg.version === "string" && pkg.version) return pkg.version;
+    } catch {
+      // try next candidate
+    }
+  }
+  return "unknown";
+}
+const SERVER_VERSION = resolveVersion();
+
 // Configuration
 // Priority: SHODH_API_URL (full URL) > SHODH_HOST+SHODH_PORT (constructed) > localhost default
 function resolveApiUrl(): string {
@@ -463,7 +483,12 @@ async function apiCall<T>(
 ): Promise<T> {
   let lastError: Error | null = null;
 
-  for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+  // Only idempotent GET requests are retried. Retrying a write (POST/PUT/DELETE)
+  // after a committed-but-unacknowledged response would create duplicate
+  // memories — fail fast instead and let the caller decide whether to re-issue.
+  const maxAttempts = method === "GET" ? RETRY_ATTEMPTS : 1;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const controller = new AbortController();
       const timeout = method === "GET" ? REQUEST_TIMEOUT_MS : WRITE_TIMEOUT_MS;
@@ -509,7 +534,7 @@ async function apiCall<T>(
       }
 
       // Log retry attempt
-      if (attempt < RETRY_ATTEMPTS) {
+      if (attempt < maxAttempts) {
         console.error(`Attempt ${attempt} failed: ${lastError.message}. Retrying in ${RETRY_DELAY_MS}ms...`);
         await sleep(RETRY_DELAY_MS * attempt); // Exponential backoff
       }
@@ -524,7 +549,7 @@ async function apiCall<T>(
       `Start the server with: shodh-memory-server`
     );
   }
-  throw new Error(`Failed after ${RETRY_ATTEMPTS} attempts: ${errMsg}`);
+  throw new Error(`Failed after ${maxAttempts} attempt${maxAttempts === 1 ? "" : "s"}: ${errMsg}`);
 }
 
 // Check if server is available
@@ -548,7 +573,7 @@ async function isServerAvailable(): Promise<boolean> {
 const server = new Server(
   {
     name: "shodh-memory",
-    version: "0.1.90",
+    version: SERVER_VERSION,
   },
   {
     capabilities: {
@@ -2702,23 +2727,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         lastUserContext = cleanedContext;
 
         // Single API call to the full proactive context pipeline:
-        // feedback loop, coactivation, segmented ingest, semantic todos, context reminders
-        const result = await apiCall<ProactiveContextResponse>("/api/proactive_context", "POST", {
-          user_id: USER_ID,
-          context: cleanedContext,
-          max_results,
-          semantic_threshold,
-          entity_match_weight,
-          recency_weight,
-          memory_types,
-          auto_ingest,
-          // Implicit feedback: send previous response so backend can evaluate which memories helped.
-          // Skipped if another proactive_context call was in-flight (prevents corrupted feedback).
-          previous_response: skipFeedback ? undefined : (lastProactiveResponse || undefined),
-          user_followup: (skipFeedback || !lastProactiveResponse) ? undefined : (previousUserContext || undefined),
-          // Tool-aware feedback attribution: causal signal from tool/actuator actions
-          ...(tool_actions.length > 0 ? { tool_actions } : {}),
-        });
+        // feedback loop, coactivation, segmented ingest, semantic todos, context reminders.
+        // Wrapped so a thrown apiCall resets the in-flight guard — otherwise the
+        // flag would stay true forever and permanently disable the feedback loop.
+        let result: ProactiveContextResponse;
+        try {
+          result = await apiCall<ProactiveContextResponse>("/api/proactive_context", "POST", {
+            user_id: USER_ID,
+            context: cleanedContext,
+            max_results,
+            semantic_threshold,
+            entity_match_weight,
+            recency_weight,
+            memory_types,
+            auto_ingest,
+            // Implicit feedback: send previous response so backend can evaluate which memories helped.
+            // Skipped if another proactive_context call was in-flight (prevents corrupted feedback).
+            previous_response: skipFeedback ? undefined : (lastProactiveResponse || undefined),
+            user_followup: (skipFeedback || !lastProactiveResponse) ? undefined : (previousUserContext || undefined),
+            // Tool-aware feedback attribution: causal signal from tool/actuator actions
+            ...(tool_actions.length > 0 ? { tool_actions } : {}),
+          });
+        } catch (e) {
+          proactiveCallInFlight = false;
+          throw e;
+        }
 
         const memories = result.memories || [];
         const entities = result.detected_entities || [];
@@ -4973,7 +5006,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Shodh-Memory MCP server v0.1.90 running");
+  console.error(`Shodh-Memory MCP server v${SERVER_VERSION} running`);
   console.error(`Connecting to: ${API_URL}`);
   console.error(`User ID: ${USER_ID}`);
   console.error(`Streaming: ${STREAM_ENABLED ? "enabled" : "disabled"}`);
