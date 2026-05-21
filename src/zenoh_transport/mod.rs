@@ -846,6 +846,12 @@ async fn register_auto_topic(
                 sample = subscriber.recv_async() => {
                     match sample {
                         Ok(sample) => {
+                            // Auto-topic payloads are deliberately NOT passed through
+                            // handlers::authenticate_payload: they are third-party feeds on an
+                            // operator-configured key_expr (e.g. a robot status topic) and
+                            // cannot carry shodh's api_key. Access control for these keys is
+                            // the Zenoh fabric's responsibility — see ZenohConfig::validate,
+                            // which warns when auto-topics are exposed on a public interface.
                             let payload_str = match sample.payload().try_to_string() {
                                 Ok(s) => s.into_owned(),
                                 Err(e) => {

@@ -270,6 +270,21 @@ impl ZenohConfig {
                  bind to 127.0.0.1 for local-only deployments."
             );
         }
+
+        // Auto-topics ingest third-party payloads (e.g. a robot's status feed)
+        // that cannot carry shodh's `api_key`, so `authenticate_payload` is
+        // intentionally NOT applied to them — this holds even when
+        // SHODH_ZENOH_API_KEY is set. Make that trust boundary explicit so an
+        // operator does not assume the key protects every Zenoh ingestion path.
+        if binds_all_interfaces && !self.auto_topics.is_empty() {
+            tracing::warn!(
+                "{} Zenoh auto-topic(s) configured while listening on all interfaces — \
+                 auto-topic payloads are ingested WITHOUT SHODH_ZENOH_API_KEY authentication \
+                 (their security relies on Zenoh-fabric access control, not shodh). \
+                 Restrict the Zenoh network or bind to 127.0.0.1 if untrusted peers can reach it.",
+                self.auto_topics.len()
+            );
+        }
     }
 }
 
