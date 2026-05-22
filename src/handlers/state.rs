@@ -2598,7 +2598,10 @@ impl MultiUserMemoryManager {
                     continue;
                 }
 
-                let db_path = path.join("memory.db");
+                // Check for RocksDB storage directory (the actual data store).
+                // Previously checked for "memory.db" which doesn't exist —
+                // RocksDB stores data in a "storage/" directory, not a single file.
+                let db_path = path.join("storage");
                 if !db_path.exists() {
                     continue;
                 }
