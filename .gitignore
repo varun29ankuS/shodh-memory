@@ -104,3 +104,9 @@ pitch-deck-stata.md
 shodh-market.csv
 benchmarks/locomo_test2.json
 seps/mcp-sep-mif.md
+
+# Prebuilt CI tools — downloaded fresh at workflow time, never committed.
+# See .github/workflows/mcp-registry.yml which downloads mcp-publisher itself.
+/mcp-publisher
+/mcp-publisher.exe
+/mcp-publisher*.tar.gz
