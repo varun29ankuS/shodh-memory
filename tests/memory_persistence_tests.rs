@@ -452,7 +452,8 @@ fn test_concurrent_reinforcement() {
     let booster = thread::spawn(move || {
         for _ in 0..20 {
             let sys = system_clone.lock();
-            let _ = sys.reinforce_recall(std::slice::from_ref(&id_clone), RetrievalOutcome::Helpful);
+            let _ =
+                sys.reinforce_recall(std::slice::from_ref(&id_clone), RetrievalOutcome::Helpful);
             drop(sys);
             thread::sleep(Duration::from_millis(5));
         }

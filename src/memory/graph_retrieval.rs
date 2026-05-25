@@ -1377,10 +1377,12 @@ mod tests {
     #[test]
     fn test_bidirectional_entity_split() {
         // Test alternating assignment distributes evenly
-        let entities = [(Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
+        let entities = [
+            (Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
             (Uuid::new_v4(), "entity2".to_string(), 1.0, 0.5),
             (Uuid::new_v4(), "entity3".to_string(), 1.0, 0.5),
-            (Uuid::new_v4(), "entity4".to_string(), 1.0, 0.5)];
+            (Uuid::new_v4(), "entity4".to_string(), 1.0, 0.5),
+        ];
 
         // With 4 entities, split should be 2-2
         let mut forward_count = 0;
@@ -1401,9 +1403,11 @@ mod tests {
     #[test]
     fn test_bidirectional_odd_entities() {
         // Test odd number of entities doesn't leave backward empty
-        let entities = [(Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
+        let entities = [
+            (Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
             (Uuid::new_v4(), "entity2".to_string(), 1.0, 0.5),
-            (Uuid::new_v4(), "entity3".to_string(), 1.0, 0.5)];
+            (Uuid::new_v4(), "entity3".to_string(), 1.0, 0.5),
+        ];
 
         // With 3 entities: indices 0,2 go forward, index 1 goes backward
         let mut forward_seeds = Vec::new();
@@ -1435,16 +1439,20 @@ mod tests {
         assert!(single_entity.len() < BIDIRECTIONAL_MIN_ENTITIES);
 
         // 2 entities: bidirectional
-        let two_entities = [(Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
-            (Uuid::new_v4(), "entity2".to_string(), 1.0, 0.5)];
+        let two_entities = [
+            (Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
+            (Uuid::new_v4(), "entity2".to_string(), 1.0, 0.5),
+        ];
         assert!(two_entities.len() >= BIDIRECTIONAL_MIN_ENTITIES);
 
         // 5 entities: bidirectional
-        let many_entities = [(Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
+        let many_entities = [
+            (Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
             (Uuid::new_v4(), "entity2".to_string(), 1.0, 0.5),
             (Uuid::new_v4(), "entity3".to_string(), 1.0, 0.5),
             (Uuid::new_v4(), "entity4".to_string(), 1.0, 0.5),
-            (Uuid::new_v4(), "entity5".to_string(), 1.0, 0.5)];
+            (Uuid::new_v4(), "entity5".to_string(), 1.0, 0.5),
+        ];
         assert!(many_entities.len() >= BIDIRECTIONAL_MIN_ENTITIES);
     }
 

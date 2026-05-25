@@ -658,13 +658,7 @@ impl HybridSearchEngine {
         phrase_boosts: Option<&[(String, f32)]>,
     ) -> Result<Vec<HybridSearchResult>> {
         // Use default discriminativeness (no dynamic weight adjustment)
-        self.search_with_dynamic_weights(
-            query,
-            vector_results,
-            term_weights,
-            phrase_boosts,
-            None,
-        )
+        self.search_with_dynamic_weights(query, vector_results, term_weights, phrase_boosts, None)
     }
 
     /// Perform hybrid search with dynamic BM25/vector weight adjustment

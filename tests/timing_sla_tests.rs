@@ -487,7 +487,6 @@ fn test_sla_flush_latency() {
 #[test]
 fn test_sla_concurrent_access_latency() {
     use std::sync::Arc;
-    
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);

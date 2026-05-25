@@ -290,8 +290,12 @@ fn test_brutal_multiple_restart_cycles() {
 
         // Verify all previous memories exist
         for (i, id) in all_ids.iter().enumerate() {
-            let memory = system.get_memory(id).unwrap_or_else(|_| panic!("Cycle {}: Memory {} should exist from previous cycle",
-                cycle, i));
+            let memory = system.get_memory(id).unwrap_or_else(|_| {
+                panic!(
+                    "Cycle {}: Memory {} should exist from previous cycle",
+                    cycle, i
+                )
+            });
             assert!(
                 memory.experience.content.contains("Restart cycle"),
                 "Cycle {}: Memory {} content should be preserved",
