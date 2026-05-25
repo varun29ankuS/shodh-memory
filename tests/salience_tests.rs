@@ -400,7 +400,7 @@ fn test_entities_ranked_by_salience() {
         .expect("Failed to add low entity");
 
     let high_entity = create_entity("High_Importance", Some(EntityLabel::Person), true, 0.8);
-    let high_id = graph
+    let _high_id = graph
         .add_entity(high_entity)
         .expect("Failed to add high entity");
 

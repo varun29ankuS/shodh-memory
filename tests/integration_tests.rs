@@ -19,12 +19,14 @@ use shodh_memory::{
 };
 
 /// Create fallback NER instance for testing
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Create experience with NER-extracted entities
+#[allow(dead_code)]
 fn create_experience_with_ner(
     content: &str,
     exp_type: ExperienceType,

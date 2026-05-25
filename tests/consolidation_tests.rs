@@ -18,12 +18,14 @@ use shodh_memory::uuid::Uuid;
 use tempfile::TempDir;
 
 /// Create fallback NER for testing (rule-based, no ONNX required)
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Create experience with NER entity extraction
+#[allow(dead_code)]
 fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
     let entities = ner.extract(content).unwrap_or_default();
     let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
@@ -367,7 +369,7 @@ fn test_low_importance_eligible_for_forget() {
 
 #[test]
 fn test_importance_affects_retention() {
-    let (mut system, _temp) = setup_memory_system();
+    let (system, _temp) = setup_memory_system();
 
     // Record high importance memory
     let high_id = system
@@ -404,7 +406,7 @@ fn test_importance_affects_retention() {
 
 #[test]
 fn test_working_memory_capacity() {
-    let (mut system, _temp) = setup_auto_compress_system();
+    let (system, _temp) = setup_auto_compress_system();
 
     // Record more memories than working memory capacity
     for i in 0..20 {
@@ -420,7 +422,7 @@ fn test_working_memory_capacity() {
 
 #[test]
 fn test_session_memory_used() {
-    let (mut system, _temp) = setup_auto_compress_system();
+    let (system, _temp) = setup_auto_compress_system();
 
     // Fill up working memory
     for i in 0..15 {
@@ -887,7 +889,7 @@ fn test_concurrent_tier_reads() {
 // =============================================================================
 
 use chrono::{Duration, TimeZone, Utc};
-use shodh_memory::memory::{ConsolidationEvent, Query};
+use shodh_memory::memory::Query;
 
 /// Helper to get a "beginning of time" DateTime for all-time queries
 fn epoch() -> chrono::DateTime<chrono::Utc> {

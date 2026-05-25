@@ -338,7 +338,7 @@ mod tests {
         //    = 0.6422...
         let id = ids();
         // Use 10 distinct ids; reuse the 5-id helper by building extras.
-        let extra: Vec<Uuid> = (6..=10).map(|n| Uuid::from_u128(n)).collect();
+        let extra: Vec<Uuid> = (6..=10).map(Uuid::from_u128).collect();
         let r = id[0];
         let n = id[1];
         let r2 = id[2];

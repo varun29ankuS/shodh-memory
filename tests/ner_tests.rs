@@ -369,7 +369,7 @@ mod edge_cases {
         let ner = create_test_ner();
 
         // Test lowercase - should not be found (not capitalized)
-        let entities_lower = ner.extract("microsoft google apple").unwrap();
+        let _entities_lower = ner.extract("microsoft google apple").unwrap();
         // Lowercase words typically won't be detected as entities
 
         // Test proper case - should be found

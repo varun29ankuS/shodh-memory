@@ -13,16 +13,17 @@ use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::{
     Experience, ExperienceType, MemoryConfig, MemorySystem, Query, RetrievalMode,
 };
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 /// Create fallback NER instance for testing
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Create experience with NER-extracted entities
+#[allow(dead_code)]
 fn create_experience_with_ner(
     content: &str,
     exp_type: ExperienceType,
@@ -70,16 +71,16 @@ fn create_experience(content: &str, exp_type: ExperienceType) -> Experience {
 
 #[test]
 fn test_working_memory_stores_recent() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(10, 50);
+    let (memory_system, _temp_dir) = setup_memory_system(10, 50);
 
     // Record some experiences
-    let id1 = memory_system
+    let _id1 = memory_system
         .remember(
             create_experience("First memory", ExperienceType::Observation),
             None,
         )
         .expect("Failed to record");
-    let id2 = memory_system
+    let _id2 = memory_system
         .remember(
             create_experience("Second memory", ExperienceType::Observation),
             None,
@@ -100,7 +101,7 @@ fn test_working_memory_stores_recent() {
 
 #[test]
 fn test_working_memory_lru_eviction() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(5, 50); // Very small working memory
+    let (memory_system, _temp_dir) = setup_memory_system(5, 50); // Very small working memory
 
     // Record more than capacity
     for i in 0..10 {
@@ -126,7 +127,7 @@ fn test_working_memory_lru_eviction() {
 
 #[test]
 fn test_session_memory_promotion() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(3, 50);
+    let (memory_system, _temp_dir) = setup_memory_system(3, 50);
 
     // Record high-importance memories (should go to session)
     let high_importance = Experience {
@@ -154,7 +155,7 @@ fn test_session_memory_promotion() {
 
 #[test]
 fn test_low_importance_stays_working() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(10, 50);
+    let (memory_system, _temp_dir) = setup_memory_system(10, 50);
 
     // Record low-importance memory
     let low_importance = Experience {
@@ -239,7 +240,7 @@ fn test_longterm_persistence() {
             importance_threshold: 0.3,
         };
 
-        let mut memory_system = MemorySystem::new(config, None).expect("Failed to create");
+        let memory_system = MemorySystem::new(config, None).expect("Failed to create");
 
         // Record important memory that should be persisted
         memory_system
@@ -349,7 +350,7 @@ fn test_longterm_persistence() {
 
 #[test]
 fn test_multi_tier_retrieval() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(5, 50);
+    let (memory_system, _temp_dir) = setup_memory_system(5, 50);
 
     // Fill working memory to trigger promotions
     for i in 0..15 {
@@ -384,7 +385,7 @@ fn test_multi_tier_retrieval() {
 
 #[test]
 fn test_importance_affects_tiering() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(3, 50);
+    let (memory_system, _temp_dir) = setup_memory_system(3, 50);
 
     // High importance memory
     let high = Experience {
@@ -425,7 +426,7 @@ fn test_importance_affects_tiering() {
 
 #[test]
 fn test_forget_low_importance() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(10, 50);
+    let (memory_system, _temp_dir) = setup_memory_system(10, 50);
 
     // Record mix of importance levels
     for i in 0..10 {
@@ -440,24 +441,20 @@ fn test_forget_low_importance() {
             .expect("Failed to record");
     }
 
-    let stats_before = memory_system.stats();
+    let _stats_before = memory_system.stats();
 
     // Forget low importance
-    let forgotten = memory_system
+    let _forgotten = memory_system
         .forget(shodh_memory::memory::ForgetCriteria::LowImportance(0.5))
         .expect("Failed to forget");
 
-    // Some memories should be forgotten
-    // Note: actual count depends on importance calculation
-    assert!(
-        forgotten >= 0,
-        "Forget operation should complete successfully"
-    );
+    // Forget operation should complete successfully — `expect` above already
+    // asserts that. Actual count depends on importance calculation.
 }
 
 #[test]
 fn test_forget_by_pattern() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(10, 50);
+    let (memory_system, _temp_dir) = setup_memory_system(10, 50);
 
     // Record memories with distinct patterns
     memory_system
@@ -508,7 +505,7 @@ fn test_forget_by_pattern() {
 
 #[test]
 fn test_similarity_retrieval() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(10, 50);
+    let (memory_system, _temp_dir) = setup_memory_system(10, 50);
 
     // Record semantically similar memories
     memory_system
@@ -550,7 +547,7 @@ fn test_similarity_retrieval() {
 
 #[test]
 fn test_hybrid_retrieval() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(10, 50);
+    let (memory_system, _temp_dir) = setup_memory_system(10, 50);
 
     // Record memories
     memory_system
@@ -595,7 +592,7 @@ fn test_hybrid_retrieval() {
 
 #[test]
 fn test_geo_filter_retrieval() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(10, 50);
+    let (memory_system, _temp_dir) = setup_memory_system(10, 50);
 
     // Record memories with geo coordinates
     let geo_memory = Experience {
@@ -638,7 +635,7 @@ fn test_geo_filter_retrieval() {
 
 #[test]
 fn test_mission_filter_retrieval() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(10, 50);
+    let (memory_system, _temp_dir) = setup_memory_system(10, 50);
 
     // Record memories with mission IDs
     let mission_a = Experience {
@@ -706,7 +703,7 @@ fn test_mission_filter_retrieval() {
 
 #[test]
 fn test_high_volume_recording() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(50, 100);
+    let (memory_system, _temp_dir) = setup_memory_system(50, 100);
 
     // Record 100 memories quickly
     for i in 0..100 {
@@ -730,7 +727,7 @@ fn test_high_volume_recording() {
 
 #[test]
 fn test_concurrent_access_pattern() {
-    let (mut memory_system, _temp_dir) = setup_memory_system(20, 50);
+    let (memory_system, _temp_dir) = setup_memory_system(20, 50);
 
     // Simulate read-write pattern
     for i in 0..20 {

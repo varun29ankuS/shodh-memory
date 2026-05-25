@@ -32,6 +32,12 @@ pub struct TestHarness {
     _temp_dir: TempDir,
 }
 
+impl Default for TestHarness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestHarness {
     /// Create a new harness with a fresh temp directory and default config.
     ///

@@ -23,12 +23,14 @@ use shodh_memory::memory::{
 };
 
 /// Create fallback NER instance for testing
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Create experience with NER-extracted entities
+#[allow(dead_code)]
 fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
     let entities = ner.extract(content).unwrap_or_default();
     let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
@@ -133,7 +135,7 @@ fn test_importance_changes_survive_restart() {
         // Apply multiple helpful reinforcements
         for _ in 0..10 {
             system
-                .reinforce_recall(&[memory_id.clone()], RetrievalOutcome::Helpful)
+                .reinforce_recall(std::slice::from_ref(&memory_id), RetrievalOutcome::Helpful)
                 .expect("Failed to reinforce");
         }
 
@@ -196,7 +198,7 @@ fn test_access_count_survives_restart() {
         // Access multiple times through reinforcement
         for _ in 0..5 {
             system
-                .reinforce_recall(&[memory_id.clone()], RetrievalOutcome::Neutral)
+                .reinforce_recall(std::slice::from_ref(&memory_id), RetrievalOutcome::Neutral)
                 .expect("Failed to reinforce");
         }
     }
@@ -264,7 +266,7 @@ fn test_multiple_memories_survive_restart() {
 
 #[test]
 fn test_cache_coherency_importance_visible_immediately() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_experience("Cache coherency test memory", vec!["cache"]);
     let id = system.remember(exp, None).expect("Failed to record");
@@ -280,7 +282,7 @@ fn test_cache_coherency_importance_visible_immediately() {
 
     // Boost importance
     system
-        .reinforce_recall(&[id.clone()], RetrievalOutcome::Helpful)
+        .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Helpful)
         .expect("Failed to reinforce");
 
     // Verify change is immediately visible through same query
@@ -297,7 +299,7 @@ fn test_cache_coherency_importance_visible_immediately() {
 
 #[test]
 fn test_cache_coherency_multiple_retrievals() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_experience("Multi-retrieval coherency test", vec!["multi"]);
     let id = system.remember(exp, None).expect("Failed to record");
@@ -318,7 +320,7 @@ fn test_cache_coherency_multiple_retrievals() {
             .importance();
 
         system
-            .reinforce_recall(&[id.clone()], RetrievalOutcome::Helpful)
+            .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Helpful)
             .expect("Failed");
 
         let after = system
@@ -340,7 +342,7 @@ fn test_cache_coherency_multiple_retrievals() {
 
 #[test]
 fn test_cache_coherency_decay_visible_immediately() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_experience("Decay visibility test", vec!["decay"]);
     let id = system.remember(exp, None).expect("Failed to record");
@@ -360,7 +362,7 @@ fn test_cache_coherency_decay_visible_immediately() {
 
     // Apply decay
     system
-        .reinforce_recall(&[id.clone()], RetrievalOutcome::Misleading)
+        .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Misleading)
         .expect("Failed");
 
     let after_decay = system
@@ -392,7 +394,7 @@ fn test_concurrent_record_and_retrieve() {
     // Spawn thread that records memories
     let writer = thread::spawn(move || {
         for i in 0..10 {
-            let mut sys = system_clone.lock();
+            let sys = system_clone.lock();
             let exp = create_experience(
                 &format!("Concurrent write test memory {}", i),
                 vec!["concurrent"],
@@ -449,8 +451,8 @@ fn test_concurrent_reinforcement() {
     // Spawn thread that boosts
     let booster = thread::spawn(move || {
         for _ in 0..20 {
-            let mut sys = system_clone.lock();
-            let _ = sys.reinforce_recall(&[id_clone.clone()], RetrievalOutcome::Helpful);
+            let sys = system_clone.lock();
+            let _ = sys.reinforce_recall(std::slice::from_ref(&id_clone), RetrievalOutcome::Helpful);
             drop(sys);
             thread::sleep(Duration::from_millis(5));
         }
@@ -458,8 +460,8 @@ fn test_concurrent_reinforcement() {
 
     // Main thread also reinforces
     for _ in 0..20 {
-        let mut sys = system.lock();
-        let _ = sys.reinforce_recall(&[id.clone()], RetrievalOutcome::Helpful);
+        let sys = system.lock();
+        let _ = sys.reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Helpful);
         drop(sys);
         thread::sleep(Duration::from_millis(5));
     }
@@ -505,7 +507,7 @@ fn test_reinforce_nonexistent_memory() {
 
 #[test]
 fn test_reinforce_mixed_existing_nonexistent() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_experience("Real memory for mixed test", vec!["mixed"]);
     let real_id = system.remember(exp, None).expect("Failed to record");
@@ -523,7 +525,7 @@ fn test_reinforce_mixed_existing_nonexistent() {
 
 #[test]
 fn test_importance_bounds_at_maximum() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_experience("Max importance test", vec!["max"]);
     let id = system.remember(exp, None).expect("Failed to record");
@@ -531,7 +533,7 @@ fn test_importance_bounds_at_maximum() {
     // Boost many times to try to exceed 1.0
     for _ in 0..100 {
         system
-            .reinforce_recall(&[id.clone()], RetrievalOutcome::Helpful)
+            .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Helpful)
             .expect("Failed");
     }
 
@@ -556,7 +558,7 @@ fn test_importance_bounds_at_maximum() {
 
 #[test]
 fn test_importance_bounds_at_minimum() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_experience("Min importance test", vec!["min"]);
     let id = system.remember(exp, None).expect("Failed to record");
@@ -564,7 +566,7 @@ fn test_importance_bounds_at_minimum() {
     // Decay many times to try to go below floor
     for _ in 0..100 {
         system
-            .reinforce_recall(&[id.clone()], RetrievalOutcome::Misleading)
+            .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Misleading)
             .expect("Failed");
     }
 
@@ -584,7 +586,7 @@ fn test_importance_bounds_at_minimum() {
 
 #[test]
 fn test_alternating_boost_and_decay() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_experience("Alternating reinforcement test", vec!["alternating"]);
     let id = system.remember(exp, None).expect("Failed to record");
@@ -609,11 +611,11 @@ fn test_alternating_boost_and_decay() {
     for i in 0..10 {
         if i % 2 == 0 {
             system
-                .reinforce_recall(&[id.clone()], RetrievalOutcome::Helpful)
+                .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Helpful)
                 .expect("Failed");
         } else {
             system
-                .reinforce_recall(&[id.clone()], RetrievalOutcome::Misleading)
+                .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Misleading)
                 .expect("Failed");
         }
         importances.push(
@@ -652,7 +654,7 @@ fn test_empty_reinforcement_list() {
 
 #[test]
 fn test_large_batch_reinforcement() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let mut ids = Vec::new();
     for i in 0..50 {
@@ -687,7 +689,7 @@ fn test_large_batch_reinforcement() {
 
 #[test]
 fn test_memory_in_working_tier_after_record() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_experience("Working tier test memory", vec!["tier"]);
     let _id = system.remember(exp, None).expect("Failed to record");
@@ -708,7 +710,7 @@ fn test_memory_in_working_tier_after_record() {
 
 #[test]
 fn test_high_volume_record_and_retrieve() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     // Record many memories
     for i in 0..100 {
@@ -754,7 +756,7 @@ fn test_high_volume_record_and_retrieve() {
 
 #[test]
 fn test_rapid_record_retrieve_cycle() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let mut recorded_ids = Vec::new();
 
@@ -769,7 +771,7 @@ fn test_rapid_record_retrieve_cycle() {
     for (i, id) in recorded_ids.iter().enumerate() {
         let memory = system
             .get_memory(id)
-            .expect(&format!("Should find memory {} by ID", i));
+            .unwrap_or_else(|_| panic!("Should find memory {} by ID", i));
         assert!(
             memory.experience.content.contains("Rapid cycle memory"),
             "Memory {} content should be correct",
@@ -795,7 +797,7 @@ fn test_rapid_record_retrieve_cycle() {
 
 #[test]
 fn test_stress_reinforcement_cycles() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     // Create memories
     let mut ids = Vec::new();

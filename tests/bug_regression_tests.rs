@@ -21,12 +21,14 @@ use shodh_memory::memory::{MemoryConfig, MemorySystem};
 // ============================================================================
 
 /// Create fallback NER for testing (rule-based, no ONNX required)
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Create experience with NER entity extraction
+#[allow(dead_code)]
 fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
     let entities = ner.extract(content).unwrap_or_default();
     let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
@@ -283,7 +285,7 @@ fn test_bug007_combined_search_scales_linearly() {
         ..Default::default()
     };
 
-    let results = system.recall(&query).expect("Failed to retrieve");
+    let _results = system.recall(&query).expect("Failed to retrieve");
     let duration = start.elapsed();
 
     // Combined search should complete in < 500ms for 50 memories
@@ -337,7 +339,7 @@ fn test_bug009_geohash_empty_string() {
 
     // The actual behavior is to return valid coordinates within bounds
     assert!(
-        lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0,
+        (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon),
         "BUG-009: Empty geohash should decode to valid coordinates, got ({}, {})",
         lat,
         lon
@@ -368,7 +370,7 @@ fn test_bug010_radius_nan_handled() {
 
     // NaN should produce valid precision (default to small precision)
     assert!(
-        precision >= 1 && precision <= 12,
+        (1..=12).contains(&precision),
         "BUG-010 REGRESSION: NaN radius produced invalid precision {}",
         precision
     );
@@ -380,7 +382,7 @@ fn test_bug010_radius_infinity_handled() {
 
     // Infinity should produce valid precision (low precision for large area)
     assert!(
-        precision >= 1 && precision <= 12,
+        (1..=12).contains(&precision),
         "BUG-010 REGRESSION: Infinity radius produced invalid precision {}",
         precision
     );
@@ -392,7 +394,7 @@ fn test_bug010_radius_negative_handled() {
 
     // Negative should produce valid precision
     assert!(
-        precision >= 1 && precision <= 12,
+        (1..=12).contains(&precision),
         "BUG-010 REGRESSION: Negative radius produced invalid precision {}",
         precision
     );
@@ -404,7 +406,7 @@ fn test_bug010_radius_zero_handled() {
 
     // Zero should produce valid precision (high precision for small area)
     assert!(
-        precision >= 1 && precision <= 12,
+        (1..=12).contains(&precision),
         "BUG-010 REGRESSION: Zero radius produced invalid precision {}",
         precision
     );
@@ -417,7 +419,7 @@ fn test_bug010_radius_huge_handled() {
 
     // Huge radius should produce valid low precision
     assert!(
-        precision >= 1 && precision <= 12,
+        (1..=12).contains(&precision),
         "BUG-010 REGRESSION: Huge radius produced invalid precision {}",
         precision
     );
@@ -436,10 +438,10 @@ fn test_bug010_radius_normal_values() {
         (1000000.0, 2), // 1000km
     ];
 
-    for (radius, expected_min_precision) in test_cases {
+    for (radius, _expected_min_precision) in test_cases {
         let precision = geohash_precision_for_radius(radius);
         assert!(
-            precision >= 1 && precision <= 12,
+            (1..=12).contains(&precision),
             "Radius {} produced invalid precision {}",
             radius,
             precision
@@ -658,7 +660,7 @@ fn test_geo_filter_retrieval() {
 
     // Should find SF downtown and nearby, but not Oakland or LA
     assert!(
-        results.len() >= 1 && results.len() <= 3,
+        !results.is_empty() && results.len() <= 3,
         "Geo filter should return 1-3 results within 1km, got {}",
         results.len()
     );

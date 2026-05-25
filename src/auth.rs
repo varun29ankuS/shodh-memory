@@ -470,6 +470,7 @@ mod tests {
     // ── AuthError JSON response shape ──
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn auth_error_response_is_valid_json() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_auth_env();
@@ -485,6 +486,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn missing_key_dev_message_includes_help() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_auth_env();
@@ -505,6 +507,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn invalid_key_dev_message_includes_help() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_auth_env();
@@ -520,6 +523,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn missing_key_prod_message_is_terse() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_auth_env();
@@ -536,6 +540,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn invalid_key_prod_message_is_terse() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_auth_env();
@@ -561,6 +566,7 @@ mod tests {
     // ── Query parameter auth (WebSocket fallback) ──
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn auth_middleware_accepts_query_param_for_websocket() {
         use axum::body::Body;
         use axum::http::Request as HttpRequest;
@@ -594,6 +600,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn auth_middleware_ignores_query_param_without_websocket_upgrade() {
         use axum::body::Body;
         use axum::http::Request as HttpRequest;
@@ -626,6 +633,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn auth_middleware_rejects_invalid_websocket_query_param() {
         use axum::body::Body;
         use axum::http::Request as HttpRequest;

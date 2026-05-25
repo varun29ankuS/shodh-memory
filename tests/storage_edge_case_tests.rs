@@ -17,12 +17,14 @@ use shodh_memory::memory::{MemoryConfig, MemorySystem};
 // ============================================================================
 
 /// Create fallback NER for testing (rule-based, no ONNX required)
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Create experience with NER entity extraction
+#[allow(dead_code)]
 fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
     let entities = ner.extract(content).unwrap_or_default();
     let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
@@ -122,7 +124,7 @@ fn test_unicode_content() {
         ..Default::default()
     };
 
-    let memory_id = system
+    let _memory_id = system
         .remember(exp, None)
         .expect("Failed to record unicode content");
 
@@ -236,7 +238,7 @@ fn test_unicode_entity_names() {
         ..Default::default()
     };
 
-    let results = system.recall(&query).expect("Failed to retrieve");
+    let _results = system.recall(&query).expect("Failed to retrieve");
     // May or may not find results depending on tag indexing
 }
 

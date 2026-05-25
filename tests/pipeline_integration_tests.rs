@@ -722,7 +722,7 @@ mod mode_tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body["memories"].as_array().unwrap().len() > 0);
+        assert!(!body["memories"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -761,8 +761,8 @@ mod mode_tests {
         assert_eq!(status1, StatusCode::OK);
         assert_eq!(status2, StatusCode::OK);
         // Both should return results (same underlying mode)
-        assert!(body1["memories"].as_array().unwrap().len() > 0);
-        assert!(body2["memories"].as_array().unwrap().len() > 0);
+        assert!(!body1["memories"].as_array().unwrap().is_empty());
+        assert!(!body2["memories"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -11,11 +11,11 @@
 use shodh_memory::integrations::{
     github::{
         GitHubBranch, GitHubIssue, GitHubLabel, GitHubMilestone, GitHubPullRequest,
-        GitHubRepository, GitHubUser, GitHubWebhook, GitHubWebhookPayload,
+        GitHubRepository, GitHubUser, GitHubWebhook,
     },
     linear::{
         LinearCycle, LinearIssueData, LinearLabel, LinearProject, LinearState, LinearTeam,
-        LinearUser, LinearWebhook, LinearWebhookPayload,
+        LinearUser, LinearWebhook,
     },
 };
 

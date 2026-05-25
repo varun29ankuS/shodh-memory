@@ -174,7 +174,7 @@ fn test_search_returns_full_memory_not_chunk() {
 
     let experience = create_long_memory_with_markers();
     let original_content = experience.content.clone();
-    let stored = system.remember(experience, None).expect("Failed to store");
+    let _stored = system.remember(experience, None).expect("Failed to store");
 
     // Search for end content
     let query = Query {

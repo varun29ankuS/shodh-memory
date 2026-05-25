@@ -6,7 +6,7 @@
 //! Run with: cargo test --test timing_sla_tests -- --test-threads=1
 //! Note: Run single-threaded for accurate timing measurements.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tempfile::TempDir;
 
 use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
@@ -24,6 +24,7 @@ const RECORD_P99_MS: u128 = 3000; // 3s P99 for record (debug mode, first record
 const RETRIEVE_P50_MS: u128 = 200; // 200ms P50 for retrieve (debug mode)
 const RETRIEVE_P99_MS: u128 = 1000; // 1s P99 for retrieve (debug mode)
 const BATCH_100_MAX_MS: u128 = 60000; // 60s max for 100 records (debug mode)
+#[allow(dead_code)]
 const INDEX_OP_MAX_MS: u128 = 10; // 10ms max for single index op (debug mode)
 const STATS_MAX_MS: u128 = 50; // 50ms max for stats (debug mode)
 
@@ -32,12 +33,14 @@ const STATS_MAX_MS: u128 = 50; // 50ms max for stats (debug mode)
 // ============================================================================
 
 /// Create fallback NER for testing (rule-based, no ONNX required)
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Create experience with NER entity extraction
+#[allow(dead_code)]
 fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
     let entities = ner.extract(content).unwrap_or_default();
     let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
@@ -91,6 +94,7 @@ fn create_rich_experience(i: usize) -> Experience {
 }
 
 /// Create rich experience with NER entity extraction
+#[allow(dead_code)]
 fn create_rich_experience_with_ner(i: usize, ner: &NeuralNer) -> Experience {
     let content = format!(
         "CEO Satya Nadella at Microsoft headquarters in Seattle discussed {} \
@@ -119,9 +123,10 @@ fn percentile(sorted_durations: &[u128], p: f64) -> u128 {
 }
 
 /// Collect timing samples for an operation
+#[allow(dead_code)]
 fn benchmark_operation<F>(op: F, iterations: usize) -> Vec<u128>
 where
-    F: Fn() -> (),
+    F: Fn(),
 {
     let mut durations = Vec::with_capacity(iterations);
     for _ in 0..iterations {
@@ -482,7 +487,7 @@ fn test_sla_flush_latency() {
 #[test]
 fn test_sla_concurrent_access_latency() {
     use std::sync::Arc;
-    use std::thread;
+    
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = create_test_config(&temp_dir);

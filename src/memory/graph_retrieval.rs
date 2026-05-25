@@ -1182,21 +1182,21 @@ mod tests {
         use crate::constants::*;
 
         // Relaxed threshold must be lower than strict threshold
-        assert!(SPREADING_RELAXED_THRESHOLD < SPREADING_ACTIVATION_THRESHOLD);
+        const _: () = assert!(SPREADING_RELAXED_THRESHOLD < SPREADING_ACTIVATION_THRESHOLD);
 
         // Min hops must be <= max hops
-        assert!(SPREADING_MIN_HOPS <= SPREADING_MAX_HOPS);
+        const _: () = assert!(SPREADING_MIN_HOPS <= SPREADING_MAX_HOPS);
 
         // Early termination ratio must be in (0, 1)
-        assert!(SPREADING_EARLY_TERMINATION_RATIO > 0.0);
-        assert!(SPREADING_EARLY_TERMINATION_RATIO < 1.0);
+        const _: () = assert!(SPREADING_EARLY_TERMINATION_RATIO > 0.0);
+        const _: () = assert!(SPREADING_EARLY_TERMINATION_RATIO < 1.0);
 
         // Normalization factor must be positive
-        assert!(SPREADING_NORMALIZATION_FACTOR > 0.0);
+        const _: () = assert!(SPREADING_NORMALIZATION_FACTOR > 0.0);
 
         // Min candidates for relaxation should be reasonable
-        assert!(SPREADING_MIN_CANDIDATES > 0);
-        assert!(SPREADING_MIN_CANDIDATES < SPREADING_EARLY_TERMINATION_CANDIDATES);
+        const _: () = assert!(SPREADING_MIN_CANDIDATES > 0);
+        const _: () = assert!(SPREADING_MIN_CANDIDATES < SPREADING_EARLY_TERMINATION_CANDIDATES);
     }
 
     #[test]
@@ -1269,23 +1269,23 @@ mod tests {
     #[test]
     fn test_bidirectional_constants_valid() {
         // Minimum entities must be at least 2 for bidirectional to make sense
-        assert!(BIDIRECTIONAL_MIN_ENTITIES >= 2);
+        const _: () = assert!(BIDIRECTIONAL_MIN_ENTITIES >= 2);
 
         // Intersection boost must be positive
-        assert!(BIDIRECTIONAL_INTERSECTION_BOOST > 1.0);
+        const _: () = assert!(BIDIRECTIONAL_INTERSECTION_BOOST > 1.0);
 
         // Intersection minimum must be below activation threshold
-        assert!(BIDIRECTIONAL_INTERSECTION_MIN < SPREADING_ACTIVATION_THRESHOLD);
+        const _: () = assert!(BIDIRECTIONAL_INTERSECTION_MIN < SPREADING_ACTIVATION_THRESHOLD);
 
         // Density thresholds must be ordered correctly
-        assert!(BIDIRECTIONAL_DENSITY_SPARSE < BIDIRECTIONAL_DENSITY_DENSE);
+        const _: () = assert!(BIDIRECTIONAL_DENSITY_SPARSE < BIDIRECTIONAL_DENSITY_DENSE);
 
         // Hop counts must be ordered: dense < medium < sparse
-        assert!(BIDIRECTIONAL_HOPS_DENSE < BIDIRECTIONAL_HOPS_MEDIUM);
-        assert!(BIDIRECTIONAL_HOPS_MEDIUM < BIDIRECTIONAL_HOPS_SPARSE);
+        const _: () = assert!(BIDIRECTIONAL_HOPS_DENSE < BIDIRECTIONAL_HOPS_MEDIUM);
+        const _: () = assert!(BIDIRECTIONAL_HOPS_MEDIUM < BIDIRECTIONAL_HOPS_SPARSE);
 
         // Medium hops × 2 should approximate max hops for unidirectional
-        assert!(BIDIRECTIONAL_HOPS_MEDIUM * 2 >= SPREADING_MAX_HOPS);
+        const _: () = assert!(BIDIRECTIONAL_HOPS_MEDIUM * 2 >= SPREADING_MAX_HOPS);
     }
 
     #[test]
@@ -1377,12 +1377,10 @@ mod tests {
     #[test]
     fn test_bidirectional_entity_split() {
         // Test alternating assignment distributes evenly
-        let entities = vec![
-            (Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
+        let entities = [(Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
             (Uuid::new_v4(), "entity2".to_string(), 1.0, 0.5),
             (Uuid::new_v4(), "entity3".to_string(), 1.0, 0.5),
-            (Uuid::new_v4(), "entity4".to_string(), 1.0, 0.5),
-        ];
+            (Uuid::new_v4(), "entity4".to_string(), 1.0, 0.5)];
 
         // With 4 entities, split should be 2-2
         let mut forward_count = 0;
@@ -1403,11 +1401,9 @@ mod tests {
     #[test]
     fn test_bidirectional_odd_entities() {
         // Test odd number of entities doesn't leave backward empty
-        let entities = vec![
-            (Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
+        let entities = [(Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
             (Uuid::new_v4(), "entity2".to_string(), 1.0, 0.5),
-            (Uuid::new_v4(), "entity3".to_string(), 1.0, 0.5),
-        ];
+            (Uuid::new_v4(), "entity3".to_string(), 1.0, 0.5)];
 
         // With 3 entities: indices 0,2 go forward, index 1 goes backward
         let mut forward_seeds = Vec::new();
@@ -1435,24 +1431,20 @@ mod tests {
         // Test when bidirectional is triggered vs unidirectional
 
         // 1 entity: unidirectional
-        let single_entity = vec![(Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5)];
+        let single_entity = [(Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5)];
         assert!(single_entity.len() < BIDIRECTIONAL_MIN_ENTITIES);
 
         // 2 entities: bidirectional
-        let two_entities = vec![
-            (Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
-            (Uuid::new_v4(), "entity2".to_string(), 1.0, 0.5),
-        ];
+        let two_entities = [(Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
+            (Uuid::new_v4(), "entity2".to_string(), 1.0, 0.5)];
         assert!(two_entities.len() >= BIDIRECTIONAL_MIN_ENTITIES);
 
         // 5 entities: bidirectional
-        let many_entities = vec![
-            (Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
+        let many_entities = [(Uuid::new_v4(), "entity1".to_string(), 1.0, 0.5),
             (Uuid::new_v4(), "entity2".to_string(), 1.0, 0.5),
             (Uuid::new_v4(), "entity3".to_string(), 1.0, 0.5),
             (Uuid::new_v4(), "entity4".to_string(), 1.0, 0.5),
-            (Uuid::new_v4(), "entity5".to_string(), 1.0, 0.5),
-        ];
+            (Uuid::new_v4(), "entity5".to_string(), 1.0, 0.5)];
         assert!(many_entities.len() >= BIDIRECTIONAL_MIN_ENTITIES);
     }
 

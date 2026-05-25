@@ -17,12 +17,14 @@ use std::collections::HashMap;
 use tempfile::TempDir;
 
 /// Create fallback NER for testing (rule-based, no ONNX required)
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Convert NER entity type to EntityLabel
+#[allow(dead_code)]
 fn ner_type_to_label(ner_type: &str) -> EntityLabel {
     match ner_type {
         "PER" => EntityLabel::Person,
@@ -33,6 +35,7 @@ fn ner_type_to_label(ner_type: &str) -> EntityLabel {
 }
 
 /// Create entity from NER extraction result
+#[allow(dead_code)]
 fn create_entity_from_ner(
     name: &str,
     ner_type: &str,
@@ -203,7 +206,7 @@ fn test_high_salience_near_center() {
 
     // Add high salience entity (proper noun with high initial salience)
     let high_entity = create_entity("CentralStar", Some(EntityLabel::Person), true, 0.9);
-    let high_salience_id = graph
+    let _high_salience_id = graph
         .add_entity(high_entity)
         .expect("Failed to add high salience entity");
 
@@ -328,7 +331,7 @@ fn test_star_size_based_on_salience() {
 
     // High salience star
     let high_entity = create_entity("BigStar", Some(EntityLabel::Person), true, 0.9);
-    let high_id = graph.add_entity(high_entity).expect("Failed");
+    let _high_id = graph.add_entity(high_entity).expect("Failed");
 
     for _ in 0..30 {
         let boost = create_entity("BigStar", Some(EntityLabel::Person), true, 0.9);
@@ -593,7 +596,7 @@ fn test_star_metadata() {
     let (graph, _temp_dir) = setup_graph_memory();
 
     let entity = create_entity("MetadataStar", Some(EntityLabel::Person), true, 0.6);
-    let entity_id = graph.add_entity(entity).expect("Failed");
+    let _entity_id = graph.add_entity(entity).expect("Failed");
 
     // Add some mentions
     for _ in 0..5 {

@@ -28,12 +28,14 @@ use shodh_memory::memory::{
 };
 
 /// Create fallback NER instance for testing
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Create experience with NER-extracted entities
+#[allow(dead_code)]
 fn create_experience_with_ner(
     content: &str,
     exp_type: ExperienceType,
@@ -89,6 +91,7 @@ fn create_error_experience(content: &str, entities: Vec<&str>) -> Experience {
     create_experience(content, ExperienceType::Error, entities)
 }
 
+#[allow(dead_code)]
 fn create_conversation_experience(content: &str, entities: Vec<&str>) -> Experience {
     create_experience(content, ExperienceType::Conversation, entities)
 }
@@ -160,7 +163,7 @@ fn test_retrieval_outcome_default() {
 
 #[test]
 fn test_tracked_retrieval_creation() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp1 = create_learning_experience(
         "Rust ownership prevents memory leaks",
@@ -191,7 +194,7 @@ fn test_tracked_retrieval_creation() {
 
 #[test]
 fn test_tracked_retrieval_memory_ids() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_learning_experience("Test content", vec!["test"]);
     let id = system.remember(exp, None).expect("Failed to record");
@@ -210,7 +213,7 @@ fn test_tracked_retrieval_memory_ids() {
 
 #[test]
 fn test_reinforce_helpful_outcome() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp1 =
         create_learning_experience("API endpoint for user authentication", vec!["api", "auth"]);
@@ -237,7 +240,7 @@ fn test_reinforce_helpful_outcome() {
 
 #[test]
 fn test_reinforce_misleading_outcome() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_learning_experience("Misleading information", vec!["test"]);
     let id = system.remember(exp, None).expect("Failed");
@@ -255,7 +258,7 @@ fn test_reinforce_misleading_outcome() {
     // Apply multiple misleading reinforcements to ensure measurable decay
     for _ in 0..5 {
         let stats = system
-            .reinforce_recall(&[id.clone()], RetrievalOutcome::Misleading)
+            .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Misleading)
             .expect("Failed");
         assert_eq!(stats.memories_processed, 1);
         assert_eq!(stats.importance_decays, 1);
@@ -282,7 +285,7 @@ fn test_reinforce_misleading_outcome() {
 
 #[test]
 fn test_reinforce_neutral_outcome() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp1 = create_learning_experience("First neutral memory", vec!["neutral"]);
     let exp2 = create_learning_experience("Second neutral memory", vec!["neutral"]);
@@ -314,7 +317,7 @@ fn test_reinforce_empty_list() {
 
 #[test]
 fn test_reinforce_tracked_convenience() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_learning_experience("Tracked memory test", vec!["tracked"]);
     system.remember(exp, None).expect("Failed");
@@ -335,7 +338,7 @@ fn test_reinforce_tracked_convenience() {
 
 #[test]
 fn test_importance_boost_cumulative() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_learning_experience("Memory that gets boosted multiple times", vec!["boost"]);
     let id = system.remember(exp, None).expect("Failed");
@@ -344,7 +347,7 @@ fn test_importance_boost_cumulative() {
     let mut total_boosts = 0;
     for _ in 0..10 {
         let stats = system
-            .reinforce_recall(&[id.clone()], RetrievalOutcome::Helpful)
+            .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Helpful)
             .expect("Failed");
         assert_eq!(stats.importance_boosts, 1);
         total_boosts += stats.importance_boosts;
@@ -356,7 +359,7 @@ fn test_importance_boost_cumulative() {
 
 #[test]
 fn test_importance_decay_floor() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp = create_learning_experience("Memory that gets decayed to minimum", vec!["decay"]);
     let id = system.remember(exp, None).expect("Failed");
@@ -365,7 +368,7 @@ fn test_importance_decay_floor() {
     let mut total_decays = 0;
     for _ in 0..20 {
         let stats = system
-            .reinforce_recall(&[id.clone()], RetrievalOutcome::Misleading)
+            .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Misleading)
             .expect("Failed");
         assert_eq!(stats.importance_decays, 1);
         total_decays += 1;
@@ -377,7 +380,7 @@ fn test_importance_decay_floor() {
 
 #[test]
 fn test_coactivation_strengthens_graph() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp1 = create_learning_experience("Database connection pooling", vec!["database"]);
     let exp2 = create_learning_experience("Query optimization techniques", vec!["database"]);
@@ -907,7 +910,7 @@ fn test_prefetch_reason_default() {
 
 #[test]
 fn test_adaptive_memory_workflow() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let experiences = vec![
         create_learning_experience(
@@ -947,8 +950,11 @@ fn test_adaptive_memory_workflow() {
         .expect("Failed");
     assert!(stats.memories_processed > 0);
 
-    let graph_stats = system.graph_stats();
-    assert!(graph_stats.node_count > 0 || graph_stats.edge_count >= 0);
+    // Graph stats are produced as a side-effect of reinforce_recall; the
+    // original `node_count > 0 || edge_count >= 0` check was tautological
+    // because both counts are unsigned. The stats access alone validates the
+    // call path without imposing a brittle invariant.
+    let _graph_stats = system.graph_stats();
 
     let prefetch = AnticipatoryPrefetch::new();
     let ctx = PrefetchContext {
@@ -962,7 +968,7 @@ fn test_adaptive_memory_workflow() {
 
 #[test]
 fn test_graph_maintenance() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let exp1 = create_learning_experience("First memory", vec!["test"]);
     let exp2 = create_learning_experience("Second memory", vec!["test"]);
@@ -976,8 +982,9 @@ fn test_graph_maintenance() {
 
     system.graph_maintenance();
 
-    let stats = system.graph_stats();
-    assert!(stats.node_count >= 0);
+    // `stats.node_count >= 0` is tautological (usize); the stats call itself
+    // exercises the graph_stats path which is what we want to validate here.
+    let _stats = system.graph_stats();
 }
 
 #[test]
@@ -1007,7 +1014,7 @@ fn test_reinforcement_stats_structure() {
 
 #[test]
 fn test_high_volume_reinforcement() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     let mut ids = Vec::new();
     for i in 0..50 {
@@ -1026,7 +1033,7 @@ fn test_high_volume_reinforcement() {
 
 #[test]
 fn test_rapid_feedback_cycles() {
-    let (mut system, _temp_dir) = create_test_system();
+    let (system, _temp_dir) = create_test_system();
 
     for i in 0..20 {
         let exp = create_learning_experience(&format!("Cycle {i}"), vec!["cycle"]);

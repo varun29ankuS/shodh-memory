@@ -17,12 +17,14 @@ use shodh_memory::uuid::Uuid;
 use tempfile::TempDir;
 
 /// Create fallback NER instance for testing
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Create experience with NER-extracted entities
+#[allow(dead_code)]
 fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
     let entities = ner.extract(content).unwrap_or_default();
     let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
@@ -334,7 +336,7 @@ fn test_activation_never_zero() {
 
 #[test]
 fn test_connected_memories_coactivate() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     let id1 = memory
         .remember(create_experience("Memory A"), None)
@@ -361,7 +363,7 @@ fn test_connected_memories_coactivate() {
 
 #[test]
 fn test_chain_activation_propagates() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Create a chain: A -> B -> C
     let id_a = memory
@@ -396,7 +398,7 @@ fn test_chain_activation_propagates() {
 
 #[test]
 fn test_disconnected_memories_independent() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Create two unconnected memories
     let _id1 = memory
@@ -420,7 +422,7 @@ fn test_disconnected_memories_independent() {
 
 #[test]
 fn test_hub_memory_activates_many() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Create hub and spokes
     let hub = memory
@@ -449,7 +451,7 @@ fn test_hub_memory_activates_many() {
     };
 
     let results = memory.recall(&query).unwrap();
-    assert!(results.len() >= 1);
+    assert!(!results.is_empty());
 }
 
 // =============================================================================
@@ -827,7 +829,7 @@ fn test_medium_decay_rate() {
 
 #[test]
 fn test_triangle_activation() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Create triangle: A-B, B-C, C-A
     let id_a = memory
@@ -863,7 +865,7 @@ fn test_triangle_activation() {
 
 #[test]
 fn test_star_activation() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Create star: center connected to 5 leaves
     let center = memory
@@ -892,7 +894,7 @@ fn test_star_activation() {
 
 #[test]
 fn test_bipartite_activation() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Create bipartite: group A connected to group B
     let mut group_a = Vec::new();
@@ -959,7 +961,7 @@ fn test_activation_update_performance() {
 
     // Just verify it completed with valid activation
     let activation = memory.activation();
-    assert!(activation >= 0.0 && activation <= 1.0);
+    assert!((0.0..=1.0).contains(&activation));
 }
 
 #[test]

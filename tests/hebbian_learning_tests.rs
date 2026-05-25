@@ -17,6 +17,7 @@ use shodh_memory::memory::{
 use tempfile::TempDir;
 
 /// Create fallback NER instance for testing
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
@@ -58,6 +59,7 @@ fn create_experience(content: &str) -> Experience {
 }
 
 /// Create experience with NER-extracted entities
+#[allow(dead_code)]
 fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
     let entities = ner.extract(content).unwrap_or_default();
     let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
@@ -75,7 +77,7 @@ fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
 
 #[test]
 fn test_retrieve_returns_memories() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record some memories
     memory
@@ -101,7 +103,7 @@ fn test_retrieve_returns_memories() {
 
 #[test]
 fn test_retrieve_multiple_related() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record related memories
     for i in 0..10 {
@@ -129,7 +131,7 @@ fn test_retrieve_multiple_related() {
 
 #[test]
 fn test_reinforce_helpful_boosts_importance() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record memory
     let id = memory
@@ -164,7 +166,7 @@ fn test_reinforce_helpful_boosts_importance() {
 
 #[test]
 fn test_reinforce_misleading_decays_importance() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record memory with high importance
     let id = memory
@@ -203,7 +205,7 @@ fn test_reinforce_misleading_decays_importance() {
 
 #[test]
 fn test_reinforce_neutral_no_change() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record memory
     let id = memory
@@ -234,7 +236,7 @@ fn test_reinforce_neutral_no_change() {
 
 #[test]
 fn test_co_retrieval_strengthens_association() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record related memories
     let id1 = memory
@@ -264,7 +266,7 @@ fn test_co_retrieval_strengthens_association() {
 
 #[test]
 fn test_repeated_co_retrieval_increases_strength() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record related memories
     let id1 = memory
@@ -298,7 +300,7 @@ fn test_repeated_co_retrieval_increases_strength() {
 
 #[test]
 fn test_single_memory_no_associations() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     let id = memory
         .remember(create_experience("Single isolated memory"), None)
@@ -318,7 +320,7 @@ fn test_single_memory_no_associations() {
 
 #[test]
 fn test_many_co_retrieved_associations() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record many related memories
     let mut ids = Vec::new();
@@ -351,7 +353,7 @@ fn test_many_co_retrieved_associations() {
 
 #[test]
 fn test_reinforcement_stats_counts() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record memories
     let id1 = memory
@@ -374,7 +376,7 @@ fn test_reinforcement_stats_counts() {
 
 #[test]
 fn test_reinforcement_empty_ids() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     let ids: Vec<shodh_memory::memory::MemoryId> = vec![];
     let stats = memory
@@ -389,7 +391,7 @@ fn test_reinforcement_empty_ids() {
 
 #[test]
 fn test_reinforcement_invalid_ids() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Create random IDs that don't exist
     let ids = vec![
@@ -414,7 +416,7 @@ fn test_reinforcement_invalid_ids() {
 
 #[test]
 fn test_importance_boost_formula() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Create memory with known importance
     let id = memory
@@ -433,7 +435,7 @@ fn test_importance_boost_formula() {
 
     // Reinforce as helpful
     memory
-        .reinforce_recall(&[id.clone()], RetrievalOutcome::Helpful)
+        .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Helpful)
         .unwrap();
 
     let after = memory.get_memory(&id).unwrap();
@@ -453,7 +455,7 @@ fn test_importance_boost_formula() {
 
 #[test]
 fn test_importance_decay_formula() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Create memory with high importance
     let id = memory
@@ -473,7 +475,7 @@ fn test_importance_decay_formula() {
 
     // Reinforce as misleading
     memory
-        .reinforce_recall(&[id.clone()], RetrievalOutcome::Misleading)
+        .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Misleading)
         .unwrap();
 
     let after = memory.get_memory(&id).unwrap();
@@ -497,7 +499,7 @@ fn test_importance_decay_formula() {
 
 #[test]
 fn test_ltp_after_multiple_reinforcements() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     let id1 = memory
         .remember(create_experience("Pattern A observation"), None)
@@ -557,7 +559,7 @@ fn test_ltp_after_multiple_reinforcements() {
 
 #[test]
 fn test_retrieve_then_reinforce_cycle() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record memories
     for i in 0..20 {
@@ -592,7 +594,7 @@ fn test_retrieve_then_reinforce_cycle() {
 
 #[test]
 fn test_reinforced_memories_rank_higher() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record several memories about the same topic
     let id_target = memory
@@ -614,7 +616,7 @@ fn test_reinforced_memories_rank_higher() {
     // Reinforce the target memory multiple times
     for _ in 0..5 {
         memory
-            .reinforce_recall(&[id_target.clone()], RetrievalOutcome::Helpful)
+            .reinforce_recall(std::slice::from_ref(&id_target), RetrievalOutcome::Helpful)
             .unwrap();
     }
 
@@ -641,7 +643,7 @@ fn test_reinforced_memories_rank_higher() {
 
 #[test]
 fn test_reinforce_same_memory_twice() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     let id = memory
         .remember(create_experience("Duplicate test"), None)
@@ -659,7 +661,7 @@ fn test_reinforce_same_memory_twice() {
 
 #[test]
 fn test_alternating_feedback() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     let id = memory
         .remember(create_experience("Alternating feedback test"), None)
@@ -667,16 +669,16 @@ fn test_alternating_feedback() {
 
     // Alternate helpful and misleading
     memory
-        .reinforce_recall(&[id.clone()], RetrievalOutcome::Helpful)
+        .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Helpful)
         .unwrap();
     memory
-        .reinforce_recall(&[id.clone()], RetrievalOutcome::Misleading)
+        .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Misleading)
         .unwrap();
     memory
-        .reinforce_recall(&[id.clone()], RetrievalOutcome::Helpful)
+        .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Helpful)
         .unwrap();
     memory
-        .reinforce_recall(&[id.clone()], RetrievalOutcome::Misleading)
+        .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Misleading)
         .unwrap();
 
     // Memory should still exist and be valid - get_memory returns Result<Memory>, success means it exists
@@ -689,7 +691,7 @@ fn test_alternating_feedback() {
 
 #[test]
 fn test_high_volume_reinforcement() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record many memories
     let mut ids = Vec::new();
@@ -751,7 +753,7 @@ fn test_hebbian_graph_persists_across_restart() {
 
     // Phase 1: Create memories and form associations
     {
-        let mut memory = create_system_with_graph(config.clone());
+        let memory = create_system_with_graph(config.clone());
 
         id1 = memory
             .remember(create_experience("Hebbian persistence test memory A"), None)
@@ -810,7 +812,7 @@ fn test_hebbian_edge_strength_persists() {
 
     // Phase 1: Create strong associations
     {
-        let mut memory = create_system_with_graph(config.clone());
+        let memory = create_system_with_graph(config.clone());
 
         id1 = memory
             .remember(create_experience("Edge strength test A"), None)
@@ -855,7 +857,7 @@ fn test_hebbian_edge_strength_persists() {
 
 #[test]
 fn test_coactivation_during_retrieve_forms_edges() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record memories
     let id1 = memory
@@ -907,7 +909,7 @@ fn test_ltp_persists_across_restart() {
 
     // Phase 1: Create LTP by many co-activations
     {
-        let mut memory = create_system_with_graph(config.clone());
+        let memory = create_system_with_graph(config.clone());
 
         id1 = memory
             .remember(create_experience("LTP persistence test A"), None)
@@ -948,7 +950,7 @@ fn test_ltp_persists_across_restart() {
 
 #[test]
 fn test_graph_stats_accuracy() {
-    let (mut memory, _temp) = setup_memory_system();
+    let (memory, _temp) = setup_memory_system();
 
     // Record several memories
     let mut ids = Vec::new();

@@ -616,20 +616,15 @@ impl HybridSearchEngine {
     /// # Arguments
     /// * `query` - Search query text
     /// * `vector_results` - Pre-computed vector search results (memory_id, similarity)
-    /// * `get_content` - Closure to fetch content for reranking
     ///
     /// # Returns
     /// Hybrid search results with component scores
-    pub fn search<F>(
+    pub fn search(
         &self,
         query: &str,
         vector_results: Vec<(MemoryId, f32)>,
-        get_content: F,
-    ) -> Result<Vec<HybridSearchResult>>
-    where
-        F: Fn(&MemoryId) -> Option<String>,
-    {
-        self.search_with_ic_weights(query, vector_results, get_content, None)
+    ) -> Result<Vec<HybridSearchResult>> {
+        self.search_with_ic_weights(query, vector_results, None)
     }
 
     /// Perform hybrid search with IC-weighted BM25 term boosting
@@ -640,23 +635,13 @@ impl HybridSearchEngine {
     /// - Verbs (relations): IC=0.7
     ///
     /// This improves retrieval by prioritizing semantically important query terms.
-    pub fn search_with_ic_weights<F>(
+    pub fn search_with_ic_weights(
         &self,
         query: &str,
         vector_results: Vec<(MemoryId, f32)>,
-        get_content: F,
         term_weights: Option<&HashMap<String, f32>>,
-    ) -> Result<Vec<HybridSearchResult>>
-    where
-        F: Fn(&MemoryId) -> Option<String>,
-    {
-        self.search_with_ic_weights_and_phrases(
-            query,
-            vector_results,
-            get_content,
-            term_weights,
-            None,
-        )
+    ) -> Result<Vec<HybridSearchResult>> {
+        self.search_with_ic_weights_and_phrases(query, vector_results, term_weights, None)
     }
 
     /// Perform hybrid search with IC-weighted BM25 term boosting AND phrase matching
@@ -665,22 +650,17 @@ impl HybridSearchEngine {
     /// Phrase boosts enable exact multi-word phrase matching:
     /// - "support group" matches the exact phrase, not just "support" OR "group"
     /// - Compound nouns get 2.0x boost, adjacent nouns get 1.5x boost
-    pub fn search_with_ic_weights_and_phrases<F>(
+    pub fn search_with_ic_weights_and_phrases(
         &self,
         query: &str,
         vector_results: Vec<(MemoryId, f32)>,
-        get_content: F,
         term_weights: Option<&HashMap<String, f32>>,
         phrase_boosts: Option<&[(String, f32)]>,
-    ) -> Result<Vec<HybridSearchResult>>
-    where
-        F: Fn(&MemoryId) -> Option<String>,
-    {
+    ) -> Result<Vec<HybridSearchResult>> {
         // Use default discriminativeness (no dynamic weight adjustment)
         self.search_with_dynamic_weights(
             query,
             vector_results,
-            get_content,
             term_weights,
             phrase_boosts,
             None,
@@ -700,22 +680,17 @@ impl HybridSearchEngine {
     /// - discriminativeness 0.0-0.4: use default weights (BM25=0.4, Vector=0.6)
     /// - discriminativeness 0.5-0.7: boost BM25 (BM25=0.55, Vector=0.45)
     /// - discriminativeness 0.8-1.0: strong BM25 (BM25=0.7, Vector=0.3)
-    pub fn search_with_dynamic_weights<F>(
+    pub fn search_with_dynamic_weights(
         &self,
         query: &str,
         vector_results: Vec<(MemoryId, f32)>,
-        get_content: F,
         term_weights: Option<&HashMap<String, f32>>,
         phrase_boosts: Option<&[(String, f32)]>,
         keyword_discriminativeness: Option<f32>,
-    ) -> Result<Vec<HybridSearchResult>>
-    where
-        F: Fn(&MemoryId) -> Option<String>,
-    {
+    ) -> Result<Vec<HybridSearchResult>> {
         self.search_with_dynamic_weights_pool(
             query,
             vector_results,
-            get_content,
             term_weights,
             phrase_boosts,
             keyword_discriminativeness,
@@ -732,19 +707,15 @@ impl HybridSearchEngine {
     /// markers near the focal entity have a chance to enter the candidate set.
     /// Pure post-fusion reranking cannot rescue passages that were never
     /// retrieved — see arXiv 2603.17580 ("Negation is Not Semantic").
-    pub fn search_with_dynamic_weights_pool<F>(
+    pub fn search_with_dynamic_weights_pool(
         &self,
         query: &str,
         vector_results: Vec<(MemoryId, f32)>,
-        _get_content: F,
         term_weights: Option<&HashMap<String, f32>>,
         phrase_boosts: Option<&[(String, f32)]>,
         keyword_discriminativeness: Option<f32>,
         bm25_pool_override: Option<usize>,
-    ) -> Result<Vec<HybridSearchResult>>
-    where
-        F: Fn(&MemoryId) -> Option<String>,
-    {
+    ) -> Result<Vec<HybridSearchResult>> {
         // 1. BM25 search with IC-weighted term boosting AND phrase matching
         let bm25_pool = bm25_pool_override.unwrap_or(self.config.candidate_count);
         let bm25_results = self.bm25_index.search_with_term_and_phrase_weights(

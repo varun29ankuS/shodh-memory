@@ -26,12 +26,14 @@ use shodh_memory::memory::{
 // ============================================================================
 
 /// Create fallback NER for testing (rule-based, no ONNX required)
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Create experience with NER entity extraction
+#[allow(dead_code)]
 fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
     let entities = ner.extract(content).unwrap_or_default();
     let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
@@ -288,10 +290,8 @@ fn test_brutal_multiple_restart_cycles() {
 
         // Verify all previous memories exist
         for (i, id) in all_ids.iter().enumerate() {
-            let memory = system.get_memory(id).expect(&format!(
-                "Cycle {}: Memory {} should exist from previous cycle",
-                cycle, i
-            ));
+            let memory = system.get_memory(id).unwrap_or_else(|_| panic!("Cycle {}: Memory {} should exist from previous cycle",
+                cycle, i));
             assert!(
                 memory.experience.content.contains("Restart cycle"),
                 "Cycle {}: Memory {} content should be preserved",
@@ -324,7 +324,7 @@ fn test_brutal_multiple_restart_cycles() {
     for (i, id) in all_ids.iter().enumerate() {
         system
             .get_memory(id)
-            .expect(&format!("Final: Memory {} should exist", i));
+            .unwrap_or_else(|_| panic!("Final: Memory {} should exist", i));
     }
     assert_eq!(all_ids.len(), 50, "Should have all 50 memories");
 }
@@ -355,7 +355,7 @@ fn test_brutal_partial_write_recovery() {
         // Boost importance multiple times to ensure detectable change
         for _ in 0..5 {
             system
-                .reinforce_recall(&[memory_id.clone()], RetrievalOutcome::Helpful)
+                .reinforce_recall(std::slice::from_ref(&memory_id), RetrievalOutcome::Helpful)
                 .expect("Failed");
         }
         boosted_importance = system.get_memory(&memory_id).unwrap().importance();
@@ -424,7 +424,7 @@ fn test_brutal_exceed_working_memory() {
     for (i, id) in all_ids.iter().enumerate() {
         system
             .get_memory(id)
-            .expect(&format!("Memory {} should exist in storage", i));
+            .unwrap_or_else(|_| panic!("Memory {} should exist in storage", i));
     }
 }
 
@@ -500,7 +500,7 @@ fn test_brutal_importance_boundary_cycling() {
         // Boost to max
         for _ in 0..50 {
             system
-                .reinforce_recall(&[id.clone()], RetrievalOutcome::Helpful)
+                .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Helpful)
                 .expect("Failed");
         }
         let high = system.get_memory(&id).expect("Failed").importance();
@@ -514,7 +514,7 @@ fn test_brutal_importance_boundary_cycling() {
         // Decay to min
         for _ in 0..100 {
             system
-                .reinforce_recall(&[id.clone()], RetrievalOutcome::Misleading)
+                .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Misleading)
                 .expect("Failed");
         }
         let low = system.get_memory(&id).expect("Failed").importance();
@@ -538,7 +538,7 @@ fn test_brutal_importance_bounds_invariant() {
     // Extreme boosts
     for _ in 0..1000 {
         system
-            .reinforce_recall(&[id.clone()], RetrievalOutcome::Helpful)
+            .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Helpful)
             .expect("Failed");
     }
     let importance = system.get_memory(&id).expect("Failed").importance();
@@ -556,7 +556,7 @@ fn test_brutal_importance_bounds_invariant() {
     // Extreme decays
     for _ in 0..1000 {
         system
-            .reinforce_recall(&[id.clone()], RetrievalOutcome::Misleading)
+            .reinforce_recall(std::slice::from_ref(&id), RetrievalOutcome::Misleading)
             .expect("Failed");
     }
     let importance = system.get_memory(&id).expect("Failed").importance();
@@ -653,12 +653,10 @@ fn test_brutal_graph_maintenance_cycles() {
         system.graph_maintenance();
     }
 
-    // Verify graph still works
-    let stats = system.graph_stats();
-    assert!(
-        stats.node_count > 0 || stats.edge_count >= 0,
-        "Graph should be intact"
-    );
+    // Verify graph still works — the stats call itself is what we want to
+    // exercise; `node_count > 0 || edge_count >= 0` was tautological (both
+    // counts are unsigned).
+    let _stats = system.graph_stats();
 }
 
 // ============================================================================
@@ -1000,7 +998,7 @@ fn test_brutal_lock_order_safety() {
         for id in &ids {
             system
                 .get_memory(id)
-                .expect(&format!("Memory missing in cycle {}", cycle));
+                .unwrap_or_else(|_| panic!("Memory missing in cycle {}", cycle));
         }
 
         // Perform mixed operations
@@ -1087,7 +1085,7 @@ fn test_brutal_reinforcement_race() {
                     d.fetch_add(1, Ordering::Relaxed);
                     RetrievalOutcome::Misleading
                 };
-                let _ = sys.reinforce_recall(&[id.clone()], outcome);
+                let _ = sys.reinforce_recall(std::slice::from_ref(&id), outcome);
             }
         });
         handles.push(handle);
@@ -1102,7 +1100,7 @@ fn test_brutal_reinforcement_race() {
     let importance = memory.importance();
 
     assert!(
-        importance >= 0.0 && importance <= 1.0,
+        (0.0..=1.0).contains(&importance),
         "Importance {} out of bounds after {} boosts and {} decays",
         importance,
         boosts.load(Ordering::Relaxed),
@@ -1270,9 +1268,9 @@ fn test_brutal_graph_consistency() {
         handle.join().expect("Thread panicked");
     }
 
-    // Verify graph is still valid
-    let stats = system.graph_stats();
-    assert!(stats.node_count >= 0, "Graph should have valid node count");
+    // Verify graph is still valid — the stats call itself validates the path;
+    // `node_count >= 0` was tautological (usize).
+    let _stats = system.graph_stats();
 }
 
 /// Test rapid creation and deletion simulation (via importance decay)
@@ -1291,7 +1289,7 @@ fn test_brutal_lifecycle_churn() {
     for _ in 0..100 {
         for id in &ids {
             system
-                .reinforce_recall(&[id.clone()], RetrievalOutcome::Misleading)
+                .reinforce_recall(std::slice::from_ref(id), RetrievalOutcome::Misleading)
                 .expect("Decay failed");
         }
     }
@@ -1300,7 +1298,7 @@ fn test_brutal_lifecycle_churn() {
     for (i, id) in ids.iter().enumerate() {
         let memory = system
             .get_memory(id)
-            .expect(&format!("Memory {} should exist", i));
+            .unwrap_or_else(|_| panic!("Memory {} should exist", i));
         // Importance should be at or near minimum (0.0)
         assert!(
             memory.importance() <= 0.1,

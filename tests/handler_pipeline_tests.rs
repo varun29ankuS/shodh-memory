@@ -89,6 +89,7 @@ fn authed_post(uri: &str, body: Value) -> Request<Body> {
         .unwrap()
 }
 
+#[allow(dead_code)]
 fn authed_put(uri: &str, body: Value) -> Request<Body> {
     let bytes = serde_json::to_vec(&body).unwrap();
     Request::builder()
@@ -109,6 +110,7 @@ fn authed_delete(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
+#[allow(dead_code)]
 fn authed_patch(uri: &str, body: Value) -> Request<Body> {
     let bytes = serde_json::to_vec(&body).unwrap();
     Request::builder()

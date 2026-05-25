@@ -385,6 +385,7 @@ mod tests {
     // ── security_headers ──
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn security_headers_present_in_dev_mode() {
         let _guard = ENV_LOCK.lock().unwrap();
         use axum::body::Body;
@@ -425,6 +426,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn security_headers_hsts_in_production() {
         let _guard = ENV_LOCK.lock().unwrap();
         use axum::body::Body;

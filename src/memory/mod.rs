@@ -2231,6 +2231,9 @@ impl MemorySystem {
             Vec<(MemoryId, f32)>,
             std::collections::HashMap<MemoryId, f32>,
         ) = {
+            // Content lookup used by the prospective-signals boost (Layer 4.7) below.
+            // No longer threaded into the hybrid search chain — the search wrappers
+            // do their own reranking from the BM25 index without needing memory bodies.
             let get_content = |id: &MemoryId| -> Option<String> {
                 self.working_memory
                     .read()
@@ -2304,7 +2307,6 @@ impl MemorySystem {
                 .search_with_dynamic_weights_pool(
                     bm25_query_text,
                     vector_results.clone(),
-                    get_content,
                     term_weights,
                     phrases,
                     disc_opt,

@@ -4,8 +4,6 @@
 //! Includes NER integration for entity extraction.
 
 use chrono::{Duration, Utc};
-use std::collections::HashMap;
-use std::sync::Arc;
 
 use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
 use shodh_memory::memory::types::{
@@ -14,12 +12,14 @@ use shodh_memory::memory::types::{
 use shodh_memory::uuid::Uuid;
 
 /// Create fallback NER instance for testing
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Create experience with NER-extracted entities
+#[allow(dead_code)]
 fn create_experience_with_ner(content: &str, ner: &NeuralNer) -> Experience {
     let entities = ner.extract(content).unwrap_or_default();
     let entity_names: Vec<String> = entities.iter().map(|e| e.text.clone()).collect();
@@ -925,8 +925,8 @@ fn test_reward_edge_modulation_constant() {
     use shodh_memory::constants::REWARD_EDGE_MODULATION;
 
     // Verify the constant is in a sane range
-    assert!(REWARD_EDGE_MODULATION > 0.0);
-    assert!(REWARD_EDGE_MODULATION <= 1.0);
+    const _: () = assert!(REWARD_EDGE_MODULATION > 0.0);
+    const _: () = assert!(REWARD_EDGE_MODULATION <= 1.0);
 
     // Verify modulation math: base_strength * (1.0 + reward * modulation)
     let base = 0.5_f32;
@@ -939,7 +939,7 @@ fn test_reward_edge_modulation_constant() {
     );
 
     // Negative reward should decrease strength
-    let negative = base * (1.0 + (-1.0) * REWARD_EDGE_MODULATION);
+    let negative = base * (1.0 + -REWARD_EDGE_MODULATION);
     assert!(
         negative < base,
         "Negative reward should decrease edge strength"

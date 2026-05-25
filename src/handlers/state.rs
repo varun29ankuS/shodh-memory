@@ -3546,11 +3546,11 @@ mod tests {
 
     #[test]
     fn test_ner_confidence_floor_constant() {
-        assert!(
+        const _: () = assert!(
             crate::constants::NER_GRAPH_CONFIDENCE_FLOOR >= 0.6,
             "Confidence floor should be >= 0.6 to reject marginal entities"
         );
-        assert!(
+        const _: () = assert!(
             crate::constants::NER_GRAPH_CONFIDENCE_FLOOR < 0.8,
             "Confidence floor should be < 0.8 to not reject legitimate entities"
         );

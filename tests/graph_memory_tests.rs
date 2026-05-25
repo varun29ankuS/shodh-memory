@@ -19,12 +19,14 @@ use std::collections::HashMap;
 use tempfile::TempDir;
 
 /// Create fallback NER instance for testing
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Convert NER entity type to GraphMemory EntityLabel
+#[allow(dead_code)]
 fn ner_type_to_label(ner_type: &NerEntityType) -> EntityLabel {
     match ner_type {
         NerEntityType::Person => EntityLabel::Person,
@@ -35,6 +37,7 @@ fn ner_type_to_label(ner_type: &NerEntityType) -> EntityLabel {
 }
 
 /// Create entity from NER extraction
+#[allow(dead_code)]
 fn create_entity_from_ner(ner: &NeuralNer, text: &str) -> Vec<EntityNode> {
     let extracted = ner.extract(text).unwrap_or_default();
     extracted
@@ -1160,7 +1163,7 @@ fn test_decay_synapse_persists() {
 
     // Create edge with old activation timestamp
     let thirty_days_ago = Utc::now() - Duration::days(30);
-    let mut edge = create_relationship_with_plasticity(
+    let edge = create_relationship_with_plasticity(
         id1,
         id2,
         RelationType::Knows,
@@ -1178,7 +1181,7 @@ fn test_decay_synapse_persists() {
     let should_prune = graph.decay_synapse(&edge_id).expect("Failed");
 
     // Verify decay was applied
-    let decayed_edge = graph
+    let _decayed_edge = graph
         .get_relationship(&edge_id)
         .expect("Failed")
         .expect("Edge should exist");

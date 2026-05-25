@@ -9,16 +9,18 @@
 //! - NER integration for entity extraction
 
 use shodh_memory::embeddings::ner::{NerConfig, NeuralNer};
-use shodh_memory::memory::{EntityRef, Experience, ExperienceType, Memory, MemoryId, MemoryTier};
+use shodh_memory::memory::{Experience, ExperienceType, Memory, MemoryId, MemoryTier};
 use shodh_memory::uuid::Uuid;
 
 /// Create fallback NER instance for testing
+#[allow(dead_code)]
 fn setup_fallback_ner() -> NeuralNer {
     let config = NerConfig::default();
     NeuralNer::new_fallback(config)
 }
 
 /// Create experience with NER-extracted entities
+#[allow(dead_code)]
 fn create_experience_with_ner(
     content: &str,
     exp_type: ExperienceType,
@@ -503,7 +505,7 @@ fn test_importance_getter() {
 
 #[test]
 fn test_importance_update() {
-    let mut memory = Memory::new(
+    let memory = Memory::new(
         MemoryId(Uuid::new_v4()),
         Experience::default(),
         0.5,
@@ -519,7 +521,7 @@ fn test_importance_update() {
 
 #[test]
 fn test_importance_clamped() {
-    let mut memory = Memory::new(
+    let memory = Memory::new(
         MemoryId(Uuid::new_v4()),
         Experience::default(),
         0.5,
@@ -544,7 +546,7 @@ fn test_importance_clamped() {
 
 #[test]
 fn test_boost_importance() {
-    let mut memory = Memory::new(
+    let memory = Memory::new(
         MemoryId(Uuid::new_v4()),
         Experience::default(),
         0.5,
@@ -597,7 +599,7 @@ fn test_access_count_initial() {
 
 #[test]
 fn test_record_access() {
-    let mut memory = Memory::new(
+    let memory = Memory::new(
         MemoryId(Uuid::new_v4()),
         Experience::default(),
         0.5,
@@ -616,7 +618,7 @@ fn test_record_access() {
 
 #[test]
 fn test_record_access_many() {
-    let mut memory = Memory::new(
+    let memory = Memory::new(
         MemoryId(Uuid::new_v4()),
         Experience::default(),
         0.5,
@@ -716,7 +718,7 @@ fn test_bincode_roundtrip_with_tier() {
 
 #[test]
 fn test_bincode_roundtrip_with_activation() {
-    let mut memory = Memory::new(
+    let memory = Memory::new(
         MemoryId(Uuid::new_v4()),
         Experience::default(),
         0.5,
@@ -974,7 +976,7 @@ fn test_max_importance() {
 
 #[test]
 fn test_zero_activation() {
-    let mut memory = Memory::new(
+    let memory = Memory::new(
         MemoryId(Uuid::new_v4()),
         Experience::default(),
         0.5,

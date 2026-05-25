@@ -911,7 +911,7 @@ mod tests {
 
         // Simulate interference history for a "survivor" memory
         // (high interference but maintained high activation)
-        let _similar_memories = vec![(
+        let _similar_memories = [(
             "survivor-mem".to_string(),
             0.90,
             0.85, // High importance maintained despite interference

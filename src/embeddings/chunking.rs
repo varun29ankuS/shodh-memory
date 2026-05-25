@@ -660,7 +660,7 @@ mod tests {
         // Code-like content with more punctuation
         let code = "fn main() { println!(\"hello\"); }";
         let tokens = estimate_tokens(code);
-        assert!(tokens >= 5 && tokens <= 15, "Code tokens: {}", tokens);
+        assert!((5..=15).contains(&tokens), "Code tokens: {}", tokens);
 
         // No whitespace (falls back to char-based)
         assert_eq!(estimate_tokens("abcdefgh"), 2); // 8 chars / 4 = 2

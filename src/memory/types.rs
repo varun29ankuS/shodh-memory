@@ -4539,15 +4539,13 @@ mod tests {
         use crate::constants::{ASSISTANT_RESPONSE_TAG_PENALTY, AUTO_CAPTURED_TAG_PENALTY};
 
         // Individual penalties should be in (0.8, 1.0) — meaningful but not devastating
-        assert!(
+        const _: () = assert!(
             AUTO_CAPTURED_TAG_PENALTY > 0.80 && AUTO_CAPTURED_TAG_PENALTY < 1.0,
-            "AUTO_CAPTURED_TAG_PENALTY should be in (0.80, 1.0), got {}",
-            AUTO_CAPTURED_TAG_PENALTY
+            "AUTO_CAPTURED_TAG_PENALTY should be in (0.80, 1.0)"
         );
-        assert!(
+        const _: () = assert!(
             ASSISTANT_RESPONSE_TAG_PENALTY > 0.80 && ASSISTANT_RESPONSE_TAG_PENALTY < 1.0,
-            "ASSISTANT_RESPONSE_TAG_PENALTY should be in (0.80, 1.0), got {}",
-            ASSISTANT_RESPONSE_TAG_PENALTY
+            "ASSISTANT_RESPONSE_TAG_PENALTY should be in (0.80, 1.0)"
         );
 
         // Combined penalty (both tags) should still be >= 0.5 — no cliff

@@ -171,7 +171,7 @@ type Handler interface {
     .unwrap();
 
     // Create a binary file (should be skipped)
-    fs::write(temp_dir.path().join("image.png"), &[0x89, 0x50, 0x4E, 0x47]).unwrap();
+    fs::write(temp_dir.path().join("image.png"), [0x89, 0x50, 0x4E, 0x47]).unwrap();
 
     // Create a large file (should be skipped with default config)
     let large_content = "x".repeat(600_000); // 600KB

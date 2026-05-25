@@ -142,7 +142,7 @@ fn main() {
         let tokens = estimate_tokens(cjk);
         let char_count = cjk.chars().count();
         // Should be in CJK mode: ~1.5 tokens per character
-        let expected = (char_count * 3 + 1) / 2;
+        let expected = (char_count * 3).div_ceil(2);
         assert_eq!(
             tokens, expected,
             "CJK: got {tokens}, expected {expected} (chars={char_count})"
