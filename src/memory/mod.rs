@@ -7788,6 +7788,43 @@ impl MemorySystem {
     ) -> Result<Vec<LineageEdge>> {
         let mut inferred_edges = Vec::new();
 
+        // Detect a project-pivot signal up front. When present we open a branch
+        // here, so the branch id is available to (a) tag the edges this memory
+        // originates and (b) anchor a BranchedFrom edge into the edge graph —
+        // otherwise branches were created as orphan metadata records that nothing
+        // referenced and every edge stayed silently on `main`.
+        let branch_id: Option<String> =
+            if lineage::LineageGraph::detect_branch_signal(&new_memory.experience.content) {
+                self.lineage_graph.ensure_main_branch(user_id)?;
+                let branch_name = format!("pivot-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+                match self.lineage_graph.create_branch(
+                    user_id,
+                    &branch_name,
+                    "main",
+                    new_memory.id.clone(),
+                    Some(&format!(
+                        "Auto-detected pivot: {}",
+                        crate::memory::char_truncate(&new_memory.experience.content, 80)
+                    )),
+                ) {
+                    Ok(branch) => {
+                        tracing::info!(
+                            user_id = %user_id,
+                            branch = %branch.name,
+                            memory_id = %new_memory.id.0,
+                            "Auto-created lineage branch from pivot signal"
+                        );
+                        Some(branch.id)
+                    }
+                    Err(e) => {
+                        tracing::debug!("Auto-branch creation failed (non-fatal): {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
         for candidate in candidate_memories {
             // Backward pass: candidate → new_memory (what caused this memory?)
             if let Some((relation, confidence)) =
@@ -7847,12 +7884,15 @@ impl MemorySystem {
                         self.lineage_graph.store_edge(user_id, &updated)?;
                     }
                     None => {
+                        // Edges originating from the pivot memory belong to the
+                        // branch it opened (None → main otherwise).
                         let edge = LineageEdge::inferred(
                             new_memory.id.clone(),
                             candidate.id.clone(),
                             relation,
                             confidence,
-                        );
+                        )
+                        .with_branch(branch_id.clone());
                         self.lineage_graph.store_edge(user_id, &edge)?;
                         inferred_edges.push(edge);
                     }
@@ -7861,36 +7901,27 @@ impl MemorySystem {
             }
         }
 
-        // Check for branch signal in memory content
-        if lineage::LineageGraph::detect_branch_signal(&new_memory.experience.content) {
-            self.lineage_graph.ensure_main_branch(user_id)?;
-            // Auto-create branch for the pivot
-            let branch_name = format!("pivot-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
-            match self.lineage_graph.create_branch(
-                user_id,
-                &branch_name,
-                "main",
-                new_memory.id.clone(),
-                Some(&format!(
-                    "Auto-detected pivot: {}",
-                    &new_memory
-                        .experience
-                        .content
-                        .chars()
-                        .take(80)
-                        .collect::<String>()
-                )),
-            ) {
-                Ok(branch) => {
-                    tracing::info!(
-                        user_id = %user_id,
-                        branch = %branch.name,
-                        memory_id = %new_memory.id.0,
-                        "Auto-created lineage branch from pivot signal"
-                    );
-                }
-                Err(e) => {
-                    tracing::debug!("Auto-branch creation failed (non-fatal): {}", e);
+        // If this memory opened a branch, anchor it into the edge graph with a
+        // BranchedFrom edge to the most recent prior candidate — the work it
+        // pivoted away from. Without this the branch is unreachable by trace()
+        // and find_root_cause().
+        if let Some(ref bid) = branch_id {
+            if let Some(origin) = candidate_memories
+                .iter()
+                .filter(|c| c.id != new_memory.id && c.created_at <= new_memory.created_at)
+                .max_by_key(|c| c.created_at)
+            {
+                let existing = self.lineage_graph.get_edges_from(user_id, &new_memory.id)?;
+                if !existing.iter().any(|e| e.to == origin.id) {
+                    let edge = LineageEdge::inferred(
+                        new_memory.id.clone(),
+                        origin.id.clone(),
+                        lineage::CausalRelation::BranchedFrom,
+                        crate::constants::LINEAGE_CONFIDENCE_BRANCHED_FROM,
+                    )
+                    .with_branch(Some(bid.clone()));
+                    self.lineage_graph.store_edge(user_id, &edge)?;
+                    inferred_edges.push(edge);
                 }
             }
         }
