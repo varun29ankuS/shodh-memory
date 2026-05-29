@@ -1511,7 +1511,7 @@ impl GraphMemory {
         let episodes_cf = db
             .cf_handle(CF_EPISODES)
             .ok_or_else(|| anyhow::anyhow!("CF '{}' not found after DB open", CF_EPISODES))?;
-        let relationship_count = Self::count_cf_entries(&db, relationships_cf);
+        let relationship_count = Self::count_relationship_edges(&db, relationships_cf);
         let episode_count = Self::count_cf_entries(&db, episodes_cf);
 
         // Load entity embedding cache for concept merging
@@ -1789,6 +1789,22 @@ impl GraphMemory {
     /// Count entries in a column family (one-time startup cost)
     fn count_cf_entries(db: &DB, cf: &ColumnFamily) -> usize {
         db.iterator_cf(cf, rocksdb::IteratorMode::Start).count()
+    }
+
+    /// Count only true relationship-edge records in the relationships CF.
+    ///
+    /// The relationships CF holds two kinds of keys: real edge records (16-byte
+    /// UUID key → encoded `RelationshipEdge`) and `mem_edge:<a>:<b>`
+    /// forward/reverse index keys (ASCII key → 16-byte edge UUID). The generic
+    /// `count_cf_entries` counts both, which over-states the edge count (~3x for
+    /// memory-pair edges). The startup seed for `relationship_count` must count
+    /// only the 16-byte-keyed edge records so it stays consistent with the
+    /// increments/decrements applied at runtime.
+    fn count_relationship_edges(db: &DB, cf: &ColumnFamily) -> usize {
+        db.iterator_cf(cf, rocksdb::IteratorMode::Start)
+            .filter_map(|r| r.ok())
+            .filter(|(key, _)| key.len() == 16)
+            .count()
     }
 
     /// Load entity embedding cache from persisted entities.
@@ -2717,7 +2733,15 @@ impl GraphMemory {
 
         // Delete from main storage
         self.db.delete_cf(self.relationships_cf(), key)?;
-        self.relationship_count.fetch_sub(1, Ordering::Relaxed);
+        // Saturating decrement: never wrap below 0. relationship_count is an
+        // accounting estimate that can legitimately drift (some creation paths
+        // historically omitted the increment), and a plain fetch_sub would wrap
+        // usize to ~1.8e19 once it hits 0.
+        let _ = self.relationship_count.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |c| Some(c.saturating_sub(1)),
+        );
 
         // Remove from entity_edges index for BOTH entities
         // (add_relationship indexes both from_entity and to_entity)
@@ -3740,6 +3764,10 @@ impl GraphMemory {
             })?;
         let mut batch = WriteBatch::default();
         let mut strengthened = 0;
+        // Count of genuinely-new edges (the `else` branch below), tracked
+        // separately from `strengthened` (which also counts updates to existing
+        // edges) so relationship_count is incremented only for new records.
+        let mut new_edges = 0;
         let mut promotion_boosts = Vec::new();
 
         for (from_id_str, to_id_str, boost) in edge_boosts {
@@ -3845,12 +3873,22 @@ impl GraphMemory {
                     );
 
                     strengthened += 1;
+                    new_edges += 1;
                 }
             }
         }
 
         if strengthened > 0 {
             self.db.write(batch)?;
+
+            // Account for genuinely-new edges created above. Mirrors
+            // record_memory_coactivation; without this the counter drifts low
+            // while delete_relationship keeps decrementing, eventually
+            // (pre-saturation) underflowing it.
+            if new_edges > 0 {
+                self.relationship_count
+                    .fetch_add(new_edges, Ordering::Relaxed);
+            }
 
             // Index new replay edges in entity_edges CF so they're visible to
             // traversal and degree-cap enforcement (GQ-11 fix)
