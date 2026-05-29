@@ -133,6 +133,15 @@ struct Args {
     /// CI keys on `full` only — per-layer numbers are not gated.
     #[arg(long, value_enum, default_value_t = LayerArg::Full)]
     layer: LayerArg,
+
+    /// Simulated edge age in days, applied AFTER ingest and BEFORE queries
+    /// (decay study). When `> 0`, the harness ages the knowledge-graph edges via
+    /// `simulate_edge_aging` at the production ~6h cadence, so recall quality is
+    /// measured as if the edges were `age_days` old. Default `0` = no aging
+    /// (pre-existing behavior). Run at 0 / 7 / 30 / 90 and diff the reports to
+    /// see how edge decay erodes recall.
+    #[arg(long, default_value_t = 0.0)]
+    age_days: f64,
 }
 
 fn main() {
@@ -163,6 +172,7 @@ fn run(args: &Args) -> Result<i32> {
         git_sha,
         repeats: args.repeats,
         layer_modes: args.layer.to_modes(),
+        age_days: args.age_days,
     };
 
     let mut report = run_smoke_suite(&inputs).context("running smoke suite")?;

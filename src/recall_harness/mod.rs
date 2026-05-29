@@ -10,6 +10,7 @@
 //! - `runner` — end-to-end smoke runner against `MemorySystem` (RH-4)
 //! - `report` — JSON schema + baseline comparison (RH-4)
 
+pub mod decay_sim;
 pub mod fixtures;
 pub mod metrics;
 pub mod report;

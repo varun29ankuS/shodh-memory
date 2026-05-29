@@ -886,9 +886,24 @@ impl RelationshipEdge {
     ///
     /// Returns true if synapse should be pruned (below tier's threshold)
     pub fn decay(&mut self) -> bool {
+        self.decay_at(Utc::now())
+    }
+
+    /// Apply time-decay as of an explicit `now`, returning whether the edge
+    /// should be pruned.
+    ///
+    /// `decay()` is the production entry point (`now = Utc::now()`); this
+    /// variant takes the clock as a parameter so decay is deterministically
+    /// testable and so the decay-simulation harness can drive an edge through
+    /// many cycles at a controlled cadence. The cadence is load-bearing:
+    /// because each call resets `last_activated = now`, the *per-cycle* elapsed
+    /// time is what `hybrid_decay_factor` sees. Simulating one large jump would
+    /// land directly in the power-law phase and hide the periodic dynamics that
+    /// production actually exhibits (every ~6h), so faithful evaluation must
+    /// step at the real cadence.
+    pub fn decay_at(&mut self, now: DateTime<Utc>) -> bool {
         use crate::decay::tier_decay_factor;
 
-        let now = Utc::now();
         let elapsed = now.signed_duration_since(self.last_activated);
         let hours_elapsed = elapsed.num_seconds() as f64 / 3600.0;
 
@@ -979,6 +994,38 @@ impl RelationshipEdge {
             false
         } else {
             exceeded_max_age || self.strength <= prune_threshold
+        }
+    }
+
+    /// Construct a synthetic, non-persisted edge for the decay-simulation
+    /// harness. `created_at`/`valid_at`/`last_activated` are anchored at
+    /// `origin` so a harness can then drive `decay_at` forward from a known
+    /// point. Entity UUIDs are random; this is never written to storage.
+    pub(crate) fn synthetic_for_sim(
+        strength: f32,
+        tier: EdgeTier,
+        ltp_status: LtpStatus,
+        origin: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength,
+            created_at: origin,
+            valid_at: origin,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: origin,
+            activation_count: 0,
+            ltp_status,
+            activation_timestamps: None,
+            tier,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
         }
     }
 
@@ -4302,12 +4349,21 @@ impl GraphMemory {
         Ok(false)
     }
 
-    /// Apply decay to already-loaded edges in-place, avoiding double deserialization.
+    /// Apply decay to already-loaded edges in-place as of an explicit `now`,
+    /// avoiding double deserialization.
     ///
     /// Mutates edges directly, serializes results into a WriteBatch, and returns
-    /// the UUIDs of edges that should be pruned. Used by `apply_decay()` which
-    /// already has the full edge list from `get_all_relationships()`.
-    fn batch_decay_edges_in_place(&self, edges: &mut [RelationshipEdge]) -> Result<Vec<Uuid>> {
+    /// the UUIDs of edges that should be pruned. Used by
+    /// [`apply_decay_at`](Self::apply_decay_at) (which already has the full edge
+    /// list from `get_all_relationships()`); production reaches it via
+    /// [`apply_decay`](Self::apply_decay) with `now = Utc::now()`. The injectable
+    /// clock lets the decay-evaluation harness age a real graph at the
+    /// production cadence without waiting wall-clock time.
+    fn batch_decay_edges_in_place_at(
+        &self,
+        edges: &mut [RelationshipEdge],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Uuid>> {
         if edges.is_empty() {
             return Ok(Vec::new());
         }
@@ -4316,14 +4372,14 @@ impl GraphMemory {
             .synapse_update_lock
             .try_lock_for(std::time::Duration::from_secs(5))
             .ok_or_else(|| {
-                anyhow::anyhow!("synapse_update_lock timeout in batch_decay_edges_in_place")
+                anyhow::anyhow!("synapse_update_lock timeout in batch_decay_edges_in_place_at")
             })?;
         let mut batch = WriteBatch::default();
         let mut to_prune = Vec::new();
 
         for edge in edges.iter_mut() {
             let strength_before = edge.strength;
-            let should_prune = edge.decay();
+            let should_prune = edge.decay_at(now);
 
             // Only write back edges whose strength actually changed (or need pruning).
             // With 300s maintenance intervals, most edges won't have meaningful decay,
@@ -4419,6 +4475,19 @@ impl GraphMemory {
     /// Returns a `GraphDecayResult` with pruned count and orphaned entity/memory IDs
     /// for Direction 2 coupling (edge pruning → orphan detection).
     pub fn apply_decay(&self) -> Result<crate::memory::types::GraphDecayResult> {
+        self.apply_decay_at(Utc::now())
+    }
+
+    /// As [`apply_decay`](Self::apply_decay), but ages edges as of an explicit
+    /// `now`. Production calls `apply_decay()` (wall clock). The decay-evaluation
+    /// harness calls this repeatedly at the ~6h production cadence to age a real
+    /// graph through simulated time — the only faithful way to reproduce the
+    /// periodic-decay dynamics, since a single large jump would land directly in
+    /// the power-law phase and hide the per-cycle behaviour.
+    pub fn apply_decay_at(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<crate::memory::types::GraphDecayResult> {
         // Get all edges (need full data for orphan tracking)
         let mut all_edges = self.get_all_relationships()?;
 
@@ -4427,7 +4496,7 @@ impl GraphMemory {
         }
 
         // Apply decay in-place on already-deserialized edges (avoids double deserialization)
-        let to_prune = self.batch_decay_edges_in_place(&mut all_edges)?;
+        let to_prune = self.batch_decay_edges_in_place_at(&mut all_edges, now)?;
 
         if to_prune.is_empty() {
             return Ok(crate::memory::types::GraphDecayResult::default());
@@ -7376,6 +7445,64 @@ mod tests {
         assert!(strength.is_some());
         let s = strength.unwrap();
         assert!(s > 0.75 && s <= 0.8, "Strength should be ~0.8, got {}", s);
+    }
+
+    #[test]
+    fn apply_decay_at_ages_a_real_graph_at_cadence() {
+        // End-to-end check of the virtual-clock decay plumbing: drive
+        // apply_decay_at over simulated time at the production ~6h cadence and
+        // confirm a real on-disk edge actually decays. This is the mechanism the
+        // decay-evaluation harness uses to age a graph for recall@k-vs-age
+        // measurement without waiting wall-clock days.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let edge = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength: 0.8,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: Utc::now(),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+        };
+        let edge_id = graph.add_relationship(edge).unwrap();
+        let start = graph.get_relationship(&edge_id).unwrap().unwrap().strength;
+
+        // Age ~10 days at the 6h cadence (40 cycles), advancing a virtual clock.
+        let t0 = Utc::now();
+        for step in 1..=40 {
+            let now = t0 + Duration::hours(6 * step);
+            graph.apply_decay_at(now).unwrap();
+        }
+
+        // Under the real cadence an L2 edge floors below its 0.2 prune threshold
+        // within ~2 days (chained ~daily-half-life exponential), and decay()'s
+        // return (`exceeded_max_age || strength <= prune_threshold`) then prunes
+        // it — the min-prune-age gate is OR'd, not a hard floor. So after 10
+        // simulated days the edge is either pruned or sitting at the decay floor.
+        // Either outcome proves the virtual clock drove real decay end-to-end.
+        assert!(start > 0.5, "sanity: edge started strong, got {start}");
+        match graph.get_relationship(&edge_id).unwrap() {
+            None => { /* pruned after flooring — the expected outcome */ }
+            Some(aged) => assert!(
+                aged.strength < 0.3,
+                "edge should have decayed near the floor under cadenced aging: \
+                 start={start}, aged={}",
+                aged.strength
+            ),
+        }
     }
 
     // =========================================================================

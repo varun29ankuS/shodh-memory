@@ -73,6 +73,15 @@ pub struct RunInputs {
     /// An empty vec is treated as `[LayerMode::Full]` so callers that don't
     /// care about per-layer attribution don't have to populate this.
     pub layer_modes: Vec<LayerMode>,
+
+    /// Simulated edge age in days, applied AFTER ingest and BEFORE the query
+    /// passes (RH decay study). When `> 0`, the harness ages the
+    /// knowledge-graph edges via `MemorySystem::simulate_edge_aging` at the
+    /// production ~6h cadence, so recall quality is measured as if the edges
+    /// were `age_days` old. `0.0` (the default) means no aging — the
+    /// pre-existing behavior, bit-for-bit. Run at 0 / 7 / 30 / 90 and diff the
+    /// reports to see how edge decay erodes recall.
+    pub age_days: f64,
 }
 
 /// One case's retrieved rank list, in score-descending order.
@@ -183,8 +192,14 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         } else {
             inputs.storage_path.join(format!("repeat_{i}"))
         };
-        let pass = run_one_pass(&pass_storage, &corpus, &cases, &layer_modes)
-            .with_context(|| format!("repeat {i} of {repeats}"))?;
+        let pass = run_one_pass(
+            &pass_storage,
+            &corpus,
+            &cases,
+            &layer_modes,
+            inputs.age_days,
+        )
+        .with_context(|| format!("repeat {i} of {repeats}"))?;
         passes.push(pass);
     }
 
@@ -332,9 +347,21 @@ fn run_one_pass(
     corpus: &[CorpusItem],
     cases: &[SmokeCase],
     layer_modes: &[LayerMode],
+    age_days: f64,
 ) -> Result<OnePassResult> {
     let system = build_system(storage_path)?;
     let id_map = ingest_corpus(&system, corpus)?;
+
+    // RH decay study: optionally age the knowledge-graph edges before querying
+    // so recall quality reflects decayed/pruned edges. Driven at the production
+    // ~6h cadence (see `MemorySystem::simulate_edge_aging`); a single large jump
+    // would skip into the power-law decay phase and misrepresent the curve.
+    // `age_days <= 0` is a no-op, preserving pre-existing behavior bit-for-bit.
+    if age_days > 0.0 {
+        system
+            .simulate_edge_aging(age_days, super::decay_sim::PRODUCTION_CADENCE_HOURS)
+            .context("aging knowledge-graph edges for the decay study")?;
+    }
     // Reverse map: random per-run UUIDs → stable corpus item IDs. The
     // determinism gate (RH-11) compares rank lists across runs, so we MUST
     // emit stable handles. Comparing UUIDs would always diverge because
@@ -563,6 +590,7 @@ mod tests {
             git_sha: "test-sha".to_string(),
             repeats: 1,
             layer_modes: vec![LayerMode::Full],
+            age_days: 0.0,
         };
         let report = run_smoke_suite(&inputs).expect("runner must succeed");
         let _ = std::fs::remove_dir_all(&storage);
@@ -643,6 +671,7 @@ mod tests {
             git_sha: "test-sha".to_string(),
             repeats: 1,
             layer_modes: vec![LayerMode::Full],
+            age_days: 0.0,
         };
         let inputs2 = RunInputs {
             storage_path: storage2.clone(),
@@ -652,6 +681,7 @@ mod tests {
             git_sha: "test-sha".to_string(),
             repeats: 2,
             layer_modes: vec![LayerMode::Full],
+            age_days: 0.0,
         };
 
         let r1 = run_smoke_suite(&inputs1).expect("repeats=1 must succeed");
@@ -722,6 +752,7 @@ mod tests {
             // Two repeats so the per-mode determinism check actually runs.
             repeats: 2,
             layer_modes: LayerMode::ALL.to_vec(),
+            age_days: 0.0,
         };
         let report = run_smoke_suite(&inputs).expect("layer-all run must succeed");
         let _ = std::fs::remove_dir_all(&storage);
