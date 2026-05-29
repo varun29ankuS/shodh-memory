@@ -365,6 +365,19 @@ impl SpannIndex {
             return Err(anyhow!("Cannot build index from empty vectors"));
         }
 
+        // SPANN posting entries store ONLY PQ codes, never the original vectors,
+        // so search() requires a PQ quantizer. A build with use_pq=false would
+        // succeed and persist, then fail every search — a silently dead index.
+        // Reject it up front. (Use the Vamana backend if exact, un-quantized
+        // vectors are required.)
+        if !self.config.use_pq {
+            return Err(anyhow!(
+                "SPANN requires PQ (use_pq=true): posting lists store only PQ \
+                 codes, not original vectors, so a non-PQ index cannot be \
+                 searched. Enable PQ or use the Vamana backend for exact vectors."
+            ));
+        }
+
         let n = vectors.len();
         let dim = vectors[0].len();
 
@@ -562,6 +575,20 @@ impl SpannIndex {
         let centroids = self.centroids.read();
         if centroids.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // Guard against dimension mismatch. build() and ProductQuantizer::encode()
+        // both validate this, but search() did not — a short query reached
+        // pq::build_distance_table and panicked on an out-of-bounds subvector
+        // slice (and compute_distance would have silently truncated via zip).
+        // Fail with an error like the sibling methods instead of panicking the
+        // calling thread.
+        if query.len() != self.config.dimension {
+            return Err(anyhow!(
+                "Query dimension {} doesn't match index dimension {}",
+                query.len(),
+                self.config.dimension
+            ));
         }
 
         // Step 1: Find top-nprobes nearest partitions
@@ -1165,7 +1192,10 @@ mod tests {
     }
 
     #[test]
-    fn test_no_pq() {
+    fn test_build_rejects_use_pq_false() {
+        // SPANN cannot search a non-PQ index (posting entries hold only PQ
+        // codes). build() must reject use_pq=false up front rather than
+        // producing a successfully-built but permanently-unsearchable index.
         let vectors = generate_random_vectors(100, 384);
 
         let config = SpannConfig {
@@ -1175,8 +1205,34 @@ mod tests {
         };
 
         let mut index = SpannIndex::new(config);
-        index.build(vectors).unwrap();
+        let err = index
+            .build(vectors)
+            .expect_err("build must reject use_pq=false");
+        assert!(
+            err.to_string().contains("use_pq=true"),
+            "error should explain PQ is required, got: {err}"
+        );
+    }
 
-        assert!(index.quantizer.read().is_none());
+    #[test]
+    fn test_search_rejects_dimension_mismatch() {
+        // A wrong-length query previously panicked inside PQ distance-table
+        // construction; it must now return an Err like build()/encode() do.
+        let vectors = generate_random_vectors(100, 384);
+        let config = SpannConfig {
+            dimension: 384,
+            ..Default::default()
+        };
+        let mut index = SpannIndex::new(config);
+        index.build(vectors).expect("build with PQ");
+
+        let bad_query = vec![0.1f32; 128]; // wrong dimension
+        let err = index
+            .search(&bad_query, 5)
+            .expect_err("search must reject a dimension-mismatched query");
+        assert!(
+            err.to_string().contains("dimension"),
+            "error should mention dimension, got: {err}"
+        );
     }
 }
