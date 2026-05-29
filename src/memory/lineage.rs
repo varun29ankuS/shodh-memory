@@ -1391,6 +1391,21 @@ impl LineageGraph {
         to: MemoryId,
         relation: CausalRelation,
     ) -> Result<LineageEdge> {
+        // Dedup: /api/lineage/link can be called repeatedly. If an edge with the
+        // same (from, to, relation) already exists, reinforce it and return it
+        // rather than inserting a second identical edge (duplicates inflate
+        // list_edges, stats, and confidence-boost propagation). store_edge keys
+        // by edge.id, so re-storing the existing edge updates it in place.
+        // Distinct relations between the same pair remain separate edges.
+        if let Some(mut existing) = self
+            .get_edges_from(user_id, &from)?
+            .into_iter()
+            .find(|e| e.to == to && e.relation == relation)
+        {
+            existing.reinforce();
+            self.store_edge(user_id, &existing)?;
+            return Ok(existing);
+        }
         let edge = LineageEdge::explicit(from, to, relation);
         self.store_edge(user_id, &edge)?;
         Ok(edge)
@@ -1639,6 +1654,51 @@ mod tests {
         assert_eq!(stats.inferred_edges, 1);
         assert_eq!(stats.explicit_edges, 1);
         assert_eq!(stats.total_branches, 1);
+    }
+
+    #[test]
+    fn add_explicit_edge_dedups_same_relation_keeps_distinct() {
+        let (graph, _dir) = create_test_graph();
+        let from = MemoryId(Uuid::new_v4());
+        let to = MemoryId(Uuid::new_v4());
+
+        let e1 = graph
+            .add_explicit_edge("user-1", from.clone(), to.clone(), CausalRelation::Caused)
+            .unwrap();
+        // Re-linking the same (from, to, relation) must reuse + reinforce the
+        // existing edge, NOT create a duplicate (regression for /api/lineage/link).
+        let e2 = graph
+            .add_explicit_edge("user-1", from.clone(), to.clone(), CausalRelation::Caused)
+            .unwrap();
+        assert_eq!(
+            e1.id, e2.id,
+            "duplicate link must reuse the existing edge id"
+        );
+        assert!(
+            e2.reinforcement_count > e1.reinforcement_count,
+            "duplicate link should reinforce the existing edge"
+        );
+        assert_eq!(
+            graph.get_edges_from("user-1", &from).unwrap().len(),
+            1,
+            "no duplicate edge should be created for a repeated link"
+        );
+
+        // A different relation between the same pair stays a separate edge.
+        let e3 = graph
+            .add_explicit_edge(
+                "user-1",
+                from.clone(),
+                to.clone(),
+                CausalRelation::InformedBy,
+            )
+            .unwrap();
+        assert_ne!(e3.id, e1.id);
+        assert_eq!(
+            graph.get_edges_from("user-1", &from).unwrap().len(),
+            2,
+            "a distinct relation must be a separate edge"
+        );
     }
 
     // =========================================================================
