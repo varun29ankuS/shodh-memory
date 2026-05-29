@@ -982,17 +982,17 @@ mod tests {
         assert!(lo < hi, "fixture ordering precondition");
 
         // Two disjoint single-item lists → identical RRF score (rank 0 in each).
-        let fused = rrf.fuse(vec![
-            vec![(hi.clone(), 0.9)],
-            vec![(lo.clone(), 0.1)],
-        ]);
+        let fused = rrf.fuse(vec![vec![(hi.clone(), 0.9)], vec![(lo.clone(), 0.1)]]);
 
         assert_eq!(fused.len(), 2);
         assert!(
             (fused[0].1 - fused[1].1).abs() < f32::EPSILON,
             "scores must tie for this to exercise the tie-break"
         );
-        assert_eq!(fused[0].0, lo, "tie must resolve to the lower MemoryId first");
+        assert_eq!(
+            fused[0].0, lo,
+            "tie must resolve to the lower MemoryId first"
+        );
         assert_eq!(fused[1].0, hi);
     }
 
