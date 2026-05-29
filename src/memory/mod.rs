@@ -3322,11 +3322,20 @@ impl MemorySystem {
         // Linguistic analysis: additive boost (5% of IC weight), not a full re-sort
         // RH-8 gate: linguistic re-sort only runs in `Full` mode.
         if layer_full && !query_analysis.focal_entities.is_empty() {
+            // Precompute the boosted score once per memory. Computing
+            // linguistic_boost inside the comparator re-scanned each memory's
+            // content O(n log n) times (twice per comparison); now it is O(n).
+            let boosted: std::collections::HashMap<MemoryId, f32> = memories
+                .iter()
+                .map(|m| {
+                    let key = m.score.unwrap_or(0.0)
+                        + Self::linguistic_boost(&m.experience.content, &query_analysis) * 0.05;
+                    (m.id.clone(), key)
+                })
+                .collect();
             memories.sort_by(|a, b| {
-                let score_a = a.score.unwrap_or(0.0)
-                    + Self::linguistic_boost(&a.experience.content, &query_analysis) * 0.05;
-                let score_b = b.score.unwrap_or(0.0)
-                    + Self::linguistic_boost(&b.experience.content, &query_analysis) * 0.05;
+                let score_a = boosted.get(&a.id).copied().unwrap_or(0.0);
+                let score_b = boosted.get(&b.id).copied().unwrap_or(0.0);
                 // Score desc → recency desc → MemoryId asc for stable rank order.
                 score_b
                     .total_cmp(&score_a)
