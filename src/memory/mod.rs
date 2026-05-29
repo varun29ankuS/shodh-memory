@@ -2877,24 +2877,33 @@ impl MemorySystem {
                 if let Some(graph) = self.graph_memory.as_ref() {
                     let g = graph.read();
                     let mut boosted_count = 0usize;
+                    // Cache the per-entity label-match decision across candidates.
+                    // expected_labels is constant for this call, and a hot entity
+                    // appears in many candidates' entity_refs, so without a cache
+                    // get_entity (a store read) is repeated for the same uuid on
+                    // every candidate that references it.
+                    let mut label_match_cache: std::collections::HashMap<Uuid, bool> =
+                        std::collections::HashMap::new();
                     for (_mem_id, fused_score) in res.iter_mut().take(rerank_budget) {
                         if let Ok(Some(episode)) = g.get_episode(&_mem_id.0) {
                             let type_matches = episode
                                 .entity_refs
                                 .iter()
                                 .filter(|uuid| {
-                                    g.get_entity(uuid)
-                                        .ok()
-                                        .flatten()
-                                        .map(|e| {
-                                            e.labels.iter().any(|l| {
-                                                onto_intent
-                                                    .expected_labels
-                                                    .iter()
-                                                    .any(|exp| l.matches_with_hierarchy(exp))
+                                    *label_match_cache.entry(**uuid).or_insert_with(|| {
+                                        g.get_entity(uuid)
+                                            .ok()
+                                            .flatten()
+                                            .map(|e| {
+                                                e.labels.iter().any(|l| {
+                                                    onto_intent
+                                                        .expected_labels
+                                                        .iter()
+                                                        .any(|exp| l.matches_with_hierarchy(exp))
+                                                })
                                             })
-                                        })
-                                        .unwrap_or(false)
+                                            .unwrap_or(false)
+                                    })
                                 })
                                 .count();
                             if type_matches > 0 {
