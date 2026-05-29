@@ -886,9 +886,24 @@ impl RelationshipEdge {
     ///
     /// Returns true if synapse should be pruned (below tier's threshold)
     pub fn decay(&mut self) -> bool {
+        self.decay_at(Utc::now())
+    }
+
+    /// Apply time-decay as of an explicit `now`, returning whether the edge
+    /// should be pruned.
+    ///
+    /// `decay()` is the production entry point (`now = Utc::now()`); this
+    /// variant takes the clock as a parameter so decay is deterministically
+    /// testable and so the decay-simulation harness can drive an edge through
+    /// many cycles at a controlled cadence. The cadence is load-bearing:
+    /// because each call resets `last_activated = now`, the *per-cycle* elapsed
+    /// time is what `hybrid_decay_factor` sees. Simulating one large jump would
+    /// land directly in the power-law phase and hide the periodic dynamics that
+    /// production actually exhibits (every ~6h), so faithful evaluation must
+    /// step at the real cadence.
+    pub fn decay_at(&mut self, now: DateTime<Utc>) -> bool {
         use crate::decay::tier_decay_factor;
 
-        let now = Utc::now();
         let elapsed = now.signed_duration_since(self.last_activated);
         let hours_elapsed = elapsed.num_seconds() as f64 / 3600.0;
 
@@ -979,6 +994,38 @@ impl RelationshipEdge {
             false
         } else {
             exceeded_max_age || self.strength <= prune_threshold
+        }
+    }
+
+    /// Construct a synthetic, non-persisted edge for the decay-simulation
+    /// harness. `created_at`/`valid_at`/`last_activated` are anchored at
+    /// `origin` so a harness can then drive `decay_at` forward from a known
+    /// point. Entity UUIDs are random; this is never written to storage.
+    pub(crate) fn synthetic_for_sim(
+        strength: f32,
+        tier: EdgeTier,
+        ltp_status: LtpStatus,
+        origin: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength,
+            created_at: origin,
+            valid_at: origin,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: origin,
+            activation_count: 0,
+            ltp_status,
+            activation_timestamps: None,
+            tier,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
         }
     }
 
