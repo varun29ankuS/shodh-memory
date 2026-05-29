@@ -138,6 +138,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
                     &memory_system,
                     None,
                     &config,
+                    None,
                 )
             });
         });
@@ -169,6 +170,7 @@ fn bench_latency_verification(c: &mut Criterion) {
                 &memory_system,
                 None,
                 &config,
+                None,
             )
         });
     });
@@ -188,7 +190,7 @@ fn bench_latency_verification(c: &mut Criterion) {
 
     for (name, context) in contexts.iter() {
         group.bench_function(*name, |b| {
-            b.iter(|| engine.surface_relevant(context, &memory_system, None, &config));
+            b.iter(|| engine.surface_relevant(context, &memory_system, None, &config, None));
         });
     }
 
@@ -226,6 +228,7 @@ fn bench_config_variations(c: &mut Criterion) {
                         &memory_system,
                         None,
                         &config,
+                        None,
                     )
                 });
             },
@@ -252,6 +255,7 @@ fn bench_config_variations(c: &mut Criterion) {
                     &memory_system,
                     None,
                     &config,
+                    None,
                 )
             });
         });
@@ -291,6 +295,7 @@ fn bench_threshold_impact(c: &mut Criterion) {
                         &memory_system,
                         None,
                         &config,
+                        None,
                     )
                 });
             },
