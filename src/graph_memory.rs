@@ -235,6 +235,176 @@ impl EntityLabel {
     }
 }
 
+/// Classify a tag string into a richer `EntityLabel`.
+///
+/// Tags are short, user-supplied descriptors (e.g. "production", "rocksdb",
+/// "config.toml"). This maps them onto the ontology so they participate in
+/// type-aware spreading activation and hierarchy matching during retrieval.
+/// Shared by every ingest path so a tag receives the same label whether it
+/// arrives via `remember`, an integration sync, or an `upsert`.
+pub fn classify_tag_label(tag: &str) -> EntityLabel {
+    let lower = tag.to_lowercase();
+
+    // Deployment / environment indicators
+    if matches!(
+        lower.as_str(),
+        "production"
+            | "staging"
+            | "dev"
+            | "development"
+            | "ci"
+            | "cd"
+            | "kubernetes"
+            | "k8s"
+            | "docker"
+            | "container"
+            | "aws"
+            | "gcp"
+            | "azure"
+    ) {
+        return EntityLabel::Environment;
+    }
+
+    // Pipeline / workflow indicators
+    if lower.contains("pipeline")
+        || lower.contains("workflow")
+        || lower.contains("ci-cd")
+        || lower.contains("cicd")
+    {
+        return EntityLabel::Pipeline;
+    }
+
+    // Database / storage indicators
+    if matches!(
+        lower.as_str(),
+        "rocksdb"
+            | "postgres"
+            | "postgresql"
+            | "redis"
+            | "sqlite"
+            | "mongodb"
+            | "mysql"
+            | "dynamodb"
+            | "s3"
+            | "cassandra"
+            | "elasticsearch"
+    ) || lower.ends_with("db")
+        || lower.ends_with("-db")
+        || lower.ends_with("_db")
+    {
+        return EntityLabel::Database;
+    }
+
+    // Service / API indicators (suffix-only to avoid "my-api-docs" false positives)
+    if lower.ends_with("-service")
+        || lower.ends_with("_service")
+        || lower.ends_with("-api")
+        || lower.ends_with("_api")
+        || lower.ends_with("-server")
+        || lower.ends_with("_server")
+        || lower.ends_with("-daemon")
+    {
+        return EntityLabel::Service;
+    }
+
+    // Documentation indicators (check before module — README.md is a doc, not a module)
+    if lower.ends_with(".md")
+        || lower.contains("readme")
+        || lower.contains("runbook")
+        || lower.ends_with("-rfc")
+        || lower.ends_with("-spec")
+    {
+        return EntityLabel::Document;
+    }
+
+    // Configuration indicators
+    if lower.ends_with(".toml")
+        || lower.ends_with(".yaml")
+        || lower.ends_with(".yml")
+        || lower.ends_with(".env")
+        || lower.ends_with(".json")
+        || lower.contains("config")
+    {
+        return EntityLabel::Configuration;
+    }
+
+    // Module / library indicators
+    if lower.ends_with(".rs")
+        || lower.ends_with(".ts")
+        || lower.ends_with(".js")
+        || lower.ends_with(".py")
+        || lower.ends_with("-lib")
+        || lower.ends_with("_lib")
+    {
+        return EntityLabel::Module;
+    }
+
+    // Default: Technology (reasonable fallback for unknown tags)
+    EntityLabel::Technology
+}
+
+/// Classify a MISC NER entity (or an otherwise-untyped name) into a more
+/// specific `EntityLabel`.
+///
+/// The NER model only outputs PER/ORG/LOC/MISC. For MISC entities that pass
+/// quality gates, we use heuristic rules to assign a richer ontological type.
+/// This activates type-aware spreading activation and `matches_with_hierarchy()`
+/// in retrieval — `Concept` entities participate in the type hierarchy while
+/// `Other("MISC")` is invisible to it. Shared by every ingest path so the same
+/// name resolves to the same label regardless of entry point.
+pub fn classify_misc_entity(name: &str) -> EntityLabel {
+    let lower = name.to_lowercase();
+
+    // Event-like terms (checked first — "conference" ends with "ence" concept suffix)
+    const EVENT_WORDS: &[&str] = &[
+        "conference",
+        "summit",
+        "meetup",
+        "hackathon",
+        "sprint",
+        "launch",
+        "release",
+        "incident",
+        "outage",
+        "postmortem",
+    ];
+    if EVENT_WORDS.iter().any(|w| lower.contains(w)) {
+        return EntityLabel::Event;
+    }
+
+    // Skill / role indicators (before concept — "engineer" ends with suffix-like patterns)
+    const SKILL_WORDS: &[&str] = &[
+        "engineer",
+        "architect",
+        "developer",
+        "designer",
+        "analyst",
+        "programming",
+        "scripting",
+    ];
+    if SKILL_WORDS.iter().any(|w| lower.contains(w)) {
+        return EntityLabel::Skill;
+    }
+
+    // Concept suffixes — abstract ideas, methodologies, qualities
+    const CONCEPT_SUFFIXES: &[&str] = &[
+        "ism", "ology", "ity", "ness", "ment", "ance", "ence", "tion", "sion",
+    ];
+    if CONCEPT_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
+        return EntityLabel::Concept;
+    }
+
+    // PascalCase proper nouns without spaces/hyphens → likely a Product
+    // (e.g., "JavaScript", "PostgreSQL", "FastAPI", "ChatGPT")
+    let has_internal_upper = name.chars().skip(1).any(|c| c.is_uppercase());
+    if has_internal_upper && !name.contains(' ') && !name.contains('-') && name.len() > 2 {
+        return EntityLabel::Product;
+    }
+
+    // Default: Concept (participates in type hierarchy via Role→Concept parent)
+    EntityLabel::Concept
+}
+
 /// Memory tier for edge consolidation
 ///
 /// Based on hippocampal-cortical memory consolidation research:
@@ -6647,6 +6817,32 @@ impl Default for EntityExtractor {
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    #[test]
+    fn classify_tag_label_maps_known_categories() {
+        assert_eq!(classify_tag_label("production"), EntityLabel::Environment);
+        assert_eq!(classify_tag_label("rocksdb"), EntityLabel::Database);
+        assert_eq!(classify_tag_label("metrics-service"), EntityLabel::Service);
+        assert_eq!(classify_tag_label("README"), EntityLabel::Document);
+        assert_eq!(
+            classify_tag_label("config.toml"),
+            EntityLabel::Configuration
+        );
+        assert_eq!(classify_tag_label("router.rs"), EntityLabel::Module);
+        assert_eq!(classify_tag_label("ci-cd"), EntityLabel::Pipeline);
+        // Unknown → Technology fallback
+        assert_eq!(classify_tag_label("widgetron"), EntityLabel::Technology);
+    }
+
+    #[test]
+    fn classify_misc_entity_maps_surface_forms() {
+        assert_eq!(classify_misc_entity("postmortem"), EntityLabel::Event);
+        assert_eq!(classify_misc_entity("backend engineer"), EntityLabel::Skill);
+        assert_eq!(classify_misc_entity("scalability"), EntityLabel::Concept);
+        assert_eq!(classify_misc_entity("PostgreSQL"), EntityLabel::Product);
+        // Plain lowercase noun with no signal → Concept (still type-hierarchy visible)
+        assert_eq!(classify_misc_entity("widget"), EntityLabel::Concept);
+    }
 
     /// Create a test relationship edge with specified strength and last_activated (L1 tier)
     fn create_test_edge(strength: f32, days_since_activated: i64) -> RelationshipEdge {
