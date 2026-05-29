@@ -3051,8 +3051,18 @@ impl MemorySystem {
                     }
 
                     // Tier 2: created_at proximity fallback for filtering queries
-                    // Most memories don't have temporal_refs, so use created_at as proxy
-                    if best_match == 0.0 && temporal_ctx.is_filtering_query {
+                    // Most memories don't have temporal_refs, so use created_at as proxy.
+                    //
+                    // Skip memories already boosted by the Layer 4.45 temporal
+                    // pre-filter: that set IS the created_at-in-range memories
+                    // (SearchCriteria::ByDate filters on created_at), so applying
+                    // this created_at proximity boost on top would reward the exact
+                    // same signal twice. Tier 1 (explicit temporal_refs) is a
+                    // distinct content signal and still applies to them above.
+                    if best_match == 0.0
+                        && temporal_ctx.is_filtering_query
+                        && !temporal_prefilter_ids.contains(&mem.id)
+                    {
                         if let Some((range_start, range_end)) = temporal_ctx.date_range {
                             let created_date = mem.created_at.date_naive();
                             let range_mid = range_start
