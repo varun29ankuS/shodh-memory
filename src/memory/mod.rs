@@ -587,6 +587,36 @@ impl MemorySystem {
         self.graph_memory.as_ref()
     }
 
+    /// Age the knowledge-graph edges by `total_days` of simulated time, applying
+    /// decay in `cadence_hours` steps (production runs the heavy maintenance
+    /// cycle ~every 6h).
+    ///
+    /// EVALUATION-ONLY hook for the decay / recall harness: it drives the real
+    /// decay path ([`GraphMemory::apply_decay_at`]) forward against a virtual
+    /// clock so recall quality can be measured at a chosen edge age without
+    /// waiting wall-clock days. The cadence is load-bearing — a single large
+    /// jump would skip straight into the power-law decay phase and hide the
+    /// per-cycle dynamics production actually exhibits, so the harness must step
+    /// at the real cadence.
+    ///
+    /// Returns the total number of edges pruned across all cycles; a no-op
+    /// (`Ok(0)`) when no graph is configured.
+    pub fn simulate_edge_aging(&self, total_days: f64, cadence_hours: i64) -> Result<usize> {
+        let Some(graph) = self.graph_memory.as_ref() else {
+            return Ok(0);
+        };
+        let cadence_hours = cadence_hours.max(1);
+        let steps = ((total_days * 24.0) / cadence_hours as f64).ceil().max(0.0) as usize;
+        let cadence = chrono::Duration::hours(cadence_hours);
+        let mut now = chrono::Utc::now();
+        let mut pruned_total = 0;
+        for _ in 0..steps {
+            now += cadence;
+            pruned_total += graph.read().apply_decay_at(now)?.pruned_count;
+        }
+        Ok(pruned_total)
+    }
+
     /// Set the feedback store for momentum-based scoring (PIPE-9)
     ///
     /// When set, retrieval automatically applies feedback momentum:

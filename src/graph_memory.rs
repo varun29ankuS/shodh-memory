@@ -4349,19 +4349,16 @@ impl GraphMemory {
         Ok(false)
     }
 
-    /// Apply decay to already-loaded edges in-place, avoiding double deserialization.
+    /// Apply decay to already-loaded edges in-place as of an explicit `now`,
+    /// avoiding double deserialization.
     ///
     /// Mutates edges directly, serializes results into a WriteBatch, and returns
-    /// the UUIDs of edges that should be pruned. Used by `apply_decay()` which
-    /// already has the full edge list from `get_all_relationships()`.
-    fn batch_decay_edges_in_place(&self, edges: &mut [RelationshipEdge]) -> Result<Vec<Uuid>> {
-        self.batch_decay_edges_in_place_at(edges, Utc::now())
-    }
-
-    /// As [`batch_decay_edges_in_place`](Self::batch_decay_edges_in_place), but
-    /// decays as of an explicit `now`. The injectable clock lets the decay
-    /// evaluation harness age a real graph at the production cadence without
-    /// waiting wall-clock time — see [`apply_decay_at`](Self::apply_decay_at).
+    /// the UUIDs of edges that should be pruned. Used by
+    /// [`apply_decay_at`](Self::apply_decay_at) (which already has the full edge
+    /// list from `get_all_relationships()`); production reaches it via
+    /// [`apply_decay`](Self::apply_decay) with `now = Utc::now()`. The injectable
+    /// clock lets the decay-evaluation harness age a real graph at the
+    /// production cadence without waiting wall-clock time.
     fn batch_decay_edges_in_place_at(
         &self,
         edges: &mut [RelationshipEdge],
@@ -4375,7 +4372,7 @@ impl GraphMemory {
             .synapse_update_lock
             .try_lock_for(std::time::Duration::from_secs(5))
             .ok_or_else(|| {
-                anyhow::anyhow!("synapse_update_lock timeout in batch_decay_edges_in_place")
+                anyhow::anyhow!("synapse_update_lock timeout in batch_decay_edges_in_place_at")
             })?;
         let mut batch = WriteBatch::default();
         let mut to_prune = Vec::new();
