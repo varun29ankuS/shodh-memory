@@ -57,6 +57,27 @@ fn parse_retrieval_mode(mode: &str) -> RetrievalMode {
     }
 }
 
+/// Map API `layers` string to `LayerMode` enum (RH-8 cumulative ladder).
+///
+/// Returns `None` when the caller did not supply the field; the recall
+/// pipeline then keeps the production default (`LayerMode::Full`). An
+/// unrecognised non-empty value is rejected by the handler so silent
+/// fall-through doesn't make per-layer eval data lie about which stages
+/// actually ran. Accepted values match the strings emitted by
+/// `LayerMode::as_key()` and the `--layer` flag of `recall-eval`.
+fn parse_layer_mode(s: &str) -> Option<crate::memory::types::LayerMode> {
+    use crate::memory::types::LayerMode;
+    match s {
+        "vamana_only" | "vamana-only" => Some(LayerMode::VamanaOnly),
+        "+spreading" | "plus_spreading" | "plus-spreading" => Some(LayerMode::PlusSpreading),
+        "+bm25" | "plus_bm25" | "plus-bm25" => Some(LayerMode::PlusBm25),
+        "+rerank" | "plus_rerank" | "plus-rerank" => Some(LayerMode::PlusRerank),
+        "+facts" | "plus_facts" | "plus-facts" => Some(LayerMode::PlusFacts),
+        "full" => Some(LayerMode::Full),
+        _ => None,
+    }
+}
+
 // =============================================================================
 // CONTEXT SUMMARY TYPES
 // =============================================================================
@@ -403,6 +424,20 @@ pub async fn recall(
     let mode = req.mode.clone();
     let retrieval_mode_for_recall = parse_retrieval_mode(&mode);
 
+    // RH-8 per-layer attribution: parse the optional `layers` field. Unknown
+    // values are rejected (400) rather than silently falling back to Full —
+    // per-layer eval data must not lie about which stages actually ran.
+    let layer_mode_for_recall = match req.layers.as_deref() {
+        None | Some("") => crate::memory::types::LayerMode::Full,
+        Some(s) => parse_layer_mode(s).ok_or_else(|| AppError::InvalidInput {
+            field: "layers".to_string(),
+            reason: format!(
+                "unknown layer mode '{}'; expected one of: vamana_only, +spreading, +bm25, +rerank, +facts, full",
+                s
+            ),
+        })?,
+    };
+
     // Pre-flight validation for robotics retrieval modes.
     // Catch missing required parameters here (400) instead of deep in the retrieval
     // engine where errors get wrapped as INTERNAL_ERROR (500).
@@ -548,6 +583,7 @@ pub async fn recall(
                 failures_only: failures_only_for_recall,
                 terrain_type: terrain_type_for_recall,
                 tags: tags_for_recall,
+                layers: layer_mode_for_recall,
                 ..Default::default()
             };
 
@@ -3507,4 +3543,44 @@ pub async fn paginated_recall(
         offset: paginated.offset,
         limit: paginated.limit,
     }))
+}
+
+#[cfg(test)]
+mod layer_mode_parsing_tests {
+    use super::parse_layer_mode;
+    use crate::memory::types::LayerMode;
+
+    #[test]
+    fn parses_canonical_layer_keys() {
+        // The canonical keys here MUST match `LayerMode::report_key()` and
+        // the strings the recall harness emits in its JSON report. If this
+        // test ever needs an exception, the eval data is ambiguous.
+        assert_eq!(parse_layer_mode("vamana_only"), Some(LayerMode::VamanaOnly));
+        assert_eq!(parse_layer_mode("+spreading"), Some(LayerMode::PlusSpreading));
+        assert_eq!(parse_layer_mode("+bm25"), Some(LayerMode::PlusBm25));
+        assert_eq!(parse_layer_mode("+rerank"), Some(LayerMode::PlusRerank));
+        assert_eq!(parse_layer_mode("+facts"), Some(LayerMode::PlusFacts));
+        assert_eq!(parse_layer_mode("full"), Some(LayerMode::Full));
+    }
+
+    #[test]
+    fn accepts_kebab_aliases_for_cli_friendly_callers() {
+        // Mirrors `recall-eval --layer vamana-only` and friends so a
+        // human typing the value into curl from memory still works.
+        assert_eq!(parse_layer_mode("vamana-only"), Some(LayerMode::VamanaOnly));
+        assert_eq!(parse_layer_mode("plus-spreading"), Some(LayerMode::PlusSpreading));
+        assert_eq!(parse_layer_mode("plus_bm25"), Some(LayerMode::PlusBm25));
+        assert_eq!(parse_layer_mode("plus-rerank"), Some(LayerMode::PlusRerank));
+        assert_eq!(parse_layer_mode("plus_facts"), Some(LayerMode::PlusFacts));
+    }
+
+    #[test]
+    fn rejects_unknown_layer_strings() {
+        // Silent fall-through to Full would make per-layer eval lie
+        // about which stages ran, so unknown strings MUST be rejected.
+        assert_eq!(parse_layer_mode("unknown"), None);
+        assert_eq!(parse_layer_mode("Full"), None); // case-sensitive on purpose
+        assert_eq!(parse_layer_mode("+SPREADING"), None);
+        assert_eq!(parse_layer_mode(""), None);
+    }
 }
