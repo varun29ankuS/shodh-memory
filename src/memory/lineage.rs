@@ -167,6 +167,16 @@ impl LineageEdge {
         }
     }
 
+    /// Tag this edge as belonging to a specific lineage branch.
+    ///
+    /// `None` keeps the edge on the main branch. Used when a pivot signal opens
+    /// a new branch so the edges the pivot memory originates are attributed to
+    /// that branch instead of silently staying on `main`.
+    pub fn with_branch(mut self, branch_id: Option<String>) -> Self {
+        self.branch_id = branch_id;
+        self
+    }
+
     /// Confirm an inferred edge
     pub fn confirm(&mut self) {
         self.source = LineageSource::Confirmed;
