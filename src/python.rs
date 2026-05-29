@@ -801,6 +801,7 @@ impl PyMemorySystem {
             max_results: limit,
             retrieval_mode,
             offset: 0,
+            layers: crate::memory::types::LayerMode::Full,
         };
 
         let memories = self
@@ -1838,6 +1839,7 @@ impl PyMemorySystem {
             max_results: max_results * 2, // Get more for filtering
             retrieval_mode: RetrievalMode::Hybrid,
             offset: 0,
+            layers: crate::memory::types::LayerMode::Full,
         };
 
         let memories = self

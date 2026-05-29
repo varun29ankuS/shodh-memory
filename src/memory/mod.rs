@@ -1384,6 +1384,21 @@ impl MemorySystem {
     ) -> Result<RetrievalResult> {
         let recall_start = std::time::Instant::now();
 
+        // ===========================================================================
+        // RH-8 (#270): per-pipeline-layer attribution gate flags
+        // ===========================================================================
+        // Production callers leave `query.layers` at the default (`Full`) and get
+        // the existing behavior — every gate below evaluates true. The recall
+        // harness passes lower modes to attribute quality deltas to specific
+        // stages. Cumulative ordering: VamanaOnly < PlusSpreading < PlusBm25 <
+        // PlusRerank < PlusFacts < Full. See `LayerMode` in `types.rs`.
+        let layer_mode = query.layers;
+        let layer_full = layer_mode >= types::LayerMode::Full;
+        let layer_facts = layer_mode >= types::LayerMode::PlusFacts;
+        let layer_rerank = layer_mode >= types::LayerMode::PlusRerank;
+        let layer_bm25 = layer_mode >= types::LayerMode::PlusBm25;
+        let layer_spreading = layer_mode >= types::LayerMode::PlusSpreading;
+
         // Diagnostic accumulators — only allocated when collect_diagnostics=true
         let mut stats = if collect_diagnostics {
             Some(RetrievalStats {
@@ -1457,7 +1472,11 @@ impl MemorySystem {
         // pre-fetch memories from the matching date range via SearchCriteria::ByDate.
         // These IDs are collected as candidates for boosting at Layer 4.45.
         // NOT exclusive — memories outside the range still enter via Vamana/BM25.
-        let temporal_prefilter_ids: HashSet<MemoryId> = if temporal_ctx.is_filtering_query {
+        // RH-8 gate: Layer 0.4 only runs in `Full` mode. Lower modes get an empty set,
+        // which makes the Layer 4.45 temporal boost a no-op without changing its code path.
+        let temporal_prefilter_ids: HashSet<MemoryId> = if layer_full
+            && temporal_ctx.is_filtering_query
+        {
             if let Some((start_date, end_date)) = temporal_ctx.date_range {
                 // Convert NaiveDate to DateTime<Utc> (start of first day, end of last day)
                 let start_dt = start_date
@@ -1559,8 +1578,9 @@ impl MemorySystem {
             crate::metrics::ONTOLOGICAL_DENSITY_SKIP_TOTAL.inc();
         }
 
-        let attribute_boost_ids: HashSet<MemoryId> = match &query_type {
-            query_parser::QueryType::Attribute(attr_query) => {
+        // RH-8 gate: Layer 0.5 attribute query detection only in `Full` mode.
+        let attribute_boost_ids: HashSet<MemoryId> = match (layer_full, &query_type) {
+            (true, query_parser::QueryType::Attribute(attr_query)) => {
                 tracing::debug!(
                     "Layer 0.5: Attribute query detected - entity='{}', attribute='{}', synonyms={:?}",
                     attr_query.entity,
@@ -1650,7 +1670,8 @@ impl MemorySystem {
         // 3. Look up temporal facts matching these
         // 4. Boost the source memories of matching facts
         // Temporal fact lookup - boost source memories of matching facts in Layer 4.5
-        let temporal_fact_boost_ids: HashSet<MemoryId> = if has_temporal_query {
+        // RH-8 gate: Layer 0.6 only runs in `Full` mode.
+        let temporal_fact_boost_ids: HashSet<MemoryId> = if layer_full && has_temporal_query {
             if let Some(user_id) = &query.user_id {
                 // Get entity name (first focal entity)
                 let entity = query_analysis
@@ -1745,36 +1766,40 @@ impl MemorySystem {
         // Pre-fetch facts by query entities to boost their source memories in Layer 4.8.
         // Facts represent consolidated knowledge — their source memories contain the
         // richest context for that knowledge and should rank higher.
+        // RH-8 gate: Layer 0.7 fact source pre-fetch only runs in `PlusFacts` and above.
         let fact_source_boosts: std::collections::HashMap<MemoryId, f32> = {
             let mut boosts: std::collections::HashMap<MemoryId, f32> =
                 std::collections::HashMap::new();
 
-            if let Some(user_id) = &query.user_id {
-                let entity_names: Vec<String> = query_analysis
-                    .focal_entities
-                    .iter()
-                    .map(|e| e.text.to_lowercase())
-                    .collect();
+            if layer_facts {
+                if let Some(user_id) = &query.user_id {
+                    let entity_names: Vec<String> = query_analysis
+                        .focal_entities
+                        .iter()
+                        .map(|e| e.text.to_lowercase())
+                        .collect();
 
-                if !entity_names.is_empty() {
-                    if let Ok(facts) = self.get_facts_for_graph_entities(user_id, &entity_names, 5)
-                    {
-                        for fact in &facts {
-                            if fact.confidence < 0.5 || fact.support_count < 3 {
-                                continue;
+                    if !entity_names.is_empty() {
+                        if let Ok(facts) =
+                            self.get_facts_for_graph_entities(user_id, &entity_names, 5)
+                        {
+                            for fact in &facts {
+                                if fact.confidence < 0.5 || fact.support_count < 3 {
+                                    continue;
+                                }
+                                let per_fact_boost = fact.confidence * 0.08;
+                                for src_id in &fact.source_memories {
+                                    let entry = boosts.entry(src_id.clone()).or_insert(0.0);
+                                    *entry = (*entry + per_fact_boost).min(0.3);
+                                }
                             }
-                            let per_fact_boost = fact.confidence * 0.08;
-                            for src_id in &fact.source_memories {
-                                let entry = boosts.entry(src_id.clone()).or_insert(0.0);
-                                *entry = (*entry + per_fact_boost).min(0.3);
+                            if !boosts.is_empty() {
+                                tracing::debug!(
+                                    "Layer 0.7: Pre-fetched {} fact-source boosts from {} facts",
+                                    boosts.len(),
+                                    facts.len()
+                                );
                             }
-                        }
-                        if !boosts.is_empty() {
-                            tracing::debug!(
-                                "Layer 0.7: Pre-fetched {} fact-source boosts from {} facts",
-                                boosts.len(),
-                                facts.len()
-                            );
                         }
                     }
                 }
@@ -1946,10 +1971,14 @@ impl MemorySystem {
         // ===========================================================================
         // LAYER 2: GRAPH EXPANSION (Knowledge Graph Traversal)
         // ===========================================================================
-        let use_graph = matches!(
-            query.retrieval_mode,
-            RetrievalMode::Hybrid | RetrievalMode::Associative | RetrievalMode::Causal
-        );
+        // RH-8 gate: Layer 2 graph spreading activation only runs in `PlusSpreading` and above.
+        // When gated off, the fallback branch yields an empty graph result vector while
+        // still producing IC weights and phrase boosts (cheap query-side analysis).
+        let use_graph = layer_spreading
+            && matches!(
+                query.retrieval_mode,
+                RetrievalMode::Hybrid | RetrievalMode::Associative | RetrievalMode::Causal
+            );
         #[allow(clippy::type_complexity)]
         let (
             graph_results,
@@ -2158,6 +2187,7 @@ impl MemorySystem {
             session_id: query.session_id.clone(),
             prospective_signals: query.prospective_signals.clone(),
             recency_weight: query.recency_weight,
+            layers: query.layers,
         };
 
         // ===========================================================================
@@ -2299,23 +2329,29 @@ impl MemorySystem {
             } else {
                 None
             };
-            let hybrid_ids = self
-                .hybrid_search
-                .search_with_dynamic_weights_pool(
-                    bm25_query_text,
-                    vector_results.clone(),
-                    get_content,
-                    term_weights,
-                    phrases,
-                    disc_opt,
-                    bm25_pool_override,
-                )
-                .map(|r| {
-                    r.into_iter()
-                        .map(|x| (x.memory_id, x.score))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or(vector_results);
+            // RH-8 gate: BM25 hybrid fusion only runs in `PlusBm25` and above.
+            // Lower modes pass the vector candidate set straight through, which makes the
+            // RRF fusion below a one- or two-leg fusion (vector ± graph) instead of three-leg.
+            let hybrid_ids = if layer_bm25 {
+                self.hybrid_search
+                    .search_with_dynamic_weights_pool(
+                        bm25_query_text,
+                        vector_results.clone(),
+                        get_content,
+                        term_weights,
+                        phrases,
+                        disc_opt,
+                        bm25_pool_override,
+                    )
+                    .map(|r| {
+                        r.into_iter()
+                            .map(|x| (x.memory_id, x.score))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or(vector_results)
+            } else {
+                vector_results
+            };
 
             // ===========================================================================
             // LAYER 4: RRF FUSION WITH DENSITY-BASED WEIGHTS (PIPE-11)
@@ -2530,7 +2566,8 @@ impl MemorySystem {
             // - High interference + high activation = "survivor" → boost (1.0-1.5x)
             // - High interference + low activation = "chronic loser" → suppress (0.5-1.0x)
             // - No interference history → neutral (1.0x)
-            {
+            // RH-8 gate: interference adjustments only run in `Full` mode.
+            if layer_full {
                 let detector = self.interference_detector.read();
 
                 // Compute max score once for normalization
@@ -2585,60 +2622,65 @@ impl MemorySystem {
             //
             // Signals come from ProspectiveTasks that matched the current query
             // via keyword or semantic similarity (built in recall handler C5).
-            if let Some(ref signals) = query.prospective_signals {
-                if !signals.is_empty() {
-                    use crate::constants::{PROSPECTIVE_BOOST_MAX, PROSPECTIVE_BOOST_PER_MATCH};
+            // RH-8 gate: prospective signal boost only runs in `Full` mode.
+            if layer_full {
+                if let Some(ref signals) = query.prospective_signals {
+                    if !signals.is_empty() {
+                        use crate::constants::{
+                            PROSPECTIVE_BOOST_MAX, PROSPECTIVE_BOOST_PER_MATCH,
+                        };
 
-                    // Tokenize all signals into unique terms (skip noise words < 3 chars)
-                    let signal_terms: std::collections::HashSet<String> = signals
-                        .iter()
-                        .flat_map(|s| {
-                            s.to_lowercase()
-                                .split_whitespace()
-                                .filter(|w| w.len() >= 3)
-                                .map(|w| w.to_string())
-                                .collect::<Vec<_>>()
-                        })
-                        .collect();
+                        // Tokenize all signals into unique terms (skip noise words < 3 chars)
+                        let signal_terms: std::collections::HashSet<String> = signals
+                            .iter()
+                            .flat_map(|s| {
+                                s.to_lowercase()
+                                    .split_whitespace()
+                                    .filter(|w| w.len() >= 3)
+                                    .map(|w| w.to_string())
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect();
 
-                    if !signal_terms.is_empty() {
-                        let mut boosted_count = 0;
-                        let ids: Vec<MemoryId> = fused.keys().cloned().collect();
+                        if !signal_terms.is_empty() {
+                            let mut boosted_count = 0;
+                            let ids: Vec<MemoryId> = fused.keys().cloned().collect();
 
-                        for id in &ids {
-                            if let Some(content) = get_content(id) {
-                                let content_lower = content.to_lowercase();
-                                let content_words = tokenize_words(&content_lower);
-                                let match_count = signal_terms
-                                    .iter()
-                                    .filter(|term| content_words.contains(term.as_str()))
-                                    .count();
+                            for id in &ids {
+                                if let Some(content) = get_content(id) {
+                                    let content_lower = content.to_lowercase();
+                                    let content_words = tokenize_words(&content_lower);
+                                    let match_count = signal_terms
+                                        .iter()
+                                        .filter(|term| content_words.contains(term.as_str()))
+                                        .count();
 
-                                if match_count > 0 {
-                                    // Sqrt scaling: diminishing returns for additional matches
-                                    let boost_factor = 1.0
-                                        + (PROSPECTIVE_BOOST_PER_MATCH
-                                            * (match_count as f32).sqrt())
-                                        .min(PROSPECTIVE_BOOST_MAX);
-                                    if let Some(score) = fused.get_mut(id) {
-                                        *score *= boost_factor;
-                                        boosted_count += 1;
-                                        if let Some(ref mut attr_map) = attributions {
-                                            if let Some(attr) = attr_map.get_mut(id) {
-                                                attr.prospective_boost = boost_factor;
+                                    if match_count > 0 {
+                                        // Sqrt scaling: diminishing returns for additional matches
+                                        let boost_factor = 1.0
+                                            + (PROSPECTIVE_BOOST_PER_MATCH
+                                                * (match_count as f32).sqrt())
+                                            .min(PROSPECTIVE_BOOST_MAX);
+                                        if let Some(score) = fused.get_mut(id) {
+                                            *score *= boost_factor;
+                                            boosted_count += 1;
+                                            if let Some(ref mut attr_map) = attributions {
+                                                if let Some(attr) = attr_map.get_mut(id) {
+                                                    attr.prospective_boost = boost_factor;
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        if boosted_count > 0 {
-                            tracing::info!(
+                            if boosted_count > 0 {
+                                tracing::info!(
                                 "Layer 4.7: Boosted {} memories from {} prospective signal terms",
                                 boosted_count,
                                 signal_terms.len()
                             );
+                            }
                         }
                     }
                 }
@@ -2693,7 +2735,12 @@ impl MemorySystem {
             res.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             let rerank_budget = query.max_results * 2;
 
-            if use_ontology_rerank && !onto_intent.expected_labels.is_empty() {
+            // RH-8 gate: ontological rerank only runs in `PlusRerank` and above.
+            // NOTE (#270 spec discrepancy): the spec calls this mode "+rerank" with the
+            // expectation of a cross-encoder. This codebase has no cross-encoder; the only
+            // rerank present is the ontological label-match boost below. The mode label is
+            // preserved for spec fidelity. See plan/PR for details.
+            if layer_rerank && use_ontology_rerank && !onto_intent.expected_labels.is_empty() {
                 if let Some(graph) = self.graph_memory.as_ref() {
                     let g = graph.read();
                     let mut boosted_count = 0usize;
@@ -2795,13 +2842,24 @@ impl MemorySystem {
 
         for (memory_id, score) in memory_ids {
             // Hebbian boost from learned graph weights (multiplicative)
+            // RH-8 gate: Hebbian association boost only applies in `Full` mode.
             let hebbian_boost = hebbian_scores.get(&memory_id).copied().unwrap_or(0.0);
-            let base_score =
-                score * (1.0 + hebbian_boost * crate::constants::HEBBIAN_ASSOCIATION_WEIGHT);
+            let base_score = if layer_full {
+                score * (1.0 + hebbian_boost * crate::constants::HEBBIAN_ASSOCIATION_WEIGHT)
+            } else {
+                score
+            };
 
             // Helper to apply unified scoring (all multiplicative on base score)
             let recency_scale_override = query.recency_weight;
             let with_unified_score = |mem: &SharedMemory, base: f32| -> SharedMemory {
+                // RH-8 gate: lower modes pass the raw fused score through unchanged so
+                // per-layer attribution measures retrieval signal, not cognitive overlay.
+                if !layer_full {
+                    let mut cloned: Memory = mem.as_ref().clone();
+                    cloned.set_score(base);
+                    return Arc::new(cloned);
+                }
                 use crate::constants::*;
 
                 // Recency: exponential decay, multiplicative factor
@@ -3100,32 +3158,37 @@ impl MemorySystem {
         // Quality gate: multiplicative factor based on content richness.
         // Prevents empty/trivial memories from surfacing on recency or graph boost alone.
         // Same formula as proactive_context (Berntsen elaboration quality).
-        for mem in &mut memories {
-            let content_len = mem.experience.content.len() as f32;
-            let has_entities = !mem.experience.entities.is_empty();
-            let has_context = mem.experience.context.is_some();
-            let quality = (content_len / 200.0).min(1.0)
-                * (1.0
-                    + if has_entities { 0.1 } else { 0.0 }
-                    + if has_context { 0.1 } else { 0.0 });
-            let quality_factor = quality.max(crate::constants::ELABORATION_QUALITY_MIN);
-            if let Some(score) = mem.score {
-                let mut cloned: Memory = mem.as_ref().clone();
-                cloned.set_score(score * quality_factor);
-                *mem = Arc::new(cloned);
+        // RH-8 gate: quality multiplier only applies in `Full` mode — lower modes
+        // expose the raw fused score so per-layer attribution isn't masked.
+        if layer_full {
+            for mem in &mut memories {
+                let content_len = mem.experience.content.len() as f32;
+                let has_entities = !mem.experience.entities.is_empty();
+                let has_context = mem.experience.context.is_some();
+                let quality = (content_len / 200.0).min(1.0)
+                    * (1.0
+                        + if has_entities { 0.1 } else { 0.0 }
+                        + if has_context { 0.1 } else { 0.0 });
+                let quality_factor = quality.max(crate::constants::ELABORATION_QUALITY_MIN);
+                if let Some(score) = mem.score {
+                    let mut cloned: Memory = mem.as_ref().clone();
+                    cloned.set_score(score * quality_factor);
+                    *mem = Arc::new(cloned);
 
-                // Track quality gate in attribution
-                if let Some(ref mut attr_map) = attributions {
-                    if let Some(attr) = attr_map.get_mut(&mem.id) {
-                        attr.quality_gate = quality_factor;
-                        attr.final_score = score * quality_factor;
+                    // Track quality gate in attribution
+                    if let Some(ref mut attr_map) = attributions {
+                        if let Some(attr) = attr_map.get_mut(&mem.id) {
+                            attr.quality_gate = quality_factor;
+                            attr.final_score = score * quality_factor;
+                        }
                     }
                 }
             }
         }
 
         // Linguistic analysis: additive boost (5% of IC weight), not a full re-sort
-        if !query_analysis.focal_entities.is_empty() {
+        // RH-8 gate: linguistic re-sort only runs in `Full` mode.
+        if layer_full && !query_analysis.focal_entities.is_empty() {
             memories.sort_by(|a, b| {
                 let score_a = a.score.unwrap_or(0.0)
                     + Self::linguistic_boost(&a.experience.content, &query_analysis) * 0.05;
@@ -3148,7 +3211,9 @@ impl MemorySystem {
         // PIPE-10: Competition must happen BEFORE coactivation - we only want to
         // strengthen associations between memories that "won" the competition.
         // Suppressed memories should not be coactivated (Hebbian "losers don't learn").
-        if memories.len() >= 2 {
+        // RH-8 gate: retrieval competition mutates interference state — only run in `Full` mode
+        // so per-layer attribution runs in `--layer all` don't pollute state across modes.
+        if layer_full && memories.len() >= 2 {
             // Use actual pipeline scores for competition, not position-based proxies.
             // Previously used 1.0 - (i/n)*0.3 which compressed all scores to [0.7, 1.0],
             // making suppression (ratio > 0.9) almost impossible.
@@ -3211,8 +3276,11 @@ impl MemorySystem {
 
         // Update access counts with instrumentation for consolidation events
         // (only for memories that survived competition)
-        for memory in &memories {
-            self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+        // RH-8 gate: access count mutates persistent state — only in `Full` mode.
+        if layer_full {
+            for memory in &memories {
+                self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+            }
         }
 
         // PIPE-10: Hebbian learning AFTER competition - only coactivate winners
@@ -3220,7 +3288,8 @@ impl MemorySystem {
         // form/strengthen edges in the memory graph. Suppressed memories don't
         // participate in coactivation (biological: "neurons that fire together
         // wire together" but suppressed neurons don't fire).
-        if memories.len() >= 2 {
+        // RH-8 gate: Hebbian coactivation mutates graph state — only in `Full` mode.
+        if layer_full && memories.len() >= 2 {
             if let Some(graph) = &self.graph_memory {
                 let memory_uuids: Vec<uuid::Uuid> = memories.iter().map(|m| m.id.0).collect();
                 match graph.read().record_memory_coactivation(&memory_uuids) {
@@ -3250,14 +3319,21 @@ impl MemorySystem {
         }
 
         // Increment and persist retrieval counter
-        if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
-            self.stats.write().total_retrievals = count;
+        // RH-8 gate: retrieval counter mutates persistent state — only in `Full` mode.
+        if layer_full {
+            if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+                self.stats.write().total_retrievals = count;
+            }
         }
 
         // Expand with hierarchy context (parent chain + children)
         // This ensures semantic search also surfaces contextually related memories
-        let mut seen_ids: HashSet<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
-        self.expand_with_hierarchy(&mut memories, &mut seen_ids);
+        // RH-8 gate: hierarchy expansion adds candidates outside the layer's scope —
+        // only in `Full` mode so per-layer ranks reflect that layer's retrieval signal.
+        if layer_full {
+            let mut seen_ids: HashSet<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
+            self.expand_with_hierarchy(&mut memories, &mut seen_ids);
+        }
 
         // Re-sort by score and trim to max_results after expansion.
         // Expanded memories must compete on score, not get a free pass.

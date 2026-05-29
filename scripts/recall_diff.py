@@ -122,6 +122,55 @@ def render(baseline: dict[str, Any], current: dict[str, Any], tolerance_pct: flo
             )
     lines.append("")
 
+    # RH-8 (#270): per-pipeline-layer attribution. The harness can run the
+    # smoke suite under up to six cumulative modes; render a delta table
+    # only for modes shared between baseline and current. When only `full`
+    # is present (the default CI path), this section gracefully degrades.
+    # Mode order is the production pipeline order, not BTreeMap order, so
+    # ndcg deltas read top-to-bottom as additive stages.
+    PIPELINE_MODE_ORDER = (
+        "vamana_only",
+        "+spreading",
+        "+bm25",
+        "+rerank",
+        "+facts",
+        "full",
+    )
+    base_layers = baseline.get("layers", {})
+    cur_layers = current.get("layers", {})
+    shared_modes = [m for m in PIPELINE_MODE_ORDER if m in base_layers and m in cur_layers]
+    # Surface this section only when there is something beyond `full` to
+    # show — otherwise it duplicates the gated table above.
+    if len(shared_modes) > 1:
+        lines.append("### Per-layer attribution `ndcg@10` / `recall@10`")
+        lines.append("")
+        lines.append(
+            "Cumulative modes (each row adds one stage to the row above). "
+            "Per-layer numbers are diagnostic — only `full` is gated by CI. "
+            "`+rerank` covers the ontological re-ranker at Layer 4.9; this "
+            "codebase has no cross-encoder despite the spec label."
+        )
+        lines.append("")
+        lines.append("| mode | `ndcg@10` (Δ) | `recall@10` (Δ) |")
+        lines.append("| ---- | ------------- | --------------- |")
+        for m in shared_modes:
+            b_layer = base_layers.get(m, {})
+            c_layer = cur_layers.get(m, {})
+            ndcg = fmt_metric(
+                b_layer.get("ndcg@10", 0.0),
+                c_layer.get("ndcg@10", 0.0),
+                tolerance_pct,
+                gating=False,
+            )
+            recall = fmt_metric(
+                b_layer.get("recall@10", 0.0),
+                c_layer.get("recall@10", 0.0),
+                tolerance_pct,
+                gating=False,
+            )
+            lines.append(f"| `{m}` | {ndcg} | {recall} |")
+        lines.append("")
+
     base_cats = baseline.get("by_category", {})
     cur_cats = current.get("by_category", {})
     cats = sorted(set(base_cats) | set(cur_cats))

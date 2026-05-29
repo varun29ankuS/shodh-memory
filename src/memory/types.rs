@@ -2048,6 +2048,13 @@ pub struct Query {
     // === Pagination (SHO-69) ===
     /// Offset for pagination (skip first N results)
     pub offset: usize,
+
+    // === Pipeline-Layer Attribution (RH-8, #270) ===
+    /// Which slice of the recall pipeline to run. Production callers leave
+    /// this at the default (`Full`) and get the existing behavior. The
+    /// recall harness sets lower modes to attribute quality deltas to
+    /// specific stages. See `LayerMode` docs.
+    pub layers: LayerMode,
 }
 
 /// Paginated search results with metadata for "load more" patterns (SHO-69)
@@ -2129,6 +2136,7 @@ impl Default for Query {
             max_results: DEFAULT_MAX_RESULTS,
             retrieval_mode: RetrievalMode::Hybrid,
             offset: 0,
+            layers: LayerMode::Full,
         }
     }
 }
@@ -2418,6 +2426,74 @@ pub enum RetrievalMode {
     Spatial,       // Geo-location based retrieval
     Mission,       // Mission context retrieval
     ActionOutcome, // Reward-based learning retrieval
+}
+
+/// Pipeline-layer attribution mode for the recall harness (RH-8, #270).
+///
+/// Cumulative — each variant turns on one more pipeline stage on top of the
+/// prior. Production code never touches this; the default is `Full`. The
+/// recall harness drives lower modes from its CLI to attribute quality
+/// deltas to specific pipeline stages.
+///
+/// Ordering reflects "how much pipeline is active":
+/// `VamanaOnly < PlusSpreading < PlusBm25 < PlusRerank < PlusFacts < Full`.
+/// Stage gates inside `semantic_retrieve_inner` use `mode >= LayerMode::X`
+/// to enable the corresponding stage.
+///
+/// **Note on `PlusRerank`:** issue #270 labels this `+rerank` and describes
+/// it as "+ cross-encoder". This codebase has **no cross-encoder**. The only
+/// rerank present is the ontological rerank at Layer 4.9 (multiplicative
+/// boost when episode entity types match expected ontology labels). The
+/// label is preserved for spec fidelity; the documented stage is what
+/// actually runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum LayerMode {
+    /// Layer 3 vector ANN only. Score is raw cosine. No graph, no BM25,
+    /// no Layer 5 cognitive adjustments, no retrieval competition.
+    VamanaOnly,
+    /// + Layer 2 graph spreading activation. Ranking is the union of
+    /// vector and graph candidates ordered by raw fused score.
+    PlusSpreading,
+    /// + Layer 4 lexical/RRF fusion (vector + graph + BM25 via three-way
+    /// reciprocal rank fusion).
+    PlusBm25,
+    /// + Layer 4.9 ontological rerank (multiplicative entity-type boost).
+    /// Spec-aliased as `+rerank` in #270 — see enum-level docs.
+    PlusRerank,
+    /// + Layer 0.7 fact source pre-fetch and Layer 4.8 fact-source boost.
+    PlusFacts,
+    /// Production. Everything: temporal pre-filter (Layer 0.4), attribute
+    /// detection (0.5), temporal facts (0.6), Layer 5 unified scoring,
+    /// retrieval competition + Hebbian coactivation.
+    #[default]
+    Full,
+}
+
+impl LayerMode {
+    /// Stable string identifier emitted into the recall harness JSON
+    /// report. Matches the labels used in #270 exactly so downstream
+    /// tooling (markdown diff, dashboards) can rely on them.
+    pub fn report_key(self) -> &'static str {
+        match self {
+            Self::VamanaOnly => "vamana_only",
+            Self::PlusSpreading => "+spreading",
+            Self::PlusBm25 => "+bm25",
+            Self::PlusRerank => "+rerank",
+            Self::PlusFacts => "+facts",
+            Self::Full => "full",
+        }
+    }
+
+    /// All variants in ascending pipeline coverage order. Used by the
+    /// `--layer all` CLI expansion in the recall harness.
+    pub const ALL: [LayerMode; 6] = [
+        LayerMode::VamanaOnly,
+        LayerMode::PlusSpreading,
+        LayerMode::PlusBm25,
+        LayerMode::PlusRerank,
+        LayerMode::PlusFacts,
+        LayerMode::Full,
+    ];
 }
 
 /// Criteria for forgetting memories
@@ -4587,5 +4663,58 @@ mod tests {
             "Decision/CodeEdit signal ratio should be > 6x, got {:.1}x",
             ratio
         );
+    }
+
+    // -------------------- RH-8 (#270) -----------------------------------
+    //
+    // LayerMode is the gate the recall harness uses to attribute quality
+    // deltas to specific pipeline stages. Production code never touches
+    // it — these tests pin the contract used by the harness CLI and the
+    // stage gates in `mod.rs`.
+
+    #[test]
+    fn layer_mode_default_is_full() {
+        assert_eq!(LayerMode::default(), LayerMode::Full);
+        // The Query default must also resolve to Full so existing call
+        // sites get unchanged behavior.
+        assert_eq!(Query::default().layers, LayerMode::Full);
+    }
+
+    #[test]
+    fn layer_mode_ordering_is_cumulative() {
+        // The whole point of the cumulative enum is that downstream code
+        // can write `if mode >= LayerMode::PlusBm25 { … }` and have BM25
+        // turn on for PlusBm25, PlusRerank, PlusFacts and Full.
+        assert!(LayerMode::VamanaOnly < LayerMode::PlusSpreading);
+        assert!(LayerMode::PlusSpreading < LayerMode::PlusBm25);
+        assert!(LayerMode::PlusBm25 < LayerMode::PlusRerank);
+        assert!(LayerMode::PlusRerank < LayerMode::PlusFacts);
+        assert!(LayerMode::PlusFacts < LayerMode::Full);
+    }
+
+    #[test]
+    fn layer_mode_report_keys_match_spec() {
+        // These string handles are part of the JSON schema consumed by
+        // `scripts/recall_diff.py` and the dashboard. They MUST match
+        // the labels in #270 character-for-character.
+        assert_eq!(LayerMode::VamanaOnly.report_key(), "vamana_only");
+        assert_eq!(LayerMode::PlusSpreading.report_key(), "+spreading");
+        assert_eq!(LayerMode::PlusBm25.report_key(), "+bm25");
+        assert_eq!(LayerMode::PlusRerank.report_key(), "+rerank");
+        assert_eq!(LayerMode::PlusFacts.report_key(), "+facts");
+        assert_eq!(LayerMode::Full.report_key(), "full");
+    }
+
+    #[test]
+    fn layer_mode_all_is_in_ascending_pipeline_order() {
+        // ALL must be sorted, contain every variant exactly once, and
+        // start at the smallest (VamanaOnly) — the harness relies on
+        // that order when iterating `--layer all`.
+        assert_eq!(LayerMode::ALL.len(), 6);
+        for w in LayerMode::ALL.windows(2) {
+            assert!(w[0] < w[1], "ALL must be strictly ascending");
+        }
+        assert_eq!(LayerMode::ALL.first().copied(), Some(LayerMode::VamanaOnly));
+        assert_eq!(LayerMode::ALL.last().copied(), Some(LayerMode::Full));
     }
 }

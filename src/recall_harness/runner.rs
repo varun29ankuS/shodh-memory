@@ -15,7 +15,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
-use crate::memory::types::ExperienceType;
+use crate::memory::types::{ExperienceType, LayerMode};
 use crate::memory::{Experience, MemoryConfig, MemorySystem, Query};
 
 use super::fixtures::{
@@ -58,6 +58,21 @@ pub struct RunInputs {
     ///
     /// Default in the CLI is `5`. Setting `0` is treated as `1`.
     pub repeats: usize,
+
+    /// Per-pipeline-layer attribution modes to run. RH-8 (#270). Each mode
+    /// is a cumulative subset of the production retrieval pipeline; running
+    /// the same query set under multiple modes lets us attribute quality
+    /// deltas to specific stages rather than treating the pipeline as a
+    /// single number. Within one repeat, ingest runs once and the case loop
+    /// runs once per mode (cost ≈ ingest + N_modes × queries).
+    ///
+    /// CI gating still keys on `LayerMode::Full` only; the other modes are
+    /// diagnostic. A single-element vec containing `Full` reproduces the
+    /// pre-RH-8 behavior bit-for-bit.
+    ///
+    /// An empty vec is treated as `[LayerMode::Full]` so callers that don't
+    /// care about per-layer attribution don't have to populate this.
+    pub layer_modes: Vec<LayerMode>,
 }
 
 /// One case's retrieved rank list, in score-descending order.
@@ -139,6 +154,16 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         .context("smoke suite failed structural validation — fix the JSONL fixtures")?;
 
     let repeats = inputs.repeats.max(1);
+    // RH-8 (#270): default to `[Full]` when caller passed an empty vec so
+    // the existing single-mode contract is preserved by construction.
+    let layer_modes: Vec<LayerMode> = if inputs.layer_modes.is_empty() {
+        vec![LayerMode::Full]
+    } else {
+        let mut m = inputs.layer_modes.clone();
+        m.sort();
+        m.dedup();
+        m
+    };
 
     // Run N independent ingest+query passes against fresh storage
     // directories. RH-12 (#272): per-case latency is the median across
@@ -146,6 +171,9 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
     // every pass. The for-loop is intentionally serial — running passes
     // in parallel would defeat the determinism check, since concurrent
     // RocksDB instances under the same root would race on file handles.
+    //
+    // RH-8: within each pass, ingest happens once and the case loop runs
+    // once per `LayerMode`. Determinism check is per-mode.
     let mut passes: Vec<OnePassResult> = Vec::with_capacity(repeats);
     for i in 0..repeats {
         let pass_storage = if repeats == 1 {
@@ -155,7 +183,7 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         } else {
             inputs.storage_path.join(format!("repeat_{i}"))
         };
-        let pass = run_one_pass(&pass_storage, &corpus, &cases)
+        let pass = run_one_pass(&pass_storage, &corpus, &cases, &layer_modes)
             .with_context(|| format!("repeat {i} of {repeats}"))?;
         passes.push(pass);
     }
@@ -163,49 +191,79 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
     // ------------------------------------------------------------------
     // Determinism check across repeats. Two passes against the same
     // fixtures, with thread pinning + the RH-10/11 tie-break in place,
-    // MUST produce byte-identical rank lists. If they don't, something
-    // upstream regressed (e.g. a new sort touched a non-determinism
-    // source). Surface every diverging case as an `infrastructure`
-    // failure so reviewers see the full picture, not just the first.
+    // MUST produce byte-identical rank lists per mode. If they don't,
+    // something upstream regressed. Surface every diverging case as an
+    // `infrastructure` failure so reviewers see the full picture.
     // ------------------------------------------------------------------
     let mut failures: Vec<Failure> = passes[0].failures.clone();
     if repeats > 1 {
-        for (i, pass) in passes.iter().enumerate().skip(1) {
-            for (k, ref_rank) in passes[0].ranks.iter().enumerate() {
-                let cur_rank = &pass.ranks[k];
-                debug_assert_eq!(ref_rank.case_id, cur_rank.case_id);
-                if ref_rank.retrieved != cur_rank.retrieved {
-                    failures.push(Failure {
-                        kind: "infrastructure".to_string(),
-                        detail: format!(
-                            "non-determinism: case {} rank list diverged between repeat 0 and repeat {i} \
-                             — repeat 0 = {:?}, repeat {i} = {:?}",
-                            ref_rank.case_id, ref_rank.retrieved, cur_rank.retrieved
-                        ),
-                    });
+        for mode in &layer_modes {
+            let ref_pass = passes[0]
+                .per_mode
+                .get(mode)
+                .expect("repeat 0 must have all modes");
+            for (i, pass) in passes.iter().enumerate().skip(1) {
+                let cur_pass = pass
+                    .per_mode
+                    .get(mode)
+                    .expect("every repeat must have every mode");
+                for (k, ref_rank) in ref_pass.ranks.iter().enumerate() {
+                    let cur_rank = &cur_pass.ranks[k];
+                    debug_assert_eq!(ref_rank.case_id, cur_rank.case_id);
+                    if ref_rank.retrieved != cur_rank.retrieved {
+                        failures.push(Failure {
+                            kind: "infrastructure".to_string(),
+                            detail: format!(
+                                "non-determinism [mode={}]: case {} rank list diverged between repeat 0 and repeat {i} \
+                                 — repeat 0 = {:?}, repeat {i} = {:?}",
+                                mode.report_key(), ref_rank.case_id, ref_rank.retrieved, cur_rank.retrieved
+                            ),
+                        });
+                    }
                 }
             }
         }
     }
 
-    // Quality metrics: take from repeat 0. The determinism check above
-    // guarantees they would be identical across repeats; if it didn't
-    // pass, the caller exits with `EXIT_INFRASTRUCTURE` anyway and the
-    // metrics don't matter.
-    let per_case = &passes[0].per_case;
-    let by_category_cases = &passes[0].by_category_cases;
-
-    // Per-case median latency: collect samples from every pass, take median.
-    let mut latencies_median_ms: Vec<f64> = Vec::with_capacity(cases.len());
-    for k in 0..cases.len() {
-        let samples: Vec<f64> = passes.iter().map(|p| p.latencies_ms[k]).collect();
-        latencies_median_ms.push(median(&samples));
+    // Quality metrics: per-mode aggregation. Take per-case metrics from
+    // repeat 0; per-case latency is the median across repeats.
+    let mut layers: BTreeMap<String, LayerReport> = BTreeMap::new();
+    for mode in &layer_modes {
+        let per_case = &passes[0]
+            .per_mode
+            .get(mode)
+            .expect("repeat 0 must have mode")
+            .per_case;
+        let mut latencies_median_ms: Vec<f64> = Vec::with_capacity(cases.len());
+        for k in 0..cases.len() {
+            let samples: Vec<f64> = passes
+                .iter()
+                .map(|p| {
+                    p.per_mode
+                        .get(mode)
+                        .expect("every repeat must have every mode")
+                        .latencies_ms[k]
+                })
+                .collect();
+            latencies_median_ms.push(median(&samples));
+        }
+        layers.insert(
+            mode.report_key().to_string(),
+            aggregate_layer(per_case, &latencies_median_ms),
+        );
     }
 
-    let layer_report = aggregate_layer(per_case, &latencies_median_ms);
-    let mut layers: BTreeMap<String, LayerReport> = BTreeMap::new();
-    layers.insert("full".to_string(), layer_report);
-
+    // Per-category breakdown is reported for the highest mode present
+    // (typically `Full`). Lower modes' per-category numbers are encoded
+    // implicitly via the per-layer ndcg/recall tables; surfacing six
+    // category-mode crosstabs would explode the report without adding
+    // signal at the current corpus size.
+    let highest_mode = layer_modes.last().copied().unwrap_or(LayerMode::Full);
+    let by_category_cases = &passes[0]
+        .per_mode
+        .get(&highest_mode)
+        .expect("repeat 0 must have highest mode")
+        .by_category_cases;
     let mut by_category: BTreeMap<String, CategoryReport> = BTreeMap::new();
     for cat in SmokeCategory::ALL {
         let cases_for_cat = by_category_cases.get(&cat).cloned().unwrap_or_default();
@@ -227,35 +285,53 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         failures,
     };
 
-    // The public ranks output is the repeat-0 rank list — that is what
-    // existing RH-11 tests expect. Cross-repeat divergence is already
-    // surfaced via `failures` above.
-    let ranks = passes.into_iter().next().expect("repeats >= 1").ranks;
+    // The public ranks output is the repeat-0 rank list for the highest
+    // mode — that matches existing RH-11 test expectations (which assume
+    // a single mode). Cross-repeat divergence is already surfaced via
+    // `failures` above on a per-mode basis.
+    let ranks = passes
+        .into_iter()
+        .next()
+        .expect("repeats >= 1")
+        .per_mode
+        .remove(&highest_mode)
+        .expect("repeat 0 must have highest mode")
+        .ranks;
 
     Ok(ReportWithRanks { report, ranks })
 }
 
-/// Output of one ingest+query pass over the fixture suite.
-///
-/// Kept private; the public surface aggregates across passes via
-/// [`run_smoke_suite_with_ranks`]. RH-12 (#272).
-struct OnePassResult {
+/// Per-case results for one `LayerMode` within a single ingest+query pass.
+struct ModePassResult {
     per_case: Vec<Metrics>,
     by_category_cases: HashMap<SmokeCategory, Vec<Metrics>>,
     latencies_ms: Vec<f64>,
     ranks: Vec<CaseRankList>,
+}
+
+/// Output of one ingest pass plus N mode-keyed query passes over the
+/// fixture suite. Ingest happens once per pass; the case loop runs once
+/// per `LayerMode` so per-mode quality and latency can be attributed
+/// without paying the ingest cost N times. RH-8 (#270), RH-12 (#272).
+struct OnePassResult {
+    per_mode: BTreeMap<LayerMode, ModePassResult>,
     failures: Vec<Failure>,
 }
 
-/// Run a single ingest + query pass against an isolated storage directory.
+/// Run a single ingest pass, then run the case loop once per `LayerMode`.
 ///
-/// The caller is responsible for choosing the storage dir so multiple passes
-/// in the same harness invocation get independent state. The corpus and
-/// cases are passed in by reference so we don't reload fixtures per pass.
+/// The caller is responsible for choosing the storage dir so multiple
+/// repeats in the same harness invocation get independent state. The
+/// corpus and cases are passed in by reference so we don't reload fixtures
+/// per pass. The system is built once and reused across modes — the modes
+/// themselves are pure read-side gates and do not mutate persisted state
+/// in lower modes (Hebbian/access-count/competition writes are gated to
+/// `Full`), so cross-mode contamination is impossible.
 fn run_one_pass(
     storage_path: &Path,
     corpus: &[CorpusItem],
     cases: &[SmokeCase],
+    layer_modes: &[LayerMode],
 ) -> Result<OnePassResult> {
     let system = build_system(storage_path)?;
     let id_map = ingest_corpus(&system, corpus)?;
@@ -268,82 +344,93 @@ fn run_one_pass(
         .map(|(corpus_id, uuid)| (*uuid, corpus_id.clone()))
         .collect();
 
-    let mut per_case = Vec::with_capacity(cases.len());
-    let mut latencies_ms = Vec::with_capacity(cases.len());
-    let mut by_category_cases: HashMap<SmokeCategory, Vec<Metrics>> = HashMap::new();
+    let mut per_mode: BTreeMap<LayerMode, ModePassResult> = BTreeMap::new();
     let mut failures: Vec<Failure> = Vec::new();
-    let mut ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
 
-    for case in cases {
-        let query = Query {
-            query_text: Some(case.query.clone()),
-            max_results: SMOKE_K,
-            ..Default::default()
-        };
+    for mode in layer_modes {
+        let mut per_case = Vec::with_capacity(cases.len());
+        let mut latencies_ms = Vec::with_capacity(cases.len());
+        let mut by_category_cases: HashMap<SmokeCategory, Vec<Metrics>> = HashMap::new();
+        let mut ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
 
-        let started = Instant::now();
-        let result = system.recall(&query);
-        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-        latencies_ms.push(elapsed_ms);
+        for case in cases {
+            let query = Query {
+                query_text: Some(case.query.clone()),
+                max_results: SMOKE_K,
+                layers: *mode,
+                ..Default::default()
+            };
 
-        let memories = match result {
-            Ok(m) => m,
-            Err(e) => {
+            let started = Instant::now();
+            let result = system.recall(&query);
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            latencies_ms.push(elapsed_ms);
+
+            let memories = match result {
+                Ok(m) => m,
+                Err(e) => {
+                    failures.push(Failure {
+                        kind: "case".to_string(),
+                        detail: format!(
+                            "recall failed for {} [mode={}]: {e:#}",
+                            case.id,
+                            mode.report_key()
+                        ),
+                    });
+                    // Treat as zero-recall so aggregates keep their denominator.
+                    Vec::new()
+                }
+            };
+
+            let retrieved_uuids: Vec<Uuid> = memories.iter().map(|m| m.id.0).collect();
+            let retrieved_corpus_ids: Vec<String> = retrieved_uuids
+                .iter()
+                .map(|u| {
+                    uuid_to_corpus_id
+                        .get(u)
+                        .cloned()
+                        .unwrap_or_else(|| format!("<unknown:{u}>"))
+                })
+                .collect();
+            ranks.push(CaseRankList {
+                case_id: case.id.clone(),
+                retrieved: retrieved_corpus_ids,
+            });
+            let relevance = build_relevance_map(case, &id_map);
+
+            // Only emit the "missing relevance map" failure once across modes
+            // — the relevance map is a function of fixtures + ingest, not
+            // the mode, so duplicating it would clutter the failure list.
+            if relevance.is_empty() && *mode == layer_modes[0] {
                 failures.push(Failure {
                     kind: "case".to_string(),
-                    detail: format!("recall failed for {}: {e:#}", case.id),
+                    detail: format!(
+                        "case {}: every relevant corpus item was missing from id_map (ingest skipped them)",
+                        case.id
+                    ),
                 });
-                // Treat as zero-recall so aggregates keep their denominator.
-                Vec::new()
             }
-        };
 
-        let retrieved_uuids: Vec<Uuid> = memories.iter().map(|m| m.id.0).collect();
-        // Translate to stable corpus IDs for the determinism gate. Items
-        // that were not part of the ingested corpus (defensive: should
-        // never happen on a fresh harness storage dir) are surfaced as
-        // `<unknown:UUID>` so any divergence in those slots is still
-        // observable instead of silently masked by a string fallback.
-        let retrieved_corpus_ids: Vec<String> = retrieved_uuids
-            .iter()
-            .map(|u| {
-                uuid_to_corpus_id
-                    .get(u)
-                    .cloned()
-                    .unwrap_or_else(|| format!("<unknown:{u}>"))
-            })
-            .collect();
-        ranks.push(CaseRankList {
-            case_id: case.id.clone(),
-            retrieved: retrieved_corpus_ids,
-        });
-        let relevance = build_relevance_map(case, &id_map);
-
-        if relevance.is_empty() {
-            failures.push(Failure {
-                kind: "case".to_string(),
-                detail: format!(
-                    "case {}: every relevant corpus item was missing from id_map (ingest skipped them)",
-                    case.id
-                ),
-            });
+            let metrics = Metrics::compute(&retrieved_uuids, &relevance, SMOKE_K);
+            by_category_cases
+                .entry(case.category)
+                .or_default()
+                .push(metrics);
+            per_case.push(metrics);
         }
 
-        let metrics = Metrics::compute(&retrieved_uuids, &relevance, SMOKE_K);
-        by_category_cases
-            .entry(case.category)
-            .or_default()
-            .push(metrics);
-        per_case.push(metrics);
+        per_mode.insert(
+            *mode,
+            ModePassResult {
+                per_case,
+                by_category_cases,
+                latencies_ms,
+                ranks,
+            },
+        );
     }
 
-    Ok(OnePassResult {
-        per_case,
-        by_category_cases,
-        latencies_ms,
-        ranks,
-        failures,
-    })
+    Ok(OnePassResult { per_mode, failures })
 }
 
 /// Pin parallel runtimes to a single thread for the harness process.
@@ -475,6 +562,7 @@ mod tests {
             suite: "smoke".to_string(),
             git_sha: "test-sha".to_string(),
             repeats: 1,
+            layer_modes: vec![LayerMode::Full],
         };
         let report = run_smoke_suite(&inputs).expect("runner must succeed");
         let _ = std::fs::remove_dir_all(&storage);
@@ -554,6 +642,7 @@ mod tests {
             suite: "smoke".to_string(),
             git_sha: "test-sha".to_string(),
             repeats: 1,
+            layer_modes: vec![LayerMode::Full],
         };
         let inputs2 = RunInputs {
             storage_path: storage2.clone(),
@@ -562,6 +651,7 @@ mod tests {
             suite: "smoke".to_string(),
             git_sha: "test-sha".to_string(),
             repeats: 2,
+            layer_modes: vec![LayerMode::Full],
         };
 
         let r1 = run_smoke_suite(&inputs1).expect("repeats=1 must succeed");
@@ -608,6 +698,71 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&storage1);
         let _ = std::fs::remove_dir_all(&storage2);
+    }
+
+    /// RH-8 (#270): running the smoke suite with multiple `LayerMode`s
+    /// emits one `layers` entry per mode, in pipeline order, and per-mode
+    /// rank lists are byte-identical across repeats.
+    ///
+    /// Marked `#[ignore]` for the same reason as the other end-to-end
+    /// runner tests — it pays the ingest cost once and the query loop six
+    /// times. Run via `cargo test --release -- --ignored
+    /// runner_layer_all_emits_six_modes_with_per_mode_determinism`
+    /// before shipping changes that touch any layer gate.
+    #[test]
+    #[ignore = "expensive: runs the smoke suite with 6 modes (~6× query time). enable with --ignored before shipping layer-gate changes."]
+    fn runner_layer_all_emits_six_modes_with_per_mode_determinism() {
+        let storage = unique_storage_dir("layer-all");
+        let inputs = RunInputs {
+            storage_path: storage.clone(),
+            corpus_path: None,
+            cases_path: None,
+            suite: "smoke".to_string(),
+            git_sha: "test-sha".to_string(),
+            // Two repeats so the per-mode determinism check actually runs.
+            repeats: 2,
+            layer_modes: LayerMode::ALL.to_vec(),
+        };
+        let report = run_smoke_suite(&inputs).expect("layer-all run must succeed");
+        let _ = std::fs::remove_dir_all(&storage);
+
+        // Six modes, all present, in their canonical report-key form.
+        for mode in LayerMode::ALL {
+            assert!(
+                report.layers.contains_key(mode.report_key()),
+                "missing layer entry for {}",
+                mode.report_key()
+            );
+        }
+        assert_eq!(report.layers.len(), LayerMode::ALL.len());
+
+        // Per-mode determinism: any divergence would have been recorded
+        // as `infrastructure` failures by the runner.
+        let infra: Vec<_> = report
+            .failures
+            .iter()
+            .filter(|f| f.kind == "infrastructure")
+            .collect();
+        assert!(
+            infra.is_empty(),
+            "per-mode determinism violated: {:?}",
+            infra
+        );
+
+        // Sanity: `full` ndcg@10 must be >= `vamana_only` ndcg@10 on the
+        // canonical fixtures. This is the #270 acceptance invariant — if a
+        // future scoring change ever inverts it, that's a real signal.
+        let full = report.layers.get("full").expect("full layer present");
+        let vamana = report
+            .layers
+            .get("vamana_only")
+            .expect("vamana_only layer present");
+        assert!(
+            full.ndcg_at_10 + 1e-6 >= vamana.ndcg_at_10,
+            "full ndcg@10 ({}) must be >= vamana_only ndcg@10 ({}) on canonical fixtures",
+            full.ndcg_at_10,
+            vamana.ndcg_at_10
+        );
     }
 
     /// Direct unit test of the cross-repeat divergence detection logic.
