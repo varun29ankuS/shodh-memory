@@ -40,6 +40,7 @@ fn create_entity(name: &str, label: EntityLabel, salience: f32) -> EntityNode {
         name_embedding: None,
         salience,
         is_proper_noun: true,
+        selectivity: None,
     }
 }
 
@@ -67,6 +68,8 @@ fn create_relationship(
         tier: Default::default(),
         activation_timestamps: None,
         entity_confidence: None,
+        forman_curvature: None,
+        endpoint_selectivity: None,
     }
 }
 

@@ -142,6 +142,10 @@ fn create_handshake(mode: StreamMode) -> StreamHandshake {
                 "decision".to_string(),
                 "discovery".to_string(),
             ],
+            // Fill any fields added to ExtractionConfig since this bench was
+            // written (e.g. the context-injection knobs) so the literal stays
+            // compilable as the config evolves.
+            ..ExtractionConfig::default()
         },
         session_id: None,
         metadata: HashMap::new(),
@@ -402,8 +406,9 @@ fn bench_message_processing(c: &mut Criterion) {
     // Content message processing
     group.bench_function("process_content_message", |b| {
         let extractor = StreamingMemoryExtractor::new(Arc::clone(&ner));
-        let session_id =
-            rt.block_on(extractor.create_session(create_handshake(StreamMode::Conversation)));
+        let session_id = rt
+            .block_on(extractor.create_session(create_handshake(StreamMode::Conversation)))
+            .expect("bench: create_session");
 
         b.iter(|| {
             let msg = create_content_message(CONVERSATION_MESSAGES[0]);
@@ -414,7 +419,9 @@ fn bench_message_processing(c: &mut Criterion) {
     // Event message processing
     group.bench_function("process_event_message", |b| {
         let extractor = StreamingMemoryExtractor::new(Arc::clone(&ner));
-        let session_id = rt.block_on(extractor.create_session(create_handshake(StreamMode::Event)));
+        let session_id = rt
+            .block_on(extractor.create_session(create_handshake(StreamMode::Event)))
+            .expect("bench: create_session");
 
         b.iter(|| {
             let (severity, event, desc) = EVENT_MESSAGES[0];
@@ -426,8 +433,9 @@ fn bench_message_processing(c: &mut Criterion) {
     // Sensor message processing
     group.bench_function("process_sensor_message", |b| {
         let extractor = StreamingMemoryExtractor::new(Arc::clone(&ner));
-        let session_id =
-            rt.block_on(extractor.create_session(create_handshake(StreamMode::Sensor)));
+        let session_id = rt
+            .block_on(extractor.create_session(create_handshake(StreamMode::Sensor)))
+            .expect("bench: create_session");
 
         b.iter(|| {
             let (sensor_id, value, unit) = SENSOR_READINGS[0];
@@ -439,8 +447,9 @@ fn bench_message_processing(c: &mut Criterion) {
     // Ping message (baseline)
     group.bench_function("process_ping", |b| {
         let extractor = StreamingMemoryExtractor::new(Arc::clone(&ner));
-        let session_id =
-            rt.block_on(extractor.create_session(create_handshake(StreamMode::Conversation)));
+        let session_id = rt
+            .block_on(extractor.create_session(create_handshake(StreamMode::Conversation)))
+            .expect("bench: create_session");
 
         b.iter(|| {
             rt.block_on(extractor.process_message(
@@ -480,7 +489,8 @@ fn bench_batch_throughput(c: &mut Criterion) {
                 let memory_arc = Arc::new(parking_lot::RwLock::new(memory_system));
                 let extractor = StreamingMemoryExtractor::new(Arc::clone(&ner));
                 let session_id = rt
-                    .block_on(extractor.create_session(create_handshake(StreamMode::Conversation)));
+                    .block_on(extractor.create_session(create_handshake(StreamMode::Conversation)))
+                    .expect("bench: create_session");
 
                 // Pre-generate messages
                 let messages: Vec<StreamMessage> = (0..size)
@@ -612,7 +622,8 @@ fn bench_full_extraction_pipeline(c: &mut Criterion) {
                     // Create session
                     let session_id = extractor
                         .create_session(create_handshake(StreamMode::Conversation))
-                        .await;
+                        .await
+                        .expect("bench: create_session");
 
                     // Buffer messages
                     for msg in CONVERSATION_MESSAGES {
@@ -648,7 +659,8 @@ fn bench_full_extraction_pipeline(c: &mut Criterion) {
                 rt.block_on(async {
                     let session_id = extractor
                         .create_session(create_handshake(StreamMode::Event))
-                        .await;
+                        .await
+                        .expect("bench: create_session");
 
                     // Buffer some events
                     for (severity, event, desc) in &EVENT_MESSAGES[..5] {
@@ -705,8 +717,9 @@ fn bench_streaming_summary(c: &mut Criterion) {
 
         // Session creation
         let start = Instant::now();
-        let session_id =
-            rt.block_on(extractor.create_session(create_handshake(StreamMode::Conversation)));
+        let session_id = rt
+            .block_on(extractor.create_session(create_handshake(StreamMode::Conversation)))
+            .expect("bench: create_session");
         session_times.push(start.elapsed());
 
         // Message buffering
