@@ -802,7 +802,9 @@ impl HybridSearchEngine {
                 bm25_weight,
                 vector_weight,
                 keyword_discriminativeness,
-                &query[..query.len().min(50)]
+                // Char-safe preview: `&query[..50]` would panic if byte 50 lands
+                // inside a multi-byte UTF-8 codepoint (CJK/emoji/accented input).
+                super::char_truncate(query, 50)
             );
         }
 

@@ -1567,10 +1567,15 @@ impl MemoryTreeNode {
             "├── "
         };
 
-        // Truncate content for display
+        // Truncate content for display on a CHAR boundary, not a byte index:
+        // `&content[..57]` panics when byte 57 falls inside a multi-byte UTF-8
+        // codepoint (e.g. CJK/emoji content), and the `len() > 60` byte guard
+        // did not prevent that. `char_truncate` returns the whole string when it
+        // is already short, so an unchanged length means no ellipsis is needed.
         let content = &self.memory.experience.content;
-        let display_content = if content.len() > 60 {
-            format!("{}...", &content[..57])
+        let preview = crate::memory::char_truncate(content, 57);
+        let display_content = if preview.len() < content.len() {
+            format!("{preview}...")
         } else {
             content.clone()
         };

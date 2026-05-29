@@ -552,17 +552,32 @@ fn extract_relative_dates(
 
     // "N days/weeks/months ago"
     for cap in AGO_RE.captures_iter(text) {
+        // AGO_RE captures `(\d+)`. A digit string too long for i64 fails to parse
+        // and harmlessly falls back to 1. The real hazard is a value that DOES
+        // parse but is large enough to overflow the day/Duration arithmetic:
+        // `n * 365` overflows i64, and `chrono::Duration::days(..)` / date
+        // subtraction PANIC on out-of-range values. A crafted query such as
+        // "90000000000 years ago" would therefore crash the retrieval thread.
+        // Convert to a day offset with checked arithmetic and skip anything
+        // absurd or out of range instead of panicking.
         let n: i64 = cap[1].parse().unwrap_or(1);
         let unit = cap[2].to_lowercase();
-        let date = match unit.as_str() {
-            "day" => today - chrono::Duration::days(n),
-            "week" => today - chrono::Duration::weeks(n),
-            "month" => {
-                // Approximate: 30 days per month
-                today - chrono::Duration::days(n * 30)
-            }
-            "year" => today - chrono::Duration::days(n * 365),
+        let days_offset: i64 = match unit.as_str() {
+            "day" => n,
+            "week" => n.checked_mul(7).unwrap_or(i64::MAX),
+            "month" => n.checked_mul(30).unwrap_or(i64::MAX), // ~30 days/month
+            "year" => n.checked_mul(365).unwrap_or(i64::MAX),
             _ => continue,
+        };
+        // ~10,000 years. Beyond this a relative date is noise, not a real query,
+        // and the value would overflow chrono's Duration/date range.
+        const MAX_RELATIVE_DAYS: i64 = 3_650_000;
+        if !(0..=MAX_RELATIVE_DAYS).contains(&days_offset) {
+            continue;
+        }
+        let date = match today.checked_sub_signed(chrono::Duration::days(days_offset)) {
+            Some(d) => d,
+            None => continue, // resulting date is out of the representable range
         };
         let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
         results.push((date, cap[0].to_string(), pos, TemporalRefType::Relative));
@@ -4299,6 +4314,45 @@ mod polar_negation_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_relative_dates_does_not_overflow_on_absurd_values() {
+        // Regression: a crafted "N years/months ago" with a huge N used to
+        // overflow `n * 365` and panic chrono's Duration/date math, crashing the
+        // retrieval thread. These must be skipped, never panic.
+        let now = Utc::now();
+        for q in [
+            "90000000000 years ago",         // n*365 is large but fits i64
+            "9999999999 months ago",         // n*30 large
+            "99999999999999999999 days ago", // 20 digits: parse fails → falls back to 1
+            "0 days ago",                    // boundary
+        ] {
+            // The assertion is simply that this returns without panicking.
+            let _ = extract_relative_dates(q, &now);
+        }
+
+        // A realistic relative date is still extracted correctly.
+        let refs = extract_relative_dates("3 days ago", &now);
+        assert!(
+            refs.iter()
+                .any(|(_, label, _, _)| label.contains("3 days ago")),
+            "a normal '3 days ago' must still be extracted, got {refs:?}"
+        );
+        assert_eq!(
+            refs.iter()
+                .find(|(_, l, _, _)| l.contains("3 days ago"))
+                .map(|(d, _, _, _)| *d),
+            Some(now.date_naive() - chrono::Duration::days(3)),
+            "the extracted date must be exactly 3 days before today"
+        );
+
+        // The absurd "90000000000 years ago" is out of the sane range and skipped.
+        let absurd = extract_relative_dates("90000000000 years ago", &now);
+        assert!(
+            absurd.iter().all(|(_, l, _, _)| !l.contains("90000000000")),
+            "an absurd relative date should be skipped, got {absurd:?}"
+        );
+    }
 
     #[test]
     fn test_noun_detection() {

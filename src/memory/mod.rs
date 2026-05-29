@@ -299,6 +299,47 @@ fn tokenize_words(text: &str) -> HashSet<&str> {
         .collect()
 }
 
+/// Char-safe prefix of `s` containing at most `max_chars` characters.
+///
+/// Unlike `&s[..n]`, this never panics on a multi-byte UTF-8 boundary, so it is
+/// safe for previews / log lines / display truncation of arbitrary user text
+/// (CJK, emoji, accented input). Returns the whole string when it is already
+/// `<= max_chars` characters; the caller can detect truncation by comparing
+/// `result.len()` to `s.len()`.
+pub(crate) fn char_truncate(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
+#[cfg(test)]
+mod char_truncate_tests {
+    use super::char_truncate;
+
+    #[test]
+    fn never_splits_multibyte_utf8() {
+        // <= max_chars → returned unchanged
+        assert_eq!(char_truncate("hello", 10), "hello");
+        assert_eq!(char_truncate("abcde", 5), "abcde");
+        assert_eq!(char_truncate("", 5), "");
+        // plain ASCII truncation
+        assert_eq!(char_truncate("hello", 3), "hel");
+        assert_eq!(char_truncate("anything", 0), "");
+        // CJK: 3 bytes/char — `&s[..2]` would panic mid-codepoint.
+        let cjk = "你好世界"; // 4 chars, 12 bytes
+        assert_eq!(char_truncate(cjk, 2), "你好");
+        assert_eq!(char_truncate(cjk, 4), cjk);
+        assert_eq!(char_truncate(cjk, 99), cjk);
+        // Emoji: 4 bytes/char.
+        let emoji = "😀😁😂";
+        assert_eq!(char_truncate(emoji, 1), "😀");
+        assert_eq!(char_truncate(emoji, 3), emoji);
+        // The result is always a prefix shorter-or-equal in bytes.
+        assert!(char_truncate(cjk, 2).len() < cjk.len());
+    }
+}
+
 impl MemorySystem {
     /// Create a new memory system.
     ///
