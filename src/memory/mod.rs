@@ -1334,9 +1334,17 @@ impl MemorySystem {
             .read()
             .log_retrieved("", memories.len(), &sources);
 
-        // Update access counts with instrumentation for consolidation events
+        // Update access counts (in-memory) + record consolidation events, then
+        // persist all candidates' access bumps in ONE batched write instead of a
+        // full re-index per candidate (the dominant old read-path cost).
+        let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
         for memory in &memories {
-            self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+            let before =
+                self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+            access_refs.push((memory.as_ref(), before));
+        }
+        if let Err(e) = self.long_term_memory.persist_access_updates(&access_refs) {
+            tracing::warn!("Failed to persist access updates: {e}");
         }
 
         // Hebbian learning: co-activation strengthens associations between memories
@@ -3348,9 +3356,17 @@ impl MemorySystem {
         // Update access counts with instrumentation for consolidation events
         // (only for memories that survived competition)
         // RH-8 gate: access count mutates persistent state — only in `Full` mode.
+        // Bump in-memory + record events, then persist all candidates' access
+        // updates in ONE batched write rather than a full re-index per candidate.
         if layer_full {
+            let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
             for memory in &memories {
-                self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+                let before =
+                    self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+                access_refs.push((memory.as_ref(), before));
+            }
+            if let Err(e) = self.long_term_memory.persist_access_updates(&access_refs) {
+                tracing::warn!("Failed to persist access updates: {e}");
             }
         }
 
@@ -4579,20 +4595,24 @@ impl MemorySystem {
     ///
     /// Records MemoryStrengthened events when memories are accessed during retrieval,
     /// capturing activation changes for introspection.
-    fn update_access_count_instrumented(&self, memory: &SharedMemory, reason: StrengtheningReason) {
+    /// Bump a recalled memory's access metadata in-memory and record a
+    /// strengthening event. Returns the memory's importance BEFORE the access so
+    /// the caller can batch-persist all candidates in one WriteBatch via
+    /// `persist_access_updates` (the importance index needs the old bucket).
+    ///
+    /// Persistence is intentionally NOT done here: the previous per-candidate
+    /// `long_term_memory.update()` (full re-index + a separate DB write each) was
+    /// the dominant cost on the read path. Callers coalesce the writes instead.
+    fn update_access_count_instrumented(
+        &self,
+        memory: &SharedMemory,
+        reason: StrengtheningReason,
+    ) -> f32 {
         // Capture activation before update
         let activation_before = memory.importance();
 
-        // Perform the actual access update
+        // Perform the actual access update (in-memory; persisted in batch by caller)
         memory.update_access();
-
-        // Persist the updated metadata to RocksDB so importance boosts survive restarts
-        if let Err(e) = self.long_term_memory.update(memory) {
-            tracing::warn!(
-                "Failed to persist access update for {}: {e}",
-                &memory.id.0.to_string()[..8]
-            );
-        }
 
         // Capture activation after update
         let activation_after = memory.importance();
@@ -4617,6 +4637,8 @@ impl MemorySystem {
 
             self.consolidation_events.write().push(event);
         }
+
+        activation_before
     }
 
     /// Clean up graph episodes for a batch of deleted memory IDs (best-effort)
