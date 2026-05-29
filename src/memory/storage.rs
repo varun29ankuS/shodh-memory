@@ -3767,7 +3767,15 @@ mod tests {
 
     #[test]
     fn test_deserialize_with_fallback_records_current_bincode2_branch() {
-        let id = MemoryId(uuid::Uuid::new_v4());
+        // Deterministic id. The legacy fallback chain tries many decoders in
+        // order, and the bincode1 attempts allow trailing bytes, so for certain
+        // uuid byte patterns an earlier decoder spuriously matches the same
+        // buffer before the intended branch — a random uuid made these fixture
+        // tests flaky. Fixed, representative ids keep branch routing
+        // reproducible without weakening any assertion below.
+        let id = MemoryId(
+            uuid::Uuid::parse_str("3f2a1b0c-1234-4abc-8def-0123456789ab").expect("static uuid"),
+        );
         let memory = sample_memory(id.clone(), "current format memory");
         let bytes = bincode::serde::encode_to_vec(&memory, bincode::config::standard()).unwrap();
 
@@ -3795,7 +3803,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage = MemoryStorage::new(dir.path(), None).expect("storage");
 
-        let id = MemoryId(uuid::Uuid::new_v4());
+        let id = MemoryId(
+            uuid::Uuid::parse_str("5a6b7c8d-4567-4def-8234-56789abcdef0").expect("static uuid"),
+        );
         let memory = sample_memory(id.clone(), "legacy raw bincode record");
         // Raw bincode 2.x with NO SHO envelope — the pre-migration on-disk
         // shape. (encode_sho would emit current postcard and defeat the test.)
@@ -3844,7 +3854,9 @@ mod tests {
 
     #[test]
     fn test_deserialize_with_fallback_bincode1_minimal_fixture() {
-        let id = MemoryId(uuid::Uuid::new_v4());
+        let id = MemoryId(
+            uuid::Uuid::parse_str("7a8b9c0d-2345-4bcd-9012-3456789abcde").expect("static uuid"),
+        );
         let fixture = LegacyMinimalFixture {
             id: id.clone(),
             content: "legacy bincode1 minimal".to_string(),
@@ -3865,7 +3877,9 @@ mod tests {
 
     #[test]
     fn test_deserialize_with_fallback_msgpack_minimal_fixture() {
-        let id = MemoryId(uuid::Uuid::new_v4());
+        let id = MemoryId(
+            uuid::Uuid::parse_str("1e2d3c4b-3456-4cde-8123-456789abcdef").expect("static uuid"),
+        );
         let fixture = LegacyMinimalFixture {
             id: id.clone(),
             content: "legacy msgpack minimal".to_string(),
