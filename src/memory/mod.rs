@@ -270,11 +270,16 @@ fn resolve_entity_label(
             "PER" => crate::graph_memory::EntityLabel::Person,
             "ORG" => crate::graph_memory::EntityLabel::Organization,
             "LOC" => crate::graph_memory::EntityLabel::Location,
-            _ => crate::graph_memory::EntityLabel::Concept,
+            // MISC / anything else: use the shared heuristic so a name resolves
+            // to the same richer label here as on the handler ingest path,
+            // instead of collapsing every non-PER/ORG/LOC entity to Concept.
+            _ => crate::graph_memory::classify_misc_entity(entity_name),
         };
         (label, *confidence)
     } else {
-        (crate::graph_memory::EntityLabel::Concept, 0.5)
+        // No NER hit — still classify by surface form rather than defaulting to
+        // Concept, keeping this path consistent with process_experience_into_graph.
+        (crate::graph_memory::classify_misc_entity(entity_name), 0.5)
     }
 }
 
@@ -337,6 +342,55 @@ mod char_truncate_tests {
         assert_eq!(char_truncate(emoji, 3), emoji);
         // The result is always a prefix shorter-or-equal in bytes.
         assert!(char_truncate(cjk, 2).len() < cjk.len());
+    }
+}
+
+#[cfg(test)]
+mod resolve_entity_label_tests {
+    use super::resolve_entity_label;
+    use crate::graph_memory::{classify_misc_entity, EntityLabel};
+    use std::collections::HashMap;
+
+    #[test]
+    fn ner_per_org_loc_map_directly() {
+        let mut lookup = HashMap::new();
+        lookup.insert("alice".to_string(), ("PER".to_string(), 0.9));
+        lookup.insert("acme".to_string(), ("ORG".to_string(), 0.8));
+        lookup.insert("paris".to_string(), ("LOC".to_string(), 0.7));
+        assert_eq!(
+            resolve_entity_label("Alice", &lookup).0,
+            EntityLabel::Person
+        );
+        assert_eq!(
+            resolve_entity_label("Acme", &lookup).0,
+            EntityLabel::Organization
+        );
+        assert_eq!(
+            resolve_entity_label("Paris", &lookup).0,
+            EntityLabel::Location
+        );
+    }
+
+    #[test]
+    fn misc_uses_shared_classifier_not_blanket_concept() {
+        let mut lookup = HashMap::new();
+        lookup.insert("postgresql".to_string(), ("MISC".to_string(), 0.6));
+        // Previously every non-PER/ORG/LOC entity collapsed to Concept; now it
+        // resolves through the same heuristic the handler path uses.
+        let (label, conf) = resolve_entity_label("PostgreSQL", &lookup);
+        assert_eq!(label, classify_misc_entity("PostgreSQL"));
+        assert_eq!(label, EntityLabel::Product);
+        assert_eq!(conf, 0.6);
+    }
+
+    #[test]
+    fn unknown_name_classified_by_surface_form() {
+        let lookup = HashMap::new();
+        // No NER hit: still classified instead of defaulting to Concept blindly.
+        assert_eq!(
+            resolve_entity_label("postmortem", &lookup).0,
+            EntityLabel::Event
+        );
     }
 }
 
