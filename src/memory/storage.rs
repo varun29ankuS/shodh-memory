@@ -3812,7 +3812,10 @@ mod tests {
 
         // First pass must actually migrate the legacy record (was 0 before fix).
         let (migrated, _already, failed) = storage.migrate_legacy().expect("migrate");
-        assert_eq!(migrated, 1, "the legacy record must be migrated to postcard");
+        assert_eq!(
+            migrated, 1,
+            "the legacy record must be migrated to postcard"
+        );
         assert_eq!(failed, 0, "no decode/write failures");
 
         // The on-disk record is now SHO v2 postcard.
