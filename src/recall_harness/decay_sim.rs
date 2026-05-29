@@ -68,7 +68,10 @@ pub struct DecayTrajectory {
 impl DecayTrajectory {
     /// Final (oldest) strength sampled.
     pub fn final_strength(&self) -> f32 {
-        self.points.last().map(|p| p.strength).unwrap_or(self.initial_strength)
+        self.points
+            .last()
+            .map(|p| p.strength)
+            .unwrap_or(self.initial_strength)
     }
 }
 
@@ -90,7 +93,9 @@ pub fn simulate(spec: DecaySpec, horizon_days: f64, cadence_hours: i64) -> Decay
     );
 
     let cadence = Duration::hours(cadence_hours);
-    let total_steps = ((horizon_days * 24.0) / cadence_hours as f64).ceil().max(0.0) as usize;
+    let total_steps = ((horizon_days * 24.0) / cadence_hours as f64)
+        .ceil()
+        .max(0.0) as usize;
 
     let mut points = Vec::with_capacity(total_steps);
     let mut pruned_at_days = None;
@@ -182,7 +187,9 @@ mod tests {
             "intended {intended_30d} should dwarf cadenced {cadenced_30d}"
         );
         // And it floored well before 30 days.
-        let floored = traj.floored_at_days.expect("a potentiated L3 edge should floor under cadence");
+        let floored = traj
+            .floored_at_days
+            .expect("a potentiated L3 edge should floor under cadence");
         assert!(floored < 20.0, "L3 floored at {floored}d under cadence");
     }
 
@@ -198,7 +205,10 @@ mod tests {
         };
         // 7 days, one jump: value_at_crossover (~0.125) * (7/3)^-0.5 (~0.655) ~= 0.082.
         let s = ideal_single_step(spec, 7.0);
-        assert!(s > 0.05 && s < 0.15, "single-step 7d power-law strength ~0.082, got {s}");
+        assert!(
+            s > 0.05 && s < 0.15,
+            "single-step 7d power-law strength ~0.082, got {s}"
+        );
     }
 
     /// The trajectory is monotonically non-increasing in strength (decay only
