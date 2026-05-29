@@ -3556,7 +3556,10 @@ mod layer_mode_parsing_tests {
         // the strings the recall harness emits in its JSON report. If this
         // test ever needs an exception, the eval data is ambiguous.
         assert_eq!(parse_layer_mode("vamana_only"), Some(LayerMode::VamanaOnly));
-        assert_eq!(parse_layer_mode("+spreading"), Some(LayerMode::PlusSpreading));
+        assert_eq!(
+            parse_layer_mode("+spreading"),
+            Some(LayerMode::PlusSpreading)
+        );
         assert_eq!(parse_layer_mode("+bm25"), Some(LayerMode::PlusBm25));
         assert_eq!(parse_layer_mode("+rerank"), Some(LayerMode::PlusRerank));
         assert_eq!(parse_layer_mode("+facts"), Some(LayerMode::PlusFacts));
@@ -3568,7 +3571,10 @@ mod layer_mode_parsing_tests {
         // Mirrors `recall-eval --layer vamana-only` and friends so a
         // human typing the value into curl from memory still works.
         assert_eq!(parse_layer_mode("vamana-only"), Some(LayerMode::VamanaOnly));
-        assert_eq!(parse_layer_mode("plus-spreading"), Some(LayerMode::PlusSpreading));
+        assert_eq!(
+            parse_layer_mode("plus-spreading"),
+            Some(LayerMode::PlusSpreading)
+        );
         assert_eq!(parse_layer_mode("plus_bm25"), Some(LayerMode::PlusBm25));
         assert_eq!(parse_layer_mode("plus-rerank"), Some(LayerMode::PlusRerank));
         assert_eq!(parse_layer_mode("plus_facts"), Some(LayerMode::PlusFacts));
