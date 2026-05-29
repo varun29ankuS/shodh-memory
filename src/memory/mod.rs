@@ -7843,6 +7843,13 @@ impl MemorySystem {
                 None
             };
 
+        // Read new_memory's outgoing edges ONCE. The forward pass below checks
+        // them on every candidate iteration; re-reading per candidate was an
+        // O(N²) store scan. We keep this cache consistent as edges are stored.
+        // (Backward-pass edges are candidate → new_memory, i.e. incoming, so they
+        // never appear here and cannot stale this cache.)
+        let mut new_memory_edges = self.lineage_graph.get_edges_from(user_id, &new_memory.id)?;
+
         for candidate in candidate_memories {
             // Backward pass: candidate → new_memory (what caused this memory?)
             if let Some((relation, confidence)) =
@@ -7892,14 +7899,14 @@ impl MemorySystem {
                 if confidence < crate::constants::LINEAGE_MIN_STORE_CONFIDENCE {
                     continue;
                 }
-                let existing_edges = self.lineage_graph.get_edges_from(user_id, &new_memory.id)?;
-                let existing_edge = existing_edges.iter().find(|e| e.to == candidate.id);
-                match existing_edge {
-                    Some(old) if confidence > old.confidence => {
-                        let mut updated = old.clone();
+                let existing_pos = new_memory_edges.iter().position(|e| e.to == candidate.id);
+                match existing_pos {
+                    Some(i) if confidence > new_memory_edges[i].confidence => {
+                        let mut updated = new_memory_edges[i].clone();
                         updated.confidence = confidence;
                         updated.relation = relation;
                         self.lineage_graph.store_edge(user_id, &updated)?;
+                        new_memory_edges[i] = updated;
                     }
                     None => {
                         // Edges originating from the pivot memory belong to the
@@ -7912,6 +7919,7 @@ impl MemorySystem {
                         )
                         .with_branch(branch_id.clone());
                         self.lineage_graph.store_edge(user_id, &edge)?;
+                        new_memory_edges.push(edge.clone());
                         inferred_edges.push(edge);
                     }
                     _ => {}
@@ -7929,8 +7937,7 @@ impl MemorySystem {
                 .filter(|c| c.id != new_memory.id && c.created_at <= new_memory.created_at)
                 .max_by_key(|c| c.created_at)
             {
-                let existing = self.lineage_graph.get_edges_from(user_id, &new_memory.id)?;
-                if !existing.iter().any(|e| e.to == origin.id) {
+                if !new_memory_edges.iter().any(|e| e.to == origin.id) {
                     let edge = LineageEdge::inferred(
                         new_memory.id.clone(),
                         origin.id.clone(),
