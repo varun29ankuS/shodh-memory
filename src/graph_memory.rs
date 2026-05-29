@@ -2737,11 +2737,11 @@ impl GraphMemory {
         // accounting estimate that can legitimately drift (some creation paths
         // historically omitted the increment), and a plain fetch_sub would wrap
         // usize to ~1.8e19 once it hits 0.
-        let _ = self.relationship_count.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |c| Some(c.saturating_sub(1)),
-        );
+        let _ = self
+            .relationship_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                Some(c.saturating_sub(1))
+            });
 
         // Remove from entity_edges index for BOTH entities
         // (add_relationship indexes both from_entity and to_entity)

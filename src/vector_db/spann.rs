@@ -1205,7 +1205,9 @@ mod tests {
         };
 
         let mut index = SpannIndex::new(config);
-        let err = index.build(vectors).expect_err("build must reject use_pq=false");
+        let err = index
+            .build(vectors)
+            .expect_err("build must reject use_pq=false");
         assert!(
             err.to_string().contains("use_pq=true"),
             "error should explain PQ is required, got: {err}"
