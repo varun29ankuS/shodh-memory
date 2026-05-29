@@ -53,6 +53,8 @@ fn run_inputs(tag: &str) -> RunInputs {
         // determinism is exercised by dedicated unit tests so this gate
         // stays focused on the production pipeline path.
         layer_modes: vec![shodh_memory::memory::types::LayerMode::Full],
+        // No aging — the determinism gate runs against the unaged pipeline.
+        age_days: 0.0,
     }
 }
 
