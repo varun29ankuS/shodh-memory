@@ -31,6 +31,14 @@ on:
         description: 'Allowed regression in percent of baseline'
         required: false
         default: '2.0'
+      layer:
+        description: 'Layer attribution: full (gated) or all (per-stage diagnosis)'
+        required: false
+        default: 'full'
+      repeats:
+        description: 'Ingest+query repeats (use 1 for a fast diagnosis run)'
+        required: false
+        default: '5'
 
 permissions:
   contents: read
@@ -43,6 +51,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   TOLERANCE: ${{ github.event.inputs.tolerance || '2.0' }}
+  # PR runs are always the gated `full`/5; only a manual dispatch can widen to
+  # per-stage diagnosis (`all`) or a fast single repeat.
+  LAYER: ${{ github.event.inputs.layer || 'full' }}
+  REPEATS: ${{ github.event.inputs.repeats || '5' }}
 
 jobs:
   smoke:
@@ -93,7 +105,8 @@ jobs:
           # across passes is hard-failed as `infrastructure`.
           ./target/release/recall-eval \
             --suite smoke \
-            --repeats 5 \
+            --layer "${LAYER}" \
+            --repeats "${REPEATS}" \
             --output current.json \
             --per-case-output per-case.json \
             --baseline tests/recall/baseline.json \

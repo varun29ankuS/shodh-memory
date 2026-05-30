@@ -110,9 +110,13 @@ pub struct CaseRankList {
 pub struct ReportWithRanks {
     pub report: Report,
     pub ranks: Vec<CaseRankList>,
-    /// Per-case diagnostics for the highest (gated) layer, aligned with the
-    /// fixture case order. Side output only — never folded into `report`.
-    pub per_case: Vec<PerCaseRecord>,
+    /// Per-case diagnostics keyed by layer `report_key` (e.g. `"full"`,
+    /// `"vamana-only"`), each aligned with the fixture case order. With
+    /// `--layer all` this carries every mode, so a missed item can be traced
+    /// to the stage that dropped it (e.g. present in `vamana-only`, gone in
+    /// `full` ⇒ a later layer demoted it). Side output only — never folded
+    /// into `report`.
+    pub per_case_by_layer: BTreeMap<String, Vec<PerCaseRecord>>,
 }
 
 /// Run the smoke suite end-to-end and return a populated [`Report`].
@@ -303,15 +307,22 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         failures,
     };
 
-    // Per-case diagnostics for the highest (gated) mode, taken from the same
-    // repeat-0 pass the aggregates use and aligned with `cases` by index.
-    let per_case = {
-        let mp = passes[0]
-            .per_mode
-            .get(&highest_mode)
-            .expect("repeat 0 must have highest mode");
-        build_per_case_records(&cases, &mp.per_case, &mp.ranks)
-    };
+    // Per-case diagnostics for every mode, from the same repeat-0 pass the
+    // aggregates use and aligned with `cases` by index. With `--layer all`
+    // this lets a missed item be traced to the stage that dropped it.
+    let per_case_by_layer: BTreeMap<String, Vec<PerCaseRecord>> = layer_modes
+        .iter()
+        .map(|mode| {
+            let mp = passes[0]
+                .per_mode
+                .get(mode)
+                .expect("repeat 0 must have mode");
+            (
+                mode.report_key().to_string(),
+                build_per_case_records(&cases, &mp.per_case, &mp.ranks),
+            )
+        })
+        .collect();
 
     // The public ranks output is the repeat-0 rank list for the highest
     // mode — that matches existing RH-11 test expectations (which assume
@@ -329,7 +340,7 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
     Ok(ReportWithRanks {
         report,
         ranks,
-        per_case,
+        per_case_by_layer,
     })
 }
 
