@@ -8,7 +8,7 @@
 //!
 //! See issue #266 for the runner's CLI and acceptance criteria.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -23,8 +23,8 @@ use super::fixtures::{
 };
 use super::metrics::Metrics;
 use super::report::{
-    aggregate_category, aggregate_layer, median, CategoryReport, Failure, LayerReport, Report,
-    SMOKE_K,
+    aggregate_category, aggregate_layer, median, CategoryReport, Failure, LayerReport,
+    PerCaseRecord, Report, SMOKE_K,
 };
 
 /// Embedder identifier emitted in the report. Matches the model wired into
@@ -110,6 +110,9 @@ pub struct CaseRankList {
 pub struct ReportWithRanks {
     pub report: Report,
     pub ranks: Vec<CaseRankList>,
+    /// Per-case diagnostics for the highest (gated) layer, aligned with the
+    /// fixture case order. Side output only — never folded into `report`.
+    pub per_case: Vec<PerCaseRecord>,
 }
 
 /// Run the smoke suite end-to-end and return a populated [`Report`].
@@ -300,6 +303,16 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         failures,
     };
 
+    // Per-case diagnostics for the highest (gated) mode, taken from the same
+    // repeat-0 pass the aggregates use and aligned with `cases` by index.
+    let per_case = {
+        let mp = passes[0]
+            .per_mode
+            .get(&highest_mode)
+            .expect("repeat 0 must have highest mode");
+        build_per_case_records(&cases, &mp.per_case, &mp.ranks)
+    };
+
     // The public ranks output is the repeat-0 rank list for the highest
     // mode — that matches existing RH-11 test expectations (which assume
     // a single mode). Cross-repeat divergence is already surfaced via
@@ -313,7 +326,56 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         .expect("repeat 0 must have highest mode")
         .ranks;
 
-    Ok(ReportWithRanks { report, ranks })
+    Ok(ReportWithRanks {
+        report,
+        ranks,
+        per_case,
+    })
+}
+
+/// Build per-case diagnostics from one mode's aligned outputs.
+///
+/// `metrics[i]`, `ranks[i]`, and `cases[i]` must describe the same query (the
+/// runner guarantees this by pushing all three in lockstep over `cases`).
+/// `missed` is the set of relevant `corpus_item_id`s absent from the top-`k`
+/// retrieved list, which is what makes a weak case actionable.
+fn build_per_case_records(
+    cases: &[SmokeCase],
+    metrics: &[Metrics],
+    ranks: &[CaseRankList],
+) -> Vec<PerCaseRecord> {
+    cases
+        .iter()
+        .enumerate()
+        .map(|(i, case)| {
+            let m = &metrics[i];
+            let topk: HashSet<&str> = ranks[i]
+                .retrieved
+                .iter()
+                .take(SMOKE_K)
+                .map(|s| s.as_str())
+                .collect();
+            let missed: Vec<String> = case
+                .relevant
+                .iter()
+                .map(|r| r.corpus_item_id.clone())
+                .filter(|id| !topk.contains(id.as_str()))
+                .collect();
+            let relevant_total = case.relevant.len();
+            PerCaseRecord {
+                case_id: case.id.clone(),
+                category: category_name(case.category).to_string(),
+                query: case.query.clone(),
+                ndcg_at_k: m.ndcg_at_k,
+                recall_at_k: m.recall_at_k,
+                mrr: m.mrr,
+                p_at_1: m.p_at_1,
+                relevant_total,
+                relevant_found: relevant_total - missed.len(),
+                missed,
+            }
+        })
+        .collect()
 }
 
 /// Per-case results for one `LayerMode` within a single ingest+query pass.
@@ -572,6 +634,83 @@ mod tests {
     fn unique_storage_dir(label: &str) -> PathBuf {
         let id = Uuid::new_v4().simple().to_string();
         std::env::temp_dir().join(format!("shodh-recall-{label}-{id}"))
+    }
+
+    #[test]
+    fn per_case_records_flag_missed_relevant_items() {
+        let cases = vec![
+            SmokeCase {
+                id: "smoke-001".into(),
+                category: SmokeCategory::MultiHop,
+                query: "chain query".into(),
+                fixture_corpus_id: "shodh-smoke".into(),
+                relevant: vec![
+                    fixtures::RelevanceJudgement {
+                        corpus_item_id: "ssm-001".into(),
+                        grade: 3,
+                    },
+                    fixtures::RelevanceJudgement {
+                        corpus_item_id: "ssm-002".into(),
+                        grade: 1,
+                    },
+                ],
+            },
+            SmokeCase {
+                id: "smoke-002".into(),
+                category: SmokeCategory::Entity,
+                query: "entity query".into(),
+                fixture_corpus_id: "shodh-smoke".into(),
+                relevant: vec![fixtures::RelevanceJudgement {
+                    corpus_item_id: "ssm-010".into(),
+                    grade: 3,
+                }],
+            },
+        ];
+        let metrics = vec![
+            Metrics {
+                recall_at_k: 0.5,
+                ndcg_at_k: 0.6,
+                mrr: 1.0,
+                p_at_1: 1.0,
+                ..Default::default()
+            },
+            Metrics {
+                recall_at_k: 1.0,
+                ndcg_at_k: 1.0,
+                mrr: 1.0,
+                p_at_1: 1.0,
+                ..Default::default()
+            },
+        ];
+        let ranks = vec![
+            // Case 1 retrieved ssm-001 (found) but dropped ssm-002 (missed).
+            CaseRankList {
+                case_id: "smoke-001".into(),
+                retrieved: vec!["ssm-001".into(), "ssm-099".into()],
+            },
+            // Case 2 retrieved its only relevant item.
+            CaseRankList {
+                case_id: "smoke-002".into(),
+                retrieved: vec!["ssm-010".into()],
+            },
+        ];
+
+        let recs = build_per_case_records(&cases, &metrics, &ranks);
+        assert_eq!(recs.len(), 2);
+
+        let r0 = &recs[0];
+        assert_eq!(r0.case_id, "smoke-001");
+        assert_eq!(r0.category, "multi_hop");
+        assert_eq!(r0.relevant_total, 2);
+        assert_eq!(r0.relevant_found, 1);
+        assert_eq!(r0.missed, vec!["ssm-002".to_string()]);
+        assert_eq!(r0.recall_at_k, 0.5);
+        assert_eq!(r0.ndcg_at_k, 0.6);
+
+        let r1 = &recs[1];
+        assert_eq!(r1.category, "entity");
+        assert_eq!(r1.relevant_found, 1);
+        assert!(r1.missed.is_empty());
     }
 
     /// Smoke test the full runner end-to-end against the canonical fixtures.
