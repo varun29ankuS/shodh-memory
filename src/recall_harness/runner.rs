@@ -286,12 +286,14 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
         .get(&highest_mode)
         .expect("repeat 0 must have highest mode")
         .by_category_cases;
+    // Report whatever categories the suite actually contains (the smoke suite
+    // has its six; LoCoMo has single_hop/open_domain/multi_hop/temporal), so a
+    // second suite does not need its categories hard-coded into `ALL`.
     let mut by_category: BTreeMap<String, CategoryReport> = BTreeMap::new();
-    for cat in SmokeCategory::ALL {
-        let cases_for_cat = by_category_cases.get(&cat).cloned().unwrap_or_default();
+    for (cat, cases_for_cat) in by_category_cases {
         by_category.insert(
-            category_name(cat).to_string(),
-            aggregate_category(&cases_for_cat),
+            category_name(*cat).to_string(),
+            aggregate_category(cases_for_cat),
         );
     }
 
@@ -635,6 +637,8 @@ fn category_name(c: SmokeCategory) -> &'static str {
         SmokeCategory::Entity => "entity",
         SmokeCategory::MultiHop => "multi_hop",
         SmokeCategory::Negation => "negation",
+        SmokeCategory::SingleHop => "single_hop",
+        SmokeCategory::OpenDomain => "open_domain",
     }
 }
 
