@@ -1096,13 +1096,18 @@ pub const RRF_K_GRAPH_FUSION: f32 = 30.0;
 ///
 /// Justification:
 /// - Attribute matches are strong relevance signals (user is asking about a
-///   specific property), so we use a significant boost
-/// - 2.5x multiplier (1.0 + 1.5) keeps the base semantic score dominant while
-///   giving clear priority to attribute-matching memories
-/// - Previously hardcoded as additive 0.5 (31x RRF scale — overwhelming)
+///   specific property), so the matching memory gets a meaningful nudge
+/// - 1.15x multiplier (1.0 + 0.15): boost MODULATES rank, RRF still decides it
+/// - G2 (algo audit, 2026-05-30): was 1.5 (×2.5). The earlier comment claimed
+///   ×2.5 "keeps the base semantic score dominant" — measured false: on RRF's
+///   ~0.007 rank-gap scale a ×2.5 swing moves a candidate dozens of ranks, so a
+///   mid-RRF attribute match leapfrogs high-RRF gold. With the Layer-5 fetch
+///   break removed (G1) that flooded the top-10 and collapsed ndcg/mrr. The
+///   prior "fix" only converted additive-huge (0.5, 31× scale) to
+///   multiplicative-huge — same disease. Down-tuned ~10× to actually modulate.
 ///
 /// Reference: Attribute-value pair retrieval in knowledge-grounded QA systems
-pub const ATTRIBUTE_QUERY_BOOST: f32 = 1.5;
+pub const ATTRIBUTE_QUERY_BOOST: f32 = 0.15;
 
 /// Temporal fact boost — multiplicative factor for temporal fact source memories
 ///
@@ -1112,11 +1117,13 @@ pub const ATTRIBUTE_QUERY_BOOST: f32 = 1.5;
 ///
 /// Justification:
 /// - Temporal fact matches are high-confidence relevance signals
-/// - 2.0x multiplier (1.0 + 1.0) is strong but doesn't override semantic ranking
-/// - Previously hardcoded as additive 0.4 (25x RRF scale — overwhelming)
+/// - 1.10x multiplier (1.0 + 0.10): modulates rank without overriding RRF
+/// - G2 (algo audit, 2026-05-30): was 1.0 (×2.0). Same scale defect as
+///   ATTRIBUTE_QUERY_BOOST — a ×2.0 swing dwarfs RRF's ~0.007 rank gaps and
+///   leapfrogged gold once G1 removed the fetch break. Down-tuned ~10×.
 ///
 /// Reference: TEMPR temporal retrieval approach (multi-hop temporal reasoning)
-pub const TEMPORAL_FACT_BOOST: f32 = 1.0;
+pub const TEMPORAL_FACT_BOOST: f32 = 0.10;
 
 /// Activation bonus scale — maximum contribution of graph spreading activation
 ///
