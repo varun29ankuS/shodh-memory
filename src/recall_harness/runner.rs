@@ -15,8 +15,10 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
-use crate::memory::types::{ExperienceType, LayerMode};
-use crate::memory::{Experience, MemoryConfig, MemorySystem, Query};
+use crate::config::ServerConfig;
+use crate::handlers::MultiUserMemoryManager;
+use crate::memory::types::{ExperienceType, LayerMode, NerEntityRecord};
+use crate::memory::{Experience, Query};
 
 use super::fixtures::{
     self, CorpusItem, SmokeCase, SmokeCategory, SMOKE_CASES_PATH, SMOKE_CORPUS_PATH,
@@ -432,8 +434,12 @@ fn run_one_pass(
     layer_modes: &[LayerMode],
     age_days: f64,
 ) -> Result<OnePassResult> {
-    let system = build_system(storage_path)?;
-    let id_map = ingest_corpus(&system, corpus)?;
+    // Ingest through the production manager so the graph/lineage/ontology layer
+    // is actually built, then query the per-user `MemorySystem` (which now has a
+    // populated graph wired in). The manager is kept alive for the whole pass.
+    let manager = build_manager(storage_path)?;
+    let id_map = ingest_corpus(&manager, corpus)?;
+    let system = manager.get_user_memory(EVAL_USER)?;
 
     // RH decay study: optionally age the knowledge-graph edges before querying
     // so recall quality reflects decayed/pruned edges. Driven at the production
@@ -442,6 +448,7 @@ fn run_one_pass(
     // `age_days <= 0` is a no-op, preserving pre-existing behavior bit-for-bit.
     if age_days > 0.0 {
         system
+            .read()
             .simulate_edge_aging(age_days, super::decay_sim::PRODUCTION_CADENCE_HOURS)
             .context("aging knowledge-graph edges for the decay study")?;
     }
@@ -472,7 +479,7 @@ fn run_one_pass(
             };
 
             let started = Instant::now();
-            let result = system.recall(&query);
+            let result = system.read().recall(&query);
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             latencies_ms.push(elapsed_ms);
 
@@ -570,33 +577,83 @@ fn pin_harness_threads() {
 }
 
 /// Construct an isolated `MemorySystem` rooted at `storage_path`.
-fn build_system(storage_path: &Path) -> Result<MemorySystem> {
+/// Single tenant the harness ingests under.
+pub const EVAL_USER: &str = "recall-eval";
+
+/// Build the production `MultiUserMemoryManager` (NOT a bare `MemorySystem`).
+///
+/// FIDELITY (critical): a bare `MemorySystem` has `graph_memory = None` and
+/// `remember()` deliberately does NOT build the entity graph — production builds
+/// it in the HTTP handler via `process_experience_into_graph`. So the previous
+/// harness measured the pipeline with the ENTIRE knowledge-graph / spreading-
+/// activation / lineage / ontology layer disabled. The manager wires a per-user
+/// graph + NER, so the eval exercises the same ingest path production does.
+fn build_manager(storage_path: &Path) -> Result<MultiUserMemoryManager> {
     std::fs::create_dir_all(storage_path)
         .with_context(|| format!("creating storage dir {}", storage_path.display()))?;
-    let config = MemoryConfig {
-        storage_path: storage_path.to_path_buf(),
-        ..MemoryConfig::default()
-    };
-    MemorySystem::new(config, None).context("initialising MemorySystem for recall harness")
+    MultiUserMemoryManager::new(storage_path.to_path_buf(), ServerConfig::default())
+        .context("initialising MultiUserMemoryManager for recall harness")
 }
 
-/// Ingest the corpus into `system`, returning the `string handle → Uuid` map
-/// used to translate ground-truth references to system memory IDs.
+/// Ingest the corpus through the production ingest path (NER → remember →
+/// graph), returning the `string handle → Uuid` map used to translate
+/// ground-truth references to system memory IDs.
+///
+/// Mirrors the HTTP `remember` handler: run NER, merge entity names, store the
+/// memory, then build the entity graph from it. Without the
+/// `process_experience_into_graph` step the graph stays empty and Layer 2
+/// spreading activation is a no-op.
 pub fn ingest_corpus(
-    system: &MemorySystem,
+    manager: &MultiUserMemoryManager,
     corpus: &[CorpusItem],
 ) -> Result<HashMap<String, Uuid>> {
     let mut map = HashMap::with_capacity(corpus.len());
+    let ner = manager.get_neural_ner();
+    let user_mem = manager.get_user_memory(EVAL_USER)?;
     for item in corpus {
+        // Pass 1: NER (faithful to the handler's NerEntityRecord shape).
+        let ner_entities: Vec<NerEntityRecord> = match ner.extract(&item.content) {
+            Ok(entities) => entities
+                .into_iter()
+                .map(|e| NerEntityRecord {
+                    text: e.text,
+                    entity_type: e.entity_type.as_str().to_string(),
+                    confidence: e.confidence,
+                    start_char: Some(e.start),
+                    end_char: Some(e.end),
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        // Merge fixture tags + NER entity names (deduped, case-insensitive).
+        let mut merged: Vec<String> = item.tags.clone();
+        let mut seen: HashSet<String> = merged.iter().map(|t| t.to_lowercase()).collect();
+        for r in &ner_entities {
+            if seen.insert(r.text.to_lowercase()) {
+                merged.push(r.text.clone());
+            }
+        }
+
         let experience = Experience {
             experience_type: experience_type_for(&item.memory_type),
             content: item.content.clone(),
-            entities: item.tags.clone(),
+            entities: merged.clone(),
+            tags: merged,
+            ner_entities,
             ..Default::default()
         };
-        let memory_id = system
-            .remember(experience, Some(item.created_at))
+
+        let memory_id = user_mem
+            .read()
+            .remember(experience.clone(), Some(item.created_at))
             .with_context(|| format!("remembering corpus item {}", item.id))?;
+
+        // Pass 2: build the entity graph from this memory (the step the bare
+        // MemorySystem path skipped entirely).
+        manager
+            .process_experience_into_graph(EVAL_USER, &experience, &memory_id, None)
+            .with_context(|| format!("graph-processing corpus item {}", item.id))?;
+
         map.insert(item.id.clone(), memory_id.0);
     }
     Ok(map)
