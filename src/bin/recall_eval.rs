@@ -186,14 +186,16 @@ fn run(args: &Args) -> Result<i32> {
 
     let ReportWithRanks {
         mut report,
-        per_case,
+        per_case_by_layer,
         ..
     } = run_smoke_suite_with_ranks(&inputs).context("running smoke suite")?;
 
     // Per-case diagnostics are written before the baseline comparison so they
-    // are always captured, even on a regressing run that exits non-zero.
+    // are always captured, even on a regressing run that exits non-zero. The
+    // payload is keyed by layer (`"full"`, … `--layer all` gives every stage)
+    // so a missed item can be traced to the stage that dropped it.
     if let Some(per_case_path) = &args.per_case_output {
-        let json = serde_json::to_vec_pretty(&per_case)
+        let json = serde_json::to_vec_pretty(&per_case_by_layer)
             .context("serialising per-case diagnostics to JSON")?;
         std::fs::write(per_case_path, &json).with_context(|| {
             format!(
