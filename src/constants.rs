@@ -1242,11 +1242,19 @@ pub const HEBBIAN_ASSOCIATION_WEIGHT: f32 = 0.1;
 /// Importance scoring factor — how much importance modulates the retrieval score
 ///
 /// Formula: importance_factor = SCORING_IMPORTANCE_FLOOR + importance × SCORING_IMPORTANCE_RANGE
-/// Range [0.7, 1.0]: low-importance memories lose up to 30% of base score.
+/// Range [0.95, 1.0]: low-importance memories lose up to 5% of base score.
+///
+/// G2 (algo audit, 2026-05-30): compressed from [0.7, 1.0] (a 1.43× swing) to
+/// [0.95, 1.0] (a 1.05× swing). The RRF base scores this multiplies span only
+/// ~0.007 (rank1→rank10); a 1.43× importance overlay is 10-100× larger than the
+/// rank gap, so it WAS the ranking — importance reordered the list more than
+/// relevance did, displacing correct hits and causing the Phase-A ndcg/mrr
+/// regression once the pool widened. Importance now modulates, not dominates.
+/// Floor + range MUST sum to 1.0 so max-importance maps to 1.0.
 ///
 /// Reference: Importance as a modulator of encoding strength (Craik & Lockhart 1972)
-pub const SCORING_IMPORTANCE_FLOOR: f32 = 0.7;
-pub const SCORING_IMPORTANCE_RANGE: f32 = 0.3;
+pub const SCORING_IMPORTANCE_FLOOR: f32 = 0.95;
+pub const SCORING_IMPORTANCE_RANGE: f32 = 0.05;
 
 /// Feedback momentum range — symmetric ±15% multiplicative adjustment
 ///
@@ -2480,17 +2488,23 @@ pub const PROACTIVE_RECENCY_DECAY_RATE: f32 = 0.03;
 /// their score, while rich elaborated memories get full weight.
 pub const ELABORATION_QUALITY_MIN: f32 = 0.3;
 
-/// Minimum quality-gate factor for the *recall* pipeline (distinct from
-/// `ELABORATION_QUALITY_MIN`, which governs proactive surfacing).
+/// Suppression factor applied to GENUINELY TRIVIAL memories by the recall
+/// quality gate (content shorter than `TRIVIAL_CONTENT_LEN`).
 ///
-/// The recall quality gate multiplies a candidate's score by a richness factor
-/// `(content_len / 200).min(1.0) * (1 + entity/context bonuses)`. Conversational
-/// corpora (dialogue turns, chat logs) are legitimately short — a 30-char gold
-/// turn would otherwise be crushed to ×0.15 and demoted out of the rescore
-/// window. Flooring the factor at 0.7 lets length modulate ranking over a
-/// 0.7→1.0 band instead of 0.15→1.0, so short-but-relevant memories survive the
-/// post-fusion rescore (paired with the wide `RESCORE_POOL_*` window below).
-pub const RECALL_QUALITY_MIN: f32 = 0.7;
+/// G2 (algo audit, 2026-05-30): the gate was a length-PROPORTIONAL multiplier
+/// `(content_len/200).min(1.0) * (1 + entity/context bonuses)` — a 0.15→1.2
+/// swing that is a second length-correlated re-ranking lever stacked on
+/// importance, large enough to reorder the RRF list (whose rank gaps are
+/// ~0.007). Conversational gold turns are legitimately short, so length is not
+/// a relevance signal here. Replaced with a BINARY gate: content below
+/// `TRIVIAL_CONTENT_LEN` chars is suppressed to this factor; everything else
+/// passes at 1.0. This keeps the "don't surface empty memories on recency/graph
+/// boost alone" guarantee without letting length reorder real content.
+pub const RECALL_QUALITY_MIN: f32 = 0.5;
+
+/// Content length (chars) below which a memory is treated as trivial by the
+/// recall quality gate. ~one short word; real dialogue turns clear it easily.
+pub const TRIVIAL_CONTENT_LEN: usize = 10;
 
 /// Post-fusion rescore window (keystone): multiplier on `max_results` for the
 /// candidate pool that survives into Layer-5 unified scoring, retrieval
