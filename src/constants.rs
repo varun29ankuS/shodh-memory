@@ -1096,18 +1096,13 @@ pub const RRF_K_GRAPH_FUSION: f32 = 30.0;
 ///
 /// Justification:
 /// - Attribute matches are strong relevance signals (user is asking about a
-///   specific property), so the matching memory gets a meaningful nudge
-/// - 1.15x multiplier (1.0 + 0.15): boost MODULATES rank, RRF still decides it
-/// - G2 (algo audit, 2026-05-30): was 1.5 (×2.5). The earlier comment claimed
-///   ×2.5 "keeps the base semantic score dominant" — measured false: on RRF's
-///   ~0.007 rank-gap scale a ×2.5 swing moves a candidate dozens of ranks, so a
-///   mid-RRF attribute match leapfrogs high-RRF gold. With the Layer-5 fetch
-///   break removed (G1) that flooded the top-10 and collapsed ndcg/mrr. The
-///   prior "fix" only converted additive-huge (0.5, 31× scale) to
-///   multiplicative-huge — same disease. Down-tuned ~10× to actually modulate.
+///   specific property), so we use a significant boost
+/// - 2.5x multiplier (1.0 + 1.5) keeps the base semantic score dominant while
+///   giving clear priority to attribute-matching memories
+/// - Previously hardcoded as additive 0.5 (31x RRF scale — overwhelming)
 ///
 /// Reference: Attribute-value pair retrieval in knowledge-grounded QA systems
-pub const ATTRIBUTE_QUERY_BOOST: f32 = 0.15;
+pub const ATTRIBUTE_QUERY_BOOST: f32 = 1.5;
 
 /// Temporal fact boost — multiplicative factor for temporal fact source memories
 ///
@@ -1117,13 +1112,11 @@ pub const ATTRIBUTE_QUERY_BOOST: f32 = 0.15;
 ///
 /// Justification:
 /// - Temporal fact matches are high-confidence relevance signals
-/// - 1.10x multiplier (1.0 + 0.10): modulates rank without overriding RRF
-/// - G2 (algo audit, 2026-05-30): was 1.0 (×2.0). Same scale defect as
-///   ATTRIBUTE_QUERY_BOOST — a ×2.0 swing dwarfs RRF's ~0.007 rank gaps and
-///   leapfrogged gold once G1 removed the fetch break. Down-tuned ~10×.
+/// - 2.0x multiplier (1.0 + 1.0) is strong but doesn't override semantic ranking
+/// - Previously hardcoded as additive 0.4 (25x RRF scale — overwhelming)
 ///
 /// Reference: TEMPR temporal retrieval approach (multi-hop temporal reasoning)
-pub const TEMPORAL_FACT_BOOST: f32 = 0.10;
+pub const TEMPORAL_FACT_BOOST: f32 = 1.0;
 
 /// Activation bonus scale — maximum contribution of graph spreading activation
 ///
@@ -1246,36 +1239,28 @@ pub const PROSPECTIVE_BOOST_MAX: f32 = 0.75;
 ///   Hebbian scores are already in a small range)
 pub const HEBBIAN_ASSOCIATION_WEIGHT: f32 = 0.1;
 
-/// Maximum fractional lift the Hebbian/graph activation may add to the base
-/// score: `base × (1 + min(hebbian × WEIGHT, HEBBIAN_BOOST_MAX))`.
+/// Multi-seed coverage bonus for spreading-activation episode scoring (G5).
 ///
-/// G2/G5 (algo audit, 2026-05-30): the comment above ASSUMED Hebbian scores are
-/// "in a small range" — measured false. Raw spreading-activation episode scores
-/// reach ~2.0 for HUB episodes (connected to a ubiquitous speaker entity) vs
-/// ~0.07 for distal gold, so the term gave hubs ×1.2 vs gold ×1.007. Once the
-/// Layer-5 fetch break was removed (G1) and the full pool got sorted by final
-/// score, that NON-DISCRIMINATIVE hub activation reordered the top-10 and
-/// collapsed ndcg/mrr. Capping the lift keeps ordering RRF-dominant (a safe
-/// floor) until graph activation is made DISCRIMINATIVE (G5: multi-seed
-/// coverage), after which the cap can be relaxed so association earns rank.
-pub const HEBBIAN_BOOST_MAX: f32 = 0.05;
+/// The multi_hop discriminator. 96% of multi_hop gold is 1-hop reachable — but
+/// so are hundreds of HUB episodes wired to the same ubiquitous speaker entity,
+/// so raw summed activation cannot separate them (the reachability hub artifact).
+/// The real signal: GOLD is connected to MULTIPLE distinct query entities
+/// (speaker AND topic), a hub-distractor to only one. An episode's activation is
+/// scaled by `1 + SEED_COVERAGE_BONUS × (distinct_query_seeds_covered − 1)`, so a
+/// 2-seed episode gets ×(1+bonus) over a 1-seed hub. Single-seed queries are
+/// unaffected (coverage is always 1), so this cannot regress single_hop/temporal.
+/// The graph leg ranks by this, feeding fusion by rank — the brain-native
+/// spreading-activation discriminator, not a Layer-5 rescore.
+pub const SEED_COVERAGE_BONUS: f32 = 1.0;
 
 /// Importance scoring factor — how much importance modulates the retrieval score
 ///
 /// Formula: importance_factor = SCORING_IMPORTANCE_FLOOR + importance × SCORING_IMPORTANCE_RANGE
-/// Range [0.95, 1.0]: low-importance memories lose up to 5% of base score.
-///
-/// G2 (algo audit, 2026-05-30): compressed from [0.7, 1.0] (a 1.43× swing) to
-/// [0.95, 1.0] (a 1.05× swing). The RRF base scores this multiplies span only
-/// ~0.007 (rank1→rank10); a 1.43× importance overlay is 10-100× larger than the
-/// rank gap, so it WAS the ranking — importance reordered the list more than
-/// relevance did, displacing correct hits and causing the Phase-A ndcg/mrr
-/// regression once the pool widened. Importance now modulates, not dominates.
-/// Floor + range MUST sum to 1.0 so max-importance maps to 1.0.
+/// Range [0.7, 1.0]: low-importance memories lose up to 30% of base score.
 ///
 /// Reference: Importance as a modulator of encoding strength (Craik & Lockhart 1972)
-pub const SCORING_IMPORTANCE_FLOOR: f32 = 0.95;
-pub const SCORING_IMPORTANCE_RANGE: f32 = 0.05;
+pub const SCORING_IMPORTANCE_FLOOR: f32 = 0.7;
+pub const SCORING_IMPORTANCE_RANGE: f32 = 0.3;
 
 /// Feedback momentum range — symmetric ±15% multiplicative adjustment
 ///
@@ -2508,51 +2493,6 @@ pub const PROACTIVE_RECENCY_DECAY_RATE: f32 = 0.03;
 /// Floor of 0.3 means even the shortest valid memories retain 30% of
 /// their score, while rich elaborated memories get full weight.
 pub const ELABORATION_QUALITY_MIN: f32 = 0.3;
-
-/// Suppression factor applied to GENUINELY TRIVIAL memories by the recall
-/// quality gate (content shorter than `TRIVIAL_CONTENT_LEN`).
-///
-/// G2 (algo audit, 2026-05-30): the gate was a length-PROPORTIONAL multiplier
-/// `(content_len/200).min(1.0) * (1 + entity/context bonuses)` — a 0.15→1.2
-/// swing that is a second length-correlated re-ranking lever stacked on
-/// importance, large enough to reorder the RRF list (whose rank gaps are
-/// ~0.007). Conversational gold turns are legitimately short, so length is not
-/// a relevance signal here. Replaced with a BINARY gate: content below
-/// `TRIVIAL_CONTENT_LEN` chars is suppressed to this factor; everything else
-/// passes at 1.0. This keeps the "don't surface empty memories on recency/graph
-/// boost alone" guarantee without letting length reorder real content.
-pub const RECALL_QUALITY_MIN: f32 = 0.5;
-
-/// Content length (chars) below which a memory is treated as trivial by the
-/// recall quality gate. ~one short word; real dialogue turns clear it easily.
-pub const TRIVIAL_CONTENT_LEN: usize = 10;
-
-/// Post-fusion rescore window (keystone): multiplier on `max_results` for the
-/// candidate pool that survives into Layer-5 unified scoring, retrieval
-/// competition, and the quality gate.
-///
-/// Previously the fused pool was truncated to `max_results` (=10) *before* the
-/// cognitive rescore, so every candidate the graph leg and reranker were meant
-/// to rescue (graph-rank 11+, dense-only matches) was discarded before it could
-/// be re-ranked into the final top-k. Widening the window to
-/// `max(max_results * MULT, MIN)` lets those candidates compete; the single
-/// final deterministic truncate still trims to `max_results`.
-pub const RESCORE_POOL_MULT: usize = 10;
-
-/// Floor for the post-fusion rescore window (see `RESCORE_POOL_MULT`).
-pub const RESCORE_POOL_MIN: usize = 50;
-
-/// Spreading-activation candidate pool returned from the graph leg before RRF
-/// fusion. Previously the graph leg truncated to `max_results` (=10), so a
-/// graph-promoted memory at graph-rank 11+ never entered the fusion pool and
-/// the cognitive layer's multi-hop benefit was discarded before rank cutoff.
-pub const GRAPH_CANDIDATE_POOL: usize = 200;
-
-/// Dense (vector) leg candidate-pool floor. The lexical (BM25) leg pools
-/// `candidate_count` (=100) candidates; the dense leg pooled only
-/// `max_results * 3` (=30), starving fusion of dense-only matches that the
-/// lexical leg never surfaces. Floors the dense pool to lexical parity.
-pub const VECTOR_CANDIDATE_POOL_MIN: usize = 100;
 
 /// Tag relevance boost for proactive_context scoring.
 ///

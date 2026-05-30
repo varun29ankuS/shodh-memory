@@ -26,7 +26,7 @@
 //! - Complexity reduction: O(b^d) → O(2 × b^(d/2)) for multi-entity queries
 
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -41,7 +41,7 @@ use crate::constants::{
     MEMORY_TIER_GRAPH_MULT_LONGTERM, MEMORY_TIER_GRAPH_MULT_SESSION,
     MEMORY_TIER_GRAPH_MULT_WORKING, ONTOLOGICAL_DENSITY_THRESHOLD, ONTOLOGICAL_ENTITY_PENALTY,
     ONTOLOGICAL_MIN_CONFIDENCE, ONTOLOGICAL_RELATION_PENALTY, SALIENCE_BOOST_FACTOR,
-    SPREADING_ACTIVATION_THRESHOLD, SPREADING_DEGREE_NORMALIZATION,
+    SEED_COVERAGE_BONUS, SPREADING_ACTIVATION_THRESHOLD, SPREADING_DEGREE_NORMALIZATION,
     SPREADING_EARLY_TERMINATION_CANDIDATES, SPREADING_EARLY_TERMINATION_RATIO, SPREADING_MAX_HOPS,
     SPREADING_MIN_CANDIDATES, SPREADING_MIN_HOPS, SPREADING_NORMALIZATION_FACTOR,
     SPREADING_RELAXED_THRESHOLD,
@@ -570,6 +570,12 @@ pub fn spreading_activation_retrieve_with_stats(
         }
     }
 
+    // G5: the query-entity seed set, for multi-seed coverage scoring. An episode
+    // connected to MORE distinct query seeds is more relevant (the multi_hop
+    // discriminator); raw summed activation alone cannot separate gold from
+    // hub-distractors that share one ubiquitous seed.
+    let seed_set: HashSet<Uuid> = entity_data.iter().map(|(u, _, _, _)| *u).collect();
+
     // Calculate total salience for normalization (attention budget)
     let total_salience: f32 = entity_data.iter().map(|(_, _, _, s)| s).sum();
     let total_salience = total_salience.max(0.1); // Prevent division by zero
@@ -843,19 +849,26 @@ pub fn spreading_activation_retrieve_with_stats(
     stats.graph_time_us = graph_start.elapsed().as_micros() as u64;
     tracing::info!("📊 Final activated entities: {}", activation_map.len());
 
-    // Step 4: Retrieve episodic memories connected to activated entities
-    let mut activated_memories: HashMap<Uuid, (f32, EpisodicNode)> = HashMap::new();
+    // Step 4: Retrieve episodic memories connected to activated entities.
+    // Tracks (summed_activation, distinct_query_seeds_covered, episode) so G5
+    // can reward episodes activated by MULTIPLE query seeds.
+    let mut activated_memories: HashMap<Uuid, (f32, HashSet<Uuid>, EpisodicNode)> = HashMap::new();
 
     for (entity_uuid, entity_activation) in &activation_map {
         let episodes = graph.get_episodes_by_entity(entity_uuid)?;
+        let is_seed = seed_set.contains(entity_uuid);
 
         for episode in episodes {
             // Accumulate activation for each episode (might be connected to multiple entities)
             let current = activated_memories
                 .entry(episode.uuid)
-                .or_insert((0.0, episode.clone()));
+                .or_insert_with(|| (0.0, HashSet::new(), episode.clone()));
 
             current.0 += entity_activation;
+            // G5: record which DISTINCT query seeds reach this episode.
+            if is_seed {
+                current.1.insert(*entity_uuid);
+            }
         }
     }
 
@@ -880,7 +893,14 @@ pub fn spreading_activation_retrieve_with_stats(
 
     let now = chrono::Utc::now();
 
-    for (_episode_uuid, (graph_activation, episode)) in activated_memories {
+    for (_episode_uuid, (raw_activation, covered_seeds, episode)) in activated_memories {
+        // G5: scale activation by distinct query-seed coverage. An episode
+        // reached by 2 distinct query seeds (e.g. speaker AND topic) is the
+        // multi_hop signal; one reached by a single ubiquitous seed (a hub) is
+        // not. coverage==1 → ×1.0, so single-seed queries are unaffected.
+        let coverage = covered_seeds.len();
+        let graph_activation = raw_activation
+            * (1.0 + SEED_COVERAGE_BONUS * (coverage.saturating_sub(1) as f32));
         // Convert episode to memory
         if let Some(memory) = episode_to_memory_fn(&episode)? {
             // Calculate semantic similarity (still needed for ActivatedMemory debug fields)
@@ -971,11 +991,8 @@ pub fn spreading_activation_retrieve_with_stats(
         scored_memories.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
     }
 
-    // Step 7: Apply limit.
-    // W3: return a wide graph candidate pool (not max_results) so graph-promoted
-    // memories at graph-rank 11+ reach the RRF fusion pool. The downstream
-    // rescore window + final truncate decide the actual top-k.
-    scored_memories.truncate(crate::constants::GRAPH_CANDIDATE_POOL.max(query.max_results));
+    // Step 7: Apply limit
+    scored_memories.truncate(query.max_results);
 
     stats.retrieval_time_us = start_time.elapsed().as_micros() as u64;
 

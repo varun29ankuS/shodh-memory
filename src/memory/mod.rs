@@ -2244,7 +2244,7 @@ impl MemorySystem {
                     .collect();
                 // Score desc; tie-break by MemoryId asc for deterministic graph candidate order.
                 r.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-                r.truncate(crate::constants::GRAPH_CANDIDATE_POOL);
+                r.truncate(200);
                 if !r.is_empty() {
                     tracing::debug!(
                         "Layer 2: {} graph results, {} query entities, top_activation={:.3}",
@@ -2340,11 +2340,7 @@ impl MemorySystem {
         } else {
             1
         };
-        // W4: floor the dense pool to lexical (BM25) parity. `max_results * 3`
-        // (=30) starved fusion of dense-only matches versus BM25's 100.
-        let vector_top_k = (query.max_results * 3)
-            .max(crate::constants::VECTOR_CANDIDATE_POOL_MIN)
-            * polar_vec_mul;
+        let vector_top_k = query.max_results * 3 * polar_vec_mul;
         let vr_pos = self.retriever.search_ids(&vector_query, vector_top_k)?;
         let vr = if let Some(neg_emb) = polar_negated_embedding.as_ref() {
             let mut neg_query = vector_query.clone();
@@ -2941,16 +2937,8 @@ impl MemorySystem {
                 }
             }
 
-            // W2 (keystone): keep a wide rescore window — NOT max_results — so
-            // graph-promoted (rank 11+) and dense-only candidates survive into
-            // Layer-5 unified scoring / competition / quality gate. The single
-            // final deterministic truncate at end-of-recall trims to max_results.
-            let rescore_pool = query
-                .max_results
-                .saturating_mul(crate::constants::RESCORE_POOL_MULT)
-                .max(crate::constants::RESCORE_POOL_MIN);
-            res.truncate(rescore_pool);
-            tracing::debug!("Layer 4: {} fused results (rescore window)", res.len());
+            res.truncate(query.max_results);
+            tracing::debug!("Layer 4: {} fused results", res.len());
 
             // Capture RRF base scores for attribution
             if let Some(ref mut attr_map) = attributions {
@@ -2999,12 +2987,7 @@ impl MemorySystem {
             // RH-8 gate: Hebbian association boost only applies in `Full` mode.
             let hebbian_boost = hebbian_scores.get(&memory_id).copied().unwrap_or(0.0);
             let base_score = if layer_full {
-                // G2/G5: cap the graph lift. Raw spreading-activation is
-                // non-discriminative (hubs ~2.0 vs distal gold ~0.07); uncapped
-                // it reorders the post-G1 wide pool by hub-ness, not relevance.
-                let hebbian_lift = (hebbian_boost * crate::constants::HEBBIAN_ASSOCIATION_WEIGHT)
-                    .min(crate::constants::HEBBIAN_BOOST_MAX);
-                score * (1.0 + hebbian_lift)
+                score * (1.0 + hebbian_boost * crate::constants::HEBBIAN_ASSOCIATION_WEIGHT)
             } else {
                 score
             };
@@ -3289,15 +3272,9 @@ impl MemorySystem {
                 }
             }
 
-            // G1 (keystone): do NOT stop at max_results here. This loop fetches
-            // candidates in RRF-descending order; breaking at max_results meant
-            // only the top-10 ever reached Layer-5 unified scoring / competition
-            // / quality gate, so the wide rescore window (mod.rs ~2940) was
-            // inert and every rank-11+ candidate the graph/boosts were meant to
-            // rescue was discarded BEFORE it could be re-ranked. `memory_ids` is
-            // already bounded to the rescore pool (max_results*MULT, capped), so
-            // the loop is naturally bounded; the single score-desc truncate at
-            // end-of-recall trims the rescored pool to max_results.
+            if memories.len() >= query.max_results {
+                break;
+            }
         }
 
         tracing::debug!(filtered_out = filtered_out, "Filter pass completed");
@@ -3337,19 +3314,14 @@ impl MemorySystem {
         // expose the raw fused score so per-layer attribution isn't masked.
         if layer_full {
             for mem in &mut memories {
-                // G2 (algo audit): binary quality gate. The old length-proportional
-                // factor (content_len/200 × entity/context bonuses, a 0.15→1.2
-                // swing) was a length-correlated re-ranking lever large enough to
-                // reorder the RRF list and crush legitimately-short conversational
-                // gold. Suppress only genuinely trivial (near-empty) content; let
-                // everything real pass at 1.0 so length stops driving rank.
-                let quality_factor = if mem.experience.content.len()
-                    < crate::constants::TRIVIAL_CONTENT_LEN
-                {
-                    crate::constants::RECALL_QUALITY_MIN
-                } else {
-                    1.0
-                };
+                let content_len = mem.experience.content.len() as f32;
+                let has_entities = !mem.experience.entities.is_empty();
+                let has_context = mem.experience.context.is_some();
+                let quality = (content_len / 200.0).min(1.0)
+                    * (1.0
+                        + if has_entities { 0.1 } else { 0.0 }
+                        + if has_context { 0.1 } else { 0.0 });
+                let quality_factor = quality.max(crate::constants::ELABORATION_QUALITY_MIN);
                 if let Some(score) = mem.score {
                     let mut cloned: Memory = mem.as_ref().clone();
                     cloned.set_score(score * quality_factor);
