@@ -200,13 +200,15 @@ pub enum ValidationError {
 ///
 /// Runs at unit-test time so any malformed addition to the fixture files
 /// fails CI before it can mask a recall regression.
-pub fn validate_smoke_suite(
+/// Suite-agnostic structural validation: unique corpus/case IDs, every case has
+/// at least one in-range graded relevance judgement, and every cited
+/// `corpus_item_id` exists in the corpus. Applies to ANY suite (smoke, LoCoMo, …).
+pub fn validate_structure(
     corpus: &[CorpusItem],
     cases: &[SmokeCase],
 ) -> Result<(), ValidationError> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
-    // Corpus item IDs must be unique.
     let mut corpus_ids = HashSet::with_capacity(corpus.len());
     for item in corpus {
         if !corpus_ids.insert(item.id.clone()) {
@@ -214,31 +216,10 @@ pub fn validate_smoke_suite(
         }
     }
 
-    // Total case count is fixed.
-    if cases.len() != TOTAL_SMOKE_CASES {
-        return Err(ValidationError::WrongTotal(cases.len()));
-    }
-
-    // Each category has exactly `CASES_PER_CATEGORY` cases.
-    let mut by_cat: HashMap<SmokeCategory, usize> = HashMap::new();
-    for case in cases {
-        *by_cat.entry(case.category).or_insert(0) += 1;
-    }
-    for cat in SmokeCategory::ALL {
-        let count = by_cat.get(&cat).copied().unwrap_or(0);
-        if count != CASES_PER_CATEGORY {
-            return Err(ValidationError::WrongCategoryCount(cat, count));
-        }
-    }
-
-    // Per-case validation.
     let mut case_ids = HashSet::with_capacity(cases.len());
     for case in cases {
         if !case_ids.insert(case.id.clone()) {
             return Err(ValidationError::DuplicateCaseId(case.id.clone()));
-        }
-        if case.fixture_corpus_id != SMOKE_CORPUS_ID {
-            return Err(ValidationError::WrongCorpusId(case.id.clone()));
         }
         if case.relevant.is_empty() {
             return Err(ValidationError::EmptyRelevant(case.id.clone()));
@@ -263,6 +244,41 @@ pub fn validate_smoke_suite(
                     corpus_item: rel.corpus_item_id.clone(),
                 });
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Smoke-suite validation: structural checks plus the smoke-specific fixed total
+/// (108), even category balance, and `fixture_corpus_id == shodh-smoke`. Only
+/// the smoke suite is balance-gated; other suites use [`validate_structure`].
+pub fn validate_smoke_suite(
+    corpus: &[CorpusItem],
+    cases: &[SmokeCase],
+) -> Result<(), ValidationError> {
+    use std::collections::HashMap;
+
+    validate_structure(corpus, cases)?;
+
+    if cases.len() != TOTAL_SMOKE_CASES {
+        return Err(ValidationError::WrongTotal(cases.len()));
+    }
+
+    let mut by_cat: HashMap<SmokeCategory, usize> = HashMap::new();
+    for case in cases {
+        *by_cat.entry(case.category).or_insert(0) += 1;
+    }
+    for cat in SmokeCategory::ALL {
+        let count = by_cat.get(&cat).copied().unwrap_or(0);
+        if count != CASES_PER_CATEGORY {
+            return Err(ValidationError::WrongCategoryCount(cat, count));
+        }
+    }
+
+    for case in cases {
+        if case.fixture_corpus_id != SMOKE_CORPUS_ID {
+            return Err(ValidationError::WrongCorpusId(case.id.clone()));
         }
     }
 
@@ -301,22 +317,12 @@ mod tests {
         // The held-out set is large: ~5.9k dialogue turns, ~1.5k questions.
         assert!(corpus.len() > 5000, "corpus too small: {}", corpus.len());
         assert!(cases.len() > 1400, "cases too few: {}", cases.len());
-        let ids: HashSet<&str> = corpus.iter().map(|c| c.id.as_str()).collect();
+        // Full structural validation (unique ids, resolvable + non-duplicate
+        // evidence, grade range) — the exact check the runner applies to the
+        // suite, so a bad fixture fails here instead of in a CI run.
+        validate_structure(&corpus, &cases).expect("locomo fixtures must validate structurally");
         for case in &cases {
             assert_eq!(case.fixture_corpus_id, "locomo", "case {}", case.id);
-            assert!(
-                !case.relevant.is_empty(),
-                "case {} has no evidence",
-                case.id
-            );
-            for r in &case.relevant {
-                assert!(
-                    ids.contains(r.corpus_item_id.as_str()),
-                    "case {} cites missing corpus item {}",
-                    case.id,
-                    r.corpus_item_id
-                );
-            }
         }
     }
 

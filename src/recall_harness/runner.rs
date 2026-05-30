@@ -166,8 +166,16 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
     let cases = fixtures::load_smoke_cases(&cases_path)
         .with_context(|| format!("loading smoke cases from {}", cases_path.display()))?;
 
-    fixtures::validate_smoke_suite(&corpus, &cases)
-        .context("smoke suite failed structural validation — fix the JSONL fixtures")?;
+    // Only the smoke suite is balance-gated (fixed 108 / even categories). Other
+    // suites (e.g. LoCoMo) just need structural integrity: unique ids, resolvable
+    // evidence. Picking by suite lets a second corpus reuse this runner.
+    if inputs.suite == "smoke" {
+        fixtures::validate_smoke_suite(&corpus, &cases)
+            .context("smoke suite failed structural validation — fix the JSONL fixtures")?;
+    } else {
+        fixtures::validate_structure(&corpus, &cases)
+            .with_context(|| format!("{} suite failed structural validation", inputs.suite))?;
+    }
 
     let repeats = inputs.repeats.max(1);
     // RH-8 (#270): default to `[Full]` when caller passed an empty vec so
