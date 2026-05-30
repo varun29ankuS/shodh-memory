@@ -1,0 +1,143 @@
+# LoCoMo-MC10 benchmark — INDEPENDENT generalization check.
+#
+# The L1 smoke suite (recall.yml) is what we tune against; this is the held-out
+# set we validate against. LoCoMo-MC10 is an external HuggingFace dataset
+# (Percena/locomo-mc10, ~1,986 multi-turn dialogue multiple-choice questions)
+# that the pipeline changes were NOT diagnosed on — so it answers "did a recall
+# change generalize, or just fit the 108 smoke cases?".
+#
+# Manual only (builds + serves shodh, ingests dialogues, calls an LLM judge —
+# expensive). Requires a repo secret LOCOMO_LLM_API_KEY (e.g. a free Groq key).
+#
+# To compare two refs (e.g. before/after a fix), dispatch twice with different
+# `ref` inputs and diff the uploaded locomo_results.json artifacts.
+name: LoCoMo-MC10 Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'git ref to benchmark (blank = this branch)'
+        required: false
+        default: ''
+      limit:
+        description: 'Number of MC questions to judge (full set ~1986)'
+        required: false
+        default: '200'
+      provider:
+        description: 'LLM provider (openai-compatible | anthropic | openai)'
+        required: false
+        default: 'openai-compatible'
+      model:
+        description: 'Judge model'
+        required: false
+        default: 'llama-3.1-8b-instant'
+      api_base:
+        description: 'API base (for openai-compatible, e.g. Groq)'
+        required: false
+        default: 'https://api.groq.com/openai/v1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: locomo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  locomo:
+    name: LoCoMo-MC10
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm clang
+
+      - name: Build server
+        run: cargo build --release --bin shodh-memory-server
+
+      - name: Start server
+        env:
+          SHODH_DEV_API_KEY: sk-shodh-dev-local-testing-key
+          SHODH_PORT: '3030'
+        run: |
+          ./target/release/shodh-memory-server serve &
+          echo $! > server.pid
+          for i in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:3030/health >/dev/null; then
+              echo "server up after ${i}x2s"; break
+            fi
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:3030/health || { echo "::error::server did not become healthy"; exit 1; }
+
+      - name: Set up Python + dataset
+        run: |
+          python3 -m pip install --quiet --upgrade pip
+          python3 -m pip install --quiet datasets tqdm openai anthropic requests
+          python3 -c "from datasets import load_dataset; load_dataset('Percena/locomo-mc10')"
+          # The eval reads a pinned snapshot path; if the cached snapshot hash
+          # differs, link the actual download into the expected location.
+          python3 - <<'PY'
+          import glob, os
+          want = os.path.expanduser(
+              '~/.cache/huggingface/hub/datasets--Percena--locomo-mc10/'
+              'snapshots/7d59a0463d83f97b042684310c0b3d17553004cd/data/locomo_mc10.json')
+          if not os.path.exists(want):
+              hits = glob.glob(os.path.expanduser(
+                  '~/.cache/huggingface/hub/datasets--Percena--locomo-mc10/'
+                  'snapshots/*/data/locomo_mc10.json'))
+              if not hits:
+                  raise SystemExit('locomo-mc10 dataset not found after download')
+              os.makedirs(os.path.dirname(want), exist_ok=True)
+              os.symlink(hits[0], want)
+              print('linked', hits[0], '->', want)
+          print('dataset ready:', want)
+          PY
+
+      - name: Run LoCoMo-MC10 eval
+        env:
+          API_KEY: ${{ secrets.LOCOMO_LLM_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.LOCOMO_LLM_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.LOCOMO_LLM_API_KEY }}
+        run: |
+          if [ -z "${API_KEY}" ]; then
+            echo "::error::secret LOCOMO_LLM_API_KEY is not set — add a free LLM API key (e.g. Groq) to run the judge"
+            exit 1
+          fi
+          python3 benchmarks/locomo_mc10_eval.py \
+            --provider "${{ github.event.inputs.provider }}" \
+            --api-base "${{ github.event.inputs.api_base }}" \
+            --model "${{ github.event.inputs.model }}" \
+            --limit "${{ github.event.inputs.limit }}" \
+            --output locomo_results.json
+          echo "## LoCoMo-MC10 result" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          d = json.load(open('locomo_results.json'))
+          print(f"- model: `{d.get('model')}`  items: {d.get('total_items')}")
+          print(f"- **overall_accuracy: {d.get('overall_accuracy')}**")
+          for k, v in (d.get('accuracy_by_type') or {}).items():
+              print(f"  - {k}: {v}")
+          PY
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: locomo-results
+          path: locomo_results.json
+
+      - name: Stop server
+        if: always()
+        run: '[ -f server.pid ] && kill "$(cat server.pid)" || true'
