@@ -615,7 +615,11 @@ mod tests {
                 .by_category
                 .get(cat)
                 .expect("category must be present");
-            assert_eq!(cr.case_count, 5, "category {cat} must have 5 cases");
+            assert_eq!(
+                cr.case_count,
+                crate::recall_harness::fixtures::CASES_PER_CATEGORY,
+                "category {cat} must have CASES_PER_CATEGORY cases"
+            );
         }
         // No infrastructure-level failures expected on the canonical fixtures.
         assert!(
