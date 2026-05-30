@@ -3396,19 +3396,32 @@ impl MemorySystem {
                 self.record_consolidation_event(event.clone());
             }
 
-            // Re-order memories based on competition results (winners first)
+            // DEMOTE suppressed memories — never remove them. Deleting suppressed
+            // results erased correct hits: the suppression proxy is score
+            // proximity, not content similarity, so a distinct relevant memory
+            // whose score sat close to the top was removed (per-layer recall
+            // diagnostics: 8 cases survived through `+facts` then vanished at
+            // `full`). Apply a mild multiplicative penalty and let the final
+            // sort+truncate decide; a suppressed-but-relevant memory can still
+            // surface. The winner/suppressed split below still gates coactivation.
             if !competition_result.suppressed.is_empty() {
-                let winner_set: std::collections::HashSet<_> = competition_result
-                    .winners
+                let suppressed_set: std::collections::HashSet<&str> = competition_result
+                    .suppressed
                     .iter()
-                    .map(|(id, _)| id.clone())
+                    .map(|s| s.as_str())
                     .collect();
-
-                // Keep only winners, maintain their relative order
-                memories.retain(|m| winner_set.contains(&m.id.0.to_string()));
+                for m in memories.iter_mut() {
+                    if suppressed_set.contains(m.id.0.to_string().as_str()) {
+                        let demoted = m.score.unwrap_or(0.0)
+                            * crate::constants::COMPETITION_SUPPRESSED_DEMOTION;
+                        let mut cloned: Memory = m.as_ref().clone();
+                        cloned.set_score(demoted);
+                        *m = Arc::new(cloned);
+                    }
+                }
 
                 tracing::debug!(
-                    "Retrieval competition: {} memories suppressed",
+                    "Retrieval competition: {} memories demoted (kept, not removed)",
                     competition_result.suppressed.len()
                 );
             }

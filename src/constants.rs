@@ -2140,6 +2140,20 @@ pub const COMPETITION_SURVIVAL_FLOOR: f32 = 0.1;
 /// record the full amount.
 pub const COMPETITION_SURVIVOR_DAMAGE_RATIO: f32 = 0.3;
 
+/// Retrieval-competition score multiplier applied to a "suppressed" memory.
+///
+/// Retrieval competition used to DELETE suppressed memories from the result
+/// set. Per-layer recall diagnostics showed this erased correct hits: 8 of the
+/// 108 smoke cases survived the entire pipeline through `+facts` and then
+/// vanished at `full`, because the suppression proxy is score-proximity (not
+/// content similarity) — a distinct, relevant memory whose score merely sat
+/// close to the top got removed. Suppressed memories are now DEMOTED by this
+/// factor and kept, so the final sort can still surface them. Kept mild (0.9)
+/// because suppressed memories are by definition high-scoring (ratio > 0.9 of
+/// the winner) and usually relevant — for multi-hop chains the co-tagged
+/// siblings are exactly these close-score "competitors".
+pub const COMPETITION_SUPPRESSED_DEMOTION: f32 = 0.9;
+
 /// Connectivity factor divisor for replay candidate prioritization
 ///
 /// Higher connectivity = more important for consolidation.
