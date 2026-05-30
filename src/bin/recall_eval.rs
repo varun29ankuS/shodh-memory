@@ -32,14 +32,37 @@ const EXIT_INFRASTRUCTURE: i32 = 2;
 #[derive(Debug, Clone, Copy, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 enum Suite {
-    /// L1 smoke suite — 30 hand-crafted shodh queries (see issue #265).
+    /// L1 smoke suite — hand-crafted shodh queries (see issue #265). The set we
+    /// tune against; this is the one CI gates on.
     Smoke,
+    /// LoCoMo recall suite — 5,882 dialogue-turn corpus + 1,531 questions with
+    /// gold evidence dia-ids (snap-research/locomo). The HELD-OUT set: none of
+    /// the pipeline changes were diagnosed against it, so recall@k here tests
+    /// generalization, not fit. Not gated — diagnostic only.
+    Locomo,
 }
 
 impl Suite {
     fn as_str(self) -> &'static str {
         match self {
             Suite::Smoke => "smoke",
+            Suite::Locomo => "locomo",
+        }
+    }
+
+    /// Corpus + cases fixture paths, or `None` to use the runner's smoke
+    /// defaults.
+    fn fixture_paths(self) -> Option<(PathBuf, PathBuf)> {
+        match self {
+            Suite::Smoke => None,
+            Suite::Locomo => Some((
+                shodh_memory::recall_harness::fixtures::manifest_path(
+                    shodh_memory::recall_harness::fixtures::LOCOMO_CORPUS_PATH,
+                ),
+                shodh_memory::recall_harness::fixtures::manifest_path(
+                    shodh_memory::recall_harness::fixtures::LOCOMO_CASES_PATH,
+                ),
+            )),
         }
     }
 }
@@ -173,10 +196,14 @@ fn run(args: &Args) -> Result<i32> {
 
     let git_sha = current_git_sha().unwrap_or_else(|_| "unknown".to_string());
 
+    let (corpus_path, cases_path) = match args.suite.fixture_paths() {
+        Some((c, q)) => (Some(c), Some(q)),
+        None => (None, None),
+    };
     let inputs = RunInputs {
         storage_path: storage_path.clone(),
-        corpus_path: None,
-        cases_path: None,
+        corpus_path,
+        cases_path,
         suite: args.suite.as_str().to_string(),
         git_sha,
         repeats: args.repeats,
