@@ -87,11 +87,17 @@ def convert(data: list) -> tuple[list, list, dict]:
             if not ev:
                 stats["qa_no_evidence"] += 1
                 continue
-            relevant = [
-                {"corpus_item_id": f"{sid}:{e}", "grade": 3}
-                for e in ev
-                if isinstance(e, str) and f"{sid}:{e}" in corpus_ids
-            ]
+            # Some LoCoMo `evidence` arrays repeat a dia_id; dedup so each case's
+            # relevant list has unique corpus items (the harness requires it).
+            relevant = []
+            seen_ev: set[str] = set()
+            for e in ev:
+                if not isinstance(e, str):
+                    continue
+                cid = f"{sid}:{e}"
+                if cid in corpus_ids and cid not in seen_ev:
+                    seen_ev.add(cid)
+                    relevant.append({"corpus_item_id": cid, "grade": 3})
             if not relevant:
                 stats["qa_unresolved"] += 1
                 continue

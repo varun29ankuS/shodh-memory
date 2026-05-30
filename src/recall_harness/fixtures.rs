@@ -317,22 +317,12 @@ mod tests {
         // The held-out set is large: ~5.9k dialogue turns, ~1.5k questions.
         assert!(corpus.len() > 5000, "corpus too small: {}", corpus.len());
         assert!(cases.len() > 1400, "cases too few: {}", cases.len());
-        let ids: HashSet<&str> = corpus.iter().map(|c| c.id.as_str()).collect();
+        // Full structural validation (unique ids, resolvable + non-duplicate
+        // evidence, grade range) — the exact check the runner applies to the
+        // suite, so a bad fixture fails here instead of in a CI run.
+        validate_structure(&corpus, &cases).expect("locomo fixtures must validate structurally");
         for case in &cases {
             assert_eq!(case.fixture_corpus_id, "locomo", "case {}", case.id);
-            assert!(
-                !case.relevant.is_empty(),
-                "case {} has no evidence",
-                case.id
-            );
-            for r in &case.relevant {
-                assert!(
-                    ids.contains(r.corpus_item_id.as_str()),
-                    "case {} cites missing corpus item {}",
-                    case.id,
-                    r.corpus_item_id
-                );
-            }
         }
     }
 
