@@ -595,7 +595,10 @@ mod tests {
         let report = run_smoke_suite(&inputs).expect("runner must succeed");
         let _ = std::fs::remove_dir_all(&storage);
 
-        assert_eq!(report.case_count, 30);
+        assert_eq!(
+            report.case_count,
+            crate::recall_harness::fixtures::TOTAL_SMOKE_CASES
+        );
         assert_eq!(report.repeats, 1);
         assert_eq!(report.suite, "smoke");
         assert_eq!(report.embedder, EMBEDDER_ID);

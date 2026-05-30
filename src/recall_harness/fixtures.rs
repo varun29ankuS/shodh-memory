@@ -1,6 +1,6 @@
 //! L1 smoke-suite fixtures.
 //!
-//! Loads a fixed corpus of shodh-flavoured memories and 30 hand-crafted
+//! Loads a fixed corpus of shodh-flavoured memories and 108 hand-crafted
 //! queries against that corpus. The fixture format is JSONL, one record per
 //! line, so individual cases are easy to add, diff, and review.
 //!
@@ -337,8 +337,8 @@ mod tests {
         }
     }
 
-    /// Build a fully-valid 30-case suite with single-item ground truth so we
-    /// can mutate one piece at a time in negative tests.
+    /// Build a fully-valid `TOTAL_SMOKE_CASES`-case suite with single-item
+    /// ground truth so we can mutate one piece at a time in negative tests.
     fn valid_synthetic_suite() -> (Vec<CorpusItem>, Vec<SmokeCase>) {
         let corpus: Vec<CorpusItem> = (1..=TOTAL_SMOKE_CASES)
             .map(|i| make_corpus_item(&format!("c{i:03}")))
