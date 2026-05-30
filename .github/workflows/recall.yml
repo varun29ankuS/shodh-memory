@@ -95,6 +95,7 @@ jobs:
             --suite smoke \
             --repeats 5 \
             --output current.json \
+            --per-case-output per-case.json \
             --baseline tests/recall/baseline.json \
             --tolerance "${TOLERANCE}" \
             --storage ./recall-storage 2>&1 | tee recall-eval.log
@@ -127,6 +128,7 @@ jobs:
           name: recall-eval-report
           path: |
             current.json
+            per-case.json
             recall-eval.log
             recall-diff.md
           if-no-files-found: warn

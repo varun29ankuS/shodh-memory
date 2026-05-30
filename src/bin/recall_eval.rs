@@ -20,7 +20,9 @@ use clap::{Parser, ValueEnum};
 
 use shodh_memory::memory::types::LayerMode;
 use shodh_memory::recall_harness::report::{compare_to_baseline, Report};
-use shodh_memory::recall_harness::runner::{run_smoke_suite, RunInputs};
+use shodh_memory::recall_harness::runner::{
+    run_smoke_suite_with_ranks, ReportWithRanks, RunInputs,
+};
 
 /// Exit codes — kept stable so CI scripts can branch on them.
 const EXIT_PASS: i32 = 0;
@@ -105,6 +107,13 @@ struct Args {
     #[arg(long)]
     baseline: Option<PathBuf>,
 
+    /// Optional path to write per-case diagnostics (JSON array) for the gated
+    /// layer: each case's ndcg/recall/mrr plus the relevant items it dropped
+    /// from the top-k. Diagnostic side output — not the gated report, not the
+    /// baseline. Use it to see *which* query is weak, not just a category mean.
+    #[arg(long)]
+    per_case_output: Option<PathBuf>,
+
     /// Allowed regression in percent of baseline. Default: 2.0%.
     #[arg(long, default_value_t = 2.0)]
     tolerance: f64,
@@ -175,7 +184,28 @@ fn run(args: &Args) -> Result<i32> {
         age_days: args.age_days,
     };
 
-    let mut report = run_smoke_suite(&inputs).context("running smoke suite")?;
+    let ReportWithRanks {
+        mut report,
+        per_case,
+        ..
+    } = run_smoke_suite_with_ranks(&inputs).context("running smoke suite")?;
+
+    // Per-case diagnostics are written before the baseline comparison so they
+    // are always captured, even on a regressing run that exits non-zero.
+    if let Some(per_case_path) = &args.per_case_output {
+        let json = serde_json::to_vec_pretty(&per_case)
+            .context("serialising per-case diagnostics to JSON")?;
+        std::fs::write(per_case_path, &json).with_context(|| {
+            format!(
+                "writing per-case diagnostics to {}",
+                per_case_path.display()
+            )
+        })?;
+        eprintln!(
+            "recall-eval: per-case diagnostics written to {}",
+            per_case_path.display()
+        );
+    }
 
     if let Some(baseline_path) = &args.baseline {
         let baseline_bytes = std::fs::read(baseline_path)
