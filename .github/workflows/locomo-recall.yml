@@ -40,9 +40,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
+      # Fetch the full history of the dispatched branch, then check out the
+      # requested commit by hand. `actions/checkout`'s `ref` input is resolved
+      # as a branch/tag name pattern (`+refs/heads/<ref>*`), so a raw commit
+      # SHA — short or full — fails the fetch. Checking out manually after a
+      # full-depth fetch makes the documented "dispatch twice with the commit
+      # before and after" A/B flow actually work for SHAs.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 0
+
+      - name: Check out requested commit
+        if: ${{ github.event.inputs.ref != '' }}
+        run: |
+          git checkout "${{ github.event.inputs.ref }}"
+          echo "Checked out $(git rev-parse --short HEAD)"
 
       - uses: dtolnay/rust-toolchain@stable
 
