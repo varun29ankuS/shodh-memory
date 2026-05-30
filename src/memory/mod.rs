@@ -2462,28 +2462,21 @@ impl MemorySystem {
             } else {
                 None
             };
-            // RH-8 gate: BM25 hybrid fusion only runs in `PlusBm25` and above.
-            // Lower modes pass the vector candidate set straight through, which makes the
-            // RRF fusion below a one- or two-leg fusion (vector ± graph) instead of three-leg.
-            let hybrid_ids = if layer_bm25 {
+            // RH-8 gate: the BM25 leg only runs in `PlusBm25` and above. Below it,
+            // fusion is graph + vector only.
+            //
+            // FLAT FUSION (#8): BM25 and vector are INDEPENDENT RRF legs, not a
+            // nested RRF(bm25, vector). Per-layer recall diagnostics proved the
+            // nesting destroyed recall — a hit ranked #1 by vector vanished the
+            // moment BM25 fusion was added, because RRF-averaging a strong
+            // single-source rank against a mediocre one buries it. Flat legs let a
+            // strong single-source hit survive.
+            let bm25_results: Vec<(MemoryId, f32)> = if layer_bm25 {
                 self.hybrid_search
-                    .search_with_dynamic_weights_pool(
-                        bm25_query_text,
-                        vector_results.clone(),
-                        get_content,
-                        term_weights,
-                        phrases,
-                        disc_opt,
-                        bm25_pool_override,
-                    )
-                    .map(|r| {
-                        r.into_iter()
-                            .map(|x| (x.memory_id, x.score))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or(vector_results)
+                    .bm25_ranked(bm25_query_text, term_weights, phrases, bm25_pool_override)
+                    .unwrap_or_default()
             } else {
-                vector_results
+                Vec::new()
             };
 
             // ===========================================================================
@@ -2571,32 +2564,58 @@ impl MemorySystem {
                 }
             }
 
-            // Hybrid (BM25+vector) results: pure RRF with density weight
-            for (r, (id, _)) in hybrid_ids.iter().enumerate() {
-                let hybrid_rrf = hybrid_w / (k + (r + 1) as f32);
-                *fused.entry(id.clone()).or_insert(0.0) += hybrid_rrf;
+            // Flat fusion legs: vector and (gated) BM25 are INDEPENDENT RRF legs.
+            // Density splits the non-graph budget (semantic_w → vector,
+            // linguistic_w → bm25); high YAKE keyword discriminativeness leans the
+            // split toward BM25, preserving the prior dynamic-weight behavior but
+            // applied at the leg level instead of inside a nested hybrid fusion.
+            // Below `PlusBm25` the vector leg carries the whole non-graph weight.
+            let (vector_leg_w, bm25_leg_w) = if !layer_bm25 {
+                (hybrid_w, 0.0)
+            } else {
+                match disc_opt {
+                    Some(d) if d >= 0.8 => (hybrid_w * 0.25, hybrid_w * 0.75),
+                    Some(d) if d >= 0.5 => (hybrid_w * 0.40, hybrid_w * 0.60),
+                    _ => (semantic_w, linguistic_w),
+                }
+            };
 
-                // Track per-memory hybrid RRF contribution
+            let new_attr = |id: &MemoryId| ScoreAttribution {
+                memory_id: id.0.to_string(),
+                attribute_boost: 1.0,
+                temporal_prefilter_boost: 1.0,
+                temporal_fact_boost: 1.0,
+                interference_adjustment: 1.0,
+                prospective_boost: 1.0,
+                fact_source_boost: 1.0,
+                ontological_boost: 1.0,
+                importance_factor: 1.0,
+                feedback_multiplier: 1.0,
+                quality_gate: 1.0,
+                ..Default::default()
+            };
+
+            // Vector leg
+            for (r, (id, _)) in vector_results.iter().enumerate() {
+                let rrf = vector_leg_w / (k + (r + 1) as f32);
+                *fused.entry(id.clone()).or_insert(0.0) += rrf;
                 if let Some(ref mut attr_map) = attributions {
-                    let attr = attr_map
-                        .entry(id.clone())
-                        .or_insert_with(|| ScoreAttribution {
-                            memory_id: id.0.to_string(),
-                            attribute_boost: 1.0,
-                            temporal_prefilter_boost: 1.0,
-                            temporal_fact_boost: 1.0,
-                            interference_adjustment: 1.0,
-                            prospective_boost: 1.0,
-                            fact_source_boost: 1.0,
-                            ontological_boost: 1.0,
-                            importance_factor: 1.0,
-                            feedback_multiplier: 1.0,
-                            quality_gate: 1.0,
-                            ..Default::default()
-                        });
-                    attr.hybrid_rrf += hybrid_rrf;
+                    let attr = attr_map.entry(id.clone()).or_insert_with(|| new_attr(id));
+                    attr.hybrid_rrf += rrf;
                     if !attr.sources.contains(&"vector".to_string()) {
                         attr.sources.push("vector".to_string());
+                    }
+                }
+            }
+            // BM25 leg — independent, not RRF-averaged with vector first.
+            for (r, (id, _)) in bm25_results.iter().enumerate() {
+                let rrf = bm25_leg_w / (k + (r + 1) as f32);
+                *fused.entry(id.clone()).or_insert(0.0) += rrf;
+                if let Some(ref mut attr_map) = attributions {
+                    let attr = attr_map.entry(id.clone()).or_insert_with(|| new_attr(id));
+                    attr.hybrid_rrf += rrf;
+                    if !attr.sources.contains(&"bm25".to_string()) {
+                        attr.sources.push("bm25".to_string());
                     }
                 }
             }

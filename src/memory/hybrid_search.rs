@@ -734,6 +734,33 @@ impl HybridSearchEngine {
     /// Variant of `search_with_dynamic_weights` that allows the caller to
     /// override the BM25 candidate pool depth.
     ///
+    /// IC-weighted BM25 ranking **without** the vector fusion — the BM25 leg on
+    /// its own, ranked by score descending and filtered to `min_bm25_score`.
+    ///
+    /// Lets the caller fuse BM25 as an INDEPENDENT leg in a flat RRF
+    /// (graph + vector + bm25) instead of nesting it inside a hybrid
+    /// `RRF(bm25, vector)`. Nesting averaged a strong single-source rank against
+    /// a weak one and buried hits; flat legs preserve a strong single-source hit.
+    pub fn bm25_ranked(
+        &self,
+        query: &str,
+        term_weights: Option<&HashMap<String, f32>>,
+        phrase_boosts: Option<&[(String, f32)]>,
+        pool_override: Option<usize>,
+    ) -> Result<Vec<(MemoryId, f32)>> {
+        let pool = pool_override.unwrap_or(self.config.candidate_count);
+        let results = self.bm25_index.search_with_term_and_phrase_weights(
+            query,
+            pool,
+            term_weights,
+            phrase_boosts,
+        )?;
+        Ok(results
+            .into_iter()
+            .filter(|(_, score)| *score >= self.config.min_bm25_score)
+            .collect())
+    }
+
     /// Used by the polarity-aware retrieval path (RH-14): when the query is
     /// polar/negation-sensitive, the pool is multiplied by
     /// `POLAR_QUERY_BM25_POOL_MULTIPLIER` so that passages containing negation
