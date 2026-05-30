@@ -92,12 +92,13 @@ jobs:
           d = json.load(open('locomo-reachability.json'))
           def pct(n,dn): return 0.0 if dn==0 else 100.0*n/dn
           print(f"- max_hops: {d['max_hops']}  (≤2hop% = canonical double-hop signal)")
-          print("\n| category | cases | gold | ≤1hop% | ≤2hop% | ≤3hop% | unreach% | no-seed% |")
-          print("| --- | --- | --- | --- | --- | --- | --- | --- |")
+          print("\n| category | cases | gold | ≤1hop% | ≤2hop% | unreach% | no-seed% | cases≥2seed% | gold≥2seed% |")
+          print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
           rows = sorted(d['by_category'].items()) + [('ALL', d['overall'])]
           for name,c in rows:
               g=c['gold_total']
-              print(f"| {name} | {c['cases']} | {g} | {pct(c['reachable_within_1'],g):.1f} | {pct(c['reachable_within_2'],g):.1f} | {pct(c['reachable_within_3'],g):.1f} | {pct(c['unreachable'],g):.1f} | {pct(c['cases_no_seed'],c['cases']):.1f} |")
+              print(f"| {name} | {c['cases']} | {g} | {pct(c['reachable_within_1'],g):.1f} | {pct(c['reachable_within_2'],g):.1f} | {pct(c['unreachable'],g):.1f} | {pct(c['cases_no_seed'],c['cases']):.1f} | {pct(c.get('cases_multi_seed',0),c['cases']):.1f} | {pct(c.get('gold_multi_seed',0),g):.1f} |")
+          print("\ngold≥2seed% = the G5 multi-seed discrimination signal. If ~0, queries resolve to too few graph cues; the lever is richer query→graph cue extraction, not episode scoring.")
           PY
 
       - name: Run LoCoMo recall@k

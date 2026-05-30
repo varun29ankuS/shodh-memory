@@ -762,18 +762,30 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
             overall.unreachable += gold.len();
             continue;
         }
+        if seed_uuids.len() >= 2 {
+            cat.cases_multi_seed += 1;
+            overall.cases_multi_seed += 1;
+        }
 
         // BFS over entity→entity edges; record the min hop at which each gold
         // episode is first attached to a reached entity.
         let mut visited: HashSet<Uuid> = seed_uuids.clone();
         let mut frontier: Vec<Uuid> = seed_uuids.iter().copied().collect();
         let mut gold_min_hop: HashMap<Uuid, usize> = HashMap::new();
+        // Per-gold set of distinct query seeds directly (1-hop) attached — the
+        // G5 multi-seed discrimination signal.
+        let mut gold_seed_cov: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
         for hop in 1..=MAX_HOPS {
             for ent in &frontier {
+                // At hop 1 the frontier is exactly the query seeds.
+                let ent_is_seed = hop == 1;
                 if let Ok(eps) = g.get_episodes_by_entity(ent) {
                     for ep in eps {
                         if gold.contains(&ep.uuid) {
                             gold_min_hop.entry(ep.uuid).or_insert(hop);
+                            if ent_is_seed {
+                                gold_seed_cov.entry(ep.uuid).or_default().insert(*ent);
+                            }
                         }
                     }
                 }
@@ -827,6 +839,12 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
                     cat.unreachable += 1;
                     overall.unreachable += 1;
                 }
+            }
+            // G5 signal availability: is this gold directly attached to ≥2
+            // distinct query seeds?
+            if gold_seed_cov.get(gid).map(|s| s.len()).unwrap_or(0) >= 2 {
+                cat.gold_multi_seed += 1;
+                overall.gold_multi_seed += 1;
             }
         }
     }

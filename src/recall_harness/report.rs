@@ -355,6 +355,15 @@ pub struct ReachabilityCategory {
     pub reachable_within_3: usize,
     /// Gold not reachable from any seed entity within `max_hops`.
     pub unreachable: usize,
+    /// Gold episodes directly attached (1 hop) to ≥2 DISTINCT query seeds — the
+    /// multi-seed discrimination signal G5 needs. If this is ~0, queries resolve
+    /// to too few graph cues for multi-seed graph reasoning to do anything, and
+    /// the lever is richer query→graph cue extraction, not episode scoring.
+    #[serde(default)]
+    pub gold_multi_seed: usize,
+    /// Cases whose query resolved to ≥2 distinct graph seed entities at all.
+    #[serde(default)]
+    pub cases_multi_seed: usize,
 }
 
 #[cfg(test)]
