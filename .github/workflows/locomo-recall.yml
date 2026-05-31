@@ -34,6 +34,10 @@ on:
         description: 'Graph-reachability diagnostic: set true to skip the recall run and instead report, per category, how much gold is reachable from query seed entities within N entity-hops (pure topology).'
         required: false
         default: 'false'
+      graph_w:
+        description: 'Override the graph leg fusion weight (blank = density-default). 0 = graph-OFF, lexical+vector only. Use to measure whether the net-negative graph leg should be removed.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -105,6 +109,7 @@ jobs:
         if: ${{ github.event.inputs.reachability != 'true' }}
         env:
           RECALL_DIAG_K: ${{ github.event.inputs.diag_k }}
+          SHODH_GRAPH_FUSION_WEIGHT: ${{ github.event.inputs.graph_w }}
         run: |
           ./target/release/recall-eval \
             --suite locomo \

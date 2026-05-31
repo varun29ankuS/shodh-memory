@@ -2508,9 +2508,21 @@ impl MemorySystem {
             // Density-based weights (already tuned in calculate_density_weights)
             // Sparse (≤0.5): graph_w=0.5, semantic_w=0.4, linguistic_w=0.1
             // Dense (≥2.0):  graph_w=0.1, semantic_w=0.7, linguistic_w=0.2
-            let (semantic_w, graph_w, linguistic_w) = graph_density
+            let (semantic_w, mut graph_w, linguistic_w) = graph_density
                 .map(calculate_density_weights)
                 .unwrap_or((0.6, 0.3, 0.1));
+
+            // Experiment knob: override the graph leg's fusion weight (eval only).
+            // SHODH_GRAPH_FUSION_WEIGHT=0 → graph-OFF (the graph leg contributes
+            // nothing to fusion AND its multiplicative activation bonus, which is
+            // gated on graph_w, becomes a no-op). Lets us measure whether the
+            // net-negative graph leg should be down-weighted/removed without a
+            // recompile. Unset in production → unchanged density behavior.
+            if let Ok(v) = std::env::var("SHODH_GRAPH_FUSION_WEIGHT") {
+                if let Ok(w) = v.parse::<f32>() {
+                    graph_w = w.clamp(0.0, 1.0);
+                }
+            }
 
             // Hybrid weight = semantic + linguistic (BM25 + vector combined)
             let hybrid_w = semantic_w + linguistic_w;
