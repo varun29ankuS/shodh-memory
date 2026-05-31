@@ -886,7 +886,7 @@ pub fn spreading_activation_retrieve_with_stats(
         emb.to_vec()
     } else {
         let embedding_start = Instant::now();
-        let emb = embedder.encode(query_text)?;
+        let emb = embedder.encode_query(query_text)?;
         stats.embedding_time_us = embedding_start.elapsed().as_micros() as u64;
         emb
     };

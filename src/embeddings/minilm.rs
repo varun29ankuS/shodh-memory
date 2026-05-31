@@ -207,6 +207,29 @@ pub struct MiniLMEmbedder {
     /// Flag for simplified mode (no ONNX)
     simplified_mode: bool,
     dimension: usize,
+    /// Asymmetric instruction prefix prepended to QUERY text before encoding.
+    /// Empty for symmetric models (MiniLM). Retrieval-tuned models like
+    /// e5-small-v2 require `"query: "` / `"passage: "` to separate the query and
+    /// document manifolds — this is the biggest free recall lever within the
+    /// edge envelope (same 384-dim, same BERT arch + mean-pool). Set from the
+    /// SHODH_EMBEDDER env var.
+    query_prefix: String,
+    /// Asymmetric instruction prefix prepended to DOCUMENT text before encoding.
+    doc_prefix: String,
+}
+
+/// Resolve the (query, document) instruction prefixes from `SHODH_EMBEDDER`.
+/// `e5` → e5-style `query:` / `passage:`; anything else → no prefixes
+/// (symmetric MiniLM behavior, byte-identical to before).
+fn embedder_prefixes() -> (String, String) {
+    match std::env::var("SHODH_EMBEDDER")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "e5" | "e5-small" | "e5-small-v2" => ("query: ".to_string(), "passage: ".to_string()),
+        _ => (String::new(), String::new()),
+    }
 }
 
 impl MiniLMEmbedder {
@@ -399,11 +422,14 @@ impl MiniLMEmbedder {
             }
         }
 
+        let (query_prefix, doc_prefix) = embedder_prefixes();
         let embedder = Self {
             config: config.clone(),
             lazy_model: OnceLock::new(),
             simplified_mode: false,
             dimension: 384,
+            query_prefix,
+            doc_prefix,
         };
 
         // If not lazy loading, initialize now
@@ -450,11 +476,14 @@ impl MiniLMEmbedder {
         tracing::warn!("    Model: {:?}", config.model_path);
         tracing::warn!("    Tokenizer: {:?}", config.tokenizer_path);
 
+        let (query_prefix, doc_prefix) = embedder_prefixes();
         Ok(Self {
             config,
             lazy_model: OnceLock::new(),
             simplified_mode: true,
             dimension: 384,
+            query_prefix,
+            doc_prefix,
         })
     }
 
@@ -774,11 +803,23 @@ impl MiniLMEmbedder {
     }
 }
 
-impl Embedder for MiniLMEmbedder {
-    fn encode(&self, text: &str) -> Result<Vec<f32>> {
+impl MiniLMEmbedder {
+    /// Core encode path with an optional asymmetric instruction prefix.
+    /// `prefix` is empty for symmetric models (byte-identical to the prior
+    /// behavior) and `"query: "` / `"passage: "` for e5-style models.
+    fn encode_prefixed(&self, text: &str, prefix: &str) -> Result<Vec<f32>> {
         if text.is_empty() {
             return Ok(vec![0.0; self.dimension]);
         }
+
+        // Prepend the instruction prefix (if any) before tokenization.
+        let owned;
+        let text: &str = if prefix.is_empty() {
+            text
+        } else {
+            owned = format!("{prefix}{text}");
+            &owned
+        };
 
         // Use simplified mode if in that mode
         if self.simplified_mode {
@@ -836,6 +877,18 @@ impl Embedder for MiniLMEmbedder {
                 self.generate_embedding_simplified(text)
             }
         }
+    }
+}
+
+impl Embedder for MiniLMEmbedder {
+    fn encode(&self, text: &str) -> Result<Vec<f32>> {
+        // Documents/passages get the doc prefix (empty for symmetric MiniLM).
+        self.encode_prefixed(text, &self.doc_prefix)
+    }
+
+    fn encode_query(&self, text: &str) -> Result<Vec<f32>> {
+        // Queries get the query prefix (empty for symmetric MiniLM).
+        self.encode_prefixed(text, &self.query_prefix)
     }
 
     fn dimension(&self) -> usize {

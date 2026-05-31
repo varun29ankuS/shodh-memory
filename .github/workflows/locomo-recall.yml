@@ -38,6 +38,10 @@ on:
         description: 'Override the graph leg fusion weight (blank = density-default). 0 = graph-OFF, lexical+vector only. Use to measure whether the net-negative graph leg should be removed.'
         required: false
         default: ''
+      embedder:
+        description: 'Embedding model: blank/minilm = MiniLM-L6 (default), e5 = e5-small-v2 (384-dim, retrieval-tuned, asymmetric query/passage). Edge-legal drop-in.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -78,6 +82,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Set up e5-small-v2 embedder
+        if: ${{ github.event.inputs.embedder == 'e5' }}
+        run: |
+          E5_DIR="$HOME/models/e5-small-v2"
+          mkdir -p "$E5_DIR"
+          echo "Downloading e5-small-v2 ONNX + tokenizer (Xenova/e5-small-v2)…"
+          curl -fL --retry 3 -o "$E5_DIR/model.onnx" \
+            https://huggingface.co/Xenova/e5-small-v2/resolve/main/onnx/model.onnx
+          curl -fL --retry 3 -o "$E5_DIR/tokenizer.json" \
+            https://huggingface.co/Xenova/e5-small-v2/resolve/main/tokenizer.json
+          ls -la "$E5_DIR"
+          # Route the embedder at this model + enable e5 query/passage prefixes.
+          echo "SHODH_EMBEDDER=e5" >> "$GITHUB_ENV"
+          echo "SHODH_MODEL_PATH=$E5_DIR" >> "$GITHUB_ENV"
+          echo "SHODH_USE_QUANTIZED_MODEL=0" >> "$GITHUB_ENV"
 
       - name: Build recall-eval
         run: cargo build --release --bin recall-eval

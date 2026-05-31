@@ -2001,7 +2001,7 @@ impl MemorySystem {
                     let embedding = self
                         .embedder
                         .as_ref()
-                        .encode(&embedding_query_text)
+                        .encode_query(&embedding_query_text)
                         .context("Failed to generate query embedding")?;
 
                     self.query_cache.insert(query_hash, embedding.clone());
@@ -2032,7 +2032,7 @@ impl MemorySystem {
                     Some(cached.clone())
                 } else {
                     EMBEDDING_CACHE_QUERY.with_label_values(&["miss"]).inc();
-                    match self.embedder.as_ref().encode(&neg_text) {
+                    match self.embedder.as_ref().encode_query(&neg_text) {
                         Ok(emb) => {
                             self.query_cache.insert(neg_hash, emb.clone());
                             EMBEDDING_CACHE_QUERY_SIZE.set(self.query_cache.entry_count() as i64);
