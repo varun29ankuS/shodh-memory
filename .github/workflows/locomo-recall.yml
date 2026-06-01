@@ -50,6 +50,14 @@ on:
         description: 'Reward learning-rate multiplier for the in-memory RL (default 1.0). Raise (e.g. 8) to amplify reward-modulated plasticity and see if it moves rank, not just score.'
         required: false
         default: ''
+      graph_idf:
+        description: 'Graph fine-tune: set true for IDF-at-birth edge weighting (born-weak speaker hubs).'
+        required: false
+        default: ''
+      hub_max:
+        description: 'Graph fine-tune: max entity degree before it stops accreting edges (default 300; lower e.g. 50 to kill speaker hubs early).'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -137,6 +145,8 @@ jobs:
         if: ${{ github.event.inputs.learning_curve == 'true' }}
         env:
           SHODH_REWARD_LR_MULT: ${{ github.event.inputs.reward_lr_mult }}
+          SHODH_GRAPH_IDF_EDGES: ${{ github.event.inputs.graph_idf }}
+          SHODH_HUB_DEGREE_MAX: ${{ github.event.inputs.hub_max }}
         run: |
           ./target/release/recall-eval \
             --suite smoke \

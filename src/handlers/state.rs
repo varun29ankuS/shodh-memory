@@ -3137,6 +3137,22 @@ impl MultiUserMemoryManager {
         // memories from dominating graph traversal. Stacks with reward modulation above.
         let edge_strength = edge_strength * experience.experience_type.edge_weight_multiplier();
 
+        // Graph fine-tuning knobs (anti-hub), read once outside the O(n^2) loop:
+        // - SHODH_HUB_DEGREE_MAX: degree above which an entity stops accreting
+        //   new edges (default 300 — historically far too late; lower it to stop
+        //   speaker hubs at the source).
+        // - SHODH_GRAPH_IDF_EDGES: when on, scale each edge's birth strength by
+        //   the less-selective endpoint, so a ubiquitous speaker (low curvature
+        //   selectivity) forms near-zero-weight edges while topic↔topic edges
+        //   stay strong. IDF-at-birth instead of a hard degree cliff.
+        let hub_max: usize = std::env::var("SHODH_HUB_DEGREE_MAX")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        let idf_edges: bool = std::env::var("SHODH_GRAPH_IDF_EDGES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         for i in 0..entity_uuids.len() {
             for j in (i + 1)..entity_uuids.len() {
                 // Edge quality gate using graph reputation
@@ -3158,8 +3174,8 @@ impl MultiUserMemoryManager {
                 }
 
                 // Skip: either endpoint is a saturated hub
-                if rep_i.as_ref().is_some_and(|r| r.degree > 300)
-                    || rep_j.as_ref().is_some_and(|r| r.degree > 300)
+                if rep_i.as_ref().is_some_and(|r| r.degree > hub_max)
+                    || rep_j.as_ref().is_some_and(|r| r.degree > hub_max)
                 {
                     tracing::debug!(
                         "Skipping edge '{}'-'{}': hub saturated (degrees: {:?}, {:?})",
@@ -3171,6 +3187,17 @@ impl MultiUserMemoryManager {
                     continue;
                 }
 
+                // IDF-at-birth: born-weak hubs. Scale by the LESS-selective
+                // endpoint so a speaker (low selectivity) can't form strong edges
+                // to everything it co-occurs with.
+                let pair_strength = if idf_edges {
+                    let sel_i = rep_i.as_ref().map(|r| r.selectivity).unwrap_or(1.0);
+                    let sel_j = rep_j.as_ref().map(|r| r.selectivity).unwrap_or(1.0);
+                    edge_strength * sel_i.min(sel_j).clamp(0.05, 1.0)
+                } else {
+                    edge_strength
+                };
+
                 let edge = RelationshipEdge {
                     uuid: uuid::Uuid::new_v4(),
                     from_entity: entity_uuids[i].1,
@@ -3179,7 +3206,7 @@ impl MultiUserMemoryManager {
                         &entity_uuids[i].2,
                         &entity_uuids[j].2,
                     ),
-                    strength: edge_strength,
+                    strength: pair_strength,
                     created_at: now,
                     valid_at: now,
                     invalidated_at: None,
