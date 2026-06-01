@@ -5785,6 +5785,20 @@ impl MemorySystem {
     ///
     /// # Returns
     /// Statistics about what was reinforced
+    /// Reward learning-rate multiplier for reward-modulated Hebbian plasticity
+    /// (the in-memory RL). Scales the importance/edge update applied on
+    /// Helpful/Misleading feedback. Default 1.0 (the calibrated constants);
+    /// `SHODH_REWARD_LR_MULT` lets us amplify the reward loop and measure when
+    /// it moves rank, not just score. The default-1.0 path is byte-identical to
+    /// the prior behavior.
+    fn reward_lr_mult(&self) -> f32 {
+        std::env::var("SHODH_REWARD_LR_MULT")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|m| *m > 0.0)
+            .unwrap_or(1.0)
+    }
+
     pub fn reinforce_recall(
         &self,
         memory_ids: &[MemoryId],
@@ -5931,11 +5945,11 @@ impl MemorySystem {
                 memory.record_access();
                 match &outcome {
                     RetrievalOutcome::Helpful => {
-                        memory.boost_importance(HEBBIAN_BOOST_HELPFUL * error_multiplier);
+                        memory.boost_importance(HEBBIAN_BOOST_HELPFUL * error_multiplier * self.reward_lr_mult());
                         stats.importance_boosts += 1;
                     }
                     RetrievalOutcome::Misleading => {
-                        memory.decay_importance(HEBBIAN_DECAY_MISLEADING * error_multiplier);
+                        memory.decay_importance(HEBBIAN_DECAY_MISLEADING * error_multiplier * self.reward_lr_mult());
                         stats.importance_decays += 1;
                     }
                     RetrievalOutcome::Neutral => {
@@ -5959,12 +5973,12 @@ impl MemorySystem {
                         memory.record_access();
                         match &outcome {
                             RetrievalOutcome::Helpful => {
-                                memory.boost_importance(HEBBIAN_BOOST_HELPFUL * error_multiplier);
+                                memory.boost_importance(HEBBIAN_BOOST_HELPFUL * error_multiplier * self.reward_lr_mult());
                                 stats.importance_boosts += 1;
                             }
                             RetrievalOutcome::Misleading => {
                                 memory
-                                    .decay_importance(HEBBIAN_DECAY_MISLEADING * error_multiplier);
+                                    .decay_importance(HEBBIAN_DECAY_MISLEADING * error_multiplier * self.reward_lr_mult());
                                 stats.importance_decays += 1;
                             }
                             RetrievalOutcome::Neutral => {

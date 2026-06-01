@@ -43,9 +43,13 @@ on:
         required: false
         default: ''
       learning_curve:
-        description: 'Learning-curve diagnostic ("smarter with use"): set true to skip recall and instead measure whether gold rank/score improves as memories are reinforced over cycles (runs on the fast smoke corpus).'
+        description: 'Learning-curve diagnostic ("smarter with use"): set true to skip recall and instead measure the reward gradient (Helpful/Neutral/Misleading) over reinforcement cycles on the smoke corpus.'
         required: false
         default: 'false'
+      reward_lr_mult:
+        description: 'Reward learning-rate multiplier for the in-memory RL (default 1.0). Raise (e.g. 8) to amplify reward-modulated plasticity and see if it moves rank, not just score.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -129,8 +133,10 @@ jobs:
           print("\ngold≥2seed% = the G5 multi-seed discrimination signal. If ~0, queries resolve to too few graph cues; the lever is richer query→graph cue extraction, not episode scoring.")
           PY
 
-      - name: Learning-curve diagnostic (smarter-with-use)
+      - name: Learning-curve diagnostic (reward gradient)
         if: ${{ github.event.inputs.learning_curve == 'true' }}
+        env:
+          SHODH_REWARD_LR_MULT: ${{ github.event.inputs.reward_lr_mult }}
         run: |
           ./target/release/recall-eval \
             --suite smoke \
@@ -138,19 +144,22 @@ jobs:
             --lc-cycles 8 \
             --output unused-recall.json \
             --storage ./lc-storage 2>&1 | tee learning-curve.log
-          echo "## Learning curve — does recall improve with use?" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Learning curve — reward-modulated plasticity (in-memory RL)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Reward LR mult: \`${SHODH_REWARD_LR_MULT:-1.0 (default)}\`" >> "$GITHUB_STEP_SUMMARY"
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
           d = json.load(open('learning-curve.json'))
-          print(f"- tracked cases (cold gold-rank in headroom): {d['tracked_cases']}, cycles: {d['cycles']}")
-          print(f"- **mean rank: {d['mean_rank_by_cycle'][0]:.2f} (cold) -> {d['mean_rank_by_cycle'][-1]:.2f} (final)**  delta {d['mean_rank_delta']:+.3f} (negative = climbs with use)")
-          print(f"- mean score: {d['mean_score_by_cycle'][0]:.4f} -> {d['mean_score_by_cycle'][-1]:.4f}  delta {d['mean_score_delta']:+.4f}")
-          print(f"- improved: {d['improved']}  worsened: {d['worsened']}  unchanged: {d['unchanged']}")
-          print("\n| cycle | mean gold rank | mean gold score |")
-          print("| --- | --- | --- |")
-          for i,(r,s) in enumerate(zip(d['mean_rank_by_cycle'], d['mean_score_by_cycle'])):
-              print(f"| {i}{' (cold)' if i==0 else ''} | {r:.3f} | {s:.4f} |")
-          print("\nrank DOWN + score UP across cycles = the 'smarter with use' claim, measured.")
+          print(f"\ncycles: {d['cycles']}. A real reward gradient: Helpful rank DOWN, Misleading rank UP, Neutral flat.\n")
+          print("| outcome | tracked | rank cold→final (Δ) | score cold→final (Δ) | imp/wor/unc |")
+          print("| --- | --- | --- | --- | --- |")
+          for a in d['arms']:
+              r=a['mean_rank_by_cycle']; s=a['mean_score_by_cycle']
+              print(f"| **{a['outcome']}** | {a['tracked_cases']} | {r[0]:.2f}→{r[-1]:.2f} ({a['mean_rank_delta']:+.3f}) | {s[0]:.4f}→{s[-1]:.4f} ({a['mean_score_delta']:+.4f}) | {a['improved']}/{a['worsened']}/{a['unchanged']} |")
+          h=next((a for a in d['arms'] if a['outcome']=='Helpful'),None)
+          m=next((a for a in d['arms'] if a['outcome']=='Misleading'),None)
+          if h and m:
+              spread = m['mean_rank_delta'] - h['mean_rank_delta']
+              print(f"\nGradient spread (Misleading − Helpful rank Δ): **{spread:+.3f}** — bigger = reward steers recall more strongly.")
           PY
 
       - name: Run LoCoMo recall@k

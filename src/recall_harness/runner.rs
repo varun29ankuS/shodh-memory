@@ -28,7 +28,8 @@ use super::fixtures::{
 use super::metrics::Metrics;
 use super::report::{
     aggregate_category, aggregate_layer, median, CategoryReport, Failure, LayerReport,
-    LearningCurveReport, PerCaseRecord, ReachabilityCategory, ReachabilityReport, Report, SMOKE_K,
+    LearningCurveArm, LearningCurveReport, PerCaseRecord, ReachabilityCategory, ReachabilityReport,
+    Report, SMOKE_K,
 };
 
 /// Embedder identifier emitted in the report. Matches the model wired into
@@ -873,29 +874,23 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
 /// breaks the symmetry. A genuine associative memory shows the gold's rank fall
 /// and score rise across cycles; a static retriever stays flat. Full mode only
 /// (Hebbian/LTP writes are gated to `Full`).
-pub fn analyze_learning_curve(inputs: &RunInputs, cycles: usize) -> Result<LearningCurveReport> {
-    pin_harness_threads();
+/// One reinforcement-outcome arm: fresh ingest, then for each headroom case run
+/// `cyc` rounds of recall + `outcome` feedback on the gold, tracking the gold's
+/// rank/score per cycle.
+fn run_learning_arm(
+    storage_path: &Path,
+    corpus: &[CorpusItem],
+    cases: &[SmokeCase],
+    cyc: usize,
+    outcome: RetrievalOutcome,
+    outcome_name: &str,
+) -> Result<LearningCurveArm> {
     const TRACK_K: usize = 50;
     const MIN_COLD_RANK: usize = 2;
     const MAX_COLD_RANK: usize = 30;
 
-    let corpus_path = inputs
-        .corpus_path
-        .clone()
-        .unwrap_or_else(|| fixtures::manifest_path(SMOKE_CORPUS_PATH));
-    let cases_path = inputs
-        .cases_path
-        .clone()
-        .unwrap_or_else(|| fixtures::manifest_path(SMOKE_CASES_PATH));
-    let corpus = fixtures::load_corpus(&corpus_path)
-        .with_context(|| format!("loading corpus from {}", corpus_path.display()))?;
-    let cases = fixtures::load_smoke_cases(&cases_path)
-        .with_context(|| format!("loading cases from {}", cases_path.display()))?;
-    fixtures::validate_structure(&corpus, &cases)
-        .with_context(|| format!("{} suite failed structural validation", inputs.suite))?;
-
-    let manager = build_manager(&inputs.storage_path)?;
-    let id_map = ingest_corpus(&manager, &corpus)?;
+    let manager = build_manager(storage_path)?;
+    let id_map = ingest_corpus(&manager, corpus)?;
     let system = manager.get_user_memory(EVAL_USER)?;
 
     // Recall the query (Full mode → reinforcement active) and return the ranked
@@ -913,7 +908,6 @@ pub fn analyze_learning_curve(inputs: &RunInputs, cycles: usize) -> Result<Learn
         }
     };
 
-    let cyc = cycles.max(1);
     let mut rank_sums = vec![0.0f64; cyc + 1];
     let mut score_sums = vec![0.0f64; cyc + 1];
     let mut tracked = 0usize;
@@ -921,7 +915,7 @@ pub fn analyze_learning_curve(inputs: &RunInputs, cycles: usize) -> Result<Learn
     let mut rank_delta_sum = 0.0f64;
     let mut score_delta_sum = 0.0f64;
 
-    for case in &cases {
+    for case in cases {
         let gold: HashSet<Uuid> = case
             .relevant
             .iter()
@@ -955,9 +949,7 @@ pub fn analyze_learning_curve(inputs: &RunInputs, cycles: usize) -> Result<Learn
         let gold_ids: Vec<MemoryId> = gold.iter().map(|u| MemoryId(*u)).collect();
         let (mut last_rank, mut last_score) = (r0, s0);
         for c in 1..=cyc {
-            let _ = system
-                .read()
-                .reinforce_recall(&gold_ids, RetrievalOutcome::Helpful);
+            let _ = system.read().reinforce_recall(&gold_ids, outcome);
             let ranked = recall_ranked(&case.query);
             let (rc, sc) = gold_rank(&ranked).unwrap_or((TRACK_K + 1, 0.0));
             rank_sums[c] += rc as f64;
@@ -976,10 +968,8 @@ pub fn analyze_learning_curve(inputs: &RunInputs, cycles: usize) -> Result<Learn
     }
 
     let n = tracked.max(1) as f64;
-    Ok(LearningCurveReport {
-        suite: inputs.suite.clone(),
-        git_sha: inputs.git_sha.clone(),
-        cycles: cyc,
+    Ok(LearningCurveArm {
+        outcome: outcome_name.to_string(),
         tracked_cases: tracked,
         mean_rank_by_cycle: rank_sums.iter().map(|s| s / n).collect(),
         mean_score_by_cycle: score_sums.iter().map(|s| s / n).collect(),
@@ -988,6 +978,53 @@ pub fn analyze_learning_curve(inputs: &RunInputs, cycles: usize) -> Result<Learn
         unchanged,
         mean_rank_delta: rank_delta_sum / n,
         mean_score_delta: score_delta_sum / n,
+    })
+}
+
+/// Learning-curve diagnostic — see [`LearningCurveReport`]. Runs three arms
+/// (Helpful / Neutral / Misleading), each on a FRESH ingest, to expose the
+/// reward GRADIENT: a real reward-modulated memory pushes the gold UP under
+/// Helpful, DOWN under Misleading, and flat under Neutral. Amplify the reward
+/// learning rate via `SHODH_REWARD_LR_MULT` and re-run to see if a stronger
+/// reward moves rank, not just score.
+pub fn analyze_learning_curve(inputs: &RunInputs, cycles: usize) -> Result<LearningCurveReport> {
+    pin_harness_threads();
+
+    let corpus_path = inputs
+        .corpus_path
+        .clone()
+        .unwrap_or_else(|| fixtures::manifest_path(SMOKE_CORPUS_PATH));
+    let cases_path = inputs
+        .cases_path
+        .clone()
+        .unwrap_or_else(|| fixtures::manifest_path(SMOKE_CASES_PATH));
+    let corpus = fixtures::load_corpus(&corpus_path)
+        .with_context(|| format!("loading corpus from {}", corpus_path.display()))?;
+    let cases = fixtures::load_smoke_cases(&cases_path)
+        .with_context(|| format!("loading cases from {}", cases_path.display()))?;
+    fixtures::validate_structure(&corpus, &cases)
+        .with_context(|| format!("{} suite failed structural validation", inputs.suite))?;
+
+    let cyc = cycles.max(1);
+    let arms_spec = [
+        ("Helpful", RetrievalOutcome::Helpful),
+        ("Neutral", RetrievalOutcome::Neutral),
+        ("Misleading", RetrievalOutcome::Misleading),
+    ];
+    let mut arms = Vec::with_capacity(arms_spec.len());
+    for (name, outcome) in arms_spec {
+        // Fresh storage per arm — reinforcement mutates state; arms must not bleed.
+        let arm_storage = inputs.storage_path.join(name.to_lowercase());
+        let arm = run_learning_arm(&arm_storage, &corpus, &cases, cyc, outcome, name)
+            .with_context(|| format!("learning-curve arm {name}"))?;
+        arms.push(arm);
+    }
+
+    Ok(LearningCurveReport {
+        suite: inputs.suite.clone(),
+        git_sha: inputs.git_sha.clone(),
+        cycles: cyc,
+        arms,
     })
 }
 

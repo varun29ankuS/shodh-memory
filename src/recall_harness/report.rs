@@ -378,19 +378,30 @@ pub struct LearningCurveReport {
     pub suite: String,
     pub git_sha: String,
     pub cycles: usize,
+    /// One arm per reinforcement-outcome (Helpful / Neutral / Misleading), each
+    /// run on a FRESH ingest. The reward-gradient test: a genuine reward signal
+    /// pushes the gold UP under Helpful, DOWN under Misleading, and leaves it
+    /// flat under Neutral. If all three look the same, the reward loop is inert.
+    pub arms: Vec<LearningCurveArm>,
+}
+
+/// One reinforcement-outcome arm of the learning-curve diagnostic.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LearningCurveArm {
+    /// "Helpful" | "Neutral" | "Misleading".
+    pub outcome: String,
     /// Cases whose cold gold-rank fell in the headroom band (≥2, ≤cap).
     pub tracked_cases: usize,
     /// Mean gold rank at each cycle: index 0 = cold, 1..=cycles after each
-    /// reinforcement. DECREASING = learning.
+    /// reinforcement. DECREASING under Helpful = learning.
     pub mean_rank_by_cycle: Vec<f64>,
-    /// Mean gold score at each cycle. RISING = the reinforced memory is boosted
-    /// even when its integer rank hasn't moved yet.
+    /// Mean gold score at each cycle.
     pub mean_score_by_cycle: Vec<f64>,
     /// Cases where final rank < initial rank (the memory got easier to recall).
     pub improved: usize,
     pub worsened: usize,
     pub unchanged: usize,
-    /// Mean (final_rank − initial_rank); NEGATIVE = "smarter with use", quantified.
+    /// Mean (final_rank − initial_rank); NEGATIVE = climbed with use.
     pub mean_rank_delta: f64,
     pub mean_score_delta: f64,
 }

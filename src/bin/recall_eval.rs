@@ -400,25 +400,34 @@ fn write_learning_curve(path: &std::path::Path, report: &LearningCurveReport) ->
 
 fn summarise_learning_curve(report: &LearningCurveReport) {
     eprintln!(
-        "recall-eval: learning curve (suite={} sha={} cycles={} tracked_cases={})",
-        report.suite, report.git_sha, report.cycles, report.tracked_cases
+        "recall-eval: learning curve (suite={} sha={} cycles={}) — reward gradient",
+        report.suite, report.git_sha, report.cycles
     );
-    eprintln!("  cycle:  mean_gold_rank   mean_gold_score   (rank DOWN + score UP = learning)");
-    for c in 0..report.mean_rank_by_cycle.len() {
-        let tag = if c == 0 { "cold" } else { "" };
+    for arm in &report.arms {
+        let (first, last) = (
+            arm.mean_rank_by_cycle.first().copied().unwrap_or(0.0),
+            arm.mean_rank_by_cycle.last().copied().unwrap_or(0.0),
+        );
+        let (sfirst, slast) = (
+            arm.mean_score_by_cycle.first().copied().unwrap_or(0.0),
+            arm.mean_score_by_cycle.last().copied().unwrap_or(0.0),
+        );
         eprintln!(
-            "   {:>2} {:<5} {:>14.3} {:>17.4}",
-            c, tag, report.mean_rank_by_cycle[c], report.mean_score_by_cycle[c]
+            "  [{:<10}] tracked={:<3} rank {:.2}->{:.2} (Δ{:+.3}) score {:.4}->{:.4} (Δ{:+.4})  imp/wor/unc={}/{}/{}",
+            arm.outcome,
+            arm.tracked_cases,
+            first,
+            last,
+            arm.mean_rank_delta,
+            sfirst,
+            slast,
+            arm.mean_score_delta,
+            arm.improved,
+            arm.worsened,
+            arm.unchanged
         );
     }
-    eprintln!(
-        "  improved={} worsened={} unchanged={}  mean_rank_delta={:+.3} (neg=better) mean_score_delta={:+.4}",
-        report.improved,
-        report.worsened,
-        report.unchanged,
-        report.mean_rank_delta,
-        report.mean_score_delta
-    );
+    eprintln!("  Helpful rank DOWN, Misleading rank UP => reward steers recall (a real gradient).");
 }
 
 fn summarise(report: &Report) {
