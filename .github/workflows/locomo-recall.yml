@@ -58,6 +58,10 @@ on:
         description: 'Graph fine-tune: max entity degree before it stops accreting edges (default 300; lower e.g. 50 to kill speaker hubs early).'
         required: false
         default: ''
+      concepts:
+        description: 'L1 substrate test: set true to add YAKE concept keyphrases as graph entities (topic nodes, not just person names). Should grow total_entities + gold≥2seed%.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -123,6 +127,7 @@ jobs:
         env:
           SHODH_GRAPH_IDF_EDGES: ${{ github.event.inputs.graph_idf }}
           SHODH_HUB_DEGREE_MAX: ${{ github.event.inputs.hub_max }}
+          SHODH_CONCEPT_ENTITIES: ${{ github.event.inputs.concepts }}
         run: |
           ./target/release/recall-eval \
             --suite locomo \

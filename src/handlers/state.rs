@@ -3026,16 +3026,70 @@ impl MultiUserMemoryManager {
             })
             .collect();
 
-        // Combine all entity groups for insertion, capped at 10 to prevent
-        // O(n²) edge explosion (10 entities → max 45 edges)
+        // Concept entities (L1 substrate test): YAKE keyphrases as graph nodes so
+        // the graph captures TOPICS — the discriminative anchors — not just person
+        // names. Edge-legal: YAKE is statistical, no model. Gated by
+        // SHODH_CONCEPT_ENTITIES. The production upgrade is GLiNER2 entity+relation
+        // extraction; this tests whether concept nodes move total_entities and
+        // gold≥2seed% off the floor before that integration.
+        let concepts_on = std::env::var("SHODH_CONCEPT_ENTITIES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let concept_entities: Vec<(String, EntityNode)> = if concepts_on {
+            crate::embeddings::keywords::KeywordExtractor::new()
+                .extract(&experience.content)
+                .into_iter()
+                .take(8)
+                .filter_map(|kw| {
+                    let name = kw.text.trim().to_string();
+                    if name.len() < 3 || known_names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                        return None;
+                    }
+                    known_names.push(name.clone());
+                    let emb = entity_name_embeddings.and_then(|m| m.get(&name)).cloned();
+                    let concept_label = EntityLabel::Other("Concept".to_string());
+                    Some((
+                        name.clone(),
+                        EntityNode {
+                            uuid: uuid::Uuid::new_v4(),
+                            name,
+                            labels: vec![concept_label.clone()],
+                            created_at: now,
+                            last_seen_at: now,
+                            mention_count: 1,
+                            summary: String::new(),
+                            attributes: HashMap::new(),
+                            name_embedding: emb,
+                            salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
+                                &concept_label,
+                                false,
+                            ),
+                            is_proper_noun: false,
+                            selectivity: None,
+                        },
+                    ))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Combine all entity groups for insertion, capped to prevent O(n²) edge
+        // explosion. Widen the cap when concept entities are on so topic nodes
+        // aren't crowded out by person names.
         let mut all_entities: Vec<(String, EntityNode)> = ner_entities
             .into_iter()
             .chain(tag_entities)
             .chain(allcaps_entities)
             .chain(issue_entities)
+            .chain(concept_entities)
             .collect();
         all_entities.sort_by(|a, b| b.1.salience.total_cmp(&a.1.salience));
-        let entity_cap = self.server_config.max_entities_per_memory;
+        let entity_cap = if concepts_on {
+            self.server_config.max_entities_per_memory.max(16)
+        } else {
+            self.server_config.max_entities_per_memory
+        };
         all_entities.truncate(entity_cap);
 
         // =====================================================================
