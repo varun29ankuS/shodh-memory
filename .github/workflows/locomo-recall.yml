@@ -120,17 +120,26 @@ jobs:
 
       - name: Graph reachability diagnostic
         if: ${{ github.event.inputs.reachability == 'true' }}
+        env:
+          SHODH_GRAPH_IDF_EDGES: ${{ github.event.inputs.graph_idf }}
+          SHODH_HUB_DEGREE_MAX: ${{ github.event.inputs.hub_max }}
         run: |
           ./target/release/recall-eval \
             --suite locomo \
             --graph-reachability locomo-reachability.json \
             --output locomo-recall.json \
             --storage ./locomo-storage 2>&1 | tee locomo-reachability.log
-          echo "## LoCoMo graph reachability (pure topology, activation-free)" >> "$GITHUB_STEP_SUMMARY"
+          echo "## LoCoMo graph reachability + degree distribution" >> "$GITHUB_STEP_SUMMARY"
+          echo "Graph tuning — IDF edges: \`${SHODH_GRAPH_IDF_EDGES:-off}\`  hub_max: \`${SHODH_HUB_DEGREE_MAX:-300}\`" >> "$GITHUB_STEP_SUMMARY"
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
           d = json.load(open('locomo-reachability.json'))
           def pct(n,dn): return 0.0 if dn==0 else 100.0*n/dn
+          gs = d.get('graph', {})
+          print(f"### Graph structure (anti-hub scoreboard)")
+          print(f"- entities: {gs.get('total_entities',0)}  edges(est): {gs.get('total_edges',0)}  mean degree: {gs.get('mean_degree',0):.1f}")
+          print(f"- **max degree: {gs.get('max_degree',0)}**  hubs (degree>{gs.get('hub_threshold',50)}): **{gs.get('hub_count',0)}**  top degrees: {gs.get('top_degrees',[])}")
+          print(f"  (max degree + hub count should FALL with IDF edges / lower hub_max)\n")
           print(f"- max_hops: {d['max_hops']}  (≤2hop% = canonical double-hop signal)")
           print("\n| category | cases | gold | ≤1hop% | ≤2hop% | unreach% | no-seed% | cases≥2seed% | gold≥2seed% |")
           print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")

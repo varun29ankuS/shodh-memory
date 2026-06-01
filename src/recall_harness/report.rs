@@ -333,6 +333,27 @@ pub struct ReachabilityReport {
     pub max_hops: usize,
     pub overall: ReachabilityCategory,
     pub by_category: BTreeMap<String, ReachabilityCategory>,
+    /// Degree distribution of the built graph — the direct scoreboard for
+    /// anti-hub construction tuning (IDF-at-birth edges, hub-degree cap). The
+    /// hub pathology only appears at corpus scale (LoCoMo), so this is where the
+    /// tuning is actually measurable.
+    #[serde(default)]
+    pub graph: GraphStructure,
+}
+
+/// Graph degree-distribution summary (for anti-hub construction tuning).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GraphStructure {
+    pub total_entities: usize,
+    pub total_edges: usize,
+    /// Highest single-entity degree (the worst hub — should fall with tuning).
+    pub max_degree: usize,
+    pub mean_degree: f64,
+    /// Number of entities whose degree exceeds the hub report threshold.
+    pub hub_count: usize,
+    pub hub_threshold: usize,
+    /// Top entity degrees, descending (the hub tail).
+    pub top_degrees: Vec<usize>,
 }
 
 /// Reachability tallies for one category (cumulative within-N-hops counts).

@@ -28,8 +28,8 @@ use super::fixtures::{
 use super::metrics::Metrics;
 use super::report::{
     aggregate_category, aggregate_layer, median, CategoryReport, Failure, LayerReport,
-    LearningCurveArm, LearningCurveReport, PerCaseRecord, ReachabilityCategory, ReachabilityReport,
-    Report, SMOKE_K,
+    GraphStructure, LearningCurveArm, LearningCurveReport, PerCaseRecord, ReachabilityCategory,
+    ReachabilityReport, Report, SMOKE_K,
 };
 
 /// Embedder identifier emitted in the report. Matches the model wired into
@@ -726,6 +726,35 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
     let ner = manager.get_neural_ner();
     let graph = manager.get_user_graph(EVAL_USER)?;
 
+    // Degree distribution of the built graph — the direct scoreboard for
+    // anti-hub construction tuning (only visible at corpus scale, where the
+    // speaker hubs actually form).
+    let graph_structure = {
+        const HUB_REPORT_THRESHOLD: usize = 50;
+        let g = graph.read();
+        let entities = g.get_all_entities().unwrap_or_default();
+        let mut degrees: Vec<usize> = entities
+            .iter()
+            .map(|e| g.get_entity_relationships(&e.uuid).map(|r| r.len()).unwrap_or(0))
+            .collect();
+        degrees.sort_unstable_by(|a, b| b.cmp(a));
+        let total_entities = degrees.len();
+        let degree_sum: usize = degrees.iter().sum();
+        GraphStructure {
+            total_entities,
+            total_edges: degree_sum / 2,
+            max_degree: degrees.first().copied().unwrap_or(0),
+            mean_degree: if total_entities == 0 {
+                0.0
+            } else {
+                degree_sum as f64 / total_entities as f64
+            },
+            hub_count: degrees.iter().filter(|d| **d > HUB_REPORT_THRESHOLD).count(),
+            hub_threshold: HUB_REPORT_THRESHOLD,
+            top_degrees: degrees.iter().take(8).copied().collect(),
+        }
+    };
+
     let mut by_category: BTreeMap<String, ReachabilityCategory> = BTreeMap::new();
     let mut overall = ReachabilityCategory::default();
 
@@ -858,6 +887,7 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
         max_hops: MAX_HOPS,
         overall,
         by_category,
+        graph: graph_structure,
     })
 }
 
