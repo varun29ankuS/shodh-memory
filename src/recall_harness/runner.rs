@@ -725,6 +725,13 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
     let id_map = ingest_corpus(&manager, &corpus)?;
     let ner = manager.get_neural_ner();
     let graph = manager.get_user_graph(EVAL_USER)?;
+    // Mirror the ingest-side concept gate on the query side so the test is
+    // symmetric: concept nodes added to the corpus are only seedable if the
+    // query also extracts concepts.
+    let concept_query_seeding = std::env::var("SHODH_CONCEPT_ENTITIES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let keyword_extractor = manager.get_keyword_extractor();
 
     // Degree distribution of the built graph — the direct scoreboard for
     // anti-hub construction tuning (only visible at corpus scale, where the
@@ -776,10 +783,24 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
 
         // Seed entities: NER over the query text, resolved to graph nodes by
         // name (same name-keyed lookup the ingest path builds them under).
-        let seed_names: Vec<String> = match ner.extract(&case.query) {
+        let mut seed_names: Vec<String> = match ner.extract(&case.query) {
             Ok(es) => es.into_iter().map(|e| e.text).collect(),
             Err(_) => Vec::new(),
         };
+        // Symmetric concept seeding: when concept entities are added to the
+        // corpus graph (SHODH_CONCEPT_ENTITIES), the QUERY must also resolve to
+        // them or those nodes are unreachable as seeds. Extract YAKE keyphrases
+        // from the query (mirroring the ingest-side concept extraction) so a
+        // concept→concept seed can form. Without this the corpus concept nodes
+        // exist but no query ever lands on them.
+        if concept_query_seeding {
+            for kw in keyword_extractor.extract(&case.query).into_iter().take(8) {
+                let name = kw.text.trim().to_string();
+                if name.len() >= 3 {
+                    seed_names.push(name);
+                }
+            }
+        }
         let g = graph.read();
         let mut seed_uuids: HashSet<Uuid> = HashSet::new();
         for name in &seed_names {
