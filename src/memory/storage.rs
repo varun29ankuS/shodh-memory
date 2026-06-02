@@ -728,99 +728,57 @@ fn deserialize_memory_inner(data: &[u8]) -> Result<(Memory, bool)> {
 }
 
 // ============================================================================
-// FIELD-LEVEL ENCRYPTION
-// Centralized encrypt-before-serialize / decrypt-after-deserialize logic so
-// every storage path transparently encrypts the `content` field at rest when
+// RECORD-LEVEL ENCRYPTION
+// Centralized serialize-before-encrypt / decrypt-before-deserialize logic so
+// every storage path makes the full Memory record opaque at rest when
 // SHODH_ENCRYPTION_KEY is configured. See `crate::encryption`.
 // ============================================================================
 
-/// Process-global field-level content encryptor, initialised once from
+/// Process-global record encryptor, initialised once from
 /// `SHODH_ENCRYPTION_KEY`. `None` means encryption is disabled (the default).
 static CONTENT_ENCRYPTOR: OnceLock<Option<crate::encryption::FieldEncryptor>> = OnceLock::new();
 
-/// Return the process-global content encryptor, or `None` when encryption is
-/// disabled. Initialised lazily on first use; a malformed key is logged loudly
-/// and treated as disabled rather than silently corrupting writes.
+/// Return the process-global record encryptor, or `None` when encryption is
+/// disabled. A malformed key is a hard startup/configuration failure: treating
+/// it as "disabled" would silently mix plaintext and encrypted records.
 fn encryptor() -> Option<&'static crate::encryption::FieldEncryptor> {
     CONTENT_ENCRYPTOR
         .get_or_init(|| match crate::encryption::FieldEncryptor::from_env() {
             Ok(enc) => enc,
             Err(e) => {
-                tracing::error!(
-                    "SHODH_ENCRYPTION_KEY is set but invalid — content encryption DISABLED: {e}"
-                );
-                None
+                panic!("SHODH_ENCRYPTION_KEY is set but invalid; refusing to continue: {e}");
             }
         })
         .as_ref()
 }
 
-/// Serialize a memory to bytes, encrypting the `content` field if encryption is enabled.
-///
-/// When encryption is configured, the plaintext content is encrypted and stored
-/// base64-encoded in the content field (raw ciphertext is not valid UTF-8), then
-/// the whole memory is serialized normally. With no key configured this is a
-/// plain `encode_sho`, so existing plaintext stores are unaffected.
+/// Serialize a memory to bytes, encrypting the entire serialized record if
+/// encryption is enabled.
 pub(crate) fn encode_memory(memory: &Memory) -> Result<Vec<u8>> {
-    match encryptor() {
-        Some(enc) => {
-            let encrypted_bytes = enc
-                .encrypt_content(&memory.experience.content)
-                .context("Failed to encrypt memory content")?;
-            use base64::Engine;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&encrypted_bytes);
-            let mut encrypted_memory = memory.clone();
-            encrypted_memory.experience.content = encoded;
-            crate::serialization::encode_sho(&encrypted_memory)
-        }
-        None => crate::serialization::encode_sho(memory),
+    let encoded = crate::serialization::encode_sho(memory)?;
+    if let Some(enc) = encryptor() {
+        enc.encrypt_bytes(&encoded)
+            .context("Failed to encrypt serialized memory record")
+    } else {
+        Ok(encoded)
     }
 }
 
-/// Decrypt the `content` field of a memory in-place if it was stored encrypted.
-///
-/// Checks whether the content is base64-encoded encrypted data (decodes and
-/// looks for the `ENC\0` marker). Plaintext content — including legacy data
-/// written before encryption was enabled — is left unchanged.
-fn decrypt_memory_content(memory: &mut Memory) {
-    let enc = match encryptor() {
-        Some(enc) => enc,
-        None => return,
-    };
-
-    use base64::Engine;
-    let decoded = match base64::engine::general_purpose::STANDARD.decode(&memory.experience.content)
-    {
-        Ok(bytes) => bytes,
-        Err(_) => return, // Not base64 — plaintext content, leave unchanged
-    };
-
-    if !crate::encryption::FieldEncryptor::is_encrypted(&decoded) {
-        return; // No encryption marker — plaintext that happens to be valid base64
-    }
-
-    match enc.decrypt_content(&decoded) {
-        Ok(plaintext) => {
-            memory.experience.content = plaintext;
-        }
-        Err(e) => {
-            tracing::error!(
-                "Failed to decrypt content for memory {} (leaving encrypted): {}",
-                memory.id.0,
-                e
-            );
-        }
-    }
-}
-
-/// Deserialize a memory, decrypting the `content` field if encryption is enabled.
-///
-/// Thin wrapper over [`deserialize_memory_inner`] so every read path
-/// transparently decrypts. See [`encode_memory`] for the write side.
+/// Deserialize a memory, decrypting the whole record first when needed.
 fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
-    let (mut memory, needs_migration) = deserialize_memory_inner(data)?;
-    decrypt_memory_content(&mut memory);
-    Ok((memory, needs_migration))
+    if crate::encryption::FieldEncryptor::is_encrypted(data) {
+        let enc = encryptor().ok_or_else(|| {
+            anyhow!(
+                "Encrypted memory record encountered, but SHODH_ENCRYPTION_KEY is not configured"
+            )
+        })?;
+        let decrypted = enc
+            .decrypt_bytes(data)
+            .context("Failed to decrypt memory record")?;
+        deserialize_memory_inner(&decrypted)
+    } else {
+        deserialize_memory_inner(data)
+    }
 }
 
 /// Public wrapper around the full legacy fallback chain, used by the migration module.
@@ -1174,6 +1132,7 @@ pub(crate) fn crc32_simple(data: &[u8]) -> u32 {
 
 /// Column family name for secondary indices (tags, types, timestamps, etc.)
 const CF_INDEX: &str = "memory_index";
+const ENCRYPTION_KEY_FINGERPRINT_KEY: &[u8] = b"meta:encryption_key_fingerprint";
 
 /// Maximum number of failed writes to buffer for retry.
 /// Small enough to bound memory usage (~100 memories × ~2KB ≈ 200KB)
@@ -1205,6 +1164,41 @@ impl MemoryStorage {
         self.db
             .cf_handle(CF_INDEX)
             .expect("memory_index CF must exist")
+    }
+
+    fn validate_encryption_key_sentinel(db: &DB) -> Result<()> {
+        let Some(cf) = db.cf_handle(CF_INDEX) else {
+            return Err(anyhow!(
+                "memory_index CF must exist for encryption sentinel"
+            ));
+        };
+        let configured = encryptor();
+        let stored = db
+            .get_cf(cf, ENCRYPTION_KEY_FINGERPRINT_KEY)
+            .context("Failed to read encryption key sentinel")?;
+
+        match (stored, configured) {
+            (Some(existing), Some(enc)) => {
+                let current = enc.key_fingerprint();
+                if existing.as_slice() != current.as_slice() {
+                    return Err(anyhow!(
+                        "SHODH_ENCRYPTION_KEY does not match the key fingerprint stored for this database"
+                    ));
+                }
+            }
+            (Some(_), None) => {
+                return Err(anyhow!(
+                    "This database has encrypted memories, but SHODH_ENCRYPTION_KEY is not configured"
+                ));
+            }
+            (None, Some(enc)) => {
+                db.put_cf(cf, ENCRYPTION_KEY_FINGERPRINT_KEY, enc.key_fingerprint())
+                    .context("Failed to write encryption key sentinel")?;
+            }
+            (None, None) => {}
+        }
+
+        Ok(())
     }
 
     /// Create a new memory storage.
@@ -1283,6 +1277,7 @@ impl MemoryStorage {
 
         // Migrate from old separate-DB layout if needed
         Self::migrate_from_separate_dbs(path, &db)?;
+        Self::validate_encryption_key_sentinel(&db)?;
 
         let write_mode = WriteMode::default();
         tracing::info!(

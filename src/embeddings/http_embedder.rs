@@ -11,8 +11,13 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use super::Embedder;
+
+const DEFAULT_BASE_URL: &str = "http://127.0.0.1:1234";
+const AVAILABILITY_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Configuration for HTTP embedding API
 #[derive(Debug, Clone)]
@@ -36,9 +41,23 @@ impl Default for HttpEmbedderConfig {
 impl HttpEmbedderConfig {
     /// Create configuration from environment variables
     pub fn from_env() -> Self {
+        let mut base_url = crate::integrations::resolve_api_url_override(
+            "SHODH_EMBEDDING_API_URL",
+            DEFAULT_BASE_URL,
+        );
+        if crate::integrations::is_insecure_remote_url(&base_url)
+            && !std::env::var("SHODH_ALLOW_INSECURE_REMOTE_EMBEDDER")
+                .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+                .unwrap_or(false)
+        {
+            tracing::warn!(
+                "SHODH_EMBEDDING_API_URL points to insecure remote HTTP; using localhost default. \
+                 Set SHODH_ALLOW_INSECURE_REMOTE_EMBEDDER=true to override."
+            );
+            base_url = DEFAULT_BASE_URL.to_string();
+        }
         Self {
-            base_url: std::env::var("SHODH_EMBEDDING_API_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:1234".to_string()),
+            base_url,
             model: std::env::var("SHODH_EMBEDDING_API_MODEL")
                 .unwrap_or_else(|_| "text-embedding-nomic-embed-text-v1.5".to_string()),
             api_key: std::env::var("SHODH_EMBEDDING_API_KEY").ok(),
@@ -84,6 +103,7 @@ pub struct HttpEmbedder {
     client: ureq::Agent,
     /// Cached dimension from first successful call
     cached_dimension: std::sync::OnceLock<usize>,
+    availability_cache: Mutex<Option<(Instant, bool)>>,
 }
 
 impl HttpEmbedder {
@@ -98,22 +118,25 @@ impl HttpEmbedder {
             config,
             client,
             cached_dimension: std::sync::OnceLock::new(),
+            availability_cache: Mutex::new(None),
         }
     }
 
-    /// Check if the embedding server is reachable.
+    /// Check if the embedding server is reachable without sending billable text.
     pub fn is_available(&self) -> bool {
-        let url = format!("{}/v1/embeddings", self.config.base_url);
-        // Send a minimal request to check connectivity
-        let req = EmbeddingRequest {
-            model: &self.config.model,
-            input: "test",
-        };
-        let mut builder = self.client.post(&url);
+        if let Some((checked_at, available)) = *self.availability_cache.lock().unwrap() {
+            if checked_at.elapsed() < AVAILABILITY_CACHE_TTL {
+                return available;
+            }
+        }
+
+        let mut builder = self.client.head(&self.config.base_url);
         if let Some(ref key) = self.config.api_key {
             builder = builder.header("Authorization", &format!("Bearer {key}"));
         }
-        builder.send_json(&req).is_ok()
+        let available = builder.call().is_ok();
+        *self.availability_cache.lock().unwrap() = Some((Instant::now(), available));
+        available
     }
 
     /// Encode a single text via the HTTP API.

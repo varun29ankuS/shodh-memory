@@ -12,6 +12,7 @@
 //! is not polluted by other test binaries.
 
 use std::env;
+use std::sync::Mutex;
 
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -27,8 +28,11 @@ const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1
 /// sharp even if the encoding layer adds incidental ASCII.
 const PLAINTEXT: &str = "rT4-encryption-round-trip-distinctive-plaintext-do-not-leak-Z9X-2026";
 
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 #[test]
 fn encryption_round_trip_against_real_rocksdb() {
+    let _guard = ENV_LOCK.lock().unwrap();
     env::set_var("SHODH_ENCRYPTION_KEY", KEY_HEX);
 
     let temp_dir = TempDir::new().expect("temp dir");
@@ -76,6 +80,14 @@ fn encryption_round_trip_against_real_rocksdb() {
          (raw len {}, plaintext len {})",
         raw.len(),
         PLAINTEXT.len(),
+    );
+    assert!(
+        raw.starts_with(b"ENC\0"),
+        "encrypted memory should be an opaque record-level ciphertext"
+    );
+    assert!(
+        !raw.starts_with(b"SHO"),
+        "the SHO serialization envelope should be inside the ciphertext"
     );
 
     env::remove_var("SHODH_ENCRYPTION_KEY");

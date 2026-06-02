@@ -1,8 +1,12 @@
-//! Field-level encryption for sensitive memory content.
+// Vendored from Veld @ dbc9036d5c29614eba9a6d43032038632d5612f9,
+// adapted for shodh-memory SHODH_* environment names.
 //!
-//! Encrypts the `content` field of Experience before storage and decrypts on read,
-//! using AES-256-GCM authenticated encryption. This provides confidentiality for
-//! memory content at rest in RocksDB without requiring full database encryption.
+//! Record-level encryption for memory payloads.
+//!
+//! Encrypts serialized memory records before storage and decrypts them on read,
+//! using AES-256-GCM authenticated encryption. This keeps content, summaries,
+//! tags, entity refs, embeddings, and other serialized `Memory` fields opaque
+//! at rest without requiring full database encryption.
 //!
 //! # Key Management
 //!
@@ -11,12 +15,12 @@
 //! - 64-character hex string (32 bytes decoded)
 //! - 44-character base64 string (32 bytes decoded)
 //!
-//! When the env var is unset or empty, encryption is disabled and content is stored
+//! When the env var is unset or empty, encryption is disabled and records are stored
 //! as plaintext (backward compatible).
 //!
 //! # Wire Format
 //!
-//! Encrypted content is stored as: `[12-byte nonce][ciphertext+tag]`
+//! Encrypted records are stored as: `[ENC\0 marker][12-byte nonce][ciphertext+tag]`
 //! The nonce is randomly generated per encryption operation for semantic security.
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
@@ -33,16 +37,17 @@ const NONCE_SIZE: usize = 12;
 /// ciphertext bytes beyond the authentication tag.
 const MIN_ENCRYPTED_SIZE: usize = NONCE_SIZE + 16;
 
-/// Prefix marker for encrypted content fields.
-/// Stored as the first 4 bytes before the nonce to distinguish encrypted content
-/// from plaintext during deserialization (backward compatibility with unencrypted data).
+/// Prefix marker for encrypted record blobs.
+///
+/// The NUL byte makes accidental collision with normal textual/base64 payloads
+/// vanishingly unlikely, and the marker lives outside the authenticated
+/// ciphertext so the storage layer can route encrypted and legacy plaintext
+/// records before decoding.
 const ENCRYPTED_MARKER: &[u8; 4] = b"ENC\x00";
 
-/// Field-level encryptor for memory content using AES-256-GCM.
+/// Record-level encryptor using AES-256-GCM.
 ///
 /// Holds a validated 256-bit key and provides encrypt/decrypt operations.
-/// Clone is derived so `MemoryStorage` can own a copy.
-///
 /// Key material is zeroized on drop: `key_bytes` is wrapped in `Zeroizing`
 /// (explicit memset-on-drop), and `Aes256Gcm` zeroizes its expanded key
 /// schedule via its own `ZeroizeOnDrop` impl when the `zeroize` feature is
@@ -84,8 +89,20 @@ impl FieldEncryptor {
         };
 
         let key_bytes = Self::decode_key(&key_str)?;
-        tracing::info!("Field-level encryption enabled (AES-256-GCM)");
+        tracing::info!("Record-level memory encryption enabled (AES-256-GCM)");
         Ok(Some(Self::new(&key_bytes)))
+    }
+
+    /// Stable non-secret key fingerprint used to detect key loss/mismatch.
+    ///
+    /// This is the first 4 bytes of SHA-256(key). It is not used for
+    /// cryptographic authentication; AES-GCM does that. It is only a startup
+    /// sentinel so operators get an explicit error instead of silent ciphertext
+    /// reads when the env key is absent or wrong.
+    pub fn key_fingerprint(&self) -> [u8; 4] {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(self.key_bytes.as_slice());
+        [digest[0], digest[1], digest[2], digest[3]]
     }
 
     /// Decode a key from hex (64 chars) or base64 (44 chars) into a 32-byte array.
@@ -128,15 +145,15 @@ impl FieldEncryptor {
         ))
     }
 
-    /// Encrypt a plaintext content string.
+    /// Encrypt an arbitrary byte payload.
     ///
     /// Returns bytes in the format: `[ENCRYPTED_MARKER (4)][nonce (12)][ciphertext+tag]`.
     /// The nonce is randomly generated for each call.
-    pub fn encrypt_content(&self, plaintext: &str) -> Result<Vec<u8>> {
+    pub fn encrypt_bytes(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let ciphertext = self
             .cipher
-            .encrypt(&nonce, plaintext.as_bytes())
+            .encrypt(&nonce, plaintext)
             .map_err(|e| anyhow!("AES-256-GCM encryption failed: {}", e))?;
 
         let mut output = Vec::with_capacity(ENCRYPTED_MARKER.len() + NONCE_SIZE + ciphertext.len());
@@ -146,16 +163,22 @@ impl FieldEncryptor {
         Ok(output)
     }
 
-    /// Decrypt an encrypted content blob back to a plaintext string.
+    /// Encrypt a plaintext content string. UTF-8 convenience wrapper for tests
+    /// and non-memory secret fields.
+    pub fn encrypt_content(&self, plaintext: &str) -> Result<Vec<u8>> {
+        self.encrypt_bytes(plaintext.as_bytes())
+    }
+
+    /// Decrypt an encrypted blob back to plaintext bytes.
     ///
     /// Expects the format: `[ENCRYPTED_MARKER (4)][nonce (12)][ciphertext+tag]`.
     /// Returns an error if the data is too short, the marker is missing, or
     /// decryption/authentication fails.
-    pub fn decrypt_content(&self, data: &[u8]) -> Result<String> {
+    pub fn decrypt_bytes(&self, data: &[u8]) -> Result<Vec<u8>> {
         let min_size = ENCRYPTED_MARKER.len() + MIN_ENCRYPTED_SIZE;
         if data.len() < min_size {
             return Err(anyhow!(
-                "Encrypted content too short: {} bytes (minimum {})",
+                "Encrypted data too short: {} bytes (minimum {})",
                 data.len(),
                 min_size
             ));
@@ -171,13 +194,18 @@ impl FieldEncryptor {
         let ciphertext = &data[4 + NONCE_SIZE..];
 
         let nonce = Nonce::from_slice(nonce_bytes);
-        let plaintext_bytes = self.cipher.decrypt(nonce, ciphertext).map_err(|e| {
+        self.cipher.decrypt(nonce, ciphertext).map_err(|e| {
             anyhow!(
                 "AES-256-GCM decryption failed (wrong key or corrupted data): {}",
                 e
             )
-        })?;
+        })
+    }
 
+    /// Decrypt an encrypted content blob back to a plaintext string. UTF-8
+    /// convenience wrapper for tests and non-memory secret fields.
+    pub fn decrypt_content(&self, data: &[u8]) -> Result<String> {
+        let plaintext_bytes = self.decrypt_bytes(data)?;
         String::from_utf8(plaintext_bytes).context("Decrypted content is not valid UTF-8")
     }
 
@@ -190,6 +218,9 @@ impl FieldEncryptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_key() -> [u8; 32] {
         // Deterministic test key (NOT for production use)
@@ -209,6 +240,29 @@ mod tests {
         let decrypted = enc.decrypt_content(&encrypted).unwrap();
 
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypt_decrypt_bytes_roundtrip() {
+        let enc = FieldEncryptor::new(&test_key());
+        let blob: Vec<u8> = (0u8..=255).cycle().take(1000).collect();
+
+        let encrypted = enc.encrypt_bytes(&blob).unwrap();
+        assert!(FieldEncryptor::is_encrypted(&encrypted));
+        assert_ne!(encrypted, blob);
+        assert_eq!(enc.decrypt_bytes(&encrypted).unwrap(), blob);
+    }
+
+    #[test]
+    fn key_fingerprint_is_stable_and_short() {
+        let enc1 = FieldEncryptor::new(&test_key());
+        let enc2 = FieldEncryptor::new(&test_key());
+        let mut other = test_key();
+        other[31] ^= 0xff;
+        let enc3 = FieldEncryptor::new(&other);
+
+        assert_eq!(enc1.key_fingerprint(), enc2.key_fingerprint());
+        assert_ne!(enc1.key_fingerprint(), enc3.key_fingerprint());
     }
 
     #[test]
@@ -304,6 +358,7 @@ mod tests {
 
     #[test]
     fn from_env_returns_none_when_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // SHODH_ENCRYPTION_KEY should not be set in test env
         std::env::remove_var("SHODH_ENCRYPTION_KEY");
         let result = FieldEncryptor::from_env().unwrap();

@@ -298,6 +298,10 @@ python = ["pyo3", "numpy"]
 # Optional: LLM-based query parser (future: requires API key)
 llm-parser = []
 
+# Optional: HTTP-backed OpenAI-compatible embedder.
+# Disabled by default because it can send memory text to an external service.
+http-embedder = []
+
 # Optional: Zenoh transport for robotics/ROS2 (pure Rust, cross-platform)
 zenoh = ["dep:zenoh"]
 
