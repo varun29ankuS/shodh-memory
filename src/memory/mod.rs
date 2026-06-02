@@ -3283,6 +3283,19 @@ impl MemorySystem {
         // Acquire once outside the loop to avoid repeated locking
         let feedback_guard = self.feedback_store.as_ref().map(|fs| fs.read());
 
+        // Momentum is the learning signal: an EMA of feedback that ACCUMULATES
+        // over repeated use (low per-event alpha + inertia → gradual, robust to a
+        // single bad signal). FEEDBACK_MOMENTUM_SCALE caps how much BUILT-UP
+        // momentum can move the score. At the 0.15 default it's imperceptible, so
+        // accumulated learning never becomes load-bearing. Make the cap tunable
+        // (SHODH_FEEDBACK_MOMENTUM_SCALE) so momentum that has built up over many
+        // interactions can re-rank — without touching alpha, so one feedback still
+        // only nudges (momentum, not forcing). Default unchanged.
+        let momentum_scale: f32 = std::env::var("SHODH_FEEDBACK_MOMENTUM_SCALE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(crate::constants::FEEDBACK_MOMENTUM_SCALE);
+
         for (memory_id, score) in memory_ids {
             // Hebbian boost from learned graph weights (multiplicative)
             // RH-8 gate: Hebbian association boost only applies in `Full` mode.
@@ -3408,9 +3421,9 @@ impl MemorySystem {
                     if let Some(fm) = guard.get_momentum(&mem.id) {
                         let momentum = fm.ema_with_decay();
                         if momentum < 0.0 {
-                            1.0 + (momentum * FEEDBACK_MOMENTUM_SCALE).max(-FEEDBACK_MOMENTUM_SCALE)
+                            1.0 + (momentum * momentum_scale).max(-momentum_scale)
                         } else {
-                            1.0 + (momentum * FEEDBACK_MOMENTUM_SCALE).min(FEEDBACK_MOMENTUM_SCALE)
+                            1.0 + (momentum * momentum_scale).min(momentum_scale)
                         }
                     } else {
                         1.0
