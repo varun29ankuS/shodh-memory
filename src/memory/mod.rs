@@ -2412,6 +2412,20 @@ impl MemorySystem {
         // ===========================================================================
         // LAYER 4: BM25 + RRF FUSION
         // ===========================================================================
+        // E3 fusion-fix (rank-based, post-Layer-5): reserve a FINAL slot for the
+        // graph's top-K-by-RANK candidates that BM25 missed (graph-exclusive).
+        // The magnitude additives could not cleanly fix multi-hop because the
+        // distal answer's signal is in its graph RANK, not its (low) activation
+        // magnitude. This keys on rank, and — unlike approach A, which injected
+        // before Layer-5 and was re-dropped — it is applied after Layer-5 scoring,
+        // gated to graph-exclusive so it never displaces a BM25-ranked correct
+        // hit. Default 0 → off.
+        let graph_reserve_final: usize = std::env::var("SHODH_GRAPH_RESERVE_FINAL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let mut graph_exclusive_reserve: Vec<MemoryId> = Vec::new();
+
         let (memory_ids, hebbian_scores): (
             Vec<(MemoryId, f32)>,
             std::collections::HashMap<MemoryId, f32>,
@@ -2622,15 +2636,27 @@ impl MemorySystem {
                 .map(|(_, a, _)| *a)
                 .fold(0.0_f32, f32::max)
                 .max(1e-6);
-            let hybrid_top: std::collections::HashSet<MemoryId> = if graph_act_add > 0.0 {
-                hybrid_ids
+            let hybrid_top: std::collections::HashSet<MemoryId> =
+                if graph_act_add > 0.0 || graph_reserve_final > 0 {
+                    hybrid_ids
+                        .iter()
+                        .take(query.max_results.max(1))
+                        .map(|(id, _)| id.clone())
+                        .collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
+
+            // Capture the graph-exclusive top-K-by-rank for the post-Layer-5
+            // reserve (the answer the graph ranks highly but BM25 missed).
+            if graph_reserve_final > 0 {
+                graph_exclusive_reserve = graph_topn
                     .iter()
-                    .take(query.max_results.max(1))
-                    .map(|(id, _)| id.clone())
-                    .collect()
-            } else {
-                std::collections::HashSet::new()
-            };
+                    .filter(|id| !hybrid_top.contains(*id))
+                    .take(graph_reserve_final)
+                    .cloned()
+                    .collect();
+            }
 
             // Graph results: pure RRF with density weight
             for (r, (id, activation, h)) in graph_results.iter().enumerate() {
@@ -3674,6 +3700,28 @@ impl MemorySystem {
                     .then_with(|| b.created_at.cmp(&a.created_at))
                     .then_with(|| a.id.cmp(&b.id))
             });
+
+            // Post-Layer-5 graph-exclusive rank reserve: ensure each reserved
+            // candidate present in `memories` lands within the kept window by
+            // promoting it to the window tail (displacing the lowest-scored
+            // non-reserved kept item). Applied after the final sort, before the
+            // cutoff — the only place a distal multi-hop answer can be guaranteed
+            // survival without inflating its score upstream.
+            if graph_reserve_final > 0 && !graph_exclusive_reserve.is_empty() {
+                let mr = query.max_results.max(1);
+                for rid in &graph_exclusive_reserve {
+                    if memories.iter().take(mr).any(|m| m.id == *rid) {
+                        continue;
+                    }
+                    if let Some(cur) = memories.iter().position(|m| m.id == *rid) {
+                        if cur >= mr {
+                            let item = memories.remove(cur);
+                            memories.insert(mr - 1, item);
+                        }
+                    }
+                }
+            }
+
             memories.truncate(query.max_results);
         }
 

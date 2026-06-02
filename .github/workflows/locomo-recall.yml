@@ -94,6 +94,10 @@ on:
         description: 'G3 prototype: set true to self-normalise the gated graph-activation additive (activation/max) so the additive is calibrated across corpora. Use with graph_act_add.'
         required: false
         default: ''
+      graph_reserve_final:
+        description: 'Rank-based multi-hop fix: reserve a FINAL (post-Layer-5) slot for the top-N graph-exclusive candidates (graph ranks high, BM25 missed). Use with graph_reserve_k. Blank=off.'
+        required: false
+        default: ''
       concept_seed_df_max:
         description: 'IDF gate on concept seeds: skip concept (YAKE) query seeds whose corpus mention_count exceeds this (generic hubs). Blank = no gate. Use with concepts=true to test discriminating-only cues.'
         required: false
@@ -233,6 +237,7 @@ jobs:
           SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
           SHODH_SPREAD_FIX: ${{ github.event.inputs.spread_fix }}
           SHODH_ACTR_NORM: ${{ github.event.inputs.actr_norm }}
+          SHODH_GRAPH_RESERVE_FINAL: ${{ github.event.inputs.graph_reserve_final }}
         run: |
           CHAINS_ARG=""
           if [ -n "${{ github.event.inputs.mh_chains }}" ]; then CHAINS_ARG="--mh-chains ${{ github.event.inputs.mh_chains }}"; fi
@@ -272,6 +277,7 @@ jobs:
           SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
           SHODH_SPREAD_FIX: ${{ github.event.inputs.spread_fix }}
           SHODH_ACTR_NORM: ${{ github.event.inputs.actr_norm }}
+          SHODH_GRAPH_RESERVE_FINAL: ${{ github.event.inputs.graph_reserve_final }}
         run: |
           ./target/release/recall-eval \
             --suite locomo \
