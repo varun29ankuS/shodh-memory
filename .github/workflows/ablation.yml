@@ -1,0 +1,90 @@
+# Ablation matrix — every component's contribution, one table, step by step.
+#
+# Ingests the suite ONCE, then runs the full case set under each named query-time
+# config (facts-off / baseline / graph-off / +spread-fix / +graph-expand / …) and
+# emits one comparison table: recall@10 + Δ-vs-baseline, ndcg, mrr, p@1, plus a
+# transposed per-category recall table. The place to SEE and UPDATE ablation
+# studies. Separate from locomo-recall.yml so it has a clean, small input set.
+name: Ablation matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'git ref/commit (blank = this branch head)'
+        required: false
+        default: ''
+      suite:
+        description: 'smoke (fast, 108 cases) or locomo (held-out, slower)'
+        required: false
+        default: 'smoke'
+      max_cases:
+        description: 'Subsample N cases (blank = full). Use on locomo to keep it fast.'
+        required: false
+        default: ''
+      extra_env:
+        description: 'Extra SHODH_* flags as space-separated KEY=VAL (e.g. "SHODH_FEEDBACK_MOMENTUM_SCALE=0.6"). Applied to all configs as a constant baseline.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ablation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ablation:
+    name: Ablation matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out requested commit
+        if: ${{ github.event.inputs.ref != '' }}
+        run: |
+          git checkout "${{ github.event.inputs.ref }}"
+          echo "Checked out $(git rev-parse --short HEAD)"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+
+      - name: Install LLVM (ONNX runtime build dep)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+
+      - name: Ablation matrix
+        env:
+          SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
+        run: |
+          # Apply any constant extra flags to every config in the matrix.
+          for kv in ${{ github.event.inputs.extra_env }}; do
+            echo "constant flag: $kv"
+            export "$kv"
+          done
+          ./target/release/recall-eval \
+            --suite "${{ github.event.inputs.suite }}" \
+            --ablation ablation.json \
+            --output unused-recall.json \
+            --storage ./abl-storage 2>&1 | tee ablation.log
+          echo "## Ablation matrix (${{ github.event.inputs.suite }})" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/## Ablation matrix/,$p' ablation.log >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload ablation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ablation-report
+          path: |
+            ablation.json
+            ablation.log
