@@ -2606,6 +2606,22 @@ impl MemorySystem {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0.0);
+            // G3 prototype (SHODH_ACTR_NORM): self-calibrate the additive by
+            // normalising activation to its own max in this query's spread. The
+            // graph's BEST candidate then always gets the full term (fixes E3,
+            // where link_i has a clear activation peak) while diffuse/tangential
+            // activation stays small (spares LoCoMo, where the graph is noisy).
+            // This is the calibration a raw scalar additive lacked — no scale
+            // threaded E3-fix vs LoCoMo-safe because raw activation magnitude
+            // varies by corpus; the ratio activation/max does not.
+            let actr_norm = std::env::var("SHODH_ACTR_NORM")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let max_activation = graph_results
+                .iter()
+                .map(|(_, a, _)| *a)
+                .fold(0.0_f32, f32::max)
+                .max(1e-6);
             let hybrid_top: std::collections::HashSet<MemoryId> = if graph_act_add > 0.0 {
                 hybrid_ids
                     .iter()
@@ -2633,8 +2649,15 @@ impl MemorySystem {
                     *score *= activation_factor;
                     // Gated additive: only lift graph-exclusive finds (absent from
                     // BM25/vector's top window), never memories BM25 already ranks.
+                    // With SHODH_ACTR_NORM the magnitude is self-normalised
+                    // (activation/max) so it is calibrated across corpora.
                     if graph_act_add > 0.0 && !hybrid_top.contains(id) {
-                        *score += graph_w * graph_act_add * activation.clamp(0.0, 1.0);
+                        let mag = if actr_norm {
+                            (activation / max_activation).clamp(0.0, 1.0)
+                        } else {
+                            activation.clamp(0.0, 1.0)
+                        };
+                        *score += graph_w * graph_act_add * mag;
                     }
                 }
 

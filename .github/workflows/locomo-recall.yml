@@ -90,6 +90,10 @@ on:
         description: 'Graph-leg precision: set true to repair the 2-hop activation collapse (fixed hop decay + additive strength/trust priors) so distal targets rank high natively. The real multi-hop fix.'
         required: false
         default: ''
+      actr_norm:
+        description: 'G3 prototype: set true to self-normalise the gated graph-activation additive (activation/max) so the additive is calibrated across corpora. Use with graph_act_add.'
+        required: false
+        default: ''
       concept_seed_df_max:
         description: 'IDF gate on concept seeds: skip concept (YAKE) query seeds whose corpus mention_count exceeds this (generic hubs). Blank = no gate. Use with concepts=true to test discriminating-only cues.'
         required: false
@@ -228,6 +232,7 @@ jobs:
           SHODH_GRAPH_ACT_ADD: ${{ github.event.inputs.graph_act_add }}
           SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
           SHODH_SPREAD_FIX: ${{ github.event.inputs.spread_fix }}
+          SHODH_ACTR_NORM: ${{ github.event.inputs.actr_norm }}
         run: |
           CHAINS_ARG=""
           if [ -n "${{ github.event.inputs.mh_chains }}" ]; then CHAINS_ARG="--mh-chains ${{ github.event.inputs.mh_chains }}"; fi
@@ -266,6 +271,7 @@ jobs:
           SHODH_GRAPH_ACT_ADD: ${{ github.event.inputs.graph_act_add }}
           SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
           SHODH_SPREAD_FIX: ${{ github.event.inputs.spread_fix }}
+          SHODH_ACTR_NORM: ${{ github.event.inputs.actr_norm }}
         run: |
           ./target/release/recall-eval \
             --suite locomo \
