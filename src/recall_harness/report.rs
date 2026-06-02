@@ -83,6 +83,37 @@ pub struct PerCaseRecord {
     pub recall_at_100: f64,
 }
 
+/// One row in the unified ablation matrix: a named config (a set of query-time
+/// flag overrides) and its aggregate metrics over the suite. The whole point is
+/// a single, re-runnable table where each fix/component is a row you can see and
+/// compare against the baseline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AblationRow {
+    /// Human-readable config name (e.g. `baseline`, `+graph-expand(K5)`).
+    pub name: String,
+    /// The env overrides applied for this row (key=value), for reproducibility.
+    pub flags: Vec<String>,
+    #[serde(rename = "recall@10")]
+    pub recall_at_10: f64,
+    #[serde(rename = "ndcg@10")]
+    pub ndcg_at_10: f64,
+    pub mrr: f64,
+    pub p_at_1: f64,
+    /// Per-category recall@10 (category name → value), so a config that helps one
+    /// capability but hurts another is visible, not hidden in the average.
+    pub by_category_recall: std::collections::BTreeMap<String, f64>,
+}
+
+/// Unified ablation report: one ingest, N query-time configs, one comparison
+/// table. The living artifact for "see and update ablation studies".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AblationReport {
+    pub suite: String,
+    pub git_sha: String,
+    pub case_count: usize,
+    pub rows: Vec<AblationRow>,
+}
+
 /// One layer's row in the E3 multi-hop ladder: recall@10 split by 2-hop
 /// (graph-only-reachable) vs 1-hop (BM25-solvable control) cases.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

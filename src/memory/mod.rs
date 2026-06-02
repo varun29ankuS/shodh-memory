@@ -1845,7 +1845,18 @@ impl MemorySystem {
         // Temporal fact lookup - boost source memories of matching facts in Layer 4.5
         // RH-8 gate: Layer 0.6 only runs in `Full` mode.
         let temporal_fact_boost_ids: HashSet<MemoryId> = if layer_full && has_temporal_query {
-            if let Some(user_id) = query.user_id.as_ref().or(self.default_user_id.as_ref()) {
+            // Ablation hook: SHODH_DISABLE_FACT_LAYERS turns the temporal/fact
+            // layers off at query time so their recall contribution can be
+            // measured against the same ingested corpus.
+            let fact_user = if std::env::var("SHODH_DISABLE_FACT_LAYERS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
+                None
+            } else {
+                query.user_id.as_ref().or(self.default_user_id.as_ref())
+            };
+            if let Some(user_id) = fact_user {
                 // Get entity name (first focal entity)
                 let entity = query_analysis
                     .focal_entities
@@ -1945,7 +1956,18 @@ impl MemorySystem {
                 std::collections::HashMap::new();
 
             if layer_facts {
-                if let Some(user_id) = query.user_id.as_ref().or(self.default_user_id.as_ref()) {
+                // Ablation hook: SHODH_DISABLE_FACT_LAYERS turns the temporal/fact
+            // layers off at query time so their recall contribution can be
+            // measured against the same ingested corpus.
+            let fact_user = if std::env::var("SHODH_DISABLE_FACT_LAYERS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
+                None
+            } else {
+                query.user_id.as_ref().or(self.default_user_id.as_ref())
+            };
+            if let Some(user_id) = fact_user {
                     let entity_names: Vec<String> = query_analysis
                         .focal_entities
                         .iter()

@@ -27,9 +27,9 @@ use super::fixtures::{
 };
 use super::metrics::Metrics;
 use super::report::{
-    aggregate_category, aggregate_layer, median, CategoryReport, Failure, LayerReport,
-    GraphStructure, LearningCurveArm, LearningCurveReport, PerCaseRecord, ReachabilityCategory,
-    ReachabilityReport, Report, SMOKE_K,
+    aggregate_category, aggregate_layer, median, AblationReport, AblationRow, CategoryReport,
+    Failure, LayerReport, GraphStructure, LearningCurveArm, LearningCurveReport, PerCaseRecord,
+    ReachabilityCategory, ReachabilityReport, Report, SMOKE_K,
 };
 
 /// Embedder identifier emitted in the report. Matches the model wired into
@@ -725,6 +725,120 @@ pub fn ingest_corpus(
 /// whether an associative PATH exists, not whether the current scoring would
 /// traverse it. `within_2` (one bridge entity) is the canonical double-hop
 /// signal for multi_hop.
+/// Unified ablation matrix (E1): ingest the suite ONCE, then run the full case
+/// set under each named query-time config and tabulate recall@10 / ndcg / mrr /
+/// p@1 + per-category recall. The single, re-runnable place to see and update
+/// every component's contribution — "don't fly blind".
+///
+/// Only QUERY-TIME flags are ablatable here (they are read per-recall against the
+/// same ingested corpus). Ingest-time flags (concept entities, IDF edges, hub cap)
+/// change what is stored and need separate ingests — run those via the workflow's
+/// before/after `ref` A/B instead.
+pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
+    pin_harness_threads();
+
+    let corpus_path = inputs
+        .corpus_path
+        .clone()
+        .unwrap_or_else(|| fixtures::manifest_path(SMOKE_CORPUS_PATH));
+    let cases_path = inputs
+        .cases_path
+        .clone()
+        .unwrap_or_else(|| fixtures::manifest_path(SMOKE_CASES_PATH));
+    let corpus = fixtures::load_corpus(&corpus_path)
+        .with_context(|| format!("loading corpus from {}", corpus_path.display()))?;
+    let cases = fixtures::load_smoke_cases(&cases_path)
+        .with_context(|| format!("loading cases from {}", cases_path.display()))?;
+    fixtures::validate_structure(&corpus, &cases)
+        .with_context(|| format!("{} suite failed structural validation", inputs.suite))?;
+
+    let manager = build_manager(&inputs.storage_path)?;
+    let id_map = ingest_corpus(&manager, &corpus)?;
+    let system = manager.get_user_memory(EVAL_USER)?;
+
+    // Query-time ablation configs: (display name, [(env_key, env_val)]). Add a
+    // row here whenever a new query-time fix lands — that is how a fix becomes a
+    // measured, comparable line in the study.
+    let configs: Vec<(&str, Vec<(&str, &str)>)> = vec![
+        ("facts-off (lexical+graph)", vec![("SHODH_DISABLE_FACT_LAYERS", "1")]),
+        ("baseline (facts on)", vec![]),
+        ("graph-off", vec![("SHODH_GRAPH_FUSION_WEIGHT", "0")]),
+        ("+spread-fix", vec![("SHODH_SPREAD_FIX", "1")]),
+        ("+graph-expand(K5)", vec![("SHODH_GRAPH_EXPAND_K", "5")]),
+        (
+            "+graph-expand+margin",
+            vec![
+                ("SHODH_GRAPH_EXPAND_K", "5"),
+                ("SHODH_GRAPH_EXPAND_MIN_STRENGTH", "0.3"),
+            ],
+        ),
+        (
+            "+expand+spread-fix",
+            vec![("SHODH_GRAPH_EXPAND_K", "5"), ("SHODH_SPREAD_FIX", "1")],
+        ),
+    ];
+
+    let mut rows: Vec<AblationRow> = Vec::with_capacity(configs.len());
+    for (name, env) in &configs {
+        // SAFETY: the harness is single-threaded (pin_harness_threads) and the
+        // production server never invokes it, so process-wide env mutation here
+        // races no other reader. Set before the query pass, clear after.
+        unsafe {
+            for (k, v) in env {
+                std::env::set_var(k, v);
+            }
+        }
+
+        let mut by_cat: HashMap<SmokeCategory, Vec<f64>> = HashMap::new();
+        let mut all: Vec<Metrics> = Vec::with_capacity(cases.len());
+        for case in &cases {
+            let query = Query {
+                query_text: Some(case.query.clone()),
+                max_results: SMOKE_K,
+                layers: LayerMode::Full,
+                ..Default::default()
+            };
+            let memories = system.read().recall(&query).unwrap_or_default();
+            let retrieved: Vec<Uuid> = memories.iter().map(|m| m.id.0).collect();
+            let relevance = build_relevance_map(case, &id_map);
+            let m = Metrics::compute(&retrieved, &relevance, SMOKE_K);
+            by_cat.entry(case.category).or_default().push(m.recall_at_k);
+            all.push(m);
+        }
+
+        unsafe {
+            for (k, _) in env {
+                std::env::remove_var(k);
+            }
+        }
+
+        let n = all.len().max(1) as f64;
+        let by_category_recall = by_cat
+            .iter()
+            .map(|(c, rs)| {
+                let r = rs.iter().sum::<f64>() / rs.len().max(1) as f64;
+                (category_name(*c).to_string(), r)
+            })
+            .collect();
+        rows.push(AblationRow {
+            name: name.to_string(),
+            flags: env.iter().map(|(k, v)| format!("{k}={v}")).collect(),
+            recall_at_10: all.iter().map(|m| m.recall_at_k).sum::<f64>() / n,
+            ndcg_at_10: all.iter().map(|m| m.ndcg_at_k).sum::<f64>() / n,
+            mrr: all.iter().map(|m| m.mrr).sum::<f64>() / n,
+            p_at_1: all.iter().map(|m| m.p_at_1).sum::<f64>() / n,
+            by_category_recall,
+        });
+    }
+
+    Ok(AblationReport {
+        suite: inputs.suite.clone(),
+        git_sha: inputs.git_sha.clone(),
+        case_count: cases.len(),
+        rows,
+    })
+}
+
 pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityReport> {
     pin_harness_threads();
     const MAX_HOPS: usize = 3;

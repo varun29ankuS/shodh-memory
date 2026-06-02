@@ -106,6 +106,14 @@ on:
         description: 'Margin gate for graph expansion: only expand on edges >= this effective strength (suppress weak/noisy bridges). Blank/0=no gate.'
         required: false
         default: ''
+      ablation:
+        description: 'Ablation matrix: set true to ingest once and run the suite under all named query-time configs (facts-off/baseline/+graph-expand/+spread-fix/…), emitting one comparison table. The place to see+update ablation studies.'
+        required: false
+        default: 'false'
+      ablation_suite:
+        description: 'Suite for the ablation matrix (smoke = fast default, locomo = held-out).'
+        required: false
+        default: 'smoke'
       concept_seed_df_max:
         description: 'IDF gate on concept seeds: skip concept (YAKE) query seeds whose corpus mention_count exceeds this (generic hubs). Blank = no gate. Use with concepts=true to test discriminating-only cues.'
         required: false
@@ -235,6 +243,13 @@ jobs:
               print(f"\nGradient spread (Misleading − Helpful rank Δ): **{spread:+.3f}** — bigger = reward steers recall more strongly.")
           PY
 
+      - name: Ablation matrix (see+update studies)
+        if: ${{ github.event.inputs.ablation == 'true' }}
+        run: |
+          ./target/release/recall-eval             --suite "${{ github.event.inputs.ablation_suite }}"             --ablation ablation.json             --output unused-recall.json             --storage ./abl-storage 2>&1 | tee ablation.log
+          echo "## Ablation matrix" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/## Ablation matrix/,$p' ablation.log >> "$GITHUB_STEP_SUMMARY" || true
+
       - name: Multi-hop diagnostic (E3 — planted 2-hop chains)
         if: ${{ github.event.inputs.multi_hop == 'true' }}
         env:
@@ -273,7 +288,7 @@ jobs:
           PY
 
       - name: Run LoCoMo recall@k
-        if: ${{ github.event.inputs.reachability != 'true' && github.event.inputs.learning_curve != 'true' && github.event.inputs.multi_hop != 'true' }}
+        if: ${{ github.event.inputs.reachability != 'true' && github.event.inputs.learning_curve != 'true' && github.event.inputs.multi_hop != 'true' && github.event.inputs.ablation != 'true' }}
         env:
           RECALL_DIAG_K: ${{ github.event.inputs.diag_k }}
           SHODH_GRAPH_FUSION_WEIGHT: ${{ github.event.inputs.graph_w }}

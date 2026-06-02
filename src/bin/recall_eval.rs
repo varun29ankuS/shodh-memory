@@ -21,11 +21,12 @@ use clap::{Parser, ValueEnum};
 use shodh_memory::memory::types::LayerMode;
 use shodh_memory::recall_harness::multihop::analyze_multihop;
 use shodh_memory::recall_harness::report::{
-    compare_to_baseline, LearningCurveReport, MultiHopReport, ReachabilityReport, Report,
+    compare_to_baseline, AblationReport, LearningCurveReport, MultiHopReport, ReachabilityReport,
+    Report,
 };
 use shodh_memory::recall_harness::runner::{
-    analyze_graph_reachability, analyze_learning_curve, run_smoke_suite_with_ranks, ReportWithRanks,
-    RunInputs,
+    analyze_ablation, analyze_graph_reachability, analyze_learning_curve,
+    run_smoke_suite_with_ranks, ReportWithRanks, RunInputs,
 };
 
 /// Exit codes — kept stable so CI scripts can branch on them.
@@ -204,6 +205,13 @@ struct Args {
     #[arg(long, default_value_t = shodh_memory::recall_harness::multihop::DEFAULT_CHAINS)]
     mh_chains: usize,
 
+    /// Ablation matrix: when set, ingest the suite once and run it under a set of
+    /// named query-time configs (baseline, facts-off, +graph-expand, +spread-fix,
+    /// …), writing an `AblationReport` (one comparison table) to this path. The
+    /// single place to see + update every component's recall contribution.
+    #[arg(long)]
+    ablation: Option<PathBuf>,
+
     /// Simulated edge age in days, applied AFTER ingest and BEFORE queries
     /// (decay study). When `> 0`, the harness ages the knowledge-graph edges via
     /// `simulate_edge_aging` at the production ~6h cadence, so recall quality is
@@ -254,6 +262,18 @@ fn run(args: &Args) -> Result<i32> {
         let report = analyze_graph_reachability(&inputs).context("graph-reachability analysis")?;
         write_reachability(reach_path, &report)?;
         summarise_reachability(&report);
+        eprintln!(
+            "recall-eval: storage retained at {} (delete manually after inspection)",
+            storage_path.display()
+        );
+        return Ok(EXIT_PASS);
+    }
+
+    // Ablation matrix short-circuits the recall run entirely.
+    if let Some(abl_path) = &args.ablation {
+        let report = analyze_ablation(&inputs).context("ablation analysis")?;
+        write_ablation(abl_path, &report)?;
+        summarise_ablation(&report);
         eprintln!(
             "recall-eval: storage retained at {} (delete manually after inspection)",
             storage_path.display()
@@ -454,6 +474,72 @@ fn summarise_learning_curve(report: &LearningCurveReport) {
         );
     }
     eprintln!("  Helpful rank DOWN, Misleading rank UP => reward steers recall (a real gradient).");
+}
+
+fn write_ablation(path: &std::path::Path, report: &AblationReport) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating output dir {}", parent.display()))?;
+        }
+    }
+    let json = serde_json::to_vec_pretty(report).context("serialising ablation report")?;
+    std::fs::write(path, &json)
+        .with_context(|| format!("writing ablation report to {}", path.display()))?;
+    Ok(())
+}
+
+/// Print the ablation matrix as a markdown table (Δ recall@10 vs the row named
+/// `baseline`), so it can be pasted straight into the study doc.
+fn summarise_ablation(report: &AblationReport) {
+    let base = report
+        .rows
+        .iter()
+        .find(|r| r.name.starts_with("baseline"))
+        .map(|r| r.recall_at_10);
+    eprintln!(
+        "recall-eval: ablation (suite={} cases={} sha={})",
+        report.suite, report.case_count, report.git_sha
+    );
+    println!("## Ablation matrix ({} suite, {} cases)\n", report.suite, report.case_count);
+    println!("| config | recall@10 | Δ vs base | ndcg@10 | mrr | p@1 |");
+    println!("| --- | --- | --- | --- | --- | --- |");
+    for r in &report.rows {
+        let delta = match base {
+            Some(b) => format!("{:+.4}", r.recall_at_10 - b),
+            None => String::new(),
+        };
+        println!(
+            "| {} | {:.4} | {} | {:.4} | {:.4} | {:.4} |",
+            r.name, r.recall_at_10, delta, r.ndcg_at_10, r.mrr, r.p_at_1
+        );
+    }
+    // Per-category recall, transposed (category × config), surfaces a config that
+    // trades one capability for another.
+    let cats: std::collections::BTreeSet<String> = report
+        .rows
+        .iter()
+        .flat_map(|r| r.by_category_recall.keys().cloned())
+        .collect();
+    if !cats.is_empty() {
+        println!("\n### Per-category recall@10\n");
+        let header: Vec<String> = report.rows.iter().map(|r| r.name.clone()).collect();
+        println!("| category | {} |", header.join(" | "));
+        println!("| --- | {} |", vec!["---"; header.len()].join(" | "));
+        for cat in &cats {
+            let cells: Vec<String> = report
+                .rows
+                .iter()
+                .map(|r| {
+                    r.by_category_recall
+                        .get(cat)
+                        .map(|v| format!("{v:.3}"))
+                        .unwrap_or_else(|| "—".to_string())
+                })
+                .collect();
+            println!("| {} | {} |", cat, cells.join(" | "));
+        }
+    }
 }
 
 fn write_multihop(path: &std::path::Path, report: &MultiHopReport) -> Result<()> {
