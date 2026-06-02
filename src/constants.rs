@@ -1264,10 +1264,15 @@ pub const SCORING_IMPORTANCE_RANGE: f32 = 0.3;
 
 /// Feedback momentum range — symmetric ±15% multiplicative adjustment
 ///
-/// Positive momentum (helpful) boosts up to 15%, negative (misleading) suppresses up to 15%.
+/// Positive momentum (helpful) boosts up to ±50%, negative (misleading) suppresses
+/// up to 50%. Raised 0.15→0.50: at 0.15 accumulated momentum was imperceptible
+/// (Helpful gold-rank moved −0.11 over 8 cycles); at 0.50 learning is load-bearing
+/// (−0.78, 4/9 cases improve) while staying gradual (EMA inertia) and safe for cold
+/// recall (no feedback → momentum 0 → no effect on baseline ranking). Tunable at
+/// runtime via SHODH_FEEDBACK_MOMENTUM_SCALE.
 ///
 /// Reference: Reinforcement learning in memory retrieval (Anderson & Bjork 1994)
-pub const FEEDBACK_MOMENTUM_SCALE: f32 = 0.15;
+pub const FEEDBACK_MOMENTUM_SCALE: f32 = 0.50;
 
 /// Recency decay rate — exponential time constant for recency scoring
 ///
