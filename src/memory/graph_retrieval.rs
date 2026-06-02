@@ -171,6 +171,21 @@ fn spread_single_direction(
     let mut activation_map: HashMap<Uuid, f32> = seeds.iter().cloned().collect();
     let mut traversed_edges: Vec<Uuid> = Vec::new();
 
+    // Audit fix #5 (flag-gated) — repair the 2-hop activation collapse. The
+    // default per-edge spread multiplies four sub-1.0 factors per hop and
+    // double-uses edge strength (it sets the decay rate AND is multiplied in),
+    // so a distal (2-hop) target collapses below `threshold` and is pruned before
+    // it can be scored. E3 proved this is the real multi-hop bottleneck (a fusion
+    // patch could not fix it without wrecking single-hop). When enabled: gentle
+    // FIXED per-hop decay (not the compounding importance-weighted rate), and edge
+    // strength / tier-trust as ADDITIVE PRIORS with a floor so a weak edge
+    // attenuates but never zeroes the path. Default off → unchanged.
+    let spread_fix = std::env::var("SHODH_SPREAD_FIX")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    const SPREAD_FIX_HOP_DECAY: f32 = 0.6;
+    const SPREAD_FIX_PRIOR_FLOOR: f32 = 0.5;
+
     for hop in 1..=max_hops {
         let current_activated: Vec<(Uuid, f32)> =
             activation_map.iter().map(|(id, act)| (*id, *act)).collect();
@@ -207,12 +222,24 @@ fn spread_single_direction(
                     }
                 };
 
-                // Importance-weighted decay (using effective_strength for time-aware decay)
                 let effective = edge.effective_strength();
-                let decay_rate = calculate_importance_weighted_decay(effective);
-                let decay = (-decay_rate * hop as f32).exp();
-
-                let base_spread = source_activation * decay * effective * tier_trust * degree_norm;
+                let base_spread = if spread_fix {
+                    // Additive priors + fixed hop decay: distal targets retain
+                    // meaningful activation instead of collapsing below threshold.
+                    // effective is used ONCE (strength prior), not twice.
+                    let hop_decay = SPREAD_FIX_HOP_DECAY.powi(hop as i32);
+                    let trust_prior =
+                        SPREAD_FIX_PRIOR_FLOOR + (1.0 - SPREAD_FIX_PRIOR_FLOOR) * tier_trust;
+                    let strength_prior =
+                        SPREAD_FIX_PRIOR_FLOOR + (1.0 - SPREAD_FIX_PRIOR_FLOOR) * effective;
+                    source_activation * hop_decay * trust_prior * strength_prior * degree_norm
+                } else {
+                    // Default: importance-weighted decay (effective sets the decay
+                    // rate AND is multiplied in — the double-use the fix removes).
+                    let decay_rate = calculate_importance_weighted_decay(effective);
+                    let decay = (-decay_rate * hop as f32).exp();
+                    source_activation * decay * effective * tier_trust * degree_norm
+                };
 
                 // Ontological type penalty: dampen activation through wrong-type edges/entities.
                 // CoOccurs, RelatedTo, CoRetrieved are generic bridges — never penalized.

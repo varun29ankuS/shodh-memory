@@ -86,6 +86,10 @@ on:
         description: 'E3 fusion-fix C: floor the graph fusion weight (e.g. 0.7) and renormalise hybrid down. Blank = off.'
         required: false
         default: ''
+      spread_fix:
+        description: 'Graph-leg precision: set true to repair the 2-hop activation collapse (fixed hop decay + additive strength/trust priors) so distal targets rank high natively. The real multi-hop fix.'
+        required: false
+        default: ''
       concept_seed_df_max:
         description: 'IDF gate on concept seeds: skip concept (YAKE) query seeds whose corpus mention_count exceeds this (generic hubs). Blank = no gate. Use with concepts=true to test discriminating-only cues.'
         required: false
@@ -223,6 +227,7 @@ jobs:
           SHODH_GRAPH_RESERVE_K: ${{ github.event.inputs.graph_reserve_k }}
           SHODH_GRAPH_ACT_ADD: ${{ github.event.inputs.graph_act_add }}
           SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
+          SHODH_SPREAD_FIX: ${{ github.event.inputs.spread_fix }}
         run: |
           CHAINS_ARG=""
           if [ -n "${{ github.event.inputs.mh_chains }}" ]; then CHAINS_ARG="--mh-chains ${{ github.event.inputs.mh_chains }}"; fi
@@ -260,6 +265,7 @@ jobs:
           SHODH_GRAPH_RESERVE_K: ${{ github.event.inputs.graph_reserve_k }}
           SHODH_GRAPH_ACT_ADD: ${{ github.event.inputs.graph_act_add }}
           SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
+          SHODH_SPREAD_FIX: ${{ github.event.inputs.spread_fix }}
         run: |
           ./target/release/recall-eval \
             --suite locomo \
