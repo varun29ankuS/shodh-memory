@@ -257,6 +257,9 @@ jobs:
           SHODH_GRAPH_IDF_EDGES: ${{ github.event.inputs.graph_idf }}
           SHODH_HUB_DEGREE_MAX: ${{ github.event.inputs.hub_max }}
           SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
+          SHODH_GRAPH_RESERVE_K: ${{ github.event.inputs.graph_reserve_k }}
+          SHODH_GRAPH_ACT_ADD: ${{ github.event.inputs.graph_act_add }}
+          SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
         run: |
           ./target/release/recall-eval \
             --suite locomo \
