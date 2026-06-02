@@ -2150,6 +2150,19 @@ impl MemorySystem {
 
                 // First, collect all query entity UUIDs
                 // Include nouns, adjectives, AND verbs for multi-hop reasoning
+                //
+                // IDF gate on concept seeds: a concept term (EntityLabel::Other,
+                // e.g. a YAKE keyphrase node) mentioned across many memories has
+                // ~no discriminative signal — it floods the spreading-activation
+                // frontier with non-gold and inflates traversal cost. When
+                // SHODH_CONCEPT_SEED_DF_MAX is set, skip concept-labeled seeds
+                // whose corpus mention_count (document-frequency proxy) exceeds
+                // it. Person/Org/Location/etc. seeds are never DF-filtered — a
+                // frequently-named person is still a valid anchor.
+                let concept_seed_df_max: Option<usize> =
+                    std::env::var("SHODH_CONCEPT_SEED_DF_MAX")
+                        .ok()
+                        .and_then(|s| s.parse().ok());
                 let mut query_entities: Vec<uuid::Uuid> = Vec::new();
                 for e in query_analysis
                     .focal_entities
@@ -2175,6 +2188,15 @@ impl MemorySystem {
                     )
                 {
                     if let Ok(Some(ent)) = g.find_entity_by_name(e) {
+                        if let Some(df_max) = concept_seed_df_max {
+                            let is_concept = matches!(
+                                ent.labels.first(),
+                                Some(crate::graph_memory::EntityLabel::Other(_))
+                            );
+                            if is_concept && ent.mention_count > df_max {
+                                continue;
+                            }
+                        }
                         query_entities.push(ent.uuid);
                     }
                 }

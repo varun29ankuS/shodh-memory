@@ -757,6 +757,9 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
     let concept_query_seeding = std::env::var("SHODH_CONCEPT_ENTITIES")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let concept_seed_df_max: Option<usize> = std::env::var("SHODH_CONCEPT_SEED_DF_MAX")
+        .ok()
+        .and_then(|s| s.parse().ok());
     let keyword_extractor = manager.get_keyword_extractor();
 
     // Degree distribution of the built graph — the direct scoreboard for
@@ -831,6 +834,17 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
         let mut seed_uuids: HashSet<Uuid> = HashSet::new();
         for name in &seed_names {
             if let Ok(Some(ent)) = g.find_entity_by_name(name) {
+                // Mirror the live IDF gate (mod.rs): skip generic concept seeds
+                // whose corpus mention_count exceeds SHODH_CONCEPT_SEED_DF_MAX.
+                if let Some(df_max) = concept_seed_df_max {
+                    let is_concept = matches!(
+                        ent.labels.first(),
+                        Some(crate::graph_memory::EntityLabel::Other(_))
+                    );
+                    if is_concept && ent.mention_count > df_max {
+                        continue;
+                    }
+                }
                 seed_uuids.insert(ent.uuid);
             }
         }

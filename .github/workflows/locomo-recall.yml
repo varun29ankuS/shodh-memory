@@ -66,6 +66,10 @@ on:
         description: 'Deterministic case subsample (stride, category-preserving) for fast directional recall reads. Blank/0 = full suite. Corpus is always ingested in full.'
         required: false
         default: ''
+      concept_seed_df_max:
+        description: 'IDF gate on concept seeds: skip concept (YAKE) query seeds whose corpus mention_count exceeds this (generic hubs). Blank = no gate. Use with concepts=true to test discriminating-only cues.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -132,6 +136,7 @@ jobs:
           SHODH_GRAPH_IDF_EDGES: ${{ github.event.inputs.graph_idf }}
           SHODH_HUB_DEGREE_MAX: ${{ github.event.inputs.hub_max }}
           SHODH_CONCEPT_ENTITIES: ${{ github.event.inputs.concepts }}
+          SHODH_CONCEPT_SEED_DF_MAX: ${{ github.event.inputs.concept_seed_df_max }}
         run: |
           ./target/release/recall-eval \
             --suite locomo \
@@ -196,6 +201,7 @@ jobs:
           RECALL_DIAG_K: ${{ github.event.inputs.diag_k }}
           SHODH_GRAPH_FUSION_WEIGHT: ${{ github.event.inputs.graph_w }}
           SHODH_CONCEPT_ENTITIES: ${{ github.event.inputs.concepts }}
+          SHODH_CONCEPT_SEED_DF_MAX: ${{ github.event.inputs.concept_seed_df_max }}
           SHODH_GRAPH_IDF_EDGES: ${{ github.event.inputs.graph_idf }}
           SHODH_HUB_DEGREE_MAX: ${{ github.event.inputs.hub_max }}
           SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
