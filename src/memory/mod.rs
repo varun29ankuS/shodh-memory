@@ -2112,6 +2112,23 @@ impl MemorySystem {
                 query.retrieval_mode,
                 RetrievalMode::Hybrid | RetrievalMode::Associative | RetrievalMode::Causal
             );
+
+        // Graph-driven query expansion (SHODH_GRAPH_EXPAND_K). The graph's role
+        // for multi-hop is NOT to win the fusion scoring fight (distal activation
+        // is low-magnitude and gets diluted) but to EXPAND THE CUE SET — spreading
+        // activation cognitively surfaces related concepts, which become part of
+        // what you retrieve. We take the top-K strongest 1-hop graph neighbours of
+        // the query's entities (the "bridges") and append them to the BM25 query,
+        // so a multi-hop answer mentioning a bridge entity surfaces on the lexical
+        // leg's own terms instead of being buried as a low-RRF graph candidate.
+        // E3 ceiling ≈ 1.0 (the 1-hop control proves: bridge-in-query → BM25 finds
+        // the answer). Default 0 → off.
+        let graph_expand_k: usize = std::env::var("SHODH_GRAPH_EXPAND_K")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let mut graph_bridges: Vec<String> = Vec::new();
+
         #[allow(clippy::type_complexity)]
         let (
             graph_results,
@@ -2199,6 +2216,38 @@ impl MemorySystem {
                         }
                         query_entities.push(ent.uuid);
                     }
+                }
+
+                // Graph-driven cue expansion: collect the top-K strongest 1-hop
+                // neighbours of the resolved query entities as "bridges" to append
+                // to the BM25 query (see SHODH_GRAPH_EXPAND_K above).
+                if graph_expand_k > 0 && !query_entities.is_empty() {
+                    let original: std::collections::HashSet<String> = query_analysis
+                        .focal_entities
+                        .iter()
+                        .map(|e| e.text.to_lowercase())
+                        .collect();
+                    let mut seen: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    let mut scored: Vec<(String, f32)> = Vec::new();
+                    for qe in &query_entities {
+                        if let Ok(edges) = g.get_entity_relationships_limited(qe, Some(32)) {
+                            for edge in edges {
+                                if let Ok(Some(nb)) = g.get_entity(&edge.to_entity) {
+                                    let name_lc = nb.name.to_lowercase();
+                                    if nb.name.trim().len() < 2 || original.contains(&name_lc) {
+                                        continue;
+                                    }
+                                    if seen.insert(name_lc) {
+                                        scored.push((nb.name.clone(), edge.effective_strength()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    graph_bridges =
+                        scored.into_iter().take(graph_expand_k).map(|(n, _)| n).collect();
                 }
 
                 // Calculate PER-ENTITY density (not global graph density)
@@ -2479,12 +2528,19 @@ impl MemorySystem {
             // `constants::POLAR_QUERY_BM25_POOL_MULTIPLIER`.
             let polarity_sensitive = query_analysis.polarity_sensitive();
             let bm25_query_owned: String;
-            let bm25_query_text: &str = if polarity_sensitive {
-                bm25_query_owned = format!(
-                    "{} {}",
-                    query_text,
-                    crate::constants::POLAR_BM25_NEGATION_CUES.join(" ")
-                );
+            let bm25_query_text: &str = if polarity_sensitive || !graph_bridges.is_empty() {
+                let mut q = query_text.to_string();
+                if polarity_sensitive {
+                    q.push(' ');
+                    q.push_str(&crate::constants::POLAR_BM25_NEGATION_CUES.join(" "));
+                }
+                // Graph-driven cue expansion: append the discovered bridge entities
+                // so a multi-hop answer surfaces on the BM25 leg's own terms.
+                if !graph_bridges.is_empty() {
+                    q.push(' ');
+                    q.push_str(&graph_bridges.join(" "));
+                }
+                bm25_query_owned = q;
                 &bm25_query_owned
             } else {
                 query_text
