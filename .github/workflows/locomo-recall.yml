@@ -66,6 +66,14 @@ on:
         description: 'Deterministic case subsample (stride, category-preserving) for fast directional recall reads. Blank/0 = full suite. Corpus is always ingested in full.'
         required: false
         default: ''
+      multi_hop:
+        description: 'E3 controlled multi-hop diagnostic: set true to run synthetic planted 2-hop chains (gold reachable ONLY via graph traversal) through every layer and report per-layer 2-hop vs 1-hop recall. Skips the recall suite.'
+        required: false
+        default: 'false'
+      mh_chains:
+        description: 'Number of planted chains for the multi-hop diagnostic (default 60).'
+        required: false
+        default: ''
       concept_seed_df_max:
         description: 'IDF gate on concept seeds: skip concept (YAKE) query seeds whose corpus mention_count exceeds this (generic hubs). Blank = no gate. Use with concepts=true to test discriminating-only cues.'
         required: false
@@ -195,8 +203,37 @@ jobs:
               print(f"\nGradient spread (Misleading − Helpful rank Δ): **{spread:+.3f}** — bigger = reward steers recall more strongly.")
           PY
 
+      - name: Multi-hop diagnostic (E3 — planted 2-hop chains)
+        if: ${{ github.event.inputs.multi_hop == 'true' }}
+        env:
+          SHODH_GRAPH_IDF_EDGES: ${{ github.event.inputs.graph_idf }}
+          SHODH_HUB_DEGREE_MAX: ${{ github.event.inputs.hub_max }}
+        run: |
+          CHAINS_ARG=""
+          if [ -n "${{ github.event.inputs.mh_chains }}" ]; then CHAINS_ARG="--mh-chains ${{ github.event.inputs.mh_chains }}"; fi
+          ./target/release/recall-eval \
+            --suite locomo \
+            --multi-hop multihop.json \
+            $CHAINS_ARG \
+            --output unused-recall.json \
+            --storage ./mh-storage 2>&1 | tee multihop.log
+          echo "## E3 controlled multi-hop (planted 2-hop chains)" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          d = json.load(open('multihop.json'))
+          print(f"- chains: {d['chains']}  2-hop cases: {d['multihop_cases']}  1-hop control: {d['onehop_cases']}")
+          print("\n| stage | 2hop recall@10 | Δ vs prev | 1hop recall@10 | 2hop mrr |")
+          print("| --- | --- | --- | --- | --- |")
+          prev = None
+          for r in d['rows']:
+              delta = '' if prev is None else f"{r['multihop_recall_at_10']-prev:+.4f}"
+              print(f"| {r['layer']} | {r['multihop_recall_at_10']:.4f} | {delta} | {r['onehop_recall_at_10']:.4f} | {r['multihop_mrr']:.4f} |")
+              prev = r['multihop_recall_at_10']
+          print("\n2-hop gold is reachable ONLY via graph traversal. +spreading's 2hop Δ = the graph leg's isolated multi-hop recall. If +bm25 lifts 1hop but not 2hop, the contrast confirms the graph carries multi-hop. This is the metric LoCoMo recall@k cannot provide; relation-quality work is measured HERE.")
+          PY
+
       - name: Run LoCoMo recall@k
-        if: ${{ github.event.inputs.reachability != 'true' && github.event.inputs.learning_curve != 'true' }}
+        if: ${{ github.event.inputs.reachability != 'true' && github.event.inputs.learning_curve != 'true' && github.event.inputs.multi_hop != 'true' }}
         env:
           RECALL_DIAG_K: ${{ github.event.inputs.diag_k }}
           SHODH_GRAPH_FUSION_WEIGHT: ${{ github.event.inputs.graph_w }}

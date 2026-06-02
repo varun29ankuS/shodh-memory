@@ -83,6 +83,34 @@ pub struct PerCaseRecord {
     pub recall_at_100: f64,
 }
 
+/// One layer's row in the E3 multi-hop ladder: recall@10 split by 2-hop
+/// (graph-only-reachable) vs 1-hop (BM25-solvable control) cases.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MultiHopLayerRow {
+    /// `report_key()` of the `LayerMode` (e.g. `vamana_only`, `+spreading`).
+    pub layer: String,
+    /// Mean recall@10 over the planted 2-hop cases (gold reachable only via
+    /// graph traversal). The `+spreading − vamana_only` delta on this column is
+    /// the graph leg's isolated multi-hop contribution.
+    pub multihop_recall_at_10: f64,
+    /// Mean recall@10 over the 1-hop control cases (gold lexically findable).
+    pub onehop_recall_at_10: f64,
+    /// Mean MRR over the 2-hop cases.
+    pub multihop_mrr: f64,
+}
+
+/// E3 controlled multi-hop report: per-layer 2-hop vs 1-hop recall over a
+/// synthetic planted-chain corpus where 2-hop gold is reachable only by graph
+/// traversal. The metric LoCoMo recall@k cannot provide.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MultiHopReport {
+    pub chains: usize,
+    pub multihop_cases: usize,
+    pub onehop_cases: usize,
+    /// One row per `LayerMode`, ordered along the cumulative ladder.
+    pub rows: Vec<MultiHopLayerRow>,
+}
+
 /// Aggregate metrics for one pipeline layer across all cases.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LayerReport {

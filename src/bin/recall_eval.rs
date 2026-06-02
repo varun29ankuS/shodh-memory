@@ -19,8 +19,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 
 use shodh_memory::memory::types::LayerMode;
+use shodh_memory::recall_harness::multihop::analyze_multihop;
 use shodh_memory::recall_harness::report::{
-    compare_to_baseline, LearningCurveReport, ReachabilityReport, Report,
+    compare_to_baseline, LearningCurveReport, MultiHopReport, ReachabilityReport, Report,
 };
 use shodh_memory::recall_harness::runner::{
     analyze_graph_reachability, analyze_learning_curve, run_smoke_suite_with_ranks, ReportWithRanks,
@@ -190,6 +191,19 @@ struct Args {
     #[arg(long, default_value_t = 8)]
     lc_cycles: usize,
 
+    /// E3 controlled multi-hop diagnostic: when set, skip the configured suite
+    /// and instead generate a synthetic planted 2-hop-chain corpus (gold
+    /// reachable ONLY by graph traversal), run it through every LayerMode, and
+    /// write a `MultiHopReport` (per-layer 2-hop vs 1-hop recall) to this path.
+    /// The `+spreading − vamana_only` 2-hop delta is the graph leg's isolated
+    /// multi-hop contribution — the signal LoCoMo recall@k cannot surface.
+    #[arg(long)]
+    multi_hop: Option<PathBuf>,
+
+    /// Number of planted chains for the multi-hop diagnostic.
+    #[arg(long, default_value_t = shodh_memory::recall_harness::multihop::DEFAULT_CHAINS)]
+    mh_chains: usize,
+
     /// Simulated edge age in days, applied AFTER ingest and BEFORE queries
     /// (decay study). When `> 0`, the harness ages the knowledge-graph edges via
     /// `simulate_edge_aging` at the production ~6h cadence, so recall quality is
@@ -240,6 +254,18 @@ fn run(args: &Args) -> Result<i32> {
         let report = analyze_graph_reachability(&inputs).context("graph-reachability analysis")?;
         write_reachability(reach_path, &report)?;
         summarise_reachability(&report);
+        eprintln!(
+            "recall-eval: storage retained at {} (delete manually after inspection)",
+            storage_path.display()
+        );
+        return Ok(EXIT_PASS);
+    }
+
+    // E3 multi-hop diagnostic short-circuits the recall run entirely.
+    if let Some(mh_path) = &args.multi_hop {
+        let report = analyze_multihop(&inputs, args.mh_chains).context("multi-hop analysis")?;
+        write_multihop(mh_path, &report)?;
+        summarise_multihop(&report);
         eprintln!(
             "recall-eval: storage retained at {} (delete manually after inspection)",
             storage_path.display()
@@ -428,6 +454,41 @@ fn summarise_learning_curve(report: &LearningCurveReport) {
         );
     }
     eprintln!("  Helpful rank DOWN, Misleading rank UP => reward steers recall (a real gradient).");
+}
+
+fn write_multihop(path: &std::path::Path, report: &MultiHopReport) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating output dir {}", parent.display()))?;
+        }
+    }
+    let json = serde_json::to_vec_pretty(report).context("serialising multi-hop report")?;
+    std::fs::write(path, &json)
+        .with_context(|| format!("writing multi-hop report to {}", path.display()))?;
+    Ok(())
+}
+
+fn summarise_multihop(report: &MultiHopReport) {
+    eprintln!(
+        "recall-eval: multi-hop (chains={} 2hop_cases={} 1hop_cases={}) — graph-only-reachable gold",
+        report.chains, report.multihop_cases, report.onehop_cases
+    );
+    eprintln!("  layer         2hop_recall@10  1hop_recall@10  2hop_mrr");
+    let mut prev_2hop: Option<f64> = None;
+    for row in &report.rows {
+        let delta = match prev_2hop {
+            Some(p) => format!("(Δ{:+.4})", row.multihop_recall_at_10 - p),
+            None => String::new(),
+        };
+        eprintln!(
+            "  {:<12}  {:.4} {:<10}  {:.4}          {:.4}",
+            row.layer, row.multihop_recall_at_10, delta, row.onehop_recall_at_10, row.multihop_mrr
+        );
+        prev_2hop = Some(row.multihop_recall_at_10);
+    }
+    eprintln!("  +spreading 2hop delta = the GRAPH leg's isolated multi-hop recall; if large while +bm25");
+    eprintln!("  adds little to 2hop (but lifts 1hop), the graph carries the multi-hop load as designed.");
 }
 
 fn summarise(report: &Report) {

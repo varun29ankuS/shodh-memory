@@ -13,5 +13,6 @@
 pub mod decay_sim;
 pub mod fixtures;
 pub mod metrics;
+pub mod multihop;
 pub mod report;
 pub mod runner;
