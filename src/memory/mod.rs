@@ -235,6 +235,16 @@ pub struct MemorySystem {
     /// Resolves relative dates ("next month" → June 2023) for accurate retrieval
     temporal_fact_store: Arc<temporal_facts::TemporalFactStore>,
 
+    /// The user this MemorySystem belongs to. The manager creates one
+    /// MemorySystem per user but the id lived only in the manager's map key, so
+    /// `remember()` could not namespace per-user stores (e.g. temporal facts are
+    /// keyed `temporal_facts:{user_id}:…`). That is why temporal-fact storage was
+    /// previously handler-only — every non-HTTP path (Python bindings, batch,
+    /// MCP-direct, eval) silently dropped them. With the owner known here,
+    /// `remember()` persists facts and `recall()` can default the query's
+    /// `user_id` to this owner. `None` preserves the prior behaviour.
+    default_user_id: Option<String>,
+
     /// Flag: new memories stored since last fact extraction cycle.
     /// When false, fact extraction is skipped entirely (no RocksDB scan, no clones).
     /// Set to true in remember(), cleared by maintenance after extraction runs.
@@ -646,6 +656,9 @@ impl MemorySystem {
             learning_history,
             // Temporal fact store for multi-hop temporal reasoning
             temporal_fact_store,
+            // Owner unknown at construction; the manager sets it via
+            // set_default_user_id() so per-user stores work outside the handler.
+            default_user_id: None,
             // Dirty flag for fact extraction: run on first cycle, then only when new memories stored
             fact_extraction_needed: std::sync::atomic::AtomicBool::new(true),
             // Watermark for incremental fact extraction — initialized to 0 (sentinel).
@@ -721,6 +734,13 @@ impl MemorySystem {
     /// This provides consistent feedback integration across all retrieval paths.
     pub fn set_feedback_store(&mut self, feedback: Arc<parking_lot::RwLock<FeedbackStore>>) {
         self.feedback_store = Some(feedback);
+    }
+
+    /// Record which user owns this MemorySystem. Set by the manager right after
+    /// construction so per-user stores (temporal facts) work on every ingest
+    /// path, and so `recall()` can default the query's `user_id` to this owner.
+    pub fn set_default_user_id(&mut self, user_id: impl Into<String>) {
+        self.default_user_id = Some(user_id.into());
     }
 
     /// Get reference to the optional feedback store
@@ -1004,14 +1024,34 @@ impl MemorySystem {
                 &memory.experience.entities,
             );
             if !facts.is_empty() {
-                // Note: We don't have user_id in remember(), will need to pass it
-                // For now, extract facts but don't store - storage happens at handler level
-                // or we can use a placeholder user_id
-                tracing::debug!(
-                    "Extracted {} temporal facts from memory {}",
-                    facts.len(),
-                    memory.id.0
-                );
+                // Persist the facts under this system's owner. Previously these
+                // were extracted then dropped here ("storage happens at handler
+                // level"), so every non-HTTP ingest path (Python bindings, batch,
+                // MCP-direct, eval harness) silently lost temporal facts and
+                // Layer 0.6 had nothing to find. With the owner known, store them
+                // on the core path so all callers get temporal reasoning.
+                if let Some(user_id) = self.default_user_id.as_deref() {
+                    match self.temporal_fact_store.store_batch(user_id, &facts) {
+                        Ok(stored) => tracing::debug!(
+                            "Stored {}/{} temporal facts from memory {} (user={})",
+                            stored,
+                            facts.len(),
+                            memory.id.0,
+                            user_id
+                        ),
+                        Err(e) => tracing::warn!(
+                            "Failed to store temporal facts for memory {}: {e}",
+                            memory.id.0
+                        ),
+                    }
+                } else {
+                    tracing::debug!(
+                        "Extracted {} temporal facts from memory {} but no owner set; \
+                         not stored (call set_default_user_id)",
+                        facts.len(),
+                        memory.id.0
+                    );
+                }
             }
         }
 
@@ -1805,7 +1845,7 @@ impl MemorySystem {
         // Temporal fact lookup - boost source memories of matching facts in Layer 4.5
         // RH-8 gate: Layer 0.6 only runs in `Full` mode.
         let temporal_fact_boost_ids: HashSet<MemoryId> = if layer_full && has_temporal_query {
-            if let Some(user_id) = &query.user_id {
+            if let Some(user_id) = query.user_id.as_ref().or(self.default_user_id.as_ref()) {
                 // Get entity name (first focal entity)
                 let entity = query_analysis
                     .focal_entities
@@ -1905,7 +1945,7 @@ impl MemorySystem {
                 std::collections::HashMap::new();
 
             if layer_facts {
-                if let Some(user_id) = &query.user_id {
+                if let Some(user_id) = query.user_id.as_ref().or(self.default_user_id.as_ref()) {
                     let entity_names: Vec<String> = query_analysis
                         .focal_entities
                         .iter()

@@ -1275,13 +1275,17 @@ impl MultiUserMemoryManager {
             let mut created = None;
             for attempt in 0..4u32 {
                 match MemorySystem::new(config.clone(), Some(&self.shared_rocksdb_cache)) {
-                    Ok(ms) => {
+                    Ok(mut ms) => {
                         if attempt > 0 {
                             info!(
                                 "Memory system for user '{}' created after {} retries (lock contention resolved)",
                                 user_id, attempt
                             );
                         }
+                        // Record the owner so per-user stores (temporal facts)
+                        // work on every ingest path and recall() can default the
+                        // query user_id to this user.
+                        ms.set_default_user_id(user_id);
                         created = Some(ms);
                         break;
                     }
