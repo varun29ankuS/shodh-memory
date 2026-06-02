@@ -2127,6 +2127,13 @@ impl MemorySystem {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+        // Margin gate: only expand on edges at/above this effective strength, so
+        // weak/noisy neighbours don't add lexical noise (recovers the small
+        // LoCoMo per-category cost on open_domain/temporal). 0 = no gate.
+        let graph_expand_min_strength: f32 = std::env::var("SHODH_GRAPH_EXPAND_MIN_STRENGTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
         let mut graph_bridges: Vec<String> = Vec::new();
 
         #[allow(clippy::type_complexity)]
@@ -2233,13 +2240,17 @@ impl MemorySystem {
                     for qe in &query_entities {
                         if let Ok(edges) = g.get_entity_relationships_limited(qe, Some(32)) {
                             for edge in edges {
+                                let strength = edge.effective_strength();
+                                if strength < graph_expand_min_strength {
+                                    continue;
+                                }
                                 if let Ok(Some(nb)) = g.get_entity(&edge.to_entity) {
                                     let name_lc = nb.name.to_lowercase();
                                     if nb.name.trim().len() < 2 || original.contains(&name_lc) {
                                         continue;
                                     }
                                     if seen.insert(name_lc) {
-                                        scored.push((nb.name.clone(), edge.effective_strength()));
+                                        scored.push((nb.name.clone(), strength));
                                     }
                                 }
                             }

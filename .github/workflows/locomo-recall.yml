@@ -102,6 +102,10 @@ on:
         description: 'Graph-driven query expansion: append the top-K strongest graph neighbours of query entities (bridges) to the BM25 query, so multi-hop answers surface on the lexical leg. Blank/0=off.'
         required: false
         default: ''
+      graph_expand_min_strength:
+        description: 'Margin gate for graph expansion: only expand on edges >= this effective strength (suppress weak/noisy bridges). Blank/0=no gate.'
+        required: false
+        default: ''
       concept_seed_df_max:
         description: 'IDF gate on concept seeds: skip concept (YAKE) query seeds whose corpus mention_count exceeds this (generic hubs). Blank = no gate. Use with concepts=true to test discriminating-only cues.'
         required: false
@@ -243,6 +247,7 @@ jobs:
           SHODH_ACTR_NORM: ${{ github.event.inputs.actr_norm }}
           SHODH_GRAPH_RESERVE_FINAL: ${{ github.event.inputs.graph_reserve_final }}
           SHODH_GRAPH_EXPAND_K: ${{ github.event.inputs.graph_expand_k }}
+          SHODH_GRAPH_EXPAND_MIN_STRENGTH: ${{ github.event.inputs.graph_expand_min_strength }}
         run: |
           CHAINS_ARG=""
           if [ -n "${{ github.event.inputs.mh_chains }}" ]; then CHAINS_ARG="--mh-chains ${{ github.event.inputs.mh_chains }}"; fi
@@ -284,6 +289,7 @@ jobs:
           SHODH_ACTR_NORM: ${{ github.event.inputs.actr_norm }}
           SHODH_GRAPH_RESERVE_FINAL: ${{ github.event.inputs.graph_reserve_final }}
           SHODH_GRAPH_EXPAND_K: ${{ github.event.inputs.graph_expand_k }}
+          SHODH_GRAPH_EXPAND_MIN_STRENGTH: ${{ github.event.inputs.graph_expand_min_strength }}
         run: |
           ./target/release/recall-eval \
             --suite locomo \
