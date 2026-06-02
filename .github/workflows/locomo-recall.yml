@@ -34,88 +34,16 @@ on:
         description: 'Graph-reachability diagnostic: set true to skip the recall run and instead report, per category, how much gold is reachable from query seed entities within N entity-hops (pure topology).'
         required: false
         default: 'false'
-      graph_w:
-        description: 'Override the graph leg fusion weight (blank = density-default). 0 = graph-OFF, lexical+vector only. Use to measure whether the net-negative graph leg should be removed.'
-        required: false
-        default: ''
-      embedder:
-        description: 'Embedding model: blank/minilm = MiniLM-L6 (default), e5 = e5-small-v2 (384-dim, retrieval-tuned, asymmetric query/passage). Edge-legal drop-in.'
-        required: false
-        default: ''
       learning_curve:
         description: 'Learning-curve diagnostic ("smarter with use"): set true to skip recall and instead measure the reward gradient (Helpful/Neutral/Misleading) over reinforcement cycles on the smoke corpus.'
         required: false
         default: 'false'
-      reward_lr_mult:
-        description: 'Reward learning-rate multiplier for the in-memory RL (default 1.0). Raise (e.g. 8) to amplify reward-modulated plasticity and see if it moves rank, not just score.'
-        required: false
-        default: ''
-      graph_idf:
-        description: 'Graph fine-tune: set true for IDF-at-birth edge weighting (born-weak speaker hubs).'
-        required: false
-        default: ''
-      hub_max:
-        description: 'Graph fine-tune: max entity degree before it stops accreting edges (default 300; lower e.g. 50 to kill speaker hubs early).'
-        required: false
-        default: ''
-      concepts:
-        description: 'L1 substrate test: set true to add YAKE concept keyphrases as graph entities (topic nodes, not just person names). Should grow total_entities + gold≥2seed%.'
-        required: false
-        default: ''
-      max_cases:
-        description: 'Deterministic case subsample (stride, category-preserving) for fast directional recall reads. Blank/0 = full suite. Corpus is always ingested in full.'
-        required: false
-        default: ''
       multi_hop:
         description: 'E3 controlled multi-hop diagnostic: set true to run synthetic planted 2-hop chains (gold reachable ONLY via graph traversal) through every layer and report per-layer 2-hop vs 1-hop recall. Skips the recall suite.'
         required: false
         default: 'false'
-      mh_chains:
-        description: 'Number of planted chains for the multi-hop diagnostic (default 60).'
-        required: false
-        default: ''
-      graph_reserve_k:
-        description: 'E3 fusion-fix A: reserve a final top-k slot for the top-N graph-leg candidates (anti-dilution). Blank = off.'
-        required: false
-        default: ''
-      graph_act_add:
-        description: 'E3 fusion-fix B: activation-proportional additive graph term (scale, e.g. 0.1). Blank = off.'
-        required: false
-        default: ''
-      graph_w_floor:
-        description: 'E3 fusion-fix C: floor the graph fusion weight (e.g. 0.7) and renormalise hybrid down. Blank = off.'
-        required: false
-        default: ''
-      spread_fix:
-        description: 'Graph-leg precision: set true to repair the 2-hop activation collapse (fixed hop decay + additive strength/trust priors) so distal targets rank high natively. The real multi-hop fix.'
-        required: false
-        default: ''
-      actr_norm:
-        description: 'G3 prototype: set true to self-normalise the gated graph-activation additive (activation/max) so the additive is calibrated across corpora. Use with graph_act_add.'
-        required: false
-        default: ''
-      graph_reserve_final:
-        description: 'Rank-based multi-hop fix: reserve a FINAL (post-Layer-5) slot for the top-N graph-exclusive candidates (graph ranks high, BM25 missed). Use with graph_reserve_k. Blank=off.'
-        required: false
-        default: ''
-      graph_expand_k:
-        description: 'Graph-driven query expansion: append the top-K strongest graph neighbours of query entities (bridges) to the BM25 query, so multi-hop answers surface on the lexical leg. Blank/0=off.'
-        required: false
-        default: ''
-      graph_expand_min_strength:
-        description: 'Margin gate for graph expansion: only expand on edges >= this effective strength (suppress weak/noisy bridges). Blank/0=no gate.'
-        required: false
-        default: ''
-      ablation:
-        description: 'Ablation matrix: set true to ingest once and run the suite under all named query-time configs (facts-off/baseline/+graph-expand/+spread-fix/…), emitting one comparison table. The place to see+update ablation studies.'
-        required: false
-        default: 'false'
-      ablation_suite:
-        description: 'Suite for the ablation matrix (smoke = fast default, locomo = held-out).'
-        required: false
-        default: 'smoke'
-      concept_seed_df_max:
-        description: 'IDF gate on concept seeds: skip concept (YAKE) query seeds whose corpus mention_count exceeds this (generic hubs). Blank = no gate. Use with concepts=true to test discriminating-only cues.'
+      extra_env:
+        description: 'Extra SHODH_* flags as space-separated KEY=VAL (e.g. "SHODH_GRAPH_EXPAND_K=5 SHODH_FEEDBACK_MOMENTUM_SCALE=0.6"). Exported into every recall step.'
         required: false
         default: ''
 
