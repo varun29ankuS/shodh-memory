@@ -2334,7 +2334,7 @@ impl MemorySystem {
                 let causal_origin = std::env::var("SHODH_CAUSAL_ORIGIN")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false);
-                if causal_origin && !query_entities.is_empty() {
+                if causal_origin {
                     const ORIGIN_CUES: &[&str] = &[
                         "root cause",
                         "root of",
@@ -2349,8 +2349,11 @@ impl MemorySystem {
                         "originate",
                     ];
                     let qt = query_text.to_lowercase();
-                    if ORIGIN_CUES.iter().any(|c| qt.contains(c)) {
+                    let cue_matched = ORIGIN_CUES.iter().any(|c| qt.contains(c));
+                    let mut origins_found = 0usize;
+                    if cue_matched && !query_entities.is_empty() {
                         if let Ok(origins) = g.trace_causal_origins(&query_entities, 8) {
+                            origins_found = origins.len();
                             for oid in origins {
                                 if let Ok(Some(ent)) = g.get_entity(&oid) {
                                     if ent.name.trim().len() >= 2 {
@@ -2359,6 +2362,16 @@ impl MemorySystem {
                                 }
                             }
                         }
+                    }
+                    // Funnel diagnostic (gated): localise WHERE causal-origin breaks —
+                    // entity resolution vs cue match vs trace. Greppable in CI logs.
+                    if std::env::var("SHODH_CAUSAL_ORIGIN_DEBUG").is_ok() {
+                        eprintln!(
+                            "CAUSAL_FUNNEL qents={} cue={} origins={}",
+                            query_entities.len(),
+                            cue_matched,
+                            origins_found
+                        );
                     }
                 }
 
