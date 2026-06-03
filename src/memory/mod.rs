@@ -2197,6 +2197,11 @@ impl MemorySystem {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
         let mut graph_bridges: Vec<String> = Vec::new();
+        // Causal-origin entities (SHODH_CAUSAL_ORIGIN): roots traced backward from
+        // the query's effect entities, whose episodes are injected as top graph
+        // candidates below (the funnel showed the trace finds the root but the lone
+        // BM25 bridge token loses to the direct cause's match on the effect term).
+        let mut causal_origin_entities: Vec<uuid::Uuid> = Vec::new();
 
         #[allow(clippy::type_complexity)]
         let (
@@ -2355,6 +2360,7 @@ impl MemorySystem {
                         if let Ok(origins) = g.trace_causal_origins(&query_entities, 8) {
                             origins_found = origins.len();
                             for oid in origins {
+                                causal_origin_entities.push(oid);
                                 if let Ok(Some(ent)) = g.get_entity(&oid) {
                                     if ent.name.trim().len() >= 2 {
                                         graph_bridges.push(ent.name);
@@ -2438,6 +2444,33 @@ impl MemorySystem {
                         )
                     })
                     .collect();
+
+                // Causal-origin injection: the backward walk found the root cause,
+                // but as a lone BM25 bridge token it loses to the direct cause's
+                // match on the effect term (funnel: origins=1, yet P@1=0). The found
+                // root IS the answer for an origin query, so inject its episodes as
+                // TOP graph candidates (score above the current max) — they enter
+                // fusion as strong graph hits instead of being diluted away.
+                if !causal_origin_entities.is_empty() {
+                    let max_score = r.iter().map(|x| x.1).fold(0.0f32, f32::max).max(1.0);
+                    let inject_score = max_score * 2.0;
+                    let mut seen: std::collections::HashSet<MemoryId> =
+                        r.iter().map(|x| x.0.clone()).collect();
+                    for oid in &causal_origin_entities {
+                        if let Ok(eps) = g.get_episodes_by_entity(oid) {
+                            for ep in eps {
+                                let mid = MemoryId(ep.uuid);
+                                let in_scope = episode_candidates
+                                    .as_ref()
+                                    .is_none_or(|c| c.contains(&mid));
+                                if in_scope && seen.insert(mid.clone()) {
+                                    r.push((mid, inject_score, inject_score));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Score desc; tie-break by MemoryId asc for deterministic graph candidate order.
                 r.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 r.truncate(200);
