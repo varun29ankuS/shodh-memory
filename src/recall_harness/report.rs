@@ -83,6 +83,26 @@ pub struct PerCaseRecord {
     pub recall_at_100: f64,
 }
 
+/// One age point in the E6 decay/stability curve.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecayRow {
+    pub age_days: f64,
+    #[serde(rename = "recall@10")]
+    pub recall_at_10: f64,
+    #[serde(rename = "ndcg@10")]
+    pub ndcg_at_10: f64,
+    pub mrr: f64,
+}
+
+/// E6 decay/forgetting report: recall@k vs simulated age. Flat = stable memory
+/// (good homeostasis); a cliff = catastrophic forgetting.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecayReport {
+    pub suite: String,
+    pub git_sha: String,
+    pub rows: Vec<DecayRow>,
+}
+
 /// One row in the unified ablation matrix: a named config (a set of query-time
 /// flag overrides) and its aggregate metrics over the suite. The whole point is
 /// a single, re-runnable table where each fix/component is a row you can see and

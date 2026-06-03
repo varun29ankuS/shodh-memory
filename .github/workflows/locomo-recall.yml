@@ -31,7 +31,7 @@ on:
         required: false
         default: ''
       mode:
-        description: 'What to run: recall (default) | reachability | learning_curve | multi_hop | ablation | temporal'
+        description: 'What to run: recall (default) | reachability | learning_curve | multi_hop | ablation | temporal | ontology | lineage | forgetting'
         required: false
         default: 'recall'
       suite:
@@ -213,6 +213,30 @@ jobs:
               prev = r['multihop_recall_at_10']
           print("\n2-hop gold is reachable ONLY via graph traversal. +spreading's 2hop Δ = the graph leg's isolated multi-hop recall. If +bm25 lifts 1hop but not 2hop, the contrast confirms the graph carries multi-hop. This is the metric LoCoMo recall@k cannot provide; relation-quality work is measured HERE.")
           PY
+
+      - name: Ontology controlled diagnostic (E5)
+        if: ${{ github.event.inputs.mode == 'ontology' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval             --suite locomo             --ontology ontology.json             --output unused-recall.json             --storage ./ontology-storage 2>&1 | tee ontology.log
+          echo "## Ontology controlled diagnostic (E5)" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/^## /,$p' ontology.log | tail -n +1 >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Causal-lineage diagnostic (E4)
+        if: ${{ github.event.inputs.mode == 'lineage' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval             --suite locomo             --lineage lineage.json             --output unused-recall.json             --storage ./lineage-storage 2>&1 | tee lineage.log
+          echo "## Causal-lineage diagnostic (E4)" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/^## /,$p' lineage.log | tail -n +1 >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Decay/forgetting stability (E6)
+        if: ${{ github.event.inputs.mode == 'forgetting' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval             --suite locomo             --forgetting forgetting.json             --output unused-recall.json             --storage ./forgetting-storage 2>&1 | tee forgetting.log
+          echo "## Decay/forgetting stability (E6)" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/^## /,$p' forgetting.log | tail -n +1 >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Temporal controlled diagnostic
         if: ${{ github.event.inputs.mode == 'temporal' }}

@@ -21,8 +21,8 @@ use clap::{Parser, ValueEnum};
 use shodh_memory::memory::types::LayerMode;
 use shodh_memory::recall_harness::multihop::analyze_multihop;
 use shodh_memory::recall_harness::report::{
-    compare_to_baseline, AblationReport, LearningCurveReport, MultiHopReport, ReachabilityReport,
-    Report,
+    compare_to_baseline, AblationReport, DecayReport, LearningCurveReport, MultiHopReport,
+    ReachabilityReport, Report,
 };
 use shodh_memory::recall_harness::runner::{
     analyze_ablation, analyze_graph_reachability, analyze_learning_curve,
@@ -219,6 +219,22 @@ struct Args {
     #[arg(long)]
     temporal: Option<PathBuf>,
 
+    /// E6 decay/forgetting: run the suite at increasing simulated ages and write a
+    /// recall@k-vs-age stability curve (flat = stable, cliff = catastrophic
+    /// forgetting).
+    #[arg(long)]
+    forgetting: Option<PathBuf>,
+
+    /// E5 ontology: planted type-disambiguation (person vs org sharing a place);
+    /// the +rerank delta on the type-qualified cases isolates the ontology layer.
+    #[arg(long)]
+    ontology: Option<PathBuf>,
+
+    /// E4 causal-lineage: planted causal chains; root-cause query reachable only by
+    /// chaining. Reports per-layer recall on root-cause vs direct-cause control.
+    #[arg(long)]
+    lineage: Option<PathBuf>,
+
     /// Simulated edge age in days, applied AFTER ingest and BEFORE queries
     /// (decay study). When `> 0`, the harness ages the knowledge-graph edges via
     /// `simulate_edge_aging` at the production ~6h cadence, so recall quality is
@@ -318,6 +334,62 @@ fn run(args: &Args) -> Result<i32> {
             "recall-eval: storage retained at {} (delete manually after inspection)",
             storage_path.display()
         );
+        return Ok(EXIT_PASS);
+    }
+
+    // E5 ontology diagnostic.
+    if let Some(o_path) = &args.ontology {
+        let report = shodh_memory::recall_harness::ontology_harness::analyze_ontology(
+            &inputs, args.mh_chains,
+        )
+        .context("ontology analysis")?;
+        write_multihop(o_path, &report)?;
+        print_cap_ladder(
+            &report,
+            "Ontology (type-disambiguation)",
+            "type-qualified recall@10",
+            "lexical-control recall@10",
+            "+rerank delta on type-qualified = the ontology layer's isolated contribution; ~0 ⇒ ontology rerank inert.",
+        );
+        return Ok(EXIT_PASS);
+    }
+
+    // E4 causal-lineage diagnostic.
+    if let Some(l_path) = &args.lineage {
+        let report = shodh_memory::recall_harness::lineage_harness::analyze_lineage(
+            &inputs, args.mh_chains,
+        )
+        .context("lineage analysis")?;
+        write_multihop(l_path, &report)?;
+        print_cap_ladder(
+            &report,
+            "Causal lineage (root-cause chains)",
+            "root-cause recall@10",
+            "direct-cause control recall@10",
+            "root-cause is reachable only by chaining; if it stays ~0 across layers, causal/lineage retrieval is not exercised in eval.",
+        );
+        return Ok(EXIT_PASS);
+    }
+
+    // E6 decay/forgetting stability curve.
+    if let Some(f_path) = &args.forgetting {
+        let report = shodh_memory::recall_harness::forgetting_harness::analyze_forgetting(
+            &inputs,
+            shodh_memory::recall_harness::forgetting_harness::DEFAULT_AGES,
+        )
+        .context("forgetting analysis")?;
+        write_decay(f_path, &report)?;
+        eprintln!("recall-eval: forgetting/stability (suite={})", report.suite);
+        println!("## Decay / forgetting stability curve ({})\n", report.suite);
+        println!("| age (days) | recall@10 | ndcg@10 | mrr |");
+        println!("| --- | --- | --- | --- |");
+        for r in &report.rows {
+            println!(
+                "| {:.0} | {:.4} | {:.4} | {:.4} |",
+                r.age_days, r.recall_at_10, r.ndcg_at_10, r.mrr
+            );
+        }
+        println!("\nFlat = stable memory (good homeostasis); a cliff = catastrophic forgetting from edge decay.");
         return Ok(EXIT_PASS);
     }
 
@@ -580,6 +652,50 @@ fn summarise_ablation(report: &AblationReport) {
             println!("| {} | {} |", cat, cells.join(" | "));
         }
     }
+}
+
+/// Shared per-layer capability ladder printer (E4/E5 reuse the MultiHopReport
+/// shape: `multihop_*` = the capability column, `onehop_*` = the control column).
+fn print_cap_ladder(
+    report: &MultiHopReport,
+    title: &str,
+    cap_col: &str,
+    ctrl_col: &str,
+    note: &str,
+) {
+    eprintln!(
+        "recall-eval: {title} (cases={} control={})",
+        report.multihop_cases, report.onehop_cases
+    );
+    println!("## {title}\n");
+    println!("| stage | {cap_col} | Δ vs prev | {ctrl_col} |");
+    println!("| --- | --- | --- | --- |");
+    let mut prev: Option<f64> = None;
+    for r in &report.rows {
+        let d = match prev {
+            Some(p) => format!("{:+.4}", r.multihop_recall_at_10 - p),
+            None => String::new(),
+        };
+        println!(
+            "| {} | {:.4} | {} | {:.4} |",
+            r.layer, r.multihop_recall_at_10, d, r.onehop_recall_at_10
+        );
+        prev = Some(r.multihop_recall_at_10);
+    }
+    println!("\n{note}");
+}
+
+fn write_decay(path: &std::path::Path, report: &DecayReport) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating output dir {}", parent.display()))?;
+        }
+    }
+    let json = serde_json::to_vec_pretty(report).context("serialising decay report")?;
+    std::fs::write(path, &json)
+        .with_context(|| format!("writing decay report to {}", path.display()))?;
+    Ok(())
 }
 
 fn write_multihop(path: &std::path::Path, report: &MultiHopReport) -> Result<()> {
