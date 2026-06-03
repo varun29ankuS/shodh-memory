@@ -3211,18 +3211,14 @@ impl MultiUserMemoryManager {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-        // Lever-1 prototype: recover a typed predicate from the episode text so an
-        // edge encodes the relation ("X caused Y" → Triggers) instead of the
-        // label-pair default (CoOccurs for two same-type entities). Only overrides
-        // GENERIC inferences so it never fights a confident label-based type.
+        // Lever-1: recover a typed, DIRECTED predicate from the episode text so an
+        // edge encodes the relation AND its direction ("X set Y in motion" →
+        // X --Triggers--> Y) instead of the label-pair default (CoOccurs for two
+        // same-type entities) with NER-order direction. Computed per pair below;
+        // only overrides GENERIC inferences so it never fights a confident label.
         let extract_predicates: bool = std::env::var("SHODH_GRAPH_EXTRACTED_PREDICATES")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let extracted_predicate = if extract_predicates {
-            crate::graph_memory::extract_predicate_from_text(&truncated_context)
-        } else {
-            None
-        };
 
         for i in 0..entity_uuids.len() {
             for j in (i + 1)..entity_uuids.len() {
@@ -3272,20 +3268,41 @@ impl MultiUserMemoryManager {
                 // Prefer a text-extracted predicate over the label-pair default,
                 // but only when the label heuristic was generic (CoOccurs/RelatedTo)
                 // — a confident typed inference (Person+Org → WorksAt) is kept.
+                // The directed extractor also sets the cause→effect arrow by surface
+                // order, overriding the NER (i,j) array order.
                 let label_relation = crate::graph_memory::infer_relation_type_for_pair(
                     &entity_uuids[i].2,
                     &entity_uuids[j].2,
                 );
-                let relation_type = match (&extracted_predicate, &label_relation) {
-                    (Some(p), crate::graph_memory::RelationType::CoOccurs)
-                    | (Some(p), crate::graph_memory::RelationType::RelatedTo) => p.clone(),
-                    _ => label_relation,
+                let mut from_entity = entity_uuids[i].1;
+                let mut to_entity = entity_uuids[j].1;
+                let relation_type = if extract_predicates
+                    && matches!(
+                        label_relation,
+                        crate::graph_memory::RelationType::CoOccurs
+                            | crate::graph_memory::RelationType::RelatedTo
+                    ) {
+                    match crate::graph_memory::extract_directed_predicate(
+                        &experience.content,
+                        &entity_uuids[i].0,
+                        &entity_uuids[j].0,
+                    ) {
+                        Some((rt, a_is_source)) => {
+                            if !a_is_source {
+                                std::mem::swap(&mut from_entity, &mut to_entity);
+                            }
+                            rt
+                        }
+                        None => label_relation,
+                    }
+                } else {
+                    label_relation
                 };
 
                 let edge = RelationshipEdge {
                     uuid: uuid::Uuid::new_v4(),
-                    from_entity: entity_uuids[i].1,
-                    to_entity: entity_uuids[j].1,
+                    from_entity,
+                    to_entity,
                     relation_type,
                     strength: pair_strength,
                     created_at: now,

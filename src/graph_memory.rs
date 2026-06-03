@@ -1499,24 +1499,10 @@ impl RelationType {
     }
 }
 
-/// Recover a typed relation from the surrounding text by relational cue phrases —
-/// lever-1 "extracted predicates" prototype, gated at the call site by
-/// `SHODH_GRAPH_EXTRACTED_PREDICATES`.
-///
-/// `infer_relation_type_for_pair` can only type a pair by what the entities ARE
-/// (Person+Organization → WorksAt); it returns `CoOccurs` whenever two same-type
-/// entities are joined by a meaningful verb ("X caused Y", "X manages Y"). This
-/// scans the episode text for cue phrases and recovers the predicate so the edge
-/// encodes the relation rather than mere adjacency. Returns `None` when no cue is
-/// found, so the caller keeps the label-pair inference.
-///
-/// NOTE (coarse): the cue is matched against the whole episode context, not the
-/// span BETWEEN the two specific entities, so a multi-relation sentence assigns the
-/// same predicate to every pair. Adequate for short, single-relation memories; a
-/// span-aware extractor is the production follow-up.
-pub fn extract_predicate_from_text(text: &str) -> Option<RelationType> {
+/// Match relational cue phrases in ALREADY-LOWERCASED text → a typed predicate.
+/// Shared by the whole-text and span-scoped extractors below.
+fn predicate_from_cues(t: &str) -> Option<RelationType> {
     use RelationType::*;
-    let t = text.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
 
     // Ordered by signal strength; first match wins. Cue fragments are chosen to
@@ -1562,6 +1548,60 @@ pub fn extract_predicate_from_text(text: &str) -> Option<RelationType> {
         return Some(Uses);
     }
     None
+}
+
+/// Whole-text predicate recovery (lever-1, gated at the call site by
+/// `SHODH_GRAPH_EXTRACTED_PREDICATES`). Undirected and clause-blind — kept for the
+/// simple single-relation path and unit tests. Prefer `extract_directed_predicate`
+/// at edge-creation time.
+pub fn extract_predicate_from_text(text: &str) -> Option<RelationType> {
+    predicate_from_cues(&text.to_ascii_lowercase())
+}
+
+/// Span-scoped, DIRECTION-aware predicate recovery. Locates both entity mentions,
+/// scans only the sentence containing BOTH for a cue, and decides direction by
+/// surface order (the earlier mention is the subject/cause → `from_entity`).
+/// Returns `(relation, a_is_source)`; `None` when the mentions don't co-occur in
+/// one sentence or no cue is present, so the caller keeps the label-pair inference.
+///
+/// This fixes the two bugs that left lineage at P@1=0: a multi-relation sentence no
+/// longer types every pair the same (sentence-scoped), and the causal arrow now
+/// points cause→effect by surface order instead of trusting NER's entity ordering
+/// (the likely cause of the failed first measurement — a reversed arrow makes the
+/// backward origin-walk dead-end).
+pub fn extract_directed_predicate(
+    text: &str,
+    name_a: &str,
+    name_b: &str,
+) -> Option<(RelationType, bool)> {
+    let lc = text.to_ascii_lowercase();
+    let a = name_a.to_ascii_lowercase();
+    let b = name_b.to_ascii_lowercase();
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    let pa = lc.find(&a)?;
+    let pb = lc.find(&b)?;
+    if pa == pb {
+        return None;
+    }
+    // Window spanning both mentions, then clamp to the enclosing sentence so a cue
+    // from a neighbouring clause cannot leak in.
+    let (lo, hi) = if pa < pb {
+        (pa, pb + b.len())
+    } else {
+        (pb, pa + a.len())
+    };
+    let sent_start = lc[..lo]
+        .rfind(['.', '!', '?', ';', '\n'])
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let sent_end = lc[hi..]
+        .find(['.', '!', '?', ';', '\n'])
+        .map(|i| hi + i)
+        .unwrap_or(lc.len());
+    let rt = predicate_from_cues(&lc[sent_start..sent_end])?;
+    Some((rt, pa < pb))
 }
 
 /// Infer a typed relation between two entities based on their labels.
@@ -7023,6 +7063,38 @@ mod tests {
         // No relational cue → None, so the caller keeps the label-pair inference.
         assert_eq!(
             extract_predicate_from_text("the sky is a colour today"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_directed_predicate_sets_cause_effect_arrow() {
+        // "A set B in motion": A is the cause (appears first) → a_is_source = true.
+        assert_eq!(
+            extract_directed_predicate("Vornak set Meslin in motion.", "Vornak", "Meslin"),
+            Some((RelationType::Triggers, true))
+        );
+        // Same fact, arguments swapped: B is queried first but A is still the cause,
+        // so a_is_source = false (the caller swaps from/to). This is the arrow-
+        // direction fix that the NER-order default got wrong.
+        assert_eq!(
+            extract_directed_predicate("Vornak set Meslin in motion.", "Meslin", "Vornak"),
+            Some((RelationType::Triggers, false))
+        );
+        // Sentence scoping: a cue in a NEIGHBOURING sentence must not be applied to
+        // a pair that merely co-occurs across the boundary.
+        assert_eq!(
+            extract_directed_predicate("Alpha and Beta met. Gamma caused Delta.", "Alpha", "Beta"),
+            None
+        );
+        // Both mentions in the cued sentence → recovered.
+        assert_eq!(
+            extract_directed_predicate("Gamma caused Delta.", "Gamma", "Delta"),
+            Some((RelationType::Triggers, true))
+        );
+        // Missing mention → None (caller keeps label-pair inference).
+        assert_eq!(
+            extract_directed_predicate("Gamma caused Delta.", "Gamma", "Epsilon"),
             None
         );
     }
