@@ -710,6 +710,29 @@ pub fn ingest_corpus(
 
         map.insert(item.id.clone(), memory_id.0);
     }
+
+    // Consolidation fidelity (SHODH_EVAL_CONSOLIDATE): production runs a periodic
+    // HEAVY maintenance cycle that the harness previously skipped — so the eval
+    // never exercised semantic-fact extraction, episodic replay, or tier
+    // promotion (W6/W7), leaving the whole consolidation stack unmeasured. When
+    // enabled, run one heavy maintenance pass after ingest so those
+    // consolidation-driven features are actually populated. decay_factor = 1.0 →
+    // no activation decay (forgetting/aging is the separate --age-days path), so
+    // this isolates consolidation from decay. Default off → prior behaviour, so a
+    // consolidate-off vs -on A/B measures the consolidation/fact contribution.
+    if std::env::var("SHODH_EVAL_CONSOLIDATE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        match user_mem.read().run_maintenance(1.0, EVAL_USER, true) {
+            Ok(r) => tracing::info!(
+                "eval consolidation cycle: facts_extracted~maintenance ran ({:?})",
+                r
+            ),
+            Err(e) => tracing::warn!("eval consolidation cycle failed: {e}"),
+        }
+    }
+
     Ok(map)
 }
 
