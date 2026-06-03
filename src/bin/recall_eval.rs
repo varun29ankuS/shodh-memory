@@ -212,6 +212,13 @@ struct Args {
     #[arg(long)]
     ablation: Option<PathBuf>,
 
+    /// Temporal controlled diagnostic: generate planted time-varying facts (gold =
+    /// the fact valid at the queried time, not the latest), run through every
+    /// LayerMode, and write per-layer recall on the valid-at-T cases vs the latest
+    /// control. The +facts delta on valid-at-T isolates the temporal layer.
+    #[arg(long)]
+    temporal: Option<PathBuf>,
+
     /// Simulated edge age in days, applied AFTER ingest and BEFORE queries
     /// (decay study). When `> 0`, the harness ages the knowledge-graph edges via
     /// `simulate_edge_aging` at the production ~6h cadence, so recall quality is
@@ -274,6 +281,39 @@ fn run(args: &Args) -> Result<i32> {
         let report = analyze_ablation(&inputs).context("ablation analysis")?;
         write_ablation(abl_path, &report)?;
         summarise_ablation(&report);
+        eprintln!(
+            "recall-eval: storage retained at {} (delete manually after inspection)",
+            storage_path.display()
+        );
+        return Ok(EXIT_PASS);
+    }
+
+    // Temporal controlled diagnostic short-circuits the recall run entirely.
+    if let Some(t_path) = &args.temporal {
+        let report =
+            shodh_memory::recall_harness::temporal_harness::analyze_temporal(&inputs, args.mh_chains)
+                .context("temporal analysis")?;
+        write_multihop(t_path, &report)?;
+        eprintln!(
+            "recall-eval: temporal (subjects={} validT_cases={} latest_cases={})",
+            report.chains, report.multihop_cases, report.onehop_cases
+        );
+        println!("## Temporal controlled (planted time-varying facts)\n");
+        println!("| stage | valid-at-T recall@10 | Δ vs prev | latest-control recall@10 |");
+        println!("| --- | --- | --- | --- |");
+        let mut prev: Option<f64> = None;
+        for r in &report.rows {
+            let d = match prev {
+                Some(p) => format!("{:+.4}", r.multihop_recall_at_10 - p),
+                None => String::new(),
+            };
+            println!(
+                "| {} | {:.4} | {} | {:.4} |",
+                r.layer, r.multihop_recall_at_10, d, r.onehop_recall_at_10
+            );
+            prev = Some(r.multihop_recall_at_10);
+        }
+        println!("\nvalid-at-T = retrieve the fact true at the queried time (gold = EARLIER memory). The +facts/+rerank delta here is the temporal layer's isolated contribution; latest-control should be BM25-solvable.");
         eprintln!(
             "recall-eval: storage retained at {} (delete manually after inspection)",
             storage_path.display()

@@ -31,7 +31,7 @@ on:
         required: false
         default: ''
       mode:
-        description: 'What to run: recall (default) | reachability | learning_curve | multi_hop | ablation'
+        description: 'What to run: recall (default) | reachability | learning_curve | multi_hop | ablation | temporal'
         required: false
         default: 'recall'
       suite:
@@ -213,6 +213,14 @@ jobs:
               prev = r['multihop_recall_at_10']
           print("\n2-hop gold is reachable ONLY via graph traversal. +spreading's 2hop Δ = the graph leg's isolated multi-hop recall. If +bm25 lifts 1hop but not 2hop, the contrast confirms the graph carries multi-hop. This is the metric LoCoMo recall@k cannot provide; relation-quality work is measured HERE.")
           PY
+
+      - name: Temporal controlled diagnostic
+        if: ${{ github.event.inputs.mode == 'temporal' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval             --suite locomo             --temporal temporal.json             --output unused-recall.json             --storage ./temporal-storage 2>&1 | tee temporal.log
+          echo "## Temporal controlled (planted time-varying facts)" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/## Temporal controlled/,$p' temporal.log >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Run LoCoMo recall@k
         if: ${{ github.event.inputs.mode == 'recall' || github.event.inputs.mode == '' }}

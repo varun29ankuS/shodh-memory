@@ -16,3 +16,4 @@ pub mod metrics;
 pub mod multihop;
 pub mod report;
 pub mod runner;
+pub mod temporal_harness;
