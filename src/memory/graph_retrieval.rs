@@ -186,6 +186,13 @@ fn spread_single_direction(
     const SPREAD_FIX_HOP_DECAY: f32 = 0.6;
     const SPREAD_FIX_PRIOR_FLOOR: f32 = 0.5;
 
+    // Lever-1 prototype: weight each hop by the edge's relation type so activation
+    // flows along meaningful predicates (causal/structural) rather than mere
+    // co-occurrence. Read once; applied per edge below. Default off → unchanged.
+    let predicate_weights = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     for hop in 1..=max_hops {
         let current_activated: Vec<(Uuid, f32)> =
             activation_map.iter().map(|(id, act)| (*id, *act)).collect();
@@ -239,6 +246,15 @@ fn spread_single_direction(
                     let decay_rate = calculate_importance_weighted_decay(effective);
                     let decay = (-decay_rate * hop as f32).exp();
                     source_activation * decay * effective * tier_trust * degree_norm
+                };
+
+                // Lever-1: scale by the relation type's intrinsic spreading weight
+                // so a real predicate (e.g. Causes 1.3) carries more activation than
+                // bare co-occurrence (0.5).
+                let base_spread = if predicate_weights {
+                    base_spread * edge.relation_type.spreading_weight()
+                } else {
+                    base_spread
                 };
 
                 // Ontological type penalty: dampen activation through wrong-type edges/entities.
@@ -693,6 +709,11 @@ pub fn spreading_activation_retrieve_with_stats(
         let mut current_threshold = SPREADING_ACTIVATION_THRESHOLD;
         // Entity label cache: each entity is read from RocksDB at most once across all hops.
         let mut entity_label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
+        // Lever-1 prototype: weight each hop by the edge's relation type (see
+        // spread_single_direction). Read once; applied per edge below.
+        let predicate_weights = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         for hop in 1..=SPREADING_MAX_HOPS {
             stats.graph_hops = hop;
@@ -750,6 +771,12 @@ pub fn spreading_activation_retrieve_with_stats(
 
                     let base_spread =
                         source_activation * decay * effective * tier_trust * degree_norm;
+                    // Lever-1: scale by relation type's intrinsic spreading weight.
+                    let base_spread = if predicate_weights {
+                        base_spread * edge.relation_type.spreading_weight()
+                    } else {
+                        base_spread
+                    };
 
                     // Ontological type penalty (same as bidirectional path)
                     let spread_amount = if let Some(intent) = intent_ref {

@@ -1458,6 +1458,103 @@ impl RelationType {
             Self::Custom(s) => s.as_str(),
         }
     }
+
+    /// Intrinsic spreading-activation weight for this relation type — lever-1
+    /// prototype, gated at the call site by `SHODH_GRAPH_PREDICATE_WEIGHTS`.
+    ///
+    /// A co-occurrence edge is weak evidence of a real relationship: the two
+    /// entities were merely co-mentioned. A typed predicate (causal, employment,
+    /// structural) encodes an actual relation. Spreading activation should flow
+    /// preferentially along meaning rather than adjacency, otherwise traversal over
+    /// a co-occurrence graph just rediscovers lexical co-occurrence (which BM25
+    /// already has). Weights are centred near 1.0 so the flag RE-WEIGHTS the graph
+    /// instead of globally scaling it; the load-bearing contrast is the 2.6× gap
+    /// between `CoOccurs` (0.5) and the causal relations (1.3).
+    pub fn spreading_weight(&self) -> f32 {
+        use RelationType::*;
+        match self {
+            // Causal relations — the lineage / multi-hop backbone.
+            Causes | ResultsIn | Triggers | SupersededBy => 1.3,
+            // Strong typed relations between distinct entities.
+            WorksAt | EmployedBy | Manages | AssignedTo | Approves | OwnedBy | CreatedBy
+            | DevelopedBy | Teaches => 1.1,
+            // Structural / functional relations.
+            PartOf | Contains | LocatedIn | LocatedAt | DependsOn | Requires | Uses | Implements
+            | Configures | DeploysTo | Monitors | Documents | WorksWith | Knows | Learned
+            | Prefers | Recommends => 1.0,
+            AlternativeTo => 0.9,
+            // Generic associations — progressively weaker evidence of meaning.
+            AssociatedWith | CoRetrieved => 0.7,
+            RelatedTo => 0.6,
+            CoOccurs => 0.5,
+            Custom(_) => 1.0,
+        }
+    }
+}
+
+/// Recover a typed relation from the surrounding text by relational cue phrases —
+/// lever-1 "extracted predicates" prototype, gated at the call site by
+/// `SHODH_GRAPH_EXTRACTED_PREDICATES`.
+///
+/// `infer_relation_type_for_pair` can only type a pair by what the entities ARE
+/// (Person+Organization → WorksAt); it returns `CoOccurs` whenever two same-type
+/// entities are joined by a meaningful verb ("X caused Y", "X manages Y"). This
+/// scans the episode text for cue phrases and recovers the predicate so the edge
+/// encodes the relation rather than mere adjacency. Returns `None` when no cue is
+/// found, so the caller keeps the label-pair inference.
+///
+/// NOTE (coarse): the cue is matched against the whole episode context, not the
+/// span BETWEEN the two specific entities, so a multi-relation sentence assigns the
+/// same predicate to every pair. Adequate for short, single-relation memories; a
+/// span-aware extractor is the production follow-up.
+pub fn extract_predicate_from_text(text: &str) -> Option<RelationType> {
+    use RelationType::*;
+    let t = text.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
+
+    // Ordered by signal strength; first match wins. Cue fragments are chosen to
+    // survive an entity splitting the verb phrase ("X set Y in motion") — real text
+    // rarely keeps a relational verb contiguous, so matching only "set in motion"
+    // would miss the relation it is meant to capture.
+    if has(&[
+        "in motion",
+        "brought about",
+        "gave rise",
+        "triggered",
+        "led directly to",
+        "led to",
+        "resulted in",
+        "caused",
+        "because of",
+        "due to",
+    ]) {
+        return Some(Triggers);
+    }
+    if has(&["superseded", "replaced by", "deprecated", "obsoleted", "rolled back"]) {
+        return Some(SupersededBy);
+    }
+    if has(&["manages", "manager of", "oversees", "supervises", "in charge of"]) {
+        return Some(Manages);
+    }
+    if has(&["works at", "works for", "employed by", "employee of", "joined"]) {
+        return Some(WorksAt);
+    }
+    if has(&["created", "developed", "built", "founded", "designed", "authored"]) {
+        return Some(CreatedBy);
+    }
+    if has(&["depends on", "relies on", "requires", "needs"]) {
+        return Some(DependsOn);
+    }
+    if has(&["located in", "based in", "headquartered", "situated in"]) {
+        return Some(LocatedIn);
+    }
+    if has(&["part of", "belongs to", "member of", "division of"]) {
+        return Some(PartOf);
+    }
+    if has(&["uses", "using", "powered by", "built on"]) {
+        return Some(Uses);
+    }
+    None
 }
 
 /// Infer a typed relation between two entities based on their labels.
@@ -6817,6 +6914,51 @@ impl Default for EntityExtractor {
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    #[test]
+    fn spreading_weight_prefers_predicates_over_cooccurrence() {
+        // The load-bearing contrast: a real causal predicate must out-weight bare
+        // co-occurrence so activation flows along meaning, not adjacency.
+        assert!(
+            RelationType::Causes.spreading_weight() > RelationType::CoOccurs.spreading_weight()
+        );
+        assert!(
+            RelationType::Triggers.spreading_weight() > RelationType::RelatedTo.spreading_weight()
+        );
+        assert!(
+            RelationType::WorksAt.spreading_weight() > RelationType::CoOccurs.spreading_weight()
+        );
+        // Co-occurrence is the weakest evidence of meaning.
+        assert_eq!(RelationType::CoOccurs.spreading_weight(), 0.5);
+        assert!((RelationType::Causes.spreading_weight() - 1.3).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn extract_predicate_recovers_causal_relations_from_text() {
+        // The lineage harness phrasing must recover a causal predicate that the
+        // (Event, Event) label heuristic would have flattened to CoOccurs.
+        assert_eq!(
+            extract_predicate_from_text("Vornak set Meslin in motion."),
+            Some(RelationType::Triggers)
+        );
+        assert_eq!(
+            extract_predicate_from_text("the outage caused the rollback"),
+            Some(RelationType::Triggers)
+        );
+        assert_eq!(
+            extract_predicate_from_text("Alice manages the platform team"),
+            Some(RelationType::Manages)
+        );
+        assert_eq!(
+            extract_predicate_from_text("Service A depends on Service B"),
+            Some(RelationType::DependsOn)
+        );
+        // No relational cue → None, so the caller keeps the label-pair inference.
+        assert_eq!(
+            extract_predicate_from_text("the sky is a colour today"),
+            None
+        );
+    }
 
     #[test]
     fn classify_tag_label_maps_known_categories() {
