@@ -2872,19 +2872,46 @@ impl MemorySystem {
                     .collect();
             }
 
-            // Graph results: pure RRF with density weight
+            // G3 (SHODH_ACTR_FUSION): replace the rank-reciprocal RRF base
+            // (graph_w/(k+rank) — a sub-0.01 crumb BM25's ranked crowd buries) with a
+            // calibrated MAGNITUDE additive: each leg's score normalised to its own
+            // max in this query and entered at full leg-weight, so the graph's
+            // confident hit competes on the fused scale instead of as a rank crumb
+            // (the triple-confirmed lock: ontology 0.65→0.083, multi-hop 0.43→0,
+            // lineage buried). Density weights remain the LoCoMo guard (dense/noisy
+            // graph → low graph_w → small contribution). The multiplicative
+            // activation bonus + gated additive below are RRF patches the magnitude
+            // makes redundant, so they collapse to no-ops under ACT-R.
+            let actr_fusion = std::env::var("SHODH_ACTR_FUSION")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let max_hybrid = hybrid_ids
+                .iter()
+                .map(|(_, s)| *s)
+                .fold(0.0_f32, f32::max)
+                .max(1e-6);
+
+            // Graph leg.
             for (r, (id, activation, h)) in graph_results.iter().enumerate() {
-                // Standard RRF: weight / (k + rank), rank is 1-indexed
-                let rrf_score = graph_w / (k + (r + 1) as f32);
+                let rrf_score = if actr_fusion {
+                    // Calibrated magnitude: the graph's best hit enters at graph_w,
+                    // not a graph_w/(k+rank) crumb.
+                    graph_w * (activation / max_activation).clamp(0.0, 1.0)
+                } else {
+                    // Standard RRF: weight / (k + rank), rank is 1-indexed.
+                    graph_w / (k + (r + 1) as f32)
+                };
                 *fused.entry(id.clone()).or_insert(0.0) += rrf_score;
                 heb.insert(id.clone(), *h);
 
-                // Multiplicative activation bonus (ACT-R style spreading activation)
-                // Scaled by graph_w: trust activation more when graph is sparse/mature
-                let activation_factor = 1.0
-                    + graph_w
+                // Multiplicative activation bonus (RRF-only; no-op under ACT-R).
+                let activation_factor = if actr_fusion {
+                    1.0
+                } else {
+                    1.0 + graph_w
                         * crate::constants::ACTIVATION_BONUS_SCALE
-                        * activation.clamp(0.0, 1.0);
+                        * activation.clamp(0.0, 1.0)
+                };
                 if let Some(score) = fused.get_mut(id) {
                     *score *= activation_factor;
                     // Gated additive: only lift graph-exclusive finds (absent from
@@ -2925,9 +2952,14 @@ impl MemorySystem {
                 }
             }
 
-            // Hybrid (BM25+vector) results: pure RRF with density weight
-            for (r, (id, _)) in hybrid_ids.iter().enumerate() {
-                let hybrid_rrf = hybrid_w / (k + (r + 1) as f32);
+            // Hybrid (BM25+vector) leg.
+            for (r, (id, hybrid_raw)) in hybrid_ids.iter().enumerate() {
+                let hybrid_rrf = if actr_fusion {
+                    // Calibrated magnitude, parallel to the graph leg.
+                    hybrid_w * (hybrid_raw / max_hybrid).clamp(0.0, 1.0)
+                } else {
+                    hybrid_w / (k + (r + 1) as f32)
+                };
                 *fused.entry(id.clone()).or_insert(0.0) += hybrid_rrf;
 
                 // Track per-memory hybrid RRF contribution
