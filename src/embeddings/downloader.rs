@@ -22,14 +22,16 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// URLs for MiniLM model files (hosted on HuggingFace)
-/// Full model is 90MB, quantized is 23MB - we download quantized for edge devices
-/// Pinned to commit c9745ed1 to prevent checksum drift when HuggingFace updates models
+/// URLs for gte-small model files (hosted on HuggingFace)
+/// Full model is 133MB, quantized (int8) is 34MB - we download quantized for edge devices
+/// gte-small: 384-dim, 512-token window, mean-pool BERT arch — drop-in for MiniLM-L6,
+/// measured +0.12 recall@10 over MiniLM on the LoCoMo gold set (int8 == fp32 quality).
+/// Pinned to commit 5927d172 to prevent checksum drift when HuggingFace updates models
 const MODEL_ONNX_URL: &str =
-    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/onnx/model.onnx";
-const MODEL_QUANTIZED_URL: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/onnx/model_quint8_avx2.onnx";
+    "https://huggingface.co/Xenova/gte-small/resolve/5927d1727bb12db490052a1b33265ad78058de08/onnx/model.onnx";
+const MODEL_QUANTIZED_URL: &str = "https://huggingface.co/Xenova/gte-small/resolve/5927d1727bb12db490052a1b33265ad78058de08/onnx/model_quantized.onnx";
 const TOKENIZER_URL: &str =
-    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/tokenizer.json";
+    "https://huggingface.co/Xenova/gte-small/resolve/5927d1727bb12db490052a1b33265ad78058de08/tokenizer.json";
 
 /// URLs for NER model files (TinyBERT-finetuned-NER, ~14.5MB quantized)
 /// Using a lightweight 4-layer TinyBERT model optimized for edge devices
@@ -45,20 +47,20 @@ const NER_TOKENIZER_URL: &str =
 struct ModelChecksums;
 
 impl ModelChecksums {
-    /// Quantized model checksum (model_quint8_avx2.onnx)
-    /// Pinned: sentence-transformers/all-MiniLM-L6-v2 @ c9745ed1
+    /// Quantized model checksum (onnx/model_quantized.onnx)
+    /// Pinned: Xenova/gte-small @ 5927d172
     const QUANTIZED_MODEL: Option<&'static str> =
-        Some("b941bf19f1f1283680f449fa6a7336bb5600bdcd5f84d10ddc5cd72218a0fd21");
+        Some("18dec105109b6004369799ca4761fb8fb413c64172c02147bcfac186b5c5f6cb");
 
-    /// Full model checksum (model.onnx)
-    /// Pinned: sentence-transformers/all-MiniLM-L6-v2 @ c9745ed1
+    /// Full model checksum (onnx/model.onnx)
+    /// Pinned: Xenova/gte-small @ 5927d172
     const FULL_MODEL: Option<&'static str> =
-        Some("6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452");
+        Some("398a29991324e0b383afa13375d681ced3079c83e097fb1ebd9290d7498523b3");
 
     /// Tokenizer checksum (tokenizer.json)
-    /// Pinned: sentence-transformers/all-MiniLM-L6-v2 @ c9745ed1
+    /// Pinned: Xenova/gte-small @ 5927d172
     const TOKENIZER: Option<&'static str> =
-        Some("be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037");
+        Some("da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0");
 
     /// NER quantized model checksum (model_quantized.onnx)
     /// Pinned: onnx-community/TinyBERT-finetuned-NER-ONNX @ 9b03777d
@@ -97,9 +99,9 @@ pub fn get_cache_dir() -> PathBuf {
     PathBuf::from(".shodh-cache")
 }
 
-/// Get the models directory for embeddings (MiniLM)
+/// Get the models directory for embeddings (gte-small)
 pub fn get_models_dir() -> PathBuf {
-    get_cache_dir().join("models").join("minilm-l6")
+    get_cache_dir().join("models").join("gte-small")
 }
 
 /// Get the models directory for NER (bert-tiny-ner)
@@ -481,9 +483,9 @@ pub fn download_models_internal(
         return Ok(models_dir);
     }
 
-    tracing::info!("Downloading MiniLM-L6-v2 model to {:?}", models_dir);
+    tracing::info!("Downloading gte-small model to {:?}", models_dir);
 
-    // Download model (quantized ~23MB or full ~90MB)
+    // Download model (quantized int8 ~34MB or full ~133MB)
     let (model_url, model_filename, model_checksum) = if use_quantized {
         (
             MODEL_QUANTIZED_URL,
@@ -502,7 +504,7 @@ pub fn download_models_internal(
         } else {
             "HuggingFace (full)"
         },
-        if use_quantized { 23 } else { 90 }
+        if use_quantized { 34 } else { 133 }
     );
     download_file_with_checksum(
         model_url,
@@ -527,7 +529,7 @@ pub fn download_models_internal(
     )?;
 
     tracing::info!(
-        "MiniLM-L6-v2 model downloaded successfully to {:?}",
+        "gte-small model downloaded successfully to {:?}",
         models_dir
     );
     Ok(models_dir)
@@ -852,7 +854,7 @@ mod tests {
     #[test]
     fn test_models_dir() {
         let models_dir = get_models_dir();
-        assert!(models_dir.to_string_lossy().contains("minilm-l6"));
+        assert!(models_dir.to_string_lossy().contains("gte-small"));
     }
 
     /// Regression test for #250: a 14KB providers_shared stub masquerading as

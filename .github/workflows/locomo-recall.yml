@@ -81,7 +81,7 @@ jobs:
       - name: Install LLVM (ONNX runtime build dep)
         run: |
           sudo apt-get update
-          sudo apt-get install -y llvm-dev libclang-dev clang
+          sudo apt-get install -y llvm-dev libclang-dev clang time
 
       - name: Set up e5-small-v2 embedder
         if: ${{ github.event.inputs.embedder == 'e5' }}
@@ -274,13 +274,19 @@ jobs:
           SHODH_GRAPH_EXPAND_MIN_STRENGTH: ${{ github.event.inputs.graph_expand_min_strength }}
         run: |
           for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
-          ./target/release/recall-eval \
+          /usr/bin/time -v -o locomo-time.log ./target/release/recall-eval \
             --suite locomo \
             --layer "${{ github.event.inputs.layer }}" \
             --repeats "${{ github.event.inputs.repeats }}" \
             --output locomo-recall.json \
             --per-case-output locomo-per-case.json \
             --storage ./locomo-storage 2>&1 | tee locomo-recall.log
+          # Resource footprint (deployment sizing): peak RSS of the full recall engine
+          MAXRSS_KB=$(grep -i "Maximum resident set size" locomo-time.log | grep -oE '[0-9]+' | head -1 || echo 0)
+          WALL=$(grep -i "Elapsed (wall clock)" locomo-time.log | sed 's/.*: //' || echo "?")
+          echo "## Resource usage (deployment sizing)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Peak RSS: $((MAXRSS_KB / 1024)) MB** — full engine: RocksDB + Vamana/SPANN index + gte-small embedder + NER + graph" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Wall clock: ${WALL}  (embedder=gte-small int8)" >> "$GITHUB_STEP_SUMMARY"
           echo "## LoCoMo held-out recall@k" >> "$GITHUB_STEP_SUMMARY"
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
@@ -339,6 +345,7 @@ jobs:
             locomo-recall.json
             locomo-per-case.json
             locomo-recall.log
+            locomo-time.log
             locomo-reachability.json
             locomo-reachability.log
             learning-curve.json
