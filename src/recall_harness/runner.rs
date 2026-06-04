@@ -1607,6 +1607,74 @@ mod tests {
         );
     }
 
+    /// OBSERVATION: the clean A/B showed V2 ontology +facts=0.88 but full=0.083.
+    /// Reproduce the harness scenario (short "Alice" vs longer org names, equi-frame)
+    /// and check the person's rank at PlusFacts vs Full under V2 — to confirm the
+    /// content-length quality gate was the `full`-layer destroyer (and that dropping
+    /// the verbosity factor keeps the person #1 at full too).
+    #[test]
+    fn observe_v2_full_layer_ontology() {
+        use crate::recall_harness::fixtures::CorpusItem;
+        use chrono::{Duration, TimeZone, Utc};
+
+        let storage = unique_storage_dir("v2-onto");
+        let manager = build_manager(&storage).unwrap();
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let frame = |e: &str| format!("{e} was registered for the Paris trade summit.");
+        let mk = |id: &str, content: String, i: i64| CorpusItem {
+            id: id.to_string(),
+            content,
+            memory_type: "fact".to_string(),
+            tags: vec![],
+            created_at: base + Duration::minutes(i),
+        };
+        let corpus = vec![
+            mk("person", frame("Alice"), 0),
+            mk("org1", frame("Acme Corporation"), 1),
+            mk("org2", frame("Globex Industries"), 2),
+            mk("org3", frame("Initech Systems"), 3),
+        ];
+        let id_map = ingest_corpus(&manager, &corpus).unwrap();
+        let rev: HashMap<Uuid, String> =
+            id_map.iter().map(|(c, u)| (*u, c.clone())).collect();
+        let system = manager.get_user_memory(EVAL_USER).unwrap();
+
+        let order = |layers: LayerMode| -> Vec<String> {
+            let query = Query {
+                query_text: Some(
+                    "Which person was registered for the Paris trade summit?".to_string(),
+                ),
+                max_results: 10,
+                layers,
+                ..Default::default()
+            };
+            system
+                .read()
+                .recall(&query)
+                .map(|ms| {
+                    ms.iter()
+                        .map(|m| rev.get(&m.id.0).cloned().unwrap_or_else(|| m.id.0.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        std::env::set_var("SHODH_FUSION_V2", "1");
+        let pf = order(LayerMode::PlusFacts);
+        let full = order(LayerMode::Full);
+        std::env::remove_var("SHODH_FUSION_V2");
+        let _ = std::fs::remove_dir_all(&storage);
+
+        let rank = |v: &Vec<String>, id: &str| v.iter().position(|i| i == id);
+        eprintln!("V2 +facts: {pf:?}");
+        eprintln!("V2 full  : {full:?}");
+        eprintln!(
+            "person rank  +facts={:?}  full={:?}",
+            rank(&pf, "person"),
+            rank(&full, "person")
+        );
+    }
+
     #[test]
     fn experience_type_recognises_known_strings() {
         assert!(matches!(

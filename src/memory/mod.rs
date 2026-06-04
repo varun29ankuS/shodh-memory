@@ -3772,14 +3772,24 @@ impl MemorySystem {
         // RH-8 gate: quality multiplier only applies in `Full` mode — lower modes
         // expose the raw fused score so per-layer attribution isn't masked.
         if layer_full {
+            let v2_no_verbosity = std::env::var("SHODH_FUSION_V2")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
             for mem in &mut memories {
-                let content_len = mem.experience.content.len() as f32;
                 let has_entities = !mem.experience.entities.is_empty();
                 let has_context = mem.experience.context.is_some();
-                let quality = (content_len / 200.0).min(1.0)
-                    * (1.0
-                        + if has_entities { 0.1 } else { 0.0 }
-                        + if has_context { 0.1 } else { 0.0 });
+                let elaboration =
+                    1.0 + if has_entities { 0.1 } else { 0.0 } + if has_context { 0.1 } else { 0.0 };
+                let quality = if v2_no_verbosity {
+                    // Conscious restructure: drop the raw content-length factor — a
+                    // verbosity bias that multiplied short correct answers (a person
+                    // name) down below longer ones (org names), crashing ontology
+                    // 0.88→0.083 at `full`. Keep only the structural elaboration.
+                    elaboration
+                } else {
+                    let content_len = mem.experience.content.len() as f32;
+                    (content_len / 200.0).min(1.0) * elaboration
+                };
                 let quality_factor = quality.max(crate::constants::ELABORATION_QUALITY_MIN);
                 if let Some(score) = mem.score {
                     let mut cloned: Memory = mem.as_ref().clone();
