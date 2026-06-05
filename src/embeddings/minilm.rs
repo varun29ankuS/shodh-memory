@@ -365,11 +365,7 @@ impl MiniLMEmbedder {
         // CRITICAL: Ensure ORT_DYLIB_PATH is set BEFORE any ort code runs
         // This prevents ort from picking up system DLLs with wrong versions
         if let Err(e) = Self::ensure_onnx_runtime_available(offline_mode) {
-            tracing::warn!(
-                "Failed to set up ONNX Runtime: {}. Using simplified embeddings.",
-                e
-            );
-            return Self::new_simplified(config);
+            return Self::simplified_or_fail(config, format!("Failed to set up ONNX Runtime: {e}"));
         }
 
         // Check if model files exist
@@ -377,10 +373,10 @@ impl MiniLMEmbedder {
 
         if !model_available {
             if offline_mode {
-                tracing::warn!(
-                    "Model files not found and SHODH_OFFLINE=true. Using simplified embeddings.",
+                return Self::simplified_or_fail(
+                    config,
+                    "Model files not found and SHODH_OFFLINE=true".to_string(),
                 );
-                return Self::new_simplified(config);
             }
 
             // Try to auto-download model files
@@ -413,11 +409,10 @@ impl MiniLMEmbedder {
                     return Self::new(updated_config);
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to download models: {}. Using simplified embeddings.",
-                        e
+                    return Self::simplified_or_fail(
+                        config,
+                        format!("Failed to download models: {e}"),
                     );
-                    return Self::new_simplified(config);
                 }
             }
         }
@@ -460,6 +455,37 @@ impl MiniLMEmbedder {
     /// Check if model is currently loaded (for diagnostics)
     pub fn is_model_loaded(&self) -> bool {
         self.lazy_model.get().is_some()
+    }
+
+    /// Either fall back to simplified (hash) embeddings — but ONLY when the caller has
+    /// explicitly opted in via `SHODH_ALLOW_SIMPLIFIED_EMBEDDINGS` — or hard-fail.
+    ///
+    /// Hash-based embeddings are non-semantic: vector search becomes meaningless and any
+    /// downstream benchmark silently degrades into a plausible-looking but garbage "success"
+    /// (this is exactly what voided the E3 substrate A/B — a model-download failure on
+    /// concurrent CI runners silently produced all-zero vamana recall that still reported
+    /// `conclusion=success`). Default behaviour is therefore to FAIL LOUDLY so corrupt runs
+    /// are caught, not hidden. Genuine resource-constrained / offline edge deployments that
+    /// accept degraded recall opt in with `SHODH_ALLOW_SIMPLIFIED_EMBEDDINGS=1`.
+    fn simplified_or_fail(config: EmbeddingConfig, reason: String) -> Result<Self> {
+        let allow = std::env::var("SHODH_ALLOW_SIMPLIFIED_EMBEDDINGS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if allow {
+            tracing::warn!(
+                "{reason}. SHODH_ALLOW_SIMPLIFIED_EMBEDDINGS is set — falling back to \
+                 hash-based embeddings (DEGRADED, non-semantic; recall quality will be poor).",
+            );
+            Self::new_simplified(config)
+        } else {
+            anyhow::bail!(
+                "{reason}. Refusing to silently fall back to hash-based (non-semantic) \
+                 embeddings — vector search would be meaningless and any benchmark a false \
+                 success. Fix the model path / network, or set \
+                 SHODH_ALLOW_SIMPLIFIED_EMBEDDINGS=1 to explicitly accept degraded embeddings \
+                 (edge/offline only)."
+            )
+        }
     }
 
     /// Create simplified embedder as fallback when model files are missing
