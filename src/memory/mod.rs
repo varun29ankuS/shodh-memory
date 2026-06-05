@@ -2861,6 +2861,16 @@ impl MemorySystem {
             let v2_fusion = std::env::var("SHODH_FUSION_V2")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
+            // DIAGNOSTIC (SHODH_V2_NO_RESCUE): keep V2's Borda backbone but drop the
+            // graph-exclusive confidence rescue. The rescue lifts the graph leg's
+            // ceiling to 2·graph_w vs the hybrid leg's graph_w; that asymmetry can
+            // promote a confident graph DISTRACTOR over the correct vector hit on
+            // single-hop. This isolates whether the rescue is the single-hop regressor
+            // while Borda alone (symmetric, scale-invariant) is neutral. Only
+            // meaningful with SHODH_FUSION_V2=1.
+            let v2_no_rescue = std::env::var("SHODH_V2_NO_RESCUE")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
             let hybrid_top: std::collections::HashSet<MemoryId> =
                 if graph_act_add > 0.0 || graph_reserve_final > 0 || v2_fusion {
                     hybrid_ids
@@ -2916,7 +2926,11 @@ impl MemorySystem {
                     // absent from hybrid — local observation showed it never fired
                     // for the common burial case.)
                     let borda = graph_w * ((n_graph - r as f32) / n_graph);
-                    let rescue = graph_w * (activation / max_activation).clamp(0.0, 1.0);
+                    let rescue = if v2_no_rescue {
+                        0.0
+                    } else {
+                        graph_w * (activation / max_activation).clamp(0.0, 1.0)
+                    };
                     borda + rescue
                 } else if actr_fusion {
                     // Calibrated magnitude: the graph's best hit enters at graph_w,
