@@ -25,6 +25,13 @@ pub use chunking::{chunk_text, ChunkConfig, ChunkResult};
 
 use anyhow::Result;
 
+/// Identifier of the embedding model wired into this build. Persisted into each
+/// store the first time it is (re-)embedded; if a store opens with a different
+/// marker, an automatic re-embed migration runs (MiniLM-space != gte-space, so
+/// stale vectors would silently mismatch live queries). Bump this whenever the
+/// embedding model changes.
+pub const CURRENT_EMBEDDER_ID: &str = "gte-small";
+
 // Re-export downloader functions for convenience
 pub use downloader::{
     are_models_downloaded, are_ner_models_downloaded, download_ner_models, ensure_downloaded,
