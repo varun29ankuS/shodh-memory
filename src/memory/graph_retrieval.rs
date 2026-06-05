@@ -1123,26 +1123,13 @@ pub fn spreading_activation_retrieve_with_stats(
         let episodes = graph.get_episodes_by_entity(entity_uuid)?;
         let is_seed = seed_set.contains(entity_uuid);
 
-        // PPR node specificity (HippoRAG s_i = 1/|P_i|): scale each entity's contribution
-        // by the inverse of how many episodes it appears in. Ubiquitous hub entities (high
-        // |P_i|) are down-weighted; peripheral, specific entities — where multi-hop gold
-        // lives — keep their full vote. Raw PPR stationary mass over-rewards hubs and starves
-        // leaves; specificity is the anti-dilution term that makes PPR mass a usable ranking
-        // signal. Applied only on the PPR path so the BFS baseline is unperturbed.
-        let specificity = if ppr_enabled {
-            1.0 / (episodes.len().max(1) as f32)
-        } else {
-            1.0
-        };
-        let contribution = entity_activation * specificity;
-
         for episode in episodes {
             // Accumulate activation for each episode (might be connected to multiple entities)
             let current = activated_memories
                 .entry(episode.uuid)
                 .or_insert_with(|| (0.0, HashSet::new(), episode.clone()));
 
-            current.0 += contribution;
+            current.0 += entity_activation;
             // G5: record which DISTINCT query seeds reach this episode.
             if is_seed {
                 current.1.insert(*entity_uuid);
