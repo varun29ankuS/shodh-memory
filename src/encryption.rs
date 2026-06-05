@@ -1,12 +1,27 @@
-// Vendored from Veld @ dbc9036d5c29614eba9a6d43032038632d5612f9,
-// adapted for shodh-memory SHODH_* environment names.
+// Apache-2.0 contribution to shodh-memory by Portll (original author).
+// Mirrors the implementation in Portll's `veld` project @ dbc9036 (BUSL-1.1);
+// contributed here under Apache-2.0 — no BUSL-1.1 terms attach to this file.
+// Adapted for shodh-memory SHODH_* environment names.
 //!
 //! Record-level encryption for memory payloads.
 //!
-//! Encrypts serialized memory records before storage and decrypts them on read,
-//! using AES-256-GCM authenticated encryption. This keeps content, summaries,
-//! tags, entity refs, embeddings, and other serialized `Memory` fields opaque
-//! at rest without requiring full database encryption.
+//! Encrypts the serialized `Memory` record before storage and decrypts it on
+//! read, using AES-256-GCM authenticated encryption. The whole serialized
+//! record — content, summary, tags, entity refs, embeddings, metadata — is
+//! opaque at rest **in the primary column family**, without requiring full
+//! database encryption.
+//!
+//! ## Scope — what is NOT covered
+//!
+//! Secondary indexes are not encrypted. The `memory_index` column family stores
+//! derived lookup keys in plaintext (e.g. `tag:<tag>:<id>`, `entity:<name>:<id>`,
+//! and date/type/importance/geo/action keys), so the existence and values of
+//! tags, entity refs, timestamps, etc. remain observable on disk even when
+//! record encryption is enabled — an index scan can confirm "a memory tagged X
+//! exists" without ever touching ciphertext. Sibling column families (feedback,
+//! files, prospective, todos) and any separately-keyed embedding blobs are
+//! likewise plaintext. See `SECURITY.md` for the full threat model. Blinding the
+//! index is tracked as separate, deferred work.
 //!
 //! # Key Management
 //!

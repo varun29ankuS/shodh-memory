@@ -1,3 +1,8 @@
+// Apache-2.0 contribution to shodh-memory by Portll (original author).
+// Mirrors the implementation in Portll's `veld` project @ dbc9036 (BUSL-1.1);
+// contributed here under Apache-2.0 — no BUSL-1.1 terms attach to this file.
+// Adapted for shodh-memory SHODH_* environment names.
+
 //! HTTP-backed embedding client for OpenAI-compatible embedding APIs.
 //!
 //! Supports LM Studio, Ollama, vLLM, or any server implementing the
@@ -18,6 +23,33 @@ use super::Embedder;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:1234";
 const AVAILABILITY_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Returns `true` when `url` is plain `http://` to a non-localhost host.
+///
+/// Self-contained copy for the (feature-gated) embedder so it does not depend on
+/// the integration-URL helpers in `integrations::mod` (owned by PR #284). It
+/// also unwraps `user:pass@` userinfo and IPv6 brackets before matching the host.
+fn is_insecure_remote_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host_and_port = authority
+        .split_once('@')
+        .map_or(authority, |(_, after)| after);
+    let host = if host_and_port.starts_with('[') {
+        host_and_port
+            .trim_start_matches('[')
+            .split(']')
+            .next()
+            .unwrap_or(host_and_port)
+    } else {
+        host_and_port
+            .rsplit_once(':')
+            .map_or(host_and_port, |(h, _)| h)
+    };
+    !matches!(host, "127.0.0.1" | "localhost" | "::1" | "0.0.0.0")
+}
 
 /// Configuration for HTTP embedding API
 #[derive(Debug, Clone)]
@@ -41,11 +73,17 @@ impl Default for HttpEmbedderConfig {
 impl HttpEmbedderConfig {
     /// Create configuration from environment variables
     pub fn from_env() -> Self {
-        let mut base_url = crate::integrations::resolve_api_url_override(
-            "SHODH_EMBEDDING_API_URL",
-            DEFAULT_BASE_URL,
-        );
-        if crate::integrations::is_insecure_remote_url(&base_url)
+        // Self-contained URL guard (see integrations/mod.rs note): an insecure
+        // plain-http override to a non-localhost host is rejected (fall back to
+        // the localhost default) because the embedder POSTs user text to it.
+        // Opt back in with SHODH_ALLOW_INSECURE_REMOTE_EMBEDDER=true.
+        let configured = std::env::var("SHODH_EMBEDDING_API_URL").unwrap_or_default();
+        let mut base_url = if configured.trim().is_empty() {
+            DEFAULT_BASE_URL.to_string()
+        } else {
+            configured.trim().to_string()
+        };
+        if is_insecure_remote_url(&base_url)
             && !std::env::var("SHODH_ALLOW_INSECURE_REMOTE_EMBEDDER")
                 .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
                 .unwrap_or(false)
@@ -239,5 +277,20 @@ mod tests {
             timeout_ms: 100,
         });
         assert_eq!(embedder.dimension(), 768);
+    }
+
+    #[test]
+    fn test_is_insecure_remote_url() {
+        assert!(is_insecure_remote_url("http://remote.example.com/api"));
+        assert!(is_insecure_remote_url(
+            "http://169.254.169.254/latest/meta-data/"
+        ));
+        assert!(is_insecure_remote_url(
+            "http://user:pass@remote.example.com/"
+        ));
+        assert!(!is_insecure_remote_url("http://localhost:3030"));
+        assert!(!is_insecure_remote_url("http://127.0.0.1:3030"));
+        assert!(!is_insecure_remote_url("http://0.0.0.0:3030"));
+        assert!(!is_insecure_remote_url("https://remote.example.com/api"));
     }
 }

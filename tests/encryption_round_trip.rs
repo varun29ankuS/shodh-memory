@@ -81,9 +81,13 @@ fn encryption_round_trip_against_real_rocksdb() {
         raw.len(),
         PLAINTEXT.len(),
     );
+    // NOTE: this asserts opacity of the PRIMARY record blob (default CF) only.
+    // The `memory_index` CF still holds plaintext lookup keys (tags, entity refs,
+    // dates) by design — see SECURITY.md. A dedicated index-plaintext test is
+    // tracked with the deferred index-blinding work, not asserted here.
     assert!(
         raw.starts_with(b"ENC\0"),
-        "encrypted memory should be an opaque record-level ciphertext"
+        "the primary memory record should be an opaque record-level ciphertext"
     );
     assert!(
         !raw.starts_with(b"SHO"),

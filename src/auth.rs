@@ -115,29 +115,31 @@ impl IntoResponse for AuthError {
     }
 }
 
-/// Constant-time string comparison to prevent timing attacks
+/// Constant-time comparison of two key strings.
 ///
-/// Compares all bytes of both strings to prevent length-based timing leaks.
-/// The comparison time is constant regardless of where differences occur.
+/// For equal-length inputs the comparison is constant-time in the input
+/// *contents* via `subtle::ConstantTimeEq`, so it does not leak where two
+/// equal-length keys first differ.
+///
+/// Unequal-length inputs return `false` immediately. This is deliberate and
+/// safe: a key's length is not secret (API-key lengths are public), and an
+/// early reject avoids doing work proportional to the *caller-supplied* length.
+/// That work would otherwise be both a timing signal (cost varying with the
+/// attacker's input) and a DoS vector (a multi-megabyte "key" forcing a
+/// multi-megabyte compare on every request). Note `subtle`'s slice `ct_eq`
+/// already short-circuits on a length mismatch, so the explicit guard only
+/// makes that intent visible — it does not change the leakage profile.
 pub(crate) fn constant_time_compare(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
 
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
 
-    // Equal-length normalisation: `subtle`'s slice `ct_eq` is only constant-time
-    // for equal-length inputs (it returns early on a length mismatch). When the
-    // lengths differ we run a fixed dummy compare and then fail via `len_match`,
-    // so the comparison cost does not leak length information.
-    let len_match = a_bytes.len() == b_bytes.len();
-    let bytes_eq = if len_match {
-        bool::from(a_bytes.ct_eq(b_bytes))
-    } else {
-        let _ = bool::from(b_bytes.ct_eq(b_bytes));
-        false
-    };
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
 
-    len_match && bytes_eq
+    bool::from(a_bytes.ct_eq(b_bytes))
 }
 
 /// Validate API key against configured keys using constant-time comparison
