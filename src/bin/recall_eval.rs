@@ -241,6 +241,12 @@ struct Args {
     #[arg(long)]
     lineage: Option<PathBuf>,
 
+    /// E7 fact-extraction QUALITY: plant memories with known gold facts, force
+    /// distillation, and score precision/recall/F1/dedup of the extracted facts.
+    /// The first harness to measure fact CORRECTNESS, not retrieval rank.
+    #[arg(long)]
+    facts: Option<PathBuf>,
+
     /// Simulated edge age in days, applied AFTER ingest and BEFORE queries
     /// (decay study). When `> 0`, the harness ages the knowledge-graph edges via
     /// `simulate_edge_aging` at the production ~6h cadence, so recall quality is
@@ -374,6 +380,42 @@ fn run(args: &Args) -> Result<i32> {
             "direct-cause control",
             "root-cause is reachable only by chaining past the lexical direct-cause distractor; if it stays ~0 across layers, causal/lineage retrieval is not exercised in eval.",
         );
+        return Ok(EXIT_PASS);
+    }
+
+    // E7 fact-extraction quality.
+    if let Some(facts_path) = &args.facts {
+        let report = shodh_memory::recall_harness::facts_harness::analyze_facts(&inputs)
+            .context("facts analysis")?;
+        std::fs::write(facts_path, serde_json::to_string_pretty(&report)?)
+            .context("write facts report")?;
+        println!("## Fact-extraction quality (E7)\n");
+        println!(
+            "- gold concepts: {}  distractors: {}  facts in store: {} (cycle created: {})",
+            report.gold_concepts,
+            report.distractors,
+            report.facts_extracted,
+            report.facts_extracted_this_cycle
+        );
+        println!(
+            "- **precision: {:.3}  recall: {:.3}  F1: {:.3}**",
+            report.precision, report.recall, report.f1
+        );
+        println!(
+            "- correct: {}  spurious: {}  dedup-ok: {}/{}  conf(correct/spurious): {:.2}/{:.2}",
+            report.correct_extracted,
+            report.spurious,
+            report.dedup_ok,
+            report.recalled_concepts,
+            report.mean_confidence_correct,
+            report.mean_confidence_spurious
+        );
+        println!("\n| fact type | gold | recalled | recall |");
+        println!("| --- | --- | --- | --- |");
+        for (t, row) in &report.by_type {
+            println!("| {} | {} | {} | {:.3} |", t, row.gold, row.recalled, row.recall);
+        }
+        println!("\nprecision = correct/extracted; recall = gold concepts captured; dedup-ok = concepts represented by exactly one fact; spurious = extracted facts matching no gold (incl. distractor leakage). A weak extractor reads as low recall here — the signal the +facts retrieval layer cannot surface.");
         return Ok(EXIT_PASS);
     }
 
