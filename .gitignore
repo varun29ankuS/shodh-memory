@@ -105,3 +105,28 @@ shodh-market.csv
 benchmarks/locomo_test2.json
 seps/mcp-sep-mif.md
 .locomo10.json
+
+# Build tooling (downloaded, not source)
+mcp-publisher
+mcp-publisher.exe
+mcp-publisher.tar.gz
+.smithery/
+
+# Pitch decks / fundraising material (keep local, never commit)
+*PITCH*DECK*
+*pitch*deck*
+*pitch-deck*
+*PitchDeck*
+
+# Logs, diffs, hook + lint scratch
+*.log
+*.diff
+*.patch
+hook_*.txt
+clippy_out*.txt
+clippy_output.txt
+facts_out.json
+*facts_out.json
+
+# Drafts / working scratch — local-only, never commit (plans, eval scratch, reports, venvs)
+drafts/
