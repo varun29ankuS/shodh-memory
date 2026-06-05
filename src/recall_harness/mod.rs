@@ -11,6 +11,7 @@
 //! - `report` — JSON schema + baseline comparison (RH-4)
 
 pub mod decay_sim;
+pub mod facts_harness;
 pub mod fixtures;
 pub mod forgetting_harness;
 pub mod lineage_harness;

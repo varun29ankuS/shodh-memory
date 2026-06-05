@@ -200,6 +200,43 @@ pub struct MultiHopReport {
     pub rows: Vec<MultiHopLayerRow>,
 }
 
+/// E7 fact-extraction QUALITY report: precision/recall/F1 of distilled facts vs
+/// planted gold concepts, plus dedup, spurious-extraction, per-type recall, and
+/// confidence calibration. The first harness to score fact CORRECTNESS — the other
+/// suites only measure retrieval rank, so a weak fact extractor reads as a null.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactsReport {
+    pub suite: String,
+    pub git_sha: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub gold_concepts: usize,
+    pub distractors: usize,
+    /// Facts present in the store after distillation.
+    pub facts_extracted: usize,
+    /// Facts the distillation cycle reported creating (from ConsolidationResult).
+    pub facts_extracted_this_cycle: usize,
+    pub correct_extracted: usize,
+    pub recalled_concepts: usize,
+    pub precision: f64,
+    pub recall: f64,
+    pub f1: f64,
+    /// Recalled concepts represented by EXACTLY one fact (dedup worked, not split).
+    pub dedup_ok: usize,
+    /// Extracted facts matching no gold concept (hallucination / distractor leak).
+    pub spurious: usize,
+    pub mean_confidence_correct: f64,
+    pub mean_confidence_spurious: f64,
+    pub by_type: std::collections::BTreeMap<String, FactsTypeRow>,
+}
+
+/// Per-`FactType` recall row for [`FactsReport`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactsTypeRow {
+    pub gold: usize,
+    pub recalled: usize,
+    pub recall: f64,
+}
+
 /// Aggregate metrics for one pipeline layer across all cases.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LayerReport {
