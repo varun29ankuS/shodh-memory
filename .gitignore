@@ -128,7 +128,5 @@ clippy_output.txt
 facts_out.json
 *facts_out.json
 
-# Eval / report working scratch (drafts/ is local-only)
-drafts/ner_eval/
-drafts/**/venv/
-drafts/*.pdf
+# Drafts / working scratch — local-only, never commit (plans, eval scratch, reports, venvs)
+drafts/
