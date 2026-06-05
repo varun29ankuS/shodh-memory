@@ -456,6 +456,196 @@ fn bidirectional_spread(
 /// spreading activation model adapted for episodic memory retrieval.
 ///
 /// For SHO-26 density-dependent weights, use `spreading_activation_retrieve_with_stats`
+/// Intern an entity UUID into the dense PPR node index (push a new row if unseen).
+fn ppr_intern(
+    u: Uuid,
+    nodes: &mut Vec<Uuid>,
+    node_idx: &mut HashMap<Uuid, usize>,
+    adj: &mut Vec<Vec<(usize, f32)>>,
+) -> usize {
+    if let Some(&i) = node_idx.get(&u) {
+        return i;
+    }
+    let i = nodes.len();
+    nodes.push(u);
+    adj.push(Vec::new());
+    node_idx.insert(u, i);
+    i
+}
+
+/// Intrinsic (decay-free, degree-free) transition weight of an edge for PPR: the
+/// `effective_strength × tier_trust` an edge contributes, optionally scaled by the
+/// relation-type spreading weight and the ontological penalty. The per-hop decay and
+/// degree normalisation of the hand-rolled spread are NOT applied here — PPR's restart
+/// factor and column-normalisation subsume them.
+fn ppr_edge_weight(
+    edge: &crate::graph_memory::RelationshipEdge,
+    intent: Option<&OntologicalIntent>,
+    predicate_weights: bool,
+    graph: &GraphMemory,
+    label_cache: &mut HashMap<Uuid, Option<Vec<EntityLabel>>>,
+) -> f32 {
+    let tier_trust = if edge.is_potentiated() {
+        EDGE_TIER_TRUST_LTP
+    } else {
+        match edge.tier {
+            EdgeTier::L3Semantic => EDGE_TIER_TRUST_L3,
+            EdgeTier::L2Episodic => EDGE_TIER_TRUST_L2,
+            EdgeTier::L1Working => EDGE_TIER_TRUST_L1,
+        }
+    };
+    let mut w = edge.effective_strength() * tier_trust;
+    if predicate_weights {
+        w *= edge.relation_type.spreading_weight();
+    }
+    if let Some(intent) = intent {
+        if !intent.relation_types.is_empty()
+            && !matches!(
+                edge.relation_type,
+                RelationType::CoOccurs | RelationType::RelatedTo | RelationType::CoRetrieved
+            )
+            && !intent.relation_types.contains(&edge.relation_type)
+        {
+            w *= ONTOLOGICAL_RELATION_PENALTY;
+        }
+        if !intent.expected_labels.is_empty() {
+            let labels = label_cache.entry(edge.to_entity).or_insert_with(|| {
+                graph.get_entity(&edge.to_entity).ok().flatten().map(|e| e.labels)
+            });
+            if let Some(labels) = labels {
+                let type_match = labels.iter().any(|l| {
+                    intent
+                        .expected_labels
+                        .iter()
+                        .any(|exp| l.matches_with_hierarchy(exp))
+                });
+                if !type_match {
+                    w *= ONTOLOGICAL_ENTITY_PENALTY;
+                }
+            }
+        }
+    }
+    w.max(0.0)
+}
+
+/// Personalized PageRank / Random-Walk-with-Restart over the local entity subgraph —
+/// the principled, convergent form of spreading activation (HippoRAG). Seeds the restart
+/// vector with the query-entity activations, BFS-expands a bounded subgraph, then
+/// power-iterates `r = (1-α)·Wᵀr + α·p` (α = restart prob). Multi-hop mass and multi-seed
+/// "bridge" boosting fall out for free. Returns (entity → stationary activation, traversed
+/// edge uuids). See `drafts/graph-substrate-plan.md`.
+fn personalized_pagerank(
+    graph: &GraphMemory,
+    seeds: &HashMap<Uuid, f32>,
+    intent: Option<&OntologicalIntent>,
+    predicate_weights: bool,
+) -> Result<(HashMap<Uuid, f32>, Vec<Uuid>)> {
+    const ALPHA: f32 = 0.5; // restart probability (HippoRAG damping=0.5)
+    const ITERS: usize = 30;
+    const TOL: f32 = 1e-6;
+    const EXPAND_HOPS: usize = 3;
+    const MAX_NODES: usize = 5000;
+    const MAX_EDGES_PER_NODE: usize = 100;
+
+    let mut nodes: Vec<Uuid> = Vec::new();
+    let mut node_idx: HashMap<Uuid, usize> = HashMap::new();
+    let mut adj: Vec<Vec<(usize, f32)>> = Vec::new();
+    let mut traversed: Vec<Uuid> = Vec::new();
+    let mut label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
+
+    // BFS-expand the subgraph reachable from the seeds, collecting weighted edges.
+    let mut frontier: Vec<Uuid> = seeds.keys().copied().collect();
+    let mut visited: HashSet<Uuid> = frontier.iter().copied().collect();
+    for &s in &frontier {
+        ppr_intern(s, &mut nodes, &mut node_idx, &mut adj);
+    }
+    for _hop in 0..EXPAND_HOPS {
+        if nodes.len() >= MAX_NODES {
+            break;
+        }
+        let mut next: Vec<Uuid> = Vec::new();
+        for &u in &frontier {
+            let ui = ppr_intern(u, &mut nodes, &mut node_idx, &mut adj);
+            let edges = graph.get_entity_relationships_limited(&u, Some(MAX_EDGES_PER_NODE))?;
+            for edge in edges {
+                let w = ppr_edge_weight(&edge, intent, predicate_weights, graph, &mut label_cache);
+                if w <= 0.0 {
+                    continue;
+                }
+                let ti = ppr_intern(edge.to_entity, &mut nodes, &mut node_idx, &mut adj);
+                adj[ui].push((ti, w));
+                traversed.push(edge.uuid);
+                if visited.insert(edge.to_entity) {
+                    next.push(edge.to_entity);
+                }
+            }
+            if nodes.len() >= MAX_NODES {
+                break;
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+
+    let n = nodes.len();
+    if n == 0 {
+        return Ok((HashMap::new(), traversed));
+    }
+
+    // Restart/personalization vector p (L1-normalized seed activations).
+    let mut p = vec![0.0_f32; n];
+    let zsum: f32 = seeds.values().copied().sum::<f32>().max(1e-9);
+    for (u, w) in seeds {
+        if let Some(&i) = node_idx.get(u) {
+            p[i] += *w / zsum;
+        }
+    }
+    // Weighted out-degree for column-stochastic normalization.
+    let mut outw = vec![0.0_f32; n];
+    for (ui, row) in adj.iter().enumerate() {
+        for &(_, w) in row {
+            outw[ui] += w;
+        }
+    }
+
+    // Power iteration: r = (1-α)·Wᵀ·r + α·p.
+    let mut r = p.clone();
+    for _ in 0..ITERS {
+        let mut nxt = vec![0.0_f32; n];
+        for ui in 0..n {
+            let ru = r[ui];
+            if ru == 0.0 || outw[ui] <= 0.0 {
+                continue;
+            }
+            let scale = (1.0 - ALPHA) * ru / outw[ui];
+            for &(ti, w) in &adj[ui] {
+                nxt[ti] += scale * w;
+            }
+        }
+        let mut delta = 0.0_f32;
+        for i in 0..n {
+            nxt[i] += ALPHA * p[i];
+            delta += (nxt[i] - r[i]).abs();
+        }
+        r = nxt;
+        if delta < TOL {
+            break;
+        }
+    }
+
+    traversed.sort_unstable();
+    traversed.dedup();
+    let mut activation = HashMap::with_capacity(n);
+    for (i, &u) in nodes.iter().enumerate() {
+        if r[i] > 1e-9 {
+            activation.insert(u, r[i]);
+        }
+    }
+    Ok((activation, traversed))
+}
+
 pub fn spreading_activation_retrieve(
     query_text: &str,
     query: &Query,
@@ -666,7 +856,28 @@ pub fn spreading_activation_retrieve_with_stats(
     let graph_start = Instant::now();
     let mut traversed_edges: Vec<Uuid>;
 
-    if entity_data.len() >= BIDIRECTIONAL_MIN_ENTITIES {
+    // SHODH_PPR: replace the hand-rolled BFS spread with Personalized PageRank — the
+    // convergent, mass-conserving form of spreading activation (HippoRAG). The seed
+    // activation_map becomes the restart vector; PPR's stationary distribution becomes the
+    // new activation_map consumed by the shared episode-scoring path below.
+    let ppr_enabled = std::env::var("SHODH_PPR")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if ppr_enabled {
+        let pred_w = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        tracing::info!(
+            "🌐 Using Personalized PageRank ({} seed entities)",
+            activation_map.len()
+        );
+        let (ppr_map, edges) = personalized_pagerank(graph, &activation_map, intent_ref, pred_w)?;
+        activation_map = ppr_map;
+        traversed_edges = edges;
+        stats.entities_activated = activation_map.len();
+        stats.graph_hops = 3; // PPR EXPAND_HOPS
+    } else if entity_data.len() >= BIDIRECTIONAL_MIN_ENTITIES {
         // PIPE-7: Bidirectional spreading activation
         // Split entities into forward/backward sets, spread from each, boost intersections
         // Density-adaptive hops: dense (fresh) graphs use fewer hops, sparse (mature) use more

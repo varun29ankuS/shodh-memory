@@ -191,6 +191,7 @@ jobs:
           SHODH_GRAPH_EXPAND_K: ${{ github.event.inputs.graph_expand_k }}
           SHODH_GRAPH_EXPAND_MIN_STRENGTH: ${{ github.event.inputs.graph_expand_min_strength }}
         run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
           CHAINS_ARG=""
           if [ -n "${{ github.event.inputs.mh_chains }}" ]; then CHAINS_ARG="--mh-chains ${{ github.event.inputs.mh_chains }}"; fi
           ./target/release/recall-eval \
