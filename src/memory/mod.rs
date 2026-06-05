@@ -3786,15 +3786,25 @@ impl MemorySystem {
         // RH-8 gate: quality multiplier only applies in `Full` mode — lower modes
         // expose the raw fused score so per-layer attribution isn't masked.
         if layer_full {
-            let v2_no_verbosity = std::env::var("SHODH_FUSION_V2")
+            // Drop the content-length verbosity factor — the ontology full-layer
+            // destroyer that multiplied short correct answers (a person name) below
+            // longer distractors (org names), crashing ontology 0.88->0.083 at `full`.
+            // The 3-way rescue A/B proved THIS drop — not V2's Borda backbone — is the
+            // real ontology fix: Borda tanks p@1 (RRF's reciprocal curve protects
+            // rank-1), so we want this drop on the RRF path. Independently togglable via
+            // SHODH_DROP_VERBOSITY; implied by SHODH_FUSION_V2 for back-compat.
+            let drop_verbosity = std::env::var("SHODH_DROP_VERBOSITY")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || std::env::var("SHODH_FUSION_V2")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
             for mem in &mut memories {
                 let has_entities = !mem.experience.entities.is_empty();
                 let has_context = mem.experience.context.is_some();
                 let elaboration =
                     1.0 + if has_entities { 0.1 } else { 0.0 } + if has_context { 0.1 } else { 0.0 };
-                let quality = if v2_no_verbosity {
+                let quality = if drop_verbosity {
                     // Conscious restructure: drop the raw content-length factor — a
                     // verbosity bias that multiplied short correct answers (a person
                     // name) down below longer ones (org names), crashing ontology
