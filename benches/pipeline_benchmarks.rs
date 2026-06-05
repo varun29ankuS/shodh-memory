@@ -166,8 +166,8 @@ fn bench_pipeline_step1_ner(c: &mut Criterion) {
 
 fn bench_pipeline_step2_embedding(c: &mut Criterion) {
     eprintln!("\n╔══════════════════════════════════════════════════════════════╗");
-    eprintln!("║  STEP 2: EMBEDDING GENERATION - MiniLM-L6-v2                 ║");
-    eprintln!("║  Model: all-MiniLM-L6-v2 (~22MB ONNX, 384-dim vectors)       ║");
+    eprintln!("║  STEP 2: EMBEDDING GENERATION - gte-small                   ║");
+    eprintln!("║  Model: gte-small (~34MB int8 ONNX, 384-dim vectors)         ║");
     eprintln!("╚══════════════════════════════════════════════════════════════╝\n");
 
     let embedder = setup_embedder();

@@ -1417,6 +1417,26 @@ impl MemoryStorage {
         }
     }
 
+    /// Read the persisted embedder-id marker — the model that produced the
+    /// vectors currently stored in this database. `None` means the marker was
+    /// never written (a legacy store predating the marker, or a fresh store).
+    pub fn get_embedder_id(&self) -> Result<Option<String>> {
+        const KEY: &[u8] = b"metadata:embedder_id";
+        match self.db.get(KEY)? {
+            Some(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+            None => Ok(None),
+        }
+    }
+
+    /// Persist the embedder-id marker. Written only after the store's vectors
+    /// have been (re-)embedded with `id`, so a crash mid-migration leaves the
+    /// marker stale and the migration re-runs on next open.
+    pub fn set_embedder_id(&self, id: &str) -> Result<()> {
+        const KEY: &[u8] = b"metadata:embedder_id";
+        self.db.put(KEY, id.as_bytes())?;
+        Ok(())
+    }
+
     /// Internal store implementation (two-phase commit with rollback)
     fn store_inner(&self, memory: &Memory) -> Result<()> {
         let key = memory.id.0.as_bytes();

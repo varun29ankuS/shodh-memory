@@ -34,7 +34,7 @@ use super::report::{
 
 /// Embedder identifier emitted in the report. Matches the model wired into
 /// `MemorySystem::new` today; bump when the embedder changes.
-pub const EMBEDDER_ID: &str = "minilm-l6-v2";
+pub const EMBEDDER_ID: &str = crate::embeddings::CURRENT_EMBEDDER_ID;
 
 /// Inputs to [`run_smoke_suite`].
 #[derive(Debug, Clone)]

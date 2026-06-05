@@ -9,7 +9,7 @@
 //! - Simplified fallback for resource-constrained devices
 //!
 //! Configuration via environment variables:
-//! - SHODH_MODEL_PATH: Base path to model files (default: ./models/minilm-l6)
+//! - SHODH_MODEL_PATH: Base path to model files (default: ./models/gte-small)
 //! - SHODH_EMBED_TIMEOUT_MS: Embedding timeout in ms (default: 5000)
 //! - SHODH_LAZY_LOAD: Set to "false" to load model at startup (default: true)
 //! - SHODH_ONNX_THREADS: Number of ONNX threads (default: 1 on macOS ARM64, 2 elsewhere)
@@ -107,7 +107,7 @@ pub struct EmbeddingConfig {
     /// Path to tokenizer file
     pub tokenizer_path: PathBuf,
 
-    /// Maximum sequence length (MiniLM default: 256)
+    /// Maximum sequence length (gte-small window: 512)
     pub max_length: usize,
 
     /// Use quantized model for faster inference
@@ -128,10 +128,10 @@ impl EmbeddingConfig {
     ///
     /// Search order for model files:
     /// 1. SHODH_MODEL_PATH environment variable
-    /// 2. Bundled in Python package (SHODH_PACKAGE_DIR/models/minilm-l6)
-    /// 3. ./models/minilm-l6 (local)
-    /// 4. ../models/minilm-l6 (parent)
-    /// 5. ~/.cache/shodh-memory/models/minilm-l6 (auto-download location)
+    /// 2. Bundled in Python package (SHODH_PACKAGE_DIR/models/gte-small)
+    /// 3. ./models/gte-small (local)
+    /// 4. ../models/gte-small (parent)
+    /// 5. ~/.cache/shodh-memory/models/gte-small (auto-download location)
     pub fn from_env() -> Self {
         let base_path = std::env::var("SHODH_MODEL_PATH")
             .map(PathBuf::from)
@@ -141,12 +141,12 @@ impl EmbeddingConfig {
                     // Bundled in Python package (highest priority for pip install)
                     std::env::var("SHODH_PACKAGE_DIR")
                         .ok()
-                        .map(|p| PathBuf::from(p).join("models/minilm-l6")),
-                    Some(PathBuf::from("./models/minilm-l6")),
-                    Some(PathBuf::from("../models/minilm-l6")),
+                        .map(|p| PathBuf::from(p).join("models/gte-small")),
+                    Some(PathBuf::from("./models/gte-small")),
+                    Some(PathBuf::from("../models/gte-small")),
                     // Auto-download cache location
                     Some(super::downloader::get_models_dir()),
-                    dirs::data_dir().map(|p| p.join("shodh-memory/models/minilm-l6")),
+                    dirs::data_dir().map(|p| p.join("shodh-memory/models/gte-small")),
                 ];
 
                 candidates
@@ -176,7 +176,7 @@ impl EmbeddingConfig {
         Self {
             model_path: base_path.join(model_filename),
             tokenizer_path: base_path.join("tokenizer.json"),
-            max_length: 256,
+            max_length: 512,
             use_quantized,
             embed_timeout_ms,
         }
@@ -187,7 +187,7 @@ impl EmbeddingConfig {
         Self {
             model_path,
             tokenizer_path,
-            max_length: 256,
+            max_length: 512,
             use_quantized: true,
             embed_timeout_ms: 5000,
         }
@@ -1011,7 +1011,7 @@ mod tests {
         let config = EmbeddingConfig::default();
 
         // Check dimension
-        assert_eq!(config.max_length, 256);
+        assert_eq!(config.max_length, 512);
     }
 
     #[test]
@@ -1020,7 +1020,7 @@ mod tests {
         let config = EmbeddingConfig {
             model_path: PathBuf::from("dummy.onnx"),
             tokenizer_path: PathBuf::from("dummy.json"),
-            max_length: 256,
+            max_length: 512,
             use_quantized: true,
             embed_timeout_ms: 5000,
         };
@@ -1042,7 +1042,7 @@ mod tests {
         let config = EmbeddingConfig {
             model_path: PathBuf::from("dummy.onnx"),
             tokenizer_path: PathBuf::from("dummy.json"),
-            max_length: 256,
+            max_length: 512,
             use_quantized: true,
             embed_timeout_ms: 5000,
         };

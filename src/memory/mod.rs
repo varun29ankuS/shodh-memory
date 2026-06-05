@@ -437,6 +437,78 @@ impl MemorySystem {
         )
         .context("Failed to initialize retrieval engine")?;
 
+        // EMBEDDER MIGRATION (auto re-embed on open): if this store's vectors were
+        // produced by a different embedder than the live one, re-embed every memory
+        // so stored vectors share the query embedding space. MiniLM-space and
+        // gte-space are not comparable, so a silent mismatch would degrade recall.
+        // The marker is stamped only after a full pass, so a crash mid-migration
+        // re-runs on next open; any per-memory failures fall through to the orphan
+        // recovery below, which re-indexes them with the live embedder.
+        {
+            let current = crate::embeddings::CURRENT_EMBEDDER_ID;
+            let stored_embedder = storage.get_embedder_id().unwrap_or(None);
+            let store_count = storage.get_stats().map(|s| s.total_count).unwrap_or(0);
+            let needs_re_embed = match &stored_embedder {
+                Some(id) => id != current,
+                None => store_count > 0, // legacy data w/o marker = pre-marker MiniLM store
+            };
+            if needs_re_embed {
+                tracing::warn!(
+                    from = ?stored_embedder,
+                    to = current,
+                    memories = store_count,
+                    "Embedder changed — re-embedding all memories (one-time migration on open)"
+                );
+                let start = std::time::Instant::now();
+                let ids = storage.get_all_ids().unwrap_or_default();
+                let total = ids.len();
+                let mut done = 0usize;
+                let mut failed = 0usize;
+                for id in &ids {
+                    let mut memory = match storage.get(id) {
+                        Ok(m) => m,
+                        Err(_) => {
+                            failed += 1;
+                            continue;
+                        }
+                    };
+                    if memory.is_forgotten() {
+                        continue;
+                    }
+                    // Drop the stale cached vector so reindex re-encodes with the live embedder.
+                    memory.experience.embeddings = None;
+                    if storage.store(&memory).is_err() {
+                        failed += 1;
+                        continue;
+                    }
+                    if retriever.reindex_memory(&memory).is_err() {
+                        failed += 1;
+                        continue;
+                    }
+                    done += 1;
+                    if done % 1000 == 0 {
+                        tracing::info!("re-embed progress: {}/{} ({} failed)", done, total, failed);
+                    }
+                }
+                if let Err(e) = retriever.save() {
+                    tracing::warn!(error = %e, "re-embed: failed to persist rebuilt index");
+                }
+                if let Err(e) = storage.set_embedder_id(current) {
+                    tracing::warn!(error = %e, "re-embed: failed to write embedder marker");
+                }
+                tracing::info!(
+                    "Re-embed migration complete: {} re-embedded, {} failed, {} total in {:.1}s",
+                    done,
+                    failed,
+                    total,
+                    start.elapsed().as_secs_f64()
+                );
+            } else if stored_embedder.is_none() {
+                // Fresh/empty store: stamp the live embedder so a future swap is detected.
+                let _ = storage.set_embedder_id(current);
+            }
+        }
+
         // STARTUP RECOVERY: Check for orphaned memories and auto-repair
         // This fixes memories that were stored but not indexed (crash, embedding failure, etc.)
         let storage_count = storage.get_stats().map(|s| s.total_count).unwrap_or(0);
