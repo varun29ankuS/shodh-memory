@@ -21,6 +21,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// URLs for MiniLM model files (hosted on HuggingFace)
 /// Full model is 90MB, quantized is 23MB - we download quantized for edge devices
@@ -367,6 +368,12 @@ fn compute_checksum(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// Overall timeout for a single model / ONNX-runtime download.
+///
+/// A backstop so a stalled connection cannot hang the download (and first-use
+/// initialisation) forever. Generous enough for a ~50MB artefact on a slow link.
+const DOWNLOAD_TIMEOUT_SECS: u64 = 600;
+
 /// Download a file from URL to path with progress and optional checksum verification
 fn download_file(
     url: &str,
@@ -390,8 +397,13 @@ fn download_file_with_checksum(
         fs::create_dir_all(parent).context("Failed to create cache directory")?;
     }
 
-    // Use ureq for simple HTTP downloads (blocking, no async runtime needed)
+    // Use ureq for simple HTTP downloads (blocking, no async runtime needed).
+    // timeout_global bounds the whole call (connect + headers + body) so a
+    // stalled connection cannot hang the download indefinitely.
     let response = ureq::get(url)
+        .config()
+        .timeout_global(Some(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS)))
+        .build()
         .call()
         .context(format!("Failed to download from {url}"))?;
 

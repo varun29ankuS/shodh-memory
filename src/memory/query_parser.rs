@@ -193,9 +193,13 @@ pub enum TemporalRefType {
     Relative,
     /// Day of week (on Monday, last Tuesday)
     DayOfWeek,
+    /// Week reference (last week, this week) — expands to a Mon–Sun window
+    Week,
     /// Month reference (in May, last March)
     Month,
-    /// Year reference (in 2023, last year)
+    /// Quarter reference (Q1 2023) — expands to a 3-month window
+    Quarter,
+    /// Year reference (in 2023, since 2023, last year)
     Year,
 }
 
@@ -336,6 +340,26 @@ pub fn extract_temporal_refs(text: &str) -> TemporalExtraction {
             confidence: 0.85,
             position: pos,
             ref_type: TemporalRefType::Month,
+        });
+        update_bounds(&mut earliest, &mut latest, date);
+    }
+
+    // Extract bare/qualified year and quarter patterns
+    // ("in 2023", "since 2023", "Q1 2023", standalone "2023").
+    let year_refs = extract_year_refs(text);
+    for (date, original, pos, ref_type) in year_refs {
+        if !is_valid_date(&date) {
+            continue;
+        }
+        if refs.iter().any(|r| r.date == date) {
+            continue;
+        }
+        refs.push(TemporalRef {
+            date,
+            original_text: original,
+            confidence: 0.8,
+            position: pos,
+            ref_type,
         });
         update_bounds(&mut earliest, &mut latest, date);
     }
@@ -520,6 +544,19 @@ static MONTH_YEAR_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+// "Q1 2023" / "Q4 1999" — a calendar quarter qualified by a year.
+static QUARTER_YEAR_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)\bQ([1-4])\s+((?:19|20)\d{2})\b").unwrap());
+// Year preceded by a temporal preposition: "in 2023", "since 2023", "of 2023".
+static YEAR_QUALIFIER_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?i)\b(?:in|since|during|for|of|from|by|after|before|until|the\s+year)\s+((?:19|20)\d{2})\b",
+    )
+    .unwrap()
+});
+// Standalone four-digit year (1900–2099 range guarded by the 19/20 prefix).
+static BARE_YEAR_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\b((?:19|20)\d{2})\b").unwrap());
 
 /// Extract relative temporal keywords from text.
 ///
@@ -552,29 +589,62 @@ fn extract_relative_dates(
 
     // "N days/weeks/months ago"
     for cap in AGO_RE.captures_iter(text) {
+        // AGO_RE captures `(\d+)`. A digit string too long for i64 fails to parse
+        // and harmlessly falls back to 1. The real hazard is a value that DOES
+        // parse but is large enough to overflow the day/Duration arithmetic:
+        // `n * 365` overflows i64, and `chrono::Duration::days(..)` / date
+        // subtraction PANIC on out-of-range values. A crafted query such as
+        // "90000000000 years ago" would therefore crash the retrieval thread.
+        // Convert to a day offset with checked arithmetic and skip anything
+        // absurd or out of range instead of panicking.
         let n: i64 = cap[1].parse().unwrap_or(1);
         let unit = cap[2].to_lowercase();
-        let date = match unit.as_str() {
-            "day" => today - chrono::Duration::days(n),
-            "week" => today - chrono::Duration::weeks(n),
-            "month" => {
-                // Approximate: 30 days per month
-                today - chrono::Duration::days(n * 30)
-            }
-            "year" => today - chrono::Duration::days(n * 365),
+        let days_offset: i64 = match unit.as_str() {
+            "day" => n,
+            "week" => n.checked_mul(7).unwrap_or(i64::MAX),
+            "month" => n.checked_mul(30).unwrap_or(i64::MAX), // ~30 days/month
+            "year" => n.checked_mul(365).unwrap_or(i64::MAX),
             _ => continue,
+        };
+        // ~10,000 years. Beyond this a relative date is noise, not a real query,
+        // and the value would overflow chrono's Duration/date range.
+        const MAX_RELATIVE_DAYS: i64 = 3_650_000;
+        if !(0..=MAX_RELATIVE_DAYS).contains(&days_offset) {
+            continue;
+        }
+        let date = match today.checked_sub_signed(chrono::Duration::days(days_offset)) {
+            Some(d) => d,
+            None => continue, // resulting date is out of the representable range
         };
         let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
         results.push((date, cap[0].to_string(), pos, TemporalRefType::Relative));
     }
 
-    // "last week/month/year"
+    // "last week/month/year" — anchor to the prior period and tag with the
+    // matching period type so the range expands to a full calendar window
+    // (a ±1-day point window around "7/30/365 days ago" was the old bug).
     for cap in LAST_RE.captures_iter(text) {
         let unit = cap[1].to_lowercase();
-        let date = match unit.as_str() {
-            "week" => today - chrono::Duration::weeks(1),
-            "month" => today - chrono::Duration::days(30),
-            "year" => today - chrono::Duration::days(365),
+        let (date, ref_type) = match unit.as_str() {
+            // Any day inside the prior week; compute_padded_date_range snaps to Mon–Sun.
+            "week" => (today - chrono::Duration::weeks(1), TemporalRefType::Week),
+            // First day of the previous calendar month; expands to the whole month.
+            "month" => {
+                let (y, m) = if today.month() == 1 {
+                    (today.year() - 1, 12)
+                } else {
+                    (today.year(), today.month() - 1)
+                };
+                (
+                    NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(today),
+                    TemporalRefType::Month,
+                )
+            }
+            // First day of the previous year; expands to the whole year.
+            "year" => (
+                NaiveDate::from_ymd_opt(today.year() - 1, 1, 1).unwrap_or(today),
+                TemporalRefType::Year,
+            ),
             _ => continue,
         };
         let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
@@ -582,16 +652,24 @@ fn extract_relative_dates(
         if results.iter().any(|r| r.0 == date) {
             continue;
         }
-        results.push((date, cap[0].to_string(), pos, TemporalRefType::Relative));
+        results.push((date, cap[0].to_string(), pos, ref_type));
     }
 
-    // "this week/month/year"
+    // "this week/month/year" — anchor to today and tag with the period type so
+    // the range expands to the current calendar week/month/year.
     for cap in THIS_RE.captures_iter(text) {
+        let unit = cap[1].to_lowercase();
+        let ref_type = match unit.as_str() {
+            "week" => TemporalRefType::Week,
+            "month" => TemporalRefType::Month,
+            "year" => TemporalRefType::Year,
+            _ => continue,
+        };
         let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
         if results.iter().any(|r| r.0 == today) {
             continue;
         }
-        results.push((today, cap[0].to_string(), pos, TemporalRefType::Relative));
+        results.push((today, cap[0].to_string(), pos, ref_type));
     }
 
     results
@@ -611,6 +689,78 @@ fn extract_month_year_dates(text: &str) -> Vec<(NaiveDate, String, usize)> {
         if let Some(date) = NaiveDate::from_ymd_opt(year, month, 1) {
             let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
             results.push((date, cap[0].to_string(), pos));
+        }
+    }
+
+    results
+}
+
+/// Extract year and quarter references from text (issue #275).
+///
+/// Handles: standalone "2023", qualified "in/since/during 2023", and
+/// "Q1 2023". Returns the anchoring date (first day of the year or quarter)
+/// plus the matching ref type so the range expands to the full window.
+///
+/// A year that is already part of a more specific pattern — "March 2023",
+/// "2023-05-07", "05/07/2023", "Q1 2023" — is NOT re-emitted as a bare year,
+/// because that would split one intent into two refs (a March-1 Month ref and
+/// a Jan-1 Year ref) and defeat the single-ref calendar expansion.
+fn extract_year_refs(text: &str) -> Vec<(NaiveDate, String, usize, TemporalRefType)> {
+    let mut results = Vec::new();
+
+    // Spans already claimed by more specific date patterns. A bare-year match
+    // overlapping any of these is suppressed.
+    let mut consumed: Vec<(usize, usize)> = Vec::new();
+    for re in [
+        &*MONTH_DAY_YEAR_RE,
+        &*ISO_DATE_RE,
+        &*SLASH_DATE_RE,
+        &*MONTH_YEAR_RE,
+    ] {
+        for m in re.find_iter(text) {
+            consumed.push((m.start(), m.end()));
+        }
+    }
+
+    // "Q1 2023" → first day of that quarter.
+    for cap in QUARTER_YEAR_RE.captures_iter(text) {
+        let quarter: u32 = cap[1].parse().unwrap_or(1);
+        let year: i32 = cap[2].parse().unwrap_or(2000);
+        let start_month = (quarter - 1) * 3 + 1;
+        if let Some(date) = NaiveDate::from_ymd_opt(year, start_month, 1) {
+            if let Some(m) = cap.get(0) {
+                consumed.push((m.start(), m.end()));
+                results.push((
+                    date,
+                    m.as_str().to_string(),
+                    m.start(),
+                    TemporalRefType::Quarter,
+                ));
+            }
+        }
+    }
+
+    // "in 2023", "since 2023", … → first day of that year.
+    for cap in YEAR_QUALIFIER_RE.captures_iter(text) {
+        let year: i32 = cap[1].parse().unwrap_or(2000);
+        if let Some(date) = NaiveDate::from_ymd_opt(year, 1, 1) {
+            if let Some(g) = cap.get(1) {
+                consumed.push((g.start(), g.end()));
+            }
+            let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
+            results.push((date, cap[0].to_string(), pos, TemporalRefType::Year));
+        }
+    }
+
+    // Standalone "2023", only when not already part of a more specific pattern.
+    for m in BARE_YEAR_RE.find_iter(text) {
+        let (start, end) = (m.start(), m.end());
+        if consumed.iter().any(|(cs, ce)| start < *ce && *cs < end) {
+            continue;
+        }
+        let year: i32 = m.as_str().parse().unwrap_or(2000);
+        if let Some(date) = NaiveDate::from_ymd_opt(year, 1, 1) {
+            results.push((date, m.as_str().to_string(), start, TemporalRefType::Year));
         }
     }
 
@@ -881,6 +1031,27 @@ fn compute_padded_date_range(extraction: &TemporalExtraction) -> Option<(NaiveDa
         // Single ref — pad based on type
         let ref_type = extraction.refs[0].ref_type;
         match ref_type {
+            TemporalRefType::Week => {
+                // Snap to the Monday–Sunday week containing the anchor date.
+                let from_monday = earliest.weekday().num_days_from_monday() as i64;
+                let start = earliest - chrono::Duration::days(from_monday);
+                let end = start + chrono::Duration::days(6);
+                Some((start, end))
+            }
+            TemporalRefType::Quarter => {
+                // Expand to the full calendar quarter containing the anchor date.
+                let start_month = ((earliest.month() - 1) / 3) * 3 + 1;
+                let start = NaiveDate::from_ymd_opt(earliest.year(), start_month, 1)?;
+                let end_month = start_month + 2;
+                let end = if end_month >= 12 {
+                    NaiveDate::from_ymd_opt(earliest.year(), 12, 31)?
+                } else {
+                    NaiveDate::from_ymd_opt(earliest.year(), end_month + 1, 1)?
+                        .pred_opt()
+                        .unwrap_or(start)
+                };
+                Some((start, end))
+            }
             TemporalRefType::Month => {
                 // Expand to full calendar month
                 let start = NaiveDate::from_ymd_opt(earliest.year(), earliest.month(), 1)?;
@@ -4296,6 +4467,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extract_relative_dates_does_not_overflow_on_absurd_values() {
+        // Regression: a crafted "N years/months ago" with a huge N used to
+        // overflow `n * 365` and panic chrono's Duration/date math, crashing the
+        // retrieval thread. These must be skipped, never panic.
+        let now = Utc::now();
+        for q in [
+            "90000000000 years ago",         // n*365 is large but fits i64
+            "9999999999 months ago",         // n*30 large
+            "99999999999999999999 days ago", // 20 digits: parse fails → falls back to 1
+            "0 days ago",                    // boundary
+        ] {
+            // The assertion is simply that this returns without panicking.
+            let _ = extract_relative_dates(q, &now);
+        }
+
+        // A realistic relative date is still extracted correctly.
+        let refs = extract_relative_dates("3 days ago", &now);
+        assert!(
+            refs.iter()
+                .any(|(_, label, _, _)| label.contains("3 days ago")),
+            "a normal '3 days ago' must still be extracted, got {refs:?}"
+        );
+        assert_eq!(
+            refs.iter()
+                .find(|(_, l, _, _)| l.contains("3 days ago"))
+                .map(|(d, _, _, _)| *d),
+            Some(now.date_naive() - chrono::Duration::days(3)),
+            "the extracted date must be exactly 3 days before today"
+        );
+
+        // The absurd "90000000000 years ago" is out of the sane range and skipped.
+        let absurd = extract_relative_dates("90000000000 years ago", &now);
+        assert!(
+            absurd.iter().all(|(_, l, _, _)| !l.contains("90000000000")),
+            "an absurd relative date should be skipped, got {absurd:?}"
+        );
+    }
+
+    #[test]
     fn test_noun_detection() {
         let query = "robot detected obstacle at coordinates";
         let analysis = analyze_query(query);
@@ -4632,5 +4842,120 @@ mod tests {
     fn test_compute_padded_date_range_empty() {
         let extraction = TemporalExtraction::default();
         assert!(compute_padded_date_range(&extraction).is_none());
+    }
+
+    // ---- Year / quarter qualifiers (issue #275) ----
+
+    #[test]
+    fn test_year_qualifier_in_expands_to_full_year() {
+        let ex = extract_temporal_refs("what did I ship in 2023");
+        assert!(
+            ex.refs
+                .iter()
+                .any(|r| r.ref_type == TemporalRefType::Year && r.date.year() == 2023),
+            "expected a Year ref for 2023, got {:?}",
+            ex.refs
+        );
+        let (start, end) = compute_padded_date_range(&ex).expect("range");
+        assert_eq!(start, NaiveDate::from_ymd_opt(2023, 1, 1).unwrap());
+        assert_eq!(end, NaiveDate::from_ymd_opt(2023, 12, 31).unwrap());
+    }
+
+    #[test]
+    fn test_bare_year_expands_to_full_year() {
+        let ex = extract_temporal_refs("did the 2021 migration finish");
+        let (start, end) = compute_padded_date_range(&ex).expect("range");
+        assert_eq!(start, NaiveDate::from_ymd_opt(2021, 1, 1).unwrap());
+        assert_eq!(end, NaiveDate::from_ymd_opt(2021, 12, 31).unwrap());
+    }
+
+    #[test]
+    fn test_since_year_qualifier() {
+        let ex = extract_temporal_refs("everything since 2020");
+        assert!(ex
+            .refs
+            .iter()
+            .any(|r| r.ref_type == TemporalRefType::Year && r.date.year() == 2020));
+    }
+
+    #[test]
+    fn test_quarter_expands_to_three_months() {
+        let ex = extract_temporal_refs("the Q1 2023 roadmap");
+        assert!(
+            ex.refs
+                .iter()
+                .any(|r| r.ref_type == TemporalRefType::Quarter),
+            "expected a Quarter ref, got {:?}",
+            ex.refs
+        );
+        let (start, end) = compute_padded_date_range(&ex).expect("range");
+        assert_eq!(start, NaiveDate::from_ymd_opt(2023, 1, 1).unwrap());
+        assert_eq!(end, NaiveDate::from_ymd_opt(2023, 3, 31).unwrap());
+    }
+
+    #[test]
+    fn test_quarter_q4_year_boundary() {
+        let ex = extract_temporal_refs("the Q4 2023 results");
+        let (start, end) = compute_padded_date_range(&ex).expect("range");
+        assert_eq!(start, NaiveDate::from_ymd_opt(2023, 10, 1).unwrap());
+        assert_eq!(end, NaiveDate::from_ymd_opt(2023, 12, 31).unwrap());
+    }
+
+    #[test]
+    fn test_month_year_not_double_counted_as_bare_year() {
+        // "March 2023" must stay a single Month ref expanding to all of March,
+        // not split into a March-1 Month ref + a Jan-1 Year ref.
+        let ex = extract_temporal_refs("what happened in March 2023");
+        assert_eq!(ex.refs.len(), 1, "got {:?}", ex.refs);
+        let (start, end) = compute_padded_date_range(&ex).expect("range");
+        assert_eq!(start, NaiveDate::from_ymd_opt(2023, 3, 1).unwrap());
+        assert_eq!(end, NaiveDate::from_ymd_opt(2023, 3, 31).unwrap());
+    }
+
+    // ---- "last/this week|month|year" calendar windows (formerly ±1 day) ----
+
+    #[test]
+    fn test_last_year_is_previous_calendar_year() {
+        let now = Utc::now();
+        let prev = now.year() - 1;
+        let ex = extract_temporal_refs("what did we decide last year");
+        let (start, end) = compute_padded_date_range(&ex).expect("range");
+        assert_eq!(start, NaiveDate::from_ymd_opt(prev, 1, 1).unwrap());
+        assert_eq!(end, NaiveDate::from_ymd_opt(prev, 12, 31).unwrap());
+    }
+
+    #[test]
+    fn test_last_month_is_full_previous_month() {
+        let now = Utc::now();
+        let (y, m) = if now.month() == 1 {
+            (now.year() - 1, 12)
+        } else {
+            (now.year(), now.month() - 1)
+        };
+        let ex = extract_temporal_refs("the bug we hit last month");
+        let (start, end) = compute_padded_date_range(&ex).expect("range");
+        assert_eq!(start, NaiveDate::from_ymd_opt(y, m, 1).unwrap());
+        // End is the last day of that month (≥ 28).
+        assert_eq!(end.month(), m);
+        assert!(end.day() >= 28);
+    }
+
+    #[test]
+    fn test_last_week_is_seven_day_window() {
+        let ex = extract_temporal_refs("the demo we ran last week");
+        let (start, end) = compute_padded_date_range(&ex).expect("range");
+        // Mon–Sun calendar week, not the old ±1-day (3-day) point window.
+        assert_eq!((end - start).num_days(), 6);
+        assert_eq!(start.weekday(), chrono::Weekday::Mon);
+        assert_eq!(end.weekday(), chrono::Weekday::Sun);
+    }
+
+    #[test]
+    fn test_this_year_is_current_calendar_year() {
+        let now = Utc::now();
+        let ex = extract_temporal_refs("everything this year");
+        let (start, end) = compute_padded_date_range(&ex).expect("range");
+        assert_eq!(start, NaiveDate::from_ymd_opt(now.year(), 1, 1).unwrap());
+        assert_eq!(end, NaiveDate::from_ymd_opt(now.year(), 12, 31).unwrap());
     }
 }

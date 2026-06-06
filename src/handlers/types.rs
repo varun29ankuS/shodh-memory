@@ -143,6 +143,12 @@ pub struct RecallRequest {
     /// Offset for pagination (skip first N results, default 0)
     #[serde(default)]
     pub offset: usize,
+    /// Pipeline-layer attribution (RH-8). One of:
+    /// "vamana_only", "+spreading", "+bm25", "+rerank", "+facts", "full" (default).
+    /// Production callers omit this. The recall harness / per-layer eval set it
+    /// to attribute quality and latency deltas to specific stages.
+    #[serde(default)]
+    pub layers: Option<String>,
 }
 
 pub fn default_recall_limit() -> usize {

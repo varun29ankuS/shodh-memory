@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::time::Duration;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -214,7 +215,15 @@ impl LinearWebhook {
         // Linear signature format: "sha256=<hex>"
         let expected_sig = signature.strip_prefix("sha256=").unwrap_or(signature);
 
-        let expected_bytes = hex::decode(expected_sig).context("Invalid signature format")?;
+        // A malformed (non-hex) signature is simply an invalid signature, not a
+        // server error — return false so the caller responds 400, not 500.
+        let expected_bytes = match hex::decode(expected_sig) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                tracing::warn!("Linear webhook signature is not valid hex — rejecting");
+                return Ok(false);
+            }
+        };
 
         Ok(mac.verify_slice(&expected_bytes).is_ok())
     }
@@ -403,16 +412,88 @@ pub struct LinearClient {
     client: reqwest::Client,
 }
 
+/// Parameterized GraphQL query for fetching issues.
+///
+/// `$first` and `$filter` are bound via the request's `variables` object — the
+/// query text itself is a fixed constant, so no caller input is ever spliced
+/// into it. `IssueFilter` is Linear's input type for the `issues` connection.
+const LINEAR_ISSUES_QUERY: &str = r#"
+query Issues($first: Int!, $filter: IssueFilter) {
+  issues(first: $first, filter: $filter) {
+    nodes {
+      id
+      identifier
+      title
+      description
+      priority
+      priorityLabel
+      url
+      createdAt
+      updatedAt
+      completedAt
+      canceledAt
+      dueDate
+      estimate
+      state { id name color type }
+      assignee { id name email }
+      creator { id name email }
+      labels { nodes { id name color } }
+      team { id name key }
+      project { id name }
+      cycle { id name number }
+      parent { id identifier title }
+    }
+  }
+}
+"#;
+
+/// Build the GraphQL `variables` object for [`LINEAR_ISSUES_QUERY`].
+///
+/// `team_id` / `updated_after` are placed inside a JSON value (the `IssueFilter`)
+/// — they are data, never query syntax, so a value containing quotes/braces
+/// cannot escape into the query. An empty filter is sent as JSON `null`.
+fn build_issues_variables(
+    team_id: Option<&str>,
+    updated_after: Option<&str>,
+    limit: usize,
+) -> serde_json::Value {
+    let mut filter = serde_json::Map::new();
+    if let Some(tid) = team_id {
+        filter.insert(
+            "team".to_string(),
+            serde_json::json!({ "id": { "eq": tid } }),
+        );
+    }
+    if let Some(after) = updated_after {
+        filter.insert("updatedAt".to_string(), serde_json::json!({ "gte": after }));
+    }
+
+    let filter_value = if filter.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::Object(filter)
+    };
+
+    serde_json::json!({ "first": limit, "filter": filter_value })
+}
+
 impl LinearClient {
     const DEFAULT_API_URL: &'static str = "https://api.linear.app/graphql";
 
+    /// Timeout for a single Linear API request. Without it, a hung upstream
+    /// connection would only be bounded by the global axum request timeout.
+    const HTTP_TIMEOUT_SECS: u64 = 30;
+
     pub fn new(api_key: String) -> Self {
         let api_url =
-            std::env::var("LINEAR_API_URL").unwrap_or_else(|_| Self::DEFAULT_API_URL.to_string());
+            crate::integrations::resolve_api_url_override("LINEAR_API_URL", Self::DEFAULT_API_URL);
         Self {
             api_key,
             api_url,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(Self::HTTP_TIMEOUT_SECS))
+                .build()
+                .expect("Failed to build Linear HTTP client"),
         }
     }
 
@@ -425,94 +506,20 @@ impl LinearClient {
     ) -> Result<Vec<LinearIssueData>> {
         let limit = limit.unwrap_or(250);
 
-        // Build filter
-        let mut filters = Vec::new();
-        if let Some(tid) = team_id {
-            filters.push(format!(r#"team: {{ id: {{ eq: "{}" }} }}"#, tid));
-        }
-        if let Some(after) = updated_after {
-            filters.push(format!(r#"updatedAt: {{ gte: "{}" }}"#, after));
-        }
-
-        let filter_str = if filters.is_empty() {
-            String::new()
-        } else {
-            format!("filter: {{ {} }}", filters.join(", "))
-        };
-
-        let query = format!(
-            r#"
-            query {{
-                issues(first: {}, {}) {{
-                    nodes {{
-                        id
-                        identifier
-                        title
-                        description
-                        priority
-                        priorityLabel
-                        url
-                        createdAt
-                        updatedAt
-                        completedAt
-                        canceledAt
-                        dueDate
-                        estimate
-                        state {{
-                            id
-                            name
-                            color
-                            type
-                        }}
-                        assignee {{
-                            id
-                            name
-                            email
-                        }}
-                        creator {{
-                            id
-                            name
-                            email
-                        }}
-                        labels {{
-                            nodes {{
-                                id
-                                name
-                                color
-                            }}
-                        }}
-                        team {{
-                            id
-                            name
-                            key
-                        }}
-                        project {{
-                            id
-                            name
-                        }}
-                        cycle {{
-                            id
-                            name
-                            number
-                        }}
-                        parent {{
-                            id
-                            identifier
-                            title
-                        }}
-                    }}
-                }}
-            }}
-        "#,
-            limit, filter_str
-        );
+        // The query is a fixed parameterized string; caller-supplied team_id /
+        // updated_after travel through GraphQL `variables`, never interpolated
+        // into the query text — so they cannot inject GraphQL.
+        let variables = build_issues_variables(team_id, updated_after, limit);
 
         let response = self
             .client
             .post(&self.api_url)
             .header("Authorization", &self.api_key)
             .header("Content-Type", "application/json")
-            .json(&serde_json::json!({ "query": query }))
+            .json(&serde_json::json!({
+                "query": LINEAR_ISSUES_QUERY,
+                "variables": variables,
+            }))
             .send()
             .await
             .context("Failed to send request to Linear API")?;
@@ -655,5 +662,57 @@ mod tests {
         assert!(tags.contains(&"Feature".to_string()));
         assert!(tags.contains(&"In Progress".to_string()));
         assert!(tags.contains(&"SHO".to_string()));
+    }
+
+    #[test]
+    fn issues_query_is_parameterized() {
+        // The query must declare GraphQL variables, not interpolate caller input.
+        assert!(LINEAR_ISSUES_QUERY.contains("$first: Int!"));
+        assert!(LINEAR_ISSUES_QUERY.contains("$filter: IssueFilter"));
+        assert!(LINEAR_ISSUES_QUERY.contains("issues(first: $first, filter: $filter)"));
+    }
+
+    #[test]
+    fn build_issues_variables_empty_filter_is_null() {
+        let vars = build_issues_variables(None, None, 250);
+        assert_eq!(vars["first"], serde_json::json!(250));
+        assert_eq!(vars["filter"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn build_issues_variables_carries_filter_as_data() {
+        let vars = build_issues_variables(Some("team-123"), Some("2026-01-01"), 50);
+        assert_eq!(vars["first"], serde_json::json!(50));
+        assert_eq!(
+            vars["filter"]["team"]["id"]["eq"],
+            serde_json::json!("team-123")
+        );
+        assert_eq!(
+            vars["filter"]["updatedAt"]["gte"],
+            serde_json::json!("2026-01-01")
+        );
+    }
+
+    #[test]
+    fn build_issues_variables_injection_attempt_stays_data() {
+        // A team_id crafted to break out of a string stays a JSON string value —
+        // it never becomes query syntax.
+        let malicious = r#"x" }) { id } } injected: issues(first: 9999) { nodes { id"#;
+        let vars = build_issues_variables(Some(malicious), None, 10);
+
+        // The payload is confined to the `eq` value verbatim.
+        assert_eq!(
+            vars["filter"]["team"]["id"]["eq"],
+            serde_json::json!(malicious)
+        );
+
+        // It did NOT create sibling fields — variables has exactly `first` + `filter`.
+        let obj = vars.as_object().expect("variables is an object");
+        assert_eq!(obj.len(), 2);
+        assert!(obj.contains_key("first") && obj.contains_key("filter"));
+
+        // On the wire the embedded quote is JSON-escaped, so it is data, not syntax.
+        let serialized = serde_json::to_string(&vars).unwrap();
+        assert!(serialized.contains(r#"\""#));
     }
 }

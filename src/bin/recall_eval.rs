@@ -18,8 +18,11 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 
+use shodh_memory::memory::types::LayerMode;
 use shodh_memory::recall_harness::report::{compare_to_baseline, Report};
-use shodh_memory::recall_harness::runner::{run_smoke_suite, RunInputs};
+use shodh_memory::recall_harness::runner::{
+    run_smoke_suite_with_ranks, ReportWithRanks, RunInputs,
+};
 
 /// Exit codes — kept stable so CI scripts can branch on them.
 const EXIT_PASS: i32 = 0;
@@ -29,14 +32,79 @@ const EXIT_INFRASTRUCTURE: i32 = 2;
 #[derive(Debug, Clone, Copy, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 enum Suite {
-    /// L1 smoke suite — 30 hand-crafted shodh queries (see issue #265).
+    /// L1 smoke suite — hand-crafted shodh queries (see issue #265). The set we
+    /// tune against; this is the one CI gates on.
     Smoke,
+    /// LoCoMo recall suite — 5,882 dialogue-turn corpus + 1,531 questions with
+    /// gold evidence dia-ids (snap-research/locomo). The HELD-OUT set: none of
+    /// the pipeline changes were diagnosed against it, so recall@k here tests
+    /// generalization, not fit. Not gated — diagnostic only.
+    Locomo,
 }
 
 impl Suite {
     fn as_str(self) -> &'static str {
         match self {
             Suite::Smoke => "smoke",
+            Suite::Locomo => "locomo",
+        }
+    }
+
+    /// Corpus + cases fixture paths, or `None` to use the runner's smoke
+    /// defaults.
+    fn fixture_paths(self) -> Option<(PathBuf, PathBuf)> {
+        match self {
+            Suite::Smoke => None,
+            Suite::Locomo => Some((
+                shodh_memory::recall_harness::fixtures::manifest_path(
+                    shodh_memory::recall_harness::fixtures::LOCOMO_CORPUS_PATH,
+                ),
+                shodh_memory::recall_harness::fixtures::manifest_path(
+                    shodh_memory::recall_harness::fixtures::LOCOMO_CASES_PATH,
+                ),
+            )),
+        }
+    }
+}
+
+/// Per-pipeline-layer attribution selector. RH-8 (#270).
+///
+/// `all` runs the full ladder of cumulative modes (vamana-only → full),
+/// emitting one entry per mode in the report's `layers` map. CI gating
+/// remains keyed on `full` so per-layer numbers are diagnostic, not gated.
+///
+/// Naming note: the `+rerank` mode in the spec is a misnomer for this
+/// codebase — there is no cross-encoder. The gate covers the ontological
+/// re-ranker at Layer 4.9 instead. The label is preserved for spec fidelity.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum LayerArg {
+    /// All six modes, ascending. Use for diagnostic per-layer attribution.
+    All,
+    /// Layer 3 vector ANN only.
+    VamanaOnly,
+    /// + Layer 2 graph spreading activation.
+    PlusSpreading,
+    /// + Layer 4 BM25/RRF fusion.
+    PlusBm25,
+    /// + Layer 4.9 ontological rerank (spec calls this `+rerank`).
+    PlusRerank,
+    /// + Layer 0.7/4.8 fact-source boost.
+    PlusFacts,
+    /// Production pipeline — every stage on. CI gates on this mode only.
+    Full,
+}
+
+impl LayerArg {
+    fn to_modes(self) -> Vec<LayerMode> {
+        match self {
+            LayerArg::All => LayerMode::ALL.to_vec(),
+            LayerArg::VamanaOnly => vec![LayerMode::VamanaOnly],
+            LayerArg::PlusSpreading => vec![LayerMode::PlusSpreading],
+            LayerArg::PlusBm25 => vec![LayerMode::PlusBm25],
+            LayerArg::PlusRerank => vec![LayerMode::PlusRerank],
+            LayerArg::PlusFacts => vec![LayerMode::PlusFacts],
+            LayerArg::Full => vec![LayerMode::Full],
         }
     }
 }
@@ -62,6 +130,13 @@ struct Args {
     #[arg(long)]
     baseline: Option<PathBuf>,
 
+    /// Optional path to write per-case diagnostics (JSON array) for the gated
+    /// layer: each case's ndcg/recall/mrr plus the relevant items it dropped
+    /// from the top-k. Diagnostic side output — not the gated report, not the
+    /// baseline. Use it to see *which* query is weak, not just a category mean.
+    #[arg(long)]
+    per_case_output: Option<PathBuf>,
+
     /// Allowed regression in percent of baseline. Default: 2.0%.
     #[arg(long, default_value_t = 2.0)]
     tolerance: f64,
@@ -82,6 +157,23 @@ struct Args {
     /// still produces a true median for IQR calculation.
     #[arg(long, default_value_t = 5)]
     repeats: usize,
+
+    /// Per-pipeline-layer attribution mode. RH-8 (#270). `full` (default)
+    /// runs only the production pipeline and reproduces the pre-RH-8
+    /// behavior bit-for-bit. `all` runs every mode and emits one entry
+    /// per mode in the report's `layers` map for diagnostic attribution.
+    /// CI keys on `full` only — per-layer numbers are not gated.
+    #[arg(long, value_enum, default_value_t = LayerArg::Full)]
+    layer: LayerArg,
+
+    /// Simulated edge age in days, applied AFTER ingest and BEFORE queries
+    /// (decay study). When `> 0`, the harness ages the knowledge-graph edges via
+    /// `simulate_edge_aging` at the production ~6h cadence, so recall quality is
+    /// measured as if the edges were `age_days` old. Default `0` = no aging
+    /// (pre-existing behavior). Run at 0 / 7 / 30 / 90 and diff the reports to
+    /// see how edge decay erodes recall.
+    #[arg(long, default_value_t = 0.0)]
+    age_days: f64,
 }
 
 fn main() {
@@ -104,16 +196,45 @@ fn run(args: &Args) -> Result<i32> {
 
     let git_sha = current_git_sha().unwrap_or_else(|_| "unknown".to_string());
 
+    let (corpus_path, cases_path) = match args.suite.fixture_paths() {
+        Some((c, q)) => (Some(c), Some(q)),
+        None => (None, None),
+    };
     let inputs = RunInputs {
         storage_path: storage_path.clone(),
-        corpus_path: None,
-        cases_path: None,
+        corpus_path,
+        cases_path,
         suite: args.suite.as_str().to_string(),
         git_sha,
         repeats: args.repeats,
+        layer_modes: args.layer.to_modes(),
+        age_days: args.age_days,
     };
 
-    let mut report = run_smoke_suite(&inputs).context("running smoke suite")?;
+    let ReportWithRanks {
+        mut report,
+        per_case_by_layer,
+        ..
+    } = run_smoke_suite_with_ranks(&inputs).context("running smoke suite")?;
+
+    // Per-case diagnostics are written before the baseline comparison so they
+    // are always captured, even on a regressing run that exits non-zero. The
+    // payload is keyed by layer (`"full"`, … `--layer all` gives every stage)
+    // so a missed item can be traced to the stage that dropped it.
+    if let Some(per_case_path) = &args.per_case_output {
+        let json = serde_json::to_vec_pretty(&per_case_by_layer)
+            .context("serialising per-case diagnostics to JSON")?;
+        std::fs::write(per_case_path, &json).with_context(|| {
+            format!(
+                "writing per-case diagnostics to {}",
+                per_case_path.display()
+            )
+        })?;
+        eprintln!(
+            "recall-eval: per-case diagnostics written to {}",
+            per_case_path.display()
+        );
+    }
 
     if let Some(baseline_path) = &args.baseline {
         let baseline_bytes = std::fs::read(baseline_path)
@@ -166,18 +287,32 @@ fn write_report(path: &std::path::Path, report: &Report) -> Result<()> {
 }
 
 fn summarise(report: &Report) {
-    let full = report.layers.get("full");
     eprintln!(
         "recall-eval: suite={} cases={} repeats={} embedder={} sha={}",
         report.suite, report.case_count, report.repeats, report.embedder, report.git_sha
     );
-    if let Some(layer) = full {
+    // Print modes in pipeline order (vamana_only → full), not BTreeMap order.
+    // Match against the canonical mode keys so any unknown key just falls
+    // through to the BTreeMap iteration at the bottom.
+    let mode_order = [
+        "vamana_only",
+        "+spreading",
+        "+bm25",
+        "+rerank",
+        "+facts",
+        "full",
+    ];
+    for name in mode_order {
+        if let Some(layer) = report.layers.get(name) {
+            eprintln!(
+                "  {:<12} ndcg@10={:.4} recall@10={:.4} mrr={:.4} p@1={:.4} map={:.4}",
+                name, layer.ndcg_at_10, layer.recall_at_10, layer.mrr, layer.p_at_1, layer.map
+            );
+        }
+    }
+    if let Some(layer) = report.layers.get("full") {
         eprintln!(
-            "  full   ndcg@10={:.4} recall@10={:.4} mrr={:.4} p@1={:.4} map={:.4}",
-            layer.ndcg_at_10, layer.recall_at_10, layer.mrr, layer.p_at_1, layer.map
-        );
-        eprintln!(
-            "  latency p50={:.1}ms p95={:.1}ms p99={:.1}ms (per-case median)",
+            "  latency p50={:.1}ms p95={:.1}ms p99={:.1}ms (per-case median, full mode)",
             layer.latency_p50_ms, layer.latency_p95_ms, layer.latency_p99_ms
         );
         eprintln!(

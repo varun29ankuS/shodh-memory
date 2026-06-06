@@ -19,26 +19,46 @@ use super::{
 /// Application state type alias
 pub type AppState = Arc<MultiUserMemoryManager>;
 
-/// Build the public routes (no authentication required)
+/// Whether `/metrics` is served without authentication.
 ///
-/// These routes must always be accessible for:
-/// - Health checks (Kubernetes probes)
-/// - Metrics (Prometheus scraping)
-/// - Context status (local Claude Code status line script)
-/// - External webhooks (have their own signature verification)
-pub fn build_public_routes(state: AppState) -> Router {
+/// Secure default is `false` — `/metrics` is registered under the authenticated
+/// routes. Set `SHODH_METRICS_PUBLIC=true` to expose it to unauthenticated
+/// scrapers (it is still rate-limited as a public route).
+fn metrics_is_public() -> bool {
+    std::env::var("SHODH_METRICS_PUBLIC")
+        .map(|v| {
+            let v = v.to_lowercase();
+            v == "true" || v == "1"
+        })
+        .unwrap_or(false)
+}
+
+/// Build the health/liveness probe routes.
+///
+/// These are kept separate from the other public routes because they must
+/// NEVER be rate-limited — a throttled `/health` would cause spurious
+/// Kubernetes restarts. The caller merges this router WITHOUT a rate-limit
+/// layer, regardless of `SHODH_PUBLIC_RATE_LIMIT`.
+pub fn build_probe_routes(state: AppState) -> Router {
     Router::new()
-        // =================================================================
-        // HEALTH & KUBERNETES PROBES
-        // =================================================================
         .route("/health", get(health::health))
         .route("/health/live", get(health::health_live))
         .route("/health/ready", get(health::health_ready))
         .route("/health/index", get(health::health_index))
-        // =================================================================
-        // METRICS (PROMETHEUS)
-        // =================================================================
-        .route("/metrics", get(health::metrics_endpoint))
+        .with_state(state)
+}
+
+/// Build the public routes (no authentication required, but rate-limited).
+///
+/// Unlike the probe routes, the caller applies a rate-limit layer to these
+/// (subject to `SHODH_PUBLIC_RATE_LIMIT`). Routes:
+/// - Context status (local Claude Code status line script)
+/// - External webhooks (verified by HMAC signature internally)
+/// - Graph visualization HTML viewer
+/// - Metrics — ONLY when `SHODH_METRICS_PUBLIC=true`; otherwise `/metrics` is
+///   an authenticated route in `build_protected_routes`.
+pub fn build_public_routes(state: AppState) -> Router {
+    let mut router = Router::new()
         // =================================================================
         // CONTEXT STATUS (LOCAL SCRIPT - NO AUTH)
         // =================================================================
@@ -55,11 +75,15 @@ pub fn build_public_routes(state: AppState) -> Router {
         // =================================================================
         // GRAPH VISUALIZATION (PUBLIC - HTML VIEWER ONLY)
         // =================================================================
-        .route("/graph/view", get(visualization::graph_view))
-        // =================================================================
-        // STATE
-        // =================================================================
-        .with_state(state)
+        .route("/graph/view", get(visualization::graph_view));
+
+    // /metrics is an authenticated route by default; expose it here only when
+    // the operator has explicitly opted in via SHODH_METRICS_PUBLIC.
+    if metrics_is_public() {
+        router = router.route("/metrics", get(health::metrics_endpoint));
+    }
+
+    router.with_state(state)
 }
 
 /// Build the protected API routes (authentication required)
@@ -67,7 +91,7 @@ pub fn build_public_routes(state: AppState) -> Router {
 /// These routes require API key authentication and are rate-limited.
 /// The auth middleware and rate limiter should be applied by the caller.
 pub fn build_protected_routes(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         // =================================================================
         // REMEMBER/RECORD ENDPOINTS
         // =================================================================
@@ -424,20 +448,29 @@ pub fn build_protected_routes(state: AppState) -> Router {
         // =================================================================
         .route("/api/export/mif", post(mif::export_mif))
         .route("/api/import/mif", post(mif::import_mif))
-        .route("/api/mif/adapters", get(mif::list_adapters))
-        // =================================================================
-        // STATE
-        // =================================================================
-        .with_state(state)
+        .route("/api/mif/adapters", get(mif::list_adapters));
+
+    // /metrics requires authentication unless SHODH_METRICS_PUBLIC=true, in
+    // which case build_public_routes serves it instead (exactly-one placement).
+    if !metrics_is_public() {
+        router = router.route("/metrics", get(health::metrics_endpoint));
+    }
+
+    // =================================================================
+    // STATE
+    // =================================================================
+    router.with_state(state)
 }
 
-/// Build the complete router with both public and protected routes
+/// Build the complete router with probe, public, and protected routes.
 ///
 /// Note: This function does NOT apply auth middleware or rate limiting.
-/// The caller (main.rs) should apply those layers as needed.
+/// The caller (server.rs) should apply those layers as needed — in particular
+/// the probe routes must be merged WITHOUT a rate-limit layer.
 pub fn build_router(state: AppState) -> Router {
+    let probe = build_probe_routes(state.clone());
     let public = build_public_routes(state.clone());
     let protected = build_protected_routes(state);
 
-    Router::new().merge(public).merge(protected)
+    Router::new().merge(probe).merge(public).merge(protected)
 }

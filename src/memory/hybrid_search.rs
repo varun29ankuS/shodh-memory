@@ -526,9 +526,17 @@ impl RRFusion {
             }
         }
 
-        // Sort by RRF score descending
+        // Sort by RRF score descending, with a deterministic MemoryId tie-break.
+        // RRF scores collide constantly by construction (any two docs at the
+        // same rank in their respective lists contribute identical amounts), and
+        // `scores` is a HashMap whose iteration order is randomized per process.
+        // Without the tie-break, equal-scored candidates are ordered arbitrarily
+        // and differently across runs, which propagates into the downstream
+        // rank-based fusion (mod.rs Layer 4) and can flip candidates in/out of
+        // the truncated top-k between identical queries. Every other sort in the
+        // pipeline already tie-breaks on MemoryId; this was the lone exception.
         let mut results: Vec<_> = scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.total_cmp(&a.1));
+        results.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         results
     }
@@ -798,7 +806,9 @@ impl HybridSearchEngine {
                 bm25_weight,
                 vector_weight,
                 keyword_discriminativeness,
-                &query[..query.len().min(50)]
+                // Char-safe preview: `&query[..50]` would panic if byte 50 lands
+                // inside a multi-byte UTF-8 codepoint (CJK/emoji/accented input).
+                super::char_truncate(query, 50)
             );
         }
 
@@ -963,6 +973,33 @@ mod tests {
         assert_eq!(fused.len(), 2);
         // Both should have same RRF score (rank 1 in their respective list)
         assert!((fused[0].1 - fused[1].1).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_rrf_fusion_ties_break_by_memory_id() {
+        // Regression: equal RRF scores must resolve to a deterministic order
+        // (ascending MemoryId), not the randomized HashMap iteration order.
+        // Use fixed-byte UUIDs so the expected ordering is known, and put the
+        // HIGHER id first in the input to prove the SORT decides, not input
+        // order.
+        let rrf = RRFusion::new(60.0, vec![0.5, 0.5]);
+        let lo = MemoryId(uuid::Uuid::from_bytes([0x00; 16]));
+        let hi = MemoryId(uuid::Uuid::from_bytes([0xff; 16]));
+        assert!(lo < hi, "fixture ordering precondition");
+
+        // Two disjoint single-item lists → identical RRF score (rank 0 in each).
+        let fused = rrf.fuse(vec![vec![(hi.clone(), 0.9)], vec![(lo.clone(), 0.1)]]);
+
+        assert_eq!(fused.len(), 2);
+        assert!(
+            (fused[0].1 - fused[1].1).abs() < f32::EPSILON,
+            "scores must tie for this to exercise the tie-break"
+        );
+        assert_eq!(
+            fused[0].0, lo,
+            "tie must resolve to the lower MemoryId first"
+        );
+        assert_eq!(fused[1].0, hi);
     }
 
     #[test]

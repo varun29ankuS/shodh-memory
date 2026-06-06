@@ -50,6 +50,28 @@ fn default_repeats() -> usize {
     1
 }
 
+/// Per-case diagnostics for the highest (gated) layer.
+///
+/// Not part of [`Report`] / `baseline.json` — those stay aggregate-only so the
+/// committed baseline is small and diffable. This is emitted to a side artifact
+/// (`recall-eval --per-case-output`) so a human can answer "which query is weak
+/// and which relevant items did it drop?" instead of only seeing a category
+/// average move. `missed` lists the relevant `corpus_item_id`s that fell
+/// outside the top-`k`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PerCaseRecord {
+    pub case_id: String,
+    pub category: String,
+    pub query: String,
+    pub ndcg_at_k: f64,
+    pub recall_at_k: f64,
+    pub mrr: f64,
+    pub p_at_1: f64,
+    pub relevant_total: usize,
+    pub relevant_found: usize,
+    pub missed: Vec<String>,
+}
+
 /// Aggregate metrics for one pipeline layer across all cases.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LayerReport {

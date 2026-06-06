@@ -235,6 +235,176 @@ impl EntityLabel {
     }
 }
 
+/// Classify a tag string into a richer `EntityLabel`.
+///
+/// Tags are short, user-supplied descriptors (e.g. "production", "rocksdb",
+/// "config.toml"). This maps them onto the ontology so they participate in
+/// type-aware spreading activation and hierarchy matching during retrieval.
+/// Shared by every ingest path so a tag receives the same label whether it
+/// arrives via `remember`, an integration sync, or an `upsert`.
+pub fn classify_tag_label(tag: &str) -> EntityLabel {
+    let lower = tag.to_lowercase();
+
+    // Deployment / environment indicators
+    if matches!(
+        lower.as_str(),
+        "production"
+            | "staging"
+            | "dev"
+            | "development"
+            | "ci"
+            | "cd"
+            | "kubernetes"
+            | "k8s"
+            | "docker"
+            | "container"
+            | "aws"
+            | "gcp"
+            | "azure"
+    ) {
+        return EntityLabel::Environment;
+    }
+
+    // Pipeline / workflow indicators
+    if lower.contains("pipeline")
+        || lower.contains("workflow")
+        || lower.contains("ci-cd")
+        || lower.contains("cicd")
+    {
+        return EntityLabel::Pipeline;
+    }
+
+    // Database / storage indicators
+    if matches!(
+        lower.as_str(),
+        "rocksdb"
+            | "postgres"
+            | "postgresql"
+            | "redis"
+            | "sqlite"
+            | "mongodb"
+            | "mysql"
+            | "dynamodb"
+            | "s3"
+            | "cassandra"
+            | "elasticsearch"
+    ) || lower.ends_with("db")
+        || lower.ends_with("-db")
+        || lower.ends_with("_db")
+    {
+        return EntityLabel::Database;
+    }
+
+    // Service / API indicators (suffix-only to avoid "my-api-docs" false positives)
+    if lower.ends_with("-service")
+        || lower.ends_with("_service")
+        || lower.ends_with("-api")
+        || lower.ends_with("_api")
+        || lower.ends_with("-server")
+        || lower.ends_with("_server")
+        || lower.ends_with("-daemon")
+    {
+        return EntityLabel::Service;
+    }
+
+    // Documentation indicators (check before module — README.md is a doc, not a module)
+    if lower.ends_with(".md")
+        || lower.contains("readme")
+        || lower.contains("runbook")
+        || lower.ends_with("-rfc")
+        || lower.ends_with("-spec")
+    {
+        return EntityLabel::Document;
+    }
+
+    // Configuration indicators
+    if lower.ends_with(".toml")
+        || lower.ends_with(".yaml")
+        || lower.ends_with(".yml")
+        || lower.ends_with(".env")
+        || lower.ends_with(".json")
+        || lower.contains("config")
+    {
+        return EntityLabel::Configuration;
+    }
+
+    // Module / library indicators
+    if lower.ends_with(".rs")
+        || lower.ends_with(".ts")
+        || lower.ends_with(".js")
+        || lower.ends_with(".py")
+        || lower.ends_with("-lib")
+        || lower.ends_with("_lib")
+    {
+        return EntityLabel::Module;
+    }
+
+    // Default: Technology (reasonable fallback for unknown tags)
+    EntityLabel::Technology
+}
+
+/// Classify a MISC NER entity (or an otherwise-untyped name) into a more
+/// specific `EntityLabel`.
+///
+/// The NER model only outputs PER/ORG/LOC/MISC. For MISC entities that pass
+/// quality gates, we use heuristic rules to assign a richer ontological type.
+/// This activates type-aware spreading activation and `matches_with_hierarchy()`
+/// in retrieval — `Concept` entities participate in the type hierarchy while
+/// `Other("MISC")` is invisible to it. Shared by every ingest path so the same
+/// name resolves to the same label regardless of entry point.
+pub fn classify_misc_entity(name: &str) -> EntityLabel {
+    let lower = name.to_lowercase();
+
+    // Event-like terms (checked first — "conference" ends with "ence" concept suffix)
+    const EVENT_WORDS: &[&str] = &[
+        "conference",
+        "summit",
+        "meetup",
+        "hackathon",
+        "sprint",
+        "launch",
+        "release",
+        "incident",
+        "outage",
+        "postmortem",
+    ];
+    if EVENT_WORDS.iter().any(|w| lower.contains(w)) {
+        return EntityLabel::Event;
+    }
+
+    // Skill / role indicators (before concept — "engineer" ends with suffix-like patterns)
+    const SKILL_WORDS: &[&str] = &[
+        "engineer",
+        "architect",
+        "developer",
+        "designer",
+        "analyst",
+        "programming",
+        "scripting",
+    ];
+    if SKILL_WORDS.iter().any(|w| lower.contains(w)) {
+        return EntityLabel::Skill;
+    }
+
+    // Concept suffixes — abstract ideas, methodologies, qualities
+    const CONCEPT_SUFFIXES: &[&str] = &[
+        "ism", "ology", "ity", "ness", "ment", "ance", "ence", "tion", "sion",
+    ];
+    if CONCEPT_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
+        return EntityLabel::Concept;
+    }
+
+    // PascalCase proper nouns without spaces/hyphens → likely a Product
+    // (e.g., "JavaScript", "PostgreSQL", "FastAPI", "ChatGPT")
+    let has_internal_upper = name.chars().skip(1).any(|c| c.is_uppercase());
+    if has_internal_upper && !name.contains(' ') && !name.contains('-') && name.len() > 2 {
+        return EntityLabel::Product;
+    }
+
+    // Default: Concept (participates in type hierarchy via Role→Concept parent)
+    EntityLabel::Concept
+}
+
 /// Memory tier for edge consolidation
 ///
 /// Based on hippocampal-cortical memory consolidation research:
@@ -886,9 +1056,24 @@ impl RelationshipEdge {
     ///
     /// Returns true if synapse should be pruned (below tier's threshold)
     pub fn decay(&mut self) -> bool {
+        self.decay_at(Utc::now())
+    }
+
+    /// Apply time-decay as of an explicit `now`, returning whether the edge
+    /// should be pruned.
+    ///
+    /// `decay()` is the production entry point (`now = Utc::now()`); this
+    /// variant takes the clock as a parameter so decay is deterministically
+    /// testable and so the decay-simulation harness can drive an edge through
+    /// many cycles at a controlled cadence. The cadence is load-bearing:
+    /// because each call resets `last_activated = now`, the *per-cycle* elapsed
+    /// time is what `hybrid_decay_factor` sees. Simulating one large jump would
+    /// land directly in the power-law phase and hide the periodic dynamics that
+    /// production actually exhibits (every ~6h), so faithful evaluation must
+    /// step at the real cadence.
+    pub fn decay_at(&mut self, now: DateTime<Utc>) -> bool {
         use crate::decay::tier_decay_factor;
 
-        let now = Utc::now();
         let elapsed = now.signed_duration_since(self.last_activated);
         let hours_elapsed = elapsed.num_seconds() as f64 / 3600.0;
 
@@ -979,6 +1164,38 @@ impl RelationshipEdge {
             false
         } else {
             exceeded_max_age || self.strength <= prune_threshold
+        }
+    }
+
+    /// Construct a synthetic, non-persisted edge for the decay-simulation
+    /// harness. `created_at`/`valid_at`/`last_activated` are anchored at
+    /// `origin` so a harness can then drive `decay_at` forward from a known
+    /// point. Entity UUIDs are random; this is never written to storage.
+    pub(crate) fn synthetic_for_sim(
+        strength: f32,
+        tier: EdgeTier,
+        ltp_status: LtpStatus,
+        origin: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength,
+            created_at: origin,
+            valid_at: origin,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: origin,
+            activation_count: 0,
+            ltp_status,
+            activation_timestamps: None,
+            tier,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
         }
     }
 
@@ -1511,7 +1728,7 @@ impl GraphMemory {
         let episodes_cf = db
             .cf_handle(CF_EPISODES)
             .ok_or_else(|| anyhow::anyhow!("CF '{}' not found after DB open", CF_EPISODES))?;
-        let relationship_count = Self::count_cf_entries(&db, relationships_cf);
+        let relationship_count = Self::count_relationship_edges(&db, relationships_cf);
         let episode_count = Self::count_cf_entries(&db, episodes_cf);
 
         // Load entity embedding cache for concept merging
@@ -1789,6 +2006,22 @@ impl GraphMemory {
     /// Count entries in a column family (one-time startup cost)
     fn count_cf_entries(db: &DB, cf: &ColumnFamily) -> usize {
         db.iterator_cf(cf, rocksdb::IteratorMode::Start).count()
+    }
+
+    /// Count only true relationship-edge records in the relationships CF.
+    ///
+    /// The relationships CF holds two kinds of keys: real edge records (16-byte
+    /// UUID key → encoded `RelationshipEdge`) and `mem_edge:<a>:<b>`
+    /// forward/reverse index keys (ASCII key → 16-byte edge UUID). The generic
+    /// `count_cf_entries` counts both, which over-states the edge count (~3x for
+    /// memory-pair edges). The startup seed for `relationship_count` must count
+    /// only the 16-byte-keyed edge records so it stays consistent with the
+    /// increments/decrements applied at runtime.
+    fn count_relationship_edges(db: &DB, cf: &ColumnFamily) -> usize {
+        db.iterator_cf(cf, rocksdb::IteratorMode::Start)
+            .filter_map(|r| r.ok())
+            .filter(|(key, _)| key.len() == 16)
+            .count()
     }
 
     /// Load entity embedding cache from persisted entities.
@@ -2717,7 +2950,15 @@ impl GraphMemory {
 
         // Delete from main storage
         self.db.delete_cf(self.relationships_cf(), key)?;
-        self.relationship_count.fetch_sub(1, Ordering::Relaxed);
+        // Saturating decrement: never wrap below 0. relationship_count is an
+        // accounting estimate that can legitimately drift (some creation paths
+        // historically omitted the increment), and a plain fetch_sub would wrap
+        // usize to ~1.8e19 once it hits 0.
+        let _ = self
+            .relationship_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                Some(c.saturating_sub(1))
+            });
 
         // Remove from entity_edges index for BOTH entities
         // (add_relationship indexes both from_entity and to_entity)
@@ -3740,6 +3981,10 @@ impl GraphMemory {
             })?;
         let mut batch = WriteBatch::default();
         let mut strengthened = 0;
+        // Count of genuinely-new edges (the `else` branch below), tracked
+        // separately from `strengthened` (which also counts updates to existing
+        // edges) so relationship_count is incremented only for new records.
+        let mut new_edges = 0;
         let mut promotion_boosts = Vec::new();
 
         for (from_id_str, to_id_str, boost) in edge_boosts {
@@ -3845,12 +4090,22 @@ impl GraphMemory {
                     );
 
                     strengthened += 1;
+                    new_edges += 1;
                 }
             }
         }
 
         if strengthened > 0 {
             self.db.write(batch)?;
+
+            // Account for genuinely-new edges created above. Mirrors
+            // record_memory_coactivation; without this the counter drifts low
+            // while delete_relationship keeps decrementing, eventually
+            // (pre-saturation) underflowing it.
+            if new_edges > 0 {
+                self.relationship_count
+                    .fetch_add(new_edges, Ordering::Relaxed);
+            }
 
             // Index new replay edges in entity_edges CF so they're visible to
             // traversal and degree-cap enforcement (GQ-11 fix)
@@ -4264,12 +4519,21 @@ impl GraphMemory {
         Ok(false)
     }
 
-    /// Apply decay to already-loaded edges in-place, avoiding double deserialization.
+    /// Apply decay to already-loaded edges in-place as of an explicit `now`,
+    /// avoiding double deserialization.
     ///
     /// Mutates edges directly, serializes results into a WriteBatch, and returns
-    /// the UUIDs of edges that should be pruned. Used by `apply_decay()` which
-    /// already has the full edge list from `get_all_relationships()`.
-    fn batch_decay_edges_in_place(&self, edges: &mut [RelationshipEdge]) -> Result<Vec<Uuid>> {
+    /// the UUIDs of edges that should be pruned. Used by
+    /// [`apply_decay_at`](Self::apply_decay_at) (which already has the full edge
+    /// list from `get_all_relationships()`); production reaches it via
+    /// [`apply_decay`](Self::apply_decay) with `now = Utc::now()`. The injectable
+    /// clock lets the decay-evaluation harness age a real graph at the
+    /// production cadence without waiting wall-clock time.
+    fn batch_decay_edges_in_place_at(
+        &self,
+        edges: &mut [RelationshipEdge],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Uuid>> {
         if edges.is_empty() {
             return Ok(Vec::new());
         }
@@ -4278,14 +4542,14 @@ impl GraphMemory {
             .synapse_update_lock
             .try_lock_for(std::time::Duration::from_secs(5))
             .ok_or_else(|| {
-                anyhow::anyhow!("synapse_update_lock timeout in batch_decay_edges_in_place")
+                anyhow::anyhow!("synapse_update_lock timeout in batch_decay_edges_in_place_at")
             })?;
         let mut batch = WriteBatch::default();
         let mut to_prune = Vec::new();
 
         for edge in edges.iter_mut() {
             let strength_before = edge.strength;
-            let should_prune = edge.decay();
+            let should_prune = edge.decay_at(now);
 
             // Only write back edges whose strength actually changed (or need pruning).
             // With 300s maintenance intervals, most edges won't have meaningful decay,
@@ -4381,6 +4645,19 @@ impl GraphMemory {
     /// Returns a `GraphDecayResult` with pruned count and orphaned entity/memory IDs
     /// for Direction 2 coupling (edge pruning → orphan detection).
     pub fn apply_decay(&self) -> Result<crate::memory::types::GraphDecayResult> {
+        self.apply_decay_at(Utc::now())
+    }
+
+    /// As [`apply_decay`](Self::apply_decay), but ages edges as of an explicit
+    /// `now`. Production calls `apply_decay()` (wall clock). The decay-evaluation
+    /// harness calls this repeatedly at the ~6h production cadence to age a real
+    /// graph through simulated time — the only faithful way to reproduce the
+    /// periodic-decay dynamics, since a single large jump would land directly in
+    /// the power-law phase and hide the per-cycle behaviour.
+    pub fn apply_decay_at(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<crate::memory::types::GraphDecayResult> {
         // Get all edges (need full data for orphan tracking)
         let mut all_edges = self.get_all_relationships()?;
 
@@ -4389,7 +4666,7 @@ impl GraphMemory {
         }
 
         // Apply decay in-place on already-deserialized edges (avoids double deserialization)
-        let to_prune = self.batch_decay_edges_in_place(&mut all_edges)?;
+        let to_prune = self.batch_decay_edges_in_place_at(&mut all_edges, now)?;
 
         if to_prune.is_empty() {
             return Ok(crate::memory::types::GraphDecayResult::default());
@@ -6541,6 +6818,32 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
+    #[test]
+    fn classify_tag_label_maps_known_categories() {
+        assert_eq!(classify_tag_label("production"), EntityLabel::Environment);
+        assert_eq!(classify_tag_label("rocksdb"), EntityLabel::Database);
+        assert_eq!(classify_tag_label("metrics-service"), EntityLabel::Service);
+        assert_eq!(classify_tag_label("README"), EntityLabel::Document);
+        assert_eq!(
+            classify_tag_label("config.toml"),
+            EntityLabel::Configuration
+        );
+        assert_eq!(classify_tag_label("router.rs"), EntityLabel::Module);
+        assert_eq!(classify_tag_label("ci-cd"), EntityLabel::Pipeline);
+        // Unknown → Technology fallback
+        assert_eq!(classify_tag_label("widgetron"), EntityLabel::Technology);
+    }
+
+    #[test]
+    fn classify_misc_entity_maps_surface_forms() {
+        assert_eq!(classify_misc_entity("postmortem"), EntityLabel::Event);
+        assert_eq!(classify_misc_entity("backend engineer"), EntityLabel::Skill);
+        assert_eq!(classify_misc_entity("scalability"), EntityLabel::Concept);
+        assert_eq!(classify_misc_entity("PostgreSQL"), EntityLabel::Product);
+        // Plain lowercase noun with no signal → Concept (still type-hierarchy visible)
+        assert_eq!(classify_misc_entity("widget"), EntityLabel::Concept);
+    }
+
     /// Create a test relationship edge with specified strength and last_activated (L1 tier)
     fn create_test_edge(strength: f32, days_since_activated: i64) -> RelationshipEdge {
         create_test_edge_with_tier(strength, days_since_activated, EdgeTier::L1Working)
@@ -7338,6 +7641,64 @@ mod tests {
         assert!(strength.is_some());
         let s = strength.unwrap();
         assert!(s > 0.75 && s <= 0.8, "Strength should be ~0.8, got {}", s);
+    }
+
+    #[test]
+    fn apply_decay_at_ages_a_real_graph_at_cadence() {
+        // End-to-end check of the virtual-clock decay plumbing: drive
+        // apply_decay_at over simulated time at the production ~6h cadence and
+        // confirm a real on-disk edge actually decays. This is the mechanism the
+        // decay-evaluation harness uses to age a graph for recall@k-vs-age
+        // measurement without waiting wall-clock days.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let edge = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::RelatedTo,
+            strength: 0.8,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: Utc::now(),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+        };
+        let edge_id = graph.add_relationship(edge).unwrap();
+        let start = graph.get_relationship(&edge_id).unwrap().unwrap().strength;
+
+        // Age ~10 days at the 6h cadence (40 cycles), advancing a virtual clock.
+        let t0 = Utc::now();
+        for step in 1..=40 {
+            let now = t0 + Duration::hours(6 * step);
+            graph.apply_decay_at(now).unwrap();
+        }
+
+        // Under the real cadence an L2 edge floors below its 0.2 prune threshold
+        // within ~2 days (chained ~daily-half-life exponential), and decay()'s
+        // return (`exceeded_max_age || strength <= prune_threshold`) then prunes
+        // it — the min-prune-age gate is OR'd, not a hard floor. So after 10
+        // simulated days the edge is either pruned or sitting at the decay floor.
+        // Either outcome proves the virtual clock drove real decay end-to-end.
+        assert!(start > 0.5, "sanity: edge started strong, got {start}");
+        match graph.get_relationship(&edge_id).unwrap() {
+            None => { /* pruned after flooring — the expected outcome */ }
+            Some(aged) => assert!(
+                aged.strength < 0.3,
+                "edge should have decayed near the floor under cadenced aging: \
+                 start={start}, aged={}",
+                aged.strength
+            ),
+        }
     }
 
     // =========================================================================

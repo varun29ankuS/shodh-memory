@@ -56,9 +56,10 @@ RUN mkdir -p /models/minilm-l6 /models/bert-tiny-ner \
     && echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  /models/bert-tiny-ner/tokenizer.json" | sha256sum -c -
 
 # Create dummy sources to build and cache dependencies
-RUN mkdir -p src benches tests \
+RUN mkdir -p src src/bin benches tests \
     && echo "fn main() {}" > src/main.rs \
     && echo "fn main() {}" > src/cli.rs \
+    && echo "fn main() {}" > src/bin/recall_eval.rs \
     && touch src/lib.rs \
     && awk -F '"' '/name = ".*benchmarks"/ {print "echo \"fn main() {}\" > benches/" $2 ".rs"}' Cargo.toml | sh \
     && touch tests/dummy.rs \

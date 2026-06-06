@@ -54,6 +54,7 @@ fn create_entity(
         name_embedding: None,
         salience,
         is_proper_noun: is_proper,
+        selectivity: None,
     }
 }
 
@@ -82,6 +83,8 @@ fn create_relationship(
         tier: Default::default(),
         activation_timestamps: None,
         entity_confidence: None,
+        forman_curvature: None,
+        endpoint_selectivity: None,
     }
 }
 

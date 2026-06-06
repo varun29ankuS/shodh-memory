@@ -270,11 +270,16 @@ fn resolve_entity_label(
             "PER" => crate::graph_memory::EntityLabel::Person,
             "ORG" => crate::graph_memory::EntityLabel::Organization,
             "LOC" => crate::graph_memory::EntityLabel::Location,
-            _ => crate::graph_memory::EntityLabel::Concept,
+            // MISC / anything else: use the shared heuristic so a name resolves
+            // to the same richer label here as on the handler ingest path,
+            // instead of collapsing every non-PER/ORG/LOC entity to Concept.
+            _ => crate::graph_memory::classify_misc_entity(entity_name),
         };
         (label, *confidence)
     } else {
-        (crate::graph_memory::EntityLabel::Concept, 0.5)
+        // No NER hit — still classify by surface form rather than defaulting to
+        // Concept, keeping this path consistent with process_experience_into_graph.
+        (crate::graph_memory::classify_misc_entity(entity_name), 0.5)
     }
 }
 
@@ -297,6 +302,96 @@ fn tokenize_words(text: &str) -> HashSet<&str> {
     text.split(|c: char| !c.is_alphanumeric() && c != '\'')
         .filter(|w| w.len() >= 3)
         .collect()
+}
+
+/// Char-safe prefix of `s` containing at most `max_chars` characters.
+///
+/// Unlike `&s[..n]`, this never panics on a multi-byte UTF-8 boundary, so it is
+/// safe for previews / log lines / display truncation of arbitrary user text
+/// (CJK, emoji, accented input). Returns the whole string when it is already
+/// `<= max_chars` characters; the caller can detect truncation by comparing
+/// `result.len()` to `s.len()`.
+pub(crate) fn char_truncate(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
+#[cfg(test)]
+mod char_truncate_tests {
+    use super::char_truncate;
+
+    #[test]
+    fn never_splits_multibyte_utf8() {
+        // <= max_chars → returned unchanged
+        assert_eq!(char_truncate("hello", 10), "hello");
+        assert_eq!(char_truncate("abcde", 5), "abcde");
+        assert_eq!(char_truncate("", 5), "");
+        // plain ASCII truncation
+        assert_eq!(char_truncate("hello", 3), "hel");
+        assert_eq!(char_truncate("anything", 0), "");
+        // CJK: 3 bytes/char — `&s[..2]` would panic mid-codepoint.
+        let cjk = "你好世界"; // 4 chars, 12 bytes
+        assert_eq!(char_truncate(cjk, 2), "你好");
+        assert_eq!(char_truncate(cjk, 4), cjk);
+        assert_eq!(char_truncate(cjk, 99), cjk);
+        // Emoji: 4 bytes/char.
+        let emoji = "😀😁😂";
+        assert_eq!(char_truncate(emoji, 1), "😀");
+        assert_eq!(char_truncate(emoji, 3), emoji);
+        // The result is always a prefix shorter-or-equal in bytes.
+        assert!(char_truncate(cjk, 2).len() < cjk.len());
+    }
+}
+
+#[cfg(test)]
+mod resolve_entity_label_tests {
+    use super::resolve_entity_label;
+    use crate::graph_memory::{classify_misc_entity, EntityLabel};
+    use std::collections::HashMap;
+
+    #[test]
+    fn ner_per_org_loc_map_directly() {
+        let mut lookup = HashMap::new();
+        lookup.insert("alice".to_string(), ("PER".to_string(), 0.9));
+        lookup.insert("acme".to_string(), ("ORG".to_string(), 0.8));
+        lookup.insert("paris".to_string(), ("LOC".to_string(), 0.7));
+        assert_eq!(
+            resolve_entity_label("Alice", &lookup).0,
+            EntityLabel::Person
+        );
+        assert_eq!(
+            resolve_entity_label("Acme", &lookup).0,
+            EntityLabel::Organization
+        );
+        assert_eq!(
+            resolve_entity_label("Paris", &lookup).0,
+            EntityLabel::Location
+        );
+    }
+
+    #[test]
+    fn misc_uses_shared_classifier_not_blanket_concept() {
+        let mut lookup = HashMap::new();
+        lookup.insert("postgresql".to_string(), ("MISC".to_string(), 0.6));
+        // Previously every non-PER/ORG/LOC entity collapsed to Concept; now it
+        // resolves through the same heuristic the handler path uses.
+        let (label, conf) = resolve_entity_label("PostgreSQL", &lookup);
+        assert_eq!(label, classify_misc_entity("PostgreSQL"));
+        assert_eq!(label, EntityLabel::Product);
+        assert_eq!(conf, 0.6);
+    }
+
+    #[test]
+    fn unknown_name_classified_by_surface_form() {
+        let lookup = HashMap::new();
+        // No NER hit: still classified instead of defaulting to Concept blindly.
+        assert_eq!(
+            resolve_entity_label("postmortem", &lookup).0,
+            EntityLabel::Event
+        );
+    }
 }
 
 impl MemorySystem {
@@ -585,6 +680,36 @@ impl MemorySystem {
         &self,
     ) -> Option<&Arc<parking_lot::RwLock<crate::graph_memory::GraphMemory>>> {
         self.graph_memory.as_ref()
+    }
+
+    /// Age the knowledge-graph edges by `total_days` of simulated time, applying
+    /// decay in `cadence_hours` steps (production runs the heavy maintenance
+    /// cycle ~every 6h).
+    ///
+    /// EVALUATION-ONLY hook for the decay / recall harness: it drives the real
+    /// decay path ([`GraphMemory::apply_decay_at`]) forward against a virtual
+    /// clock so recall quality can be measured at a chosen edge age without
+    /// waiting wall-clock days. The cadence is load-bearing — a single large
+    /// jump would skip straight into the power-law decay phase and hide the
+    /// per-cycle dynamics production actually exhibits, so the harness must step
+    /// at the real cadence.
+    ///
+    /// Returns the total number of edges pruned across all cycles; a no-op
+    /// (`Ok(0)`) when no graph is configured.
+    pub fn simulate_edge_aging(&self, total_days: f64, cadence_hours: i64) -> Result<usize> {
+        let Some(graph) = self.graph_memory.as_ref() else {
+            return Ok(0);
+        };
+        let cadence_hours = cadence_hours.max(1);
+        let steps = ((total_days * 24.0) / cadence_hours as f64).ceil().max(0.0) as usize;
+        let cadence = chrono::Duration::hours(cadence_hours);
+        let mut now = chrono::Utc::now();
+        let mut pruned_total = 0;
+        for _ in 0..steps {
+            now += cadence;
+            pruned_total += graph.read().apply_decay_at(now)?.pruned_count;
+        }
+        Ok(pruned_total)
     }
 
     /// Set the feedback store for momentum-based scoring (PIPE-9)
@@ -1263,9 +1388,17 @@ impl MemorySystem {
             .read()
             .log_retrieved("", memories.len(), &sources);
 
-        // Update access counts with instrumentation for consolidation events
+        // Update access counts (in-memory) + record consolidation events, then
+        // persist all candidates' access bumps in ONE batched write instead of a
+        // full re-index per candidate (the dominant old read-path cost).
+        let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
         for memory in &memories {
-            self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+            let before =
+                self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+            access_refs.push((memory.as_ref(), before));
+        }
+        if let Err(e) = self.long_term_memory.persist_access_updates(&access_refs) {
+            tracing::warn!("Failed to persist access updates: {e}");
         }
 
         // Hebbian learning: co-activation strengthens associations between memories
@@ -1384,6 +1517,21 @@ impl MemorySystem {
     ) -> Result<RetrievalResult> {
         let recall_start = std::time::Instant::now();
 
+        // ===========================================================================
+        // RH-8 (#270): per-pipeline-layer attribution gate flags
+        // ===========================================================================
+        // Production callers leave `query.layers` at the default (`Full`) and get
+        // the existing behavior — every gate below evaluates true. The recall
+        // harness passes lower modes to attribute quality deltas to specific
+        // stages. Cumulative ordering: VamanaOnly < PlusSpreading < PlusBm25 <
+        // PlusRerank < PlusFacts < Full. See `LayerMode` in `types.rs`.
+        let layer_mode = query.layers;
+        let layer_full = layer_mode >= types::LayerMode::Full;
+        let layer_facts = layer_mode >= types::LayerMode::PlusFacts;
+        let layer_rerank = layer_mode >= types::LayerMode::PlusRerank;
+        let layer_bm25 = layer_mode >= types::LayerMode::PlusBm25;
+        let layer_spreading = layer_mode >= types::LayerMode::PlusSpreading;
+
         // Diagnostic accumulators — only allocated when collect_diagnostics=true
         let mut stats = if collect_diagnostics {
             Some(RetrievalStats {
@@ -1457,7 +1605,11 @@ impl MemorySystem {
         // pre-fetch memories from the matching date range via SearchCriteria::ByDate.
         // These IDs are collected as candidates for boosting at Layer 4.45.
         // NOT exclusive — memories outside the range still enter via Vamana/BM25.
-        let temporal_prefilter_ids: HashSet<MemoryId> = if temporal_ctx.is_filtering_query {
+        // RH-8 gate: Layer 0.4 only runs in `Full` mode. Lower modes get an empty set,
+        // which makes the Layer 4.45 temporal boost a no-op without changing its code path.
+        let temporal_prefilter_ids: HashSet<MemoryId> = if layer_full
+            && temporal_ctx.is_filtering_query
+        {
             if let Some((start_date, end_date)) = temporal_ctx.date_range {
                 // Convert NaiveDate to DateTime<Utc> (start of first day, end of last day)
                 let start_dt = start_date
@@ -1559,8 +1711,9 @@ impl MemorySystem {
             crate::metrics::ONTOLOGICAL_DENSITY_SKIP_TOTAL.inc();
         }
 
-        let attribute_boost_ids: HashSet<MemoryId> = match &query_type {
-            query_parser::QueryType::Attribute(attr_query) => {
+        // RH-8 gate: Layer 0.5 attribute query detection only in `Full` mode.
+        let attribute_boost_ids: HashSet<MemoryId> = match (layer_full, &query_type) {
+            (true, query_parser::QueryType::Attribute(attr_query)) => {
                 tracing::debug!(
                     "Layer 0.5: Attribute query detected - entity='{}', attribute='{}', synonyms={:?}",
                     attr_query.entity,
@@ -1650,7 +1803,8 @@ impl MemorySystem {
         // 3. Look up temporal facts matching these
         // 4. Boost the source memories of matching facts
         // Temporal fact lookup - boost source memories of matching facts in Layer 4.5
-        let temporal_fact_boost_ids: HashSet<MemoryId> = if has_temporal_query {
+        // RH-8 gate: Layer 0.6 only runs in `Full` mode.
+        let temporal_fact_boost_ids: HashSet<MemoryId> = if layer_full && has_temporal_query {
             if let Some(user_id) = &query.user_id {
                 // Get entity name (first focal entity)
                 let entity = query_analysis
@@ -1745,36 +1899,40 @@ impl MemorySystem {
         // Pre-fetch facts by query entities to boost their source memories in Layer 4.8.
         // Facts represent consolidated knowledge — their source memories contain the
         // richest context for that knowledge and should rank higher.
+        // RH-8 gate: Layer 0.7 fact source pre-fetch only runs in `PlusFacts` and above.
         let fact_source_boosts: std::collections::HashMap<MemoryId, f32> = {
             let mut boosts: std::collections::HashMap<MemoryId, f32> =
                 std::collections::HashMap::new();
 
-            if let Some(user_id) = &query.user_id {
-                let entity_names: Vec<String> = query_analysis
-                    .focal_entities
-                    .iter()
-                    .map(|e| e.text.to_lowercase())
-                    .collect();
+            if layer_facts {
+                if let Some(user_id) = &query.user_id {
+                    let entity_names: Vec<String> = query_analysis
+                        .focal_entities
+                        .iter()
+                        .map(|e| e.text.to_lowercase())
+                        .collect();
 
-                if !entity_names.is_empty() {
-                    if let Ok(facts) = self.get_facts_for_graph_entities(user_id, &entity_names, 5)
-                    {
-                        for fact in &facts {
-                            if fact.confidence < 0.5 || fact.support_count < 3 {
-                                continue;
+                    if !entity_names.is_empty() {
+                        if let Ok(facts) =
+                            self.get_facts_for_graph_entities(user_id, &entity_names, 5)
+                        {
+                            for fact in &facts {
+                                if fact.confidence < 0.5 || fact.support_count < 3 {
+                                    continue;
+                                }
+                                let per_fact_boost = fact.confidence * 0.08;
+                                for src_id in &fact.source_memories {
+                                    let entry = boosts.entry(src_id.clone()).or_insert(0.0);
+                                    *entry = (*entry + per_fact_boost).min(0.3);
+                                }
                             }
-                            let per_fact_boost = fact.confidence * 0.08;
-                            for src_id in &fact.source_memories {
-                                let entry = boosts.entry(src_id.clone()).or_insert(0.0);
-                                *entry = (*entry + per_fact_boost).min(0.3);
+                            if !boosts.is_empty() {
+                                tracing::debug!(
+                                    "Layer 0.7: Pre-fetched {} fact-source boosts from {} facts",
+                                    boosts.len(),
+                                    facts.len()
+                                );
                             }
-                        }
-                        if !boosts.is_empty() {
-                            tracing::debug!(
-                                "Layer 0.7: Pre-fetched {} fact-source boosts from {} facts",
-                                boosts.len(),
-                                facts.len()
-                            );
                         }
                     }
                 }
@@ -1946,10 +2104,14 @@ impl MemorySystem {
         // ===========================================================================
         // LAYER 2: GRAPH EXPANSION (Knowledge Graph Traversal)
         // ===========================================================================
-        let use_graph = matches!(
-            query.retrieval_mode,
-            RetrievalMode::Hybrid | RetrievalMode::Associative | RetrievalMode::Causal
-        );
+        // RH-8 gate: Layer 2 graph spreading activation only runs in `PlusSpreading` and above.
+        // When gated off, the fallback branch yields an empty graph result vector while
+        // still producing IC weights and phrase boosts (cheap query-side analysis).
+        let use_graph = layer_spreading
+            && matches!(
+                query.retrieval_mode,
+                RetrievalMode::Hybrid | RetrievalMode::Associative | RetrievalMode::Causal
+            );
         #[allow(clippy::type_complexity)]
         let (
             graph_results,
@@ -2158,6 +2320,7 @@ impl MemorySystem {
             session_id: query.session_id.clone(),
             prospective_signals: query.prospective_signals.clone(),
             recency_weight: query.recency_weight,
+            layers: query.layers,
         };
 
         // ===========================================================================
@@ -2299,23 +2462,29 @@ impl MemorySystem {
             } else {
                 None
             };
-            let hybrid_ids = self
-                .hybrid_search
-                .search_with_dynamic_weights_pool(
-                    bm25_query_text,
-                    vector_results.clone(),
-                    get_content,
-                    term_weights,
-                    phrases,
-                    disc_opt,
-                    bm25_pool_override,
-                )
-                .map(|r| {
-                    r.into_iter()
-                        .map(|x| (x.memory_id, x.score))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or(vector_results);
+            // RH-8 gate: BM25 hybrid fusion only runs in `PlusBm25` and above.
+            // Lower modes pass the vector candidate set straight through, which makes the
+            // RRF fusion below a one- or two-leg fusion (vector ± graph) instead of three-leg.
+            let hybrid_ids = if layer_bm25 {
+                self.hybrid_search
+                    .search_with_dynamic_weights_pool(
+                        bm25_query_text,
+                        vector_results.clone(),
+                        get_content,
+                        term_weights,
+                        phrases,
+                        disc_opt,
+                        bm25_pool_override,
+                    )
+                    .map(|r| {
+                        r.into_iter()
+                            .map(|x| (x.memory_id, x.score))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or(vector_results)
+            } else {
+                vector_results
+            };
 
             // ===========================================================================
             // LAYER 4: RRF FUSION WITH DENSITY-BASED WEIGHTS (PIPE-11)
@@ -2530,7 +2699,8 @@ impl MemorySystem {
             // - High interference + high activation = "survivor" → boost (1.0-1.5x)
             // - High interference + low activation = "chronic loser" → suppress (0.5-1.0x)
             // - No interference history → neutral (1.0x)
-            {
+            // RH-8 gate: interference adjustments only run in `Full` mode.
+            if layer_full {
                 let detector = self.interference_detector.read();
 
                 // Compute max score once for normalization
@@ -2585,60 +2755,65 @@ impl MemorySystem {
             //
             // Signals come from ProspectiveTasks that matched the current query
             // via keyword or semantic similarity (built in recall handler C5).
-            if let Some(ref signals) = query.prospective_signals {
-                if !signals.is_empty() {
-                    use crate::constants::{PROSPECTIVE_BOOST_MAX, PROSPECTIVE_BOOST_PER_MATCH};
+            // RH-8 gate: prospective signal boost only runs in `Full` mode.
+            if layer_full {
+                if let Some(ref signals) = query.prospective_signals {
+                    if !signals.is_empty() {
+                        use crate::constants::{
+                            PROSPECTIVE_BOOST_MAX, PROSPECTIVE_BOOST_PER_MATCH,
+                        };
 
-                    // Tokenize all signals into unique terms (skip noise words < 3 chars)
-                    let signal_terms: std::collections::HashSet<String> = signals
-                        .iter()
-                        .flat_map(|s| {
-                            s.to_lowercase()
-                                .split_whitespace()
-                                .filter(|w| w.len() >= 3)
-                                .map(|w| w.to_string())
-                                .collect::<Vec<_>>()
-                        })
-                        .collect();
+                        // Tokenize all signals into unique terms (skip noise words < 3 chars)
+                        let signal_terms: std::collections::HashSet<String> = signals
+                            .iter()
+                            .flat_map(|s| {
+                                s.to_lowercase()
+                                    .split_whitespace()
+                                    .filter(|w| w.len() >= 3)
+                                    .map(|w| w.to_string())
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect();
 
-                    if !signal_terms.is_empty() {
-                        let mut boosted_count = 0;
-                        let ids: Vec<MemoryId> = fused.keys().cloned().collect();
+                        if !signal_terms.is_empty() {
+                            let mut boosted_count = 0;
+                            let ids: Vec<MemoryId> = fused.keys().cloned().collect();
 
-                        for id in &ids {
-                            if let Some(content) = get_content(id) {
-                                let content_lower = content.to_lowercase();
-                                let content_words = tokenize_words(&content_lower);
-                                let match_count = signal_terms
-                                    .iter()
-                                    .filter(|term| content_words.contains(term.as_str()))
-                                    .count();
+                            for id in &ids {
+                                if let Some(content) = get_content(id) {
+                                    let content_lower = content.to_lowercase();
+                                    let content_words = tokenize_words(&content_lower);
+                                    let match_count = signal_terms
+                                        .iter()
+                                        .filter(|term| content_words.contains(term.as_str()))
+                                        .count();
 
-                                if match_count > 0 {
-                                    // Sqrt scaling: diminishing returns for additional matches
-                                    let boost_factor = 1.0
-                                        + (PROSPECTIVE_BOOST_PER_MATCH
-                                            * (match_count as f32).sqrt())
-                                        .min(PROSPECTIVE_BOOST_MAX);
-                                    if let Some(score) = fused.get_mut(id) {
-                                        *score *= boost_factor;
-                                        boosted_count += 1;
-                                        if let Some(ref mut attr_map) = attributions {
-                                            if let Some(attr) = attr_map.get_mut(id) {
-                                                attr.prospective_boost = boost_factor;
+                                    if match_count > 0 {
+                                        // Sqrt scaling: diminishing returns for additional matches
+                                        let boost_factor = 1.0
+                                            + (PROSPECTIVE_BOOST_PER_MATCH
+                                                * (match_count as f32).sqrt())
+                                            .min(PROSPECTIVE_BOOST_MAX);
+                                        if let Some(score) = fused.get_mut(id) {
+                                            *score *= boost_factor;
+                                            boosted_count += 1;
+                                            if let Some(ref mut attr_map) = attributions {
+                                                if let Some(attr) = attr_map.get_mut(id) {
+                                                    attr.prospective_boost = boost_factor;
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        if boosted_count > 0 {
-                            tracing::info!(
+                            if boosted_count > 0 {
+                                tracing::info!(
                                 "Layer 4.7: Boosted {} memories from {} prospective signal terms",
                                 boosted_count,
                                 signal_terms.len()
                             );
+                            }
                         }
                     }
                 }
@@ -2693,28 +2868,42 @@ impl MemorySystem {
             res.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             let rerank_budget = query.max_results * 2;
 
-            if use_ontology_rerank && !onto_intent.expected_labels.is_empty() {
+            // RH-8 gate: ontological rerank only runs in `PlusRerank` and above.
+            // NOTE (#270 spec discrepancy): the spec calls this mode "+rerank" with the
+            // expectation of a cross-encoder. This codebase has no cross-encoder; the only
+            // rerank present is the ontological label-match boost below. The mode label is
+            // preserved for spec fidelity. See plan/PR for details.
+            if layer_rerank && use_ontology_rerank && !onto_intent.expected_labels.is_empty() {
                 if let Some(graph) = self.graph_memory.as_ref() {
                     let g = graph.read();
                     let mut boosted_count = 0usize;
+                    // Cache the per-entity label-match decision across candidates.
+                    // expected_labels is constant for this call, and a hot entity
+                    // appears in many candidates' entity_refs, so without a cache
+                    // get_entity (a store read) is repeated for the same uuid on
+                    // every candidate that references it.
+                    let mut label_match_cache: std::collections::HashMap<Uuid, bool> =
+                        std::collections::HashMap::new();
                     for (_mem_id, fused_score) in res.iter_mut().take(rerank_budget) {
                         if let Ok(Some(episode)) = g.get_episode(&_mem_id.0) {
                             let type_matches = episode
                                 .entity_refs
                                 .iter()
                                 .filter(|uuid| {
-                                    g.get_entity(uuid)
-                                        .ok()
-                                        .flatten()
-                                        .map(|e| {
-                                            e.labels.iter().any(|l| {
-                                                onto_intent
-                                                    .expected_labels
-                                                    .iter()
-                                                    .any(|exp| l.matches_with_hierarchy(exp))
+                                    *label_match_cache.entry(**uuid).or_insert_with(|| {
+                                        g.get_entity(uuid)
+                                            .ok()
+                                            .flatten()
+                                            .map(|e| {
+                                                e.labels.iter().any(|l| {
+                                                    onto_intent
+                                                        .expected_labels
+                                                        .iter()
+                                                        .any(|exp| l.matches_with_hierarchy(exp))
+                                                })
                                             })
-                                        })
-                                        .unwrap_or(false)
+                                            .unwrap_or(false)
+                                    })
                                 })
                                 .count();
                             if type_matches > 0 {
@@ -2795,13 +2984,24 @@ impl MemorySystem {
 
         for (memory_id, score) in memory_ids {
             // Hebbian boost from learned graph weights (multiplicative)
+            // RH-8 gate: Hebbian association boost only applies in `Full` mode.
             let hebbian_boost = hebbian_scores.get(&memory_id).copied().unwrap_or(0.0);
-            let base_score =
-                score * (1.0 + hebbian_boost * crate::constants::HEBBIAN_ASSOCIATION_WEIGHT);
+            let base_score = if layer_full {
+                score * (1.0 + hebbian_boost * crate::constants::HEBBIAN_ASSOCIATION_WEIGHT)
+            } else {
+                score
+            };
 
             // Helper to apply unified scoring (all multiplicative on base score)
             let recency_scale_override = query.recency_weight;
             let with_unified_score = |mem: &SharedMemory, base: f32| -> SharedMemory {
+                // RH-8 gate: lower modes pass the raw fused score through unchanged so
+                // per-layer attribution measures retrieval signal, not cognitive overlay.
+                if !layer_full {
+                    let mut cloned: Memory = mem.as_ref().clone();
+                    cloned.set_score(base);
+                    return Arc::new(cloned);
+                }
                 use crate::constants::*;
 
                 // Recency: exponential decay, multiplicative factor
@@ -2860,8 +3060,18 @@ impl MemorySystem {
                     }
 
                     // Tier 2: created_at proximity fallback for filtering queries
-                    // Most memories don't have temporal_refs, so use created_at as proxy
-                    if best_match == 0.0 && temporal_ctx.is_filtering_query {
+                    // Most memories don't have temporal_refs, so use created_at as proxy.
+                    //
+                    // Skip memories already boosted by the Layer 4.45 temporal
+                    // pre-filter: that set IS the created_at-in-range memories
+                    // (SearchCriteria::ByDate filters on created_at), so applying
+                    // this created_at proximity boost on top would reward the exact
+                    // same signal twice. Tier 1 (explicit temporal_refs) is a
+                    // distinct content signal and still applies to them above.
+                    if best_match == 0.0
+                        && temporal_ctx.is_filtering_query
+                        && !temporal_prefilter_ids.contains(&mem.id)
+                    {
                         if let Some((range_start, range_end)) = temporal_ctx.date_range {
                             let created_date = mem.created_at.date_naive();
                             let range_mid = range_start
@@ -3100,37 +3310,51 @@ impl MemorySystem {
         // Quality gate: multiplicative factor based on content richness.
         // Prevents empty/trivial memories from surfacing on recency or graph boost alone.
         // Same formula as proactive_context (Berntsen elaboration quality).
-        for mem in &mut memories {
-            let content_len = mem.experience.content.len() as f32;
-            let has_entities = !mem.experience.entities.is_empty();
-            let has_context = mem.experience.context.is_some();
-            let quality = (content_len / 200.0).min(1.0)
-                * (1.0
-                    + if has_entities { 0.1 } else { 0.0 }
-                    + if has_context { 0.1 } else { 0.0 });
-            let quality_factor = quality.max(crate::constants::ELABORATION_QUALITY_MIN);
-            if let Some(score) = mem.score {
-                let mut cloned: Memory = mem.as_ref().clone();
-                cloned.set_score(score * quality_factor);
-                *mem = Arc::new(cloned);
+        // RH-8 gate: quality multiplier only applies in `Full` mode — lower modes
+        // expose the raw fused score so per-layer attribution isn't masked.
+        if layer_full {
+            for mem in &mut memories {
+                let content_len = mem.experience.content.len() as f32;
+                let has_entities = !mem.experience.entities.is_empty();
+                let has_context = mem.experience.context.is_some();
+                let quality = (content_len / 200.0).min(1.0)
+                    * (1.0
+                        + if has_entities { 0.1 } else { 0.0 }
+                        + if has_context { 0.1 } else { 0.0 });
+                let quality_factor = quality.max(crate::constants::ELABORATION_QUALITY_MIN);
+                if let Some(score) = mem.score {
+                    let mut cloned: Memory = mem.as_ref().clone();
+                    cloned.set_score(score * quality_factor);
+                    *mem = Arc::new(cloned);
 
-                // Track quality gate in attribution
-                if let Some(ref mut attr_map) = attributions {
-                    if let Some(attr) = attr_map.get_mut(&mem.id) {
-                        attr.quality_gate = quality_factor;
-                        attr.final_score = score * quality_factor;
+                    // Track quality gate in attribution
+                    if let Some(ref mut attr_map) = attributions {
+                        if let Some(attr) = attr_map.get_mut(&mem.id) {
+                            attr.quality_gate = quality_factor;
+                            attr.final_score = score * quality_factor;
+                        }
                     }
                 }
             }
         }
 
         // Linguistic analysis: additive boost (5% of IC weight), not a full re-sort
-        if !query_analysis.focal_entities.is_empty() {
+        // RH-8 gate: linguistic re-sort only runs in `Full` mode.
+        if layer_full && !query_analysis.focal_entities.is_empty() {
+            // Precompute the boosted score once per memory. Computing
+            // linguistic_boost inside the comparator re-scanned each memory's
+            // content O(n log n) times (twice per comparison); now it is O(n).
+            let boosted: std::collections::HashMap<MemoryId, f32> = memories
+                .iter()
+                .map(|m| {
+                    let key = m.score.unwrap_or(0.0)
+                        + Self::linguistic_boost(&m.experience.content, &query_analysis) * 0.05;
+                    (m.id.clone(), key)
+                })
+                .collect();
             memories.sort_by(|a, b| {
-                let score_a = a.score.unwrap_or(0.0)
-                    + Self::linguistic_boost(&a.experience.content, &query_analysis) * 0.05;
-                let score_b = b.score.unwrap_or(0.0)
-                    + Self::linguistic_boost(&b.experience.content, &query_analysis) * 0.05;
+                let score_a = boosted.get(&a.id).copied().unwrap_or(0.0);
+                let score_b = boosted.get(&b.id).copied().unwrap_or(0.0);
                 // Score desc → recency desc → MemoryId asc for stable rank order.
                 score_b
                     .total_cmp(&score_a)
@@ -3148,7 +3372,9 @@ impl MemorySystem {
         // PIPE-10: Competition must happen BEFORE coactivation - we only want to
         // strengthen associations between memories that "won" the competition.
         // Suppressed memories should not be coactivated (Hebbian "losers don't learn").
-        if memories.len() >= 2 {
+        // RH-8 gate: retrieval competition mutates interference state — only run in `Full` mode
+        // so per-layer attribution runs in `--layer all` don't pollute state across modes.
+        if layer_full && memories.len() >= 2 {
             // Use actual pipeline scores for competition, not position-based proxies.
             // Previously used 1.0 - (i/n)*0.3 which compressed all scores to [0.7, 1.0],
             // making suppression (ratio > 0.9) almost impossible.
@@ -3170,19 +3396,32 @@ impl MemorySystem {
                 self.record_consolidation_event(event.clone());
             }
 
-            // Re-order memories based on competition results (winners first)
+            // DEMOTE suppressed memories — never remove them. Deleting suppressed
+            // results erased correct hits: the suppression proxy is score
+            // proximity, not content similarity, so a distinct relevant memory
+            // whose score sat close to the top was removed (per-layer recall
+            // diagnostics: 8 cases survived through `+facts` then vanished at
+            // `full`). Apply a mild multiplicative penalty and let the final
+            // sort+truncate decide; a suppressed-but-relevant memory can still
+            // surface. The winner/suppressed split below still gates coactivation.
             if !competition_result.suppressed.is_empty() {
-                let winner_set: std::collections::HashSet<_> = competition_result
-                    .winners
+                let suppressed_set: std::collections::HashSet<&str> = competition_result
+                    .suppressed
                     .iter()
-                    .map(|(id, _)| id.clone())
+                    .map(|s| s.as_str())
                     .collect();
-
-                // Keep only winners, maintain their relative order
-                memories.retain(|m| winner_set.contains(&m.id.0.to_string()));
+                for m in memories.iter_mut() {
+                    if suppressed_set.contains(m.id.0.to_string().as_str()) {
+                        let demoted = m.score.unwrap_or(0.0)
+                            * crate::constants::COMPETITION_SUPPRESSED_DEMOTION;
+                        let mut cloned: Memory = m.as_ref().clone();
+                        cloned.set_score(demoted);
+                        *m = Arc::new(cloned);
+                    }
+                }
 
                 tracing::debug!(
-                    "Retrieval competition: {} memories suppressed",
+                    "Retrieval competition: {} memories demoted (kept, not removed)",
                     competition_result.suppressed.len()
                 );
             }
@@ -3211,8 +3450,19 @@ impl MemorySystem {
 
         // Update access counts with instrumentation for consolidation events
         // (only for memories that survived competition)
-        for memory in &memories {
-            self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+        // RH-8 gate: access count mutates persistent state — only in `Full` mode.
+        // Bump in-memory + record events, then persist all candidates' access
+        // updates in ONE batched write rather than a full re-index per candidate.
+        if layer_full {
+            let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
+            for memory in &memories {
+                let before =
+                    self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+                access_refs.push((memory.as_ref(), before));
+            }
+            if let Err(e) = self.long_term_memory.persist_access_updates(&access_refs) {
+                tracing::warn!("Failed to persist access updates: {e}");
+            }
         }
 
         // PIPE-10: Hebbian learning AFTER competition - only coactivate winners
@@ -3220,7 +3470,8 @@ impl MemorySystem {
         // form/strengthen edges in the memory graph. Suppressed memories don't
         // participate in coactivation (biological: "neurons that fire together
         // wire together" but suppressed neurons don't fire).
-        if memories.len() >= 2 {
+        // RH-8 gate: Hebbian coactivation mutates graph state — only in `Full` mode.
+        if layer_full && memories.len() >= 2 {
             if let Some(graph) = &self.graph_memory {
                 let memory_uuids: Vec<uuid::Uuid> = memories.iter().map(|m| m.id.0).collect();
                 match graph.read().record_memory_coactivation(&memory_uuids) {
@@ -3250,14 +3501,21 @@ impl MemorySystem {
         }
 
         // Increment and persist retrieval counter
-        if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
-            self.stats.write().total_retrievals = count;
+        // RH-8 gate: retrieval counter mutates persistent state — only in `Full` mode.
+        if layer_full {
+            if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+                self.stats.write().total_retrievals = count;
+            }
         }
 
         // Expand with hierarchy context (parent chain + children)
         // This ensures semantic search also surfaces contextually related memories
-        let mut seen_ids: HashSet<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
-        self.expand_with_hierarchy(&mut memories, &mut seen_ids);
+        // RH-8 gate: hierarchy expansion adds candidates outside the layer's scope —
+        // only in `Full` mode so per-layer ranks reflect that layer's retrieval signal.
+        if layer_full {
+            let mut seen_ids: HashSet<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
+            self.expand_with_hierarchy(&mut memories, &mut seen_ids);
+        }
 
         // Re-sort by score and trim to max_results after expansion.
         // Expanded memories must compete on score, not get a free pass.
@@ -4432,20 +4690,24 @@ impl MemorySystem {
     ///
     /// Records MemoryStrengthened events when memories are accessed during retrieval,
     /// capturing activation changes for introspection.
-    fn update_access_count_instrumented(&self, memory: &SharedMemory, reason: StrengtheningReason) {
+    /// Bump a recalled memory's access metadata in-memory and record a
+    /// strengthening event. Returns the memory's importance BEFORE the access so
+    /// the caller can batch-persist all candidates in one WriteBatch via
+    /// `persist_access_updates` (the importance index needs the old bucket).
+    ///
+    /// Persistence is intentionally NOT done here: the previous per-candidate
+    /// `long_term_memory.update()` (full re-index + a separate DB write each) was
+    /// the dominant cost on the read path. Callers coalesce the writes instead.
+    fn update_access_count_instrumented(
+        &self,
+        memory: &SharedMemory,
+        reason: StrengtheningReason,
+    ) -> f32 {
         // Capture activation before update
         let activation_before = memory.importance();
 
-        // Perform the actual access update
+        // Perform the actual access update (in-memory; persisted in batch by caller)
         memory.update_access();
-
-        // Persist the updated metadata to RocksDB so importance boosts survive restarts
-        if let Err(e) = self.long_term_memory.update(memory) {
-            tracing::warn!(
-                "Failed to persist access update for {}: {e}",
-                &memory.id.0.to_string()[..8]
-            );
-        }
 
         // Capture activation after update
         let activation_after = memory.importance();
@@ -4470,6 +4732,8 @@ impl MemorySystem {
 
             self.consolidation_events.write().push(event);
         }
+
+        activation_before
     }
 
     /// Clean up graph episodes for a batch of deleted memory IDs (best-effort)
@@ -7565,6 +7829,50 @@ impl MemorySystem {
     ) -> Result<Vec<LineageEdge>> {
         let mut inferred_edges = Vec::new();
 
+        // Detect a project-pivot signal up front. When present we open a branch
+        // here, so the branch id is available to (a) tag the edges this memory
+        // originates and (b) anchor a BranchedFrom edge into the edge graph —
+        // otherwise branches were created as orphan metadata records that nothing
+        // referenced and every edge stayed silently on `main`.
+        let branch_id: Option<String> =
+            if lineage::LineageGraph::detect_branch_signal(&new_memory.experience.content) {
+                self.lineage_graph.ensure_main_branch(user_id)?;
+                let branch_name = format!("pivot-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+                match self.lineage_graph.create_branch(
+                    user_id,
+                    &branch_name,
+                    "main",
+                    new_memory.id.clone(),
+                    Some(&format!(
+                        "Auto-detected pivot: {}",
+                        crate::memory::char_truncate(&new_memory.experience.content, 80)
+                    )),
+                ) {
+                    Ok(branch) => {
+                        tracing::info!(
+                            user_id = %user_id,
+                            branch = %branch.name,
+                            memory_id = %new_memory.id.0,
+                            "Auto-created lineage branch from pivot signal"
+                        );
+                        Some(branch.id)
+                    }
+                    Err(e) => {
+                        tracing::debug!("Auto-branch creation failed (non-fatal): {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+        // Read new_memory's outgoing edges ONCE. The forward pass below checks
+        // them on every candidate iteration; re-reading per candidate was an
+        // O(N²) store scan. We keep this cache consistent as edges are stored.
+        // (Backward-pass edges are candidate → new_memory, i.e. incoming, so they
+        // never appear here and cannot stale this cache.)
+        let mut new_memory_edges = self.lineage_graph.get_edges_from(user_id, &new_memory.id)?;
+
         for candidate in candidate_memories {
             // Backward pass: candidate → new_memory (what caused this memory?)
             if let Some((relation, confidence)) =
@@ -7614,23 +7922,27 @@ impl MemorySystem {
                 if confidence < crate::constants::LINEAGE_MIN_STORE_CONFIDENCE {
                     continue;
                 }
-                let existing_edges = self.lineage_graph.get_edges_from(user_id, &new_memory.id)?;
-                let existing_edge = existing_edges.iter().find(|e| e.to == candidate.id);
-                match existing_edge {
-                    Some(old) if confidence > old.confidence => {
-                        let mut updated = old.clone();
+                let existing_pos = new_memory_edges.iter().position(|e| e.to == candidate.id);
+                match existing_pos {
+                    Some(i) if confidence > new_memory_edges[i].confidence => {
+                        let mut updated = new_memory_edges[i].clone();
                         updated.confidence = confidence;
                         updated.relation = relation;
                         self.lineage_graph.store_edge(user_id, &updated)?;
+                        new_memory_edges[i] = updated;
                     }
                     None => {
+                        // Edges originating from the pivot memory belong to the
+                        // branch it opened (None → main otherwise).
                         let edge = LineageEdge::inferred(
                             new_memory.id.clone(),
                             candidate.id.clone(),
                             relation,
                             confidence,
-                        );
+                        )
+                        .with_branch(branch_id.clone());
                         self.lineage_graph.store_edge(user_id, &edge)?;
+                        new_memory_edges.push(edge.clone());
                         inferred_edges.push(edge);
                     }
                     _ => {}
@@ -7638,36 +7950,26 @@ impl MemorySystem {
             }
         }
 
-        // Check for branch signal in memory content
-        if lineage::LineageGraph::detect_branch_signal(&new_memory.experience.content) {
-            self.lineage_graph.ensure_main_branch(user_id)?;
-            // Auto-create branch for the pivot
-            let branch_name = format!("pivot-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
-            match self.lineage_graph.create_branch(
-                user_id,
-                &branch_name,
-                "main",
-                new_memory.id.clone(),
-                Some(&format!(
-                    "Auto-detected pivot: {}",
-                    &new_memory
-                        .experience
-                        .content
-                        .chars()
-                        .take(80)
-                        .collect::<String>()
-                )),
-            ) {
-                Ok(branch) => {
-                    tracing::info!(
-                        user_id = %user_id,
-                        branch = %branch.name,
-                        memory_id = %new_memory.id.0,
-                        "Auto-created lineage branch from pivot signal"
-                    );
-                }
-                Err(e) => {
-                    tracing::debug!("Auto-branch creation failed (non-fatal): {}", e);
+        // If this memory opened a branch, anchor it into the edge graph with a
+        // BranchedFrom edge to the most recent prior candidate — the work it
+        // pivoted away from. Without this the branch is unreachable by trace()
+        // and find_root_cause().
+        if let Some(ref bid) = branch_id {
+            if let Some(origin) = candidate_memories
+                .iter()
+                .filter(|c| c.id != new_memory.id && c.created_at <= new_memory.created_at)
+                .max_by_key(|c| c.created_at)
+            {
+                if !new_memory_edges.iter().any(|e| e.to == origin.id) {
+                    let edge = LineageEdge::inferred(
+                        new_memory.id.clone(),
+                        origin.id.clone(),
+                        lineage::CausalRelation::BranchedFrom,
+                        crate::constants::LINEAGE_CONFIDENCE_BRANCHED_FROM,
+                    )
+                    .with_branch(Some(bid.clone()));
+                    self.lineage_graph.store_edge(user_id, &edge)?;
+                    inferred_edges.push(edge);
                 }
             }
         }
