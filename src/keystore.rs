@@ -21,7 +21,7 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Envelope wire/format version (records + keystore). Bumped on format changes.
 pub const CRYPTO_VERSION: u8 = 1;
@@ -118,7 +118,7 @@ fn unwrap_key(wrapping_key: &[u8; KEY_LEN], w: &Wrapped, aad: &[u8]) -> Result<S
     }
     let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = b64d(&w.ciphertext)?;
-    let plaintext = cipher
+    let mut plaintext = cipher
         .decrypt(
             nonce,
             Payload {
@@ -134,6 +134,7 @@ fn unwrap_key(wrapping_key: &[u8; KEY_LEN], w: &Wrapped, aad: &[u8]) -> Result<S
     }
     let mut k = Zeroizing::new([0u8; KEY_LEN]);
     k.copy_from_slice(&plaintext);
+    plaintext.zeroize(); // wipe the intermediate key-material buffer
     Ok(k)
 }
 
@@ -447,12 +448,13 @@ impl Keystore {
             .find(|w| w.provider == "kms")
             .ok_or_else(|| anyhow!("keystore has no KMS wrap"))?;
         let blob = b64d(&w.ciphertext)?;
-        let pt = kms.kms_decrypt(&blob)?;
+        let mut pt = kms.kms_decrypt(&blob)?;
         if pt.len() != KEY_LEN {
             return Err(anyhow!("KMS-unwrapped key has wrong length"));
         }
         let mut kek = Zeroizing::new([0u8; KEY_LEN]);
         kek.copy_from_slice(&pt);
+        pt.zeroize(); // wipe the intermediate key-material buffer
         if b64e(&fingerprint(kek.as_slice())) != self.kek_fingerprint {
             return Err(anyhow!("KMS unsealed an unexpected key"));
         }
