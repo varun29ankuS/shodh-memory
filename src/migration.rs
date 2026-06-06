@@ -448,7 +448,7 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
                 Ok(memory) => {
                     if !dry_run {
                         // Route through encode_memory so re-encoded memories are
-                        // encrypted when SHODH_ENCRYPTION_KEY is configured.
+                        // encrypted when a keystore is configured (SHODH_MASTER_PASSPHRASE).
                         let new_value = crate::memory::storage::encode_memory(&memory)?;
                         batch.put(&*key, &new_value);
                         batch_count += 1;

@@ -728,10 +728,11 @@ fn deserialize_memory_inner(data: &[u8]) -> Result<(Memory, bool)> {
 }
 
 // ============================================================================
-// RECORD-LEVEL ENCRYPTION
+// RECORD-LEVEL ENCRYPTION (encryption-v2)
 // Centralized serialize-before-encrypt / decrypt-before-deserialize logic so
-// every storage path makes the full Memory record opaque at rest when
-// SHODH_ENCRYPTION_KEY is configured. See `crate::encryption`.
+// every storage path makes the full Memory record opaque at rest when a keystore
+// is configured (SHODH_MASTER_PASSPHRASE / SHODH_KMS_WRAP_KEY). See
+// `crate::keystore`; exact-match index terms are HMAC-blinded (see blind_term).
 // ============================================================================
 
 /// Process-global v2 storage crypto: record encryptor + index blinder, set once
