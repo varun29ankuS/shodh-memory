@@ -469,6 +469,15 @@ impl Keystore {
     /// (e.g. recovery) are preserved.
     pub fn rotate_passphrase(&mut self, old: &str, new: &str) -> Result<()> {
         let kek = self.unseal_with_passphrase(old)?;
+        self.set_passphrase(&kek, new)
+    }
+
+    /// (Re)wrap the master key under a NEW passphrase, given an already-unsealed
+    /// KEK. This is the recovery primitive: when the old passphrase is lost,
+    /// unseal via the recovery code (or KMS) to obtain the KEK, then install a
+    /// usable passphrase. Derives a fresh salt/params and replaces only the
+    /// passphrase wrap; the recovery and KMS wraps are preserved.
+    pub fn set_passphrase(&mut self, kek: &SecretKey, new: &str) -> Result<()> {
         let new_kdf = KdfParams::production();
         let unseal = new_kdf.derive(new)?;
         let new_wrap = wrap_key(&unseal, kek.as_slice(), KEK_AAD, "passphrase")?;
@@ -476,7 +485,7 @@ impl Keystore {
         self.kek_wraps.push(new_wrap);
         self.kdf = new_kdf;
         self.generation += 1;
-        self.seal(&kek)?;
+        self.seal(kek)?;
         Ok(())
     }
 
@@ -920,6 +929,23 @@ mod tests {
             post.for_epoch(1).unwrap().decrypt_record(&ct1).unwrap(),
             b"post-rotation-blob"
         );
+    }
+
+    #[test]
+    fn recovery_code_resets_lost_passphrase() {
+        let mut ks = Keystore::create("original-pass", KdfParams::fast_for_tests()).unwrap();
+        let kek0 = ks.unseal_with_passphrase("original-pass").unwrap();
+        let code = ks.add_recovery_code(&kek0).unwrap();
+
+        // Passphrase "lost": recover via the code, then install a new passphrase.
+        let kek_via_code = ks.unseal_with_recovery_code(&code).unwrap();
+        ks.set_passphrase(&kek_via_code, "brand-new-pass").unwrap();
+
+        // The new passphrase unseals the SAME master key...
+        let kek1 = ks.unseal_with_passphrase("brand-new-pass").unwrap();
+        assert_eq!(kek0.as_slice(), kek1.as_slice());
+        // ...and the old passphrase no longer works.
+        assert!(ks.unseal_with_passphrase("original-pass").is_err());
     }
 
     #[test]

@@ -46,6 +46,14 @@ enum Cmd {
         #[arg(long, env = "SHODH_MASTER_PASSPHRASE")]
         passphrase: String,
     },
+    /// Recover from passphrase loss: unseal with a recovery code and install a
+    /// new passphrase. The used recovery code is rotated (a fresh one is printed).
+    Recover {
+        #[arg(long, env = "SHODH_RECOVERY_CODE")]
+        recovery_code: String,
+        #[arg(long, env = "SHODH_NEW_MASTER_PASSPHRASE")]
+        new_passphrase: String,
+    },
 }
 
 fn load(path: &Path) -> Result<Keystore> {
@@ -84,6 +92,23 @@ fn main() -> Result<()> {
             let code = ks.add_recovery_code(&kek)?;
             ks.save_to_path(&cli.keystore)?;
             println!("RECOVERY CODE (store offline, shown once): {code}");
+        }
+        Cmd::Recover {
+            recovery_code,
+            new_passphrase,
+        } => {
+            let mut ks = load(&cli.keystore)?;
+            let kek = ks.unseal_with_recovery_code(&recovery_code)?;
+            ks.verify_integrity(&kek)?;
+            ks.set_passphrase(&kek, &new_passphrase)?;
+            // Retire the used code: install a fresh recovery wrap.
+            let new_code = ks.add_recovery_code(&kek)?;
+            ks.save_to_path(&cli.keystore)?;
+            println!(
+                "passphrase reset via recovery code (keystore generation {})",
+                ks.generation
+            );
+            println!("NEW RECOVERY CODE (store offline, shown once): {new_code}");
         }
     }
     Ok(())
