@@ -1269,9 +1269,29 @@ impl MemoryStorage {
             .map(u64::from_le_bytes)
             .unwrap_or(0);
         if generation < stored {
-            return Err(anyhow!(
-                "keystore rollback detected: file generation {generation} < last-seen {stored}"
-            ));
+            let allow_rollback = std::env::var("SHODH_ALLOW_KEYSTORE_ROLLBACK")
+                .map(|v| {
+                    let v = v.trim().to_ascii_lowercase();
+                    v == "true" || v == "1"
+                })
+                .unwrap_or(false);
+            if !allow_rollback {
+                return Err(anyhow!(
+                    "keystore rollback detected: file generation {generation} < last-seen {stored}. \
+                     If you intentionally restored an older keystore (e.g. keystore.json.bak), set \
+                     SHODH_ALLOW_KEYSTORE_ROLLBACK=true once to accept it and reset the sentinel."
+                ));
+            }
+            tracing::warn!(
+                file_generation = generation,
+                last_seen = stored,
+                "SHODH_ALLOW_KEYSTORE_ROLLBACK set: accepting an older keystore generation (restored \
+                 keystore?) and resetting the rollback sentinel to it. Rollback protection is \
+                 bypassed for this start — unset the variable afterward."
+            );
+            db.put_cf(cf, KEYSTORE_GENERATION_KEY, generation.to_le_bytes())
+                .context("reset keystore generation sentinel")?;
+            return Ok(());
         }
         if generation > stored {
             db.put_cf(cf, KEYSTORE_GENERATION_KEY, generation.to_le_bytes())
