@@ -1740,7 +1740,12 @@ impl MemoryStorage {
                 if let Some(seq) = ctx.episode.sequence_number {
                     // Zero-pad sequence number for correct lexicographic ordering in RocksDB
                     // Without padding: 1, 10, 100, 2, 20... With {:010}: 0000000001, 0000000002...
-                    let seq_key = format!("episode_seq:{}:{:010}:{}", episode_id, seq, memory.id.0);
+                    let seq_key = format!(
+                        "episode_seq:{}:{:010}:{}",
+                        blind_term(&episode_id.to_string()),
+                        seq,
+                        memory.id.0
+                    );
                     batch.put_cf(idx, seq_key.as_bytes(), b"1");
                 }
             }
@@ -1770,7 +1775,14 @@ impl MemoryStorage {
 
         // Index by geo_location (for spatial queries) using geohash
         // Key format: geo:GEOHASH:memory_id (geohash at precision 10 = ~1.2m x 60cm)
-        // Geohash enables efficient prefix-based spatial queries
+        // Geohash enables efficient prefix-based spatial queries.
+        //
+        // SECURITY (residual): the geohash is stored UNBLINDED, unlike the
+        // exact-match index terms. Spatial search scans by geohash *prefix*
+        // (proximity), so HMAC-blinding would destroy the prefix structure and
+        // break nearby-queries. Precise location (~1.2m) is therefore visible in
+        // the index CF to anyone who can read it — same class as the date/type/
+        // importance range keys. See SECURITY.md.
         if let Some(geo) = memory.experience.geo_location {
             let lat = geo[0];
             let lon = geo[1];
@@ -2080,7 +2092,12 @@ impl MemoryStorage {
                 batch.delete_cf(idx, episode_key.as_bytes());
 
                 if let Some(seq) = ctx.episode.sequence_number {
-                    let seq_key = format!("episode_seq:{}:{:010}:{}", episode_id, seq, id.0);
+                    let seq_key = format!(
+                        "episode_seq:{}:{:010}:{}",
+                        blind_term(&episode_id.to_string()),
+                        seq,
+                        id.0
+                    );
                     batch.delete_cf(idx, seq_key.as_bytes());
                 }
             }
@@ -2428,8 +2445,11 @@ impl MemoryStorage {
     ) -> Result<Vec<MemoryId>> {
         let mut results: Vec<(u32, MemoryId)> = Vec::new();
 
-        // Scan the episode_seq index which has format: episode_seq:{episode_id}:{seq}:{memory_id}
-        let prefix = format!("episode_seq:{episode_id}:");
+        // Scan the episode_seq index which has format:
+        //   episode_seq:{blinded episode_id}:{seq}:{memory_id}
+        // The episode_id is blinded (HMAC) to match update_indices; seq stays
+        // plaintext as the zero-padded in-episode ordering key.
+        let prefix = format!("episode_seq:{}:", blind_term(episode_id));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
