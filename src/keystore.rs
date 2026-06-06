@@ -35,6 +35,14 @@ const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
 const NONCE_SIZE: usize = 12;
 
+/// Upper bounds on Argon2 params read from a (possibly tampered) keystore.json,
+/// so a malicious keystore cannot trigger a multi-TB allocation / OOM at unseal
+/// (the DoS happens before any key check). The 4 GiB ceiling is far above a sane
+/// production setting (~256 MiB) yet blocks the absurd.
+const MAX_ARGON2_M_COST_KIB: u32 = 4 * 1024 * 1024;
+const MAX_ARGON2_T_COST: u32 = 64;
+const MAX_ARGON2_P_COST: u32 = 64;
+
 /// AAD bound into the KEK wrap (domain separation / substitution resistance).
 const KEK_AAD: &[u8] = b"shodh:keystore:kek:v1";
 
@@ -267,6 +275,18 @@ impl KdfParams {
 
     /// Derive a 256-bit unseal key from the passphrase under these params.
     fn derive(&self, passphrase: &str) -> Result<SecretKey> {
+        if self.m_cost > MAX_ARGON2_M_COST_KIB
+            || self.t_cost > MAX_ARGON2_T_COST
+            || self.p_cost > MAX_ARGON2_P_COST
+        {
+            return Err(anyhow!(
+                "Argon2 params exceed safe bounds (possible tampered keystore): \
+                 m_cost={} t_cost={} p_cost={}",
+                self.m_cost,
+                self.t_cost,
+                self.p_cost
+            ));
+        }
         let params = Params::new(self.m_cost, self.t_cost, self.p_cost, Some(KEY_LEN))
             .map_err(|e| anyhow!("invalid Argon2 params: {e}"))?;
         let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -773,6 +793,18 @@ mod tests {
         let a = kdf.derive("pw").unwrap();
         let b = kdf.derive("pw").unwrap();
         assert_eq!(a.as_slice(), b.as_slice());
+    }
+
+    #[test]
+    fn derive_rejects_excessive_argon2_params() {
+        // A tampered keystore with absurd m_cost must be rejected before Argon2 runs.
+        let kdf = KdfParams {
+            m_cost: u32::MAX,
+            t_cost: 3,
+            p_cost: 1,
+            salt: b64e(&[0u8; SALT_LEN]),
+        };
+        assert!(kdf.derive("pw").is_err());
     }
 
     #[test]

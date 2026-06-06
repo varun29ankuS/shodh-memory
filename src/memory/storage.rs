@@ -742,6 +742,10 @@ fn deserialize_memory_inner(data: &[u8]) -> Result<(Memory, bool)> {
 struct StorageCrypto {
     record: crate::keystore::RecordCryptor,
     index: crate::keystore::IndexBlinder,
+    /// KEK fingerprint of the keystore this crypto came from, so a second store
+    /// opened with a *different* keystore fails loudly instead of silently reusing
+    /// the first store's keys (the process-global is single-keystore).
+    kek_fingerprint: String,
 }
 
 static V2_CRYPTO: OnceLock<StorageCrypto> = OnceLock::new();
@@ -1234,9 +1238,20 @@ impl MemoryStorage {
         let sc = StorageCrypto {
             record: RecordCryptor::new(epoch, dek),
             index: IndexBlinder::derive_from_kek(&kek),
+            kek_fingerprint: ks.kek_fingerprint.clone(),
         };
-        // First store wins (process-global, matching shodh's single-store design).
-        let _ = V2_CRYPTO.set(sc);
+        // Process-global = single keystore per process. First store wins; a second
+        // store with a DIFFERENT keystore must fail loudly, not silently reuse the
+        // first store's keys (cross-keystore data confusion).
+        if let Err(rejected) = V2_CRYPTO.set(sc) {
+            let existing = V2_CRYPTO.get().expect("V2_CRYPTO just observed as set");
+            if existing.kek_fingerprint != rejected.kek_fingerprint {
+                return Err(anyhow!(
+                    "a different encryption keystore is already active in this process; \
+                     shodh's process-global encryption supports a single keystore per process"
+                ));
+            }
+        }
         Ok(())
     }
 
