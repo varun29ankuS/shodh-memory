@@ -102,6 +102,20 @@ jobs:
       - name: Build recall-eval
         run: cargo build --release --bin recall-eval
 
+      - name: Pre-fetch MiniLM embedder model (robust — avoids HF auto-download flakes)
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          # The binary skips its own (weak-retry) download when these exist. Aggressive
+          # curl retries beat the HF rate-limit/contention that voided 4 funnel runs.
+          curl -fL --retry 12 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
+            -o "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          curl -fL --retry 12 --retry-all-errors --retry-delay 5 --connect-timeout 30 \
+            -o "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+          ls -la "$MODEL_DIR"
+
       - name: Graph reachability diagnostic
         if: ${{ github.event.inputs.mode == 'reachability' }}
         env:
