@@ -34,10 +34,18 @@ enum Cmd {
         #[arg(long, env = "SHODH_NEW_MASTER_PASSPHRASE")]
         new: String,
     },
-    /// Rotate the active data key (new epoch; old records stay readable).
+    /// Rotate the active data key to a new epoch.
+    ///
+    /// WARNING: the storage layer currently serves only the active epoch, so
+    /// records written under the previous epoch become UNREADABLE after a
+    /// rotation (multi-epoch read is a pending follow-up). Refuses unless
+    /// `--force` is given — only safe on an empty or disposable store.
     RotateDek {
         #[arg(long, env = "SHODH_MASTER_PASSPHRASE")]
         passphrase: String,
+        /// Rotate anyway, accepting that all existing records become unreadable.
+        #[arg(long)]
+        force: bool,
     },
     /// Add a one-time recovery code (printed once — store it offline).
     AddRecoveryCode {
@@ -63,12 +71,23 @@ fn main() -> Result<()> {
             ks.save_to_path(&cli.keystore)?;
             println!("passphrase rotated (keystore generation {})", ks.generation);
         }
-        Cmd::RotateDek { passphrase } => {
+        Cmd::RotateDek { passphrase, force } => {
+            if !force {
+                anyhow::bail!(
+                    "refusing to rotate the data key: storage reads only the active epoch, so \
+                     every existing record would become unreadable. Re-run with --force only on \
+                     an empty or disposable store (multi-epoch read is a pending follow-up)."
+                );
+            }
             let mut ks = load(&cli.keystore)?;
             let kek = ks.unseal_with_passphrase(&passphrase)?;
             ks.verify_integrity(&kek)?;
             let epoch = ks.rotate_dek(&kek)?;
             ks.save_to_path(&cli.keystore)?;
+            eprintln!(
+                "WARNING: rotated to epoch {epoch}; records written under earlier epochs are now \
+                 UNREADABLE until multi-epoch read is implemented."
+            );
             println!(
                 "data key rotated to epoch {epoch} (keystore generation {})",
                 ks.generation
