@@ -17,10 +17,13 @@ use aes_gcm::{Aes256Gcm, Key, Nonce};
 use anyhow::{anyhow, Context, Result};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::Path;
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Envelope wire/format version (records + keystore). Bumped on format changes.
@@ -300,6 +303,14 @@ pub struct Keystore {
     pub active_epoch: u32,
     /// base64(4-byte KEK fingerprint) — detects unseal-to-wrong-key.
     pub kek_fingerprint: String,
+    /// Monotonic generation, bumped on every keystore mutation. Combined with a
+    /// database-side sentinel to detect rollback to an older keystore file.
+    #[serde(default)]
+    pub generation: u64,
+    /// HMAC over the keystore (keyed by a KEK-derived integrity key) detecting
+    /// in-place tampering of active_epoch / deks / wraps. Empty until sealed.
+    #[serde(default)]
+    pub mac: String,
 }
 
 impl Keystore {
@@ -314,7 +325,7 @@ impl Keystore {
         let kek_wrap = wrap_key(&unseal, kek.as_slice(), KEK_AAD, "passphrase")?;
         let dek_wrap = wrap_key(&kek, dek.as_slice(), &dek_aad(0), "kek")?;
 
-        Ok(Self {
+        let mut ks = Self {
             crypto_version: CRYPTO_VERSION,
             schema_version: SCHEMA_VERSION,
             kdf,
@@ -326,7 +337,54 @@ impl Keystore {
             }],
             active_epoch: 0,
             kek_fingerprint: b64e(&fingerprint(kek.as_slice())),
-        })
+            generation: 0,
+            mac: String::new(),
+        };
+        ks.seal(&kek)?;
+        Ok(ks)
+    }
+
+    /// Recompute and store the integrity MAC. Call after every mutation while the
+    /// KEK is in hand.
+    pub fn seal(&mut self, kek: &SecretKey) -> Result<()> {
+        self.mac = self.compute_mac(kek)?;
+        Ok(())
+    }
+
+    /// Verify the keystore has not been tampered in place (active_epoch, deks, or
+    /// wraps). Requires the unsealed KEK.
+    pub fn verify_integrity(&self, kek: &SecretKey) -> Result<()> {
+        if self.mac.is_empty() {
+            return Err(anyhow!("keystore is not integrity-sealed (missing MAC)"));
+        }
+        let expected = self.compute_mac(kek)?;
+        let ok = expected.len() == self.mac.len()
+            && bool::from(expected.as_bytes().ct_eq(self.mac.as_bytes()));
+        if ok {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "keystore integrity check failed — tampered active_epoch/deks/wraps?"
+            ))
+        }
+    }
+
+    /// HMAC-SHA256 over the keystore JSON (with the `mac` field blanked), keyed by
+    /// a KEK-derived integrity key.
+    fn compute_mac(&self, kek: &SecretKey) -> Result<String> {
+        let mut bare = self.clone();
+        bare.mac = String::new();
+        let bytes = serde_json::to_string(&bare).context("serialize keystore for MAC")?;
+
+        let mut ik = <HmacSha256 as Mac>::new_from_slice(kek.as_slice())
+            .expect("HMAC accepts any key length");
+        Mac::update(&mut ik, b"shodh:keystore-integrity:v1");
+        let ikey = Mac::finalize(ik).into_bytes();
+
+        let mut mac =
+            <HmacSha256 as Mac>::new_from_slice(&ikey).expect("HMAC accepts any key length");
+        Mac::update(&mut mac, bytes.as_bytes());
+        Ok(hex::encode(Mac::finalize(mac).into_bytes()))
     }
 
     /// Unseal the master key (KEK) via the passphrase provider; verifies the
@@ -374,6 +432,8 @@ impl Keystore {
         self.kek_wraps.retain(|w| w.provider != "passphrase");
         self.kek_wraps.push(new_wrap);
         self.kdf = new_kdf;
+        self.generation += 1;
+        self.seal(&kek)?;
         Ok(())
     }
 
@@ -386,6 +446,8 @@ impl Keystore {
         let wrap = wrap_key(&wrap_key_bytes, kek.as_slice(), KEK_AAD, "recovery")?;
         self.kek_wraps.retain(|w| w.provider != "recovery");
         self.kek_wraps.push(wrap);
+        self.generation += 1;
+        self.seal(kek)?;
         Ok(code)
     }
 
@@ -422,6 +484,8 @@ impl Keystore {
             state: "active".to_string(),
         });
         self.active_epoch = new_epoch;
+        self.generation += 1;
+        self.seal(kek)?;
         Ok(new_epoch)
     }
 
@@ -437,6 +501,8 @@ impl Keystore {
         };
         self.kek_wraps.retain(|w| w.provider != "kms");
         self.kek_wraps.push(wrap);
+        self.generation += 1;
+        self.seal(kek)?;
         Ok(())
     }
 
@@ -459,6 +525,47 @@ impl Keystore {
             return Err(anyhow!("KMS unsealed an unexpected key"));
         }
         Ok(kek)
+    }
+
+    /// Atomically persist the keystore to `path`: write a temp file, fsync it,
+    /// then rename over the target, so a crash/power-loss never leaves a truncated
+    /// or empty keystore (which would make the KEK — and thus all data —
+    /// unrecoverable). Keeps a `.bak` of the prior keystore as a recovery copy.
+    /// On unix the file is chmod 0600 and the parent dir is fsynced so the rename
+    /// is durable.
+    pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        use std::io::Write;
+
+        let json = self.to_json()?;
+
+        // Preserve the previous keystore as a recovery backup before overwriting.
+        if path.exists() {
+            let bak = path.with_extension("json.bak");
+            std::fs::copy(path, &bak).context("failed to back up existing keystore")?;
+        }
+
+        let tmp = path.with_extension("json.tmp");
+        {
+            let mut f =
+                std::fs::File::create(&tmp).context("failed to create keystore temp file")?;
+            f.write_all(json.as_bytes())
+                .context("failed to write keystore temp file")?;
+            f.sync_all().context("failed to fsync keystore temp file")?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        std::fs::rename(&tmp, path).context("failed to rename keystore into place")?;
+        // fsync the directory so the rename itself is durable across a crash.
+        #[cfg(unix)]
+        if let Some(dir) = path.parent() {
+            if let Ok(d) = std::fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
+        Ok(())
     }
 
     pub fn to_json(&self) -> Result<String> {
@@ -511,7 +618,9 @@ impl IndexBlinder {
 
 // ============================================================================
 // Record envelope (P2) — encrypt/decrypt a serialized record blob under a DEK.
-// Wire format: `ENC\0 | crypto_version(1) | epoch(4 LE) | nonce(12) | ct+tag`.
+// Wire format: `ENC\0 | crypto_version(1) | epoch(4 LE) | nonce(24) | ct+tag`.
+// Records use XChaCha20-Poly1305 (192-bit nonce) so random nonces never approach
+// a collision bound; key-wrapping (low volume) stays on AES-256-GCM.
 // AAD binds the epoch (prevents cross-epoch substitution). Record-id binding is
 // a documented follow-up: it requires confirming the RocksDB key == memory id
 // invariant at every write site first (design §5).
@@ -520,9 +629,9 @@ impl IndexBlinder {
 /// 4-byte marker distinguishing an encrypted record from a legacy plaintext
 /// (bincode) record. bincode of a `Memory` never begins with `ENC\0`.
 const RECORD_MARKER: &[u8; 4] = b"ENC\x00";
-/// marker(4) + version(1) + epoch(4) + nonce(12)
-const RECORD_HEADER_LEN: usize = 4 + 1 + 4 + 12;
-/// GCM tag is 16 bytes; a valid ciphertext is at least the tag.
+/// marker(4) + version(1) + epoch(4) + nonce(24, XChaCha20)
+const RECORD_HEADER_LEN: usize = 4 + 1 + 4 + 24;
+/// Poly1305 tag is 16 bytes; a valid ciphertext is at least the tag.
 const RECORD_MIN_LEN: usize = RECORD_HEADER_LEN + 16;
 
 fn record_aad(epoch: u32) -> Vec<u8> {
@@ -560,9 +669,9 @@ pub fn decrypt_record(dek: &SecretKey, data: &[u8]) -> Result<Vec<u8>> {
         return Err(anyhow!("unsupported record crypto version {version}"));
     }
     let epoch = u32::from_le_bytes([data[5], data[6], data[7], data[8]]);
-    let nonce = Nonce::from_slice(&data[9..RECORD_HEADER_LEN]);
+    let nonce = XNonce::from_slice(&data[9..RECORD_HEADER_LEN]);
     let ciphertext = &data[RECORD_HEADER_LEN..];
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(dek.as_slice()));
+    let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(dek.as_slice()));
     cipher
         .decrypt(
             nonce,
@@ -593,8 +702,8 @@ impl RecordCryptor {
 
     /// Encrypt a serialized record blob under the active DEK.
     pub fn encrypt_record(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(self.dek.as_slice()));
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(self.dek.as_slice()));
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
         let ciphertext = cipher
             .encrypt(
                 &nonce,
@@ -857,5 +966,59 @@ mod tests {
         assert!(decode_32(&"00".repeat(32)).is_ok());
         assert!(decode_32(&base64::engine::general_purpose::STANDARD.encode([0u8; 32])).is_ok());
         assert!(decode_32("tooshort").is_err());
+    }
+
+    #[test]
+    fn save_to_path_is_atomic_reloadable_and_backed_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keystore.json");
+        let ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+
+        ks.save_to_path(&path).unwrap();
+        assert!(path.exists());
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "no leftover temp"
+        );
+        let loaded = Keystore::from_json(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(loaded.unseal_with_passphrase("pw").is_ok());
+
+        // A second save preserves the prior keystore as a .bak recovery copy.
+        ks.save_to_path(&path).unwrap();
+        assert!(path.with_extension("json.bak").exists(), "backup written");
+    }
+
+    #[test]
+    fn integrity_seal_detects_in_place_tampering() {
+        let ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+        ks.verify_integrity(&kek).unwrap(); // sealed at create
+
+        let mut tampered = ks.clone();
+        tampered.active_epoch = 99;
+        assert!(tampered.verify_integrity(&kek).is_err());
+
+        let mut t2 = ks.clone();
+        t2.kek_fingerprint = "AAAAAA==".to_string();
+        assert!(t2.verify_integrity(&kek).is_err());
+
+        // survives a JSON round-trip (mac + generation persisted)
+        let reloaded = Keystore::from_json(&ks.to_json().unwrap()).unwrap();
+        reloaded.verify_integrity(&kek).unwrap();
+    }
+
+    #[test]
+    fn generation_bumps_on_mutation_and_reseals() {
+        let mut ks = Keystore::create("pw", KdfParams::fast_for_tests()).unwrap();
+        assert_eq!(ks.generation, 0);
+        let kek = ks.unseal_with_passphrase("pw").unwrap();
+
+        ks.rotate_dek(&kek).unwrap();
+        assert_eq!(ks.generation, 1);
+        ks.verify_integrity(&kek).unwrap(); // re-sealed after mutation
+
+        ks.add_recovery_code(&kek).unwrap();
+        assert_eq!(ks.generation, 2);
+        ks.verify_integrity(&kek).unwrap();
     }
 }
