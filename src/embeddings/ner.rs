@@ -268,6 +268,72 @@ pub struct NeuralNer {
     entity_cache: moka::sync::Cache<u64, Vec<NerEntity>>,
 }
 
+// ── NER replay hook (offline-entity ablation; env-gated, default OFF) ────────
+// When SHODH_NER_REPLAY points at a JSON map {text -> [entities]}, extract()/
+// extract_batch() return those entities instead of running the neural model.
+// Lets us ablate a different NER (e.g. gliner-bi-edge) through the REAL pipeline
+// without porting it to Rust. JSON: {"<text>": [{"text","type"("PER"|"ORG"|"LOC"
+// |"MISC"),"start","end","conf"}]}. A miss falls through to the neural model.
+#[derive(serde::Deserialize)]
+struct ReplayEntity {
+    text: String,
+    #[serde(rename = "type")]
+    ty: String,
+    start: usize,
+    end: usize,
+    conf: f32,
+}
+
+static NER_REPLAY_MAP: std::sync::OnceLock<
+    Option<std::collections::HashMap<String, Vec<NerEntity>>>,
+> = std::sync::OnceLock::new();
+
+fn ner_replay_map() -> Option<&'static std::collections::HashMap<String, Vec<NerEntity>>> {
+    NER_REPLAY_MAP
+        .get_or_init(|| {
+            let path = std::env::var("SHODH_NER_REPLAY").ok()?;
+            let data = std::fs::read_to_string(&path)
+                .map_err(|e| tracing::error!("SHODH_NER_REPLAY read {path} failed: {e}"))
+                .ok()?;
+            let raw: std::collections::HashMap<String, Vec<ReplayEntity>> =
+                serde_json::from_str(&data)
+                    .map_err(|e| tracing::error!("SHODH_NER_REPLAY parse failed: {e}"))
+                    .ok()?;
+            let map: std::collections::HashMap<String, Vec<NerEntity>> = raw
+                .into_iter()
+                .map(|(k, ents)| {
+                    let v = ents
+                        .into_iter()
+                        .map(|e| NerEntity {
+                            text: e.text,
+                            entity_type: match e.ty.as_str() {
+                                "PER" => NerEntityType::Person,
+                                "ORG" => NerEntityType::Organization,
+                                "LOC" => NerEntityType::Location,
+                                _ => NerEntityType::Misc,
+                            },
+                            confidence: e.conf,
+                            start: e.start,
+                            end: e.end,
+                        })
+                        .collect();
+                    (k, v)
+                })
+                .collect();
+            tracing::warn!(
+                "SHODH_NER_REPLAY ACTIVE: {} texts loaded from {} (neural NER bypassed on hits)",
+                map.len(),
+                path
+            );
+            Some(map)
+        })
+        .as_ref()
+}
+
+fn ner_replay_lookup(text: &str) -> Option<Vec<NerEntity>> {
+    ner_replay_map()?.get(text).cloned()
+}
+
 impl NeuralNer {
     /// Create new NER model with lazy loading
     pub fn new(config: NerConfig) -> Result<Self> {
@@ -352,6 +418,11 @@ impl NeuralNer {
             return Ok(Vec::new());
         }
 
+        // NER replay hook (SHODH_NER_REPLAY) — offline-entity ablation, default off.
+        if let Some(ents) = ner_replay_lookup(text) {
+            return Ok(ents);
+        }
+
         // Check cache first
         let cache_key = Self::cache_key(text);
         if let Some(cached) = self.entity_cache.get(&cache_key) {
@@ -401,6 +472,12 @@ impl NeuralNer {
         // First pass: check cache
         for (i, &text) in texts.iter().enumerate() {
             if text.trim().is_empty() {
+                continue;
+            }
+
+            // NER replay hook (SHODH_NER_REPLAY) — offline-entity ablation, default off.
+            if let Some(ents) = ner_replay_lookup(text) {
+                results[i] = ents;
                 continue;
             }
 
