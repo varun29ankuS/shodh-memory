@@ -1351,6 +1351,14 @@ pub fn spreading_activation_retrieve_with_stats(
     // Step 6: Sort by final score (descending)
     scored_memories.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
 
+    // Bound the candidate set before the O(n²) lateral-inhibition pass below. The caller
+    // keeps only the top ~200 graph candidates anyway, so this loses nothing — but without
+    // it, reachability injection's large candidate set makes lateral inhibition (pairwise
+    // cosine over every candidate) pathologically slow on real corpora (a hub maps hundreds
+    // of episodes into the pool). Latent O(n²) hazard that threshold-pruned spreading hid.
+    const GRAPH_CANDIDATE_CAP: usize = 200;
+    scored_memories.truncate(GRAPH_CANDIDATE_CAP);
+
     // Step 6.5: Lateral inhibition — high-scoring memories suppress similar competitors
     // Mimics cortical winner-take-all dynamics (Rumelhart & Zipser 1985)
     if scored_memories.len() > 1 {
