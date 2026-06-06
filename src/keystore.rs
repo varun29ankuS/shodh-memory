@@ -729,6 +729,7 @@ pub fn decrypt_record(dek: &SecretKey, data: &[u8]) -> Result<Vec<u8>> {
 /// Encrypts serialized record blobs under a fixed active DEK/epoch. Held by the
 /// storage layer (P2 wiring). Reads of older epochs go through [`decrypt_record`]
 /// with the DEK fetched from the keystore for that epoch.
+#[derive(Clone)]
 pub struct RecordCryptor {
     epoch: u32,
     dek: SecretKey,
@@ -768,6 +769,53 @@ impl RecordCryptor {
     /// Decrypt with the active DEK (convenience for same-epoch reads/tests).
     pub fn decrypt_record(&self, data: &[u8]) -> Result<Vec<u8>> {
         decrypt_record(&self.dek, data)
+    }
+}
+
+/// The set of record cryptors a store needs: the active one for new writes, plus
+/// one per retired epoch so records written before a key rotation stay readable.
+/// Built from the keystore's retained per-epoch DEKs — this is what makes data
+/// key rotation safe (the read path selects the DEK for each record's epoch).
+#[derive(Clone)]
+pub struct RecordCryptors {
+    active_epoch: u32,
+    by_epoch: std::collections::HashMap<u32, RecordCryptor>,
+}
+
+impl RecordCryptors {
+    /// Derive a cryptor for every epoch the keystore retains a DEK for.
+    pub fn from_keystore(ks: &Keystore, kek: &SecretKey) -> Result<Self> {
+        let mut by_epoch = std::collections::HashMap::new();
+        for entry in &ks.deks {
+            let dek = ks.data_key_for_epoch(kek, entry.epoch)?;
+            by_epoch.insert(entry.epoch, RecordCryptor::new(entry.epoch, dek));
+        }
+        if !by_epoch.contains_key(&ks.active_epoch) {
+            return Err(anyhow!(
+                "keystore active_epoch {} has no DEK entry",
+                ks.active_epoch
+            ));
+        }
+        Ok(Self {
+            active_epoch: ks.active_epoch,
+            by_epoch,
+        })
+    }
+
+    /// Cryptor for new writes (the active epoch).
+    pub fn active(&self) -> &RecordCryptor {
+        self.by_epoch
+            .get(&self.active_epoch)
+            .expect("active-epoch cryptor present (checked at construction)")
+    }
+
+    /// Cryptor for a stored record's epoch, if the keystore retains that DEK.
+    pub fn for_epoch(&self, epoch: u32) -> Option<&RecordCryptor> {
+        self.by_epoch.get(&epoch)
+    }
+
+    pub fn active_epoch(&self) -> u32 {
+        self.active_epoch
     }
 }
 
@@ -841,6 +889,37 @@ mod tests {
             salt: b64e(&[0u8; SALT_LEN]),
         };
         assert!(kdf.derive("pw").is_err());
+    }
+
+    #[test]
+    fn record_cryptors_decrypt_across_epochs_after_rotation() {
+        let mut ks = Keystore::create("pw-rotation-test", KdfParams::fast_for_tests()).unwrap();
+        let kek = ks.unseal_with_passphrase("pw-rotation-test").unwrap();
+
+        // Encrypt a record under the original epoch (0).
+        let pre = RecordCryptors::from_keystore(&ks, &kek).unwrap();
+        assert_eq!(pre.active_epoch(), 0);
+        let ct0 = pre.active().encrypt_record(b"pre-rotation-blob").unwrap();
+        assert_eq!(record_epoch(&ct0), Some(0));
+
+        // Rotate the DEK -> epoch 1.
+        assert_eq!(ks.rotate_dek(&kek).unwrap(), 1);
+
+        // A fresh cryptor set (as a restarted process would build) reads BOTH epochs.
+        let post = RecordCryptors::from_keystore(&ks, &kek).unwrap();
+        assert_eq!(post.active_epoch(), 1, "writes now use epoch 1");
+        // The pre-rotation record still decrypts under its retired epoch-0 DEK.
+        assert_eq!(
+            post.for_epoch(0).unwrap().decrypt_record(&ct0).unwrap(),
+            b"pre-rotation-blob"
+        );
+        // New writes go out at epoch 1 and round-trip.
+        let ct1 = post.active().encrypt_record(b"post-rotation-blob").unwrap();
+        assert_eq!(record_epoch(&ct1), Some(1));
+        assert_eq!(
+            post.for_epoch(1).unwrap().decrypt_record(&ct1).unwrap(),
+            b"post-rotation-blob"
+        );
     }
 
     #[test]

@@ -740,7 +740,7 @@ fn deserialize_memory_inner(data: &[u8]) -> Result<(Memory, bool)> {
 /// (plaintext, backward compatible). Process-global to match shodh's existing
 /// single-store architecture (the prior single-key encryptor was global too).
 struct StorageCrypto {
-    record: crate::keystore::RecordCryptor,
+    record: crate::keystore::RecordCryptors,
     index: crate::keystore::IndexBlinder,
     /// KEK fingerprint of the keystore this crypto came from, so a second store
     /// opened with a *different* keystore fails loudly instead of silently reusing
@@ -769,6 +769,7 @@ pub(crate) fn encode_memory(memory: &Memory) -> Result<Vec<u8>> {
     match crypto() {
         Some(sc) => sc
             .record
+            .active()
             .encrypt_record(&encoded)
             .context("Failed to encrypt serialized memory record"),
         None => Ok(encoded),
@@ -782,14 +783,16 @@ fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
             anyhow!("Encrypted memory record encountered, but no keystore/passphrase is configured")
         })?;
         let epoch = crate::keystore::record_epoch(data).unwrap_or(0);
-        if epoch != sc.record.epoch() {
-            return Err(anyhow!(
-                "record epoch {epoch} differs from active epoch {}; key rotation not yet supported",
-                sc.record.epoch()
-            ));
-        }
-        let decrypted = sc
-            .record
+        // Select the DEK for THIS record's epoch — records written before a key
+        // rotation decrypt under their original (retired) epoch key.
+        let cryptor = sc.record.for_epoch(epoch).ok_or_else(|| {
+            anyhow!(
+                "record epoch {epoch} has no DEK in the keystore (active epoch {}); \
+                 the keystore may have been replaced or the epoch's key pruned",
+                sc.record.active_epoch()
+            )
+        })?;
+        let decrypted = cryptor
             .decrypt_record(data)
             .context("Failed to decrypt memory record")?;
         deserialize_memory_inner(&decrypted)
@@ -1188,7 +1191,7 @@ impl MemoryStorage {
     /// rollback generation, and install the process-global v2 storage crypto.
     /// No keystore + no passphrase = plaintext (backward compatible).
     fn init_storage_crypto(db: &DB, storage_path: &Path) -> Result<()> {
-        use crate::keystore::{IndexBlinder, KdfParams, Keystore, LocalAeadKms, RecordCryptor};
+        use crate::keystore::{IndexBlinder, KdfParams, Keystore, LocalAeadKms, RecordCryptors};
 
         let keystore_path = storage_path.join("keystore.json");
         let passphrase = std::env::var("SHODH_MASTER_PASSPHRASE")
@@ -1234,9 +1237,8 @@ impl MemoryStorage {
             .context("keystore integrity verification failed")?;
         Self::check_keystore_generation(db, ks.generation)?;
 
-        let (epoch, dek) = ks.active_data_key(&kek)?;
         let sc = StorageCrypto {
-            record: RecordCryptor::new(epoch, dek),
+            record: RecordCryptors::from_keystore(&ks, &kek)?,
             index: IndexBlinder::derive_from_kek(&kek),
             kek_fingerprint: ks.kek_fingerprint.clone(),
         };
