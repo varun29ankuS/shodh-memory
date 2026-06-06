@@ -26,7 +26,7 @@ use shodh_memory::recall_harness::report::{
 };
 use shodh_memory::recall_harness::runner::{
     analyze_ablation, analyze_funnel, analyze_graph_reachability, analyze_learning_curve,
-    run_smoke_suite_with_ranks, ReportWithRanks, RunInputs,
+    analyze_linking, run_smoke_suite_with_ranks, ReportWithRanks, RunInputs,
 };
 
 /// Exit codes — kept stable so CI scripts can branch on them.
@@ -188,6 +188,12 @@ struct Args {
     #[arg(long)]
     funnel: Option<PathBuf>,
 
+    /// Query→graph entity-linking accuracy: NER → link to graph nodes vs the lexical mentions
+    /// in each query. Writes a `LinkingReport` (precision/recall, no-seed rate). The number
+    /// that says whether NER/linking is the bottleneck before investing in a better NER.
+    #[arg(long)]
+    linking: Option<PathBuf>,
+
     /// Learning-curve diagnostic ("smarter with use"): when set, skip the recall
     /// run and instead repeatedly recall + reinforce each tracked query, writing
     /// a `LearningCurveReport` (gold rank/score per reinforcement cycle) to this
@@ -298,6 +304,19 @@ fn run(args: &Args) -> Result<i32> {
         let report = analyze_graph_reachability(&inputs).context("graph-reachability analysis")?;
         write_reachability(reach_path, &report)?;
         summarise_reachability(&report);
+        eprintln!(
+            "recall-eval: storage retained at {} (delete manually after inspection)",
+            storage_path.display()
+        );
+        return Ok(EXIT_PASS);
+    }
+
+    // Entity-linking accuracy short-circuits the recall run entirely.
+    if let Some(link_path) = &args.linking {
+        let report = analyze_linking(&inputs).context("linking analysis")?;
+        std::fs::write(link_path, serde_json::to_string_pretty(&report)?)
+            .with_context(|| format!("writing {}", link_path.display()))?;
+        summarise_linking(&report);
         eprintln!(
             "recall-eval: storage retained at {} (delete manually after inspection)",
             storage_path.display()
@@ -855,6 +874,38 @@ fn summarise(report: &Report) {
 /// Resolve the current git SHA by shelling out. Returns an error rather
 /// than panicking so the binary can still produce a report when run from a
 /// non-git checkout (e.g. a release tarball).
+fn summarise_linking(report: &shodh_memory::recall_harness::report::LinkingReport) {
+    use shodh_memory::recall_harness::report::LinkingRow;
+    println!(
+        "## Query→graph entity-linking accuracy (suite={} sha={})",
+        report.suite, report.git_sha
+    );
+    println!("\n| category | cases | NER/q | linked/q | no-seed% | mentions/q | precision | RECALL |");
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
+    let row = |r: &LinkingRow| {
+        println!(
+            "| {} | {} | {:.2} | {:.2} | {:.1} | {:.2} | {:.3} | {:.3} |",
+            r.category,
+            r.cases,
+            r.ner_mean,
+            r.linked_mean,
+            r.no_seed_pct,
+            r.lexical_mean,
+            r.link_precision,
+            r.link_recall
+        );
+    };
+    row(&report.overall);
+    for r in report.by_category.values() {
+        row(r);
+    }
+    println!(
+        "\nRECALL = of the graph entities a query lexically mentions, the fraction NER+linking \
+         actually resolves. Low recall ⇒ traversal starts from missing/wrong seeds; NER/linking \
+         is the ceiling. no-seed% = queries that produced zero usable seeds at all."
+    );
+}
+
 fn summarise_funnel(report: &shodh_memory::recall_harness::report::FunnelReport) {
     use shodh_memory::recall_harness::report::FunnelStageRow;
     println!(

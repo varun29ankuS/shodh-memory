@@ -29,7 +29,8 @@ use super::metrics::Metrics;
 use super::report::{
     aggregate_category, aggregate_layer, median, AblationReport, AblationRow, CategoryReport,
     Failure, LayerReport, FunnelReport, FunnelStageRow, GraphStructure, LearningCurveArm,
-    LearningCurveReport, PerCaseRecord, ReachabilityCategory, ReachabilityReport, Report, SMOKE_K,
+    LearningCurveReport, LinkingReport, LinkingRow, PerCaseRecord, ReachabilityCategory,
+    ReachabilityReport, Report, SMOKE_K,
 };
 
 /// Embedder identifier emitted in the report. Matches the model wired into
@@ -859,6 +860,156 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
         git_sha: inputs.git_sha.clone(),
         case_count: cases.len(),
         rows,
+    })
+}
+
+/// Whole-word / phrase containment: does `name` appear in `text_lc` at word boundaries?
+/// Both args must already be lowercased. Avoids spurious substring hits (e.g. "al" in "also").
+fn phrase_in_text(name: &str, text_lc: &str) -> bool {
+    if name.len() < 2 {
+        return false;
+    }
+    let bytes = text_lc.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = text_lc[start..].find(name) {
+        let pos = start + rel;
+        let before_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
+        let end = pos + name.len();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = pos + 1;
+        if start >= text_lc.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// Query→graph entity-linking accuracy diagnostic. For each query: NER → mentions → link via
+/// `find_entity_by_name` → linked graph nodes; compared against a lexical ground truth (graph
+/// entity names that appear as phrases in the query). Reports link precision/recall, no-seed
+/// rate, and extraction counts — turning "is NER the bottleneck?" into a number. Low recall ⇒
+/// the traversal/graph starts from wrong-or-missing seeds and NER/linking is the ceiling.
+pub fn analyze_linking(inputs: &RunInputs) -> Result<LinkingReport> {
+    pin_harness_threads();
+
+    let corpus_path = inputs
+        .corpus_path
+        .clone()
+        .unwrap_or_else(|| fixtures::manifest_path(SMOKE_CORPUS_PATH));
+    let cases_path = inputs
+        .cases_path
+        .clone()
+        .unwrap_or_else(|| fixtures::manifest_path(SMOKE_CASES_PATH));
+    let corpus = fixtures::load_corpus(&corpus_path)
+        .with_context(|| format!("loading corpus from {}", corpus_path.display()))?;
+    let cases = fixtures::load_smoke_cases(&cases_path)
+        .with_context(|| format!("loading cases from {}", cases_path.display()))?;
+    fixtures::validate_structure(&corpus, &cases)
+        .with_context(|| format!("{} suite failed structural validation", inputs.suite))?;
+
+    let manager = build_manager(&inputs.storage_path)?;
+    let _id_map = ingest_corpus(&manager, &corpus)?;
+    let ner = manager.get_neural_ner();
+    let graph = manager.get_user_graph(EVAL_USER)?;
+
+    // Lexical ground truth: all graph entity names (lowercased) — the entities the corpus built.
+    let entity_names_lc: Vec<String> = {
+        let g = graph.read();
+        g.get_all_entities()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| e.name.to_lowercase())
+            .filter(|n| n.len() >= 2)
+            .collect()
+    };
+
+    #[derive(Default)]
+    struct Acc {
+        cases: usize,
+        ner_sum: usize,
+        linked_sum: usize,
+        no_seed: usize,
+        lexical_sum: usize,
+        tp_sum: usize,
+        linked_total: usize,
+        lexical_total: usize,
+    }
+    let mut overall = Acc::default();
+    let mut by_cat: BTreeMap<String, Acc> = BTreeMap::new();
+
+    for case in &cases {
+        let cat = category_name(case.category).to_string();
+        let query_lc = case.query.to_lowercase();
+
+        let mentions: Vec<String> = match ner.extract(&case.query) {
+            Ok(es) => es.into_iter().map(|e| e.text).collect(),
+            Err(_) => Vec::new(),
+        };
+        let mut linked: HashSet<String> = HashSet::new();
+        {
+            let g = graph.read();
+            for m in &mentions {
+                if let Ok(Some(ent)) = g.find_entity_by_name(m) {
+                    linked.insert(ent.name.to_lowercase());
+                }
+            }
+        }
+        let lexical: HashSet<String> = entity_names_lc
+            .iter()
+            .filter(|n| phrase_in_text(n, &query_lc))
+            .cloned()
+            .collect();
+        let tp = linked.iter().filter(|n| lexical.contains(*n)).count();
+
+        let (m, l, lex, no_seed) = (mentions.len(), linked.len(), lexical.len(), linked.is_empty());
+        let bump = |acc: &mut Acc| {
+            acc.cases += 1;
+            acc.ner_sum += m;
+            acc.linked_sum += l;
+            if no_seed {
+                acc.no_seed += 1;
+            }
+            acc.lexical_sum += lex;
+            acc.tp_sum += tp;
+            acc.linked_total += l;
+            acc.lexical_total += lex;
+        };
+        bump(&mut overall);
+        bump(by_cat.entry(cat).or_default());
+    }
+
+    let to_row = |cat: &str, a: &Acc| -> LinkingRow {
+        let n = a.cases.max(1) as f64;
+        LinkingRow {
+            category: cat.to_string(),
+            cases: a.cases,
+            ner_mean: a.ner_sum as f64 / n,
+            linked_mean: a.linked_sum as f64 / n,
+            no_seed_pct: 100.0 * a.no_seed as f64 / n,
+            lexical_mean: a.lexical_sum as f64 / n,
+            link_precision: if a.linked_total == 0 {
+                0.0
+            } else {
+                a.tp_sum as f64 / a.linked_total as f64
+            },
+            link_recall: if a.lexical_total == 0 {
+                0.0
+            } else {
+                a.tp_sum as f64 / a.lexical_total as f64
+            },
+        }
+    };
+
+    let by_category: BTreeMap<String, LinkingRow> =
+        by_cat.iter().map(|(c, a)| (c.clone(), to_row(c, a))).collect();
+    Ok(LinkingReport {
+        suite: inputs.suite.clone(),
+        git_sha: inputs.git_sha.clone(),
+        overall: to_row("ALL", &overall),
+        by_category,
     })
 }
 

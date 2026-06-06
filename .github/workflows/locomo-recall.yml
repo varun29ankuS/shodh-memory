@@ -31,7 +31,7 @@ on:
         required: false
         default: ''
       mode:
-        description: 'What to run: recall (default) | reachability | funnel | learning_curve | multi_hop | ablation | temporal | ontology | lineage | forgetting | selective_forgetting'
+        description: 'What to run: recall (default) | reachability | funnel | linking | learning_curve | multi_hop | ablation | temporal | ontology | lineage | forgetting | selective_forgetting'
         required: false
         default: 'recall'
       suite:
@@ -150,6 +150,18 @@ jobs:
               print(f"| {name} | {c['cases']} | {g} | {pct(c['reachable_within_1'],g):.1f} | {pct(c['reachable_within_2'],g):.1f} | {pct(c['unreachable'],g):.1f} | {pct(c['cases_no_seed'],c['cases']):.1f} | {pct(c.get('cases_multi_seed',0),c['cases']):.1f} | {pct(c.get('gold_multi_seed',0),g):.1f} |")
           print("\ngold≥2seed% = the G5 multi-seed discrimination signal. If ~0, queries resolve to too few graph cues; the lever is richer query→graph cue extraction, not episode scoring.")
           PY
+
+      - name: Entity-linking accuracy (is NER/linking the bottleneck?)
+        if: ${{ github.event.inputs.mode == 'linking' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval \
+            --suite locomo \
+            --linking locomo-linking.json \
+            --output unused-recall.json \
+            --storage ./linking-storage 2>&1 | tee linking.log
+          echo "## Query→graph entity-linking accuracy" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/## Query→graph entity-linking accuracy/,$p' linking.log >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Per-stage gold funnel (locates where reachable gold is lost)
         if: ${{ github.event.inputs.mode == 'funnel' }}

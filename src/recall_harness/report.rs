@@ -459,6 +459,38 @@ pub struct FunnelStageRow {
     pub mean_rank_when_present: f64,
 }
 
+/// Query→graph entity-linking accuracy. For each query: NER → mentions → link to graph nodes,
+/// measured against a lexical ground truth (graph entity names that appear in the query text —
+/// the entities the query DOES mention that our graph HAS). `link_recall` is the load-bearing
+/// number: of the linkable entities the query mentions, how many does our NER+linking actually
+/// resolve? Low recall ⇒ NER/linking is the ceiling (traversal starts blind / from wrong seeds).
+/// `no_seed_pct` ⇒ queries that produce zero usable seeds at all.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LinkingRow {
+    pub category: String,
+    pub cases: usize,
+    /// Mean entities NER extracted per query.
+    pub ner_mean: f64,
+    /// Mean entities that linked to a graph node per query.
+    pub linked_mean: f64,
+    /// % of cases that produced zero linked seeds.
+    pub no_seed_pct: f64,
+    /// Mean graph entities lexically present in the query (the should-link set).
+    pub lexical_mean: f64,
+    /// linked ∩ lexical / linked — are our extracted seeds real query mentions?
+    pub link_precision: f64,
+    /// linked ∩ lexical / lexical — do we catch the query's linkable mentions? (THE number.)
+    pub link_recall: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LinkingReport {
+    pub suite: String,
+    pub git_sha: String,
+    pub overall: LinkingRow,
+    pub by_category: BTreeMap<String, LinkingRow>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FunnelReport {
     pub suite: String,
