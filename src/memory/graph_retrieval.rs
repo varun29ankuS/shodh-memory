@@ -664,6 +664,13 @@ fn reachable_inject(
     const MAX_NODES: usize = 4000;
     const MAX_EDGES_PER_NODE: usize = 100;
     const HOP_DECAY: f32 = 0.5;
+    // Keep only the strongest-path reachable entities. Threshold-free expansion over a
+    // hub (degree 225 on LoCoMo) otherwise floods the candidate set — every reachable
+    // episode becomes a candidate, blowing up the O(n²) lateral-inhibition pass and the
+    // downstream pool. The competitor audit (HippoRAG/Graphiti) inject a BOUNDED, ranked
+    // set, not everything reachable. 1-hop gold (96% of cases) carries the strongest
+    // activation, so it survives the cap.
+    const REACH_MAX_ENTITIES: usize = 128;
 
     let mut best: HashMap<Uuid, f32> = seeds.clone();
     let mut frontier: Vec<Uuid> = seeds.keys().copied().collect();
@@ -700,6 +707,14 @@ fn reachable_inject(
             break;
         }
         frontier = next;
+    }
+
+    // Bound the injected set to the strongest-path reachable entities.
+    if best.len() > REACH_MAX_ENTITIES {
+        let mut items: Vec<(Uuid, f32)> = best.into_iter().collect();
+        items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        items.truncate(REACH_MAX_ENTITIES);
+        return Ok(items.into_iter().collect());
     }
     Ok(best)
 }
