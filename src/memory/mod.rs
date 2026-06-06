@@ -2740,6 +2740,8 @@ impl MemorySystem {
                 vector_results
             };
 
+            crate::memory::gold_funnel::record("hybrid", hybrid_ids.iter().map(|(id, _)| id));
+
             // ===========================================================================
             // LAYER 4: RRF FUSION WITH DENSITY-BASED WEIGHTS (PIPE-11)
             // ===========================================================================
