@@ -686,8 +686,14 @@ const RECORD_HEADER_LEN: usize = 4 + 1 + 4 + 24;
 /// Poly1305 tag is 16 bytes; a valid ciphertext is at least the tag.
 const RECORD_MIN_LEN: usize = RECORD_HEADER_LEN + 16;
 
-fn record_aad(epoch: u32) -> Vec<u8> {
-    format!("shodh:record:v1:epoch:{epoch}").into_bytes()
+/// Associated data for record AEAD: domain string + epoch, plus a caller-supplied
+/// identity context so a ciphertext only authenticates under the identity it was
+/// written for (anti-swap). An empty `ctx` means epoch-bound only.
+fn record_aad(epoch: u32, ctx: &[u8]) -> Vec<u8> {
+    let mut aad = format!("shodh:record:v1:epoch:{epoch}").into_bytes();
+    aad.push(0x1f); // unit separator: keep ctx from colliding with the epoch text
+    aad.extend_from_slice(ctx);
+    aad
 }
 
 /// `true` if `data` carries the encrypted-record marker.
@@ -706,7 +712,7 @@ pub fn record_epoch(data: &[u8]) -> Option<u32> {
 
 /// Decrypt an encrypted record blob with the DEK for its epoch. The caller is
 /// responsible for selecting `dek` matching [`record_epoch`].
-pub fn decrypt_record(dek: &SecretKey, data: &[u8]) -> Result<Vec<u8>> {
+pub fn decrypt_record(dek: &SecretKey, data: &[u8], aad_ctx: &[u8]) -> Result<Vec<u8>> {
     if !is_encrypted_record(data) {
         return Err(anyhow!("not an encrypted record (missing marker)"));
     }
@@ -729,10 +735,10 @@ pub fn decrypt_record(dek: &SecretKey, data: &[u8]) -> Result<Vec<u8>> {
             nonce,
             Payload {
                 msg: ciphertext,
-                aad: &record_aad(epoch),
+                aad: &record_aad(epoch, aad_ctx),
             },
         )
-        .map_err(|e| anyhow!("record decrypt failed (wrong key/epoch or tampered): {e}"))
+        .map_err(|e| anyhow!("record decrypt failed (wrong key/epoch/identity or tampered): {e}"))
 }
 
 /// Encrypts serialized record blobs under a fixed active DEK/epoch. Held by the
@@ -753,8 +759,10 @@ impl RecordCryptor {
         self.epoch
     }
 
-    /// Encrypt a serialized record blob under the active DEK.
-    pub fn encrypt_record(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+    /// Encrypt a serialized record blob under the active DEK. `aad_ctx` binds the
+    /// ciphertext to a caller identity (pass `&[]` for none); the same `aad_ctx`
+    /// must be supplied to decrypt.
+    pub fn encrypt_record(&self, plaintext: &[u8], aad_ctx: &[u8]) -> Result<Vec<u8>> {
         let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(self.dek.as_slice()));
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
         let ciphertext = cipher
@@ -762,7 +770,7 @@ impl RecordCryptor {
                 &nonce,
                 Payload {
                     msg: plaintext,
-                    aad: &record_aad(self.epoch),
+                    aad: &record_aad(self.epoch, aad_ctx),
                 },
             )
             .map_err(|e| anyhow!("record encrypt failed: {e}"))?;
@@ -776,8 +784,9 @@ impl RecordCryptor {
     }
 
     /// Decrypt with the active DEK (convenience for same-epoch reads/tests).
-    pub fn decrypt_record(&self, data: &[u8]) -> Result<Vec<u8>> {
-        decrypt_record(&self.dek, data)
+    /// `aad_ctx` must match what was passed to [`encrypt_record`](Self::encrypt_record).
+    pub fn decrypt_record(&self, data: &[u8], aad_ctx: &[u8]) -> Result<Vec<u8>> {
+        decrypt_record(&self.dek, data, aad_ctx)
     }
 }
 
@@ -908,7 +917,7 @@ mod tests {
         // Encrypt a record under the original epoch (0).
         let pre = RecordCryptors::from_keystore(&ks, &kek).unwrap();
         assert_eq!(pre.active_epoch(), 0);
-        let ct0 = pre.active().encrypt_record(b"pre-rotation-blob").unwrap();
+        let ct0 = pre.active().encrypt_record(b"pre-rotation-blob", b"").unwrap();
         assert_eq!(record_epoch(&ct0), Some(0));
 
         // Rotate the DEK -> epoch 1.
@@ -919,14 +928,14 @@ mod tests {
         assert_eq!(post.active_epoch(), 1, "writes now use epoch 1");
         // The pre-rotation record still decrypts under its retired epoch-0 DEK.
         assert_eq!(
-            post.for_epoch(0).unwrap().decrypt_record(&ct0).unwrap(),
+            post.for_epoch(0).unwrap().decrypt_record(&ct0, b"").unwrap(),
             b"pre-rotation-blob"
         );
         // New writes go out at epoch 1 and round-trip.
-        let ct1 = post.active().encrypt_record(b"post-rotation-blob").unwrap();
+        let ct1 = post.active().encrypt_record(b"post-rotation-blob", b"").unwrap();
         assert_eq!(record_epoch(&ct1), Some(1));
         assert_eq!(
-            post.for_epoch(1).unwrap().decrypt_record(&ct1).unwrap(),
+            post.for_epoch(1).unwrap().decrypt_record(&ct1, b"").unwrap(),
             b"post-rotation-blob"
         );
     }
@@ -984,11 +993,13 @@ mod tests {
     fn record_encrypt_decrypt_roundtrip() {
         let cryptor = RecordCryptor::new(0, Zeroizing::new([5u8; KEY_LEN]));
         let plaintext = b"bincode-serialized-memory-record-bytes".to_vec();
-        let enc = cryptor.encrypt_record(&plaintext).unwrap();
+        let enc = cryptor.encrypt_record(&plaintext, b"mem-1").unwrap();
         assert!(is_encrypted_record(&enc));
         assert_eq!(record_epoch(&enc), Some(0));
         assert_ne!(enc, plaintext);
-        assert_eq!(cryptor.decrypt_record(&enc).unwrap(), plaintext);
+        assert_eq!(cryptor.decrypt_record(&enc, b"mem-1").unwrap(), plaintext);
+        // Identity binding: the same ciphertext under a different id fails (anti-swap).
+        assert!(cryptor.decrypt_record(&enc, b"mem-2").is_err());
     }
 
     #[test]
@@ -1002,23 +1013,23 @@ mod tests {
     #[test]
     fn record_wrong_dek_fails() {
         let c1 = RecordCryptor::new(0, Zeroizing::new([1u8; KEY_LEN]));
-        let enc = c1.encrypt_record(b"secret").unwrap();
-        assert!(decrypt_record(&Zeroizing::new([2u8; KEY_LEN]), &enc).is_err());
+        let enc = c1.encrypt_record(b"secret", b"").unwrap();
+        assert!(decrypt_record(&Zeroizing::new([2u8; KEY_LEN]), &enc, b"").is_err());
     }
 
     #[test]
     fn record_tamper_is_detected() {
         let c = RecordCryptor::new(3, Zeroizing::new([7u8; KEY_LEN]));
-        let mut enc = c.encrypt_record(b"payload").unwrap();
+        let mut enc = c.encrypt_record(b"payload", b"").unwrap();
         let last = enc.len() - 1;
         enc[last] ^= 0xff; // flip a ciphertext byte
-        assert!(c.decrypt_record(&enc).is_err());
+        assert!(c.decrypt_record(&enc, b"").is_err());
     }
 
     #[test]
     fn record_epoch_in_header_matches() {
         let c = RecordCryptor::new(42, Zeroizing::new([9u8; KEY_LEN]));
-        let enc = c.encrypt_record(b"x").unwrap();
+        let enc = c.encrypt_record(b"x", b"").unwrap();
         assert_eq!(record_epoch(&enc), Some(42));
         assert_eq!(c.epoch(), 42);
     }
@@ -1043,8 +1054,8 @@ mod tests {
         let kek = ks.unseal_with_passphrase("pw").unwrap();
         let (epoch, dek) = ks.active_data_key(&kek).unwrap();
         let cryptor = RecordCryptor::new(epoch, dek);
-        let enc = cryptor.encrypt_record(b"end-to-end").unwrap();
-        assert_eq!(cryptor.decrypt_record(&enc).unwrap(), b"end-to-end");
+        let enc = cryptor.encrypt_record(b"end-to-end", b"").unwrap();
+        assert_eq!(cryptor.decrypt_record(&enc, b"").unwrap(), b"end-to-end");
     }
 
     #[test]

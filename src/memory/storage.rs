@@ -770,7 +770,10 @@ pub(crate) fn encode_memory(memory: &Memory) -> Result<Vec<u8>> {
         Some(sc) => sc
             .record
             .active()
-            .encrypt_record(&encoded)
+            // Records are epoch-bound only (empty AAD identity) for now; binding
+            // the memory-id needs decode_stored's callers threaded + the
+            // rocksdb-key==memory-id invariant audited (tracked follow-up).
+            .encrypt_record(&encoded, b"")
             .context("Failed to encrypt serialized memory record"),
         None => Ok(encoded),
     }
@@ -793,7 +796,7 @@ fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
             )
         })?;
         let decrypted = cryptor
-            .decrypt_record(data)
+            .decrypt_record(data, b"")
             .context("Failed to decrypt memory record")?;
         deserialize_memory_inner(&decrypted)
     } else {
