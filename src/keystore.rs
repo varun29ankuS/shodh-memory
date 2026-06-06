@@ -43,6 +43,16 @@ const MAX_ARGON2_M_COST_KIB: u32 = 4 * 1024 * 1024;
 const MAX_ARGON2_T_COST: u32 = 64;
 const MAX_ARGON2_P_COST: u32 = 64;
 
+/// Lower bounds on Argon2 params read from a (possibly tampered) keystore.json.
+/// The unseal path runs the KDF to derive the wrap key BEFORE the KEK-keyed
+/// integrity MAC can be checked, so a tampered keystore could otherwise pin the
+/// absolute-weakest params (e.g. m_cost=8 KiB) and make the passphrase wrap
+/// cheaply brute-forced offline. 8 MiB is a defense-in-depth floor — well below
+/// the ~256 MiB production setting, but far above the absurd downgrade.
+const MIN_ARGON2_M_COST_KIB: u32 = 8 * 1024;
+const MIN_ARGON2_T_COST: u32 = 1;
+const MIN_ARGON2_P_COST: u32 = 1;
+
 /// AAD bound into the KEK wrap (domain separation / substitution resistance).
 const KEK_AAD: &[u8] = b"shodh:keystore:kek:v1";
 
@@ -262,11 +272,12 @@ impl KdfParams {
         }
     }
 
-    /// Weak params for fast tests ONLY (never production).
+    /// Reduced params for fast tests ONLY (never production). Sits at the
+    /// minimum accepted floor so tests still exercise the real KDF cheaply.
     #[cfg(test)]
     pub fn fast_for_tests() -> Self {
         Self {
-            m_cost: 8,
+            m_cost: MIN_ARGON2_M_COST_KIB,
             t_cost: 1,
             p_cost: 1,
             salt: b64e(&random_salt()),
@@ -281,6 +292,18 @@ impl KdfParams {
         {
             return Err(anyhow!(
                 "Argon2 params exceed safe bounds (possible tampered keystore): \
+                 m_cost={} t_cost={} p_cost={}",
+                self.m_cost,
+                self.t_cost,
+                self.p_cost
+            ));
+        }
+        if self.m_cost < MIN_ARGON2_M_COST_KIB
+            || self.t_cost < MIN_ARGON2_T_COST
+            || self.p_cost < MIN_ARGON2_P_COST
+        {
+            return Err(anyhow!(
+                "Argon2 params below safe minimum (possible tampered keystore / KDF downgrade): \
                  m_cost={} t_cost={} p_cost={}",
                 self.m_cost,
                 self.t_cost,
@@ -801,6 +824,19 @@ mod tests {
         let kdf = KdfParams {
             m_cost: u32::MAX,
             t_cost: 3,
+            p_cost: 1,
+            salt: b64e(&[0u8; SALT_LEN]),
+        };
+        assert!(kdf.derive("pw").is_err());
+    }
+
+    #[test]
+    fn derive_rejects_weak_argon2_params() {
+        // A tampered keystore that downgrades the KDF below the floor must be
+        // rejected before Argon2 runs (prevents an offline brute-force downgrade).
+        let kdf = KdfParams {
+            m_cost: 8, // the old absolute-minimum; now below MIN_ARGON2_M_COST_KIB
+            t_cost: 1,
             p_cost: 1,
             salt: b64e(&[0u8; SALT_LEN]),
         };
