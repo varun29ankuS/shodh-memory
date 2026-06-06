@@ -2853,23 +2853,31 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((mut memory, _)) = deserialize_memory(&value) {
-                if memory.is_forgotten() {
-                    continue;
-                }
-                if memory.created_at < cutoff {
-                    flagged_ids.push(memory.id.clone());
-                    memory
-                        .experience
-                        .metadata
-                        .insert("forgotten".to_string(), "true".to_string());
-                    memory
-                        .experience
-                        .metadata
-                        .insert("forgotten_at".to_string(), now.clone());
+            match deserialize_memory(&value) {
+                Ok((mut memory, _)) => {
+                    if memory.is_forgotten() {
+                        continue;
+                    }
+                    if memory.created_at < cutoff {
+                        flagged_ids.push(memory.id.clone());
+                        memory
+                            .experience
+                            .metadata
+                            .insert("forgotten".to_string(), "true".to_string());
+                        memory
+                            .experience
+                            .metadata
+                            .insert("forgotten_at".to_string(), now.clone());
 
-                    let updated_value = encode_memory(&memory)?;
-                    batch.put(&key, updated_value);
+                        let updated_value = encode_memory(&memory)?;
+                        batch.put(&key, updated_value);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "skipping a record that failed to decrypt/deserialize during forget-by-age (corruption, wrong key, or unsupported epoch)"
+                    );
                 }
             }
         }
@@ -2896,23 +2904,31 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((mut memory, _)) = deserialize_memory(&value) {
-                if memory.is_forgotten() {
-                    continue;
-                }
-                if memory.importance() < threshold {
-                    flagged_ids.push(memory.id.clone());
-                    memory
-                        .experience
-                        .metadata
-                        .insert("forgotten".to_string(), "true".to_string());
-                    memory
-                        .experience
-                        .metadata
-                        .insert("forgotten_at".to_string(), now.clone());
+            match deserialize_memory(&value) {
+                Ok((mut memory, _)) => {
+                    if memory.is_forgotten() {
+                        continue;
+                    }
+                    if memory.importance() < threshold {
+                        flagged_ids.push(memory.id.clone());
+                        memory
+                            .experience
+                            .metadata
+                            .insert("forgotten".to_string(), "true".to_string());
+                        memory
+                            .experience
+                            .metadata
+                            .insert("forgotten_at".to_string(), now.clone());
 
-                    let updated_value = encode_memory(&memory)?;
-                    batch.put(&key, updated_value);
+                        let updated_value = encode_memory(&memory)?;
+                        batch.put(&key, updated_value);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "skipping a record that failed to decrypt/deserialize during forget-by-importance (corruption, wrong key, or unsupported epoch)"
+                    );
                 }
             }
         }
