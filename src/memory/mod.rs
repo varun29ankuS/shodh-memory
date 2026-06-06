@@ -2719,24 +2719,45 @@ impl MemorySystem {
             // RH-8 gate: BM25 hybrid fusion only runs in `PlusBm25` and above.
             // Lower modes pass the vector candidate set straight through, which makes the
             // RRF fusion below a one- or two-leg fusion (vector ± graph) instead of three-leg.
+            // Flatten-the-double-RRF prep: retain each result's BM25 and vector COMPONENT
+            // scores (HybridSearchResult already carries them) so the main fusion can treat
+            // vector and BM25 as independent calibrated legs instead of pre-RRF'ing them into
+            // one hybrid score that buries the vector-strong gold (funnel: multi_hop gold
+            // vector rank 7.4 → hybrid rank 28.4). id → (bm25_score, vector_score).
+            let mut hybrid_components: std::collections::HashMap<MemoryId, (f32, f32)> =
+                std::collections::HashMap::new();
             let hybrid_ids = if layer_bm25 {
-                self.hybrid_search
-                    .search_with_dynamic_weights_pool(
-                        bm25_query_text,
-                        vector_results.clone(),
-                        get_content,
-                        term_weights,
-                        phrases,
-                        disc_opt,
-                        bm25_pool_override,
-                    )
-                    .map(|r| {
+                match self.hybrid_search.search_with_dynamic_weights_pool(
+                    bm25_query_text,
+                    vector_results.clone(),
+                    get_content,
+                    term_weights,
+                    phrases,
+                    disc_opt,
+                    bm25_pool_override,
+                ) {
+                    Ok(r) => {
+                        for x in &r {
+                            hybrid_components.insert(
+                                x.memory_id.clone(),
+                                (x.bm25_score.unwrap_or(0.0), x.vector_score.unwrap_or(0.0)),
+                            );
+                        }
                         r.into_iter()
                             .map(|x| (x.memory_id, x.score))
                             .collect::<Vec<_>>()
-                    })
-                    .unwrap_or(vector_results)
+                    }
+                    Err(_) => {
+                        for (id, s) in &vector_results {
+                            hybrid_components.insert(id.clone(), (0.0, *s));
+                        }
+                        vector_results
+                    }
+                }
             } else {
+                for (id, s) in &vector_results {
+                    hybrid_components.insert(id.clone(), (0.0, *s));
+                }
                 vector_results
             };
 
@@ -2911,6 +2932,32 @@ impl MemorySystem {
             let n_graph = graph_results.len().max(1) as f32;
             let n_hybrid = hybrid_ids.len().max(1) as f32;
 
+            // Flatten the double-RRF (SHODH_FUSION_FLAT): vector and BM25 enter the fusion as
+            // SEPARATE calibrated-magnitude legs, so a vector-strong gold keeps its rank
+            // instead of being RRF-buried by BM25's lexical crowd in the hybrid pre-fusion
+            // (funnel-located: the entire multi_hop loss is vector 7.4 → hybrid 28.4). Implies
+            // the calibrated graph leg. hybrid_w is split; vector trusted more by default.
+            let flat_fusion = std::env::var("SHODH_FUSION_FLAT")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let vector_leg_w = hybrid_w
+                * std::env::var("SHODH_VECTOR_LEG_FRAC")
+                    .ok()
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .unwrap_or(0.6)
+                    .clamp(0.0, 1.0);
+            let bm25_leg_w = (hybrid_w - vector_leg_w).max(0.0);
+            let max_vec = hybrid_components
+                .values()
+                .map(|(_, v)| *v)
+                .fold(0.0_f32, f32::max)
+                .max(1e-6);
+            let max_bm = hybrid_components
+                .values()
+                .map(|(b, _)| *b)
+                .fold(0.0_f32, f32::max)
+                .max(1e-6);
+
             // Graph leg.
             for (r, (id, activation, h)) in graph_results.iter().enumerate() {
                 let rrf_score = if v2_fusion {
@@ -2924,7 +2971,7 @@ impl MemorySystem {
                     let borda = graph_w * ((n_graph - r as f32) / n_graph);
                     let rescue = graph_w * (activation / max_activation).clamp(0.0, 1.0);
                     borda + rescue
-                } else if actr_fusion {
+                } else if actr_fusion || flat_fusion {
                     // Calibrated magnitude: the graph's best hit enters at graph_w,
                     // not a graph_w/(k+rank) crumb.
                     graph_w * (activation / max_activation).clamp(0.0, 1.0)
@@ -2985,7 +3032,14 @@ impl MemorySystem {
 
             // Hybrid (BM25+vector) leg.
             for (r, (id, hybrid_raw)) in hybrid_ids.iter().enumerate() {
-                let hybrid_rrf = if v2_fusion {
+                let hybrid_rrf = if flat_fusion {
+                    // The flatten: independent calibrated vector + BM25 legs. A vector-strong
+                    // gold keeps its magnitude; BM25's lexical crowd can no longer RRF-bury it
+                    // inside a single pre-fused hybrid score.
+                    let (bm25, vec) = hybrid_components.get(id).copied().unwrap_or((0.0, 0.0));
+                    vector_leg_w * (vec / max_vec).clamp(0.0, 1.0)
+                        + bm25_leg_w * (bm25 / max_bm).clamp(0.0, 1.0)
+                } else if v2_fusion {
                     // Borda: rank-1 ≈ full hybrid_w (scale-invariant, no crumb).
                     hybrid_w * ((n_hybrid - r as f32) / n_hybrid)
                 } else if actr_fusion {
