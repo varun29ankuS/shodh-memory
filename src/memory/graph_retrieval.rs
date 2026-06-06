@@ -719,6 +719,84 @@ fn reachable_inject(
     Ok(best)
 }
 
+/// Graph-native multi-hop traversal — "walk the reasoning". Beam search from the query seeds
+/// along the strongest INTENT-MATCHING edge paths (scored by `ppr_edge_weight`, which encodes
+/// edge strength × relation-intent match), returning the reached NON-seed entities scored by
+/// path strength. The endpoint of an A→B→C walk IS the composed answer — this turns the graph
+/// from a retrieval index (rank passages) into a reasoner (compose by traversal). Retrieval
+/// alone cannot answer multi-hop; traversal can. LLM-free; adapts the embedding-guided neural
+/// search recipe (arXiv 2511.19648) to our stack. Returns entity uuid → best path score.
+fn traverse_beam(
+    graph: &GraphMemory,
+    seeds: &HashMap<Uuid, f32>,
+    intent: Option<&OntologicalIntent>,
+    predicate_weights: bool,
+) -> Result<HashMap<Uuid, f32>> {
+    const HOPS: usize = 2;
+    const BEAM: usize = 32;
+    const MAX_EDGES: usize = 100;
+
+    struct BeamPath {
+        endpoint: Uuid,
+        score: f32,
+        visited: HashSet<Uuid>,
+    }
+    let mut beam: Vec<BeamPath> = seeds
+        .iter()
+        .map(|(&u, &w)| {
+            let mut visited = HashSet::new();
+            visited.insert(u);
+            BeamPath {
+                endpoint: u,
+                score: w.max(1e-3),
+                visited,
+            }
+        })
+        .collect();
+    let mut reached: HashMap<Uuid, f32> = HashMap::new();
+    let mut label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
+
+    for _ in 0..HOPS {
+        let mut next: Vec<BeamPath> = Vec::new();
+        for p in &beam {
+            let edges = graph.get_entity_relationships_limited(&p.endpoint, Some(MAX_EDGES))?;
+            for edge in edges {
+                if p.visited.contains(&edge.to_entity) {
+                    continue;
+                }
+                let w = ppr_edge_weight(&edge, intent, predicate_weights, graph, &mut label_cache);
+                if w <= 0.0 {
+                    continue;
+                }
+                let mut visited = p.visited.clone();
+                visited.insert(edge.to_entity);
+                next.push(BeamPath {
+                    endpoint: edge.to_entity,
+                    score: p.score * w,
+                    visited,
+                });
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        next.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
+        next.truncate(BEAM);
+        for p in &next {
+            let e = reached.entry(p.endpoint).or_insert(0.0);
+            if p.score > *e {
+                *e = p.score;
+            }
+        }
+        beam = next;
+    }
+    // The composed answer is a NEW entity reached by the walk, never a seed.
+    for s in seeds.keys() {
+        reached.remove(s);
+    }
+    Ok(reached)
+}
+
 pub fn spreading_activation_retrieve(
     query_text: &str,
     query: &Query,
@@ -1214,6 +1292,34 @@ pub fn spreading_activation_retrieve_with_stats(
                 );
             }
             Err(e) => tracing::warn!("Reachability injection failed: {e}"),
+        }
+    }
+
+    // SHODH_GRAPH_TRAVERSE: walk the reasoning. Beam-search the strongest intent-matching
+    // paths from the seeds and inject the reached endpoint entities (the composed multi-hop
+    // answer) with a strong boost, so the traversal answer dominates the diffuse activation
+    // pool. This is composition-by-traversal — what retrieval+ranking structurally cannot do.
+    let traverse = std::env::var("SHODH_GRAPH_TRAVERSE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if traverse {
+        const TRAVERSE_BOOST: f32 = 5.0;
+        let pred_w = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        match traverse_beam(graph, &seed_activations, intent_ref, pred_w) {
+            Ok(answers) => {
+                let n = answers.len();
+                for (ent, score) in answers {
+                    let boosted = score * TRAVERSE_BOOST;
+                    let e = activation_map.entry(ent).or_insert(0.0);
+                    if boosted > *e {
+                        *e = boosted;
+                    }
+                }
+                tracing::info!("🧭 Traversal: {} path-answer entities injected", n);
+            }
+            Err(e) => tracing::warn!("Traversal failed: {e}"),
         }
     }
 
