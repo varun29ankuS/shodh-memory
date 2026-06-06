@@ -1924,7 +1924,7 @@ impl MemoryStorage {
     /// Used for upsert operations when syncing from external sources.
     pub fn find_by_external_id(&self, external_id: &str) -> Result<Option<Memory>> {
         // Index key format: external:{external_id}:{memory_id}
-        let prefix = format!("external:{}:", blind_term(&external_id.to_string()));
+        let prefix = format!("external:{}:", blind_term(external_id));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
@@ -2349,7 +2349,7 @@ impl MemoryStorage {
     /// Returns all memories in the specified episode
     fn search_by_episode(&self, episode_id: &str) -> Result<Vec<MemoryId>> {
         let mut ids = Vec::new();
-        let prefix = format!("episode:{}:", blind_term(&episode_id.to_string()));
+        let prefix = format!("episode:{}:", blind_term(episode_id));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
@@ -2426,7 +2426,7 @@ impl MemoryStorage {
     /// Search memories by robot/drone identifier
     fn search_by_robot(&self, robot_id: &str) -> Result<Vec<MemoryId>> {
         let mut ids = Vec::new();
-        let prefix = format!("robot:{}:", blind_term(&robot_id.to_string()));
+        let prefix = format!("robot:{}:", blind_term(robot_id));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
@@ -2450,7 +2450,7 @@ impl MemoryStorage {
     /// Search memories by mission identifier
     fn search_by_mission(&self, mission_id: &str) -> Result<Vec<MemoryId>> {
         let mut ids = Vec::new();
-        let prefix = format!("mission:{}:", blind_term(&mission_id.to_string()));
+        let prefix = format!("mission:{}:", blind_term(mission_id));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
@@ -2531,7 +2531,7 @@ impl MemoryStorage {
     /// Search memories by action type
     fn search_by_action_type(&self, action_type: &str) -> Result<Vec<MemoryId>> {
         let mut ids = Vec::new();
-        let prefix = format!("action:{}:", blind_term(&action_type.to_string()));
+        let prefix = format!("action:{}:", blind_term(action_type));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
