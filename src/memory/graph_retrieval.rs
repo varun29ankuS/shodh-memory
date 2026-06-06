@@ -646,6 +646,64 @@ fn personalized_pagerank(
     Ok((activation, traversed))
 }
 
+/// Reachability injection (complete, threshold-free spreading). For every entity within
+/// REACH_HOPS of a query seed, compute its best-path activation — the max over paths of the
+/// edge-weight product, distance-decayed — with NO threshold pruning. The reachability
+/// diagnostic shows ~98% of gold is ≤2-hop reachable while ordinary spreading activation
+/// surfaces ~2%; threshold/decay drop reachable-but-weak paths before they can rank. This
+/// recovers them as graded candidates so downstream fusion can surface the reachable gold.
+/// Bounded by hops, a total node cap, and a per-node edge cap. Relaxation over REACH_HOPS
+/// rounds (re-expanding improved nodes) — exact best-path for the small hop budget.
+fn reachable_inject(
+    graph: &GraphMemory,
+    seeds: &HashMap<Uuid, f32>,
+    intent: Option<&OntologicalIntent>,
+    predicate_weights: bool,
+) -> Result<HashMap<Uuid, f32>> {
+    const REACH_HOPS: usize = 2;
+    const MAX_NODES: usize = 4000;
+    const MAX_EDGES_PER_NODE: usize = 100;
+    const HOP_DECAY: f32 = 0.5;
+
+    let mut best: HashMap<Uuid, f32> = seeds.clone();
+    let mut frontier: Vec<Uuid> = seeds.keys().copied().collect();
+    let mut label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
+
+    for _hop in 0..REACH_HOPS {
+        if best.len() >= MAX_NODES {
+            break;
+        }
+        let mut next: Vec<Uuid> = Vec::new();
+        for &u in &frontier {
+            let au = best.get(&u).copied().unwrap_or(0.0);
+            if au <= 0.0 {
+                continue;
+            }
+            let edges = graph.get_entity_relationships_limited(&u, Some(MAX_EDGES_PER_NODE))?;
+            for edge in edges {
+                let w = ppr_edge_weight(&edge, intent, predicate_weights, graph, &mut label_cache);
+                if w <= 0.0 {
+                    continue;
+                }
+                let nb = edge.to_entity;
+                let new_act = au * w * HOP_DECAY;
+                if new_act > best.get(&nb).copied().unwrap_or(0.0) {
+                    best.insert(nb, new_act);
+                    next.push(nb);
+                }
+            }
+            if best.len() >= MAX_NODES {
+                break;
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    Ok(best)
+}
+
 pub fn spreading_activation_retrieve(
     query_text: &str,
     query: &Query,
@@ -850,6 +908,14 @@ pub fn spreading_activation_retrieve_with_stats(
         stats.retrieval_time_us = start_time.elapsed().as_micros() as u64;
         return Ok((Vec::new(), stats)); // Caller should fall back to semantic search
     }
+
+    // Snapshot seed activations BEFORE spreading overwrites activation_map — the
+    // reachability-injection pass re-derives a complete, threshold-free best-path
+    // activation from these seeds.
+    let seed_activations = activation_map.clone();
+    let reach_inject = std::env::var("SHODH_GRAPH_REACH_INJECT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     // Step 3: Spread activation through graph
     // PIPE-7: Use bidirectional spreading when 2+ focal entities, else unidirectional
@@ -1109,6 +1175,31 @@ pub fn spreading_activation_retrieve_with_stats(
         }
 
         traversed_edges = edges_collected;
+    }
+
+    // Reachability injection: the reachability diagnostic shows ~98% of gold is ≤2-hop
+    // reachable while spreading activation surfaces ~2% — threshold pruning / decay drop
+    // reachable-but-weak paths before they can rank. Re-derive a complete best-path
+    // activation for every entity within REACH_HOPS of a seed (NO threshold) and merge by
+    // max, so fusion can rank the reachable gold instead of never seeing it.
+    if reach_inject {
+        match reachable_inject(graph, &seed_activations, intent_ref, false) {
+            Ok(reach) => {
+                let before = activation_map.len();
+                for (u, a) in reach {
+                    let e = activation_map.entry(u).or_insert(0.0);
+                    if a > *e {
+                        *e = a;
+                    }
+                }
+                tracing::info!(
+                    "🧭 Reachability injection: {} → {} activated entities",
+                    before,
+                    activation_map.len()
+                );
+            }
+            Err(e) => tracing::warn!("Reachability injection failed: {e}"),
+        }
     }
 
     stats.graph_time_us = graph_start.elapsed().as_micros() as u64;
