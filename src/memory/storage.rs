@@ -770,17 +770,22 @@ pub(crate) fn encode_memory(memory: &Memory) -> Result<Vec<u8>> {
         Some(sc) => sc
             .record
             .active()
-            // Records are epoch-bound only (empty AAD identity) for now; binding
-            // the memory-id needs decode_stored's callers threaded + the
-            // rocksdb-key==memory-id invariant audited (tracked follow-up).
-            .encrypt_record(&encoded, b"")
+            // Bind the record to its identity: AAD = the memory-id (== the
+            // primary-CF key, id.0.as_bytes()). A ciphertext lifted from one key
+            // and replanted at another fails to decrypt (anti-swap / anti-
+            // relocation), and tamper of the stored id is caught.
+            .encrypt_record(&encoded, memory.id.0.as_bytes())
             .context("Failed to encrypt serialized memory record"),
         None => Ok(encoded),
     }
 }
 
 /// Deserialize a memory, decrypting the whole record first when needed.
-fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
+///
+/// `id` is the record's identity (its primary-CF key, id.0.as_bytes()), bound
+/// into the AEAD AAD by encode_memory. Pass the rocksdb key the value was read
+/// at; a mismatch fails decryption (anti-swap). Unused on the plaintext path.
+fn deserialize_memory(id: &[u8], data: &[u8]) -> Result<(Memory, bool)> {
     if crate::keystore::is_encrypted_record(data) {
         let sc = crypto().ok_or_else(|| {
             anyhow!("Encrypted memory record encountered, but no keystore/passphrase is configured")
@@ -796,7 +801,7 @@ fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
             )
         })?;
         let decrypted = cryptor
-            .decrypt_record(data, b"")
+            .decrypt_record(data, id)
             .context("Failed to decrypt memory record")?;
         deserialize_memory_inner(&decrypted)
     } else {
@@ -808,8 +813,8 @@ fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
 ///
 /// Tries SHO v2 (postcard), SHO v1 (bincode 2.x), then the 17-path legacy
 /// fallback for raw bincode/msgpack data. Returns just the Memory on success.
-pub fn deserialize_memory_for_migration(data: &[u8]) -> Result<Memory> {
-    deserialize_memory(data).map(|(m, _)| m)
+pub fn deserialize_memory_for_migration(id: &[u8], data: &[u8]) -> Result<Memory> {
+    deserialize_memory(id, data).map(|(m, _)| m)
 }
 
 /// Legacy MemoryFlat for bincode 2.x data written BEFORE multimodal Experience fields
@@ -1920,13 +1925,14 @@ impl MemoryStorage {
         let key = id.0.as_bytes();
         match self.db.get(key)? {
             Some(value) => {
-                let (memory, needs_migration) = deserialize_memory(&value).with_context(|| {
-                    format!(
-                        "Failed to deserialize memory {} ({} bytes)",
-                        id.0,
-                        value.len()
-                    )
-                })?;
+                let (memory, needs_migration) =
+                    deserialize_memory(key, &value).with_context(|| {
+                        format!(
+                            "Failed to deserialize memory {} ({} bytes)",
+                            id.0,
+                            value.len()
+                        )
+                    })?;
 
                 // Lazy migration: re-write legacy formats in current format
                 if needs_migration {
@@ -2719,7 +2725,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory(&key, &value) {
                 if memory.parent_id.is_none() {
                     roots.push(memory.id);
                 }
@@ -2832,7 +2838,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory(&key, &value) {
                 if !memory.is_forgotten() {
                     memories.push(memory);
                 }
@@ -2857,7 +2863,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory(&key, &value) {
                 if !memory.is_forgotten() {
                     f(memory)?;
                 }
@@ -2875,7 +2881,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory(&key, &value) {
                 if !memory.compressed && !memory.is_forgotten() && memory.created_at < cutoff {
                     memories.push(memory);
                 }
@@ -2898,7 +2904,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            match deserialize_memory(&value) {
+            match deserialize_memory(&key, &value) {
                 Ok((mut memory, _)) => {
                     if memory.is_forgotten() {
                         continue;
@@ -2949,7 +2955,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            match deserialize_memory(&value) {
+            match deserialize_memory(&key, &value) {
                 Ok((mut memory, _)) => {
                     if memory.is_forgotten() {
                         continue;
@@ -2997,7 +3003,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory(&key, &value) {
                 if regex.is_match(&memory.experience.content) {
                     to_delete.push(memory.id);
                     count += 1;
@@ -3053,7 +3059,7 @@ impl MemoryStorage {
                         continue;
                     }
 
-                    match deserialize_memory(&value) {
+                    match deserialize_memory(&key, &value) {
                         Ok((memory, _)) => {
                             if memory.is_forgotten() {
                                 continue;
@@ -3175,7 +3181,7 @@ impl MemoryStorage {
                     key.len()
                 );
                 to_delete.push(key.to_vec());
-            } else if deserialize_memory(&value).is_err() {
+            } else if deserialize_memory(&key, &value).is_err() {
                 tracing::debug!(
                     "Marking for deletion: valid key but corrupted value ({} bytes)",
                     value.len()
@@ -3254,7 +3260,7 @@ impl MemoryStorage {
             // decode via the full fallback chain and queue it for re-encode to
             // postcard. A decode failure is counted as `failed`, never silently
             // skipped.
-            match deserialize_memory(&value) {
+            match deserialize_memory(&key, &value) {
                 Ok((memory, _)) => {
                     to_migrate.push((key.to_vec(), memory));
                 }
@@ -3802,7 +3808,7 @@ impl MemoryStorage {
                 continue;
             }
 
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory(&key, &value) {
                 let has_mapping = match self.get_vector_mapping(&memory.id) {
                     Ok(Some(entry)) => entry.text_vectors().is_some_and(|v| !v.is_empty()),
                     _ => false,

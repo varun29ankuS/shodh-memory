@@ -444,7 +444,7 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
             }
 
             // Try to deserialize with the full legacy fallback chain
-            match crate::memory::storage::deserialize_memory_for_migration(&value) {
+            match crate::memory::storage::deserialize_memory_for_migration(&key, &value) {
                 Ok(memory) => {
                     if !dry_run {
                         // Route through encode_memory so re-encoded memories are
