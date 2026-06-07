@@ -2659,6 +2659,26 @@ impl MemorySystem {
                             .map(|m| m.experience.content.clone())
                     })
             };
+            // Mirror of get_content for entity sets — used by the specificity/
+            // concentration fusion term (SHODH_SPEC_FUSION).
+            let get_entities = |id: &MemoryId| -> Option<Vec<String>> {
+                self.working_memory
+                    .read()
+                    .get(id)
+                    .map(|m| m.experience.entities.clone())
+                    .or_else(|| {
+                        self.session_memory
+                            .read()
+                            .get(id)
+                            .map(|m| m.experience.entities.clone())
+                    })
+                    .or_else(|| {
+                        self.long_term_memory
+                            .get(id)
+                            .ok()
+                            .map(|m| m.experience.entities.clone())
+                    })
+            };
             // Use IC-weighted BM25 search with phrase matching
             let term_weights = if ic_weights.is_empty() {
                 None
@@ -3237,6 +3257,58 @@ impl MemorySystem {
             // Signals come from ProspectiveTasks that matched the current query
             // via keyword or semantic similarity (built in recall handler C5).
             // RH-8 gate: prospective signal boost only runs in `Full` mode.
+            // SPECIFICITY / CONCENTRATION FUSION TERM (SHODH_SPEC_FUSION=<scale>, default OFF).
+            // Competitor-convergent anti-pollution lever (veld concentration ratio, Zep
+            // node-distance, Cognee ontology_valid trust-flag): down-weight DILUTED memories
+            // (the query matches only a small fraction of the memory's entities → broad/
+            // off-topic) and up-weight FOCUSED ones, query-conditional at rank time. This is
+            // the principled fix for "more entities pollute the graph" — it makes richer NER
+            // net-neutral instead of harmful. Multiplicative + clamped (veld-proven form);
+            // the additive G3 version is the refinement once this shows signal.
+            if let Some(scale) = std::env::var("SHODH_SPEC_FUSION")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|s| *s != 0.0)
+            {
+                const SPEC_CENTER: f32 = 0.33;
+                let q_terms: std::collections::HashSet<String> =
+                    tokenize_words(&query_text.to_lowercase())
+                        .into_iter()
+                        .filter(|w| w.len() > 2)
+                        .map(|w| w.to_string())
+                        .collect();
+                if q_terms.len() >= 2 {
+                    let ids: Vec<MemoryId> = fused.keys().cloned().collect();
+                    let mut adjusted = 0usize;
+                    for id in &ids {
+                        if let Some(ents) = get_entities(id) {
+                            if ents.len() >= 2 {
+                                // Concentration = fraction of the memory's entities the query mentions.
+                                let matched = ents
+                                    .iter()
+                                    .filter(|e| {
+                                        let el = e.to_lowercase();
+                                        q_terms.iter().any(|qt| el.contains(qt.as_str()))
+                                    })
+                                    .count();
+                                let concentration = matched as f32 / ents.len() as f32;
+                                let factor =
+                                    (1.0 + scale * (concentration - SPEC_CENTER)).clamp(0.70, 1.30);
+                                if let Some(score) = fused.get_mut(id) {
+                                    *score *= factor;
+                                    adjusted += 1;
+                                }
+                            }
+                        }
+                    }
+                    tracing::debug!(
+                        "SHODH_SPEC_FUSION: concentration term (scale={}) applied to {} candidates",
+                        scale,
+                        adjusted
+                    );
+                }
+            }
+
             if layer_full {
                 if let Some(ref signals) = query.prospective_signals {
                     if !signals.is_empty() {

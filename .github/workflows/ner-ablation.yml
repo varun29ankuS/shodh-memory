@@ -7,8 +7,6 @@ name: NER ablation (TinyBERT vs gliner-bi-edge)
 # variable is the NER. Reports the real recall@10 delta per category.
 
 on:
-  push:
-    branches: [exp/ner-gliner-ablation]
   workflow_dispatch:
 
 jobs:
