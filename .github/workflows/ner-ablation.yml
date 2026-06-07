@@ -51,9 +51,9 @@ jobs:
             --output base.json --storage ./s-base 2>&1 | tee base.log
           echo "baseline done"
 
-      - name: TREATMENT — gliner-bi-edge entities via SHODH_NER_REPLAY
+      - name: TREATMENT — gliner-bi-edge PER/ORG/LOC-filtered (MISC common-noun flood dropped)
         env:
-          SHODH_NER_REPLAY: tests/recall/locomo_ner_gliner.json
+          SHODH_NER_REPLAY: tests/recall/locomo_ner_gliner_filtered.json
         run: |
           ./target/release/recall-eval --suite locomo \
             --output treat.json --storage ./s-treat 2>&1 | tee treat.log
