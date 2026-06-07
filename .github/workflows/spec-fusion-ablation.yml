@@ -6,8 +6,6 @@ name: specificity-fusion ablation
 # convergent) improves recall@10. Only variable is the env scale.
 
 on:
-  push:
-    branches: [exp/ner-gliner-ablation]
   workflow_dispatch:
 
 jobs:

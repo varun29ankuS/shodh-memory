@@ -1,0 +1,76 @@
+name: layer ablation (per-stage attribution)
+
+# Runs the LoCoMo recall harness with --layer all: the cumulative pipeline ladder
+# (vamana-only → +spreading → +bm25 → +rerank → +facts → full). Each stage's
+# recall@10 delta = that layer's contribution. This is the ablation figure for
+# the VC deck — it shows exactly where recall is earned and where gold is lost.
+
+on:
+  push:
+    branches: [exp/ner-gliner-ablation]
+  workflow_dispatch:
+
+jobs:
+  layers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Run --layer all (cumulative ladder)
+        run: ./target/release/recall-eval --suite locomo --layer all --output layers.json --storage ./s-layers 2>&1 | tail -8
+
+      - name: Per-layer ablation table
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          d = json.load(open('layers.json'))
+          L = d.get('layers', {})
+          order = ['vamana-only', 'plus-spreading', 'plus-bm25', 'plus-rerank', 'plus-facts', 'full']
+          def r(v):
+              return v['recall@10'] if isinstance(v, dict) else v
+          print("## Per-layer ablation — LoCoMo recall@10 (cumulative ladder)\n")
+          print("| stage | recall@10 | Δ vs prev |")
+          print("| --- | --- | --- |")
+          prev = None
+          shown = False
+          for k in order:
+              if k in L:
+                  rk = r(L[k]); shown = True
+                  delta = "" if prev is None else f"{rk-prev:+.4f}"
+                  print(f"| {k} | {rk:.4f} | {delta} |")
+                  prev = rk
+          if not shown:
+              print("layers keys:", list(L.keys()))
+              print("```\n" + json.dumps(d, indent=1)[:1200] + "\n```")
+          # per-category at full (where the loss concentrates)
+          bc = d.get('by_category', {})
+          if bc:
+              print("\n### Full-pipeline recall@10 by category")
+              print("| category | recall@10 |\n| --- | --- |")
+              for c, v in sorted(bc.items()):
+                  print(f"| {c} | {r(v):.4f} |")
+          PY
