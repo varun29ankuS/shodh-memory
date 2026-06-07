@@ -917,7 +917,10 @@ mod tests {
         // Encrypt a record under the original epoch (0).
         let pre = RecordCryptors::from_keystore(&ks, &kek).unwrap();
         assert_eq!(pre.active_epoch(), 0);
-        let ct0 = pre.active().encrypt_record(b"pre-rotation-blob", b"").unwrap();
+        let ct0 = pre
+            .active()
+            .encrypt_record(b"pre-rotation-blob", b"")
+            .unwrap();
         assert_eq!(record_epoch(&ct0), Some(0));
 
         // Rotate the DEK -> epoch 1.
@@ -928,14 +931,23 @@ mod tests {
         assert_eq!(post.active_epoch(), 1, "writes now use epoch 1");
         // The pre-rotation record still decrypts under its retired epoch-0 DEK.
         assert_eq!(
-            post.for_epoch(0).unwrap().decrypt_record(&ct0, b"").unwrap(),
+            post.for_epoch(0)
+                .unwrap()
+                .decrypt_record(&ct0, b"")
+                .unwrap(),
             b"pre-rotation-blob"
         );
         // New writes go out at epoch 1 and round-trip.
-        let ct1 = post.active().encrypt_record(b"post-rotation-blob", b"").unwrap();
+        let ct1 = post
+            .active()
+            .encrypt_record(b"post-rotation-blob", b"")
+            .unwrap();
         assert_eq!(record_epoch(&ct1), Some(1));
         assert_eq!(
-            post.for_epoch(1).unwrap().decrypt_record(&ct1, b"").unwrap(),
+            post.for_epoch(1)
+                .unwrap()
+                .decrypt_record(&ct1, b"")
+                .unwrap(),
             b"post-rotation-blob"
         );
     }
