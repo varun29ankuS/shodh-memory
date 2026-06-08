@@ -168,9 +168,11 @@ impl RetrievalEngine {
     ) -> Result<Self> {
         let storage_path = storage.path().to_path_buf();
 
-        // Initialize Vamana index optimized for 10M+ memories per user
+        // Initialize Vamana index optimized for 10M+ memories per user.
+        // Dimension is the single source of truth (default 384; SHODH_TEXT_DIM=768
+        // for native nomic) — MUST match the embedder output or search misaligns.
         let vamana_config = VamanaConfig {
-            dimension: 384,        // MiniLM dimension
+            dimension: crate::embeddings::minilm::configured_text_dim(),
             max_degree: 32,        // Increased for better recall at scale
             search_list_size: 100, // 2x for better accuracy with 10M vectors
             alpha: 1.2,

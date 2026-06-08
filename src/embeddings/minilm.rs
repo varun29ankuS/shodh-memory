@@ -209,9 +209,13 @@ pub struct MiniLMEmbedder {
     /// Final, stored embedding dimension (always the 384-dim edge envelope).
     dimension: usize,
     /// Model's native hidden/output size used as the mean-pool stride. Equals
-    /// `dimension` for native-384 models; larger (768) for Matryoshka models
-    /// (nomic) that are pooled wide then truncated to `dimension`.
+    /// `dimension` for native-384 models; larger (768) for nomic, which is
+    /// pooled wide then (optionally) truncated to `dimension`.
     native_hidden: usize,
+    /// Apply nomic's parameter-free LayerNorm over the full `native_hidden`
+    /// width before any truncation. True for nomic (its reference recipe applies
+    /// it at EVERY output dim, 768 or truncated); false for all other models.
+    apply_prenorm: bool,
     /// Asymmetric instruction prefix prepended to QUERY text before encoding.
     /// Empty for symmetric models (MiniLM). Retrieval-tuned models like
     /// e5-small-v2 require `"query: "` / `"passage: "` to separate the query and
@@ -249,23 +253,50 @@ fn embedder_prefixes() -> (String, String) {
     }
 }
 
-/// Resolve `(native_hidden, output_dim)` from `SHODH_EMBEDDER`.
+/// The configured text-embedding dimension — the SINGLE SOURCE OF TRUTH that the
+/// embedder output, the Vamana index (`retrieval.rs`), and the stored vector
+/// metadata (`storage.rs`) must all agree on. A mismatch makes vector search
+/// stride over misaligned memory (silent corruption), so every consumer reads
+/// this one value.
 ///
-/// Most 384-dim models output exactly the edge-envelope dimension, so
-/// `native_hidden == output_dim == 384` (byte-identical to before). Matryoshka
-/// models (nomic-embed-text-v1.5) emit a larger native hidden size (768) that we
-/// mean-pool at full width, then truncate to the first 384 dims and
-/// re-normalize — yielding big-model quality at the same 384-dim RAM/index cost.
-/// The truncate-then-renormalize order is required: Matryoshka guarantees the
-/// leading-prefix subspace is a valid embedding only after its own L2 norm.
+/// Default 384 (MiniLM/bge/gte/mxbai, and nomic-Matryoshka truncated to 384).
+/// Set `SHODH_TEXT_DIM=768` to run nomic at its NATIVE 768 dim with no
+/// truncation — the experiment that decouples "is the embedder weak?" from "is
+/// 384 the binding constraint?". Only nomic supports 768; native-384 models
+/// ignore it (they cannot emit 768).
+pub fn configured_text_dim() -> usize {
+    static DIM: OnceLock<usize> = OnceLock::new();
+    *DIM.get_or_init(|| {
+        std::env::var("SHODH_TEXT_DIM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|d| [128, 256, 384, 512, 768, 1024].contains(d))
+            .unwrap_or(384)
+    })
+}
+
+/// True when `SHODH_EMBEDDER` selects nomic (needs the parameter-free LayerNorm).
+fn embedder_is_nomic() -> bool {
+    matches!(
+        std::env::var("SHODH_EMBEDDER")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "nomic" | "nomic-embed-text" | "nomic-embed-text-v1.5"
+    )
+}
+
+/// Resolve `(native_hidden, output_dim)` from `SHODH_EMBEDDER` + `SHODH_TEXT_DIM`.
+///
+/// - nomic: native_hidden = 768 (its true hidden size, the mean-pool stride);
+///   output_dim = `configured_text_dim()` (768 = native/no-truncation, or 384 =
+///   Matryoshka-truncated to the edge envelope).
+/// - all others: native-384, `(384, 384)` — byte-identical to before.
 fn embedder_dims() -> (usize, usize) {
-    match std::env::var("SHODH_EMBEDDER")
-        .unwrap_or_default()
-        .to_lowercase()
-        .as_str()
-    {
-        "nomic" | "nomic-embed-text" | "nomic-embed-text-v1.5" => (768, 384),
-        _ => (384, 384),
+    if embedder_is_nomic() {
+        (768, configured_text_dim())
+    } else {
+        (384, 384)
     }
 }
 
@@ -462,6 +493,7 @@ impl MiniLMEmbedder {
             simplified_mode: false,
             dimension,
             native_hidden,
+            apply_prenorm: embedder_is_nomic(),
             query_prefix,
             doc_prefix,
         };
@@ -549,6 +581,7 @@ impl MiniLMEmbedder {
             simplified_mode: true,
             dimension,
             native_hidden,
+            apply_prenorm: embedder_is_nomic(),
             query_prefix,
             doc_prefix,
         })
@@ -638,19 +671,19 @@ impl MiniLMEmbedder {
         Ok(embedding)
     }
 
-    /// Finalize a wide mean-pooled vector into the stored edge-envelope
-    /// embedding.
+    /// Finalize a wide mean-pooled vector into the stored embedding.
     ///
     /// Native-384 models (MiniLM/bge/gte/mxbai): scrub NaN/Inf → L2-normalize,
-    /// byte-identical to the prior path (no truncation, no layer-norm).
+    /// byte-identical to the prior path (no LayerNorm, no truncation).
     ///
-    /// Matryoshka models (nomic, `native_hidden > dimension`): scrub →
-    /// parameter-free LayerNorm over the FULL `native_hidden` width → truncate to
-    /// the leading `dimension` dims → L2-normalize. This is nomic's exact
-    /// reference recipe (`F.layer_norm(x, (hidden,))` with no learned affine, then
-    /// `x[:, :d]`, then `F.normalize`). Order is load-bearing: the layer-norm must
-    /// see all 768 dims, and the L2 norm must be the LAST step on the truncated
-    /// prefix, or the Matryoshka subspace is not a valid unit embedding.
+    /// nomic (`apply_prenorm`): scrub → parameter-free LayerNorm over the FULL
+    /// `native_hidden` (768) width → truncate to the leading `dimension` dims (a
+    /// no-op when running native 768) → L2-normalize. This is nomic's exact
+    /// reference recipe (`F.layer_norm(x, (768,))` no learned affine, then
+    /// `x[:, :d]`, then `F.normalize`). The LayerNorm is gated on the MODEL, not
+    /// on truncation: nomic applies it at every output dim (768 or truncated).
+    /// Order is load-bearing — LayerNorm sees all 768 dims, L2 is the last step on
+    /// the (possibly truncated) prefix, or the embedding is not a valid unit vector.
     fn finalize_pooled(&self, mut pooled: Vec<f32>) -> Vec<f32> {
         for val in pooled.iter_mut() {
             if val.is_nan() || val.is_infinite() {
@@ -658,7 +691,7 @@ impl MiniLMEmbedder {
             }
         }
 
-        if self.native_hidden > self.dimension {
+        if self.apply_prenorm {
             // Parameter-free LayerNorm across the full native width (nomic recipe).
             let n = pooled.len() as f32;
             let mean = pooled.iter().sum::<f32>() / n;
@@ -669,6 +702,10 @@ impl MiniLMEmbedder {
                     *val = (*val - mean) / denom;
                 }
             }
+        }
+
+        // Matryoshka truncation to the configured output dim (no-op at native 768).
+        if pooled.len() > self.dimension {
             pooled.truncate(self.dimension);
         }
 
