@@ -50,10 +50,12 @@ jobs:
           [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
           [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
 
+      # --output is clap-required even though --graph-reachability short-circuits
+      # the recall run (bin returns early), so it is required-but-ignored here.
       - name: A reachability — Tier-4 OFF (baseline)
-        run: set -o pipefail; ./target/release/recall-eval --suite locomo --graph-reachability ra.json --storage ./s-ra 2>&1 | tail -25
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --graph-reachability ra.json --output oa.json --storage ./s-ra 2>&1 | tail -25
       - name: B reachability — Tier-4 ON (name embeddings)
-        run: set -o pipefail; SHODH_EVAL_NAME_EMB=1 ./target/release/recall-eval --suite locomo --graph-reachability rb.json --storage ./s-rb 2>&1 | tail -25
+        run: set -o pipefail; SHODH_EVAL_NAME_EMB=1 ./target/release/recall-eval --suite locomo --graph-reachability rb.json --output ob.json --storage ./s-rb 2>&1 | tail -25
 
       - name: Compare (EFFECT + MECHANISM)
         if: always()
