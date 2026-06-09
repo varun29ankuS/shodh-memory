@@ -529,7 +529,7 @@ fn ppr_edge_weight(
 }
 
 /// Personalized PageRank / Random-Walk-with-Restart over the local entity subgraph —
-/// the principled, convergent form of spreading activation (HippoRAG). Seeds the restart
+/// the principled, convergent form of spreading activation (PPR over the entity KG). Seeds the restart
 /// vector with the query-entity activations, BFS-expands a bounded subgraph, then
 /// power-iterates `r = (1-α)·Wᵀr + α·p` (α = restart prob). Multi-hop mass and multi-seed
 /// "bridge" boosting fall out for free. Returns (entity → stationary activation, traversed
@@ -540,7 +540,7 @@ fn personalized_pagerank(
     intent: Option<&OntologicalIntent>,
     predicate_weights: bool,
 ) -> Result<(HashMap<Uuid, f32>, Vec<Uuid>)> {
-    const ALPHA: f32 = 0.5; // restart probability (HippoRAG damping=0.5)
+    const ALPHA: f32 = 0.5; // restart probability (PPR damping = 0.5)
     const ITERS: usize = 30;
     const TOL: f32 = 1e-6;
     const EXPAND_HOPS: usize = 3;
@@ -667,7 +667,7 @@ fn reachable_inject(
     // Keep only the strongest-path reachable entities. Threshold-free expansion over a
     // hub (degree 225 on LoCoMo) otherwise floods the candidate set — every reachable
     // episode becomes a candidate, blowing up the O(n²) lateral-inhibition pass and the
-    // downstream pool. The competitor audit (HippoRAG/Graphiti) inject a BOUNDED, ranked
+    // downstream pool. KG-RAG systems inject a BOUNDED, ranked
     // set, not everything reachable. 1-hop gold (96% of cases) carries the strongest
     // activation, so it survives the cap.
     const REACH_MAX_ENTITIES: usize = 128;
@@ -1016,7 +1016,7 @@ pub fn spreading_activation_retrieve_with_stats(
     let mut traversed_edges: Vec<Uuid>;
 
     // SHODH_PPR: replace the hand-rolled BFS spread with Personalized PageRank — the
-    // convergent, mass-conserving form of spreading activation (HippoRAG). The seed
+    // convergent, mass-conserving form of spreading activation (PPR). The seed
     // activation_map becomes the restart vector; PPR's stationary distribution becomes the
     // new activation_map consumed by the shared episode-scoring path below.
     let ppr_enabled = std::env::var("SHODH_PPR")

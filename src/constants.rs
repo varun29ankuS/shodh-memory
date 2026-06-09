@@ -250,7 +250,7 @@ pub const EDGE_SEMANTIC_WEIGHT_FLOOR: f32 = 0.2;
 /// the base edge strength. A ≤-chance pair has PPMI=0; this floor keeps a weak edge for any
 /// observed co-occurrence rather than deleting the association outright (a single
 /// co-occurrence is still weak evidence, not zero). Replaces the selectivity-IDF proxy as
-/// the principled, frequency-aware edge weighting (HippoRAG/GraphRAG edge statistics).
+/// the principled, frequency-aware edge weighting (KG-RAG edge statistics).
 pub const GRAPH_PMI_WEIGHT_FLOOR: f32 = 0.1;
 
 /// Whether to apply degree normalization during spreading activation.

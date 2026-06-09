@@ -1,6 +1,6 @@
 name: GLiREL on-device probe (P1 foundation gate)
 
-# The whole "local HippoRAG" roadmap hinges on running typed relation extraction
+# The whole local relation-graph memory roadmap hinges on running typed relation extraction
 # on-device, LLM-free. GLiREL is the candidate RE engine (GLiNER-family). This probe
 # answers, with evidence not assumption: (1) backbone + param count (edge-deployable?),
 # (2) does it run a sample relation extraction, (3) does it EXPORT TO ONNX (the Rust
@@ -52,8 +52,8 @@ jobs:
               print("config introspect failed:", e)
           # 2) sample relation extraction
           print("=== sample predict_relations ===")
-          tokens = "Bernal Jimenez Gutierrez works with Yu Su at Ohio State University on HippoRAG".split()
-          ner = [[0,2,'PERSON','Bernal Jimenez Gutierrez'],[5,6,'PERSON','Yu Su'],[7,9,'ORG','Ohio State University']]
+          tokens = "Alice collaborates with Bob at Acme Corporation on a research project".split()
+          ner = [[0,0,'PERSON','Alice'],[3,3,'PERSON','Bob'],[5,6,'ORG','Acme Corporation']]
           labels = ["works with","employed by","affiliated with","located in","collaborates on"]
           try:
               t0=time.time()
