@@ -1,0 +1,86 @@
+name: ① pre-test — does edge TYPING move the 51% reach? (cheap, no new code)
+
+# Before building the embedder-reuse relation typer (O(n^2) embeds at ingest), test the
+# HYPOTHESIS cheaply with the EXISTING typing lever: SHODH_GRAPH_EXTRACTED_PREDICATES
+# (default ON, +0.033 multi_hop). Arm A = typing ON (default). Arm B = typing OFF (falls
+# back to label-heuristic / mostly CoOccurs). Read the funnel GRAPH present%:
+#   - if OFF drops present% below 51% → typing AFFECTS reach → build the better typer (①).
+#   - if present% stays ~51% regardless → typing only moves RANKING, not reach → the 51%
+#     ceiling is edge EXISTENCE (cross-memory entity resolution / bridges), NOT typing →
+#     PIVOT ① to edge-existence, skip the expensive embedder typer.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/graph-typing-ab.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  typing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — typing ON (default)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — typing OFF
+        run: set -o pipefail; SHODH_GRAPH_EXTRACTED_PREDICATES=0 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: A funnel — typing ON
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
+      - name: B funnel — typing OFF
+        run: set -o pipefail; SHODH_GRAPH_EXTRACTED_PREDICATES=0 ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          a=load("a.json"); b=load("b.json"); fa=load("fa.json"); fb=load("fb.json")
+          def rec(d,c):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if c=='ALL' else d['by_category'][c]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          print("## ① pre-test — edge typing ON vs OFF (does typing move reach?)\n")
+          print("### recall@10\n| cat | typing ON | typing OFF | Δ(off) |")
+          print("| --- | --- | --- | --- |")
+          for c in cats:
+              print(f"| {c} | {rec(a,c):.4f} | {rec(b,c):.4f} | {rec(b,c)-rec(a,c):+.4f} |")
+          def g(fn,stage,k):
+              if not fn: return float('nan')
+              for r in fn.get('overall',[]):
+                  if r['stage']==stage: return r.get(k,float('nan'))
+              return float('nan')
+          print("\n### funnel GRAPH stage (the reach metric)\n| metric | typing ON | typing OFF |")
+          print("| --- | --- | --- |")
+          for k in ('present_pct','top10_pct','mean_rank_when_present'):
+              print(f"| graph {k} | {g(fa,'graph',k):.2f} | {g(fb,'graph',k):.2f} |")
+          print("\n**Verdict:** if graph present% is ~equal ON vs OFF → typing does NOT move REACH (only ranking) → the 51% ceiling is edge EXISTENCE, PIVOT ① to entity-resolution/bridges, skip the embedder typer. If OFF drops present% → typing affects reach → build the better (embedder) typer.")
+          PY
