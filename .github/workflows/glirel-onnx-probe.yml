@@ -26,6 +26,9 @@ jobs:
           set -o pipefail
           python -m pip install --upgrade pip
           pip install glirel onnx onnxruntime loguru sentencepiece protobuf 2>&1 | tail -5
+          # glirel was built against an older huggingface_hub API (_from_pretrained still
+          # took proxies/resume_download). Pin <0.26 so model load works.
+          pip install "huggingface_hub<0.26" 2>&1 | tail -3
           pip install "optimum[exporters]" 2>&1 | tail -5 || echo "optimum install failed (non-fatal)"
       - name: Probe — architecture, sample run, ONNX export
         run: |
