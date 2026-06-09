@@ -725,6 +725,14 @@ pub fn ingest_corpus(
     let mut map = HashMap::with_capacity(corpus.len());
     let ner = manager.get_neural_ner();
     let user_mem = manager.get_user_memory(EVAL_USER)?;
+    // Eval-fidelity gate: production embeds entity names so Tier-4 embedding
+    // concept-merge runs (cross-memory entity resolution). The eval passed None →
+    // Tier-4 OFF → entities under-resolved vs prod (every reach number measured
+    // without it). SHODH_EVAL_NAME_EMB=1 populates name embeddings, matching the
+    // handler (remember.rs:740). Default off → byte-identical (None).
+    let name_emb_on = std::env::var("SHODH_EVAL_NAME_EMB")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     for item in corpus {
         // Pass 1: NER (faithful to the handler's NerEntityRecord shape).
         let ner_entities: Vec<NerEntityRecord> = match ner.extract(&item.content) {
@@ -749,6 +757,19 @@ pub fn ingest_corpus(
             }
         }
 
+        // Embed entity/tag names so Tier-4 concept-merge runs (gated; see above).
+        // Computed before `merged` is moved into the experience.
+        let name_embeddings: Option<HashMap<String, Vec<f32>>> =
+            if name_emb_on && !merged.is_empty() {
+                let refs: Vec<&str> = merged.iter().map(|s| s.as_str()).collect();
+                match user_mem.read().get_embedder().encode_batch(&refs) {
+                    Ok(vecs) => Some(merged.iter().cloned().zip(vecs).collect()),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+
         let experience = Experience {
             experience_type: experience_type_for(&item.memory_type),
             content: item.content.clone(),
@@ -766,7 +787,12 @@ pub fn ingest_corpus(
         // Pass 2: build the entity graph from this memory (the step the bare
         // MemorySystem path skipped entirely).
         manager
-            .process_experience_into_graph(EVAL_USER, &experience, &memory_id, None)
+            .process_experience_into_graph(
+                EVAL_USER,
+                &experience,
+                &memory_id,
+                name_embeddings.as_ref(),
+            )
             .with_context(|| format!("graph-processing corpus item {}", item.id))?;
 
         map.insert(item.id.clone(), memory_id.0);

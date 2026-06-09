@@ -1,0 +1,87 @@
+name: ① entity-resolution A/B — does Tier-4 merge lift the 51% reach?
+
+# The funnel + the typing pre-test pinned the 51% graph-reach ceiling on edge EXISTENCE
+# (cross-memory entities under-merged → no bridge edge). DISCOVERY: the eval ingest passed
+# None for name-embeddings → Tier-4 embedding concept-merge was OFF in EVERY measurement →
+# entities under-resolved vs production. SHODH_EVAL_NAME_EMB=1 turns it on (matching the
+# handler). Arm A = off (today's baseline). Arm B = on. KEY metric = funnel GRAPH present%:
+#   - B present% rises past 51% → entity resolution IS the reach lever (and the 51% was partly
+#     an eval-fidelity artifact). Build it out (P1).
+#   - B ~= 51% → Tier-4 merge doesn't add bridges either → reach gap is deeper (coref / truly
+#     absent relations) → next pivot.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/graph-entityres-ab.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  entityres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — Tier-4 OFF (baseline)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — Tier-4 ON (name embeddings)
+        run: set -o pipefail; SHODH_EVAL_NAME_EMB=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: A funnel — Tier-4 OFF
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
+      - name: B funnel — Tier-4 ON
+        run: set -o pipefail; SHODH_EVAL_NAME_EMB=1 ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          a=load("a.json"); b=load("b.json"); fa=load("fa.json"); fb=load("fb.json")
+          def rec(d,c):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if c=='ALL' else d['by_category'][c]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          print("## ① entity-resolution A/B — Tier-4 concept merge OFF vs ON\n")
+          print("### recall@10\n| cat | OFF | ON | Δ |")
+          print("| --- | --- | --- | --- |")
+          for c in cats:
+              print(f"| {c} | {rec(a,c):.4f} | {rec(b,c):.4f} | {rec(b,c)-rec(a,c):+.4f} |")
+          def g(fn,stage,k):
+              if not fn: return float('nan')
+              for r in fn.get('overall',[]):
+                  if r['stage']==stage: return r.get(k,float('nan'))
+              return float('nan')
+          print("\n### funnel GRAPH stage (THE reach metric)\n| metric | OFF | ON |")
+          print("| --- | --- | --- |")
+          for k in ('present_pct','top10_pct','mean_rank_when_present'):
+              print(f"| graph {k} | {g(fa,'graph',k):.2f} | {g(fb,'graph',k):.2f} |")
+          print("\n**Verdict:** graph present% ON > 51% → entity resolution (Tier-4) lifts REACH → it's the lever (and 51% was partly an eval-fidelity artifact); build P1. ~equal → Tier-4 doesn't add bridges → reach gap is deeper (coref / truly-absent edges). AUDIT: also confirm multi_hop moves WITH present% (cross-check), and watch for OVER-merge (a category regressing = distinct entities wrongly merged).")
+          PY
