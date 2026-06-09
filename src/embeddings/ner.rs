@@ -988,7 +988,11 @@ impl NeuralNer {
                             .is_some_and(|slice| slice.eq_ignore_ascii_case(&e.name))
                     })
                     .map(|(pos, _)| (pos, pos + name_len))
-                    .unwrap_or((0, name_len.min(text.len())));
+                    // Not found in the source text (e.g. the extractor normalised the
+                    // surface form): emit a zero-width span at offset 0 to signal
+                    // "position unknown" rather than fabricating a (0, name_len) span
+                    // that falsely claims the first name_len bytes are this entity.
+                    .unwrap_or((0, 0));
 
                 NerEntity {
                     text: e.name,

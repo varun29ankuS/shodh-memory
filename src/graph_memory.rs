@@ -2345,23 +2345,27 @@ impl GraphMemory {
             stemmed_index.insert(stemmed_name.clone(), entity.uuid);
         }
 
-        // Update entity embedding cache for future concept merges
+        // Update entity embedding cache for future concept merges.
+        // Recency-of-mention ordering: the front is the least-recently-mentioned
+        // entry (the eviction victim), the back is the most recent. A re-mention
+        // counts as an access and moves the entry to the back, so the drain below
+        // removes genuinely cold entities rather than merely the earliest-added
+        // (which may still be hot). Only matters once the graph exceeds
+        // ENTITY_EMBEDDING_CACHE_MAX (10k) distinct embedded entities.
         if let Some(ref emb) = entity.name_embedding {
             let mut cache = self.entity_embedding_cache.write();
             if is_new_entity {
                 cache.push((entity.uuid, emb.clone()));
-                // Evict oldest entries when cache exceeds the configured maximum.
-                // Oldest entries (index 0) are typically the least recently mentioned
-                // since they were loaded at startup or added earliest.
                 if cache.len() > ENTITY_EMBEDDING_CACHE_MAX {
                     let excess = cache.len() - ENTITY_EMBEDDING_CACHE_MAX;
                     cache.drain(..excess);
                 }
-            } else {
-                // Update existing entry in cache (embedding may have changed)
-                if let Some(entry) = cache.iter_mut().find(|(uuid, _)| *uuid == entity.uuid) {
-                    entry.1 = emb.clone();
-                }
+            } else if let Some(pos) = cache.iter().position(|(uuid, _)| *uuid == entity.uuid) {
+                // Re-mention: refresh the (possibly changed) embedding and promote
+                // to the back as the most-recently-accessed entry.
+                let mut entry = cache.remove(pos);
+                entry.1 = emb.clone();
+                cache.push(entry);
             }
         }
 
