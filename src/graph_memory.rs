@@ -1117,7 +1117,10 @@ impl RelationshipEdge {
             EdgeTier::L2Episodic | EdgeTier::L3Semantic => {
                 // L2/L3: Wixted 2004 hybrid (exponential consolidation → power-law long-term)
                 let days = hours_elapsed / 24.0;
-                let is_potentiated = ltp_factor < 0.5; // Weekly or Full LTP
+                // Burst/Weekly/Full LTP all use the potentiated (slower) power-law.
+                // decay_factor() returns exactly 0.5 for Burst, so `<` would exclude it
+                // (off-by-one) and decay Burst edges at the non-potentiated rate.
+                let is_potentiated = ltp_factor <= 0.5;
                 let decay = crate::decay::hybrid_decay_factor(days, is_potentiated);
                 let prune_threshold = self.tier.prune_threshold();
                 // Min age before pruning: 30 days for L2, 90 days for L3
@@ -1221,7 +1224,8 @@ impl RelationshipEdge {
             EdgeTier::L2Episodic | EdgeTier::L3Semantic => {
                 // Wixted 2004 hybrid: exponential consolidation → power-law long-term
                 let days = hours_elapsed / 24.0;
-                let is_potentiated = ltp_factor < 0.5;
+                // Inclusive: Burst decay_factor() == 0.5 must take the potentiated path.
+                let is_potentiated = ltp_factor <= 0.5;
                 (
                     crate::decay::hybrid_decay_factor(days, is_potentiated),
                     false,

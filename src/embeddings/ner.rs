@@ -1000,6 +1000,10 @@ impl NeuralNer {
             })
             .collect();
 
+        // Dedup to match the neural/batch paths — the heuristic extractor can emit
+        // the same surface mention more than once (e.g. repeated occurrences).
+        let entities = self.deduplicate_entities(entities);
+
         Ok(entities)
     }
 }
