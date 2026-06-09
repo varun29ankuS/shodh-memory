@@ -2999,12 +2999,34 @@ impl MemorySystem {
                 .fold(0.0_f32, f32::max)
                 .max(1e-6);
 
+            // SHODH_FUSION_SUM: calibrated weighted-SUM fusion. Each leg's raw score is
+            // min-max normalised to [0,1] then linearly combined with sweepable weights
+            // (SHODH_FW_VEC / _BM25 / _GRAPH). Unlike flat-MAX (which keeps the best single
+            // leg per candidate), vector AND BM25 both contribute additively, and the sweep
+            // finds the mix that ranks the present-but-buried gold (96% present at fusion,
+            // mean-rank 14.3) into top-10. Default off → fusion unchanged.
+            let sum_fusion = std::env::var("SHODH_FUSION_SUM")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let env_w = |key: &str, default: f32| -> f32 {
+                std::env::var(key)
+                    .ok()
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .unwrap_or(default)
+            };
+            let fw_graph = env_w("SHODH_FW_GRAPH", 0.3);
+            let fw_vec = env_w("SHODH_FW_VEC", 0.6);
+            let fw_bm25 = env_w("SHODH_FW_BM25", 0.4);
+
             // Graph leg.
             for (r, (id, activation, h)) in graph_results.iter().enumerate() {
                 if !graph_leg_on {
                     break; // SHODH_LEG=bm25|vector isolates the hybrid leg
                 }
-                let rrf_score = if v2_fusion {
+                let rrf_score = if sum_fusion {
+                    // Calibrated weighted-SUM: graph leg enters at fw_graph·(activation/max).
+                    fw_graph * (activation / max_activation).clamp(0.0, 1.0)
+                } else if v2_fusion {
                     // Borda (rank-1 ≈ full graph_w) + CONFIDENCE rescue: every graph
                     // candidate gets graph_w·(activation/max) added, so a strongly
                     // activated hit reaches up to 2·graph_w and can beat a lexical
@@ -3026,8 +3048,8 @@ impl MemorySystem {
                 *fused.entry(id.clone()).or_insert(0.0) += rrf_score;
                 heb.insert(id.clone(), *h);
 
-                // Multiplicative activation bonus (RRF-only; no-op under ACT-R / V2).
-                let activation_factor = if actr_fusion || v2_fusion {
+                // Multiplicative activation bonus (RRF-only; no-op under ACT-R / V2 / SUM).
+                let activation_factor = if actr_fusion || v2_fusion || sum_fusion {
                     1.0
                 } else {
                     1.0 + graph_w
@@ -3076,7 +3098,15 @@ impl MemorySystem {
 
             // Hybrid (BM25+vector) leg.
             for (r, (id, hybrid_raw)) in hybrid_ids.iter().enumerate() {
-                let hybrid_rrf = if flat_fusion {
+                let hybrid_rrf = if sum_fusion {
+                    // Calibrated weighted-SUM: vector and BM25 each min-max normalised and
+                    // added with sweepable weights. The sweep (SHODH_FW_VEC/_BM25) tunes the
+                    // mix; additive (not max) so a candidate strong in BOTH legs outranks one
+                    // strong in a single leg — the consensus signal max-fusion discards.
+                    let (bm25, vec) = hybrid_components.get(id).copied().unwrap_or((0.0, 0.0));
+                    fw_vec * (vec / max_vec).clamp(0.0, 1.0)
+                        + fw_bm25 * (bm25 / max_bm).clamp(0.0, 1.0)
+                } else if flat_fusion {
                     // The flatten, max-fusion form: per-candidate MAX of the calibrated
                     // vector/BM25 legs (+ a small consensus bonus on the MIN). A candidate
                     // strong in EITHER leg keeps a high score — so BM25's lexical crowd can't
