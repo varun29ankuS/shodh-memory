@@ -25,7 +25,7 @@ jobs:
         run: |
           set -o pipefail
           python -m pip install --upgrade pip
-          pip install glirel onnx onnxruntime 2>&1 | tail -5
+          pip install glirel onnx onnxruntime loguru sentencepiece protobuf 2>&1 | tail -5
           pip install "optimum[exporters]" 2>&1 | tail -5 || echo "optimum install failed (non-fatal)"
       - name: Probe — architecture, sample run, ONNX export
         run: |
