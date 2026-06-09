@@ -2957,7 +2957,7 @@ impl MemorySystem {
             // instead of being RRF-buried by BM25's lexical crowd in the hybrid pre-fusion
             // (funnel-located: the entire multi_hop loss is vector 7.4 → hybrid 28.4). Implies
             // the calibrated graph leg. hybrid_w is split; vector trusted more by default.
-            let flat_fusion = std::env::var("SHODH_FUSION_FLAT")
+            let explicit_flat = std::env::var("SHODH_FUSION_FLAT")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
             // Consensus weight for the MIN leg in the max-fusion (a candidate present in BOTH
@@ -3017,6 +3017,20 @@ impl MemorySystem {
             let fw_graph = env_w("SHODH_FW_GRAPH", 0.3);
             let fw_vec = env_w("SHODH_FW_VEC", 0.6);
             let fw_bm25 = env_w("SHODH_FW_BM25", 0.4);
+
+            // SHODH_FUSION_FLAT (calibrated-max) is now the DEFAULT fusion: measured
+            // +0.0665 recall@10 ALL (RRF 0.6188 → 0.6853), funnel fusion mean-rank 14.3→8.25,
+            // top10 68.7→76.0 (runs 27216648530 + 27218456694, reproduced identically). The
+            // per-candidate MAX of the calibrated vector/BM25 legs (+ small consensus on the
+            // min) and the calibrated graph leg keep a single-leg-strong gold from being
+            // RRF-buried by the lexical crowd. It is on UNLESS another explicit fusion mode
+            // (V2 / ACT-R / SUM) is requested, or SHODH_FUSION_RRF selects the legacy
+            // rank-reciprocal fusion (escape hatch). Explicit SHODH_FUSION_FLAT still forces it.
+            let rrf_escape = std::env::var("SHODH_FUSION_RRF")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let flat_fusion = explicit_flat
+                || (!rrf_escape && !v2_fusion && !actr_fusion && !sum_fusion);
 
             // Graph leg.
             for (r, (id, activation, h)) in graph_results.iter().enumerate() {
