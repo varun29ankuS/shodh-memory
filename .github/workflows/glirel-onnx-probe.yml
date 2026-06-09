@@ -1,0 +1,90 @@
+name: GLiREL on-device probe (P1 foundation gate)
+
+# The whole "local HippoRAG" roadmap hinges on running typed relation extraction
+# on-device, LLM-free. GLiREL is the candidate RE engine (GLiNER-family). This probe
+# answers, with evidence not assumption: (1) backbone + param count (edge-deployable?),
+# (2) does it run a sample relation extraction, (3) does it EXPORT TO ONNX (the Rust
+# inference path, same route as the GLiNER NER export). Success → P1 substrate swap is
+# unblocked. Failure → we learn the exact export blocker and pick another RE engine.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/glirel-onnx-probe.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install GLiREL + ONNX tooling
+        run: |
+          set -o pipefail
+          python -m pip install --upgrade pip
+          pip install glirel onnx onnxruntime 2>&1 | tail -5
+          pip install "optimum[exporters]" 2>&1 | tail -5 || echo "optimum install failed (non-fatal)"
+      - name: Probe — architecture, sample run, ONNX export
+        run: |
+          set -o pipefail
+          python - <<'PY'
+          import sys, time, traceback
+          print("=== GLiREL load ===")
+          from glirel import GLiREL
+          import torch
+          model = GLiREL.from_pretrained("jackboyla/glirel-large-v0")
+          model.eval()
+          # 1) architecture + size
+          n_params = sum(p.numel() for p in model.parameters())
+          print(f"PARAMS: {n_params/1e6:.1f}M")
+          # backbone name
+          bb = None
+          for attr in ("model", "token_rep_layer", "transformer", "encoder", "bert"):
+              if hasattr(model, attr):
+                  print(f"has submodule: {attr} -> {type(getattr(model, attr)).__name__}")
+          try:
+              cfg = getattr(model, "config", None) or getattr(getattr(model,"model",None),"config",None)
+              print("CONFIG model_type:", getattr(cfg, "model_type", "?"), "| name:", getattr(cfg,"_name_or_path","?"))
+          except Exception as e:
+              print("config introspect failed:", e)
+          # 2) sample relation extraction
+          print("=== sample predict_relations ===")
+          tokens = "Bernal Jimenez Gutierrez works with Yu Su at Ohio State University on HippoRAG".split()
+          ner = [[0,2,'PERSON','Bernal Jimenez Gutierrez'],[5,6,'PERSON','Yu Su'],[7,9,'ORG','Ohio State University']]
+          labels = ["works with","employed by","affiliated with","located in","collaborates on"]
+          try:
+              t0=time.time()
+              rels = model.predict_relations(tokens, labels, threshold=0.0, ner=ner, top_k=3)
+              dt=(time.time()-t0)*1000
+              print(f"predict_relations OK in {dt:.0f} ms; got {len(rels)} relations:")
+              for r in rels[:5]:
+                  print("  ", r)
+          except Exception:
+              print("predict_relations FAILED:"); traceback.print_exc()
+          # 3) ONNX export attempt (encoder backbone via torch.onnx)
+          print("=== ONNX export attempt ===")
+          try:
+              import onnx, onnxruntime  # noqa
+              # Try optimum first (handles HF encoders)
+              ok=False
+              try:
+                  from optimum.exporters.onnx import main_export
+                  cfgname = getattr(getattr(model,"config",None),"_name_or_path",None)
+                  if cfgname:
+                      main_export(model_name_or_path=cfgname, output="onnx_backbone", task="feature-extraction")
+                      import os
+                      sz=sum(os.path.getsize(os.path.join("onnx_backbone",f)) for f in os.listdir("onnx_backbone") if f.endswith(".onnx"))
+                      print(f"OPTIMUM backbone export OK; onnx size {sz/1e6:.0f} MB")
+                      ok=True
+              except Exception:
+                  print("optimum backbone export failed:"); traceback.print_exc()
+              if not ok:
+                  print("=> backbone exports via optimum is the path IF model_type is standard (deberta/bert).")
+              print("NOTE: the GLiREL relation HEAD + span scoring needs custom ONNX wiring (same as GLiNER NER export #237).")
+          except Exception:
+              print("onnx tooling import failed:"); traceback.print_exc()
+          print("=== PROBE DONE ===")
+          PY
