@@ -2988,6 +2988,16 @@ impl MemorySystem {
                 .and_then(|s| s.parse::<f32>().ok())
                 .unwrap_or(0.3)
                 .clamp(0.0, 1.0);
+            // SHODH_FLAT_VEC_TRUST: multiplier on the vector leg inside the flat-MAX. The
+            // per-category funnel showed the vector leg ranks gold better (mean-rank ~3.7-4.5)
+            // than FLAT fusion achieves (~8-10) — fusion dilutes the strong vector signal.
+            // >1 lifts a vector-strong candidate in the max without hurting a BM25-strong gold
+            // (which still wins via bn). Default 1.0 → unchanged.
+            let flat_vec_trust = std::env::var("SHODH_FLAT_VEC_TRUST")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(1.0)
+                .max(0.0);
             let max_vec = hybrid_components
                 .values()
                 .map(|(_, v)| *v)
@@ -3129,7 +3139,7 @@ impl MemorySystem {
                     // (measured: monotonic multi_hop↔single_hop tradeoff); max preserves the
                     // best signal per candidate.
                     let (bm25, vec) = hybrid_components.get(id).copied().unwrap_or((0.0, 0.0));
-                    let vn = (vec / max_vec).clamp(0.0, 1.0);
+                    let vn = (vec / max_vec).clamp(0.0, 1.0) * flat_vec_trust;
                     let bn = (bm25 / max_bm).clamp(0.0, 1.0);
                     let (hi, lo) = if vn >= bn { (vn, bn) } else { (bn, vn) };
                     hybrid_w * (hi + flat_consensus * lo)

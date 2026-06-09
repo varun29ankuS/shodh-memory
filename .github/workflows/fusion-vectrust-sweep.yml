@@ -1,0 +1,100 @@
+name: ⑥ FLAT vector-trust sweep — capture the rank-9-15 buried gold
+
+# FLAT is now default (+0.0665). By-category funnel: gold present 96-98% at fusion but FLAT
+# mean-rank 8-10 (single/multi) — 20-23pp present-but-buried. The vector LEG ranks gold better
+# (mean-rank 3.7-4.5) than FLAT fusion achieves → fusion dilutes the vector signal. New knob
+# SHODH_FLAT_VEC_TRUST multiplies the vector leg inside the flat-MAX (BM25-strong gold still
+# wins via bn, so single_hop is protected). Sweep finds the trust that pulls multi_hop/single
+# gold toward the vector peak without regressing.
+#   A=FLAT(trust1.0, =default)  B=1.3  C=1.6  D=2.0
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/fusion-vectrust-sweep.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  vectrust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — vec_trust 1.0 (FLAT default)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — vec_trust 1.3
+        run: set -o pipefail; SHODH_FLAT_VEC_TRUST=1.3 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — vec_trust 1.6
+        run: set -o pipefail; SHODH_FLAT_VEC_TRUST=1.6 ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+      - name: D recall — vec_trust 2.0
+        run: set -o pipefail; SHODH_FLAT_VEC_TRUST=2.0 ./target/release/recall-eval --suite locomo --repeats 1 --output d.json --storage ./s-d 2>&1 | tail -3
+      - name: A funnel — vec_trust 1.0
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
+      - name: B funnel — vec_trust 1.6
+        run: set -o pipefail; SHODH_FLAT_VEC_TRUST=1.6 ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'t1.0':load('a.json'),'t1.3':load('b.json'),'t1.6':load('c.json'),'t2.0':load('d.json')}
+          def rec(d,cat):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if cat=='ALL' else d['by_category'][cat]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          names=list(arms.keys())
+          print("## ⑥ FLAT vector-trust sweep — recall@10 (baseline FLAT=t1.0=0.6853)\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          for cat in cats:
+              print(f"| {cat} | "+" | ".join(f"{rec(arms[n],cat):.4f}" for n in names)+" |")
+          print("\n**Δ ALL vs t1.0:** "+", ".join(f"{n} {rec(arms[n],'ALL')-rec(arms['t1.0'],'ALL'):+.4f}" for n in names if n!='t1.0'))
+          def g(fn,stage,k):
+              if not fn: return float('nan')
+              for r in fn.get('overall',[]):
+                  if r['stage']==stage: return r.get(k,float('nan'))
+              return float('nan')
+          fa=load('fa.json'); fb=load('fb.json')
+          print("\n### funnel FUSION — t1.0 vs t1.6\n| metric | t1.0 | t1.6 |")
+          print("| --- | --- | --- |")
+          for k in ('present_pct','top10_pct','mean_rank_when_present'):
+              print(f"| fusion {k} | {g(fa,'fusion',k):.2f} | {g(fb,'fusion',k):.2f} |")
+          print("\n**Decision:** a trust>1 lifts ALL + fusion top10% / lowers mean_rank with NO category regressing → fold the best trust into the default (PR). single_hop must NOT regress (bm25-strong gold should still win via bn — if single drops, trust is over-boosting vector noise). All flat ⇒ vector dilution wasn't the binding constraint → pivot to learned weights (C) or leg improvements.")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fusion-vectrust-json
+          path: "*.json"
+          if-no-files-found: warn
