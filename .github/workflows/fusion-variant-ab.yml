@@ -1,0 +1,101 @@
+name: ③ fusion-variant A/B — lift the 28pp present-but-buried gold into top-10
+
+# The reach-inject A/B (27211082884) located the lever via the baseline funnel: gold is 96.3%
+# PRESENT at fusion but only 68.7% in TOP-10 (mean rank 14.3) — ~28pp of gold is present-but-
+# buried below rank 10. RRF (rank-reciprocal) destroys leg-score MAGNITUDE, so single-leg-strong
+# gold sinks. This A/B asks whether an existing magnitude-aware fusion backbone ranks that
+# present gold into top-10:
+#   A = baseline (RRF).  B = SHODH_ACTR_FUSION=1 (ACT-R additive activation).  C = SHODH_FUSION_V2=1.
+# KEY = funnel FUSION top10_pct + mean_rank (does B/C lift 68.7→toward 96?) and recall@10.
+# If none lifts it, the answer is a real calibrated magnitude-fusion BUILD, not a flag.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/fusion-variant-ab.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  fusion:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — RRF (baseline)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — ACT-R fusion
+        run: set -o pipefail; SHODH_ACTR_FUSION=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — FUSION_V2
+        run: set -o pipefail; SHODH_FUSION_V2=1 ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+      - name: A funnel — RRF
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
+      - name: B funnel — ACT-R
+        run: set -o pipefail; SHODH_ACTR_FUSION=1 ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb 2>&1 | tail -3
+      - name: C funnel — V2
+        run: set -o pipefail; SHODH_FUSION_V2=1 ./target/release/recall-eval --suite locomo --output oc.json --funnel fc.json --storage ./s-fc 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          a=load("a.json"); b=load("b.json"); c=load("c.json")
+          fa=load("fa.json"); fb=load("fb.json"); fc=load("fc.json")
+          def rec(d,cat):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if cat=='ALL' else d['by_category'][cat]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          print("## ③ fusion-variant A/B — RRF vs ACT-R vs V2\n")
+          print("### recall@10\n| cat | RRF | ACT-R | V2 |")
+          print("| --- | --- | --- | --- |")
+          for cat in cats:
+              print(f"| {cat} | {rec(a,cat):.4f} | {rec(b,cat):.4f} | {rec(c,cat):.4f} |")
+          def g(fn,stage,k):
+              if not fn: return float('nan')
+              for r in fn.get('overall',[]):
+                  if r['stage']==stage: return r.get(k,float('nan'))
+              return float('nan')
+          print("\n### funnel FUSION stage (THE ranking metric — does present gold reach top-10?)")
+          print("| metric | RRF | ACT-R | V2 |")
+          print("| --- | --- | --- | --- |")
+          for k in ('present_pct','top10_pct','mean_rank_when_present'):
+              print(f"| fusion {k} | {g(fa,'fusion',k):.2f} | {g(fb,'fusion',k):.2f} | {g(fc,'fusion',k):.2f} |")
+          print("\n**Baseline reference:** RRF fusion present 96.3%, top10 68.7%, mean_rank 14.3 → ~28pp present-but-buried.")
+          print("**Decision:** a variant lifts fusion top10% toward 96 + recall up ⇒ magnitude fusion IS the lever, that variant wins → make default after audit. All ~equal to RRF ⇒ existing flags don't rank present gold → a real calibrated magnitude-fusion BUILD is required (weighted-SUM of sigmoid-calibrated leg scores, veld/G2 style), not a flag. AUDIT: watch any category REGRESS (a variant that helps multi_hop but tanks single_hop is mis-calibrated).")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fusion-variant-json
+          path: "*.json"
+          if-no-files-found: warn
