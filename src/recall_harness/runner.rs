@@ -1078,6 +1078,83 @@ pub fn analyze_linking(inputs: &RunInputs) -> Result<LinkingReport> {
 /// the gold is present and its best rank. Aggregates the per-stage drop-off so the step that
 /// loses reachable gold is LOCATED, not inferred (e.g. present after `graph`, absent after
 /// `fusion` ⇒ RRF is burying it).
+/// Apply the optional fast-read subsamples to a loaded `(cases, corpus)`.
+/// `SHODH_MAX_CASES` strides the query set down (corpus stays full → distractor
+/// difficulty unchanged); then `SHODH_MAX_CORPUS` shrinks the distractor pool while
+/// ALWAYS retaining every gold item referenced by the surviving cases (directional
+/// only — recall inflates). Both unset → returned unchanged (full scale). Shared so
+/// the recall run and the funnel honor the SAME knobs; without it the funnel ran
+/// full-scale (1531 × 5882) and timed out. Mirrors the inline blocks in
+/// `run_smoke_suite_with_ranks` (dedupe those into this helper is a follow-up).
+fn apply_eval_caps(cases: Vec<SmokeCase>, corpus: Vec<CorpusItem>) -> (Vec<SmokeCase>, Vec<CorpusItem>) {
+    let cases = match std::env::var("SHODH_MAX_CASES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0 && n < cases.len())
+    {
+        Some(n) => {
+            let total = cases.len();
+            let stride = (total / n).max(1);
+            let sampled: Vec<_> = cases.into_iter().step_by(stride).take(n).collect();
+            tracing::info!(
+                "SHODH_MAX_CASES={n}: subsampled {} of {} cases (stride {})",
+                sampled.len(),
+                total,
+                stride
+            );
+            sampled
+        }
+        None => cases,
+    };
+    let corpus = match std::env::var("SHODH_MAX_CORPUS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0 && n < corpus.len())
+    {
+        Some(n) => {
+            let gold: std::collections::HashSet<&str> = cases
+                .iter()
+                .flat_map(|c| c.relevant.iter().map(|r| r.corpus_item_id.as_str()))
+                .collect();
+            let total = corpus.len();
+            let gold_count = corpus.iter().filter(|it| gold.contains(it.id.as_str())).count();
+            let keep_distractors = n.saturating_sub(gold_count);
+            let distractor_total = total - gold_count;
+            let stride = if keep_distractors == 0 {
+                usize::MAX
+            } else {
+                (distractor_total / keep_distractors).max(1)
+            };
+            let mut seen_distractor = 0usize;
+            let mut kept_distractors = 0usize;
+            let reduced: Vec<_> = corpus
+                .into_iter()
+                .filter(|it| {
+                    if gold.contains(it.id.as_str()) {
+                        return true;
+                    }
+                    let take = kept_distractors < keep_distractors && seen_distractor % stride == 0;
+                    seen_distractor += 1;
+                    if take {
+                        kept_distractors += 1;
+                    }
+                    take
+                })
+                .collect();
+            tracing::info!(
+                "SHODH_MAX_CORPUS={n}: reduced corpus {} → {} ({} gold + {} distractors)",
+                total,
+                reduced.len(),
+                gold_count,
+                kept_distractors
+            );
+            reduced
+        }
+        None => corpus,
+    };
+    (cases, corpus)
+}
+
 pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
     pin_harness_threads();
 
@@ -1095,6 +1172,10 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
         .with_context(|| format!("loading cases from {}", cases_path.display()))?;
     fixtures::validate_structure(&corpus, &cases)
         .with_context(|| format!("{} suite failed structural validation", inputs.suite))?;
+
+    // Honor the same fast-read caps as the recall run, or the funnel runs full-scale
+    // (1531 cases × 5882 corpus) per arm and times out. Default unset → full scale.
+    let (cases, corpus) = apply_eval_caps(cases, corpus);
 
     let manager = build_manager(&inputs.storage_path)?;
     let id_map = ingest_corpus(&manager, &corpus)?;
