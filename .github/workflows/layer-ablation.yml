@@ -6,8 +6,6 @@ name: layer ablation (per-stage attribution)
 # the VC deck — it shows exactly where recall is earned and where gold is lost.
 
 on:
-  push:
-    branches: [exp/ner-gliner-ablation]
   workflow_dispatch:
 
 jobs:
