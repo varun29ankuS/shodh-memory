@@ -1015,13 +1015,22 @@ pub fn spreading_activation_retrieve_with_stats(
     let graph_start = Instant::now();
     let mut traversed_edges: Vec<Uuid>;
 
-    // SHODH_PPR: replace the hand-rolled BFS spread with Personalized PageRank — the
-    // convergent, mass-conserving form of spreading activation (PPR). The seed
+    // SHODH_PPR: Personalized PageRank replaces the hand-rolled BFS spread — the
+    // convergent, mass-conserving form of spreading activation. The seed
     // activation_map becomes the restart vector; PPR's stationary distribution becomes the
     // new activation_map consumed by the shared episode-scoring path below.
+    //
+    // DEFAULT ON since runs 27252898191 + 27255557316 (reproduced to 4 decimals):
+    // recall@10 ALL 0.6853→0.6976 with single_hop +0.018 AND temporal +0.014 —
+    // the first graph-side lever WITHOUT the structural category tradeoff
+    // (multi_hop -0.006 the only cost; p@1/MRR also up; funnel graph present%
+    // 51→76). PPR subsumes the BFS spread's patches in one principled mechanism:
+    // no per-hop threshold pruning (the 2-3 hop activation collapse), restart
+    // mass replaces ad-hoc hop decay, and column normalization handles hubs.
+    // SHODH_PPR=0 restores the legacy BFS spread (escape hatch).
     let ppr_enabled = std::env::var("SHODH_PPR")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+        .unwrap_or(true);
 
     if ppr_enabled {
         let pred_w = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
