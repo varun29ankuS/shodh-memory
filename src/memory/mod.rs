@@ -3059,6 +3059,43 @@ impl MemorySystem {
             let flat_fusion = explicit_flat
                 || (!rrf_escape && !v2_fusion && !actr_fusion && !sum_fusion);
 
+            // SHODH_FLAT_ADAPTIVE: LEARNED per-query leg trust (approach C, stage 1). A GLOBAL
+            // vector-trust trades multi_hop↔single_hop (run 27221406266) — single_hop wants
+            // BM25/lexical, multi_hop wants vector/semantic, and no global scalar serves both.
+            // A PER-QUERY weight conditioned on a query feature breaks it. Feature = BM25
+            // peakedness (max/mean BM25 over the candidate pool): a SHARP peak ⇒ one memory
+            // lexically dominates ⇒ exact-match/single_hop ⇒ trust BM25 (vec_trust→1); a FLAT
+            // BM25 ⇒ no lexical anchor ⇒ semantic/multi_hop ⇒ trust vector (vec_trust→max).
+            // Coefficients (peak_lo/hi, trust_max) seeded from the sweeps; the next stage fits
+            // them on the eval / adapts them online from recall feedback (the E2 moat). Default
+            // off → FLAT unchanged.
+            let flat_adaptive = std::env::var("SHODH_FLAT_ADAPTIVE")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let effective_vec_trust = if flat_adaptive {
+                let adapt_trust_max = env_w("SHODH_ADAPT_TRUST_MAX", 1.6);
+                let adapt_peak_lo = env_w("SHODH_ADAPT_PEAK_LO", 2.0);
+                let adapt_peak_hi = env_w("SHODH_ADAPT_PEAK_HI", 6.0);
+                let bm_vals: Vec<f32> = hybrid_components
+                    .values()
+                    .map(|(b, _)| *b)
+                    .filter(|b| *b > 0.0)
+                    .collect();
+                let mean_bm = if bm_vals.is_empty() {
+                    0.0
+                } else {
+                    bm_vals.iter().sum::<f32>() / bm_vals.len() as f32
+                };
+                let bm_peak = if mean_bm > 1e-6 { max_bm / mean_bm } else { 1.0 };
+                // t = 1 when BM25 is flat (peak ≤ lo) → full vector trust; t = 0 when sharply
+                // peaked (peak ≥ hi) → no extra trust (BM25-strong gold protected).
+                let span = (adapt_peak_hi - adapt_peak_lo).max(1e-6);
+                let t = ((adapt_peak_hi - bm_peak) / span).clamp(0.0, 1.0);
+                1.0 + (adapt_trust_max - 1.0) * t
+            } else {
+                flat_vec_trust
+            };
+
             // Graph leg.
             for (r, (id, activation, h)) in graph_results.iter().enumerate() {
                 if !graph_leg_on {
@@ -3161,7 +3198,7 @@ impl MemorySystem {
                         // and cannot displace a BM25-strong gold; a strong match competes fully.
                         ((vec - flat_vec_floor) / (1.0 - flat_vec_floor)).clamp(0.0, 1.0)
                     } else {
-                        (vec / max_vec).clamp(0.0, 1.0) * flat_vec_trust
+                        (vec / max_vec).clamp(0.0, 1.0) * effective_vec_trust
                     };
                     let bn = (bm25 / max_bm).clamp(0.0, 1.0);
                     let (hi, lo) = if vn >= bn { (vn, bn) } else { (bn, vn) };
