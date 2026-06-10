@@ -1499,6 +1499,18 @@ impl RelationType {
     }
 }
 
+/// SHODH_PERSON_PERSON_KNOWS=1 — type Person↔Person co-mentions as `Knows`
+/// instead of `CoOccurs`. Cached: read once per process (eval sets env before
+/// start; production restarts to change it).
+fn person_person_knows() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("SHODH_PERSON_PERSON_KNOWS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
 /// Match relational cue phrases in ALREADY-LOWERCASED text → a typed predicate.
 /// Shared by the whole-text and span-scoped extractors below.
 fn predicate_from_cues(t: &str) -> Option<RelationType> {
@@ -1560,7 +1572,8 @@ pub fn extract_predicate_from_text(text: &str) -> Option<RelationType> {
 
 /// Span-scoped, DIRECTION-aware predicate recovery. Locates both entity mentions,
 /// scans only the sentence containing BOTH for a cue, and decides direction by
-/// surface order (the earlier mention is the subject/cause → `from_entity`).
+/// surface order (the earlier mention is the subject/cause → `from_entity`),
+/// FLIPPED for effect-first constructions (see below).
 /// Returns `(relation, a_is_source)`; `None` when the mentions don't co-occur in
 /// one sentence or no cue is present, so the caller keeps the label-pair inference.
 ///
@@ -1569,6 +1582,14 @@ pub fn extract_predicate_from_text(text: &str) -> Option<RelationType> {
 /// points cause→effect by surface order instead of trusting NER's entity ordering
 /// (the likely cause of the failed first measurement — a reversed arrow makes the
 /// backward origin-walk dead-end).
+///
+/// DIRECTION FIX (substrate audit 2026-06-10): surface order is only correct for
+/// cause-first constructions ("B triggered A"). Effect-first constructions invert
+/// it — "A happened BECAUSE OF B" / "A DUE TO B" / passive "A WAS CAUSED BY B" all
+/// put the EFFECT first, so the earlier mention is NOT the cause. Three of the ten
+/// causal cues systematically wrote reversed arrows, dead-ending the backward
+/// origin-walk for exactly those sentences. When an effect-first cue is present in
+/// the sentence, the arrow flips.
 pub fn extract_directed_predicate(
     text: &str,
     name_a: &str,
@@ -1600,8 +1621,13 @@ pub fn extract_directed_predicate(
         .find(['.', '!', '?', ';', '\n'])
         .map(|i| hi + i)
         .unwrap_or(lc.len());
-    let rt = predicate_from_cues(&lc[sent_start..sent_end])?;
-    Some((rt, pa < pb))
+    let sentence = &lc[sent_start..sent_end];
+    let rt = predicate_from_cues(sentence)?;
+    // Effect-first constructions: the earlier mention is the EFFECT, not the cause.
+    const EFFECT_FIRST_CUES: [&str; 4] = ["because of", "due to", "caused by", "triggered by"];
+    let effect_first = EFFECT_FIRST_CUES.iter().any(|c| sentence.contains(c));
+    let a_first = pa < pb;
+    Some((rt, if effect_first { !a_first } else { a_first }))
 }
 
 /// Infer a typed relation between two entities based on their labels.
@@ -1617,6 +1643,15 @@ pub fn infer_relation_type_for_pair(from: &EntityLabel, to: &EntityLabel) -> Rel
     use RelationType::*;
 
     match (from, to) {
+        // Person↔Person — the dominant pair in conversational/personal memory —
+        // previously had NO rule and fell through to CoOccurs (the mechanical
+        // cause of the >80%-untyped graph on conversational corpora, substrate
+        // audit 2026-06-10). Typed as Knows behind SHODH_PERSON_PERSON_KNOWS
+        // because the change is NOT free: non-generic types become eligible for
+        // ontological relation penalties and predicate weighting, so it must be
+        // A/B'd, not assumed.
+        (Person, Person) if person_person_knows() => Knows,
+
         // Person relationships
         (Person, Organization) | (Person, Team) => WorksAt,
         (Person, Technology) | (Person, Service) | (Person, Database) => Uses,
@@ -7102,6 +7137,38 @@ mod tests {
         assert_eq!(
             extract_directed_predicate("Gamma caused Delta.", "Gamma", "Epsilon"),
             None
+        );
+    }
+
+    #[test]
+    fn extract_directed_predicate_flips_effect_first_constructions() {
+        // "A happened because of B": A appears FIRST but B is the CAUSE.
+        // Surface order alone would mark A the source — the audit's inversion bug.
+        assert_eq!(
+            extract_directed_predicate(
+                "The flood happened because of the dam failure.",
+                "dam failure",
+                "flood"
+            ),
+            Some((RelationType::Triggers, true)),
+            "because-of: the later-mentioned cause must be the source"
+        );
+        // Passive voice: "A was caused by B" — B is the cause despite appearing second.
+        assert_eq!(
+            extract_directed_predicate("The outage was caused by Redis.", "Redis", "outage"),
+            Some((RelationType::Triggers, true)),
+            "passive caused-by: the later-mentioned cause must be the source"
+        );
+        // "due to": same effect-first shape.
+        assert_eq!(
+            extract_directed_predicate("The delay was due to the storm.", "delay", "storm"),
+            Some((RelationType::Triggers, false)),
+            "due-to: the earlier-mentioned effect must NOT be the source"
+        );
+        // Control: cause-first active voice is unchanged by the fix.
+        assert_eq!(
+            extract_directed_predicate("Redis caused the outage.", "Redis", "outage"),
+            Some((RelationType::Triggers, true))
         );
     }
 
