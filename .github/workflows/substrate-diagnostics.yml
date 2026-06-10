@@ -1,0 +1,72 @@
+name: ⑲ substrate diagnostics — ontology + lineage harnesses (rung-1 audit measurement)
+
+# Companion measurement for the relationships/ontology/lineage audit (2026-06-10).
+# Code findings to quantify:
+#   RELATIONSHIPS — infer_relation_type_for_pair is engineering-domain-only:
+#     (Person,Person), the most common conversational pair, has NO rule → CoOccurs
+#     (why >80% of edges are untyped). Cue extractor maps ALL causal cues to
+#     Triggers; "because of"/"due to" (and passive voice) INVERT the cause→effect
+#     arrow because direction comes from surface order.
+#   ONTOLOGY — 22 hardcoded engineering-skewed labels; intent from question-word
+#     heuristics at 0.4 confidence (measured CI example expects Person/Org/Team for
+#     an EVENT question, then penalizes right-typed entities during spreading).
+#   LINEAGE — backward origin walk is structurally sound (edges indexed under both
+#     endpoints) but starves on untyped/inverted edges; strongest-64 cap can drop
+#     causal edges at hubs.
+# These harnesses isolate each layer's contribution (E4/E5): if +rerank deltas stay
+# ~0, the layers are inert in eval and the substrate build (#65-68) is confirmed as
+# the only path. Runs both on the current defaults (PPR + hebbian-off + FLAT).
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/substrate-diagnostics.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  substrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: Ontology harness (E5)
+        run: |
+          set -o pipefail
+          ./target/release/recall-eval --suite locomo --output o-main.json --ontology ontology.json --storage ./s-o | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Lineage harness (E4)
+        run: |
+          set -o pipefail
+          ./target/release/recall-eval --suite locomo --output l-main.json --lineage lineage.json --storage ./s-l | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: substrate-diagnostics-json
+          path: "*.json"
+          if-no-files-found: warn
