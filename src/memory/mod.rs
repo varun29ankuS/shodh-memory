@@ -2666,6 +2666,17 @@ impl MemorySystem {
             "linguistic",
             "competition",
         ];
+        // DEFAULT: the Layer-5 hebbian RANK BOOST is disabled. The L5 bisect (run
+        // 27251798933) measured it as a strict ordering saboteur: disabling only
+        // hebbian lifted p@1 ALL 0.4100→0.4767 (+6.7pp), single_hop +11pp,
+        // open_domain 2x, multi_hop up, temporal HELD, MRR +0.042 — with recall@10
+        // bit-identical (L5 is post-truncation). Mechanism: heb scores come from
+        // graph co-activation and edges strengthen on EVERY retrieval (not on
+        // outcome), so frequently co-retrieved hub memories climb within the
+        // top-10 and displace gold at rank 1 — retrieval-gated rich-get-richer.
+        // Hebbian LEARNING (edge strengthening, spreading activation) is untouched;
+        // only the L5 score multiplier is off. Setting SHODH_DISABLE_BOOSTS
+        // explicitly (even to "") replaces this default — the escape hatch.
         let disabled_boosts: std::collections::HashSet<String> =
             std::env::var("SHODH_DISABLE_BOOSTS")
                 .map(|v| {
@@ -2674,7 +2685,7 @@ impl MemorySystem {
                         .filter(|t| !t.is_empty())
                         .collect()
                 })
-                .unwrap_or_default();
+                .unwrap_or_else(|_| std::iter::once("hebbian".to_string()).collect());
         for tok in &disabled_boosts {
             if tok != "all" && !BOOST_FAMILIES.contains(&tok.as_str()) {
                 tracing::warn!("SHODH_DISABLE_BOOSTS: unknown boost family '{tok}' (ignored)");
