@@ -3133,14 +3133,21 @@ impl MemorySystem {
             // peakedness (max/mean BM25 over the candidate pool): a SHARP peak ⇒ one memory
             // lexically dominates ⇒ exact-match/single_hop ⇒ trust BM25 (vec_trust→1); a FLAT
             // BM25 ⇒ no lexical anchor ⇒ semantic/multi_hop ⇒ trust vector (vec_trust→max).
-            // Coefficients (peak_lo/hi, trust_max) seeded from the sweeps; the next stage fits
-            // them on the eval / adapts them online from recall feedback (the E2 moat). Default
-            // off → FLAT unchanged.
+            // DEFAULT ON since runs 27268510462 + 27269567367 (confirm): the FITTED
+            // SYMMETRIC gate (feature=fitted, symmetric, trust_max 2.0) BROKE the
+            // structural single↔multi tradeoff — recall@10 ALL 0.6976→~0.705
+            // (reproduced), multi_hop 0.4318→0.4896 (exact across runs, the largest
+            // multi_hop gain in project history), single_hop HELD at 0.7730 exactly,
+            // p@1 +2.3pp. CAVEAT: the fitted coefficients were trained on the LoCoMo
+            // eval distribution (70% of its cases, run 27267533447, holdout AUC
+            // 0.756) — stage 3 (online refit from recall feedback, per user) replaces
+            // them; this fit is the cold-start seed. SHODH_FLAT_ADAPTIVE=0 restores
+            // plain FLAT (escape hatch).
             let flat_adaptive = std::env::var("SHODH_FLAT_ADAPTIVE")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+                .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+                .unwrap_or(true);
             let effective_vec_trust = if flat_adaptive {
-                let adapt_trust_max = env_w("SHODH_ADAPT_TRUST_MAX", 1.6);
+                let adapt_trust_max = env_w("SHODH_ADAPT_TRUST_MAX", 2.0);
                 // SHODH_ADAPT_FEATURE selects the per-query discriminating feature:
                 //   peak      — BM25 peakedness (stage 1; run 27244857747: helps
                 //               multi/temporal but craters single_hop — the feature
@@ -3164,7 +3171,7 @@ impl MemorySystem {
                 //               single_hop holding, and stage 3 is the online refit
                 //               from feedback.
                 let adapt_feature = std::env::var("SHODH_ADAPT_FEATURE")
-                    .unwrap_or_else(|_| "peak".to_string())
+                    .unwrap_or_else(|_| "fitted".to_string())
                     .to_ascii_lowercase();
                 let t = if adapt_feature == "fitted" {
                     // (mu, sd, weight) per standardized feature, then bias — from
@@ -3298,14 +3305,17 @@ impl MemorySystem {
                     let span = (adapt_peak_hi - adapt_peak_lo).max(1e-6);
                     ((adapt_peak_hi - bm_peak) / span).clamp(0.0, 1.0)
                 };
-                // SHODH_ADAPT_SYMMETRIC=1: map t through [down-weight, up-weight]
-                // instead of boost-only — with a CALIBRATED probability (fitted),
-                // t < 0.5 is evidence the query is BM25-favored and the vector leg
-                // can justifiably be weakened below 1.0 (floored at 0.2 so vector
-                // never vanishes). Boost-only (default) is the stage-1 form.
+                // SHODH_ADAPT_SYMMETRIC (default ON): map t through [down-weight,
+                // up-weight] instead of boost-only — with a CALIBRATED probability
+                // (fitted), t < 0.5 is evidence the query is BM25-favored and the
+                // vector leg can justifiably be weakened below 1.0 (floored at 0.2
+                // so vector never vanishes). MEASURED: boost-only FAILS even with
+                // fitted features (0.6879 vs base 0.6976) — the down-weighting is
+                // what protects single_hop while multi_hop gets freed. =0 restores
+                // the stage-1 boost-only form.
                 let symmetric = std::env::var("SHODH_ADAPT_SYMMETRIC")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
+                    .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+                    .unwrap_or(true);
                 if symmetric {
                     (1.0 + (adapt_trust_max - 1.0) * (2.0 * t - 1.0)).max(0.2)
                 } else {
