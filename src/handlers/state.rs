@@ -3419,12 +3419,16 @@ impl MultiUserMemoryManager {
                     }
                     typed_semantic += 1;
                     rt
-                } else if extract_predicates
-                    && matches!(
-                        label_relation,
-                        crate::graph_memory::RelationType::CoOccurs
-                            | crate::graph_memory::RelationType::RelatedTo
-                    ) {
+                } else if extract_predicates {
+                    // LINEAGE-ZERO FIX (repro: lineage_walk_survives_harness_scale):
+                    // the cue extractor was gated to run ONLY when the label-pair
+                    // table returned a generic relation. A confident-LOOKING pair
+                    // guess ((Technology,Technology) → AlternativeTo from mere
+                    // co-mention) therefore suppressed explicit causal text ("x set
+                    // y in motion") — no causal edge was ever created and the
+                    // backward origin walk starved (root-cause P@1 0.0 at every
+                    // layer). Sentence-level evidence outranks static label-pair
+                    // defaults — the same precedence the semantic typer already has.
                     match crate::graph_memory::extract_directed_predicate(
                         &experience.content,
                         &entity_uuids[i].0,

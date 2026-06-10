@@ -1686,8 +1686,13 @@ pub fn infer_relation_type_for_pair(from: &EntityLabel, to: &EntityLabel) -> Rel
         | (Module, Project)
         | (Service, Project) => PartOf,
 
-        // Technology alternatives
-        (Technology, Technology) => AlternativeTo,
+        // Two technologies co-mentioned were previously typed AlternativeTo —
+        // fabricated semantics from labels alone (co-mention says nothing about
+        // substitutability), and as a "confident" type it suppressed the cue
+        // extractor, starving the causal walk (the lineage-zero root cause,
+        // 2026-06-10). Co-mention is co-occurrence; real relations come from
+        // sentence evidence (semantic typer / cues).
+        (Technology, Technology) => CoOccurs,
 
         // Location relationships (either direction)
         (_, Location) | (Location, _) => LocatedIn,

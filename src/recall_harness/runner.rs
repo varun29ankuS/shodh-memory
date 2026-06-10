@@ -1847,6 +1847,191 @@ mod tests {
         std::env::temp_dir().join(format!("shodh-recall-{label}-{id}"))
     }
 
+    /// Lineage repro (substrate diagnosis 2026-06-10): root-cause P@1 has been
+    /// 0.0 through every fix, and the instrumented CI run produced ZERO edge
+    /// provenance lines and ZERO causal-funnel lines — hypothesis: the chain
+    /// entities never become graph structure at all. This test pushes one
+    /// lineage chain through the REAL harness ingest (ingest_corpus →
+    /// process_experience_into_graph) and asserts stage by stage:
+    ///   1. the chain entities exist in the graph by name
+    ///   2. edges connect them
+    ///   3. at least one connecting edge is typed CAUSAL (the walk's food)
+    /// Whichever assert fails localizes the lineage zero.
+    #[test]
+    fn lineage_chain_builds_causal_graph_structure() {
+        let dir = unique_storage_dir("lineage-repro");
+        let manager = build_manager(&dir).expect("manager");
+        let (corpus, _cases) = crate::recall_harness::lineage_harness::generate_lineage_fixtures(1);
+        ingest_corpus(&manager, &corpus).expect("ingest");
+
+        let graph = manager.get_user_graph(EVAL_USER).expect("graph");
+        let g = graph.read();
+
+        // Chain 0 entities: "the Vornak incident" → "the Meslin incident" →
+        // "the Caldor incident" (event(0..3)).
+        let names = ["the Vornak incident", "the Meslin incident", "the Caldor incident"];
+        let mut uuids = Vec::new();
+        for name in names {
+            let found = g.find_entity_by_name(name).expect("lookup");
+            assert!(
+                found.is_some(),
+                "STAGE 1 FAIL: chain entity '{name}' missing from graph — \
+                 entity creation is the lineage zero"
+            );
+            uuids.push(found.unwrap().uuid);
+        }
+
+        // Edges between consecutive chain entities?
+        for w in uuids.windows(2) {
+            let edges = g
+                .get_entity_relationships_limited(&w[0], Some(64))
+                .expect("edges");
+            let connecting: Vec<_> = edges
+                .iter()
+                .filter(|e| {
+                    (e.from_entity == w[0] && e.to_entity == w[1])
+                        || (e.from_entity == w[1] && e.to_entity == w[0])
+                })
+                .collect();
+            assert!(
+                !connecting.is_empty(),
+                "STAGE 2 FAIL: no edge between consecutive chain entities — \
+                 pair-loop/edge creation is the lineage zero"
+            );
+            let causal = connecting.iter().any(|e| e.relation_type.is_causal());
+            assert!(
+                causal,
+                "STAGE 3 FAIL: edges exist but none is causal (types: {:?}) — \
+                 the typing chain is the lineage zero",
+                connecting
+                    .iter()
+                    .map(|e| e.relation_type.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        // STAGE 4: the backward origin walk itself. From the observed effect
+        // (Caldor), trace_causal_origins must return the root (Vornak).
+        let origins = g
+            .trace_causal_origins(&[uuids[2]], 8)
+            .expect("origin walk");
+        assert!(
+            origins.contains(&uuids[0]),
+            "STAGE 4 FAIL: backward walk from the effect did not reach the \
+             root cause (origins: {} found) — edge direction or walk is the \
+             lineage zero",
+            origins.len()
+        );
+        drop(g);
+
+        // STAGE 5: the full recall path. The root memory (which shares NO token
+        // with the query other than what the walk provides) must appear in the
+        // results for the root-cause query.
+        let system = manager.get_user_memory(EVAL_USER).expect("system");
+        let query = crate::memory::types::Query {
+            query_text: Some("What was the earliest origin behind the Caldor incident?".into()),
+            max_results: 10,
+            layers: LayerMode::Full,
+            ..Default::default()
+        };
+        let results = system.read().recall(&query).expect("recall");
+        let texts: Vec<String> = results
+            .iter()
+            .map(|m| m.experience.content.clone())
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Vornak")),
+            "STAGE 5 FAIL: walk works but the root memory is not in the top-10 \
+             — the origins-USAGE path (BM25 cue expansion) is the lineage zero. \
+             Retrieved: {texts:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Same pipeline at HARNESS scale: with the default chain count every
+    /// memory shares the "incident"/"set in motion"/"brought about" phrasing,
+    /// so the failure mode (lineage P@1 = 0.0 in CI while the 1-chain repro
+    /// passes end-to-end) must be scale-induced — dilution of the walked
+    /// origin among cross-chain lexical distractors, or cross-chain entity
+    /// resolution bleeding (substring tiers matching "Vornak" ↔ "Vornak2").
+    #[test]
+    fn lineage_walk_survives_harness_scale() {
+        let dir = unique_storage_dir("lineage-scale");
+        let manager = build_manager(&dir).expect("manager");
+        let chains = crate::recall_harness::multihop::DEFAULT_CHAINS;
+        let (corpus, _cases) = crate::recall_harness::lineage_harness::generate_lineage_fixtures(chains);
+        ingest_corpus(&manager, &corpus).expect("ingest");
+
+        let graph = manager.get_user_graph(EVAL_USER).expect("graph");
+        let g = graph.read();
+        // Probe a middle chain (i=5): events 15, 16, 17.
+        let a = g
+            .find_entity_by_name("the Polnar incident")
+            .expect("lookup")
+            .map(|e| e.uuid);
+        let c = g
+            .find_entity_by_name("the Selvic incident")
+            .expect("lookup")
+            .map(|e| e.uuid);
+        let (a, c) = match (a, c) {
+            (Some(a), Some(c)) => (a, c),
+            other => panic!(
+                "SCALE STAGE 1 FAIL: chain-5 entities unresolved at {chains} chains: {other:?} \
+                 — cross-chain entity-resolution bleeding"
+            ),
+        };
+        let origins = g.trace_causal_origins(&[c], 8).expect("walk");
+        if !origins.contains(&a) {
+            // Diagnostics: what does the effect node's neighbourhood look like?
+            let c_edges = g
+                .get_entity_relationships_limited(&c, Some(64))
+                .expect("edges");
+            let incoming_causal = c_edges
+                .iter()
+                .filter(|e| e.to_entity == c && e.relation_type.is_causal())
+                .count();
+            let type_counts: std::collections::HashMap<&str, usize> =
+                c_edges.iter().fold(Default::default(), |mut m, e| {
+                    *m.entry(e.relation_type.as_str()).or_default() += 1;
+                    m
+                });
+            panic!(
+                "SCALE STAGE 4 FAIL at {chains} chains: {} origins; effect node has \
+                 {} edges (incoming causal: {incoming_causal}; types: {type_counts:?}); \
+                 graph stats: {:?}",
+                origins.len(),
+                c_edges.len(),
+                g.get_stats()
+                    .map(|s| (s.entity_count, s.relationship_count))
+                    .ok()
+            );
+        }
+        drop(g);
+
+        let system = manager.get_user_memory(EVAL_USER).expect("system");
+        let query = crate::memory::types::Query {
+            query_text: Some("What was the earliest origin behind the Selvic incident?".into()),
+            max_results: 10,
+            layers: LayerMode::Full,
+            ..Default::default()
+        };
+        let results = system.read().recall(&query).expect("recall");
+        let texts: Vec<String> = results
+            .iter()
+            .map(|m| m.experience.content.clone())
+            .collect();
+        let root_rank = texts.iter().position(|t| t.contains("Polnar"));
+        assert!(
+            root_rank.is_some(),
+            "SCALE STAGE 5 FAIL: root memory absent from top-10 at {chains} chains \
+             — walked origins diluted by cross-chain lexical distractors. \
+             Retrieved: {texts:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn per_case_records_flag_missed_relevant_items() {
         let cases = vec![
