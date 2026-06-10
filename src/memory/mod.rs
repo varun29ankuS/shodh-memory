@@ -11,6 +11,7 @@ pub mod context;
 pub mod facts;
 pub mod feedback;
 pub mod files;
+pub mod fusion_features;
 pub mod gold_funnel;
 pub mod graph_retrieval;
 pub mod hybrid_search;
@@ -3216,6 +3217,78 @@ impl MemorySystem {
                 // path is enabled (global scalars measured as a category tradeoff).
                 1.0
             };
+
+            // Approach C stage 2: per-query feature export for the offline trust fit.
+            // Armed by the recall harness (SHODH_FUSION_FEATURE_EXPORT) — a no-op in
+            // production. Computed here because this is the only point that sees all
+            // three calibrated legs plus the raw per-candidate scores, and the armed
+            // gold set lets us record per-leg gold ranks (the supervision label:
+            // which leg WOULD have ranked this query's gold best).
+            if crate::memory::fusion_features::is_armed() {
+                crate::memory::fusion_features::record_with(|gold| {
+                    use crate::memory::fusion_features::FusionFeatures;
+                    let mut by_vec: Vec<(&MemoryId, f32)> = hybrid_components
+                        .iter()
+                        .filter(|(_, (_, v))| *v > 0.0)
+                        .map(|(id, (_, v))| (id, *v))
+                        .collect();
+                    let mut by_bm: Vec<(&MemoryId, f32)> = hybrid_components
+                        .iter()
+                        .filter(|(_, (b, _))| *b > 0.0)
+                        .map(|(id, (b, _))| (id, *b))
+                        .collect();
+                    by_vec.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                    by_bm.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                    let peak = |xs: &[(&MemoryId, f32)]| -> f32 {
+                        if xs.is_empty() {
+                            return 1.0;
+                        }
+                        let max = xs[0].1;
+                        let mean = xs.iter().map(|x| x.1).sum::<f32>() / xs.len() as f32;
+                        if mean > 1e-6 {
+                            max / mean
+                        } else {
+                            1.0
+                        }
+                    };
+                    let agreement_top10 = if by_vec.is_empty() || by_bm.is_empty() {
+                        0.0
+                    } else {
+                        let k10 = 10usize.min(by_vec.len()).min(by_bm.len()).max(1);
+                        let top_v: std::collections::HashSet<&MemoryId> =
+                            by_vec.iter().take(k10).map(|(id, _)| *id).collect();
+                        by_bm
+                            .iter()
+                            .take(k10)
+                            .filter(|(id, _)| top_v.contains(id))
+                            .count() as f32
+                            / k10 as f32
+                    };
+                    let rank_of_gold = |xs: &[(&MemoryId, f32)]| -> Option<usize> {
+                        xs.iter().position(|(id, _)| gold.contains(*id))
+                    };
+                    let mut by_graph: Vec<(&MemoryId, f32)> = graph_results
+                        .iter()
+                        .map(|(id, a, _)| (id, *a))
+                        .collect();
+                    by_graph.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                    FusionFeatures {
+                        n_hybrid: hybrid_components.len(),
+                        n_bm_pos: by_bm.len(),
+                        n_vec_pos: by_vec.len(),
+                        bm_peak: peak(&by_bm),
+                        vec_peak: peak(&by_vec),
+                        agreement_top10,
+                        max_bm,
+                        max_vec,
+                        n_graph: by_graph.len(),
+                        graph_max_activation: by_graph.first().map(|x| x.1).unwrap_or(0.0),
+                        gold_vec_rank: rank_of_gold(&by_vec),
+                        gold_bm_rank: rank_of_gold(&by_bm),
+                        gold_graph_rank: rank_of_gold(&by_graph),
+                    }
+                });
+            }
 
             // Graph leg.
             for (r, (id, activation, h)) in graph_results.iter().enumerate() {

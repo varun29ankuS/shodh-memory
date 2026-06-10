@@ -595,6 +595,17 @@ fn run_one_pass(
         .filter(|k| *k >= SMOKE_K)
         .unwrap_or(SMOKE_K);
 
+    // Approach C stage 2: per-query fusion-feature export for the offline trust
+    // fit (SHODH_FUSION_FEATURE_EXPORT=<jsonl path>). Full mode only — that is
+    // the production path the fit targets. Lines accumulate across modes/repeats
+    // and append at pass end.
+    let feature_export: Option<std::path::PathBuf> =
+        std::env::var("SHODH_FUSION_FEATURE_EXPORT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from);
+    let mut feature_lines: Vec<String> = Vec::new();
+
     for mode in layer_modes {
         let mut per_case = Vec::with_capacity(cases.len());
         let mut latencies_ms = Vec::with_capacity(cases.len());
@@ -608,6 +619,18 @@ fn run_one_pass(
                 layers: *mode,
                 ..Default::default()
             };
+
+            // Pure function of fixtures + ingest (hoisted above recall so the
+            // feature exporter can arm with this query's gold ids).
+            let relevance = build_relevance_map(case, &id_map);
+            if feature_export.is_some() && matches!(*mode, LayerMode::Full) {
+                crate::memory::fusion_features::begin(
+                    relevance
+                        .keys()
+                        .map(|u| crate::memory::types::MemoryId(*u))
+                        .collect(),
+                );
+            }
 
             let started = Instant::now();
             let result = system.read().recall(&query);
@@ -644,7 +667,24 @@ fn run_one_pass(
                 case_id: case.id.clone(),
                 retrieved: retrieved_corpus_ids,
             });
-            let relevance = build_relevance_map(case, &id_map);
+
+            // Drain the per-query fusion features (None unless armed above AND
+            // the FLAT fusion path ran) and pair them with the case outcome.
+            if let Some(features) = crate::memory::fusion_features::take() {
+                let gold_final_rank = retrieved_uuids
+                    .iter()
+                    .position(|u| relevance.contains_key(u));
+                feature_lines.push(
+                    serde_json::json!({
+                        "case_id": case.id,
+                        "category": format!("{:?}", case.category),
+                        "query_len": case.query.len(),
+                        "gold_final_rank": gold_final_rank,
+                        "features": features,
+                    })
+                    .to_string(),
+                );
+            }
 
             // Only emit the "missing relevance map" failure once across modes
             // — the relevance map is a function of fixtures + ingest, not
@@ -676,6 +716,20 @@ fn run_one_pass(
                 ranks,
             },
         );
+    }
+
+    if let Some(path) = &feature_export {
+        if !feature_lines.is_empty() {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .with_context(|| format!("opening feature export {}", path.display()))?;
+            for line in &feature_lines {
+                writeln!(f, "{line}")?;
+            }
+        }
     }
 
     Ok(OnePassResult { per_mode, failures })
