@@ -3129,6 +3129,63 @@ impl MultiUserMemoryManager {
         all_entities.truncate(entity_cap);
 
         // =====================================================================
+        // PHASE 1.9: SEMANTIC RELATION TYPING (SHODH_SEMANTIC_RELATIONS=1)
+        // Substrate increment 1 (#65): type entity-pair relations by embedding
+        // the template-normalized pair sentence against cached relation-label
+        // exemplars (relation_typer.rs). Embedding happens HERE, before the
+        // graph lock — Phase 2's pair loop only does map lookups. try_read on
+        // the user system: if a writer holds it we SKIP typing for this memory
+        // (graceful degradation) instead of risking the historical re-entrant
+        // deadlock class. Keyed by (name_i, name_j); the pair loop looks up in
+        // its own (i < j) order.
+        // =====================================================================
+        let semantic_relations_on = std::env::var("SHODH_SEMANTIC_RELATIONS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let mut semantic_pairs: HashMap<
+            (String, String),
+            (crate::graph_memory::RelationType, bool, f32),
+        > = HashMap::new();
+        if semantic_relations_on && all_entities.len() >= 2 {
+            if let Ok(system) = self.get_user_memory(user_id) {
+                if let Some(sys) = system.try_read() {
+                    let embedder = sys.get_embedder();
+                    // Mirror the Phase-2 pair cap (20) so we never embed pairs
+                    // the loop won't create edges for.
+                    const MAX_SEMANTIC_PAIRS: usize = 20;
+                    let mut budget = MAX_SEMANTIC_PAIRS;
+                    'outer: for i in 0..all_entities.len() {
+                        for j in (i + 1)..all_entities.len() {
+                            if budget == 0 {
+                                break 'outer;
+                            }
+                            budget -= 1;
+                            if let Some(hit) = crate::relation_typer::RELATION_TYPER.type_relation(
+                                embedder,
+                                &experience.content,
+                                &all_entities[i].0,
+                                &all_entities[j].0,
+                            ) {
+                                semantic_pairs.insert(
+                                    (all_entities[i].0.clone(), all_entities[j].0.clone()),
+                                    hit,
+                                );
+                            }
+                        }
+                    }
+                    if !semantic_pairs.is_empty() {
+                        tracing::debug!(
+                            "semantic relation typing: {} pairs typed",
+                            semantic_pairs.len()
+                        );
+                    }
+                } else {
+                    tracing::debug!("semantic relation typing skipped: user system busy");
+                }
+            }
+        }
+
+        // =====================================================================
         // PHASE 2: GRAPH INSERTION (WITH LOCK)
         // Only fast I/O operations happen here.
         // =====================================================================
@@ -3339,7 +3396,19 @@ impl MultiUserMemoryManager {
                 );
                 let mut from_entity = entity_uuids[i].1;
                 let mut to_entity = entity_uuids[j].1;
-                let relation_type = if extract_predicates
+                // Typing chain: semantic (Phase 1.9, embeds the actual pair
+                // sentence — most specific) → cue extractor → label-pair table.
+                // A semantic hit overrides even a non-generic label-pair rule:
+                // the sentence-level evidence beats a static type-pair default.
+                let semantic_hit = semantic_pairs
+                    .get(&(entity_uuids[i].0.clone(), entity_uuids[j].0.clone()))
+                    .cloned();
+                let relation_type = if let Some((rt, a_is_source, _sim)) = semantic_hit {
+                    if !a_is_source {
+                        std::mem::swap(&mut from_entity, &mut to_entity);
+                    }
+                    rt
+                } else if extract_predicates
                     && matches!(
                         label_relation,
                         crate::graph_memory::RelationType::CoOccurs
