@@ -547,6 +547,22 @@ fn run_one_pass(
     let id_map = ingest_corpus(&manager, corpus)?;
     let system = manager.get_user_memory(EVAL_USER)?;
 
+    // SHODH_VAMANA_QUALITY_REBUILD=1 — A/B lever: bulk alpha-RNG rebuild at the
+    // ingest→query boundary. The harness is the only place that KNOWS this
+    // boundary; a search-time trigger fires on remember()'s dedup search before
+    // any insert and silently no-ops (caught by run 27255269454's gate). Vector
+    // composition and the id mapping are preserved — only graph topology changes,
+    // so the arm isolates greedy-insert vs alpha-RNG construction.
+    if std::env::var("SHODH_VAMANA_QUALITY_REBUILD")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        system
+            .read()
+            .force_vector_quality_rebuild()
+            .context("vamana quality rebuild at the ingest→query boundary")?;
+    }
+
     // RH decay study: optionally age the knowledge-graph edges before querying
     // so recall quality reflects decayed/pruned edges. Driven at the production
     // ~6h cadence (see `MemorySystem::simulate_edge_aging`); a single large jump

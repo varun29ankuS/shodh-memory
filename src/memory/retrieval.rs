@@ -59,9 +59,6 @@ pub struct RetrievalEngine {
     /// Shared consolidation event buffer for introspection
     /// Records edge formation, strengthening, and pruning events
     consolidation_events: Option<Arc<RwLock<ConsolidationEventBuffer>>>,
-    /// One-shot guard for SHODH_VAMANA_QUALITY_REBUILD (bulk alpha-RNG rebuild
-    /// before first search). True once the check ran, regardless of outcome.
-    quality_rebuild_done: std::sync::atomic::AtomicBool,
 }
 
 /// Bidirectional mapping between memory IDs and vector IDs
@@ -212,7 +209,6 @@ impl RetrievalEngine {
             id_mapping: Arc::new(RwLock::new(id_mapping)),
             storage_path,
             consolidation_events,
-            quality_rebuild_done: std::sync::atomic::AtomicBool::new(false),
         };
 
         // ATOMIC STARTUP: Rebuild Vamana from RocksDB (single source of truth)
@@ -899,7 +895,6 @@ impl RetrievalEngine {
             };
 
         // Search vector index - fetch more candidates for chunk deduplication
-        self.maybe_quality_rebuild();
         let index = self.vector_index.read();
         let results = index
             .search(
@@ -975,7 +970,6 @@ impl RetrievalEngine {
         exclude_id: Option<&MemoryId>,
     ) -> Result<Vec<(MemoryId, f32)>> {
         // Search vector index - fetch more candidates to account for chunk deduplication
-        self.maybe_quality_rebuild();
         let index = self.vector_index.read();
         let results = index
             .search(embedding, limit * VECTOR_SEARCH_CANDIDATE_MULTIPLIER * 2)
@@ -1523,45 +1517,24 @@ impl RetrievalEngine {
         }
     }
 
-    /// SHODH_VAMANA_QUALITY_REBUILD=1 — one-shot bulk alpha-RNG rebuild before the
-    /// first search.
+    /// Bulk-rebuild the Vamana graph with full alpha-RNG construction.
     ///
     /// Every production write path reaches the index through `add_vector()`, which
     /// skips `robust_prune` (greedy top-k neighbors, distance-only back-edge
-    /// pruning). Even `rebuild_from_rocksdb()` re-adds vectors one at a time, so
-    /// the alpha-RNG construction (`build()`) never runs on a live index: the graph
-    /// is a greedy kNN graph that progressively loses the long-range edges greedy
-    /// search needs (documented 5-15% recall@10 loss). This hook rebuilds the graph
-    /// once with full Vamana construction, preserving vector composition exactly:
-    /// live vectors are collected in vector-id order with their memory ids from the
-    /// live mapping (chunk structure intact), bulk-built, remapped, and the new
-    /// mapping persisted to RocksDB so a later instant-startup stays consistent.
-    /// Default unset → no behavior change.
-    fn maybe_quality_rebuild(&self) {
-        use std::sync::atomic::Ordering;
-        if self.quality_rebuild_done.load(Ordering::Acquire) {
-            return;
-        }
-        let enabled = std::env::var("SHODH_VAMANA_QUALITY_REBUILD")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        // Mark done regardless of outcome: exactly one attempt per engine instance.
-        if self.quality_rebuild_done.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        if !enabled {
-            return;
-        }
-        if let Err(e) = self.force_quality_rebuild() {
-            tracing::warn!(
-                "Vamana quality rebuild failed; continuing on incremental graph: {e}"
-            );
-        }
-    }
-
-    /// Bulk-rebuild the Vamana graph with full alpha-RNG construction.
-    /// See `maybe_quality_rebuild` for rationale and invariants.
-    fn force_quality_rebuild(&self) -> Result<()> {
+    /// pruning), so the live graph progressively loses the long-range edges greedy
+    /// search needs (documented 5-15% recall@10 loss). This rebuilds the graph with
+    /// full Vamana construction, preserving vector composition exactly: live
+    /// vectors are collected in vector-id order with their memory ids from the live
+    /// mapping (chunk structure intact), bulk-built, remapped, and the new mapping
+    /// persisted to RocksDB so a later instant-startup stays consistent.
+    ///
+    /// Callers decide WHEN: the eval harness invokes it at the ingest→query
+    /// boundary (SHODH_VAMANA_QUALITY_REBUILD=1); production wiring belongs in the
+    /// maintenance cycle. A search-time trigger is the wrong shape — remember()'s
+    /// dedup search arrives before ingest, so any first-search heuristic fires on
+    /// an empty-or-tiny index and the real corpus never gets the rebuilt graph
+    /// (measured: run 27255269454's verification gate caught exactly that no-op).
+    pub(crate) fn force_quality_rebuild(&self) -> Result<()> {
         let start = std::time::Instant::now();
         // LOCK ORDERING: vector_index (1) before id_mapping (2)
         let mut index = self.vector_index.write();
@@ -2639,49 +2612,5 @@ mod tests {
         engine
             .force_quality_rebuild()
             .expect("no-op rebuild must succeed");
-    }
-
-    /// The env-gated wrapper must fire exactly once per engine instance.
-    #[test]
-    fn test_maybe_quality_rebuild_is_one_shot() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let storage =
-            Arc::new(crate::memory::storage::MemoryStorage::new(dir.path(), None).expect("storage"));
-        let embedder = Arc::new(
-            crate::embeddings::minilm::MiniLMEmbedder::new_simplified(
-                crate::embeddings::minilm::EmbeddingConfig::default(),
-            )
-            .expect("simplified embedder"),
-        );
-        let engine = RetrievalEngine::new(storage, embedder).expect("engine");
-
-        let dim = crate::embeddings::minilm::configured_text_dim();
-        for i in 0..5 {
-            let vid = engine
-                .vector_index
-                .write()
-                .add_vector(test_vector(i, dim))
-                .expect("add_vector");
-            engine
-                .id_mapping
-                .write()
-                .insert(MemoryId(uuid::Uuid::new_v4()), vid);
-        }
-
-        // Without the env var, maybe_quality_rebuild must not rebuild — but it
-        // marks the check done (one attempt per instance, regardless of outcome).
-        // 4, not 5: the first add_vector seeds the graph (not incremental).
-        engine.maybe_quality_rebuild();
-        assert_eq!(
-            engine.index_health().incremental_inserts,
-            4,
-            "no rebuild without SHODH_VAMANA_QUALITY_REBUILD"
-        );
-        assert!(
-            engine
-                .quality_rebuild_done
-                .load(std::sync::atomic::Ordering::Acquire),
-            "check must be marked done after first call"
-        );
     }
 }

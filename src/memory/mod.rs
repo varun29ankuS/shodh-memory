@@ -6633,6 +6633,16 @@ impl MemorySystem {
         self.retriever.index_health()
     }
 
+    /// Bulk-rebuild the Vamana graph with full alpha-RNG construction
+    /// (robust_prune), replacing the greedy incremental-insert graph. Vector
+    /// composition and the id mapping are preserved exactly — only graph
+    /// topology changes. Used by the eval harness at the ingest→query boundary
+    /// (SHODH_VAMANA_QUALITY_REBUILD=1); production wiring belongs in the
+    /// maintenance cycle.
+    pub fn force_vector_quality_rebuild(&self) -> Result<()> {
+        self.retriever.force_quality_rebuild()
+    }
+
     /// Auto-rebuild vector index if degradation threshold is exceeded
     ///
     /// Returns `Ok(true)` if rebuild was performed, `Ok(false)` if not needed.
