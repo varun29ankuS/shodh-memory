@@ -2637,6 +2637,71 @@ impl MemorySystem {
             .unwrap_or(0);
         let mut graph_exclusive_reserve: Vec<MemoryId> = Vec::new();
 
+        // SHODH_DISABLE_BOOSTS=<family,...> — ablation kill-switch for the post-fusion
+        // boost stack. Each token disables one boost family at recall time so its
+        // marginal contribution can be measured against the calibrated FLAT baseline
+        // (the stack predates calibrated fusion and was never ablated against it).
+        // Layer 4.45-4.9 families: attribute, temporal_prefilter, temporal_fact,
+        // interference, prospective, fact_source, ontological. Layer 5-5.7 families:
+        // hebbian, recency, arousal, credibility, temporal_match, feedback, importance,
+        // tag_penalty, quality, linguistic, competition. "all" disables every family.
+        // Default unset → all boosts active (shipped behavior unchanged).
+        const BOOST_FAMILIES: [&str; 18] = [
+            "attribute",
+            "temporal_prefilter",
+            "temporal_fact",
+            "interference",
+            "prospective",
+            "fact_source",
+            "ontological",
+            "hebbian",
+            "recency",
+            "arousal",
+            "credibility",
+            "temporal_match",
+            "feedback",
+            "importance",
+            "tag_penalty",
+            "quality",
+            "linguistic",
+            "competition",
+        ];
+        let disabled_boosts: std::collections::HashSet<String> =
+            std::env::var("SHODH_DISABLE_BOOSTS")
+                .map(|v| {
+                    v.split(',')
+                        .map(|t| t.trim().to_ascii_lowercase())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+        for tok in &disabled_boosts {
+            if tok != "all" && !BOOST_FAMILIES.contains(&tok.as_str()) {
+                tracing::warn!("SHODH_DISABLE_BOOSTS: unknown boost family '{tok}' (ignored)");
+            }
+        }
+        let boost_on = |family: &str| -> bool {
+            !(disabled_boosts.contains("all") || disabled_boosts.contains(family))
+        };
+        let boost_attribute = boost_on("attribute");
+        let boost_temporal_prefilter = boost_on("temporal_prefilter");
+        let boost_temporal_fact = boost_on("temporal_fact");
+        let boost_interference = boost_on("interference");
+        let boost_prospective = boost_on("prospective");
+        let boost_fact_source = boost_on("fact_source");
+        let boost_ontological = boost_on("ontological");
+        let boost_hebbian = boost_on("hebbian");
+        let boost_recency = boost_on("recency");
+        let boost_arousal = boost_on("arousal");
+        let boost_credibility = boost_on("credibility");
+        let boost_temporal_match = boost_on("temporal_match");
+        let boost_feedback = boost_on("feedback");
+        let boost_importance = boost_on("importance");
+        let boost_tag_penalty = boost_on("tag_penalty");
+        let boost_quality = boost_on("quality");
+        let boost_linguistic = boost_on("linguistic");
+        let boost_competition = boost_on("competition");
+
         let (memory_ids, hebbian_scores): (
             Vec<(MemoryId, f32)>,
             std::collections::HashMap<MemoryId, f32>,
@@ -3245,7 +3310,7 @@ impl MemorySystem {
             // For attribute queries, heavily boost memories that contain BOTH the entity
             // AND an attribute synonym value. This ensures "Caroline is single" ranks
             // high for "What is Caroline's relationship status?".
-            if !attribute_boost_ids.is_empty() {
+            if boost_attribute && !attribute_boost_ids.is_empty() {
                 let mut boosted_count = 0;
                 let boost_factor = 1.0 + crate::constants::ATTRIBUTE_QUERY_BOOST;
                 for id in &attribute_boost_ids {
@@ -3273,7 +3338,7 @@ impl MemorySystem {
             // Memories that fell within the query's parsed date range (Layer 0.4)
             // get a multiplicative boost. This ensures date-relevant memories rise
             // above semantically similar but temporally wrong results.
-            if !temporal_prefilter_ids.is_empty() {
+            if boost_temporal_prefilter && !temporal_prefilter_ids.is_empty() {
                 let mut boosted_count = 0;
                 let boost_factor = 1.0 + crate::constants::TEMPORAL_PREFILTER_BOOST;
                 for id in &temporal_prefilter_ids {
@@ -3301,7 +3366,7 @@ impl MemorySystem {
             // Source memories of matching temporal facts get a moderate boost.
             // This ensures "When did Melanie paint a sunrise?" boosts the memory that
             // recorded the event, not just memories with temporal_refs.
-            if !temporal_fact_boost_ids.is_empty() {
+            if boost_temporal_fact && !temporal_fact_boost_ids.is_empty() {
                 let mut boosted_count = 0;
                 let boost_factor = 1.0 + crate::constants::TEMPORAL_FACT_BOOST;
                 for id in &temporal_fact_boost_ids {
@@ -3338,7 +3403,7 @@ impl MemorySystem {
             // - High interference + low activation = "chronic loser" → suppress (0.5-1.0x)
             // - No interference history → neutral (1.0x)
             // RH-8 gate: interference adjustments only run in `Full` mode.
-            if layer_full {
+            if layer_full && boost_interference {
                 let detector = self.interference_detector.read();
 
                 // Compute max score once for normalization
@@ -3446,7 +3511,7 @@ impl MemorySystem {
                 }
             }
 
-            if layer_full {
+            if layer_full && boost_prospective {
                 if let Some(ref signals) = query.prospective_signals {
                     if !signals.is_empty() {
                         use crate::constants::{
@@ -3518,7 +3583,7 @@ impl MemorySystem {
             //
             // Conservative: only boosts memories already in fused set (does NOT inject
             // new candidates). Facts validate existing retrieval signals, not override.
-            if !fact_source_boosts.is_empty() {
+            if boost_fact_source && !fact_source_boosts.is_empty() {
                 let mut boosted_count = 0;
                 for (id, boost) in &fact_source_boosts {
                     if let Some(score) = fused.get_mut(id) {
@@ -3563,7 +3628,11 @@ impl MemorySystem {
             // expectation of a cross-encoder. This codebase has no cross-encoder; the only
             // rerank present is the ontological label-match boost below. The mode label is
             // preserved for spec fidelity. See plan/PR for details.
-            if layer_rerank && use_ontology_rerank && !onto_intent.expected_labels.is_empty() {
+            if layer_rerank
+                && boost_ontological
+                && use_ontology_rerank
+                && !onto_intent.expected_labels.is_empty()
+            {
                 if let Some(graph) = self.graph_memory.as_ref() {
                     let g = graph.read();
                     let mut boosted_count = 0usize;
@@ -3722,7 +3791,7 @@ impl MemorySystem {
             // Hebbian boost from learned graph weights (multiplicative)
             // RH-8 gate: Hebbian association boost only applies in `Full` mode.
             let hebbian_boost = hebbian_scores.get(&memory_id).copied().unwrap_or(0.0);
-            let base_score = if layer_full {
+            let base_score = if layer_full && boost_hebbian {
                 score * (1.0 + hebbian_boost * crate::constants::HEBBIAN_ASSOCIATION_WEIGHT)
             } else {
                 score
@@ -3743,24 +3812,34 @@ impl MemorySystem {
                 // Recency: exponential decay, multiplicative factor
                 let hours_old = (now - mem.created_at).num_hours().max(0) as f32;
                 let recency_scale = recency_scale_override.unwrap_or(RECENCY_BOOST_SCALE);
-                let recency_factor = (-RECENCY_DECAY_RATE * hours_old).exp() * recency_scale;
+                let recency_factor = if boost_recency {
+                    (-RECENCY_DECAY_RATE * hours_old).exp() * recency_scale
+                } else {
+                    0.0
+                };
 
                 // Emotional arousal: high arousal = more salient
                 // Reference: LaBar & Cabeza (2006) — emotionally arousing events better remembered
-                let arousal_factor = mem
-                    .experience
-                    .context
-                    .as_ref()
-                    .map(|c| c.emotional.arousal * AROUSAL_BOOST_SCALE)
-                    .unwrap_or(0.0);
+                let arousal_factor = if boost_arousal {
+                    mem.experience
+                        .context
+                        .as_ref()
+                        .map(|c| c.emotional.arousal * AROUSAL_BOOST_SCALE)
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
 
                 // Source credibility: credible sources weighted higher
-                let credibility_factor = mem
-                    .experience
-                    .context
-                    .as_ref()
-                    .map(|c| (c.source.credibility - 0.5).max(0.0) * CREDIBILITY_BOOST_SCALE)
-                    .unwrap_or(0.0);
+                let credibility_factor = if boost_credibility {
+                    mem.experience
+                        .context
+                        .as_ref()
+                        .map(|c| (c.source.credibility - 0.5).max(0.0) * CREDIBILITY_BOOST_SCALE)
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
 
                 // TEMPORAL MATCH (TEMPR approach for multi-hop temporal retrieval)
                 //
@@ -3768,7 +3847,10 @@ impl MemorySystem {
                 // 1. If memory has explicit temporal_refs → match against query refs (highest signal)
                 // 2. If query is filtering BY date → use created_at proximity as fallback
                 // 3. If query is seeking FOR a date (WhenQuestion) → skip boost entirely
-                let temporal_factor = if has_temporal_query && !temporal_ctx.is_seeking_query {
+                let temporal_factor = if boost_temporal_match
+                    && has_temporal_query
+                    && !temporal_ctx.is_seeking_query
+                {
                     let mut best_match = 0.0_f32;
 
                     // Tier 1: Explicit temporal_refs on the memory
@@ -3806,7 +3888,7 @@ impl MemorySystem {
                     // distinct content signal and still applies to them above.
                     if best_match == 0.0
                         && temporal_ctx.is_filtering_query
-                        && !temporal_prefilter_ids.contains(&mem.id)
+                        && !(boost_temporal_prefilter && temporal_prefilter_ids.contains(&mem.id))
                     {
                         if let Some((range_start, range_end)) = temporal_ctx.date_range {
                             let created_date = mem.created_at.date_naive();
@@ -3839,7 +3921,9 @@ impl MemorySystem {
 
                 // FEEDBACK MOMENTUM (PIPE-9)
                 // Symmetric ±15% multiplicative adjustment
-                let feedback_multiplier = if let Some(ref guard) = feedback_guard {
+                let feedback_multiplier = if !boost_feedback {
+                    1.0
+                } else if let Some(ref guard) = feedback_guard {
                     if let Some(fm) = guard.get_momentum(&mem.id) {
                         let momentum = fm.ema_with_decay();
                         if momentum < 0.0 {
@@ -3855,8 +3939,11 @@ impl MemorySystem {
                 };
 
                 // Importance: scale base score by learned importance (7 factors)
-                let importance_factor =
-                    SCORING_IMPORTANCE_FLOOR + mem.importance() * SCORING_IMPORTANCE_RANGE;
+                let importance_factor = if boost_importance {
+                    SCORING_IMPORTANCE_FLOOR + mem.importance() * SCORING_IMPORTANCE_RANGE
+                } else {
+                    1.0
+                };
 
                 // Unified multiplicative scoring:
                 // base × importance × (1 + recency + arousal + credibility + temporal) × feedback
@@ -3869,7 +3956,9 @@ impl MemorySystem {
                 // Hook-ingested memories carry "auto-captured" tag; assistant responses
                 // carry "assistant-response". Apply multiplicative penalty so they don't
                 // outrank intentional memories when volume gives them a ranking edge.
-                let tag_penalty = {
+                let tag_penalty = if !boost_tag_penalty {
+                    1.0
+                } else {
                     let mut penalty = 1.0_f32;
                     for tag in &mem.experience.tags {
                         match tag.as_str() {
@@ -3905,26 +3994,40 @@ impl MemorySystem {
                         use crate::constants::*;
                         let hours_old = (now - mem.created_at).num_hours().max(0) as f32;
                         let recency_scale = recency_scale_override.unwrap_or(RECENCY_BOOST_SCALE);
-                        attr.recency_factor =
-                            (-RECENCY_DECAY_RATE * hours_old).exp() * recency_scale;
-                        attr.arousal_factor = mem
-                            .experience
-                            .context
-                            .as_ref()
-                            .map(|c| c.emotional.arousal * AROUSAL_BOOST_SCALE)
-                            .unwrap_or(0.0);
-                        attr.credibility_factor = mem
-                            .experience
-                            .context
-                            .as_ref()
-                            .map(|c| {
-                                (c.source.credibility - 0.5).max(0.0) * CREDIBILITY_BOOST_SCALE
-                            })
-                            .unwrap_or(0.0);
-                        attr.importance_factor =
-                            SCORING_IMPORTANCE_FLOOR + mem.importance() * SCORING_IMPORTANCE_RANGE;
+                        attr.recency_factor = if boost_recency {
+                            (-RECENCY_DECAY_RATE * hours_old).exp() * recency_scale
+                        } else {
+                            0.0
+                        };
+                        attr.arousal_factor = if boost_arousal {
+                            mem.experience
+                                .context
+                                .as_ref()
+                                .map(|c| c.emotional.arousal * AROUSAL_BOOST_SCALE)
+                                .unwrap_or(0.0)
+                        } else {
+                            0.0
+                        };
+                        attr.credibility_factor = if boost_credibility {
+                            mem.experience
+                                .context
+                                .as_ref()
+                                .map(|c| {
+                                    (c.source.credibility - 0.5).max(0.0) * CREDIBILITY_BOOST_SCALE
+                                })
+                                .unwrap_or(0.0)
+                        } else {
+                            0.0
+                        };
+                        attr.importance_factor = if boost_importance {
+                            SCORING_IMPORTANCE_FLOOR + mem.importance() * SCORING_IMPORTANCE_RANGE
+                        } else {
+                            1.0
+                        };
                         // Feedback multiplier
-                        attr.feedback_multiplier = if let Some(ref guard) = feedback_guard {
+                        attr.feedback_multiplier = if !boost_feedback {
+                            1.0
+                        } else if let Some(ref guard) = feedback_guard {
                             if let Some(fm) = guard.get_momentum(&mem.id) {
                                 let momentum = fm.ema_with_decay();
                                 if momentum < 0.0 {
@@ -4048,7 +4151,7 @@ impl MemorySystem {
         // Same formula as proactive_context (Berntsen elaboration quality).
         // RH-8 gate: quality multiplier only applies in `Full` mode — lower modes
         // expose the raw fused score so per-layer attribution isn't masked.
-        if layer_full {
+        if layer_full && boost_quality {
             let v2_no_verbosity = std::env::var("SHODH_FUSION_V2")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
@@ -4086,7 +4189,7 @@ impl MemorySystem {
 
         // Linguistic analysis: additive boost (5% of IC weight), not a full re-sort
         // RH-8 gate: linguistic re-sort only runs in `Full` mode.
-        if layer_full && !query_analysis.focal_entities.is_empty() {
+        if layer_full && boost_linguistic && !query_analysis.focal_entities.is_empty() {
             let v2_single = std::env::var("SHODH_FUSION_V2")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
@@ -4137,7 +4240,7 @@ impl MemorySystem {
         // Suppressed memories should not be coactivated (Hebbian "losers don't learn").
         // RH-8 gate: retrieval competition mutates interference state — only run in `Full` mode
         // so per-layer attribution runs in `--layer all` don't pollute state across modes.
-        if layer_full && memories.len() >= 2 {
+        if layer_full && boost_competition && memories.len() >= 2 {
             // Use actual pipeline scores for competition, not position-based proxies.
             // Previously used 1.0 - (i/n)*0.3 which compressed all scores to [0.7, 1.0],
             // making suppression (ratio > 0.9) almost impossible.
