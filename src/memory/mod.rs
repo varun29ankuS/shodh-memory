@@ -2528,6 +2528,7 @@ impl MemorySystem {
             user_id: query.user_id.clone(),
             query_text: None, // Don't re-generate embedding
             query_embedding: Some(query_embedding),
+            ner_entities: None, // vector leg doesn't seed from entities
             time_range: query.time_range,
             experience_types: query.experience_types.clone(),
             importance_threshold: query.importance_threshold,

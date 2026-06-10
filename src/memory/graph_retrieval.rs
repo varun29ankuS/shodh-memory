@@ -954,6 +954,39 @@ pub fn spreading_activation_retrieve_with_stats(
         }
     }
 
+    // Query-NER seeding (query-analysis audit 2026-06-10): augment the heuristic
+    // focal entities with NEURAL-NER entities annotated on the query by the
+    // caller that owns the model (recall handler / eval runner, behind
+    // SHODH_QUERY_NER). The POS heuristic measurably seeds the graph with verbs
+    // and months while demoting real entities to modifiers; the 17MB NER model
+    // fixes exactly this at ingest but never saw queries. AUGMENT, not replace:
+    // NER misses stay covered by the heuristic; duplicates dedup by entity uuid.
+    // Seed IC weight matches the noun IC (2.3) the heuristic would assign.
+    if let Some(ner_names) = query.ner_entities.as_deref() {
+        const QUERY_NER_SEED_IC: f32 = 2.3;
+        let seen: HashSet<Uuid> = entity_data.iter().map(|(u, _, _, _)| *u).collect();
+        let mut added = 0usize;
+        for name in ner_names {
+            if name.trim().len() < 2 {
+                continue;
+            }
+            if let Some(entity_node) = graph.find_entity_by_name(name)? {
+                if !seen.contains(&entity_node.uuid) {
+                    entity_data.push((
+                        entity_node.uuid,
+                        name.clone(),
+                        QUERY_NER_SEED_IC,
+                        entity_node.salience,
+                    ));
+                    added += 1;
+                }
+            }
+        }
+        if added > 0 {
+            tracing::debug!("Query-NER seeding: +{added} neural-NER graph seeds");
+        }
+    }
+
     // G5: the query-entity seed set, for multi-seed coverage scoring. An episode
     // connected to MORE distinct query seeds is more relevant (the multi_hop
     // discriminator); raw summed activation alone cannot separate gold from

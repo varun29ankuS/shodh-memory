@@ -613,12 +613,14 @@ fn run_one_pass(
         let mut ranks: Vec<CaseRankList> = Vec::with_capacity(cases.len());
 
         for case in cases {
-            let query = Query {
+            let mut query = Query {
                 query_text: Some(case.query.clone()),
                 max_results: diag_k,
                 layers: *mode,
                 ..Default::default()
             };
+            // SHODH_QUERY_NER A/B lever: neural-NER graph seeding (no-op when unset).
+            manager.annotate_query_ner(&mut query);
 
             // Pure function of fixtures + ingest (hoisted above recall so the
             // feature exporter can arm with this query's gold ids).

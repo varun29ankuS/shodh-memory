@@ -1766,6 +1766,38 @@ impl MultiUserMemoryManager {
         self.neural_ner.clone()
     }
 
+    /// SHODH_QUERY_NER=1 — annotate a recall query with neural-NER entities so
+    /// the graph leg seeds from the real recognizer instead of the POS
+    /// heuristic (which measurably tags verbs/months as entities — query
+    /// analysis audit 2026-06-10). No-op when the flag is unset, the query has
+    /// no text, or NER finds nothing. Confidence-filtered (≥0.5), capped at 8
+    /// names to bound the seed budget.
+    pub fn annotate_query_ner(&self, query: &mut crate::memory::types::Query) {
+        let enabled = std::env::var("SHODH_QUERY_NER")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !enabled {
+            return;
+        }
+        let Some(text) = query.query_text.as_deref() else {
+            return;
+        };
+        match self.neural_ner.extract(text) {
+            Ok(entities) => {
+                let names: Vec<String> = entities
+                    .into_iter()
+                    .filter(|e| e.confidence >= 0.5 && e.text.trim().len() >= 2)
+                    .map(|e| e.text)
+                    .take(8)
+                    .collect();
+                if !names.is_empty() {
+                    query.ner_entities = Some(names);
+                }
+            }
+            Err(e) => tracing::debug!("query NER annotation failed: {e}"),
+        }
+    }
+
     /// Get keyword extractor for statistical term extraction
     pub fn get_keyword_extractor(&self) -> Arc<KeywordExtractor> {
         self.keyword_extractor.clone()
