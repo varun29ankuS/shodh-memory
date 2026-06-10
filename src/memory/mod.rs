@@ -3140,23 +3140,76 @@ impl MemorySystem {
                 .unwrap_or(false);
             let effective_vec_trust = if flat_adaptive {
                 let adapt_trust_max = env_w("SHODH_ADAPT_TRUST_MAX", 1.6);
-                let adapt_peak_lo = env_w("SHODH_ADAPT_PEAK_LO", 2.0);
-                let adapt_peak_hi = env_w("SHODH_ADAPT_PEAK_HI", 6.0);
-                let bm_vals: Vec<f32> = hybrid_components
-                    .values()
-                    .map(|(b, _)| *b)
-                    .filter(|b| *b > 0.0)
-                    .collect();
-                let mean_bm = if bm_vals.is_empty() {
-                    0.0
+                // SHODH_ADAPT_FEATURE selects the per-query discriminating feature:
+                //   peak      — BM25 peakedness (stage 1; run 27244857747: helps
+                //               multi/temporal but craters single_hop — the feature
+                //               doesn't separate the query types cleanly)
+                //   agreement — vector↔BM25 top-K overlap (stage 1b): when the two
+                //               legs AGREE on the top candidates there is a lexical
+                //               anchor (single_hop shape → trust BM25, vec_trust→1);
+                //               when vector's top is invisible to BM25 the answer is
+                //               semantic-only (multi_hop shape → trust vector →max).
+                //               Unlike peakedness this measures the RELATION between
+                //               the legs, not one leg's shape alone.
+                let adapt_feature = std::env::var("SHODH_ADAPT_FEATURE")
+                    .unwrap_or_else(|_| "peak".to_string())
+                    .to_ascii_lowercase();
+                let t = if adapt_feature == "agreement" {
+                    let agree_k = env_w("SHODH_ADAPT_AGREE_K", 10.0).max(1.0) as usize;
+                    let agree_lo = env_w("SHODH_ADAPT_AGREE_LO", 0.1);
+                    let agree_hi = env_w("SHODH_ADAPT_AGREE_HI", 0.5);
+                    let mut by_vec: Vec<(&MemoryId, f32)> = hybrid_components
+                        .iter()
+                        .filter(|(_, (_, v))| *v > 0.0)
+                        .map(|(id, (_, v))| (id, *v))
+                        .collect();
+                    let mut by_bm: Vec<(&MemoryId, f32)> = hybrid_components
+                        .iter()
+                        .filter(|(_, (b, _))| *b > 0.0)
+                        .map(|(id, (b, _))| (id, *b))
+                        .collect();
+                    if by_bm.is_empty() {
+                        // No lexical signal at all — the strongest "no anchor" case.
+                        1.0
+                    } else if by_vec.is_empty() {
+                        0.0
+                    } else {
+                        // Deterministic top-K per leg (score desc, id tie-break).
+                        by_vec.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                        by_bm.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                        let k = agree_k.min(by_vec.len()).min(by_bm.len()).max(1);
+                        let top_v: std::collections::HashSet<&MemoryId> =
+                            by_vec.iter().take(k).map(|(id, _)| *id).collect();
+                        let overlap = by_bm
+                            .iter()
+                            .take(k)
+                            .filter(|(id, _)| top_v.contains(id))
+                            .count() as f32
+                            / k as f32;
+                        // overlap ≥ hi → t=0 (legs agree, trust BM25);
+                        // overlap ≤ lo → t=1 (vector sees what BM25 can't).
+                        let span = (agree_hi - agree_lo).max(1e-6);
+                        ((agree_hi - overlap) / span).clamp(0.0, 1.0)
+                    }
                 } else {
-                    bm_vals.iter().sum::<f32>() / bm_vals.len() as f32
+                    let adapt_peak_lo = env_w("SHODH_ADAPT_PEAK_LO", 2.0);
+                    let adapt_peak_hi = env_w("SHODH_ADAPT_PEAK_HI", 6.0);
+                    let bm_vals: Vec<f32> = hybrid_components
+                        .values()
+                        .map(|(b, _)| *b)
+                        .filter(|b| *b > 0.0)
+                        .collect();
+                    let mean_bm = if bm_vals.is_empty() {
+                        0.0
+                    } else {
+                        bm_vals.iter().sum::<f32>() / bm_vals.len() as f32
+                    };
+                    let bm_peak = if mean_bm > 1e-6 { max_bm / mean_bm } else { 1.0 };
+                    // t = 1 when BM25 is flat (peak ≤ lo) → full vector trust; t = 0 when
+                    // sharply peaked (peak ≥ hi) → no extra trust (BM25-strong gold protected).
+                    let span = (adapt_peak_hi - adapt_peak_lo).max(1e-6);
+                    ((adapt_peak_hi - bm_peak) / span).clamp(0.0, 1.0)
                 };
-                let bm_peak = if mean_bm > 1e-6 { max_bm / mean_bm } else { 1.0 };
-                // t = 1 when BM25 is flat (peak ≤ lo) → full vector trust; t = 0 when sharply
-                // peaked (peak ≥ hi) → no extra trust (BM25-strong gold protected).
-                let span = (adapt_peak_hi - adapt_peak_lo).max(1e-6);
-                let t = ((adapt_peak_hi - bm_peak) / span).clamp(0.0, 1.0);
                 1.0 + (adapt_trust_max - 1.0) * t
             } else {
                 // No global vector-trust knob: 1.0 unless the per-query adaptive
