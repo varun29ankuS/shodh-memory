@@ -53,15 +53,27 @@ jobs:
       - name: A recall — incremental graph (baseline)
         run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
       - name: B recall — quality rebuild (alpha-RNG)
-        run: set -o pipefail; SHODH_VAMANA_QUALITY_REBUILD=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+        run: |
+          set -o pipefail
+          RUST_LOG=shodh_memory=info SHODH_VAMANA_QUALITY_REBUILD=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b > b.log 2>&1 || { tail -20 b.log; exit 1; }
+          grep -m1 "Vamana quality rebuild" b.log || { echo "::error::quality rebuild NEVER FIRED — B arm invalid"; tail -30 b.log; exit 1; }
+          tail -3 b.log
       - name: A vector-leg — incremental graph
         run: set -o pipefail; SHODH_LEG=vector ./target/release/recall-eval --suite locomo --repeats 1 --output va.json --storage ./s-va 2>&1 | tail -3
       - name: B vector-leg — quality rebuild
-        run: set -o pipefail; SHODH_LEG=vector SHODH_VAMANA_QUALITY_REBUILD=1 ./target/release/recall-eval --suite locomo --repeats 1 --output vb.json --storage ./s-vb 2>&1 | tail -3
+        run: |
+          set -o pipefail
+          RUST_LOG=shodh_memory=info SHODH_LEG=vector SHODH_VAMANA_QUALITY_REBUILD=1 ./target/release/recall-eval --suite locomo --repeats 1 --output vb.json --storage ./s-vb > vb.log 2>&1 || { tail -20 vb.log; exit 1; }
+          grep -m1 "Vamana quality rebuild" vb.log || { echo "::error::quality rebuild NEVER FIRED — vB arm invalid"; tail -30 vb.log; exit 1; }
+          tail -3 vb.log
       - name: A funnel — incremental graph
         run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
       - name: B funnel — quality rebuild
-        run: set -o pipefail; SHODH_VAMANA_QUALITY_REBUILD=1 ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb 2>&1 | tail -3
+        run: |
+          set -o pipefail
+          RUST_LOG=shodh_memory=info SHODH_VAMANA_QUALITY_REBUILD=1 ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb > fb.log 2>&1 || { tail -20 fb.log; exit 1; }
+          grep -m1 "Vamana quality rebuild" fb.log || { echo "::error::quality rebuild NEVER FIRED — fB arm invalid"; tail -30 fb.log; exit 1; }
+          tail -3 fb.log
 
       - name: Compare
         if: always()

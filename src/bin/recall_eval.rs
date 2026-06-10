@@ -265,6 +265,17 @@ struct Args {
 }
 
 fn main() {
+    // Opt-in tracing (RUST_LOG=shodh_memory=info): without a subscriber the
+    // library's tracing events are silently dropped, which makes flag-gated
+    // behavior (e.g. SHODH_VAMANA_QUALITY_REBUILD) unverifiable from CI logs —
+    // an A/B arm can no-op silently and read as "no effect".
+    if std::env::var("RUST_LOG").is_ok() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
+
     let args = Args::parse();
     let exit = match run(&args) {
         Ok(code) => code,

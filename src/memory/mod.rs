@@ -2907,7 +2907,16 @@ impl MemorySystem {
             if let Ok(v) = std::env::var("SHODH_GRAPH_W_FLOOR") {
                 if let Ok(f) = v.parse::<f32>() {
                     if f > graph_w {
-                        graph_w = f.clamp(0.0, 0.95);
+                        // Cap the floor so renormalisation can never silently zero the
+                        // semantic/BM25 leg: keep at least 0.05 of semantic weight.
+                        let max_floor = (1.0 - linguistic_w - 0.05).max(0.0);
+                        let requested = f.clamp(0.0, 0.95);
+                        graph_w = requested.min(max_floor);
+                        if requested > max_floor {
+                            tracing::warn!(
+                                "SHODH_GRAPH_W_FLOOR={requested} capped to {graph_w:.2} to keep the semantic leg alive"
+                            );
+                        }
                         semantic_w = (1.0 - graph_w - linguistic_w).max(0.0);
                     }
                 }
@@ -3064,33 +3073,14 @@ impl MemorySystem {
                 .and_then(|s| s.parse::<f32>().ok())
                 .unwrap_or(0.3)
                 .clamp(0.0, 1.0);
-            // SHODH_FLAT_VEC_TRUST: multiplier on the vector leg inside the flat-MAX. The
-            // per-category funnel showed the vector leg ranks gold better (mean-rank ~3.7-4.5)
-            // than FLAT fusion achieves (~8-10) — fusion dilutes the strong vector signal.
-            // >1 lifts a vector-strong candidate in the max without hurting a BM25-strong gold
-            // (which still wins via bn). Default 1.0 → unchanged.
-            let flat_vec_trust = std::env::var("SHODH_FLAT_VEC_TRUST")
-                .ok()
-                .and_then(|s| s.parse::<f32>().ok())
-                .unwrap_or(1.0)
-                .max(0.0);
-            // SHODH_FLAT_VEC_ABS: calibrate the vector leg by ABSOLUTE cosine confidence
-            // instead of within-query relative rank (vec/max_vec). Relative normalisation
-            // hands the top candidate 1.0 even when its cosine is mediocre, so on a query with
-            // no real semantic match vector-NOISE competes with the BM25-strong gold — the
-            // single_hop regression that a global vector-trust multiplier caused (run
-            // 27221406266). Absolute calibration zeroes weak-cosine candidates (< floor) so
-            // vector contributes ONLY where it is genuinely confident: query-adaptive without a
-            // query-type label (which multi_hop can't supply at runtime). Default off → FLAT
-            // unchanged. SHODH_FLAT_VEC_FLOOR sets the cosine below which vector is ignored.
-            let flat_vec_abs = std::env::var("SHODH_FLAT_VEC_ABS")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            let flat_vec_floor = std::env::var("SHODH_FLAT_VEC_FLOOR")
-                .ok()
-                .and_then(|s| s.parse::<f32>().ok())
-                .unwrap_or(0.3)
-                .clamp(0.0, 0.95);
+            // SHODH_FLAT_VEC_TRUST (global vector multiplier) and SHODH_FLAT_VEC_ABS /
+            // SHODH_FLAT_VEC_FLOOR (absolute cosine calibration) were REMOVED: both
+            // measured NEGATIVE (runs 27221406266, 27223054766 — each trades
+            // multi_hop↔single_hop through a global scalar; the structural fix is the
+            // per-query SHODH_FLAT_ADAPTIVE path below). Deleted rather than left
+            // default-off so a stale sweep config can't silently re-enable a known
+            // regression. Recoverable from git history if a per-query variant of
+            // absolute calibration is ever wanted as an adaptive FEATURE.
             let max_vec = hybrid_components
                 .values()
                 .map(|(_, v)| *v)
@@ -3169,7 +3159,9 @@ impl MemorySystem {
                 let t = ((adapt_peak_hi - bm_peak) / span).clamp(0.0, 1.0);
                 1.0 + (adapt_trust_max - 1.0) * t
             } else {
-                flat_vec_trust
+                // No global vector-trust knob: 1.0 unless the per-query adaptive
+                // path is enabled (global scalars measured as a category tradeoff).
+                1.0
             };
 
             // Graph leg.
@@ -3269,13 +3261,7 @@ impl MemorySystem {
                     // (measured: monotonic multi_hop↔single_hop tradeoff); max preserves the
                     // best signal per candidate.
                     let (bm25, vec) = hybrid_components.get(id).copied().unwrap_or((0.0, 0.0));
-                    let vn = if flat_vec_abs {
-                        // Absolute cosine confidence: a weak-cosine candidate (< floor) → ~0
-                        // and cannot displace a BM25-strong gold; a strong match competes fully.
-                        ((vec - flat_vec_floor) / (1.0 - flat_vec_floor)).clamp(0.0, 1.0)
-                    } else {
-                        (vec / max_vec).clamp(0.0, 1.0) * effective_vec_trust
-                    };
+                    let vn = (vec / max_vec).clamp(0.0, 1.0) * effective_vec_trust;
                     let bn = (bm25 / max_bm).clamp(0.0, 1.0);
                     let (hi, lo) = if vn >= bn { (vn, bn) } else { (bn, vn) };
                     hybrid_w * (hi + flat_consensus * lo)
@@ -3349,6 +3335,10 @@ impl MemorySystem {
             // Memories that fell within the query's parsed date range (Layer 0.4)
             // get a multiplicative boost. This ensures date-relevant memories rise
             // above semantically similar but temporally wrong results.
+            // MEASURED (boost ablation, run 27249880829): despite the name, this boost's
+            // recall@10 contribution lands in single_hop; temporal-category recall is
+            // invariant with it on or off. Temporal ORDERING is carried by the Layer-5
+            // linguistic family instead.
             if boost_temporal_prefilter && !temporal_prefilter_ids.is_empty() {
                 let mut boosted_count = 0;
                 let boost_factor = 1.0 + crate::constants::TEMPORAL_PREFILTER_BOOST;
@@ -3377,6 +3367,9 @@ impl MemorySystem {
             // Source memories of matching temporal facts get a moderate boost.
             // This ensures "When did Melanie paint a sunrise?" boosts the memory that
             // recorded the event, not just memories with temporal_refs.
+            // MEASURED (boost ablation, run 27249880829): contributes to single_hop
+            // recall, NOT to temporal-category recall (invariant on/off) — the name
+            // describes the trigger, not the measured effect.
             if boost_temporal_fact && !temporal_fact_boost_ids.is_empty() {
                 let mut boosted_count = 0;
                 let boost_factor = 1.0 + crate::constants::TEMPORAL_FACT_BOOST;
@@ -3960,8 +3953,17 @@ impl MemorySystem {
                 // base × importance × (1 + recency + arousal + credibility + temporal) × feedback
                 // All boost factors are additive within the parenthetical, then multiplicative
                 // on the base. This preserves RRF ranking while allowing signals to modulate.
-                let combined_boost =
-                    1.0 + recency_factor + arousal_factor + credibility_factor + temporal_factor;
+                // Clamp: under default constants the additive parts max out at ~1.25
+                // (0.5 recency + 0.15 arousal + 0.1 credibility + 0.5 temporal), so 2.5
+                // never bites — but query.recency_weight is CALLER-supplied and unbounded,
+                // and an extreme override must not be able to multiply one memory's score
+                // arbitrarily past the rest of the window.
+                let combined_boost = (1.0
+                    + recency_factor
+                    + arousal_factor
+                    + credibility_factor
+                    + temporal_factor)
+                    .min(2.5);
 
                 // AUTO-CAPTURED TAG PENALTY (PIPE-8)
                 // Hook-ingested memories carry "auto-captured" tag; assistant responses

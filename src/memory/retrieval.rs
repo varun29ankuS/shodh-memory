@@ -183,6 +183,18 @@ impl RetrievalEngine {
             ..Default::default()
         };
 
+        // The search paths convert Vamana distance to similarity as
+        // `similarity = -distance`, which is ONLY correct for NormalizedDotProduct
+        // (distance = -dot). Under Euclidean/Cosine that conversion silently corrupts
+        // every score, so refuse to construct with any other metric until the
+        // conversions are made metric-aware.
+        anyhow::ensure!(
+            vamana_config.distance_metric
+                == crate::vector_db::vamana::DistanceMetric::NormalizedDotProduct,
+            "RetrievalEngine requires DistanceMetric::NormalizedDotProduct: the \
+             distance→similarity conversion in search paths assumes it"
+        );
+
         let vamana_storage = storage_path.join("vector_index");
         std::fs::create_dir_all(&vamana_storage)?;
         let vector_index = VamanaIndex::with_storage_path(vamana_config, Some(vamana_storage))
@@ -250,12 +262,16 @@ impl RetrievalEngine {
                 mappings.len()
             );
 
-            // LOCK ORDERING: Always acquire vector_index (1) before id_mapping (2)
-            let mut vector_index = self.vector_index.write();
-            let mut id_mapping = self.id_mapping.write();
-            id_mapping.clear();
-            let mut indexed = 0;
-            let mut failed = 0;
+            // Collect (memory_id, embedding) pairs first, then ONE bulk build with
+            // full alpha-RNG construction (robust_prune). The previous implementation
+            // re-added vectors one at a time through add_vector(), which skips
+            // robust_prune entirely — every "rebuild" produced a greedy kNN graph
+            // (documented 5-15% recall@10 loss at scale) and the proper Vamana
+            // construction never ran on a live index.
+            let expected_dim = crate::embeddings::minilm::configured_text_dim();
+            let mut memory_ids: Vec<MemoryId> = Vec::with_capacity(mappings.len());
+            let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(mappings.len());
+            let mut failed = 0usize;
 
             for (memory_id, entry) in &mappings {
                 // Check if this entry has text vectors (current modality)
@@ -264,30 +280,43 @@ impl RetrievalEngine {
                 }
 
                 // Get memory with embeddings from storage
-                if let Ok(memory) = self.storage.get(memory_id) {
-                    if let Some(ref embedding) = memory.experience.embeddings {
-                        // Insert into Vamana and get new vector_id
-                        match vector_index.add_vector(embedding.clone()) {
-                            Ok(new_vector_id) => {
-                                id_mapping.insert(memory_id.clone(), new_vector_id);
-                                indexed += 1;
-                            }
-                            Err(e) => {
+                match self.storage.get(memory_id) {
+                    Ok(memory) => {
+                        if let Some(ref embedding) = memory.experience.embeddings {
+                            if embedding.len() == expected_dim {
+                                memory_ids.push(memory_id.clone());
+                                vectors.push(embedding.clone());
+                            } else {
                                 tracing::warn!(
-                                    "Failed to index memory {} during rebuild: {}",
+                                    "Skipping memory {} during rebuild: embedding dim {} != configured {}",
                                     memory_id.0,
-                                    e
+                                    embedding.len(),
+                                    expected_dim
                                 );
                                 failed += 1;
                             }
                         }
                     }
+                    Err(_) => failed += 1,
+                }
+            }
+
+            // LOCK ORDERING: Always acquire vector_index (1) before id_mapping (2)
+            let mut vector_index = self.vector_index.write();
+            let mut id_mapping = self.id_mapping.write();
+            id_mapping.clear();
+            let indexed = memory_ids.len();
+            if !vectors.is_empty() {
+                // Bulk build: new vector ids are positional (0..n) in `memory_ids` order.
+                vector_index.rebuild_from_vectors(vectors)?;
+                for (new_id, memory_id) in memory_ids.iter().enumerate() {
+                    id_mapping.insert(memory_id.clone(), new_id as u32);
                 }
             }
 
             let elapsed = start_time.elapsed();
             info!(
-                "Rebuilt Vamana from RocksDB: {} indexed, {} failed in {:.2}s",
+                "Rebuilt Vamana from RocksDB (bulk alpha-RNG build): {} indexed, {} failed in {:.2}s",
                 indexed,
                 failed,
                 elapsed.as_secs_f64()
@@ -1537,7 +1566,7 @@ impl RetrievalEngine {
         // LOCK ORDERING: vector_index (1) before id_mapping (2)
         let mut index = self.vector_index.write();
         let incremental = index.incremental_insert_count();
-        if index.len() == 0 || incremental == 0 {
+        if index.is_empty() || incremental == 0 {
             return Ok(());
         }
         // Position in extract_all_vectors() == vector id.
@@ -2497,6 +2526,162 @@ mod tests {
             mapping.vector_to_memory.len(),
             2,
             "vector_to_memory should not grow on re-insert"
+        );
+    }
+
+    /// Build a deterministic L2-normalized test vector with REALISTIC geometry:
+    /// a shared base direction plus one strong per-i component, giving pairwise
+    /// cosine ≈ 0.8 and self-similarity 1.0. Near-orthogonal one-hot vectors are
+    /// the degenerate worst case for RNG-graph navigability (all pairs are
+    /// equidistant, so alpha-pruning has nothing to discriminate on and the bulk
+    /// build can legitimately fragment) — real embeddings are correlated.
+    fn test_vector(i: usize, dim: usize) -> Vec<f32> {
+        let mut v = vec![1.0f32; dim];
+        v[i % dim] += 0.5 * (dim as f32).sqrt();
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+        v
+    }
+
+    /// End-to-end proof that the quality rebuild fires, resets the incremental
+    /// counter, preserves the id mapping, and leaves search functional. This is
+    /// the local verification for the SHODH_VAMANA_QUALITY_REBUILD path — CI
+    /// eval logs are tail-truncated, so the A/B arm cannot prove the rebuild
+    /// executed; this test can.
+    #[test]
+    fn test_force_quality_rebuild_resets_counter_and_preserves_mapping() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::memory::storage::MemoryStorage::new(dir.path(), None).expect("storage"));
+        let embedder = Arc::new(
+            crate::embeddings::minilm::MiniLMEmbedder::new_simplified(
+                crate::embeddings::minilm::EmbeddingConfig::default(),
+            )
+            .expect("simplified embedder"),
+        );
+        let engine = RetrievalEngine::new(storage, embedder).expect("engine");
+
+        let dim = crate::embeddings::minilm::configured_text_dim();
+        let mut ids: Vec<(MemoryId, Vec<f32>)> = Vec::new();
+        for i in 0..25 {
+            let v = test_vector(i, dim);
+            let vid = engine
+                .vector_index
+                .write()
+                .add_vector(v.clone())
+                .expect("add_vector");
+            let mid = MemoryId(uuid::Uuid::new_v4());
+            engine.id_mapping.write().insert(mid.clone(), vid);
+            ids.push((mid, v));
+        }
+        // 24, not 25: the first add_vector seeds an empty graph and is not
+        // counted as an incremental insert (vamana.rs first-vector branch).
+        assert_eq!(
+            engine.index_health().incremental_inserts,
+            24,
+            "incremental inserts must be counted before rebuild"
+        );
+
+        // Sanity: exact-vector search works on the incremental graph, so any
+        // post-rebuild failure below is attributable to the rebuild alone.
+        for (mid, v) in ids.iter().take(5) {
+            let results = engine
+                .search_by_embedding(v, 3, None)
+                .expect("search before rebuild");
+            assert_eq!(
+                results.first().map(|(id, _)| id),
+                Some(mid),
+                "top hit before rebuild must be the vector's own memory"
+            );
+        }
+
+        engine
+            .force_quality_rebuild()
+            .expect("quality rebuild must succeed");
+
+        let health = engine.index_health();
+        assert_eq!(
+            health.incremental_inserts, 0,
+            "rebuild must reset the incremental counter (proves bulk build ran)"
+        );
+        assert_eq!(health.total_vectors, 25, "no vectors lost in rebuild");
+
+        // Data integrity: vector content must survive the rebuild bit-for-bit,
+        // in positional order (id i == input order i).
+        let post = engine.vector_index.read().extract_all_vectors();
+        assert_eq!(post.len(), 25, "extract count after rebuild");
+        for (i, (_, v)) in ids.iter().enumerate() {
+            assert!(
+                post[i]
+                    .iter()
+                    .zip(v.iter())
+                    .all(|(a, b)| (a - b).abs() < 1e-6),
+                "vector {i} content corrupted by rebuild"
+            );
+        }
+
+        // Mapping integrity: searching each original vector must return its own
+        // memory id as the top hit (positional remap must match build order).
+        for (mid, v) in ids.iter().take(5) {
+            let results = engine
+                .search_by_embedding(v, 3, None)
+                .expect("search after rebuild");
+            assert_eq!(
+                results.first().map(|(id, _)| id),
+                Some(mid),
+                "top hit after rebuild must be the vector's own memory"
+            );
+        }
+
+        // Second rebuild with zero incremental inserts is a no-op, not an error.
+        engine
+            .force_quality_rebuild()
+            .expect("no-op rebuild must succeed");
+    }
+
+    /// The env-gated wrapper must fire exactly once per engine instance.
+    #[test]
+    fn test_maybe_quality_rebuild_is_one_shot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage =
+            Arc::new(crate::memory::storage::MemoryStorage::new(dir.path(), None).expect("storage"));
+        let embedder = Arc::new(
+            crate::embeddings::minilm::MiniLMEmbedder::new_simplified(
+                crate::embeddings::minilm::EmbeddingConfig::default(),
+            )
+            .expect("simplified embedder"),
+        );
+        let engine = RetrievalEngine::new(storage, embedder).expect("engine");
+
+        let dim = crate::embeddings::minilm::configured_text_dim();
+        for i in 0..5 {
+            let vid = engine
+                .vector_index
+                .write()
+                .add_vector(test_vector(i, dim))
+                .expect("add_vector");
+            engine
+                .id_mapping
+                .write()
+                .insert(MemoryId(uuid::Uuid::new_v4()), vid);
+        }
+
+        // Without the env var, maybe_quality_rebuild must not rebuild — but it
+        // marks the check done (one attempt per instance, regardless of outcome).
+        // 4, not 5: the first add_vector seeds the graph (not incremental).
+        engine.maybe_quality_rebuild();
+        assert_eq!(
+            engine.index_health().incremental_inserts,
+            4,
+            "no rebuild without SHODH_VAMANA_QUALITY_REBUILD"
+        );
+        assert!(
+            engine
+                .quality_rebuild_done
+                .load(std::sync::atomic::Ordering::Acquire),
+            "check must be marked done after first call"
         );
     }
 }
