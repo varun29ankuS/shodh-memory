@@ -1479,9 +1479,9 @@ impl RelationType {
             WorksAt | EmployedBy | Manages | AssignedTo | Approves | OwnedBy | CreatedBy
             | DevelopedBy | Teaches => 1.1,
             // Structural / functional relations.
-            PartOf | Contains | LocatedIn | LocatedAt | DependsOn | Requires | Uses | Implements
-            | Configures | DeploysTo | Monitors | Documents | WorksWith | Knows | Learned
-            | Prefers | Recommends => 1.0,
+            PartOf | Contains | LocatedIn | LocatedAt | DependsOn | Requires | Uses
+            | Implements | Configures | DeploysTo | Monitors | Documents | WorksWith | Knows
+            | Learned | Prefers | Recommends => 1.0,
             AlternativeTo => 0.9,
             // Generic associations — progressively weaker evidence of meaning.
             AssociatedWith | CoRetrieved => 0.7,
@@ -1495,7 +1495,10 @@ impl RelationType {
     /// `to`). Used by backward causal-origin tracing: to find the origin of an
     /// effect, walk these edges from the effect (`to`) toward the cause (`from`).
     pub fn is_causal(&self) -> bool {
-        matches!(self, RelationType::Causes | RelationType::Triggers | RelationType::ResultsIn)
+        matches!(
+            self,
+            RelationType::Causes | RelationType::Triggers | RelationType::ResultsIn
+        )
     }
 }
 
@@ -1535,16 +1538,41 @@ fn predicate_from_cues(t: &str) -> Option<RelationType> {
     ]) {
         return Some(Triggers);
     }
-    if has(&["superseded", "replaced by", "deprecated", "obsoleted", "rolled back"]) {
+    if has(&[
+        "superseded",
+        "replaced by",
+        "deprecated",
+        "obsoleted",
+        "rolled back",
+    ]) {
         return Some(SupersededBy);
     }
-    if has(&["manages", "manager of", "oversees", "supervises", "in charge of"]) {
+    if has(&[
+        "manages",
+        "manager of",
+        "oversees",
+        "supervises",
+        "in charge of",
+    ]) {
         return Some(Manages);
     }
-    if has(&["works at", "works for", "employed by", "employee of", "joined"]) {
+    if has(&[
+        "works at",
+        "works for",
+        "employed by",
+        "employee of",
+        "joined",
+    ]) {
         return Some(WorksAt);
     }
-    if has(&["created", "developed", "built", "founded", "designed", "authored"]) {
+    if has(&[
+        "created",
+        "developed",
+        "built",
+        "founded",
+        "designed",
+        "authored",
+    ]) {
         return Some(CreatedBy);
     }
     if has(&["depends on", "relies on", "requires", "needs"]) {
@@ -3131,50 +3159,83 @@ impl GraphMemory {
     /// Requires causally-typed edges (see `extract_predicate_from_text` /
     /// `SHODH_GRAPH_EXTRACTED_PREDICATES`); on a pure co-occurrence graph there are
     /// no causal edges to walk and this correctly returns nothing.
-    pub fn trace_causal_origins(&self, seeds: &[Uuid], max_depth: usize) -> Result<Vec<Uuid>> {
+    ///
+    /// Returns origins SCORED by backward-path strength — the max over paths of the
+    /// product of edge `effective_strength` with per-hop decay — sorted strongest
+    /// first. The unscored version of this walk returned EVERY terminal source in
+    /// the backward cone; on a graph with cross-chain causal bleed that was 21–57
+    /// origins per query when exactly 1 was correct (the measured lineage flood),
+    /// and the downstream injection amplified all of them. Scores let the caller
+    /// take a bounded top-k — the reach_inject lesson (bounded ranked set, never
+    /// everything reachable), causal edition. Relaxation re-expands improved nodes
+    /// (exact best-path); products of factors < 1 cannot improve around a cycle, so
+    /// it terminates.
+    pub fn trace_causal_origins(
+        &self,
+        seeds: &[Uuid],
+        max_depth: usize,
+    ) -> Result<Vec<(Uuid, f32)>> {
         use std::collections::HashSet;
+        const HOP_DECAY: f32 = 0.7;
+        const MAX_NODES: usize = 4000;
 
         let seed_set: HashSet<Uuid> = seeds.iter().copied().collect();
-        let mut visited: HashSet<Uuid> = HashSet::new();
-        let mut origins: Vec<Uuid> = Vec::new();
-        let mut origin_set: HashSet<Uuid> = HashSet::new();
+        // Best backward-path strength per node (max-product relaxation).
+        let mut best: HashMap<Uuid, f32> = seeds.iter().map(|s| (*s, 1.0_f32)).collect();
+        let mut origins: HashMap<Uuid, f32> = HashMap::new();
         let mut frontier: Vec<Uuid> = seeds.to_vec();
 
         for _ in 0..max_depth.max(1) {
-            if frontier.is_empty() {
+            if frontier.is_empty() || best.len() >= MAX_NODES {
                 break;
             }
             let mut next: Vec<Uuid> = Vec::new();
             for node in std::mem::take(&mut frontier) {
-                if !visited.insert(node) {
+                let node_score = best.get(&node).copied().unwrap_or(0.0);
+                if node_score <= 0.0 {
                     continue;
                 }
                 let edges = self.get_entity_relationships_limited(&node, Some(64))?;
                 // Incoming causal edges: this node is the EFFECT (to_entity); the
                 // cause is the from_entity. Self-loops are skipped.
-                let parents: Vec<Uuid> = edges
+                let parents: Vec<(Uuid, f32)> = edges
                     .iter()
                     .filter(|e| {
-                        e.to_entity == node
-                            && e.from_entity != node
-                            && e.relation_type.is_causal()
+                        e.to_entity == node && e.from_entity != node && e.relation_type.is_causal()
                     })
-                    .map(|e| e.from_entity)
+                    .map(|e| (e.from_entity, e.effective_strength().clamp(0.0, 1.0)))
                     .collect();
                 if parents.is_empty() {
                     // No causal antecedent → this is a source. A seed with no causal
                     // parent is the query subject itself, not an origin, so skip it.
-                    if !seed_set.contains(&node) && origin_set.insert(node) {
-                        origins.push(node);
+                    if !seed_set.contains(&node) {
+                        let entry = origins.entry(node).or_insert(0.0);
+                        if node_score > *entry {
+                            *entry = node_score;
+                        }
                     }
                 } else {
-                    next.extend(parents);
+                    for (parent, strength) in parents {
+                        let candidate = node_score * strength * HOP_DECAY;
+                        let entry = best.entry(parent).or_insert(0.0);
+                        if candidate > *entry {
+                            *entry = candidate;
+                            next.push(parent);
+                        }
+                    }
                 }
             }
             frontier = next;
         }
 
-        Ok(origins)
+        let mut out: Vec<(Uuid, f32)> = origins.into_iter().collect();
+        // Strongest first; uuid tiebreak for determinism.
+        out.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        Ok(out)
     }
 
     /// Calculate edge density for a specific entity (SHO-D5)
@@ -7286,14 +7347,25 @@ mod tests {
 
         // Origin of the effect c is the root a (walk c ← b ← a), NOT the proximal
         // cause b. This is the exact failure mode spreading activation cannot solve.
-        assert_eq!(graph.trace_causal_origins(&[c], 8).unwrap(), vec![a]);
+        let origins = graph.trace_causal_origins(&[c], 8).unwrap();
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].0, a);
+        // Two hops at strength 0.8 each with HOP_DECAY 0.7: the score is the path
+        // product, strictly positive and below a single-hop score.
+        assert!(
+            origins[0].1 > 0.0 && origins[0].1 < 0.7,
+            "two-hop origin score should be decayed: {}",
+            origins[0].1
+        );
 
         // A non-causal edge into c must NOT be followed (co-occurrence is not cause).
         let d = Uuid::new_v4();
         graph
             .add_relationship(mk(d, c, RelationType::CoOccurs))
             .unwrap();
-        assert_eq!(graph.trace_causal_origins(&[c], 8).unwrap(), vec![a]);
+        let origins = graph.trace_causal_origins(&[c], 8).unwrap();
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].0, a);
     }
 
     #[test]

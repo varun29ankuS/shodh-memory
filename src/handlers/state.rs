@@ -3356,6 +3356,27 @@ impl MultiUserMemoryManager {
         let mut typed_cue = 0usize;
         let mut typed_pair = 0usize;
         let mut untyped_generic = 0usize;
+        let mut typed_blocked_fragment = 0usize;
+
+        // MAXIMAL-MENTION mask: an entity whose name is a substring of a
+        // CO-MENTIONED entity's name is a recognizer fragment of that mention
+        // ("Mor" inside "the Morwen incident"), not an independent participant.
+        // Typed/causal edges to fragments make them CROSS-DOCUMENT CAUSAL BRIDGES:
+        // the 60-chain lineage sweep (2026-06-11) measured 34 such bridge
+        // fragments fusing 57/60 causal chains (backward-cone p50 = 48 when the
+        // true cone is 1). Fragments keep plain CoOccurs edges (spread-visible,
+        // walk-invisible); they are simply never causal/typed endpoints.
+        let fragment_of_comention: Vec<bool> = (0..entity_uuids.len())
+            .map(|k| {
+                let name_k = entity_uuids[k].0.to_lowercase();
+                entity_uuids.iter().enumerate().any(|(m, other)| {
+                    m != k && {
+                        let name_m = other.0.to_lowercase();
+                        name_m.len() > name_k.len() && name_m.contains(name_k.as_str())
+                    }
+                })
+            })
+            .collect();
 
         for i in 0..entity_uuids.len() {
             for j in (i + 1)..entity_uuids.len() {
@@ -3435,7 +3456,11 @@ impl MultiUserMemoryManager {
                 let semantic_hit = semantic_pairs
                     .get(&(entity_uuids[i].0.clone(), entity_uuids[j].0.clone()))
                     .cloned();
-                let relation_type = if let Some((rt, a_is_source, _sim)) = semantic_hit {
+                let relation_type = if fragment_of_comention[i] || fragment_of_comention[j] {
+                    // Fragment endpoint: never typed, never causal (see mask above).
+                    typed_blocked_fragment += 1;
+                    crate::graph_memory::RelationType::CoOccurs
+                } else if let Some((rt, a_is_source, _sim)) = semantic_hit {
                     if !a_is_source {
                         std::mem::swap(&mut from_entity, &mut to_entity);
                     }
@@ -3509,12 +3534,13 @@ impl MultiUserMemoryManager {
         }
         // Lock released here
 
-        if typed_semantic + typed_cue + typed_pair + untyped_generic > 0 {
+        if typed_semantic + typed_cue + typed_pair + untyped_generic + typed_blocked_fragment > 0 {
             tracing::info!(
                 semantic = typed_semantic,
                 cue = typed_cue,
                 pair_table = typed_pair,
                 generic = untyped_generic,
+                fragment_blocked = typed_blocked_fragment,
                 "edge typing provenance"
             );
         }

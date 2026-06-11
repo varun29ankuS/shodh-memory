@@ -1959,17 +1959,17 @@ impl MemorySystem {
 
             if layer_facts {
                 // Ablation hook: SHODH_DISABLE_FACT_LAYERS turns the temporal/fact
-            // layers off at query time so their recall contribution can be
-            // measured against the same ingested corpus.
-            let fact_user = if std::env::var("SHODH_DISABLE_FACT_LAYERS")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-            {
-                None
-            } else {
-                query.user_id.as_ref().or(self.default_user_id.as_ref())
-            };
-            if let Some(user_id) = fact_user {
+                // layers off at query time so their recall contribution can be
+                // measured against the same ingested corpus.
+                let fact_user = if std::env::var("SHODH_DISABLE_FACT_LAYERS")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+                {
+                    None
+                } else {
+                    query.user_id.as_ref().or(self.default_user_id.as_ref())
+                };
+                if let Some(user_id) = fact_user {
                     let entity_names: Vec<String> = query_analysis
                         .focal_entities
                         .iter()
@@ -2199,11 +2199,12 @@ impl MemorySystem {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
         let mut graph_bridges: Vec<String> = Vec::new();
-        // Causal-origin entities (SHODH_CAUSAL_ORIGIN): roots traced backward from
-        // the query's effect entities, whose episodes are injected as top graph
-        // candidates below (the funnel showed the trace finds the root but the lone
-        // BM25 bridge token loses to the direct cause's match on the effect term).
-        let mut causal_origin_entities: Vec<uuid::Uuid> = Vec::new();
+        // Causal-origin entities (SHODH_CAUSAL_ORIGIN): top-k roots traced backward
+        // from the query's effect entities with their backward-path scores, whose
+        // episodes are injected as top graph candidates below (the funnel showed the
+        // trace finds the root but the lone BM25 bridge token loses to the direct
+        // cause's match on the effect term).
+        let mut causal_origin_entities: Vec<(uuid::Uuid, f32)> = Vec::new();
 
         #[allow(clippy::type_complexity)]
         let (
@@ -2252,10 +2253,9 @@ impl MemorySystem {
                 // whose corpus mention_count (document-frequency proxy) exceeds
                 // it. Person/Org/Location/etc. seeds are never DF-filtered — a
                 // frequently-named person is still a valid anchor.
-                let concept_seed_df_max: Option<usize> =
-                    std::env::var("SHODH_CONCEPT_SEED_DF_MAX")
-                        .ok()
-                        .and_then(|s| s.parse().ok());
+                let concept_seed_df_max: Option<usize> = std::env::var("SHODH_CONCEPT_SEED_DF_MAX")
+                    .ok()
+                    .and_then(|s| s.parse().ok());
                 let mut query_entities: Vec<uuid::Uuid> = Vec::new();
                 for e in query_analysis
                     .focal_entities
@@ -2305,6 +2305,9 @@ impl MemorySystem {
                 // the phrases strict resolution needs.
                 let mut strict_walk_seeds: Vec<uuid::Uuid> = Vec::new();
                 {
+                    // Collect candidates WITH names so the maximal-match filter
+                    // below can compare mentions.
+                    let mut candidates: Vec<(uuid::Uuid, String)> = Vec::new();
                     let mut seen: std::collections::HashSet<uuid::Uuid> =
                         std::collections::HashSet::new();
                     // Phrase-level: entities whose FULL name occurs verbatim in
@@ -2313,12 +2316,10 @@ impl MemorySystem {
                     // incident" → "selvic", "incident"), and fragments either
                     // miss (strict) or bind to arbitrary hubs (fuzzy).
                     let qt_lower = query_text.to_lowercase();
-                    if let Ok(contained) =
-                        g.find_entities_contained_in_text(&qt_lower, 5, 8)
-                    {
+                    if let Ok(contained) = g.find_entities_contained_in_text(&qt_lower, 5, 8) {
                         for ent in contained {
                             if seen.insert(ent.uuid) {
-                                strict_walk_seeds.push(ent.uuid);
+                                candidates.push((ent.uuid, ent.name.to_lowercase()));
                             }
                         }
                     }
@@ -2328,8 +2329,26 @@ impl MemorySystem {
                     for e in ner_names.iter().map(|s| s.as_str()) {
                         if let Ok(Some(ent)) = g.find_entity_by_name_strict(e) {
                             if seen.insert(ent.uuid) {
-                                strict_walk_seeds.push(ent.uuid);
+                                candidates.push((ent.uuid, ent.name.to_lowercase()));
                             }
+                        }
+                    }
+                    // MAXIMAL-MATCH only: drop any seed whose name is a substring
+                    // of another seed's name. NER fragment entities ("Tavmor4",
+                    // "v1.2") pass the verbatim-containment test alongside the
+                    // full mention ("the Tavmor4 incident", "the v1.2 rollback"),
+                    // and a fragment is a cross-document hub — walking back from
+                    // it unions the backward cones of every chain that touches it
+                    // (funnel 2026-06-11: strict=2–4 seeds → 52–60 origins when 1
+                    // is correct). The longest mention is the intended referent.
+                    for (uuid, name) in &candidates {
+                        let subsumed = candidates.iter().any(|(other_uuid, other_name)| {
+                            other_uuid != uuid
+                                && other_name.len() > name.len()
+                                && other_name.contains(name.as_str())
+                        });
+                        if !subsumed {
+                            strict_walk_seeds.push(*uuid);
                         }
                     }
                 }
@@ -2366,8 +2385,11 @@ impl MemorySystem {
                         }
                     }
                     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-                    graph_bridges =
-                        scored.into_iter().take(graph_expand_k).map(|(n, _)| n).collect();
+                    graph_bridges = scored
+                        .into_iter()
+                        .take(graph_expand_k)
+                        .map(|(n, _)| n)
+                        .collect();
                 }
 
                 // Causal-origin retrieval (SHODH_CAUSAL_ORIGIN). "What was the
@@ -2414,8 +2436,22 @@ impl MemorySystem {
                     if cue_matched && !strict_walk_seeds.is_empty() {
                         if let Ok(origins) = g.trace_causal_origins(&strict_walk_seeds, 8) {
                             origins_found = origins.len();
-                            for oid in origins {
-                                causal_origin_entities.push(oid);
+                            // TOP-K only. The walk returns every terminal source in
+                            // the backward cone, scored by path strength; on a graph
+                            // with cross-chain causal bleed that was 21–57 origins
+                            // when 1 was correct, and injecting all of them FLOODED
+                            // the leg (the measured r@10 0.05 / P@1 0.0 is the
+                            // arithmetic of 1-true-in-50-injected). Bounded ranked
+                            // set, never everything reachable — the reach_inject
+                            // lesson, causal edition. SHODH_CAUSAL_ORIGIN_TOPK
+                            // overrides (default 3).
+                            let top_k = std::env::var("SHODH_CAUSAL_ORIGIN_TOPK")
+                                .ok()
+                                .and_then(|v| v.parse::<usize>().ok())
+                                .filter(|k| *k > 0)
+                                .unwrap_or(3);
+                            for (oid, score) in origins.into_iter().take(top_k) {
+                                causal_origin_entities.push((oid, score));
                                 if let Ok(Some(ent)) = g.get_entity(&oid) {
                                     if ent.name.trim().len() >= 2 {
                                         graph_bridges.push(ent.name);
@@ -2504,21 +2540,27 @@ impl MemorySystem {
                 // Causal-origin injection: the backward walk found the root cause,
                 // but as a lone BM25 bridge token it loses to the direct cause's
                 // match on the effect term (funnel: origins=1, yet P@1=0). The found
-                // root IS the answer for an origin query, so inject its episodes as
-                // TOP graph candidates (score above the current max) — they enter
-                // fusion as strong graph hits instead of being diluted away.
+                // roots ARE the answer for an origin query, so inject their episodes
+                // as TOP graph candidates — scaled by each origin's backward-path
+                // score relative to the strongest, so the best-supported root
+                // outranks the weaker top-k companions instead of all entering at a
+                // flat 2× ceiling.
                 if !causal_origin_entities.is_empty() {
                     let max_score = r.iter().map(|x| x.1).fold(0.0f32, f32::max).max(1.0);
-                    let inject_score = max_score * 2.0;
+                    let best_origin = causal_origin_entities
+                        .iter()
+                        .map(|(_, s)| *s)
+                        .fold(0.0f32, f32::max)
+                        .max(1e-9);
                     let mut seen: std::collections::HashSet<MemoryId> =
                         r.iter().map(|x| x.0.clone()).collect();
-                    for oid in &causal_origin_entities {
+                    for (oid, origin_score) in &causal_origin_entities {
+                        let inject_score = max_score * 2.0 * (origin_score / best_origin);
                         if let Ok(eps) = g.get_episodes_by_entity(oid) {
                             for ep in eps {
                                 let mid = MemoryId(ep.uuid);
-                                let in_scope = episode_candidates
-                                    .as_ref()
-                                    .is_none_or(|c| c.contains(&mid));
+                                let in_scope =
+                                    episode_candidates.as_ref().is_none_or(|c| c.contains(&mid));
                                 if in_scope && seen.insert(mid.clone()) {
                                     r.push((mid, inject_score, inject_score));
                                 }
@@ -3178,8 +3220,8 @@ impl MemorySystem {
             let rrf_escape = std::env::var("SHODH_FUSION_RRF")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            let flat_fusion = explicit_flat
-                || (!rrf_escape && !v2_fusion && !actr_fusion && !sum_fusion);
+            let flat_fusion =
+                explicit_flat || (!rrf_escape && !v2_fusion && !actr_fusion && !sum_fusion);
 
             // SHODH_FLAT_ADAPTIVE: LEARNED per-query leg trust (approach C, stage 1). A GLOBAL
             // vector-trust trades multi_hop↔single_hop (run 27221406266) — single_hop wants
@@ -3354,7 +3396,11 @@ impl MemorySystem {
                     } else {
                         bm_vals.iter().sum::<f32>() / bm_vals.len() as f32
                     };
-                    let bm_peak = if mean_bm > 1e-6 { max_bm / mean_bm } else { 1.0 };
+                    let bm_peak = if mean_bm > 1e-6 {
+                        max_bm / mean_bm
+                    } else {
+                        1.0
+                    };
                     // t = 1 when BM25 is flat (peak ≤ lo) → full vector trust; t = 0 when
                     // sharply peaked (peak ≥ hi) → no extra trust (BM25-strong gold protected).
                     let span = (adapt_peak_hi - adapt_peak_lo).max(1e-6);
@@ -3431,10 +3477,8 @@ impl MemorySystem {
                     let rank_of_gold = |xs: &[(&MemoryId, f32)]| -> Option<usize> {
                         xs.iter().position(|(id, _)| gold.contains(*id))
                     };
-                    let mut by_graph: Vec<(&MemoryId, f32)> = graph_results
-                        .iter()
-                        .map(|(id, a, _)| (id, *a))
-                        .collect();
+                    let mut by_graph: Vec<(&MemoryId, f32)> =
+                        graph_results.iter().map(|(id, a, _)| (id, *a)).collect();
                     by_graph.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
                     FusionFeatures {
                         n_hybrid: hybrid_components.len(),
@@ -4248,12 +4292,9 @@ impl MemorySystem {
                 // never bites — but query.recency_weight is CALLER-supplied and unbounded,
                 // and an extreme override must not be able to multiply one memory's score
                 // arbitrarily past the rest of the window.
-                let combined_boost = (1.0
-                    + recency_factor
-                    + arousal_factor
-                    + credibility_factor
-                    + temporal_factor)
-                    .min(2.5);
+                let combined_boost =
+                    (1.0 + recency_factor + arousal_factor + credibility_factor + temporal_factor)
+                        .min(2.5);
 
                 // AUTO-CAPTURED TAG PENALTY (PIPE-8)
                 // Hook-ingested memories carry "auto-captured" tag; assistant responses
@@ -4461,8 +4502,9 @@ impl MemorySystem {
             for mem in &mut memories {
                 let has_entities = !mem.experience.entities.is_empty();
                 let has_context = mem.experience.context.is_some();
-                let elaboration =
-                    1.0 + if has_entities { 0.1 } else { 0.0 } + if has_context { 0.1 } else { 0.0 };
+                let elaboration = 1.0
+                    + if has_entities { 0.1 } else { 0.0 }
+                    + if has_context { 0.1 } else { 0.0 };
                 let quality = if v2_no_verbosity {
                     // Conscious restructure: drop the raw content-length factor — a
                     // verbosity bias that multiplied short correct answers (a person
@@ -4502,8 +4544,8 @@ impl MemorySystem {
                 // final sort silently discards when len>max. One score, one sort.
                 for m in memories.iter_mut() {
                     if let Some(s) = m.score {
-                        let add = Self::linguistic_boost(&m.experience.content, &query_analysis)
-                            * 0.05;
+                        let add =
+                            Self::linguistic_boost(&m.experience.content, &query_analysis) * 0.05;
                         let mut cloned: Memory = m.as_ref().clone();
                         cloned.set_score(s + add);
                         *m = Arc::new(cloned);
@@ -7151,11 +7193,15 @@ impl MemorySystem {
                 memory.record_access();
                 match &outcome {
                     RetrievalOutcome::Helpful => {
-                        memory.boost_importance(HEBBIAN_BOOST_HELPFUL * error_multiplier * self.reward_lr_mult());
+                        memory.boost_importance(
+                            HEBBIAN_BOOST_HELPFUL * error_multiplier * self.reward_lr_mult(),
+                        );
                         stats.importance_boosts += 1;
                     }
                     RetrievalOutcome::Misleading => {
-                        memory.decay_importance(HEBBIAN_DECAY_MISLEADING * error_multiplier * self.reward_lr_mult());
+                        memory.decay_importance(
+                            HEBBIAN_DECAY_MISLEADING * error_multiplier * self.reward_lr_mult(),
+                        );
                         stats.importance_decays += 1;
                     }
                     RetrievalOutcome::Neutral => {
@@ -7179,12 +7225,19 @@ impl MemorySystem {
                         memory.record_access();
                         match &outcome {
                             RetrievalOutcome::Helpful => {
-                                memory.boost_importance(HEBBIAN_BOOST_HELPFUL * error_multiplier * self.reward_lr_mult());
+                                memory.boost_importance(
+                                    HEBBIAN_BOOST_HELPFUL
+                                        * error_multiplier
+                                        * self.reward_lr_mult(),
+                                );
                                 stats.importance_boosts += 1;
                             }
                             RetrievalOutcome::Misleading => {
-                                memory
-                                    .decay_importance(HEBBIAN_DECAY_MISLEADING * error_multiplier * self.reward_lr_mult());
+                                memory.decay_importance(
+                                    HEBBIAN_DECAY_MISLEADING
+                                        * error_multiplier
+                                        * self.reward_lr_mult(),
+                                );
                                 stats.importance_decays += 1;
                             }
                             RetrievalOutcome::Neutral => {

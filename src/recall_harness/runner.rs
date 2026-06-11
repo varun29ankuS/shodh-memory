@@ -17,9 +17,9 @@ use uuid::Uuid;
 
 use crate::config::ServerConfig;
 use crate::handlers::MultiUserMemoryManager;
-use crate::memory::types::{ExperienceType, LayerMode, NerEntityRecord};
 use crate::memory::retrieval::RetrievalOutcome;
 use crate::memory::types::MemoryId;
+use crate::memory::types::{ExperienceType, LayerMode, NerEntityRecord};
 use crate::memory::{Experience, Query};
 
 use super::fixtures::{
@@ -28,7 +28,7 @@ use super::fixtures::{
 use super::metrics::Metrics;
 use super::report::{
     aggregate_category, aggregate_layer, median, AblationReport, AblationRow, CategoryReport,
-    Failure, LayerReport, FunnelReport, FunnelStageRow, GraphStructure, LearningCurveArm,
+    Failure, FunnelReport, FunnelStageRow, GraphStructure, LayerReport, LearningCurveArm,
     LearningCurveReport, LinkingReport, LinkingRow, PerCaseRecord, ReachabilityCategory,
     ReachabilityReport, Report, SMOKE_K,
 };
@@ -231,7 +231,10 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
                 .flat_map(|c| c.relevant.iter().map(|r| r.corpus_item_id.as_str()))
                 .collect();
             let total = corpus.len();
-            let gold_count = corpus.iter().filter(|it| gold.contains(it.id.as_str())).count();
+            let gold_count = corpus
+                .iter()
+                .filter(|it| gold.contains(it.id.as_str()))
+                .count();
             let keep_distractors = n.saturating_sub(gold_count);
             let distractor_total = total - gold_count;
             let stride = if keep_distractors == 0 {
@@ -247,8 +250,7 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
                     if gold.contains(it.id.as_str()) {
                         return true;
                     }
-                    let take = kept_distractors < keep_distractors
-                        && seen_distractor % stride == 0;
+                    let take = kept_distractors < keep_distractors && seen_distractor % stride == 0;
                     seen_distractor += 1;
                     if take {
                         kept_distractors += 1;
@@ -478,14 +480,21 @@ fn build_per_case_records(
             // Recall over wider cutoffs of the same retrieved list. When the
             // harness queries with a diagnostic `max_results` (RECALL_DIAG_K),
             // these split "gold ranked >10" from "gold never retrieved".
-            let gold: HashSet<&str> =
-                case.relevant.iter().map(|r| r.corpus_item_id.as_str()).collect();
+            let gold: HashSet<&str> = case
+                .relevant
+                .iter()
+                .map(|r| r.corpus_item_id.as_str())
+                .collect();
             let recall_at = |k: usize| -> f64 {
                 if gold.is_empty() {
                     return 0.0;
                 }
-                let topn: HashSet<&str> =
-                    ranks[i].retrieved.iter().take(k).map(|s| s.as_str()).collect();
+                let topn: HashSet<&str> = ranks[i]
+                    .retrieved
+                    .iter()
+                    .take(k)
+                    .map(|s| s.as_str())
+                    .collect();
                 let hit = gold.iter().filter(|g| topn.contains(*g)).count();
                 hit as f64 / gold.len() as f64
             };
@@ -599,11 +608,10 @@ fn run_one_pass(
     // fit (SHODH_FUSION_FEATURE_EXPORT=<jsonl path>). Full mode only — that is
     // the production path the fit targets. Lines accumulate across modes/repeats
     // and append at pass end.
-    let feature_export: Option<std::path::PathBuf> =
-        std::env::var("SHODH_FUSION_FEATURE_EXPORT")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(std::path::PathBuf::from);
+    let feature_export: Option<std::path::PathBuf> = std::env::var("SHODH_FUSION_FEATURE_EXPORT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
     let mut feature_lines: Vec<String> = Vec::new();
 
     for mode in layer_modes {
@@ -942,7 +950,10 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
     // row here whenever a new query-time fix lands — that is how a fix becomes a
     // measured, comparable line in the study.
     let configs: Vec<(&str, Vec<(&str, &str)>)> = vec![
-        ("facts-off (lexical+graph)", vec![("SHODH_DISABLE_FACT_LAYERS", "1")]),
+        (
+            "facts-off (lexical+graph)",
+            vec![("SHODH_DISABLE_FACT_LAYERS", "1")],
+        ),
         ("baseline (facts on)", vec![]),
         ("graph-off", vec![("SHODH_GRAPH_FUSION_WEIGHT", "0")]),
         ("+spread-fix", vec![("SHODH_SPREAD_FIX", "1")]),
@@ -1122,7 +1133,12 @@ pub fn analyze_linking(inputs: &RunInputs) -> Result<LinkingReport> {
             .collect();
         let tp = linked.iter().filter(|n| lexical.contains(*n)).count();
 
-        let (m, l, lex, no_seed) = (mentions.len(), linked.len(), lexical.len(), linked.is_empty());
+        let (m, l, lex, no_seed) = (
+            mentions.len(),
+            linked.len(),
+            lexical.len(),
+            linked.is_empty(),
+        );
         let bump = |acc: &mut Acc| {
             acc.cases += 1;
             acc.ner_sum += m;
@@ -1161,8 +1177,10 @@ pub fn analyze_linking(inputs: &RunInputs) -> Result<LinkingReport> {
         }
     };
 
-    let by_category: BTreeMap<String, LinkingRow> =
-        by_cat.iter().map(|(c, a)| (c.clone(), to_row(c, a))).collect();
+    let by_category: BTreeMap<String, LinkingRow> = by_cat
+        .iter()
+        .map(|(c, a)| (c.clone(), to_row(c, a)))
+        .collect();
     Ok(LinkingReport {
         suite: inputs.suite.clone(),
         git_sha: inputs.git_sha.clone(),
@@ -1184,7 +1202,10 @@ pub fn analyze_linking(inputs: &RunInputs) -> Result<LinkingReport> {
 /// the recall run and the funnel honor the SAME knobs; without it the funnel ran
 /// full-scale (1531 × 5882) and timed out. Mirrors the inline blocks in
 /// `run_smoke_suite_with_ranks` (dedupe those into this helper is a follow-up).
-fn apply_eval_caps(cases: Vec<SmokeCase>, corpus: Vec<CorpusItem>) -> (Vec<SmokeCase>, Vec<CorpusItem>) {
+fn apply_eval_caps(
+    cases: Vec<SmokeCase>,
+    corpus: Vec<CorpusItem>,
+) -> (Vec<SmokeCase>, Vec<CorpusItem>) {
     let cases = match std::env::var("SHODH_MAX_CASES")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -1215,7 +1236,10 @@ fn apply_eval_caps(cases: Vec<SmokeCase>, corpus: Vec<CorpusItem>) -> (Vec<Smoke
                 .flat_map(|c| c.relevant.iter().map(|r| r.corpus_item_id.as_str()))
                 .collect();
             let total = corpus.len();
-            let gold_count = corpus.iter().filter(|it| gold.contains(it.id.as_str())).count();
+            let gold_count = corpus
+                .iter()
+                .filter(|it| gold.contains(it.id.as_str()))
+                .count();
             let keep_distractors = n.saturating_sub(gold_count);
             let distractor_total = total - gold_count;
             let stride = if keep_distractors == 0 {
@@ -1378,8 +1402,10 @@ pub fn analyze_funnel(inputs: &RunInputs) -> Result<FunnelReport> {
             .collect()
     };
 
-    let by_category: BTreeMap<String, Vec<FunnelStageRow>> =
-        by_cat.iter().map(|(c, m)| (c.clone(), to_rows(m))).collect();
+    let by_category: BTreeMap<String, Vec<FunnelStageRow>> = by_cat
+        .iter()
+        .map(|(c, m)| (c.clone(), to_rows(m)))
+        .collect();
 
     Ok(FunnelReport {
         suite: inputs.suite.clone(),
@@ -1442,7 +1468,11 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
         let entities = g.get_all_entities().unwrap_or_default();
         let mut degrees: Vec<usize> = entities
             .iter()
-            .map(|e| g.get_entity_relationships(&e.uuid).map(|r| r.len()).unwrap_or(0))
+            .map(|e| {
+                g.get_entity_relationships(&e.uuid)
+                    .map(|r| r.len())
+                    .unwrap_or(0)
+            })
             .collect();
         degrees.sort_unstable_by(|a, b| b.cmp(a));
         let total_entities = degrees.len();
@@ -1456,7 +1486,10 @@ pub fn analyze_graph_reachability(inputs: &RunInputs) -> Result<ReachabilityRepo
             } else {
                 degree_sum as f64 / total_entities as f64
             },
-            hub_count: degrees.iter().filter(|d| **d > HUB_REPORT_THRESHOLD).count(),
+            hub_count: degrees
+                .iter()
+                .filter(|d| **d > HUB_REPORT_THRESHOLD)
+                .count(),
             hub_threshold: HUB_REPORT_THRESHOLD,
             top_degrees: degrees.iter().take(8).copied().collect(),
         }
@@ -1665,7 +1698,10 @@ fn run_learning_arm(
             ..Default::default()
         };
         match system.read().recall(&query) {
-            Ok(mems) => mems.iter().map(|m| (m.id.0, m.score.unwrap_or(0.0))).collect(),
+            Ok(mems) => mems
+                .iter()
+                .map(|m| (m.id.0, m.score.unwrap_or(0.0)))
+                .collect(),
             Err(_) => Vec::new(),
         }
     };
@@ -1869,7 +1905,11 @@ mod tests {
 
         // Chain 0 entities: "the Vornak incident" → "the Meslin incident" →
         // "the Caldor incident" (event(0..3)).
-        let names = ["the Vornak incident", "the Meslin incident", "the Caldor incident"];
+        let names = [
+            "the Vornak incident",
+            "the Meslin incident",
+            "the Caldor incident",
+        ];
         let mut uuids = Vec::new();
         for name in names {
             let found = g.find_entity_by_name(name).expect("lookup");
@@ -1912,11 +1952,9 @@ mod tests {
 
         // STAGE 4: the backward origin walk itself. From the observed effect
         // (Caldor), trace_causal_origins must return the root (Vornak).
-        let origins = g
-            .trace_causal_origins(&[uuids[2]], 8)
-            .expect("origin walk");
+        let origins = g.trace_causal_origins(&[uuids[2]], 8).expect("origin walk");
         assert!(
-            origins.contains(&uuids[0]),
+            origins.iter().any(|(id, _)| *id == uuids[0]),
             "STAGE 4 FAIL: backward walk from the effect did not reach the \
              root cause (origins: {} found) — edge direction or walk is the \
              lineage zero",
@@ -1955,12 +1993,182 @@ mod tests {
     /// passes end-to-end) must be scale-induced — dilution of the walked
     /// origin among cross-chain lexical distractors, or cross-chain entity
     /// resolution bleeding (substring tiers matching "Vornak" ↔ "Vornak2").
+    /// Regression guard for the lineage flood (2026-06-11): NER fragment
+    /// entities ("Mor", "wen") used to receive causal edges from the pair-typing
+    /// loop, forming cross-document causal bridges that fused 57/60 chains
+    /// (backward-cone p50 = 48 when the true cone is 1; r@10 pinned at 0.05).
+    /// The maximal-mention ingest guard must keep fragments out of causal
+    /// typing entirely, and every chain's backward cone must be exactly its own
+    /// root, ranked first.
+    #[test]
+    fn lineage_fragment_bridges_never_form() {
+        let dir = unique_storage_dir("lineage-flood-diag");
+        let manager = build_manager(&dir).expect("manager");
+        let chains = crate::recall_harness::multihop::DEFAULT_CHAINS;
+        let (corpus, _cases) =
+            crate::recall_harness::lineage_harness::generate_lineage_fixtures(chains);
+        ingest_corpus(&manager, &corpus).expect("ingest");
+
+        let graph = manager.get_user_graph(EVAL_USER).expect("graph");
+        let g = graph.read();
+        let stats = g.get_stats().expect("stats");
+        eprintln!(
+            "DIAG graph: {} entities, {} edges (expected ~{} event entities)",
+            stats.entity_count,
+            stats.relationship_count,
+            chains * 3
+        );
+
+        // FRAGMENT CENSUS: entities that are not full "... incident" event names.
+        // For each, count causal IN (others claim to cause it) and causal OUT (it
+        // claims to cause others) — a fragment with BOTH is a cross-chain bridge
+        // for the backward walk.
+        let all = g.get_all_entities().expect("entities");
+        let mut bridges = 0usize;
+        eprintln!("DIAG fragment census ({} entities total):", all.len());
+        for ent in &all {
+            if ent.name.contains("incident") {
+                continue;
+            }
+            let edges = g
+                .get_entity_relationships_limited(&ent.uuid, Some(256))
+                .expect("edges");
+            let causal_in = edges
+                .iter()
+                .filter(|e| e.to_entity == ent.uuid && e.relation_type.is_causal())
+                .count();
+            let causal_out = edges
+                .iter()
+                .filter(|e| e.from_entity == ent.uuid && e.relation_type.is_causal())
+                .count();
+            if causal_in > 0 || causal_out > 0 {
+                let bridge = causal_in > 0 && causal_out > 0;
+                if bridge {
+                    bridges += 1;
+                }
+                eprintln!(
+                    "  frag {:?}: causal_in={causal_in} causal_out={causal_out}{}",
+                    ent.name,
+                    if bridge { "  <-- BRIDGE" } else { "" }
+                );
+            }
+        }
+        eprintln!("DIAG bridge fragments: {bridges}");
+
+        // CONE SWEEP: walk from every chain's effect entity. Corpus layout per
+        // chain i: item 2i = root "A set B in motion.", item 2i+1 = mid
+        // "B then brought about C.".
+        let mut sizes: Vec<usize> = Vec::new();
+        let mut root_found = 0usize;
+        let mut root_top1 = 0usize;
+        let mut fattest: (usize, String, Uuid) = (0, String::new(), Uuid::nil());
+        for i in 0..chains {
+            let root_name = corpus[2 * i]
+                .content
+                .split(" set ")
+                .next()
+                .unwrap()
+                .to_string();
+            let effect_name = corpus[2 * i + 1]
+                .content
+                .split(" then brought about ")
+                .nth(1)
+                .unwrap()
+                .trim_end_matches('.')
+                .to_string();
+            let (Some(root), Some(effect)) = (
+                g.find_entity_by_name(&root_name).expect("lookup"),
+                g.find_entity_by_name(&effect_name).expect("lookup"),
+            ) else {
+                eprintln!("  chain {i}: UNRESOLVED ({root_name} / {effect_name})");
+                continue;
+            };
+            let origins = g.trace_causal_origins(&[effect.uuid], 8).expect("walk");
+            sizes.push(origins.len());
+            let found = origins.iter().any(|(id, _)| *id == root.uuid);
+            if found {
+                root_found += 1;
+                if origins
+                    .first()
+                    .map(|(id, _)| *id == root.uuid)
+                    .unwrap_or(false)
+                {
+                    root_top1 += 1;
+                }
+            }
+            if origins.len() > fattest.0 {
+                fattest = (origins.len(), effect_name.clone(), effect.uuid);
+            }
+        }
+        sizes.sort_unstable();
+        let n = sizes.len().max(1);
+        eprintln!(
+            "DIAG cone sweep over {} chains: min={} p50={} max={} | cones>3: {} | root found: {}/{} | root TOP-1 by score: {}/{}",
+            n,
+            sizes.first().unwrap_or(&0),
+            sizes.get(n / 2).unwrap_or(&0),
+            sizes.last().unwrap_or(&0),
+            sizes.iter().filter(|s| **s > 3).count(),
+            root_found,
+            n,
+            root_top1,
+            n
+        );
+
+        // BRIDGE TRACE on the fattest cone: 1-hop and 2-hop backward parents
+        // (prints only on failure conditions, as forensics).
+        if fattest.0 > 1 {
+            eprintln!(
+                "DIAG fattest cone: {} origins from {:?} — backward parents:",
+                fattest.0, fattest.1
+            );
+            let edges = g
+                .get_entity_relationships_limited(&fattest.2, Some(64))
+                .expect("edges");
+            for e in edges
+                .iter()
+                .filter(|e| e.to_entity == fattest.2 && e.relation_type.is_causal())
+            {
+                let pname = g.get_entity(&e.from_entity).ok().flatten().map(|x| x.name);
+                eprintln!("  hop1 parent: {pname:?}");
+                let pedges = g
+                    .get_entity_relationships_limited(&e.from_entity, Some(64))
+                    .expect("edges");
+                for pe in pedges
+                    .iter()
+                    .filter(|pe| pe.to_entity == e.from_entity && pe.relation_type.is_causal())
+                {
+                    let gname = g.get_entity(&pe.from_entity).ok().flatten().map(|x| x.name);
+                    eprintln!("    hop2 parent: {gname:?}");
+                }
+            }
+        }
+
+        // The regression assertions (measured before the maximal-mention guard:
+        // bridges=34, cone p50=48, top-1 18/60; after: 0 / 1 / 60).
+        assert_eq!(bridges, 0, "fragment entities acquired causal edges again");
+        assert_eq!(
+            sizes.last().copied().unwrap_or(0),
+            1,
+            "a backward cone exceeded its own chain — cross-chain causal bleed is back"
+        );
+        assert_eq!(
+            root_found, n,
+            "a chain's true root vanished from its backward cone"
+        );
+        assert_eq!(
+            root_top1, n,
+            "a chain's true root is no longer the strongest-scored origin"
+        );
+    }
+
     #[test]
     fn lineage_walk_survives_harness_scale() {
         let dir = unique_storage_dir("lineage-scale");
         let manager = build_manager(&dir).expect("manager");
         let chains = crate::recall_harness::multihop::DEFAULT_CHAINS;
-        let (corpus, _cases) = crate::recall_harness::lineage_harness::generate_lineage_fixtures(chains);
+        let (corpus, _cases) =
+            crate::recall_harness::lineage_harness::generate_lineage_fixtures(chains);
         ingest_corpus(&manager, &corpus).expect("ingest");
 
         let graph = manager.get_user_graph(EVAL_USER).expect("graph");
@@ -1982,7 +2190,7 @@ mod tests {
             ),
         };
         let origins = g.trace_causal_origins(&[c], 8).expect("walk");
-        if !origins.contains(&a) {
+        if !origins.iter().any(|(id, _)| *id == a) {
             // Diagnostics: what does the effect node's neighbourhood look like?
             let c_edges = g
                 .get_entity_relationships_limited(&c, Some(64))
@@ -2031,7 +2239,7 @@ mod tests {
             let g = graph.read();
             let origins_after = g.trace_causal_origins(&[c], 8).expect("walk after traffic");
             assert!(
-                origins_after.contains(&a),
+                origins_after.iter().any(|(id, _)| *id == a),
                 "MUTATION CONFIRMED AT THE WALK: origins lost after {} pre-Full \
                  queries (had them on fresh storage)",
                 _cases.len() * 5
@@ -2287,16 +2495,39 @@ mod tests {
         };
         // Competing vector matches: c0/c4 both share "brown"; query favours c0.
         let corpus = vec![
-            mk("c0", "The brown fox leaps over the lazy dog in the meadow", 0),
-            mk("c1", "A red car drove down the busy city highway at night", 1),
-            mk("c2", "The chef prepared a delicious pasta with fresh basil", 2),
-            mk("c3", "Quantum computers use qubits for parallel computation", 3),
-            mk("c4", "The brown bear caught a salmon in the rushing river", 4),
-            mk("c5", "She painted a vivid sunset over the calm blue ocean", 5),
+            mk(
+                "c0",
+                "The brown fox leaps over the lazy dog in the meadow",
+                0,
+            ),
+            mk(
+                "c1",
+                "A red car drove down the busy city highway at night",
+                1,
+            ),
+            mk(
+                "c2",
+                "The chef prepared a delicious pasta with fresh basil",
+                2,
+            ),
+            mk(
+                "c3",
+                "Quantum computers use qubits for parallel computation",
+                3,
+            ),
+            mk(
+                "c4",
+                "The brown bear caught a salmon in the rushing river",
+                4,
+            ),
+            mk(
+                "c5",
+                "She painted a vivid sunset over the calm blue ocean",
+                5,
+            ),
         ];
         let id_map = ingest_corpus(&manager, &corpus).unwrap();
-        let rev: HashMap<Uuid, String> =
-            id_map.iter().map(|(cid, u)| (*u, cid.clone())).collect();
+        let rev: HashMap<Uuid, String> = id_map.iter().map(|(cid, u)| (*u, cid.clone())).collect();
         let system = manager.get_user_memory(EVAL_USER).unwrap();
 
         let recall_order = |q: &str| -> Vec<(String, f32)> {
@@ -2311,7 +2542,9 @@ mod tests {
                     .iter()
                     .map(|m| {
                         (
-                            rev.get(&m.id.0).cloned().unwrap_or_else(|| m.id.0.to_string()),
+                            rev.get(&m.id.0)
+                                .cloned()
+                                .unwrap_or_else(|| m.id.0.to_string()),
                             m.score.unwrap_or(0.0),
                         )
                     })
@@ -2359,9 +2592,21 @@ mod tests {
             created_at: base + Duration::minutes(i),
         };
         let mut corpus = vec![
-            mk("bridge", "Alice collaborates closely with Bob on their research", 0),
-            mk("gold", "Bob discovered a rare luminescent mineral inside the cave", 1),
-            mk("distract", "Alice discovered an ordinary grey rock out in the field", 2),
+            mk(
+                "bridge",
+                "Alice collaborates closely with Bob on their research",
+                0,
+            ),
+            mk(
+                "gold",
+                "Bob discovered a rare luminescent mineral inside the cave",
+                1,
+            ),
+            mk(
+                "distract",
+                "Alice discovered an ordinary grey rock out in the field",
+                2,
+            ),
         ];
         // Many noise memories so a graph-only answer is genuinely OUTSIDE the
         // hybrid top-`max_results` window (the rescue gate). Without this the
@@ -2374,8 +2619,7 @@ mod tests {
             ));
         }
         let id_map = ingest_corpus(&manager, &corpus).unwrap();
-        let rev: HashMap<Uuid, String> =
-            id_map.iter().map(|(c, u)| (*u, c.clone())).collect();
+        let rev: HashMap<Uuid, String> = id_map.iter().map(|(c, u)| (*u, c.clone())).collect();
         let system = manager.get_user_memory(EVAL_USER).unwrap();
 
         let recall_order = |q: &str| -> Vec<(String, f32)> {
@@ -2392,7 +2636,9 @@ mod tests {
                     ms.iter()
                         .map(|m| {
                             (
-                                rev.get(&m.id.0).cloned().unwrap_or_else(|| m.id.0.to_string()),
+                                rev.get(&m.id.0)
+                                    .cloned()
+                                    .unwrap_or_else(|| m.id.0.to_string()),
                                 m.score.unwrap_or(0.0),
                             )
                         })
@@ -2449,8 +2695,7 @@ mod tests {
             mk("org3", frame("Initech Systems"), 3),
         ];
         let id_map = ingest_corpus(&manager, &corpus).unwrap();
-        let rev: HashMap<Uuid, String> =
-            id_map.iter().map(|(c, u)| (*u, c.clone())).collect();
+        let rev: HashMap<Uuid, String> = id_map.iter().map(|(c, u)| (*u, c.clone())).collect();
         let system = manager.get_user_memory(EVAL_USER).unwrap();
 
         let order = |layers: LayerMode| -> Vec<String> {
@@ -2467,7 +2712,11 @@ mod tests {
                 .recall(&query)
                 .map(|ms| {
                     ms.iter()
-                        .map(|m| rev.get(&m.id.0).cloned().unwrap_or_else(|| m.id.0.to_string()))
+                        .map(|m| {
+                            rev.get(&m.id.0)
+                                .cloned()
+                                .unwrap_or_else(|| m.id.0.to_string())
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
