@@ -539,6 +539,7 @@ fn personalized_pagerank(
     seeds: &HashMap<Uuid, f32>,
     intent: Option<&OntologicalIntent>,
     predicate_weights: bool,
+    specificity: bool,
 ) -> Result<(HashMap<Uuid, f32>, Vec<Uuid>)> {
     const ALPHA: f32 = 0.5; // restart probability (PPR damping = 0.5)
     const ITERS: usize = 30;
@@ -595,12 +596,36 @@ fn personalized_pagerank(
     }
 
     // Restart/personalization vector p (L1-normalized seed activations).
-    let mut p = vec![0.0_f32; n];
-    let zsum: f32 = seeds.values().copied().sum::<f32>().max(1e-9);
-    for (u, w) in seeds {
-        if let Some(&i) = node_idx.get(u) {
-            p[i] += *w / zsum;
+    //
+    // Node specificity (HippoRAG, Gutiérrez 2024): when enabled, each seed's restart
+    // mass is scaled by an inverse-frequency signal s_i = 1/mention_count before
+    // normalization, so a rare, discriminative query entity receives more restart
+    // probability than a ubiquitous hub seed that appears in many memories. This is a
+    // LOCAL IDF — it reads only the seed's own mention_count, never aggregating over the
+    // whole corpus — which keeps it within the edge-RAM budget. HippoRAG's ablation
+    // measured ~2.7 R@2 from this term; our raw seeds (salience-weighted activations)
+    // otherwise let a hub seed dominate the stationary distribution.
+    let spec_weight = |u: &Uuid, w: f32| -> f32 {
+        if !specificity {
+            return w;
         }
+        let mention_count = graph
+            .get_entity(u)
+            .ok()
+            .flatten()
+            .map(|e| e.mention_count)
+            .unwrap_or(1)
+            .max(1);
+        w / mention_count as f32
+    };
+    let mut p = vec![0.0_f32; n];
+    let weighted: Vec<(usize, f32)> = seeds
+        .iter()
+        .filter_map(|(u, w)| node_idx.get(u).map(|&i| (i, spec_weight(u, *w))))
+        .collect();
+    let zsum: f32 = weighted.iter().map(|(_, w)| *w).sum::<f32>().max(1e-9);
+    for (i, w) in weighted {
+        p[i] += w / zsum;
     }
     // Weighted out-degree for column-stochastic normalization.
     let mut outw = vec![0.0_f32; n];
@@ -1069,11 +1094,18 @@ pub fn spreading_activation_retrieve_with_stats(
         let pred_w = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        // SHODH_PPR_SPECIFICITY: node-specificity restart weighting (HippoRAG). A/B
+        // arm — default off until the LoCoMo recall guard confirms no regression.
+        let specificity = std::env::var("SHODH_PPR_SPECIFICITY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         tracing::info!(
-            "🌐 Using Personalized PageRank ({} seed entities)",
-            activation_map.len()
+            "🌐 Using Personalized PageRank ({} seed entities, specificity={})",
+            activation_map.len(),
+            specificity
         );
-        let (ppr_map, edges) = personalized_pagerank(graph, &activation_map, intent_ref, pred_w)?;
+        let (ppr_map, edges) =
+            personalized_pagerank(graph, &activation_map, intent_ref, pred_w, specificity)?;
         activation_map = ppr_map;
         traversed_edges = edges;
         stats.entities_activated = activation_map.len();
@@ -1665,6 +1697,102 @@ mod tests {
         let a = vec![1.0, 1.0];
         let b = vec![1.0, 1.0];
         assert!((cosine_similarity(&a, &b) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn ppr_node_specificity_favors_rare_seed() {
+        // HippoRAG node specificity: a rare seed (low mention_count) should steer more
+        // restart mass into its subtree than a ubiquitous hub seed of equal raw
+        // activation. Build two disjoint one-hop subtrees — hub→target_h, rare→target_r
+        // — seed both roots equally, and compare the target masses with specificity
+        // off vs on. Off ⇒ symmetric (equal mass); on ⇒ target_r outranks target_h.
+        use crate::graph_memory::{
+            EdgeTier, EntityLabel, EntityNode, GraphMemory, LtpStatus, RelationType,
+            RelationshipEdge,
+        };
+        use chrono::Utc;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let mk_entity = |name: &str| EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Concept],
+            created_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: std::collections::HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: false,
+            selectivity: None,
+        };
+
+        // add_entity forces mention_count=1 for a new entity and +1 on each re-add of
+        // the same name. Re-add "Hubword" five times → mention_count 5 (the frequent
+        // hub); "Rareword" once → mention_count 1 (the discriminative seed).
+        let mut hub = Uuid::nil();
+        for _ in 0..5 {
+            hub = graph.add_entity(mk_entity("Hubword")).unwrap();
+        }
+        let rare = graph.add_entity(mk_entity("Rareword")).unwrap();
+        let target_h = graph.add_entity(mk_entity("Targethub")).unwrap();
+        let target_r = graph.add_entity(mk_entity("Targetrare")).unwrap();
+        assert_eq!(graph.get_entity(&hub).unwrap().unwrap().mention_count, 5);
+        assert_eq!(graph.get_entity(&rare).unwrap().unwrap().mention_count, 1);
+
+        let mk_edge = |from: Uuid, to: Uuid| RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type: RelationType::RelatedTo,
+            strength: 0.8,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: Utc::now(),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+        };
+        graph.add_relationship(mk_edge(hub, target_h)).unwrap();
+        graph.add_relationship(mk_edge(rare, target_r)).unwrap();
+
+        let mut seeds = HashMap::new();
+        seeds.insert(hub, 1.0_f32);
+        seeds.insert(rare, 1.0_f32);
+
+        let (off, _) = personalized_pagerank(&graph, &seeds, None, false, false).unwrap();
+        let (on, _) = personalized_pagerank(&graph, &seeds, None, false, true).unwrap();
+
+        let off_h = off.get(&target_h).copied().unwrap_or(0.0);
+        let off_r = off.get(&target_r).copied().unwrap_or(0.0);
+        let on_h = on.get(&target_h).copied().unwrap_or(0.0);
+        let on_r = on.get(&target_r).copied().unwrap_or(0.0);
+
+        // Without specificity the two symmetric subtrees receive equal mass.
+        assert!(
+            (off_h - off_r).abs() < 1e-6,
+            "no-specificity should be symmetric: target_h={off_h} target_r={off_r}"
+        );
+        // With specificity the rare seed's target outranks the hub seed's target, and
+        // gains mass relative to the unweighted baseline.
+        assert!(
+            on_r > on_h,
+            "specificity should favor the rare seed: target_r={on_r} target_h={on_h}"
+        );
+        assert!(
+            on_r > off_r,
+            "rare target should gain mass under specificity: on={on_r} off={off_r}"
+        );
     }
 
     #[test]
