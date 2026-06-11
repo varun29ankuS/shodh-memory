@@ -3238,6 +3238,28 @@ impl GraphMemory {
         Ok(out)
     }
 
+    /// Count edges by relation type — the substrate's typed-fraction scoreboard
+    /// (audit 2026-06-10: >80% of the graph was CoOccurs; the typed fraction is
+    /// the progress metric for the relation substrate). Full scan; intended for
+    /// post-ingest diagnostics, not the query path. Index entries in the CF fail
+    /// the format-tag decode and are skipped.
+    pub fn relation_type_distribution(&self) -> Result<Vec<(String, usize)>> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let iter = self
+            .db
+            .iterator_cf(self.relationships_cf(), rocksdb::IteratorMode::Start);
+        for (_, value) in iter.flatten() {
+            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value) {
+                *counts
+                    .entry(edge.relation_type.as_str().to_string())
+                    .or_default() += 1;
+            }
+        }
+        let mut out: Vec<(String, usize)> = counts.into_iter().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(out)
+    }
+
     /// Calculate edge density for a specific entity (SHO-D5)
     ///
     /// Returns the number of edges connected to this entity.

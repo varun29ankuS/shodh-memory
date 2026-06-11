@@ -556,6 +556,32 @@ fn run_one_pass(
     let id_map = ingest_corpus(&manager, corpus)?;
     let system = manager.get_user_memory(EVAL_USER)?;
 
+    // Typed-fraction scoreboard: the substrate's creation metric, printed once
+    // per pass at the ingest→query boundary. generic = CoOccurs/RelatedTo/
+    // CoRetrieved (walk-invisible bridges); everything else is typed signal.
+    // Greppable in CI logs as EDGE_TYPE_DISTRIBUTION.
+    if let Ok(graph) = manager.get_user_graph(EVAL_USER) {
+        if let Ok(dist) = graph.read().relation_type_distribution() {
+            let total: usize = dist.iter().map(|(_, c)| c).sum();
+            if total > 0 {
+                let generic: usize = dist
+                    .iter()
+                    .filter(|(t, _)| t == "CoOccurs" || t == "RelatedTo" || t == "CoRetrieved")
+                    .map(|(_, c)| c)
+                    .sum();
+                let breakdown = dist
+                    .iter()
+                    .map(|(t, c)| format!("{t}={c}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                eprintln!(
+                    "EDGE_TYPE_DISTRIBUTION total={total} typed_pct={:.1} {breakdown}",
+                    100.0 * (total - generic) as f64 / total as f64
+                );
+            }
+        }
+    }
+
     // SHODH_VAMANA_QUALITY_REBUILD=1 — A/B lever: bulk alpha-RNG rebuild at the
     // ingest→query boundary. The harness is the only place that KNOWS this
     // boundary; a search-time trigger fires on remember()'s dedup search before
