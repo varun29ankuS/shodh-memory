@@ -58,11 +58,33 @@ jobs:
       - name: Lineage harness — semrel 0.6 (BEFORE = 0.0 everywhere)
         run: |
           set -o pipefail
-          SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 ./target/release/recall-eval --suite locomo --output l1-main.json --lineage lineage-06.json --storage ./s-l1 | tee -a "$GITHUB_STEP_SUMMARY"
+          # Stderr captured: the CI/local lineage gap (CI 0.200 vs local 1.000 at
+          # the same commit, 2026-06-11) survived four falsified hypotheses —
+          # instrument THIS environment instead of reproducing elsewhere. The
+          # funnel (CAUSAL_FUNNEL), edge-type census (EDGE_TYPE_DISTRIBUTION),
+          # and NER/tracing lines say whether CI's graph even has the 120
+          # Triggers edges and where its walk dies.
+          SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_CAUSAL_ORIGIN_DEBUG=1 \
+            ./target/release/recall-eval --suite locomo --output l1-main.json --lineage lineage-06.json --storage ./s-l1 2>l1.err | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "### lineage-06 stderr diagnostics" >> "$GITHUB_STEP_SUMMARY"
+          grep -E "EDGE_TYPE_DISTRIBUTION" l1.err | head -2 >> "$GITHUB_STEP_SUMMARY" || true
+          grep -E "CAUSAL_FUNNEL" l1.err | sort | uniq -c | sort -rn | head -12 >> "$GITHUB_STEP_SUMMARY" || true
+          grep -iE "ner.*(fallback|fail|download)|fallback.*ner" l1.err | head -5 >> "$GITHUB_STEP_SUMMARY" || true
       - name: Lineage harness — semrel 0.5
         run: |
           set -o pipefail
-          SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_SEMREL_MIN=0.5 ./target/release/recall-eval --suite locomo --output l2-main.json --lineage lineage-05.json --storage ./s-l2 | tee -a "$GITHUB_STEP_SUMMARY"
+          SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_SEMREL_MIN=0.5 SHODH_CAUSAL_ORIGIN_DEBUG=1 \
+            ./target/release/recall-eval --suite locomo --output l2-main.json --lineage lineage-05.json --storage ./s-l2 2>l2.err | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "### lineage-05 stderr diagnostics" >> "$GITHUB_STEP_SUMMARY"
+          grep -E "EDGE_TYPE_DISTRIBUTION" l2.err | head -2 >> "$GITHUB_STEP_SUMMARY" || true
+          grep -E "CAUSAL_FUNNEL" l2.err | sort | uniq -c | sort -rn | head -12 >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Upload stderr diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-stderr-diagnostics
+          path: "*.err"
+          if-no-files-found: warn
       - name: Ontology harness — semrel 0.6 (BEFORE = 0.05 full)
         run: |
           set -o pipefail
