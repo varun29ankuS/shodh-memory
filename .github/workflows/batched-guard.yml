@@ -1,0 +1,134 @@
+name: ㉕ BATCHED — real-NER re-baseline · semrel default guard · learned-pairs A/B · lineage cross-platform confirm
+
+# ONE run, four readouts (zero-budget regime: dispatches batched, artifacts
+# small with 3-day retention).
+#
+# ① REAL-NER RE-BASELINE (#23): every prior CI number was measured on the
+#    FALLBACK NER (census-shape proof, run 27342411453 — workflows only
+#    prefetched MiniLM). This workflow prefetches the pinned TinyBERT-NER and
+#    HARD-FAILS if absent. Arm A vs fallback-NER history (base 0.7113 / +semrel
+#    0.7157) quantifies the measurement bias.
+# ② SEMREL DEFAULT GUARD: the flip was unblocked locally (2f90434: cue-first
+#    precedence + budget fix; 34/34 semrel-ON tests). B ≥ A-0.003 with lineage
+#    clean ⇒ flip the default.
+# ③ LEARNED-PAIRS A/B (Stanford-1, 2e0cfe4): expect learned= counts > 0 and
+#    typed_pct ↑ on LoCoMo; recall must hold. typed_pct flat ⇒ the cue list is
+#    too sparse a teacher → semantic co-supervision next.
+# ④ LINEAGE CROSS-PLATFORM CONFIRM: local r@10 1.000 every config; CI was
+#    0.200 before the precedence fix. Expect ≥0.95 here; below ⇒ a platform
+#    divergence remains (stderr diagnostics retained).
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/batched-guard.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  batched:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache models (MiniLM + NER)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-ner-v1
+      - name: Pre-fetch models — MiniLM AND the pinned NER (hard gate)
+        run: |
+          set -o pipefail
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+          ND="$HOME/.cache/shodh-memory/models/bert-tiny-ner"; mkdir -p "$ND"
+          NB="https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7"
+          [ -s "$ND/model_quantized.onnx" ] || dl "$ND/model_quantized.onnx" "$NB/onnx/model_quantized.onnx"
+          [ -s "$ND/tokenizer.json" ]       || dl "$ND/tokenizer.json" "$NB/tokenizer.json"
+          # HARD GATE (#23): refuse to measure on the fallback NER ever again.
+          test -s "$ND/model_quantized.onnx" || { echo "::error::NER model missing — refusing to eval on fallback NER"; exit 1; }
+          test -s "$ND/tokenizer.json" || { echo "::error::NER tokenizer missing"; exit 1; }
+          ls -la "$ND"
+
+      - name: A recall — base, REAL NER (the re-baseline)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>a.err | tail -3
+      - name: B recall — +semrel (the default-flip guard)
+        run: set -o pipefail; SHODH_SEMANTIC_RELATIONS=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>b.err | tail -3
+      - name: C recall — +semrel +learned-pairs (Stanford-1 A/B)
+        run: set -o pipefail; SHODH_SEMANTIC_RELATIONS=1 SHODH_LEARNED_PAIRS=1 RUST_LOG=info ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>c.err | tail -3
+      - name: Lineage — +semrel, cross-platform confirm
+        run: |
+          set -o pipefail
+          SHODH_SEMANTIC_RELATIONS=1 SHODH_CAUSAL_ORIGIN_DEBUG=1 \
+            ./target/release/recall-eval --suite locomo --output l-main.json --lineage lineage-confirm.json --storage ./s-l 2>l.err | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Compare
+        if: always()
+        run: |
+          {
+            echo "### censuses and counters"
+            echo "A census:";  grep -E "EDGE_TYPE_DISTRIBUTION" a.err | head -1 || true
+            echo "B census:";  grep -E "EDGE_TYPE_DISTRIBUTION" b.err | head -1 || true
+            echo "C census:";  grep -E "EDGE_TYPE_DISTRIBUTION" c.err | head -1 || true
+            echo "C learned counts (provenance):"; grep -oE "learned=[0-9]+" c.err | sort | uniq -c | sort -rn | head -5 || true
+            echo "lineage census:"; grep -E "EDGE_TYPE_DISTRIBUTION" l.err | head -1 || true
+            echo "lineage funnel:"; grep -E "CAUSAL_FUNNEL" l.err | sort | uniq -c | sort -rn | head -8 || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'A base(realNER)':load('a.json'),'B +semrel':load('b.json'),'C +learned':load('c.json')}
+          names=list(arms.keys())
+          def m(d,cat,k='recall@10'):
+              if not d: return float('nan')
+              src = d['layers']['full'] if cat=='ALL' else d['by_category'][cat]
+              return src.get(k,float('nan'))
+          print("## ㉕ batched guard — recall@10 (fallback-NER history: base 0.7113, +semrel 0.7157)\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          for cat in ('ALL','single_hop','multi_hop','temporal','open_domain'):
+              print(f"| {cat} | "+" | ".join(f"{m(arms[n],cat):.4f}" for n in names)+" |")
+          def p1(d):
+              if not d: return float('nan')
+              return d['layers']['full'].get('p@1',float('nan'))
+          print("| p@1 | "+" | ".join(f"{p1(arms[n]):.4f}" for n in names)+" |")
+          def lin(f):
+              d=load(f)
+              if not d: return "n/a"
+              full=[r for r in d['rows'] if r['layer']=='full']
+              return f"r@10 {full[0]['multihop_recall_at_10']:.3f}, P@1 {full[0]['multihop_p_at_1']:.3f}" if full else "n/a"
+          print(f"\n**lineage (full):** CI-before-precedence-fix = 0.200 | now → {lin('lineage-confirm.json')} (local = 1.000)")
+          print("\n**Pre-registered decisions:**")
+          print("- ① A vs 0.7113: the real-NER measurement bias, quantified. A < 0.70 ⇒ real NER hurts LoCoMo "
+                "(fragment noise) → investigate before further NER-dependent defaults.")
+          print("- ② B ≥ A-0.003 AND lineage ≥ 0.95 ⇒ FLIP SEMREL DEFAULT (its blocker is gone).")
+          print("- ③ C: learned>0 + typed_pct(C) > typed_pct(B) with recall within 0.003 of B ⇒ Stanford-1 fires; "
+                "typed_pct flat ⇒ cue list too sparse a teacher → semantic co-supervision next.")
+          print("- ④ lineage < 0.95 ⇒ a platform divergence REMAINS — read l.err funnel before touching anything.")
+          PY
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: batched-guard-results
+          path: |
+            *.json
+            *.err
+          retention-days: 3
+          if-no-files-found: warn
