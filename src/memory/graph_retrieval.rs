@@ -534,19 +534,31 @@ fn ppr_edge_weight(
 /// power-iterates `r = (1-α)·Wᵀr + α·p` (α = restart prob). Multi-hop mass and multi-seed
 /// "bridge" boosting fall out for free. Returns (entity → stationary activation, traversed
 /// edge uuids). See `drafts/graph-substrate-plan.md`.
+/// PPR output: (entity → stationary activation, episode → max-normalized passage
+/// mass, traversed edge uuids).
+type PprOutput = (HashMap<Uuid, f32>, HashMap<Uuid, f32>, Vec<Uuid>);
+
+/// When `passage_weight` is Some(w), episode (passage) nodes are interned into the
+/// PPR graph with "contains" edges (HippoRAG 2, Gutiérrez 2025: unified phrase+passage
+/// graph — the stationary distribution over passage nodes IS the episode ranking,
+/// replacing the unnormalized sum-of-entity-activations). The second returned map is
+/// episode uuid → max-normalized stationary mass (empty when off).
 fn personalized_pagerank(
     graph: &GraphMemory,
     seeds: &HashMap<Uuid, f32>,
     intent: Option<&OntologicalIntent>,
     predicate_weights: bool,
     specificity: bool,
-) -> Result<(HashMap<Uuid, f32>, Vec<Uuid>)> {
+    passage_weight: Option<f32>,
+) -> Result<PprOutput> {
     const ALPHA: f32 = 0.5; // restart probability (PPR damping = 0.5)
     const ITERS: usize = 30;
     const TOL: f32 = 1e-6;
     const EXPAND_HOPS: usize = 3;
     const MAX_NODES: usize = 5000;
     const MAX_EDGES_PER_NODE: usize = 100;
+    const MAX_PASSAGES: usize = 4000;
+    const MAX_EPISODES_PER_ENTITY: usize = 100;
 
     let mut nodes: Vec<Uuid> = Vec::new();
     let mut node_idx: HashMap<Uuid, usize> = HashMap::new();
@@ -590,9 +602,66 @@ fn personalized_pagerank(
         frontier = next;
     }
 
+    // Unified phrase+passage graph (HippoRAG 2): intern the episodes of every
+    // in-subgraph entity as passage nodes with bidirectional "contains" edges.
+    // Passages are added AFTER entity expansion and are never expansion sources,
+    // so the entity subgraph stays bounded; an episode's entities outside the
+    // subgraph are simply not connected. DELIBERATE DEVIATION from HippoRAG 2:
+    // they balance phrase-vs-passage influence via the reset vector (their dense
+    // leg); our vector leg already covers dense retrieval, so passages get ZERO
+    // reset mass and the balance lives in the flow — each entity's total
+    // contains out-weight is budgeted to `passage_weight` (split across its
+    // episodes) so episode fan-out cannot starve entity→entity spreading.
+    // Mass conservation is the point: a hub episode cannot accumulate an
+    // unbounded sum the way the legacy per-entity summation allowed.
+    let n_entities = nodes.len();
+    let mut passage_idx: HashMap<Uuid, usize> = HashMap::new();
+    if let Some(pw) = passage_weight {
+        let mut full = false;
+        for ei in 0..n_entities {
+            if full {
+                break;
+            }
+            let eu = nodes[ei];
+            let Ok(eps) = graph.get_episodes_by_entity(&eu) else {
+                continue;
+            };
+            let n_eps = eps.len().min(MAX_EPISODES_PER_ENTITY);
+            if n_eps == 0 {
+                continue;
+            }
+            let per_edge_w = pw / n_eps as f32;
+            for ep in eps.into_iter().take(MAX_EPISODES_PER_ENTITY) {
+                let pi = match passage_idx.get(&ep.uuid) {
+                    Some(&i) => i,
+                    None => {
+                        if passage_idx.len() >= MAX_PASSAGES {
+                            full = true;
+                            break;
+                        }
+                        let i = nodes.len();
+                        nodes.push(ep.uuid);
+                        adj.push(Vec::new());
+                        passage_idx.insert(ep.uuid, i);
+                        i
+                    }
+                };
+                adj[ei].push((pi, per_edge_w));
+                // episode→entity return edges are column-normalized among
+                // themselves, so weight 1.0 = an even split across the
+                // episode's in-subgraph entities.
+                adj[pi].push((ei, 1.0));
+            }
+        }
+        tracing::debug!(
+            "Unified PPR: {} passage nodes interned (budget w={pw})",
+            passage_idx.len()
+        );
+    }
+
     let n = nodes.len();
     if n == 0 {
-        return Ok((HashMap::new(), traversed));
+        return Ok((HashMap::new(), HashMap::new(), traversed));
     }
 
     // Restart/personalization vector p (L1-normalized seed activations).
@@ -662,13 +731,30 @@ fn personalized_pagerank(
 
     traversed.sort_unstable();
     traversed.dedup();
-    let mut activation = HashMap::with_capacity(n);
-    for (i, &u) in nodes.iter().enumerate() {
+    // Split the stationary distribution: indices < n_entities are entities,
+    // the rest are passages. Passage masses are max-normalized so the episode
+    // scores land on the same 0..1 scale the downstream hybrid mixing expects
+    // (raw stationary masses are ~1e-3 and would vanish next to semantic 0..1).
+    let mut activation = HashMap::with_capacity(n_entities);
+    for (i, &u) in nodes.iter().enumerate().take(n_entities) {
         if r[i] > 1e-9 {
             activation.insert(u, r[i]);
         }
     }
-    Ok((activation, traversed))
+    let mut passage_activation = HashMap::with_capacity(passage_idx.len());
+    if !passage_idx.is_empty() {
+        let max_mass = passage_idx
+            .values()
+            .map(|&i| r[i])
+            .fold(0.0_f32, f32::max)
+            .max(1e-9);
+        for (&u, &i) in &passage_idx {
+            if r[i] > 1e-9 {
+                passage_activation.insert(u, r[i] / max_mass);
+            }
+        }
+    }
+    Ok((activation, passage_activation, traversed))
 }
 
 /// Reachability injection (complete, threshold-free spreading). For every entity within
@@ -1072,6 +1158,9 @@ pub fn spreading_activation_retrieve_with_stats(
     // PIPE-7: Use bidirectional spreading when 2+ focal entities, else unidirectional
     let graph_start = Instant::now();
     let mut traversed_edges: Vec<Uuid>;
+    // Unified-PPR passage masses (SHODH_PPR_PASSAGE); empty unless the PPR
+    // branch ran with passages enabled.
+    let mut ppr_passage_map: HashMap<Uuid, f32> = HashMap::new();
 
     // SHODH_PPR: Personalized PageRank replaces the hand-rolled BFS spread — the
     // convergent, mass-conserving form of spreading activation. The seed
@@ -1101,14 +1190,29 @@ pub fn spreading_activation_retrieve_with_stats(
         let specificity = std::env::var("SHODH_PPR_SPECIFICITY")
             .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
             .unwrap_or(true);
+        // SHODH_PPR_PASSAGE: unified phrase+passage PPR (HippoRAG 2). The value
+        // is the per-entity contains-edge flow budget (e.g. 0.5); unset/0 = off.
+        // A/B spike — default off.
+        let passage_weight = std::env::var("SHODH_PPR_PASSAGE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|w| *w > 0.0);
         tracing::info!(
-            "🌐 Using Personalized PageRank ({} seed entities, specificity={})",
+            "🌐 Using Personalized PageRank ({} seed entities, specificity={}, passages={:?})",
             activation_map.len(),
-            specificity
+            specificity,
+            passage_weight
         );
-        let (ppr_map, edges) =
-            personalized_pagerank(graph, &activation_map, intent_ref, pred_w, specificity)?;
+        let (ppr_map, passage_map, edges) = personalized_pagerank(
+            graph,
+            &activation_map,
+            intent_ref,
+            pred_w,
+            specificity,
+            passage_weight,
+        )?;
         activation_map = ppr_map;
+        ppr_passage_map = passage_map;
         traversed_edges = edges;
         stats.entities_activated = activation_map.len();
         stats.graph_hops = 3; // PPR EXPAND_HOPS
@@ -1423,6 +1527,26 @@ pub fn spreading_activation_retrieve_with_stats(
                 current.1.insert(*entity_uuid);
             }
         }
+    }
+
+    // Unified PPR (HippoRAG 2): where a passage node carries stationary mass,
+    // it REPLACES the per-entity activation sum — mass-conserved, hub-safe
+    // ranking instead of the unnormalized SUM the spreading audit flagged.
+    // Episodes that missed the passage cap keep the summed fallback; G5 seed
+    // coverage still applies on top (orthogonal signal).
+    if !ppr_passage_map.is_empty() {
+        let mut replaced = 0usize;
+        for (uuid, entry) in activated_memories.iter_mut() {
+            if let Some(mass) = ppr_passage_map.get(uuid) {
+                entry.0 = *mass;
+                replaced += 1;
+            }
+        }
+        tracing::debug!(
+            "Unified PPR: passage mass replaced {} / {} episode scores",
+            replaced,
+            activated_memories.len()
+        );
     }
 
     stats.graph_candidates = activated_memories.len();
@@ -1772,8 +1896,9 @@ mod tests {
         seeds.insert(hub, 1.0_f32);
         seeds.insert(rare, 1.0_f32);
 
-        let (off, _) = personalized_pagerank(&graph, &seeds, None, false, false).unwrap();
-        let (on, _) = personalized_pagerank(&graph, &seeds, None, false, true).unwrap();
+        let (off, _, _) =
+            personalized_pagerank(&graph, &seeds, None, false, false, None).unwrap();
+        let (on, _, _) = personalized_pagerank(&graph, &seeds, None, false, true, None).unwrap();
 
         let off_h = off.get(&target_h).copied().unwrap_or(0.0);
         let off_r = off.get(&target_r).copied().unwrap_or(0.0);
@@ -1794,6 +1919,107 @@ mod tests {
         assert!(
             on_r > off_r,
             "rare target should gain mass under specificity: on={on_r} off={off_r}"
+        );
+    }
+
+    #[test]
+    fn ppr_passage_nodes_rank_bridge_episode_first() {
+        // HippoRAG 2 unified phrase+passage PPR: an episode containing BOTH the
+        // seed entity and its relation neighbor (a bridge passage) must collect
+        // more stationary mass than an episode touching the seed alone, and
+        // entity→entity spreading must survive the added passage fan-out.
+        use crate::graph_memory::{
+            EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory,
+            LtpStatus, RelationType, RelationshipEdge,
+        };
+        use chrono::Utc;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let mk_entity = |name: &str| EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Concept],
+            created_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: std::collections::HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: false,
+            selectivity: None,
+        };
+        let a = graph.add_entity(mk_entity("Alphaword")).unwrap();
+        let b = graph.add_entity(mk_entity("Betaword")).unwrap();
+        graph
+            .add_relationship(RelationshipEdge {
+                uuid: Uuid::new_v4(),
+                from_entity: a,
+                to_entity: b,
+                relation_type: RelationType::RelatedTo,
+                strength: 0.8,
+                created_at: Utc::now(),
+                valid_at: Utc::now(),
+                invalidated_at: None,
+                source_episode_id: None,
+                context: String::new(),
+                last_activated: Utc::now(),
+                activation_count: 1,
+                ltp_status: LtpStatus::None,
+                activation_timestamps: None,
+                tier: EdgeTier::L2Episodic,
+                entity_confidence: None,
+                forman_curvature: None,
+                endpoint_selectivity: None,
+            })
+            .unwrap();
+
+        let mk_episode = |name: &str, refs: Vec<Uuid>| EpisodicNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            content: format!("{name} content"),
+            valid_at: Utc::now(),
+            created_at: Utc::now(),
+            entity_refs: refs,
+            source: EpisodeSource::Message,
+            metadata: std::collections::HashMap::new(),
+        };
+        let ep_bridge = mk_episode("bridge", vec![a, b]);
+        let ep_solo = mk_episode("solo", vec![a]);
+        let bridge_id = ep_bridge.uuid;
+        let solo_id = ep_solo.uuid;
+        graph.add_episode(ep_bridge).unwrap();
+        graph.add_episode(ep_solo).unwrap();
+
+        let mut seeds = HashMap::new();
+        seeds.insert(a, 1.0_f32);
+
+        // Flag off: no passage map.
+        let (_, no_passages, _) =
+            personalized_pagerank(&graph, &seeds, None, false, false, None).unwrap();
+        assert!(no_passages.is_empty(), "passages off must return empty map");
+
+        let (entities, passages, _) =
+            personalized_pagerank(&graph, &seeds, None, false, false, Some(0.5)).unwrap();
+
+        let bridge_mass = passages.get(&bridge_id).copied().unwrap_or(0.0);
+        let solo_mass = passages.get(&solo_id).copied().unwrap_or(0.0);
+        assert!(
+            bridge_mass > solo_mass && solo_mass > 0.0,
+            "bridge episode (fed by both entities) must outrank the solo episode: \
+             bridge={bridge_mass} solo={solo_mass}"
+        );
+        // Max-normalization: the top passage is exactly 1.0.
+        assert!(
+            (bridge_mass - 1.0).abs() < 1e-6,
+            "top passage mass should be max-normalized to 1.0, got {bridge_mass}"
+        );
+        // Entity spreading survives the passage fan-out: B retains mass.
+        assert!(
+            entities.get(&b).copied().unwrap_or(0.0) > 0.0,
+            "entity→entity spreading must survive passage interning"
         );
     }
 
