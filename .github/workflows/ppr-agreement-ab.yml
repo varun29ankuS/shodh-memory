@@ -1,0 +1,91 @@
+name: ⑮ PPR × agreement — does the multi_hop lever survive on the new baseline?
+
+# Two facts collided: PPR is now the default (runs 27252898191+27255557316:
+# 0.6976, single +0.018, temporal +0.014) and the agreement feature is the only
+# lever that ever moved multi_hop by +0.05 (run 27255684449: 0.4379→0.4886) but
+# re-traded single_hop -0.037 on the OLD spread. Question: on PPR's lifted
+# single_hop/temporal, does agreement's multi_hop gain survive with the trade
+# absorbed? If PPR+agreement(gentle) holds ALL ≥ ~0.6976 with multi_hop ≥ 0.46,
+# that's a Pareto default candidate. Otherwise stage 2 (offline multi-feature
+# fit) proceeds as planned.
+#   A=base (PPR default)   B=+agreement (k10 lo.1 hi.5 max1.6)   C=+agreement max1.4
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/ppr-agreement-ab.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  ppr-agreement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — base (PPR default)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — PPR + agreement default
+        run: set -o pipefail; SHODH_FLAT_ADAPTIVE=1 SHODH_ADAPT_FEATURE=agreement ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — PPR + agreement gentle (max1.4)
+        run: set -o pipefail; SHODH_FLAT_ADAPTIVE=1 SHODH_ADAPT_FEATURE=agreement SHODH_ADAPT_TRUST_MAX=1.4 ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'ppr':load('a.json'),'ppr+agree':load('b.json'),'ppr+agree1.4':load('c.json')}
+          names=list(arms.keys())
+          def m(d,cat,k='recall@10'):
+              if not d: return float('nan')
+              src = d['layers']['full'] if cat=='ALL' else d['by_category'][cat]
+              return src.get(k,float('nan'))
+          print("## ⑮ PPR × agreement — recall@10 (new baseline ref 0.6976)\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          for cat in ('ALL','single_hop','multi_hop','temporal','open_domain'):
+              print(f"| {cat} | "+" | ".join(f"{m(arms[n],cat):.4f}" for n in names)+" |")
+          for cat in ('ALL','single_hop','multi_hop','temporal'):
+              print(f"\n**Δ {cat} vs ppr:** "+", ".join(f"{n} {m(arms[n],cat)-m(arms['ppr'],cat):+.4f}" for n in names if n!='ppr'))
+          print("\n**Decision:** an agreement arm holds ALL within ~0.003 of the PPR base AND lifts "
+                "multi_hop ≥ +0.02 ⇒ Pareto default candidate → confirm + default PR (approach C "
+                "stage-1 finally proven). Multi_hop gain evaporates or single_hop trades again ⇒ "
+                "interaction confirmed dead end → stage 2: instrument per-query feature export "
+                "(agreement, peakedness, graph strength, entity count) + offline logistic fit.")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppr-agreement-json
+          path: "*.json"
+          if-no-files-found: warn

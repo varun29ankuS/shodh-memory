@@ -1,0 +1,135 @@
+name: ㉑ semantic relation typer A/B — substrate increment 1 (#65)
+
+# Heuristic patching is PROVEN exhausted (run 27272612202: lineage root-cause
+# P@1 = 0.0 with every quick fix active). Increment 1 of the typed-relation
+# substrate: SHODH_SEMANTIC_RELATIONS=1 types entity-pair edges by embedding the
+# template-normalized pair sentence against cached relation-label exemplars
+# (relation_typer.rs — zero new model, zero training, growable by adding
+# exemplar lines). Typing chain: semantic → cue extractor → label-pair table.
+#   A=base recall (guard)   B=+semrel recall   C=+semrel min 0.5 recall
+#   + lineage harness (semrel 0.6 and 0.5) + ontology harness (semrel 0.6)
+# Scoreboards: lineage root-cause P@1 (BEFORE = 0.0), ontology type-P@1
+# (BEFORE = 0.05 full), locomo recall must not regress (base ~0.7124 w/ qner;
+# this run's base arm is the in-run reference).
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/semantic-relations-ab.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  semrel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — base (guard)
+        run: set -o pipefail; SHODH_QUERY_NER=1 ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — +semantic relations (min 0.6)
+        run: set -o pipefail; SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — +semantic relations (min 0.5)
+        run: set -o pipefail; SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_SEMREL_MIN=0.5 ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+      - name: Lineage harness — semrel 0.6 (BEFORE = 0.0 everywhere)
+        run: |
+          set -o pipefail
+          # Stderr captured: the CI/local lineage gap (CI 0.200 vs local 1.000 at
+          # the same commit, 2026-06-11) survived four falsified hypotheses —
+          # instrument THIS environment instead of reproducing elsewhere. The
+          # funnel (CAUSAL_FUNNEL), edge-type census (EDGE_TYPE_DISTRIBUTION),
+          # and NER/tracing lines say whether CI's graph even has the 120
+          # Triggers edges and where its walk dies.
+          SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_CAUSAL_ORIGIN_DEBUG=1 \
+            ./target/release/recall-eval --suite locomo --output l1-main.json --lineage lineage-06.json --storage ./s-l1 2>l1.err | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "### lineage-06 stderr diagnostics" >> "$GITHUB_STEP_SUMMARY"
+          grep -E "EDGE_TYPE_DISTRIBUTION" l1.err | head -2 >> "$GITHUB_STEP_SUMMARY" || true
+          grep -E "CAUSAL_FUNNEL" l1.err | sort | uniq -c | sort -rn | head -12 >> "$GITHUB_STEP_SUMMARY" || true
+          grep -iE "ner.*(fallback|fail|download)|fallback.*ner" l1.err | head -5 >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Lineage harness — semrel 0.5
+        run: |
+          set -o pipefail
+          SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_SEMREL_MIN=0.5 SHODH_CAUSAL_ORIGIN_DEBUG=1 \
+            ./target/release/recall-eval --suite locomo --output l2-main.json --lineage lineage-05.json --storage ./s-l2 2>l2.err | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "### lineage-05 stderr diagnostics" >> "$GITHUB_STEP_SUMMARY"
+          grep -E "EDGE_TYPE_DISTRIBUTION" l2.err | head -2 >> "$GITHUB_STEP_SUMMARY" || true
+          grep -E "CAUSAL_FUNNEL" l2.err | sort | uniq -c | sort -rn | head -12 >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Upload stderr diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-stderr-diagnostics
+          path: "*.err"
+          if-no-files-found: warn
+      - name: Ontology harness — semrel 0.6 (BEFORE = 0.05 full)
+        run: |
+          set -o pipefail
+          SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 ./target/release/recall-eval --suite locomo --output o-main.json --ontology ontology.json --storage ./s-o | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'base':load('a.json'),'semrel':load('b.json'),'semrel.5':load('c.json')}
+          names=list(arms.keys())
+          def m(d,cat,k='recall@10'):
+              if not d: return float('nan')
+              src = d['layers']['full'] if cat=='ALL' else d['by_category'][cat]
+              return src.get(k,float('nan'))
+          print("## ㉑ semantic relation typer — recall@10 guard\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          for cat in ('ALL','single_hop','multi_hop','temporal','open_domain'):
+              print(f"| {cat} | "+" | ".join(f"{m(arms[n],cat):.4f}" for n in names)+" |")
+          def lin(f):
+              d=load(f)
+              if not d: return "n/a"
+              full=[r for r in d['rows'] if r['layer']=='full']
+              return f"P@1 {full[0]['multihop_p_at_1']:.2f}, r@10 {full[0]['multihop_recall_at_10']:.2f}" if full else "n/a"
+          print(f"\n**lineage (full layer):** before=0.00 | semrel0.6 → {lin('lineage-06.json')} | semrel0.5 → {lin('lineage-05.json')}")
+          o=load('ontology.json')
+          if o:
+              full=[r for r in o['rows'] if r['layer']=='full']
+              if full: print(f"**ontology type-P@1 (full):** before=0.05 → {full[0]['multihop_p_at_1']:.2f}")
+          print("\n**Decision:** lineage P@1 rises above 0 ⇒ the substrate's first typed edges are LIVE — "
+                "iterate exemplars/threshold, then default PR. Lineage stays 0 with recall flat ⇒ inspect "
+                "whether semantic edges were CREATED (typed-fraction instrumentation next) before judging "
+                "the approach — creation failure and ranking failure are different bugs. Recall regression "
+                "> 0.005 in B/C ⇒ noisy typed edges hurt spreading → raise threshold.")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semantic-relations-json
+          path: "*.json"
+          if-no-files-found: warn

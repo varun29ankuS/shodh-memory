@@ -1,0 +1,90 @@
+name: 384-dim embedder bake-off
+
+# All candidates are 384-dim (same RAM as MiniLM) — the edge constraint. Tests
+# whether a STRONGER 384-dim model lifts recall vs the MiniLM-L6 baseline, each
+# run with its correct query/passage prefix (fair comparison). gte=symmetric,
+# bge/mxbai=retrieval-instruction. Answers "improve recall within same variables".
+
+on:
+  workflow_dispatch:
+
+# Directional fast read: cap the QUERY set (full-distractor difficulty preserved)
+# and SHRINK the corpus to ~1,500 (gold-preserving; recall inflates, gaps
+# compress — winner must be re-confirmed at full scale). Each arm drops from
+# ~75 min to ~8-10 min, so all four embedders + Compare finish in ~1 hour.
+jobs:
+  bakeoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Fetch all 384-dim models
+        run: |
+          dl() { curl -fL --retry 10 --retry-all-errors --retry-delay 5 -o "$1" "$2"; }
+          # MiniLM (baseline, cached)
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+          for spec in \
+            "bge:Xenova/bge-small-en-v1.5" \
+            "gte:Xenova/gte-small" \
+            "mxbai:mixedbread-ai/mxbai-embed-xsmall-v1" \
+            "nomic:nomic-ai/nomic-embed-text-v1.5"; do
+            name="${spec%%:*}"; repo="${spec#*:}"; D="$HOME/models/$name"; mkdir -p "$D"
+            dl "$D/model.onnx"     "https://huggingface.co/$repo/resolve/main/onnx/model.onnx"
+            dl "$D/tokenizer.json" "https://huggingface.co/$repo/resolve/main/tokenizer.json"
+            ls -la "$D"
+          done
+
+      - name: MiniLM-L6 (baseline)
+        run: ./target/release/recall-eval --suite locomo --output mini.json --storage ./s-mini 2>&1 | tail -3
+      - name: bge-small-en-v1.5
+        run: SHODH_EMBEDDER=bge SHODH_MODEL_PATH=/home/runner/models/bge SHODH_USE_QUANTIZED_MODEL=0 ./target/release/recall-eval --suite locomo --output bge.json --storage ./s-bge 2>&1 | tail -3
+      - name: gte-small
+        run: SHODH_EMBEDDER=gte SHODH_MODEL_PATH=/home/runner/models/gte SHODH_USE_QUANTIZED_MODEL=0 ./target/release/recall-eval --suite locomo --output gte.json --storage ./s-gte 2>&1 | tail -3
+      - name: mxbai-xsmall
+        run: SHODH_EMBEDDER=mxbai SHODH_MODEL_PATH=/home/runner/models/mxbai SHODH_USE_QUANTIZED_MODEL=0 ./target/release/recall-eval --suite locomo --output mxbai.json --storage ./s-mxbai 2>&1 | tail -3
+      - name: nomic Matryoshka@384 (768→384 truncated)
+        run: SHODH_EMBEDDER=nomic SHODH_MATRYOSHKA=1 SHODH_MODEL_PATH=/home/runner/models/nomic SHODH_USE_QUANTIZED_MODEL=0 ./target/release/recall-eval --suite locomo --output nomic.json --storage ./s-nomic 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms=[("MiniLM-L6","mini.json"),("bge-small","bge.json"),("gte-small","gte.json"),("mxbai-xsmall","mxbai.json"),("nomic@384","nomic.json")]
+          data=[(n,load(f)) for n,f in arms]
+          def rec(d,c):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if c=='ALL' else d['by_category'][c]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          base=rec(data[0][1],'ALL')
+          print("## 384-dim embedder bake-off — full-pipeline recall@10 (same RAM)\n")
+          print("_Directional fast read: SHODH_MAX_CASES=300, SHODH_MAX_CORPUS=1500 (gold-preserving). Recall is inflated vs full scale; the WINNER (top Δ) must be re-confirmed at full corpus. nomic@384 = 768-dim truncated to 384 + renormalized._\n")
+          print("| category | "+" | ".join(n for n,_ in data)+" |")
+          print("| --- | "+" | ".join("---" for _ in data)+" |")
+          for c in cats:
+              print(f"| {c} | "+" | ".join(f"{rec(d,c):.4f}" for _,d in data)+" |")
+          print("\n**Δ vs MiniLM (ALL):** "+"  ".join(f"{n} {rec(d,'ALL')-base:+.4f}" for n,d in data[1:]))
+          print("\nAll 384-dim → identical RAM. A positive Δ = free recall within the edge constraint.")
+          PY

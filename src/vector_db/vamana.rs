@@ -700,6 +700,19 @@ impl VamanaIndex {
         // Cache existing vectors for O(1) access in inner loop
         let mut pruned_vectors: Vec<&[f32]> = Vec::with_capacity(self.config.max_degree);
 
+        // The α-RNG rule requires NONNEGATIVE distances. NormalizedDotProduct
+        // returns d = -dot ∈ [-1, 1]: multiplying a NEGATIVE d by α > 1 makes it
+        // "closer", inverting the prune rule — for near-tied similar candidates
+        // `α·dist_ce ≤ dist_nc` then fires for everything after the first kept
+        // neighbor and the built graph degenerates to out-degree ~1 (reproduced by
+        // retrieval::tests::test_force_quality_rebuild_*). Shift to cosine
+        // distance (1 + d ∈ [0, 2]) for the α comparison; Euclidean/Cosine are
+        // already nonnegative (offset 0).
+        let rng_offset = match self.config.distance_metric {
+            DistanceMetric::NormalizedDotProduct => 1.0_f32,
+            DistanceMetric::Euclidean | DistanceMetric::Cosine => 0.0_f32,
+        };
+
         for (candidate_id, candidate_vec, _candidate_dist) in &candidate_vectors {
             let dist_nc = self.distance(node_slice, candidate_vec);
 
@@ -708,8 +721,10 @@ impl VamanaIndex {
                 let dist_ne = pruned_dist_ne[i]; // Cached - no recomputation!
                 let dist_ce = self.distance(candidate_vec, pruned_vectors[i]);
 
-                // α-RNG pruning condition
-                if self.config.alpha * dist_ce <= dist_nc && dist_ce <= dist_ne {
+                // α-RNG pruning condition (on the nonnegative-shifted scale)
+                if self.config.alpha * (dist_ce + rng_offset) <= (dist_nc + rng_offset)
+                    && dist_ce <= dist_ne
+                {
                     should_add = false;
                     break;
                 }
@@ -750,6 +765,15 @@ impl VamanaIndex {
         // Check if index is empty
         if self.num_vectors.load(std::sync::atomic::Ordering::Acquire) == 0 {
             return Ok(Vec::new());
+        }
+
+        // SHODH_VECTOR_EXACT=1 → bypass the Vamana ANN graph and return the TRUE
+        // k nearest neighbours by exact brute-force. Diagnostic: separates *index
+        // recall* (ANN vs exact, the number LanceDB/FAISS publish) from *task recall*
+        // (gold answers). If task recall is unchanged vs ANN, the index is faithful
+        // and the embeddings — not the index — are the ceiling.
+        if std::env::var("SHODH_VECTOR_EXACT").is_ok() {
+            return self.brute_force_search(query, k);
         }
 
         // Check if graph is built

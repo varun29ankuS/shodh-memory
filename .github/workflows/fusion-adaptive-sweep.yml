@@ -1,0 +1,101 @@
+name: ⑧ learned per-query trust (C, stage 1) — break the tradeoff
+
+# Global vector-trust trades multi_hop↔single_hop; abs-calibration trades the other way. The
+# tradeoff is structural to a GLOBAL scalar. SHODH_FLAT_ADAPTIVE sets vec_trust PER QUERY from
+# BM25 peakedness (max/mean over candidates): sharp peak ⇒ exact-match/single_hop ⇒ trust bm25
+# (vec_trust→1); flat ⇒ semantic/multi_hop ⇒ trust vector (→max). Goal: multi_hop UP and
+# single_hop HELD ⇒ ALL > 0.6853 ⇒ the per-query weight breaks the tradeoff (stage-1 proof of C).
+#   A=FLAT(adaptive off, 0.6853)  B=adaptive default(max1.6,lo2,hi6)  C=max2.0  D=lo1.5/hi4
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/fusion-adaptive-sweep.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  adaptive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — adaptive OFF (FLAT default)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — adaptive default (max1.6 lo2 hi6)
+        run: set -o pipefail; SHODH_FLAT_ADAPTIVE=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — adaptive max2.0
+        run: set -o pipefail; SHODH_FLAT_ADAPTIVE=1 SHODH_ADAPT_TRUST_MAX=2.0 ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+      - name: D recall — adaptive lo1.5 hi4
+        run: set -o pipefail; SHODH_FLAT_ADAPTIVE=1 SHODH_ADAPT_PEAK_LO=1.5 SHODH_ADAPT_PEAK_HI=4 ./target/release/recall-eval --suite locomo --repeats 1 --output d.json --storage ./s-d 2>&1 | tail -3
+      - name: A funnel — adaptive OFF
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
+      - name: B funnel — adaptive default
+        run: set -o pipefail; SHODH_FLAT_ADAPTIVE=1 ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'off':load('a.json'),'def':load('b.json'),'max2.0':load('c.json'),'lo1.5':load('d.json')}
+          def rec(d,cat):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if cat=='ALL' else d['by_category'][cat]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          names=list(arms.keys())
+          print("## ⑧ learned per-query trust (stage 1) — recall@10 (FLAT off=0.6853)\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          for cat in cats:
+              print(f"| {cat} | "+" | ".join(f"{rec(arms[n],cat):.4f}" for n in names)+" |")
+          print("\n**Δ ALL vs off:** "+", ".join(f"{n} {rec(arms[n],'ALL')-rec(arms['off'],'ALL'):+.4f}" for n in names if n!='off'))
+          print("**Δ single_hop:** "+", ".join(f"{n} {rec(arms[n],'single_hop')-rec(arms['off'],'single_hop'):+.4f}" for n in names if n!='off'))
+          print("**Δ multi_hop:** "+", ".join(f"{n} {rec(arms[n],'multi_hop')-rec(arms['off'],'multi_hop'):+.4f}" for n in names if n!='off'))
+          def g(fn,stage,k):
+              if not fn: return float('nan')
+              for r in fn.get('overall',[]):
+                  if r['stage']==stage: return r.get(k,float('nan'))
+              return float('nan')
+          fa=load('fa.json'); fb=load('fb.json')
+          print("\n### funnel FUSION — off vs adaptive\n| metric | off | adaptive |")
+          print("| --- | --- | --- |")
+          for k in ('present_pct','top10_pct','mean_rank_when_present'):
+              print(f"| fusion {k} | {g(fa,'fusion',k):.2f} | {g(fb,'fusion',k):.2f} |")
+          print("\n**Decision (stage-1 proof of approach C):** an arm lifts ALL > 0.6853 with multi_hop UP and single_hop NOT regressing (≥~0.7515) ⇒ the per-query BM25-peakedness weight BREAKS the structural tradeoff → fold best params into the FLAT default (PR), then STAGE 2: fit coefficients on the eval + add features (vec-bm25 agreement, graph strength), STAGE 3: online-adapt from feedback (E2 moat). All ≤ off ⇒ BM25-peakedness doesn't separate single/multi → try the agreement feature or a multi-feature fit. AUDIT: multi_hop AND single_hop must BOTH move the right way (the whole point).")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fusion-adaptive-json
+          path: "*.json"
+          if-no-files-found: warn

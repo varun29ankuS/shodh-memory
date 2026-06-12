@@ -1,0 +1,123 @@
+name: ㉒ lineage diagnosis — WHERE does root-cause retrieval die?
+
+# Lineage root-cause P@1 = 0.0 through every fix (cue direction, person-knows,
+# query-NER, semantic relation typer at two thresholds — runs 27272612202 +
+# 27276437326). Gates verified firing in code (extract_predicates default-on;
+# ORIGIN_CUES matches the harness's "earliest origin" queries). This run
+# instruments the full chain in ONE pass:
+#   1. "edge typing provenance" lines (NEW) — were causal edges CREATED at
+#      ingest, and by which stage (semantic/cue/pair/generic)?
+#   2. CAUSAL_FUNNEL lines (existing SHODH_CAUSAL_ORIGIN_DEBUG) — per query:
+#      qents (did the queried event RESOLVE to a graph node?), cue (did the
+#      origin gate fire?), origins (did the backward walk RETURN anything?).
+# Outcomes: qents=0 ⇒ entity-resolution failure (POS fragmentation of harness
+# names). origins=0 with causal edges present ⇒ walk/edge-direction failure.
+# origins>0 with P@1 still 0 ⇒ the USAGE path (BM25 cue expansion) is too weak
+# → origins need direct candidate injection/boost.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/lineage-diagnosis.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  lineage-diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: Lineage harness — fully instrumented
+        run: |
+          set -o pipefail
+          RUST_LOG=shodh_memory=info SHODH_CAUSAL_ORIGIN_DEBUG=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_QUERY_NER=1 \
+            ./target/release/recall-eval --suite locomo --output l-main.json --lineage lineage.json --storage ./s-l > diag.log 2>&1 || { tail -20 diag.log; exit 1; }
+          tail -3 diag.log
+
+      - name: Diagnose
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re, json
+          from collections import Counter
+          log = open('diag.log', encoding='utf-8', errors='replace').read()
+          print("## ㉒ lineage diagnosis\n")
+          # 1. Edge typing provenance during ingest
+          prov = Counter()
+          for m in re.finditer(r'edge typing provenance.*?semantic=(\d+).*?cue=(\d+).*?pair_table=(\d+).*?generic=(\d+)', log):
+              prov['semantic'] += int(m.group(1)); prov['cue'] += int(m.group(2))
+              prov['pair'] += int(m.group(3)); prov['generic'] += int(m.group(4))
+          # field order in tracing output may differ; fall back to per-field scan
+          if not prov:
+              for line in log.splitlines():
+                  if 'edge typing provenance' in line:
+                      for k, alias in (('semantic','semantic'),('cue','cue'),('pair','pair_table'),('generic','generic')):
+                          mm = re.search(rf'{alias}=(\d+)', line)
+                          if mm: prov[k] += int(mm.group(1))
+          total = sum(prov.values())
+          print(f"### ingest edge typing (total {total} edges)\n")
+          if total:
+              for k in ('semantic','cue','pair','generic'):
+                  print(f"- {k}: {prov[k]} ({prov[k]/max(total,1):.1%})")
+          else:
+              print("- NO provenance lines found — typing chain never ran or logs filtered")
+          # 2. Causal funnel per query
+          funnel = [(int(a),b=='true',int(c)) for a,b,c in re.findall(r'CAUSAL_FUNNEL qents=(\d+) cue=(\w+) origins=(\d+)', log)]
+          print(f"\n### causal funnel ({len(funnel)} queries with debug lines)\n")
+          if funnel:
+              n=len(funnel)
+              qents0=sum(1 for q,_,_ in funnel if q==0)
+              cue_on=sum(1 for _,c,_ in funnel if c)
+              orig0=sum(1 for q,c,o in funnel if c and q>0 and o==0)
+              orig_pos=sum(1 for _,c,o in funnel if c and o>0)
+              print(f"- queries with qents=0 (ENTITY RESOLUTION FAILED): {qents0}/{n}")
+              print(f"- queries with cue matched: {cue_on}/{n}")
+              print(f"- cue+resolved but origins=0 (WALK FAILED): {orig0}/{n}")
+              print(f"- origins>0 (walk WORKED — usage path is the suspect): {orig_pos}/{n}")
+          else:
+              print("- NO CAUSAL_FUNNEL lines — debug flag not reaching the binary or recall path differs")
+          d=json.load(open('lineage.json'))
+          full=[r for r in d['rows'] if r['layer']=='full']
+          if full: print(f"\n**lineage full-layer P@1: {full[0]['multihop_p_at_1']:.3f}**")
+          print("\n**Next action by outcome:** qents=0-dominant → fix harness-name resolution (query-NER "
+                "should already help — check why not) ; walk-failed-dominant → inspect created causal edges' "
+                "direction/type on the chain sentences ; origins>0-dominant → build direct origin candidate "
+                "injection (origins currently only feed BM25 cue expansion — too weak to beat the lexical "
+                "direct-cause distractor).")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-diagnosis
+          path: |
+            lineage.json
+            l-main.json
+            diag.log
+          if-no-files-found: warn

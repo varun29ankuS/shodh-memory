@@ -1,0 +1,80 @@
+name: NER ablation (TinyBERT vs gliner-bi-edge)
+
+# Push-triggered (so it runs from THIS branch's definition; the dispatch-input
+# path is blocked because main's locomo-recall.yml lacks extra_env). Runs the
+# LoCoMo recall harness twice on identical code — baseline (TinyBERT NER) vs
+# treatment (SHODH_NER_REPLAY = gliner-bi-edge offline entities) — so the only
+# variable is the NER. Reports the real recall@10 delta per category.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ablation:
+    name: NER ablation
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: BASELINE — TinyBERT NER
+        run: |
+          ./target/release/recall-eval --suite locomo \
+            --output base.json --storage ./s-base 2>&1 | tee base.log
+          echo "baseline done"
+
+      - name: TREATMENT — gliner-bi-edge PER/ORG/LOC-filtered (MISC common-noun flood dropped)
+        env:
+          SHODH_NER_REPLAY: tests/recall/locomo_ner_gliner_filtered.json
+        run: |
+          ./target/release/recall-eval --suite locomo \
+            --output treat.json --storage ./s-treat 2>&1 | tee treat.log
+          echo "--- replay-active check ---"
+          grep -m1 "SHODH_NER_REPLAY ACTIVE" treat.log || echo "WARNING: replay-active log line not found"
+
+      - name: Compare recall@10 (baseline vs gliner)
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          b = json.load(open('base.json')); t = json.load(open('treat.json'))
+          def rec(d, c):
+              return d['layers']['full']['recall@10'] if c == 'ALL' else d['by_category'][c]['recall@10']
+          cats = ['ALL', 'single_hop', 'multi_hop', 'temporal', 'open_domain']
+          print("## NER ablation — recall@10 (TinyBERT vs gliner-bi-edge)\n")
+          print("Identical pipeline; only the NER differs (SHODH_NER_REPLAY).\n")
+          print("| category | baseline (TinyBERT) | gliner-bi-edge | Δ |")
+          print("| --- | --- | --- | --- |")
+          for c in cats:
+              try:
+                  bb, tt = rec(b, c), rec(t, c)
+                  print(f"| {c} | {bb:.4f} | {tt:.4f} | {tt-bb:+.4f} |")
+              except Exception as e:
+                  print(f"| {c} | (err: {e}) | | |")
+          PY

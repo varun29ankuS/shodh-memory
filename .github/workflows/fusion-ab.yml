@@ -1,0 +1,87 @@
+name: fusion A/B — RRF vs ACT-R activation (recall + per-stage funnel)
+
+# G3 measure-first: the existing SHODH_ACTR_FUSION already does magnitude-additive
+# fusion (graph leg = graph_w·activation/max, hybrid leg = hybrid_w·raw/max) instead
+# of RRF rank-reciprocal. This A/Bs it vs the RRF baseline on the fast capped harness
+# and — per "verify numbers at each step" — reads the PER-STAGE gold-rank funnel for
+# both, so we see whether ACT-R pulls gold-rank-at-fusion from ~29 toward ≤10
+# (the discrimination faculty), not just the end-to-end recall delta.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/fusion-ab.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: recall — RRF baseline
+        run: ./target/release/recall-eval --suite locomo --output rrf.json --storage ./s-rrf 2>&1 | tail -3
+      - name: recall — ACT-R activation
+        run: SHODH_ACTR_FUSION=1 ./target/release/recall-eval --suite locomo --output actr.json --storage ./s-actr 2>&1 | tail -3
+      - name: funnel — RRF baseline
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output orrf.json --funnel frrf.json --storage ./s-frrf 2>&1 | tail -5
+      - name: funnel — ACT-R activation
+        run: set -o pipefail; SHODH_ACTR_FUSION=1 ./target/release/recall-eval --suite locomo --output oactr.json --funnel factr.json --storage ./s-factr 2>&1 | tail -5
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          rrf=load("rrf.json"); actr=load("actr.json")
+          frrf=load("frrf.json"); factr=load("factr.json")
+          def rec(d,c):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if c=='ALL' else d['by_category'][c]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          print("## Fusion A/B — RRF vs ACT-R activation (capped: MAX_CASES=300, MAX_CORPUS=1500; recall inflated, read Δ)\n")
+          print("### recall@10\n| category | RRF | ACT-R | Δ |")
+          print("| --- | --- | --- | --- |")
+          for c in cats:
+              a=rec(rrf,c); b=rec(actr,c)
+              print(f"| {c} | {a:.4f} | {b:.4f} | {b-a:+.4f} |")
+          def funnel_rows(d):
+              return {r['stage']: r for r in (d.get('overall',[]) if d else [])}
+          fr=funnel_rows(frrf); fa=funnel_rows(factr)
+          stages=list(fr.keys()) or list(fa.keys())
+          print("\n### Per-stage gold-rank funnel (mean_rank_when_present ↓ better; top10% ↑ better)\n")
+          print("| stage | RRF present% | RRF top10% | RRF mean_rank | ACT-R present% | ACT-R top10% | ACT-R mean_rank |")
+          print("| --- | --- | --- | --- | --- | --- | --- |")
+          for s in stages:
+              a=fr.get(s,{}); b=fa.get(s,{})
+              def g(x,k): return f"{x.get(k,float('nan')):.2f}" if x else "—"
+              print(f"| {s} | {g(a,'present_pct')} | {g(a,'top10_pct')} | {g(a,'mean_rank_when_present')} | {g(b,'present_pct')} | {g(b,'top10_pct')} | {g(b,'mean_rank_when_present')} |")
+          print("\n**Verdict:** ACT-R works iff (1) recall@10 Δ > 0 AND (2) the FUSION-stage mean_rank drops / top10% rises vs RRF — i.e. gold the graph already reached gets DISCRIMINATED into the top-10 instead of buried. If recall is flat but fusion-rank improves, the gain is downstream-truncated (raise the fusion pool). If both flat, ACT-R as-wired isn't the win and G3 needs the clean-rewrite, not the existing knob.")
+          PY

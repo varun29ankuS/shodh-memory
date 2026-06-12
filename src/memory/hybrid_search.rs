@@ -140,6 +140,14 @@ pub struct BM25Index {
     content_field: Field,
     tags_field: Field,
     entities_field: Field,
+    /// Commits that failed even after retries. A nonzero count means the
+    /// searchable index is silently missing documents — callers that need
+    /// read-your-writes integrity (the recall harness) check this and bail
+    /// instead of measuring a partial index. Observed in the wild: external
+    /// processes (Windows Search indexer on the Documents tree, antivirus
+    /// real-time scans) intermittently locking freshly written segment
+    /// files, which made eval rankings depend on ambient machine state.
+    commit_failures: std::sync::atomic::AtomicU64,
 }
 
 impl BM25Index {
@@ -210,6 +218,7 @@ impl BM25Index {
             content_field,
             tags_field,
             entities_field,
+            commit_failures: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -247,11 +256,48 @@ impl BM25Index {
         Ok(())
     }
 
-    /// Commit pending changes to disk
+    /// Commit pending changes to disk.
+    ///
+    /// Retries transient failures with backoff: tantivy commits can fail when
+    /// an external process (antivirus scan, search indexer, sync daemon)
+    /// briefly holds a lock on a segment file. Those locks clear in tens of
+    /// milliseconds; without the retry a single hiccup silently drops every
+    /// document in the pending batch from the searchable index.
     pub fn commit(&self) -> Result<()> {
+        const ATTEMPTS: u32 = 4;
         let mut writer = self.writer.write();
-        writer.commit().context("Failed to commit BM25 index")?;
-        Ok(())
+        let mut last_err = None;
+        for attempt in 0..ATTEMPTS {
+            match writer.commit() {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    if attempt + 1 < ATTEMPTS {
+                        let backoff = std::time::Duration::from_millis(50 << attempt);
+                        tracing::warn!(
+                            "BM25 commit attempt {}/{} failed ({e}); retrying in {:?}",
+                            attempt + 1,
+                            ATTEMPTS,
+                            backoff
+                        );
+                        std::thread::sleep(backoff);
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+        self.commit_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err(anyhow::anyhow!(
+            "Failed to commit BM25 index after {ATTEMPTS} attempts: {}",
+            last_err.expect("loop ran at least once")
+        ))
+    }
+
+    /// Number of commit batches lost after exhausting retries. Nonzero means
+    /// the searchable index is missing documents.
+    pub fn commit_failure_count(&self) -> u64 {
+        self.commit_failures
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Search using BM25
@@ -405,9 +451,15 @@ impl BM25Index {
         self.len() == 0
     }
 
-    /// Reload the reader to see committed changes
+    /// Reload the reader to see committed changes. A failed reload leaves the
+    /// reader serving a stale (partial) view — counted as a commit failure
+    /// because the read-your-writes effect is identical.
     pub fn reload(&self) -> Result<()> {
-        self.reader.reload()?;
+        if let Err(e) = self.reader.reload() {
+            self.commit_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(anyhow::anyhow!("Failed to reload BM25 reader: {e}"));
+        }
         Ok(())
     }
 
@@ -601,6 +653,11 @@ impl HybridSearchEngine {
     pub fn commit_and_reload(&self) -> Result<()> {
         self.bm25_index.commit()?;
         self.bm25_index.reload()
+    }
+
+    /// Commit batches lost after retries — see [`BM25Index::commit_failure_count`].
+    pub fn bm25_commit_failure_count(&self) -> u64 {
+        self.bm25_index.commit_failure_count()
     }
 
     /// Merge BM25 segments to remove ghost state and reclaim space.

@@ -1,0 +1,70 @@
+name: GLiREL on-device probe (P1 foundation gate)
+
+# The local relation-graph memory roadmap hinges on running typed relation extraction
+# on-device, LLM-free. This probe answers the gate with evidence: (1) the model's
+# backbone encoder + size (edge-deployable?), (2) does the backbone EXPORT TO ONNX (the
+# Rust inference path, same route as the GLiNER NER export). It reads config+weights
+# DIRECTLY from the HF repo and exports the backbone via optimum — bypassing GLiREL's
+# Python loader (which has dependency rot). Relation extraction runs at INGEST (write
+# path, async), not recall — so backbone size matters less than for the recall embedder.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/glirel-onnx-probe.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install tooling
+        run: |
+          set -o pipefail
+          python -m pip install --upgrade pip
+          pip install huggingface_hub transformers onnx onnxruntime "optimum[exporters]" sentencepiece protobuf 2>&1 | tail -5
+      - name: Probe — backbone, size, ONNX export (config-first, robust)
+        run: |
+          set -o pipefail
+          python - <<'PY'
+          import os, json, traceback
+          from huggingface_hub import hf_hub_download, HfApi
+          REPO = "jackboyla/glirel-large-v0"
+          print("=== repo config ===")
+          cfg = {}
+          try:
+              cfg = json.load(open(hf_hub_download(REPO, "config.json")))
+              print("config keys:", list(cfg.keys()))
+              for k in ("model_type","model_name","_name_or_path","hidden_size","encoder_config","span_mode","max_width"):
+                  if k in cfg: print(f"  {k}: {cfg[k] if k!='encoder_config' else cfg[k].get('_name_or_path', cfg[k])}")
+          except Exception:
+              print("config read failed:"); traceback.print_exc()
+          print("=== weight sizes ===")
+          backbone = None
+          try:
+              info = HfApi().model_info(REPO, files_metadata=True)
+              for s in info.siblings:
+                  if s.rfilename.endswith((".safetensors",".bin",".onnx")):
+                      print(f"  {s.rfilename}: {(s.size or 0)/1e6:.0f} MB")
+          except Exception:
+              print("model_info failed:"); traceback.print_exc()
+          # Resolve the backbone encoder name for export
+          enc = cfg.get("encoder_config") or {}
+          backbone = (cfg.get("model_name") or enc.get("_name_or_path")
+                      or cfg.get("_name_or_path") or "microsoft/deberta-v3-large")
+          print("=== resolved backbone:", backbone, "===")
+          print("=== backbone ONNX export (optimum) ===")
+          try:
+              from optimum.exporters.onnx import main_export
+              main_export(model_name_or_path=backbone, output="onnx_bb", task="feature-extraction")
+              sz = sum(os.path.getsize(os.path.join("onnx_bb",f)) for f in os.listdir("onnx_bb") if f.endswith(".onnx"))
+              print(f"BACKBONE EXPORT OK: {backbone} -> ONNX {sz/1e6:.0f} MB (fp32). int8 ~= {sz/4e6:.0f} MB.")
+              print("VERDICT: backbone is ONNX-exportable; the GLiREL relation HEAD needs custom ONNX wiring (same as GLiNER NER export #237) but that is build work, not a feasibility blocker.")
+          except Exception:
+              print("backbone export FAILED:"); traceback.print_exc()
+          print("=== PROBE DONE ===")
+          PY

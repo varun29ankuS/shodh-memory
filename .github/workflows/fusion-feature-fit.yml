@@ -1,0 +1,152 @@
+name: ⑯ approach C stage 2 — per-query feature export + offline trust fit
+
+# Stage 1 closed: every hand-tuned single feature (peakedness, agreement) re-trades
+# single_hop for multi_hop regardless of the spread (runs 27244857747, 27255684449,
+# 27265607332). Stage 2 exports per-query fusion features + per-leg gold ranks
+# (SHODH_FUSION_FEATURE_EXPORT, commit pending) and fits offline:
+#   1. ORACLE HEADROOM — per category, % of queries whose gold ranks better under
+#      vector vs BM25 (the per-query trust ceiling: is there even signal to learn?)
+#   2. per-feature AUC for predicting "trust vector"
+#   3. multi-feature logistic fit (pure-python GD), 70/30 split, holdout AUC
+# Decision: holdout AUC ≥ ~0.70 ⇒ a learnable per-query gate exists → stage 2b
+# hardcodes the coefficients behind SHODH_FLAT_ADAPTIVE and A/Bs it. AUC ≈ 0.5-0.6
+# ⇒ the features can't separate the categories → per-query trust at fusion is the
+# wrong altitude; the multi_hop lever moves to the substrate (#65-68).
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/fusion-feature-fit.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  feature-fit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: Export per-query features (Full mode)
+        run: set -o pipefail; SHODH_FUSION_FEATURE_EXPORT=features.jsonl ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+
+      - name: Fit + analyze
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, math, hashlib
+          rows = [json.loads(l) for l in open('features.jsonl')]
+          print(f"## ⑯ stage 2 — offline trust fit ({len(rows)} queries exported)\n")
+          # Label: vector ranks gold strictly better than BM25. Exclude rows where
+          # gold is absent from BOTH legs (nothing to choose between).
+          def label(r):
+              f = r['features']; v, b = f['gold_vec_rank'], f['gold_bm_rank']
+              if v is None and b is None: return None
+              if v is None: return 0
+              if b is None: return 1
+              return 1 if v < b else 0
+          data = [(r, label(r)) for r in rows]
+          data = [(r, y) for r, y in data if y is not None]
+          print(f"usable (gold in ≥1 leg): {len(data)}\n")
+          # 1. Oracle headroom per category
+          from collections import defaultdict
+          cat = defaultdict(lambda: [0, 0, 0])  # [vec-better, bm-better-or-tie, n]
+          for r, y in data:
+              c = cat[r['category']]
+              c[0] += y; c[1] += 1 - y; c[2] += 1
+          print("### oracle: which leg ranks gold better (per-query ceiling)\n")
+          print("| category | vec better | bm better/tie | n |")
+          print("| --- | --- | --- | --- |")
+          for k, (v, b, n) in sorted(cat.items()):
+              print(f"| {k} | {v/n:.2%} | {b/n:.2%} | {n} |")
+          # 2. Features
+          FEATS = ['bm_peak','vec_peak','agreement_top10','max_bm','max_vec',
+                   'n_bm_pos','n_vec_pos','n_hybrid','n_graph','graph_max_activation']
+          def vec(r): return [float(r['features'][k]) for k in FEATS] + [float(r['query_len'])]
+          NAMES = FEATS + ['query_len']
+          X = [vec(r) for r, _ in data]; Y = [y for _, y in data]
+          # per-feature AUC (rank-based)
+          def auc(xs, ys):
+              pairs = sorted(zip(xs, ys))
+              pos = sum(ys); neg = len(ys) - pos
+              if pos == 0 or neg == 0: return float('nan')
+              rank_sum = 0; i = 0
+              while i < len(pairs):
+                  j = i
+                  while j < len(pairs) and pairs[j][0] == pairs[i][0]: j += 1
+                  avg_rank = (i + j + 1) / 2  # 1-based average rank for ties
+                  rank_sum += sum(avg_rank for k in range(i, j) if pairs[k][1] == 1)
+                  i = j
+              return (rank_sum - pos * (pos + 1) / 2) / (pos * neg)
+          print("\n### per-feature AUC for 'trust vector'\n")
+          print("| feature | AUC |")
+          print("| --- | --- |")
+          for i, name in enumerate(NAMES):
+              a = auc([x[i] for x in X], Y)
+              print(f"| {name} | {a:.3f} |")
+          # 3. Logistic fit (standardize, GD), deterministic 70/30 split by case_id hash
+          def split(r): return int(hashlib.md5(r['case_id'].encode()).hexdigest(), 16) % 10 < 7
+          tr = [(x, y) for (x, (r, y)) in zip(X, data) if split(r)]
+          te = [(x, y) for (x, (r, y)) in zip(X, data) if not split(r)]
+          mu = [sum(x[i] for x, _ in tr) / len(tr) for i in range(len(NAMES))]
+          sd = [max(1e-6, (sum((x[i]-mu[i])**2 for x, _ in tr)/len(tr))**.5) for i in range(len(NAMES))]
+          def z(x): return [(x[i]-mu[i])/sd[i] for i in range(len(NAMES))]
+          w = [0.0]*len(NAMES); b = 0.0; lr = 0.1
+          for _ in range(3000):
+              gw = [0.0]*len(NAMES); gb = 0.0
+              for x, y in tr:
+                  zx = z(x); p = 1/(1+math.exp(-min(30, max(-30, sum(wi*xi for wi, xi in zip(w, zx))+b))))
+                  d = p - y
+                  for i in range(len(NAMES)): gw[i] += d*zx[i]
+                  gb += d
+              for i in range(len(NAMES)): w[i] -= lr*gw[i]/len(tr)
+              b -= lr*gb/len(tr)
+          def score(x):
+              zx = z(x); return sum(wi*xi for wi, xi in zip(w, zx))+b
+          a_tr = auc([score(x) for x, _ in tr], [y for _, y in tr])
+          a_te = auc([score(x) for x, _ in te], [y for _, y in te])
+          print(f"\n### logistic fit — train AUC {a_tr:.3f}, HOLDOUT AUC {a_te:.3f} (n_train={len(tr)}, n_test={len(te)})\n")
+          print("| feature | weight (standardized) |")
+          print("| --- | --- |")
+          for name, wi in sorted(zip(NAMES, w), key=lambda t: -abs(t[1])):
+              print(f"| {name} | {wi:+.3f} |")
+          print(f"| (bias) | {b:+.3f} |")
+          print("\n**Decision:** holdout AUC ≥ ~0.70 ⇒ learnable per-query gate exists → stage 2b: "
+                "hardcode these coefficients behind SHODH_FLAT_ADAPTIVE (feature=fitted) and A/B with "
+                "the usual gate (multi_hop UP, single_hop HELD). AUC ≲ 0.6 ⇒ fusion-time features "
+                "cannot separate the categories → close approach C at this altitude; the multi_hop "
+                "lever moves to the typed-relation substrate (#65-68).")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fusion-feature-fit
+          path: |
+            features.jsonl
+            a.json
+          if-no-files-found: warn

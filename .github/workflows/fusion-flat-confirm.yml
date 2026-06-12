@@ -1,0 +1,102 @@
+name: ⑤ FLAT fusion confirm + refine — lock the +0.063 win
+
+# Sweep (27216648530) found SHODH_FUSION_FLAT (calibrated-max) = +0.063 recall@10 ALL
+# (0.6221→0.6853), the biggest lever of the investigation. But that run measured FLAT recall
+# only with repeats=1 and ran the funnel for SUM, not FLAT. This run LOCKS it:
+#   - FLAT's own funnel (does mean_rank 14.3→~9 and top10 rise, cross-checking the recall win?)
+#   - a flat_consensus refinement (0.15 / 0.3 / 0.5) + a graph-weight floor — push past 0.685
+#     and probe the open_domain -0.017 dip.
+# A=RRF  B=FLAT(default c0.3)  C=FLAT c0.5  D=FLAT c0.15  E=FLAT graph-floor0.45
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/fusion-flat-confirm.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  flat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — RRF (baseline)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — FLAT (default consensus 0.3)
+        run: set -o pipefail; SHODH_FUSION_FLAT=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — FLAT consensus 0.5
+        run: set -o pipefail; SHODH_FUSION_FLAT=1 SHODH_FLAT_CONSENSUS=0.5 ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+      - name: D recall — FLAT consensus 0.15
+        run: set -o pipefail; SHODH_FUSION_FLAT=1 SHODH_FLAT_CONSENSUS=0.15 ./target/release/recall-eval --suite locomo --repeats 1 --output d.json --storage ./s-d 2>&1 | tail -3
+      - name: E recall — FLAT graph-floor 0.45
+        run: set -o pipefail; SHODH_FUSION_FLAT=1 SHODH_GRAPH_W_FLOOR=0.45 ./target/release/recall-eval --suite locomo --repeats 1 --output e.json --storage ./s-e 2>&1 | tail -3
+      - name: A funnel — RRF
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
+      - name: B funnel — FLAT
+        run: set -o pipefail; SHODH_FUSION_FLAT=1 ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'RRF':load('a.json'),'FLAT':load('b.json'),'FLAT.c50':load('c.json'),'FLAT.c15':load('d.json'),'FLAT.gf45':load('e.json')}
+          def rec(d,cat):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if cat=='ALL' else d['by_category'][cat]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          names=list(arms.keys())
+          print("## ⑤ FLAT confirm + refine — recall@10\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          for cat in cats:
+              print(f"| {cat} | "+" | ".join(f"{rec(arms[n],cat):.4f}" for n in names)+" |")
+          print("\n**Δ ALL vs RRF:** "+", ".join(f"{n} {rec(arms[n],'ALL')-rec(arms['RRF'],'ALL'):+.4f}" for n in names if n!='RRF'))
+          def g(fn,stage,k):
+              if not fn: return float('nan')
+              for r in fn.get('overall',[]):
+                  if r['stage']==stage: return r.get(k,float('nan'))
+              return float('nan')
+          fa=load('fa.json'); fb=load('fb.json')
+          print("\n### funnel FUSION — RRF vs FLAT (the missing cross-check)\n| metric | RRF | FLAT |")
+          print("| --- | --- | --- |")
+          for k in ('present_pct','top10_pct','mean_rank_when_present'):
+              print(f"| fusion {k} | {g(fa,'fusion',k):.2f} | {g(fb,'fusion',k):.2f} |")
+          print("\n**Confirm:** FLAT recall ≈ +0.063 reproduces AND funnel top10% up / mean_rank down ⇒ WIN locked → make SHODH_FUSION_FLAT the default via PR. Best consensus/graph-floor arm with no new category regression → fold into the default. AUDIT: open_domain must not regress further than the sweep's -0.017.")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fusion-flat-confirm-json
+          path: "*.json"
+          if-no-files-found: warn

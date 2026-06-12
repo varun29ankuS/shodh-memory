@@ -1,0 +1,85 @@
+name: embedder confirmation — int8, full corpus (MiniLM vs gte vs bge)
+
+# Confirms the directional bake-off winner at EDGE-REALISTIC precision and REAL
+# distractor difficulty:
+#   - int8 everywhere (model_quantized.onnx, SHODH_USE_QUANTIZED_MODEL=1) — same
+#     precision across arms AND what actually ships on edge (fp32 nomic's 86-min
+#     run proved fp32 is undeployable).
+#   - NO caps — full 5,882-memory corpus + all 1,531 queries, so recall is the
+#     true full-scale number (baseline MiniLM ≈ 0.54), not the inflated capped read.
+# gte-small won the directional bake-off (+0.021 ALL); bge was second (+0.016) and
+# close enough that the full-scale ranking could flip — so both challenge MiniLM.
+# Watch open_domain: every prefix-tuned model REGRESSED it -0.083 under the cap
+# (n=15); at full scale open_domain has 89 cases, so this is where it gets decided.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Fetch MiniLM + gte + bge (int8)
+        run: |
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          # MiniLM int8 baseline (cached quantized)
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+          # gte + bge int8 quantized (uint8, ~34MB each)
+          for spec in \
+            "gte:Xenova/gte-small" \
+            "bge:Xenova/bge-small-en-v1.5"; do
+            name="${spec%%:*}"; repo="${spec#*:}"; D="$HOME/models/$name"; mkdir -p "$D"
+            dl "$D/model_quantized.onnx" "https://huggingface.co/$repo/resolve/main/onnx/model_quantized.onnx"
+            dl "$D/tokenizer.json"       "https://huggingface.co/$repo/resolve/main/tokenizer.json"
+            ls -la "$D"
+          done
+
+      - name: MiniLM-L6 int8 (baseline, full corpus)
+        run: ./target/release/recall-eval --suite locomo --output mini.json --storage ./s-mini 2>&1 | tail -3
+      - name: gte-small int8 (full corpus)
+        run: SHODH_EMBEDDER=gte SHODH_MODEL_PATH=/home/runner/models/gte SHODH_USE_QUANTIZED_MODEL=1 ./target/release/recall-eval --suite locomo --output gte.json --storage ./s-gte 2>&1 | tail -3
+      - name: bge-small int8 (full corpus)
+        run: SHODH_EMBEDDER=bge SHODH_MODEL_PATH=/home/runner/models/bge SHODH_USE_QUANTIZED_MODEL=1 ./target/release/recall-eval --suite locomo --output bge.json --storage ./s-bge 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms=[("MiniLM-L6 int8","mini.json"),("gte-small int8","gte.json"),("bge-small int8","bge.json")]
+          data=[(n,load(f)) for n,f in arms]
+          def rec(d,c):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if c=='ALL' else d['by_category'][c]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          base=rec(data[0][1],'ALL')
+          print("## Embedder confirmation — int8, FULL corpus, full-pipeline recall@10\n")
+          print("_No caps: true full-scale recall (MiniLM baseline ~0.54). int8 = same precision across arms + edge-realistic. The real swap decision lives here, not in the capped directional table._\n")
+          print("| category | "+" | ".join(n for n,_ in data)+" |")
+          print("| --- | "+" | ".join("---" for _ in data)+" |")
+          for c in cats:
+              print(f"| {c} | "+" | ".join(f"{rec(d,c):.4f}" for _,d in data)+" |")
+          print("\n**Δ vs MiniLM (ALL):** "+"  ".join(f"{n} {rec(d,'ALL')-base:+.4f}" for n,d in data[1:]))
+          print("\nDecide the swap on these Δ. A positive ALL Δ that does NOT regress open_domain (89 cases here) is a real, edge-deployable win; otherwise MiniLM stays and the recall lever is fusion (G3), not the embedder.")
+          PY

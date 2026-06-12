@@ -1,0 +1,105 @@
+name: ④ fusion calibrated weighted-SUM sweep — capture the 28pp
+
+# Lever (located by 3 prior A/Bs): gold 96.3% present at fusion, mean-rank 14.3, top10 68.7%.
+# RRF destroys leg-score magnitude. This sweeps the new SHODH_FUSION_SUM (calibrated
+# weighted-SUM of min-max-normalised vector/BM25/graph legs, weights SHODH_FW_*) AND the
+# pre-existing SHODH_FUSION_FLAT (calibrated MAX — missed in the variant A/B) against RRF.
+#   A=RRF  B=FLAT(max)  C=SUM default(g.3/v.6/b.4)  D=SUM vec-heavy  E=SUM graph-heavy
+# KEY: recall@10 by category + funnel fusion top10_pct/mean_rank (does any lift 68.7→toward 96
+# without regressing a category?). Picks the weight direction to refine next.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/fusion-sum-sweep.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — RRF (baseline)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — FLAT (calibrated max)
+        run: set -o pipefail; SHODH_FUSION_FLAT=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — SUM default (g.3 v.6 b.4)
+        run: set -o pipefail; SHODH_FUSION_SUM=1 ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+      - name: D recall — SUM vec-heavy (g.3 v.9 b.3)
+        run: set -o pipefail; SHODH_FUSION_SUM=1 SHODH_FW_GRAPH=0.3 SHODH_FW_VEC=0.9 SHODH_FW_BM25=0.3 ./target/release/recall-eval --suite locomo --repeats 1 --output d.json --storage ./s-d 2>&1 | tail -3
+      - name: E recall — SUM graph-heavy (g.6 v.5 b.4)
+        run: set -o pipefail; SHODH_FUSION_SUM=1 SHODH_FW_GRAPH=0.6 SHODH_FW_VEC=0.5 SHODH_FW_BM25=0.4 ./target/release/recall-eval --suite locomo --repeats 1 --output e.json --storage ./s-e 2>&1 | tail -3
+      - name: A funnel — RRF
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
+      - name: C funnel — SUM default
+        run: set -o pipefail; SHODH_FUSION_SUM=1 ./target/release/recall-eval --suite locomo --output oc.json --funnel fc.json --storage ./s-fc 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'RRF':load('a.json'),'FLAT':load('b.json'),'SUM.def':load('c.json'),'SUM.vec':load('d.json'),'SUM.graph':load('e.json')}
+          def rec(d,cat):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if cat=='ALL' else d['by_category'][cat]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          names=list(arms.keys())
+          print("## ④ fusion weighted-SUM sweep — recall@10\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          base=arms['RRF']
+          for cat in cats:
+              row=[f"{rec(arms[n],cat):.4f}" for n in names]
+              print(f"| {cat} | "+" | ".join(row)+" |")
+          # deltas vs RRF on ALL
+          print("\n**Δ ALL vs RRF:** "+", ".join(f"{n} {rec(arms[n],'ALL')-rec(base,'ALL'):+.4f}" for n in names if n!='RRF'))
+          def g(fn,stage,k):
+              if not fn: return float('nan')
+              for r in fn.get('overall',[]):
+                  if r['stage']==stage: return r.get(k,float('nan'))
+              return float('nan')
+          fa=load('fa.json'); fc=load('fc.json')
+          print("\n### funnel FUSION stage — RRF vs SUM.def\n| metric | RRF | SUM |")
+          print("| --- | --- | --- |")
+          for k in ('present_pct','top10_pct','mean_rank_when_present'):
+              print(f"| fusion {k} | {g(fa,'fusion',k):.2f} | {g(fc,'fusion',k):.2f} |")
+          print("\n**Baseline:** RRF fusion top10 68.7%, mean_rank 14.3 (28pp buried). Decision: best arm lifts recall + funnel top10% with NO category regressing → that weight direction wins, refine the sweep around it. SUM/FLAT all ~flat ⇒ calibrated linear fusion can't rank present gold → need per-query-type weights (B) or learned weights (C). AUDIT: watch temporal (V2 regressed it) and open_domain.")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fusion-sum-sweep-json
+          path: "*.json"
+          if-no-files-found: warn

@@ -70,6 +70,134 @@ pub struct PerCaseRecord {
     pub relevant_total: usize,
     pub relevant_found: usize,
     pub missed: Vec<String>,
+    /// Recall computed over a wider cutoff of the SAME retrieved list, to split
+    /// ranking failures (gold present but ranked >10) from retrieval-reach
+    /// failures (gold absent from the candidate funnel). Only informative when
+    /// the harness queries with `max_results >= 50/100` (via `RECALL_DIAG_K`);
+    /// otherwise the list is shorter than the cutoff and these equal
+    /// `recall_at_k`. The gap `recall_at_100 - recall_at_k` is the upper bound
+    /// on what a perfect reranker over the top-100 pool could recover.
+    #[serde(default)]
+    pub recall_at_50: f64,
+    #[serde(default)]
+    pub recall_at_100: f64,
+}
+
+/// One age point in the E6 decay/stability curve.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecayRow {
+    pub age_days: f64,
+    #[serde(rename = "recall@10")]
+    pub recall_at_10: f64,
+    #[serde(rename = "ndcg@10")]
+    pub ndcg_at_10: f64,
+    pub mrr: f64,
+}
+
+/// E6 decay/forgetting report: recall@k vs simulated age. Flat = stable memory
+/// (good homeostasis); a cliff = catastrophic forgetting.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecayReport {
+    pub suite: String,
+    pub git_sha: String,
+    pub rows: Vec<DecayRow>,
+}
+
+/// One age point in the SELECTIVE-forgetting curve. For each age, `important_*`
+/// and `trivial_*` are retention rates (recall@10) of the reinforced vs the
+/// never-reinforced population under the SAME query; `divergence` =
+/// important − trivial. A real cognitive memory keeps `important_retention` high
+/// while `trivial_retention` decays, so `divergence` GROWS with age. Equal decay
+/// (divergence flat near 0) means forgetting is indiscriminate — the failure the
+/// global stability curve cannot see.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SelectiveForgettingRow {
+    pub age_days: f64,
+    pub important_retention: f64,
+    pub trivial_retention: f64,
+    pub divergence: f64,
+}
+
+/// Selective-forgetting report: retention divergence (important − trivial) vs age.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SelectiveForgettingReport {
+    pub suite: String,
+    pub git_sha: String,
+    /// Reinforcement cycles applied to each important memory before aging.
+    pub reinforce_cycles: usize,
+    /// Number of (important, trivial) competitive pairs.
+    pub pairs: usize,
+    pub rows: Vec<SelectiveForgettingRow>,
+}
+
+/// One row in the unified ablation matrix: a named config (a set of query-time
+/// flag overrides) and its aggregate metrics over the suite. The whole point is
+/// a single, re-runnable table where each fix/component is a row you can see and
+/// compare against the baseline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AblationRow {
+    /// Human-readable config name (e.g. `baseline`, `+graph-expand(K5)`).
+    pub name: String,
+    /// The env overrides applied for this row (key=value), for reproducibility.
+    pub flags: Vec<String>,
+    #[serde(rename = "recall@10")]
+    pub recall_at_10: f64,
+    #[serde(rename = "ndcg@10")]
+    pub ndcg_at_10: f64,
+    pub mrr: f64,
+    pub p_at_1: f64,
+    /// Per-category recall@10 (category name → value), so a config that helps one
+    /// capability but hurts another is visible, not hidden in the average.
+    pub by_category_recall: std::collections::BTreeMap<String, f64>,
+}
+
+/// Unified ablation report: one ingest, N query-time configs, one comparison
+/// table. The living artifact for "see and update ablation studies".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AblationReport {
+    pub suite: String,
+    pub git_sha: String,
+    pub case_count: usize,
+    pub rows: Vec<AblationRow>,
+}
+
+/// One layer's row in the E3 multi-hop ladder: recall@10 split by 2-hop
+/// (graph-only-reachable) vs 1-hop (BM25-solvable control) cases.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MultiHopLayerRow {
+    /// `report_key()` of the `LayerMode` (e.g. `vamana_only`, `+spreading`).
+    pub layer: String,
+    /// Mean recall@10 over the planted 2-hop cases (gold reachable only via
+    /// graph traversal). The `+spreading − vamana_only` delta on this column is
+    /// the graph leg's isolated multi-hop contribution.
+    pub multihop_recall_at_10: f64,
+    /// Mean recall@10 over the 1-hop control cases (gold lexically findable).
+    pub onehop_recall_at_10: f64,
+    /// Mean MRR over the 2-hop cases.
+    pub multihop_mrr: f64,
+    /// Mean P@1 over the 2-hop / capability cases. For controlled harnesses with
+    /// few equi-confusable candidates per query (temporal: 3 states; ontology:
+    /// 1 person + K orgs), recall@10 saturates at 1.0 because the whole confusable
+    /// set fits in the top-10 window — only P@1 (is the CAPABILITY-correct item
+    /// ranked #1 above its distractors?) discriminates. This is the headline
+    /// metric for those harnesses.
+    #[serde(default)]
+    pub multihop_p_at_1: f64,
+    /// Mean P@1 over the control cases.
+    #[serde(default)]
+    pub onehop_p_at_1: f64,
+}
+
+/// E3 controlled multi-hop report: per-layer 2-hop vs 1-hop recall over a
+/// synthetic planted-chain corpus where 2-hop gold is reachable only by graph
+/// traversal. The metric LoCoMo recall@k cannot provide.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MultiHopReport {
+    pub chains: usize,
+    pub multihop_cases: usize,
+    pub onehop_cases: usize,
+    /// One row per `LayerMode`, ordered along the cumulative ladder.
+    pub rows: Vec<MultiHopLayerRow>,
 }
 
 /// Aggregate metrics for one pipeline layer across all cases.
@@ -304,6 +432,173 @@ pub fn compare_to_baseline(
     check("p@1", base_full.p_at_1, cur_full.p_at_1);
 
     failures
+}
+
+/// Graph-reachability diagnostic: for each case, is each gold memory reachable
+/// from the query's seed entities within N entity-hops in the *built* knowledge
+/// graph — ignoring the (separately-audited) spreading-activation weights and
+/// prune threshold. This isolates a pure topology question — "does an
+/// associative path EXIST?" — from "does the current activation math surface
+/// it?". It answers whether the graph-native fix cluster can lift multi_hop:
+/// if the stranded gold is graph-reachable, better activation/ranking will
+/// surface it; if it is not, the deficit is entity-extraction/graph-construction
+/// or a non-entity-mediated hop (a retrieval-reach problem the graph cannot fix).
+/// Per-stage gold-rank funnel. For each pipeline stage (graph → vector → fusion → final),
+/// the fraction of cases whose gold is present at all, the fraction with gold inside the
+/// top-K window, and the mean best-gold rank when present. The biggest drop between
+/// consecutive stages LOCATES where reachable gold is lost (e.g. present in `graph` but gone
+/// after `fusion` ⇒ RRF is burying it).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FunnelStageRow {
+    pub stage: String,
+    /// % of cases where any gold id appears anywhere in this stage's candidate list.
+    pub present_pct: f64,
+    /// % of cases where the best gold rank is inside the top-K (SMOKE_K) window.
+    pub top10_pct: f64,
+    /// Mean best-gold rank (0-based) across cases where gold is present at this stage.
+    pub mean_rank_when_present: f64,
+}
+
+/// Query→graph entity-linking accuracy. For each query: NER → mentions → link to graph nodes,
+/// measured against a lexical ground truth (graph entity names that appear in the query text —
+/// the entities the query DOES mention that our graph HAS). `link_recall` is the load-bearing
+/// number: of the linkable entities the query mentions, how many does our NER+linking actually
+/// resolve? Low recall ⇒ NER/linking is the ceiling (traversal starts blind / from wrong seeds).
+/// `no_seed_pct` ⇒ queries that produce zero usable seeds at all.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LinkingRow {
+    pub category: String,
+    pub cases: usize,
+    /// Mean entities NER extracted per query.
+    pub ner_mean: f64,
+    /// Mean entities that linked to a graph node per query.
+    pub linked_mean: f64,
+    /// % of cases that produced zero linked seeds.
+    pub no_seed_pct: f64,
+    /// Mean graph entities lexically present in the query (the should-link set).
+    pub lexical_mean: f64,
+    /// linked ∩ lexical / linked — are our extracted seeds real query mentions?
+    pub link_precision: f64,
+    /// linked ∩ lexical / lexical — do we catch the query's linkable mentions? (THE number.)
+    pub link_recall: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LinkingReport {
+    pub suite: String,
+    pub git_sha: String,
+    pub overall: LinkingRow,
+    pub by_category: BTreeMap<String, LinkingRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FunnelReport {
+    pub suite: String,
+    pub git_sha: String,
+    pub case_count: usize,
+    pub overall: Vec<FunnelStageRow>,
+    pub by_category: BTreeMap<String, Vec<FunnelStageRow>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReachabilityReport {
+    pub suite: String,
+    pub git_sha: String,
+    pub max_hops: usize,
+    pub overall: ReachabilityCategory,
+    pub by_category: BTreeMap<String, ReachabilityCategory>,
+    /// Degree distribution of the built graph — the direct scoreboard for
+    /// anti-hub construction tuning (IDF-at-birth edges, hub-degree cap). The
+    /// hub pathology only appears at corpus scale (LoCoMo), so this is where the
+    /// tuning is actually measurable.
+    #[serde(default)]
+    pub graph: GraphStructure,
+}
+
+/// Graph degree-distribution summary (for anti-hub construction tuning).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GraphStructure {
+    pub total_entities: usize,
+    pub total_edges: usize,
+    /// Highest single-entity degree (the worst hub — should fall with tuning).
+    pub max_degree: usize,
+    pub mean_degree: f64,
+    /// Number of entities whose degree exceeds the hub report threshold.
+    pub hub_count: usize,
+    pub hub_threshold: usize,
+    /// Top entity degrees, descending (the hub tail).
+    pub top_degrees: Vec<usize>,
+}
+
+/// Reachability tallies for one category (cumulative within-N-hops counts).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ReachabilityCategory {
+    /// Number of cases in this category.
+    pub cases: usize,
+    /// Cases where NER found no query entity that resolves to a graph node —
+    /// the query has no associative anchor at all (an extraction gap, not a
+    /// traversal gap).
+    pub cases_no_seed: usize,
+    /// Total gold memories summed across the category's cases.
+    pub gold_total: usize,
+    /// Gold reachable with the seed entity directly mentioning it (1 hop).
+    pub reachable_within_1: usize,
+    /// Gold reachable within 2 entity-hops (one bridge entity) — the canonical
+    /// double-hop path.
+    pub reachable_within_2: usize,
+    /// Gold reachable within 3 entity-hops.
+    pub reachable_within_3: usize,
+    /// Gold not reachable from any seed entity within `max_hops`.
+    pub unreachable: usize,
+    /// Gold episodes directly attached (1 hop) to ≥2 DISTINCT query seeds — the
+    /// multi-seed discrimination signal G5 needs. If this is ~0, queries resolve
+    /// to too few graph cues for multi-seed graph reasoning to do anything, and
+    /// the lever is richer query→graph cue extraction, not episode scoring.
+    #[serde(default)]
+    pub gold_multi_seed: usize,
+    /// Cases whose query resolved to ≥2 distinct graph seed entities at all.
+    #[serde(default)]
+    pub cases_multi_seed: usize,
+}
+
+/// Learning-curve diagnostic: does recall of a memory IMPROVE as the memory is
+/// used? The flagship test of the "smarter with use" claim that no single-shot
+/// retrieval metric can see. Protocol: for cases whose gold sits at a
+/// recallable-but-not-top rank (headroom), repeatedly recall the query while
+/// applying `Helpful` feedback to the gold; track the gold's rank and score per
+/// cycle. A genuine associative/Hebbian memory shows the rank DECREASE (gold
+/// climbs) and score RISE over cycles; a static retriever stays flat.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LearningCurveReport {
+    pub suite: String,
+    pub git_sha: String,
+    pub cycles: usize,
+    /// One arm per reinforcement-outcome (Helpful / Neutral / Misleading), each
+    /// run on a FRESH ingest. The reward-gradient test: a genuine reward signal
+    /// pushes the gold UP under Helpful, DOWN under Misleading, and leaves it
+    /// flat under Neutral. If all three look the same, the reward loop is inert.
+    pub arms: Vec<LearningCurveArm>,
+}
+
+/// One reinforcement-outcome arm of the learning-curve diagnostic.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LearningCurveArm {
+    /// "Helpful" | "Neutral" | "Misleading".
+    pub outcome: String,
+    /// Cases whose cold gold-rank fell in the headroom band (≥2, ≤cap).
+    pub tracked_cases: usize,
+    /// Mean gold rank at each cycle: index 0 = cold, 1..=cycles after each
+    /// reinforcement. DECREASING under Helpful = learning.
+    pub mean_rank_by_cycle: Vec<f64>,
+    /// Mean gold score at each cycle.
+    pub mean_score_by_cycle: Vec<f64>,
+    /// Cases where final rank < initial rank (the memory got easier to recall).
+    pub improved: usize,
+    pub worsened: usize,
+    pub unchanged: usize,
+    /// Mean (final_rank − initial_rank); NEGATIVE = climbed with use.
+    pub mean_rank_delta: f64,
+    pub mean_score_delta: f64,
 }
 
 #[cfg(test)]

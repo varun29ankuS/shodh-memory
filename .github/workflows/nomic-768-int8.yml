@@ -1,0 +1,85 @@
+name: nomic NATIVE 768 int8 — full corpus (is 384 the constraint?)
+
+# Runs nomic at its NATIVE 768 dim (SHODH_TEXT_DIM=768, no truncation) at int8,
+# full corpus. This decouples two things we've been conflating:
+#   - "is the embedder weak?"  vs  "is 384 the binding constraint?"
+# The whole pipeline (embedder output, Vamana index, stored vector metadata) moves
+# to 768 via the single source of truth configured_text_dim(). MiniLM@384 int8 is
+# the baseline (~0.54 full-scale).
+# Read WITH the parallel nomic@384 int8 run (nomic-confirm-int8.yml) for 3 points:
+#   MiniLM@384  vs  nomic@384 (truncated)  vs  nomic@768 (native)
+#   - nomic@768 - nomic@384  = the cost of truncating to fit the 384 envelope
+#   - nomic@768 - MiniLM@384 = the embedder ceiling if you PAY the 768 RAM
+# If nomic@768 is still only ~+0.02 over MiniLM, the encoder is not the lever even
+# unconstrained — it's fusion (G3). If it jumps, 384 is genuinely costing recall.
+
+on:
+  workflow_dispatch:
+  # One-shot registration trigger (see nomic-confirm-int8.yml). paths-filtered so
+  # only edits to THIS file fire it.
+  push:
+    paths: ['.github/workflows/nomic-768-int8.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  native768:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Fetch MiniLM + nomic (int8)
+        run: |
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+          ND="$HOME/models/nomic"; mkdir -p "$ND"
+          NB="https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main"
+          dl "$ND/model_quantized.onnx" "$NB/onnx/model_quantized.onnx"
+          dl "$ND/tokenizer.json"       "$NB/tokenizer.json"
+          ls -la "$ND"
+
+      - name: MiniLM-L6 int8 @384 (baseline, full corpus)
+        run: ./target/release/recall-eval --suite locomo --output mini.json --storage ./s-mini 2>&1 | tail -3
+      - name: nomic NATIVE 768 int8 (full corpus)
+        run: SHODH_EMBEDDER=nomic SHODH_TEXT_DIM=768 SHODH_USE_QUANTIZED_MODEL=1 SHODH_MODEL_PATH=/home/runner/models/nomic ./target/release/recall-eval --suite locomo --output nomic768.json --storage ./s-nomic768 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms=[("MiniLM-L6 @384","mini.json"),("nomic NATIVE @768","nomic768.json")]
+          data=[(n,load(f)) for n,f in arms]
+          def rec(d,c):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if c=='ALL' else d['by_category'][c]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          base=rec(data[0][1],'ALL')
+          print("## nomic NATIVE 768 int8 — FULL corpus, full-pipeline recall@10\n")
+          print("_No caps, no truncation: nomic at its real 768-dim. MiniLM@384 baseline ~0.54. Pair with the nomic@384 run to read the truncation cost (768 vs 384 nomic) and the unconstrained embedder ceiling (768 vs MiniLM)._\n")
+          print("| category | MiniLM @384 | nomic @768 | Δ |")
+          print("| --- | --- | --- | --- |")
+          for c in cats:
+              m=rec(data[0][1],c); n=rec(data[1][1],c)
+              print(f"| {c} | {m:.4f} | {n:.4f} | {n-m:+.4f} |")
+          print(f"\n**Δ vs MiniLM@384 (ALL):** nomic@768 {rec(data[1][1],'ALL')-base:+.4f}")
+          print("\nIf nomic@768 is still ~+0.02 over MiniLM, the embedder is not the lever even at full dim — it's fusion (G3). A near-zero (~0.0) result instead would mean the 768-dim pipeline mis-wired (index/embedder dim mismatch) — sanity-check, do not trust a collapse.")
+          PY

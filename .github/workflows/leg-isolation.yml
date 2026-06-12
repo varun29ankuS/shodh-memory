@@ -1,0 +1,82 @@
+name: leg isolation (per-leg standalone recall)
+
+# SHODH_LEG isolates one retrieval leg. Answers: (1) which leg is the strongest
+# standalone base (bm25 vs vector vs graph), and (2) is vamana low because of the
+# embedder? — by running vector_only on MiniLM vs E5.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  legs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM + E5 embedders
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+          E5="$HOME/models/e5-small-v2"; mkdir -p "$E5"
+          dl "$E5/model.onnx"     "https://huggingface.co/Xenova/e5-small-v2/resolve/main/onnx/model.onnx"
+          dl "$E5/tokenizer.json" "https://huggingface.co/Xenova/e5-small-v2/resolve/main/tokenizer.json"
+
+      - name: bm25_only (MiniLM)
+        env: { SHODH_LEG: bm25 }
+        run: ./target/release/recall-eval --suite locomo --output bm25.json --storage ./s-bm25 2>&1 | tail -3
+      - name: vector_only (MiniLM)
+        env: { SHODH_LEG: vector }
+        run: ./target/release/recall-eval --suite locomo --output vec.json --storage ./s-vec 2>&1 | tail -3
+      - name: graph_only (MiniLM)
+        env: { SHODH_LEG: graph }
+        run: ./target/release/recall-eval --suite locomo --output graph.json --storage ./s-graph 2>&1 | tail -3
+      - name: vector_only (E5)
+        env:
+          SHODH_LEG: vector
+          SHODH_EMBEDDER: e5
+          SHODH_MODEL_PATH: /home/runner/models/e5-small-v2
+          SHODH_USE_QUANTIZED_MODEL: "0"
+        run: ./target/release/recall-eval --suite locomo --output vec_e5.json --storage ./s-vec-e5 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms=[("bm25_only(MiniLM)","bm25.json"),("vector_only(MiniLM)","vec.json"),
+                ("graph_only(MiniLM)","graph.json"),("vector_only(E5)","vec_e5.json")]
+          data=[(n,load(f)) for n,f in arms]
+          def rec(d,c):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if c=='ALL' else d['by_category'][c]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          print("## Per-leg standalone recall@10\n")
+          print("| category | "+" | ".join(n for n,_ in data)+" |")
+          print("| --- | "+" | ".join("---" for _ in data)+" |")
+          for c in cats:
+              print(f"| {c} | "+" | ".join(f"{rec(d,c):.4f}" for _,d in data)+" |")
+          v_mini=rec(dict(data).get('vector_only(MiniLM)'),'ALL') if False else rec(data[1][1],'ALL')
+          v_e5=rec(data[3][1],'ALL')
+          print(f"\n**Embedder effect on vector leg (ALL):** MiniLM {v_mini:.4f} → E5 {v_e5:.4f}  (Δ {v_e5-v_mini:+.4f})")
+          PY

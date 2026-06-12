@@ -1,0 +1,131 @@
+name: ⑪ vamana quality-rebuild A/B — does alpha-RNG construction beat the greedy graph?
+
+# AUDIT FINDING (2026-06-10): every production write reaches Vamana via add_vector(),
+# which skips robust_prune (greedy top-k neighbors + distance-only back-edge pruning) —
+# and even rebuild_from_rocksdb() re-adds one vector at a time. The alpha-RNG bulk
+# construction (build()) NEVER runs on a live index: the "Vamana" graph is a greedy kNN
+# graph that loses the long-range edges greedy search needs (file docs: 5-15% recall@10
+# loss). The eval corpus (1500 one-at-a-time inserts into an empty index) never had an
+# alpha-pruned graph at all. Vector is the DOMINANT leg (0.413 standalone of 0.540).
+# SHODH_VAMANA_QUALITY_REBUILD=1 bulk-rebuilds with full Vamana construction before the
+# first search (vector composition preserved exactly — only graph topology changes).
+#   A=baseline incremental graph   B=quality rebuild
+# Judged on: isolated vector-leg recall (SHODH_LEG=vector, cleanest graph-quality
+# signal), full-pipeline recall@10, funnel vector-stage present%/mean_rank.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/vamana-rebuild-ab.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  vamana-rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — incremental graph (baseline)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — quality rebuild (alpha-RNG)
+        run: |
+          set -o pipefail
+          RUST_LOG=shodh_memory=info SHODH_VAMANA_QUALITY_REBUILD=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b > b.log 2>&1 || { tail -20 b.log; exit 1; }
+          grep -m1 "Vamana quality rebuild" b.log || { echo "::error::quality rebuild NEVER FIRED — B arm invalid"; tail -30 b.log; exit 1; }
+          tail -3 b.log
+      - name: A vector-leg — incremental graph
+        run: set -o pipefail; SHODH_LEG=vector ./target/release/recall-eval --suite locomo --repeats 1 --output va.json --storage ./s-va 2>&1 | tail -3
+      - name: B vector-leg — quality rebuild
+        run: |
+          set -o pipefail
+          RUST_LOG=shodh_memory=info SHODH_LEG=vector SHODH_VAMANA_QUALITY_REBUILD=1 ./target/release/recall-eval --suite locomo --repeats 1 --output vb.json --storage ./s-vb > vb.log 2>&1 || { tail -20 vb.log; exit 1; }
+          grep -m1 "Vamana quality rebuild" vb.log || { echo "::error::quality rebuild NEVER FIRED — vB arm invalid"; tail -30 vb.log; exit 1; }
+          tail -3 vb.log
+      - name: A funnel — incremental graph
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
+      - name: B funnel — quality rebuild
+        run: |
+          set -o pipefail
+          RUST_LOG=shodh_memory=info SHODH_VAMANA_QUALITY_REBUILD=1 ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb > fb.log 2>&1 || { tail -20 fb.log; exit 1; }
+          grep -m1 "Vamana quality rebuild" fb.log || { echo "::error::quality rebuild NEVER FIRED — fB arm invalid"; tail -30 fb.log; exit 1; }
+          tail -3 fb.log
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          full={'incremental':load('a.json'),'rebuilt':load('b.json')}
+          leg={'incremental':load('va.json'),'rebuilt':load('vb.json')}
+          def m(d,cat,k='recall@10'):
+              if not d: return float('nan')
+              src = d['layers']['full'] if cat=='ALL' else d['by_category'][cat]
+              return src.get(k,float('nan'))
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          print("## ⑪ vamana quality-rebuild A/B (ref: FLAT baseline 0.6853, vector standalone ~0.41)\n")
+          for title,arms in (("FULL pipeline recall@10",full),("ISOLATED vector leg recall@10",leg)):
+              names=list(arms.keys())
+              print(f"### {title}\n")
+              print("| cat | "+" | ".join(names)+" | delta |")
+              print("| --- "*(len(names)+2)+"|")
+              for cat in cats:
+                  d=m(arms['rebuilt'],cat)-m(arms['incremental'],cat)
+                  print(f"| {cat} | "+" | ".join(f"{m(arms[n],cat):.4f}" for n in names)+f" | {d:+.4f} |")
+              print()
+          def g(fn,stage,k):
+              if not fn: return float('nan')
+              for r in fn.get('overall',[]):
+                  if r['stage']==stage: return r.get(k,float('nan'))
+              return float('nan')
+          fa=load('fa.json'); fb=load('fb.json')
+          print("### funnel — incremental vs rebuilt\n| stage.metric | incremental | rebuilt |")
+          print("| --- | --- | --- |")
+          for st in ('vector','fusion'):
+              for k in ('present_pct','top10_pct','mean_rank_when_present'):
+                  print(f"| {st} {k} | {g(fa,st,k):.2f} | {g(fb,st,k):.2f} |")
+          print("\n**Decision:** vector-leg delta is the graph-quality signal (full pipeline can mask it "
+                "behind BM25). Leg delta ≥ +0.01 with full-pipeline ALL not regressing ⇒ the greedy graph "
+                "IS costing recall → wire quality rebuild into production maintenance (post-bulk-ingest / "
+                "lowered needs_rebuild threshold) via PR, and re-run the FLAT baseline on the rebuilt "
+                "graph (the 0.6853 reference shifts). Leg delta ≈ 0 ⇒ at 1500 vectors the greedy graph is "
+                "near-exact (degradation is a scale problem, not an eval problem) → bank the finding, "
+                "re-test at 10k+ corpus before trusting Vamana numbers at scale. AUDIT: B logs must show "
+                "'Vamana quality rebuild' once per storage — if absent, the flag never fired and the arm "
+                "is invalid.")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vamana-rebuild-json
+          path: "*.json"
+          if-no-files-found: warn

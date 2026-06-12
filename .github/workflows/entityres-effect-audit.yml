@@ -1,0 +1,109 @@
+name: entity-res EFFECT audit — does Tier-4 merge entities + add bridges?
+
+# The entity-res recall A/B (run 27204683436) showed Tier-4 concept-merge ON
+# (SHODH_EVAL_NAME_EMB=1) left graph present% FLAT (51.00→51.33) and all categories
+# unmoved. But that run logged NO entity/merge counts, so we cannot tell WHETHER Tier-4
+# actually merged anything — "name-embeddings populated but zero merges" is a no-op that
+# would look identical. This audit closes that gap with the --graph-reachability path,
+# which reports total_entities + per-category reachable%:
+#   EFFECT    — total_entities ON < OFF  ⇒ Tier-4 really merged (magnitude = #merges).
+#   MECHANISM — reachable≤2hop% ON > OFF ⇒ merges ADD bridges ⇒ entity-res IS a reach lever.
+#               reachable% flat          ⇒ merges add no bridges ⇒ the gap is coref / truly-
+#               absent edges (the 4 tiers can't touch pronominal/contextual mentions).
+# Same SHODH_MAX_* caps as the recall A/B (runner now applies them in the reachability path)
+# so the graph matches the one that measured 51%. Fast: ingest + BFS, no 300-case recall.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/entityres-effect-audit.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  effect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      # --output is clap-required even though --graph-reachability short-circuits
+      # the recall run (bin returns early), so it is required-but-ignored here.
+      - name: A reachability — Tier-4 OFF (baseline)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --graph-reachability ra.json --output oa.json --storage ./s-ra 2>&1 | tail -25
+      - name: B reachability — Tier-4 ON (name embeddings)
+        run: set -o pipefail; SHODH_EVAL_NAME_EMB=1 ./target/release/recall-eval --suite locomo --graph-reachability rb.json --output ob.json --storage ./s-rb 2>&1 | tail -25
+
+      - name: Compare (EFFECT + MECHANISM)
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          a=load("ra.json"); b=load("rb.json")
+          def G(d,k): return (d or {}).get("graph",{}).get(k)
+          print("## entity-res EFFECT audit — Tier-4 concept-merge OFF vs ON (reachability)\n")
+          print("### EFFECT — graph structure (did entities actually merge?)")
+          print("| metric | OFF | ON | Δ |\n| --- | --- | --- | --- |")
+          for k in ("total_entities","total_edges","max_degree","mean_degree","hub_count"):
+              av=G(a,k); bv=G(b,k)
+              try: d=round(bv-av,3)
+              except Exception: d="n/a"
+              print(f"| {k} | {av} | {bv} | {d} |")
+          def pct(cat,field):
+              if not cat: return float('nan')
+              g=cat.get("gold_total",0)
+              return 100.0*cat.get(field,0)/g if g else float('nan')
+          oa=(a or {}).get("overall",{}); ob=(b or {}).get("overall",{})
+          def row(name,ca,cb):
+              p2a=pct(ca,"reachable_within_2"); p2b=pct(cb,"reachable_within_2")
+              p1a=pct(ca,"reachable_within_1"); p1b=pct(cb,"reachable_within_1")
+              try: dd=f"{p2b-p2a:+.2f}"
+              except Exception: dd="n/a"
+              print(f"| {name} | {p2a:.2f} | {p2b:.2f} | {dd} | {p1a:.2f} | {p1b:.2f} |")
+          print("\n### MECHANISM — reachable% of gold (did merges add bridges?)")
+          print("| scope | OFF ≤2hop% | ON ≤2hop% | Δ | OFF ≤1hop% | ON ≤1hop% |")
+          print("| --- | --- | --- | --- | --- | --- |")
+          row("ALL", oa, ob)
+          bca=(a or {}).get("by_category",{}); bcb=(b or {}).get("by_category",{})
+          for c in sorted(set(list(bca.keys())+list(bcb.keys()))):
+              row(c, bca.get(c,{}), bcb.get(c,{}))
+          print("\n**Decision rubric (cross-check with the recall A/B's flat present% 51.00→51.33):**")
+          print("- total_entities ON << OFF ⇒ Tier-4 MERGED (EFFECT real); magnitude = #merges.")
+          print("- ...AND reachable≤2hop% rises ⇒ merges ADD bridges ⇒ entity-res IS a reach lever → build coref/alias to merge MORE.")
+          print("- ...BUT reachable% flat ⇒ merges add NO bridges ⇒ unreached gold needs edges merge can't make ⇒ coref/contextual-alias or truly-absent relations.")
+          print("- total_entities ~flat ⇒ Tier-4 barely fired (cos≥0.85 too strict for conversational names) ⇒ inconclusive; real gap is coref, not name-similarity.")
+          PY
+
+      - name: Upload reachability JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: entityres-effect-json
+          path: "r*.json"
+          if-no-files-found: warn

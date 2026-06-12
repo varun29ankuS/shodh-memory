@@ -1,0 +1,78 @@
+name: specificity-fusion ablation
+
+# Push-triggered on the branch. Runs the LoCoMo recall harness 3× on identical
+# code — baseline vs SHODH_SPEC_FUSION at two scales — to measure whether the
+# query-conditional concentration term (anti-pollution lever; veld/Zep/Cognee
+# convergent) improves recall@10. Only variable is the env scale.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  spec:
+    name: specificity fusion ablation
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: BASELINE (no spec term)
+        run: ./target/release/recall-eval --suite locomo --output base.json --storage ./s-base 2>&1 | tail -5
+
+      - name: SPEC scale=0.5
+        env:
+          SHODH_SPEC_FUSION: "0.5"
+        run: ./target/release/recall-eval --suite locomo --output s05.json --storage ./s-05 2>&1 | tail -5
+
+      - name: SPEC scale=1.0
+        env:
+          SHODH_SPEC_FUSION: "1.0"
+        run: ./target/release/recall-eval --suite locomo --output s10.json --storage ./s-10 2>&1 | tail -5
+
+      - name: Compare recall@10
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          runs = [("baseline", load("base.json")), ("spec@0.5", load("s05.json")), ("spec@1.0", load("s10.json"))]
+          def rec(d, c):
+              return d['layers']['full']['recall@10'] if c == 'ALL' else d['by_category'][c]['recall@10']
+          cats = ['ALL', 'single_hop', 'multi_hop', 'temporal', 'open_domain']
+          base = runs[0][1]
+          print("## Specificity-fusion ablation — recall@10\n")
+          print("| category | " + " | ".join(n for n,_ in runs) + " | Δ@0.5 | Δ@1.0 |")
+          print("| --- | " + " | ".join("---" for _ in runs) + " | --- | --- |")
+          for c in cats:
+              vals = []
+              for _, d in runs:
+                  vals.append(rec(d, c) if d else float('nan'))
+              b = vals[0]
+              d05 = vals[1]-b if base else float('nan')
+              d10 = vals[2]-b if base else float('nan')
+              print(f"| {c} | " + " | ".join(f"{v:.4f}" for v in vals) + f" | {d05:+.4f} | {d10:+.4f} |")
+          PY
