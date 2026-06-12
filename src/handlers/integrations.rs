@@ -13,6 +13,20 @@ use std::sync::Arc;
 
 type AppState = Arc<MultiUserMemoryManager>;
 
+/// Whether the server accepts webhooks when no signing secret is configured.
+///
+/// Secure default is `false` — without a secret the webhook is unverifiable and
+/// is rejected (fail closed). Operators who genuinely need unsigned webhooks can
+/// opt in with `SHODH_ALLOW_UNSIGNED_WEBHOOKS=true`.
+fn allow_unsigned_webhooks() -> bool {
+    std::env::var("SHODH_ALLOW_UNSIGNED_WEBHOOKS")
+        .map(|v| {
+            let v = v.to_lowercase();
+            v == "true" || v == "1"
+        })
+        .unwrap_or(false)
+}
+
 /// POST /webhook/linear - Linear webhook receiver
 #[tracing::instrument(skip(state, body, headers))]
 pub async fn linear_webhook(
@@ -50,7 +64,21 @@ pub async fn linear_webhook(
             });
         }
         (false, _) => {
-            tracing::warn!("No LINEAR_WEBHOOK_SECRET configured, skipping signature verification");
+            if allow_unsigned_webhooks() {
+                tracing::warn!(
+                    "No LINEAR_WEBHOOK_SECRET configured — processing this webhook UNSIGNED \
+                     because SHODH_ALLOW_UNSIGNED_WEBHOOKS is set (insecure)."
+                );
+            } else {
+                tracing::error!(
+                    "Rejecting Linear webhook: LINEAR_WEBHOOK_SECRET is not configured. \
+                     Set it to enable HMAC verification, or set SHODH_ALLOW_UNSIGNED_WEBHOOKS=true \
+                     to accept unsigned webhooks (insecure)."
+                );
+                return Err(AppError::ServiceUnavailable(
+                    "Webhook signature verification is not configured on this server".to_string(),
+                ));
+            }
         }
     }
 
@@ -266,7 +294,21 @@ pub async fn github_webhook(
             });
         }
         (false, _) => {
-            tracing::warn!("No GITHUB_WEBHOOK_SECRET configured, skipping signature verification");
+            if allow_unsigned_webhooks() {
+                tracing::warn!(
+                    "No GITHUB_WEBHOOK_SECRET configured — processing this webhook UNSIGNED \
+                     because SHODH_ALLOW_UNSIGNED_WEBHOOKS is set (insecure)."
+                );
+            } else {
+                tracing::error!(
+                    "Rejecting GitHub webhook: GITHUB_WEBHOOK_SECRET is not configured. \
+                     Set it to enable HMAC verification, or set SHODH_ALLOW_UNSIGNED_WEBHOOKS=true \
+                     to accept unsigned webhooks (insecure)."
+                );
+                return Err(AppError::ServiceUnavailable(
+                    "Webhook signature verification is not configured on this server".to_string(),
+                ));
+            }
         }
     }
 

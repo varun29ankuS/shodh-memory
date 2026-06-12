@@ -187,7 +187,21 @@ async fn async_main() -> Result<()> {
 
     // Configure rate limiting (0 = disabled, for localhost/embedded use)
     let rate_limit_enabled = server_config.rate_limit_per_second > 0;
-    let governor_layer = if rate_limit_enabled {
+    if rate_limit_enabled {
+        let rps = server_config.rate_limit_per_second.max(1);
+        let cell_interval = std::time::Duration::from_nanos(1_000_000_000 / rps);
+        info!(
+            "Rate limiting: {} req/sec (cell interval: {:?}), burst of {}",
+            server_config.rate_limit_per_second, cell_interval, server_config.rate_limit_burst
+        );
+    } else {
+        info!("Rate limiting: disabled (SHODH_RATE_LIMIT=0)");
+    }
+
+    // Builds a fresh GovernorLayer on each call. Each call yields independent
+    // per-IP rate-limit buckets, so public and protected routes can both be
+    // limited without depending on GovernorLayer being Clone.
+    let make_governor_layer = || {
         let rps = server_config.rate_limit_per_second.max(1);
         let cell_interval = std::time::Duration::from_nanos(1_000_000_000 / rps);
         let governor_conf = GovernorConfigBuilder::default()
@@ -195,20 +209,18 @@ async fn async_main() -> Result<()> {
             .burst_size(server_config.rate_limit_burst)
             .finish()
             .expect("Failed to build governor rate limiter configuration");
-        info!(
-            "Rate limiting: {} req/sec (cell interval: {:?}), burst of {}",
-            server_config.rate_limit_per_second, cell_interval, server_config.rate_limit_burst
-        );
-        Some(GovernorLayer::new(governor_conf))
-    } else {
-        info!("Rate limiting: disabled (SHODH_RATE_LIMIT=0)");
-        None
+        GovernorLayer::new(governor_conf)
     };
 
     // Build CORS layer
     let cors = server_config.cors.to_layer();
 
-    // Build routes using handlers module
+    // Build routes using handlers module.
+    //
+    // Probe routes (/health*) are merged WITHOUT a rate-limit layer — a
+    // throttled health check would cause spurious Kubernetes restarts.
+    let probe_routes = handlers::build_probe_routes(Arc::clone(&manager));
+
     let public_routes = handlers::build_public_routes(Arc::clone(&manager)).route(
         "/",
         axum::routing::get(|| async {
@@ -229,18 +241,32 @@ async fn async_main() -> Result<()> {
         }),
     );
 
-    let protected_routes = if let Some(governor) = governor_layer {
-        handlers::build_protected_routes(Arc::clone(&manager))
-            .layer(axum::middleware::from_fn(auth::auth_middleware))
-            .layer(governor)
+    // Public (non-probe) routes are rate-limited unless SHODH_PUBLIC_RATE_LIMIT
+    // is disabled. Webhooks in particular are an unauthenticated write surface.
+    let limit_public = rate_limit_enabled && server_config.public_rate_limit;
+    let public_routes = if limit_public {
+        public_routes.layer(make_governor_layer())
     } else {
-        handlers::build_protected_routes(Arc::clone(&manager))
-            .layer(axum::middleware::from_fn(auth::auth_middleware))
+        public_routes
+    };
+    if rate_limit_enabled && !server_config.public_rate_limit {
+        info!("Public-route rate limiting: disabled (SHODH_PUBLIC_RATE_LIMIT=false)");
+    }
+
+    let protected_routes = {
+        let routes = handlers::build_protected_routes(Arc::clone(&manager))
+            .layer(axum::middleware::from_fn(auth::auth_middleware));
+        if rate_limit_enabled {
+            routes.layer(make_governor_layer())
+        } else {
+            routes
+        }
     };
 
     // Combine routes with global middleware
     let request_timeout = std::time::Duration::from_secs(server_config.request_timeout_secs);
     let app = axum::Router::new()
+        .merge(probe_routes)
         .merge(public_routes)
         .merge(protected_routes)
         .layer(

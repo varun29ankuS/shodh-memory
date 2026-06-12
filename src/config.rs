@@ -267,6 +267,11 @@ pub struct ServerConfig {
     /// Rate limit: burst size (default: 8000 - allows rapid agent bursts)
     pub rate_limit_burst: u32,
 
+    /// Whether non-probe public routes (webhooks, context status, graph view)
+    /// are rate-limited (default: true). Health probe routes (`/health*`) are
+    /// never rate-limited. Set SHODH_PUBLIC_RATE_LIMIT=false to opt out.
+    pub public_rate_limit: bool,
+
     /// Maximum concurrent requests (default: 200)
     pub max_concurrent_requests: usize,
 
@@ -329,6 +334,7 @@ impl Default for ServerConfig {
             audit_retention_days: 30,
             rate_limit_per_second: 4000,
             rate_limit_burst: 8000,
+            public_rate_limit: true,
             max_concurrent_requests: 200,
             request_timeout_secs: 60,
             is_production: false,
@@ -408,6 +414,13 @@ impl ServerConfig {
             if let Ok(n) = val.parse() {
                 config.rate_limit_burst = n;
             }
+        }
+
+        // Public-route rate limiting is on by default; only an explicit
+        // false/0 disables it (any other value keeps the secure default).
+        if let Ok(val) = env::var("SHODH_PUBLIC_RATE_LIMIT") {
+            let v = val.to_lowercase();
+            config.public_rate_limit = !(v == "false" || v == "0");
         }
 
         // Concurrency
@@ -584,6 +597,14 @@ pub fn print_env_help() {
     println!("  SHODH_REQUEST_TIMEOUT  - Request timeout in seconds (default: 60)");
     println!("  SHODH_AUDIT_MAX_ENTRIES    - Max audit entries per user (default: 10000)");
     println!("  SHODH_AUDIT_RETENTION_DAYS - Audit log retention days (default: 30)");
+    println!();
+    println!("Security (secure defaults — override only if you understand the risk):");
+    println!("  SHODH_ALLOW_UNSIGNED_WEBHOOKS - Accept webhooks when no *_WEBHOOK_SECRET is set (default: false = reject)");
+    println!(
+        "  SHODH_PUBLIC_RATE_LIMIT       - Rate-limit non-probe public routes (default: true)"
+    );
+    println!("  SHODH_ENFORCE_HTTPS           - Reject insecure http:// integration API URL overrides (default: false = warn)");
+    println!("  SHODH_METRICS_PUBLIC          - Expose /metrics without authentication (default: false = require API key)");
     println!();
     println!("Integration APIs:");
     println!("  LINEAR_API_URL         - Linear GraphQL API URL (default: https://api.linear.app/graphql)");
