@@ -34,9 +34,7 @@ use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 
 use crate::memory::types::LayerMode;
-use crate::recall_harness::fixtures::{
-    CorpusItem, RelevanceJudgement, SmokeCase, SmokeCategory,
-};
+use crate::recall_harness::fixtures::{CorpusItem, RelevanceJudgement, SmokeCase, SmokeCategory};
 use crate::recall_harness::report::{MultiHopLayerRow, MultiHopReport};
 use crate::recall_harness::runner::{run_smoke_suite_with_ranks, RunInputs};
 
@@ -161,7 +159,8 @@ fn write_fixtures(
         qbuf.push_str(&serde_json::to_string(case)?);
         qbuf.push('\n');
     }
-    std::fs::write(&cases_path, qbuf).with_context(|| format!("writing {}", cases_path.display()))?;
+    std::fs::write(&cases_path, qbuf)
+        .with_context(|| format!("writing {}", cases_path.display()))?;
 
     Ok((corpus_path, cases_path))
 }
@@ -196,8 +195,7 @@ pub fn analyze_multihop(inputs: &RunInputs, chains: usize) -> Result<MultiHopRep
         age_days: inputs.age_days,
     };
 
-    let out = run_smoke_suite_with_ranks(&run_inputs)
-        .context("multihop suite run failed")?;
+    let out = run_smoke_suite_with_ranks(&run_inputs).context("multihop suite run failed")?;
 
     // Per layer: mean recall@10 split by case category.
     let mean = |records: &[crate::recall_harness::report::PerCaseRecord], cat: &str| -> f64 {

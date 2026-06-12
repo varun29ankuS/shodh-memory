@@ -2495,8 +2495,15 @@ impl MemorySystem {
                         (
                             "located",
                             &[
-                                "where does", "where do", "where did", "where is", "where was",
-                                "where are", "live now", "lives now", "living now",
+                                "where does",
+                                "where do",
+                                "where did",
+                                "where is",
+                                "where was",
+                                "where are",
+                                "live now",
+                                "lives now",
+                                "living now",
                             ],
                             &[RelationType::LocatedIn],
                             false,
@@ -2504,8 +2511,13 @@ impl MemorySystem {
                         (
                             "creator",
                             &[
-                                "who made", "who created", "who built", "who wrote",
-                                "who painted", "who designed", "who composed",
+                                "who made",
+                                "who created",
+                                "who built",
+                                "who wrote",
+                                "who painted",
+                                "who designed",
+                                "who composed",
                             ],
                             &[RelationType::CreatedBy],
                             true,

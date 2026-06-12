@@ -2526,8 +2526,9 @@ mod tests {
     #[test]
     fn test_force_quality_rebuild_resets_counter_and_preserves_mapping() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let storage =
-            Arc::new(crate::memory::storage::MemoryStorage::new(dir.path(), None).expect("storage"));
+        let storage = Arc::new(
+            crate::memory::storage::MemoryStorage::new(dir.path(), None).expect("storage"),
+        );
         let embedder = Arc::new(
             crate::embeddings::minilm::MiniLMEmbedder::new_simplified(
                 crate::embeddings::minilm::EmbeddingConfig::default(),

@@ -362,9 +362,11 @@ fn run(args: &Args) -> Result<i32> {
 
     // Temporal controlled diagnostic short-circuits the recall run entirely.
     if let Some(t_path) = &args.temporal {
-        let report =
-            shodh_memory::recall_harness::temporal_harness::analyze_temporal(&inputs, args.mh_chains)
-                .context("temporal analysis")?;
+        let report = shodh_memory::recall_harness::temporal_harness::analyze_temporal(
+            &inputs,
+            args.mh_chains,
+        )
+        .context("temporal analysis")?;
         write_multihop(t_path, &report)?;
         eprintln!(
             "recall-eval: temporal (subjects={} validT_cases={} latest_cases={})",
@@ -396,7 +398,8 @@ fn run(args: &Args) -> Result<i32> {
     // E5 ontology diagnostic.
     if let Some(o_path) = &args.ontology {
         let report = shodh_memory::recall_harness::ontology_harness::analyze_ontology(
-            &inputs, args.mh_chains,
+            &inputs,
+            args.mh_chains,
         )
         .context("ontology analysis")?;
         write_multihop(o_path, &report)?;
@@ -412,10 +415,9 @@ fn run(args: &Args) -> Result<i32> {
 
     // E4 causal-lineage diagnostic.
     if let Some(l_path) = &args.lineage {
-        let report = shodh_memory::recall_harness::lineage_harness::analyze_lineage(
-            &inputs, args.mh_chains,
-        )
-        .context("lineage analysis")?;
+        let report =
+            shodh_memory::recall_harness::lineage_harness::analyze_lineage(&inputs, args.mh_chains)
+                .context("lineage analysis")?;
         write_multihop(l_path, &report)?;
         print_cap_ladder(
             &report,
@@ -468,7 +470,10 @@ fn run(args: &Args) -> Result<i32> {
             "## Selective forgetting — important vs trivial retention ({}, {} pairs, {} reinforce cycles)\n",
             report.suite, report.pairs, report.reinforce_cycles
         );
-        println!("| age (days) | important@{} | trivial@{} | divergence |", 6, 6);
+        println!(
+            "| age (days) | important@{} | trivial@{} | divergence |",
+            6, 6
+        );
         println!("| --- | --- | --- | --- |");
         for r in &report.rows {
             println!(
@@ -594,7 +599,13 @@ fn write_reachability(path: &std::path::Path, report: &ReachabilityReport) -> Re
 }
 
 fn summarise_reachability(report: &ReachabilityReport) {
-    let pct = |n: usize, d: usize| if d == 0 { 0.0 } else { 100.0 * n as f64 / d as f64 };
+    let pct = |n: usize, d: usize| {
+        if d == 0 {
+            0.0
+        } else {
+            100.0 * n as f64 / d as f64
+        }
+    };
     eprintln!(
         "recall-eval: graph reachability (suite={} sha={} max_hops={})",
         report.suite, report.git_sha, report.max_hops
@@ -604,8 +615,10 @@ fn summarise_reachability(report: &ReachabilityReport) {
         "category", "cases", "gold", "≤1hop%", "≤2hop%", "≤3hop%", "unreach%", "no-seed%"
     );
     let overall_label = report_overall_label();
-    let mut rows: Vec<(&String, &shodh_memory::recall_harness::report::ReachabilityCategory)> =
-        report.by_category.iter().collect();
+    let mut rows: Vec<(
+        &String,
+        &shodh_memory::recall_harness::report::ReachabilityCategory,
+    )> = report.by_category.iter().collect();
     rows.push((&overall_label, &report.overall));
     for (name, c) in rows {
         eprintln!(
@@ -700,7 +713,10 @@ fn summarise_ablation(report: &AblationReport) {
         "recall-eval: ablation (suite={} cases={} sha={})",
         report.suite, report.case_count, report.git_sha
     );
-    println!("## Ablation matrix ({} suite, {} cases)\n", report.suite, report.case_count);
+    println!(
+        "## Ablation matrix ({} suite, {} cases)\n",
+        report.suite, report.case_count
+    );
     println!("| config | recall@10 | Δ vs base | ndcg@10 | mrr | p@1 |");
     println!("| --- | --- | --- | --- | --- | --- |");
     for r in &report.rows {
@@ -830,8 +846,12 @@ fn summarise_multihop(report: &MultiHopReport) {
         );
         prev_2hop = Some(row.multihop_recall_at_10);
     }
-    eprintln!("  +spreading 2hop delta = the GRAPH leg's isolated multi-hop recall; if large while +bm25");
-    eprintln!("  adds little to 2hop (but lifts 1hop), the graph carries the multi-hop load as designed.");
+    eprintln!(
+        "  +spreading 2hop delta = the GRAPH leg's isolated multi-hop recall; if large while +bm25"
+    );
+    eprintln!(
+        "  adds little to 2hop (but lifts 1hop), the graph carries the multi-hop load as designed."
+    );
 }
 
 fn summarise(report: &Report) {
@@ -891,7 +911,9 @@ fn summarise_linking(report: &shodh_memory::recall_harness::report::LinkingRepor
         "## Query→graph entity-linking accuracy (suite={} sha={})",
         report.suite, report.git_sha
     );
-    println!("\n| category | cases | NER/q | linked/q | no-seed% | mentions/q | precision | RECALL |");
+    println!(
+        "\n| category | cases | NER/q | linked/q | no-seed% | mentions/q | precision | RECALL |"
+    );
     println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
     let row = |r: &LinkingRow| {
         println!(

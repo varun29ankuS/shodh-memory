@@ -216,7 +216,10 @@ mod tests {
         let (rt, a_is_source, sim) = r.expect("exact template must match");
         assert_eq!(rt, RelationType::Causes);
         assert!(a_is_source, "earlier-mentioned cause must be the source");
-        assert!(sim > 0.99, "identical normalized text must be ~1.0, got {sim}");
+        assert!(
+            sim > 0.99,
+            "identical normalized text must be ~1.0, got {sim}"
+        );
 
         // Same sentence, arguments swapped at the call site: direction flips.
         let r = typer.type_relation(&embedder, "Redis caused Outage.", "Outage", "Redis");
@@ -225,12 +228,7 @@ mod tests {
         assert!(!a_is_source, "name_a is the effect here");
 
         // Effect-first template: direction lives in the exemplar.
-        let r = typer.type_relation(
-            &embedder,
-            "Outage was caused by Redis.",
-            "Redis",
-            "Outage",
-        );
+        let r = typer.type_relation(&embedder, "Outage was caused by Redis.", "Redis", "Outage");
         let (rt, a_is_source, _) = r.expect("effect-first template must match");
         assert_eq!(rt, RelationType::Causes);
         assert!(a_is_source, "the later-mentioned cause must be the source");

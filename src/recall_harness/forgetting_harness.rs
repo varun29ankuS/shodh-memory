@@ -159,13 +159,10 @@ pub fn generate_selective_fixtures(groups: usize) -> SelectiveFixtures {
             let id = format!("self-{g:04}-{m:02}");
             corpus.push(CorpusItem {
                 id: id.clone(),
-                content: format!(
-                    "Regarding the {token} initiative, the {entry} entry was filed."
-                ),
+                content: format!("Regarding the {token} initiative, the {entry} entry was filed."),
                 memory_type: "fact".to_string(),
                 tags: vec![token.clone()],
-                created_at: base
-                    + chrono::Duration::minutes((MEMORIES_PER_GROUP * g + m) as i64),
+                created_at: base + chrono::Duration::minutes((MEMORIES_PER_GROUP * g + m) as i64),
             });
             if m % stride == 0 && imp.len() < IMPORTANT_PER_GROUP {
                 imp.push(id);
@@ -189,8 +186,8 @@ pub fn generate_selective_fixtures(groups: usize) -> SelectiveFixtures {
 /// Distinct, content-neutral entry words so each memory in a group is a separate
 /// record while staying equi-lexical w.r.t. the query (none appear in the query).
 const ENTRY_WORDS: &[&str] = &[
-    "amber", "cobalt", "crimson", "emerald", "indigo", "ivory", "jade", "maroon", "ochre", "russet",
-    "saffron", "teal",
+    "amber", "cobalt", "crimson", "emerald", "indigo", "ivory", "jade", "maroon", "ochre",
+    "russet", "saffron", "teal",
 ];
 
 /// Run the selective-forgetting study: ingest the competitive corpus, reinforce

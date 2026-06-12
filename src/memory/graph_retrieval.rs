@@ -510,7 +510,11 @@ fn ppr_edge_weight(
         }
         if !intent.expected_labels.is_empty() {
             let labels = label_cache.entry(edge.to_entity).or_insert_with(|| {
-                graph.get_entity(&edge.to_entity).ok().flatten().map(|e| e.labels)
+                graph
+                    .get_entity(&edge.to_entity)
+                    .ok()
+                    .flatten()
+                    .map(|e| e.labels)
             });
             if let Some(labels) = labels {
                 let type_match = labels.iter().any(|l| {
@@ -1576,8 +1580,8 @@ pub fn spreading_activation_retrieve_with_stats(
         // multi_hop signal; one reached by a single ubiquitous seed (a hub) is
         // not. coverage==1 → ×1.0, so single-seed queries are unaffected.
         let coverage = covered_seeds.len();
-        let graph_activation = raw_activation
-            * (1.0 + SEED_COVERAGE_BONUS * (coverage.saturating_sub(1) as f32));
+        let graph_activation =
+            raw_activation * (1.0 + SEED_COVERAGE_BONUS * (coverage.saturating_sub(1) as f32));
         // Convert episode to memory
         if let Some(memory) = episode_to_memory_fn(&episode)? {
             // Calculate semantic similarity (still needed for ActivatedMemory debug fields)
@@ -1896,8 +1900,7 @@ mod tests {
         seeds.insert(hub, 1.0_f32);
         seeds.insert(rare, 1.0_f32);
 
-        let (off, _, _) =
-            personalized_pagerank(&graph, &seeds, None, false, false, None).unwrap();
+        let (off, _, _) = personalized_pagerank(&graph, &seeds, None, false, false, None).unwrap();
         let (on, _, _) = personalized_pagerank(&graph, &seeds, None, false, true, None).unwrap();
 
         let off_h = off.get(&target_h).copied().unwrap_or(0.0);
@@ -1929,8 +1932,8 @@ mod tests {
         // more stationary mass than an episode touching the seed alone, and
         // entity→entity spreading must survive the added passage fan-out.
         use crate::graph_memory::{
-            EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory,
-            LtpStatus, RelationType, RelationshipEdge,
+            EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, LtpStatus,
+            RelationType, RelationshipEdge,
         };
         use chrono::Utc;
 

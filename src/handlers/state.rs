@@ -3184,8 +3184,7 @@ impl MultiUserMemoryManager {
                             all_entities.iter().enumerate().any(|(m, other)| {
                                 m != k && {
                                     let name_m = other.0.to_lowercase();
-                                    name_m.len() > name_k.len()
-                                        && name_m.contains(name_k.as_str())
+                                    name_m.len() > name_k.len() && name_m.contains(name_k.as_str())
                                 }
                             })
                         })

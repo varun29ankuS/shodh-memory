@@ -32,8 +32,8 @@ pub const DEFAULT_SUBJECTS: usize = 60;
 
 const NAMES: &[&str] = &[
     "Vorland", "Mesker", "Calthen", "Brenwick", "Torsten", "Quillon", "Davmont", "Fenwick",
-    "Gorlan", "Halbrook", "Jennoll", "Korvath", "Lanyon", "Morwell", "Norcliff", "Polk",
-    "Rinhart", "Selby", "Tavish", "Wendell",
+    "Gorlan", "Halbrook", "Jennoll", "Korvath", "Lanyon", "Morwell", "Norcliff", "Polk", "Rinhart",
+    "Selby", "Tavish", "Wendell",
 ];
 const EARLY_ROLES: &[&str] = &["pilot", "analyst", "courier", "scout", "clerk"];
 const LATE_ROLES: &[&str] = &["captain", "director", "marshal", "warden", "chief"];
