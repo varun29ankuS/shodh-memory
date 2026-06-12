@@ -265,6 +265,28 @@ struct Args {
 }
 
 fn main() {
+    // Pin determinism env BEFORE anything builds the ONNX session or the rayon
+    // pool: pin_harness_threads runs inside the suite, but by then the binary
+    // may have already initialized a multi-threaded ONNX/rayon runtime whose
+    // float-reduction order is non-deterministic across CI cores (local
+    // single-core hides it; the L1 smoke gate on a multi-core runner surfaced
+    // it as adjacent rank swaps, smoke-094). Setting them at the process top,
+    // only-if-unset, guarantees single-threaded reductions from the first
+    // allocation. SHODH_RECALL_READONLY pinned here too so the binary measures
+    // variance, not learning curves (same rationale as the lib harness).
+    // SAFETY: single-threaded at process startup, no other readers yet.
+    unsafe {
+        for (k, v) in [
+            ("SHODH_ONNX_THREADS", "1"),
+            ("RAYON_NUM_THREADS", "1"),
+            ("SHODH_RECALL_READONLY", "1"),
+        ] {
+            if std::env::var_os(k).is_none() {
+                std::env::set_var(k, v);
+            }
+        }
+    }
+
     // Opt-in tracing (RUST_LOG=shodh_memory=info): without a subscriber the
     // library's tracing events are silently dropped, which makes flag-gated
     // behavior (e.g. SHODH_VAMANA_QUALITY_REBUILD) unverifiable from CI logs —
