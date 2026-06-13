@@ -45,6 +45,10 @@ enum Suite {
     /// the pipeline changes were diagnosed against it, so recall@k here tests
     /// generalization, not fit. Not gated — diagnostic only.
     Locomo,
+    /// LoCoMo-100 fast CI gate — 100 real LoCoMo cases against one
+    /// conversation's 629-turn corpus. The per-PR recall-regression gate that
+    /// replaced the synthetic smoke suite. Fast (~1-2 min), real data.
+    LocomoGate,
 }
 
 impl Suite {
@@ -52,21 +56,23 @@ impl Suite {
         match self {
             Suite::Smoke => "smoke",
             Suite::Locomo => "locomo",
+            Suite::LocomoGate => "locomo-gate",
         }
     }
 
     /// Corpus + cases fixture paths, or `None` to use the runner's smoke
     /// defaults.
     fn fixture_paths(self) -> Option<(PathBuf, PathBuf)> {
+        use shodh_memory::recall_harness::fixtures as fx;
         match self {
             Suite::Smoke => None,
             Suite::Locomo => Some((
-                shodh_memory::recall_harness::fixtures::manifest_path(
-                    shodh_memory::recall_harness::fixtures::LOCOMO_CORPUS_PATH,
-                ),
-                shodh_memory::recall_harness::fixtures::manifest_path(
-                    shodh_memory::recall_harness::fixtures::LOCOMO_CASES_PATH,
-                ),
+                fx::manifest_path(fx::LOCOMO_CORPUS_PATH),
+                fx::manifest_path(fx::LOCOMO_CASES_PATH),
+            )),
+            Suite::LocomoGate => Some((
+                fx::manifest_path(fx::LOCOMO_GATE_CORPUS_PATH),
+                fx::manifest_path(fx::LOCOMO_GATE_CASES_PATH),
             )),
         }
     }

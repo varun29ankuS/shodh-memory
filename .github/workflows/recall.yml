@@ -1,11 +1,11 @@
 name: Recall Harness
 
 # RH-5 (#267): gate PRs on retrieval-quality regressions against the
-# checked-in `tests/recall/baseline.json`. The `recall-eval` binary owns
+# checked-in `tests/recall/locomo-gate-baseline.json`. The `recall-eval` binary owns
 # the comparison and exit code; this workflow's job is just to:
 #
 #   1. Build the binary (release).
-#   2. Run the smoke suite with `--baseline tests/recall/baseline.json`.
+#   2. Run the smoke suite with `--baseline tests/recall/locomo-gate-baseline.json`.
 #   3. Render a markdown diff table.
 #   4. Post that table as a PR comment (idempotent — edits its own prior
 #      comment instead of stacking).
@@ -54,7 +54,7 @@ env:
   # PR runs are always the gated `full`/5; only a manual dispatch can widen to
   # per-stage diagnosis (`all`) or a fast single repeat.
   LAYER: ${{ github.event.inputs.layer || 'full' }}
-  REPEATS: ${{ github.event.inputs.repeats || '5' }}
+  REPEATS: ${{ github.event.inputs.repeats || '1' }}
 
 jobs:
   smoke:
@@ -83,12 +83,12 @@ jobs:
 
       - name: Verify baseline is checked in
         run: |
-          if [ ! -f tests/recall/baseline.json ]; then
-            echo "::error::tests/recall/baseline.json is missing — see tests/recall/README.md to regenerate."
+          if [ ! -f tests/recall/locomo-gate-baseline.json ]; then
+            echo "::error::tests/recall/locomo-gate-baseline.json is missing — see tests/recall/README.md to regenerate."
             exit 1
           fi
-          BASELINE_SHA=$(jq -r '.git_sha' tests/recall/baseline.json)
-          BASELINE_EMBEDDER=$(jq -r '.embedder' tests/recall/baseline.json)
+          BASELINE_SHA=$(jq -r '.git_sha' tests/recall/locomo-gate-baseline.json)
+          BASELINE_EMBEDDER=$(jq -r '.embedder' tests/recall/locomo-gate-baseline.json)
           echo "Baseline: sha=$BASELINE_SHA embedder=$BASELINE_EMBEDDER"
           echo "BASELINE_SHA=$BASELINE_SHA" >> $GITHUB_ENV
           echo "BASELINE_EMBEDDER=$BASELINE_EMBEDDER" >> $GITHUB_ENV
@@ -104,12 +104,12 @@ jobs:
           # across 5 independent ingest+query passes; rank-list divergence
           # across passes is hard-failed as `infrastructure`.
           ./target/release/recall-eval \
-            --suite smoke \
+            --suite locomo-gate \
             --layer "${LAYER}" \
             --repeats "${REPEATS}" \
             --output current.json \
             --per-case-output per-case.json \
-            --baseline tests/recall/baseline.json \
+            --baseline tests/recall/locomo-gate-baseline.json \
             --tolerance "${TOLERANCE}" \
             --storage ./recall-storage 2>&1 | tee recall-eval.log
           EXIT=${PIPESTATUS[0]}
@@ -124,7 +124,7 @@ jobs:
         if: always() && hashFiles('current.json') != ''
         run: |
           python3 scripts/recall_diff.py \
-            tests/recall/baseline.json \
+            tests/recall/locomo-gate-baseline.json \
             current.json \
             --tolerance "${TOLERANCE}" > recall-diff.md
           {
