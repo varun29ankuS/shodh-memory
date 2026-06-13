@@ -577,7 +577,15 @@ fn personalized_pagerank(
     let mut label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
 
     // BFS-expand the subgraph reachable from the seeds, collecting weighted edges.
+    // Sort the initial frontier: seeds.keys() yields per-process-random HashMap
+    // order, which is the order nodes are interned into the dense PPR index. A
+    // different index assignment reorders the power-iteration matrix-vector
+    // sums, and f32 addition is non-associative, so the stationary masses wobble
+    // by a few ULPs between recall repeats — enough to flip near-tie episode
+    // ranks across the final-sort quantization boundary. Sorting makes the node
+    // ordering, and therefore the PPR result, bit-reproducible.
     let mut frontier: Vec<Uuid> = seeds.keys().copied().collect();
+    frontier.sort_unstable();
     let mut visited: HashSet<Uuid> = frontier.iter().copied().collect();
     for &s in &frontier {
         ppr_intern(s, &mut nodes, &mut node_idx, &mut adj);
