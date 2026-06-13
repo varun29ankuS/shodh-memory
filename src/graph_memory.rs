@@ -586,8 +586,7 @@ impl LtpStatus {
         match self {
             Self::Burst { detected_at } => {
                 // Frozen scoring clock on the read path (see decay_factor).
-                (crate::memory::scoring_now() - *detected_at).num_hours()
-                    > LTP_BURST_DURATION_HOURS
+                (crate::memory::scoring_now() - *detected_at).num_hours() > LTP_BURST_DURATION_HOURS
             }
             _ => false,
         }
