@@ -1015,6 +1015,158 @@ pub fn ingest_corpus(
 /// Unified ablation matrix (E1): ingest the suite ONCE, then run the full case
 /// set under each named query-time config and tabulate recall@10 / ndcg / mrr /
 /// p@1 + per-category recall. The single, re-runnable place to see and update
+/// One LongMemEval question: its private haystack (corpus) + turn-level gold.
+#[derive(serde::Deserialize)]
+struct LongMemEvalCase {
+    id: String,
+    question: String,
+    category: String,
+    gold_ids: Vec<String>,
+    corpus: String,
+}
+
+/// Aggregate LongMemEval result.
+pub struct LongMemEvalReport {
+    pub questions: usize,
+    pub recall_at_k: f64,
+    pub by_category: BTreeMap<String, (f64, usize)>,
+    pub k: usize,
+    pub ner_backend: String,
+}
+
+/// Run the LongMemEval-S suite (ICLR 2025, the current SOTA long-term memory
+/// benchmark). UNLIKE LoCoMo, each question carries its OWN ~48-session haystack
+/// (~115K tokens), so this is a LOOP of mini-evals: per question, ingest its
+/// haystack into fresh storage, run the question as a query, and score
+/// turn-level recall@k against the `has_answer` gold turns. No LLM judge — the
+/// same gold-evidence retrieval signal the smoke/LoCoMo suites use.
+///
+/// Fixtures come from `benchmarks/longmemeval_to_harness.py` (manifest.jsonl +
+/// per-question corpora/<id>.jsonl). `limit` bounds the question count for a
+/// cheap pilot (each haystack is a full ~500-turn ingest).
+pub fn run_longmemeval(
+    base_dir: &Path,
+    storage_root: &Path,
+    limit: Option<usize>,
+    k: usize,
+) -> Result<LongMemEvalReport> {
+    pin_harness_threads();
+
+    let manifest_path = base_dir.join("manifest.jsonl");
+    let manifest_txt = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let mut cases: Vec<LongMemEvalCase> = Vec::new();
+    for line in manifest_txt.lines().filter(|l| !l.trim().is_empty()) {
+        cases.push(serde_json::from_str(line).context("parsing LongMemEval manifest line")?);
+    }
+    if let Some(n) = limit {
+        cases.truncate(n);
+    }
+
+    let mut sum_recall = 0.0f64;
+    let mut scored = 0usize;
+    let mut by_cat: HashMap<String, (f64, usize)> = HashMap::new();
+    let mut ner_backend = String::from("unknown");
+
+    for (qi, case) in cases.iter().enumerate() {
+        let corpus_path = base_dir.join(&case.corpus);
+        let corpus_txt = std::fs::read_to_string(&corpus_path)
+            .with_context(|| format!("reading {}", corpus_path.display()))?;
+        let corpus: Vec<CorpusItem> = corpus_txt
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(serde_json::from_str)
+            .collect::<std::result::Result<_, _>>()
+            .context("parsing LongMemEval corpus")?;
+
+        // Fresh, isolated storage per question so haystacks never bleed across.
+        let q_storage = storage_root.join(format!("q{qi}"));
+        let _ = std::fs::remove_dir_all(&q_storage);
+        let manager = build_manager(&q_storage)?;
+        if qi == 0 {
+            ner_backend = if manager.get_neural_ner().is_fallback_mode() {
+                "fallback".to_string()
+            } else {
+                "neural".to_string()
+            };
+            eprintln!("NER_BACKEND={ner_backend}");
+            if ner_backend == "fallback"
+                && !cfg!(test)
+                && !std::env::var("SHODH_ALLOW_FALLBACK_NER")
+                    .map(|v| v == "1")
+                    .unwrap_or(false)
+            {
+                anyhow::bail!(
+                    "LongMemEval refusing to run on FALLBACK NER — set \
+                     SHODH_ALLOW_FALLBACK_NER=1 to override visibly."
+                );
+            }
+        }
+
+        let id_map = ingest_corpus(&manager, &corpus)?;
+        let system = manager.get_user_memory(EVAL_USER)?;
+
+        let mut query = Query {
+            query_text: Some(case.question.clone()),
+            max_results: k,
+            layers: LayerMode::Full,
+            ..Default::default()
+        };
+        manager.annotate_query_ner(&mut query);
+        let memories = system.read().recall(&query).unwrap_or_default();
+        let topk: HashSet<Uuid> = memories.iter().take(k).map(|m| m.id.0).collect();
+
+        // Turn-level recall@k: fraction of gold `has_answer` turns in the top-k.
+        let gold_uuids: Vec<Uuid> = case
+            .gold_ids
+            .iter()
+            .filter_map(|g| id_map.get(g).copied())
+            .collect();
+        if gold_uuids.is_empty() {
+            // Gold turn dropped at ingest (e.g. empty content) — unscorable.
+            let _ = std::fs::remove_dir_all(&q_storage);
+            continue;
+        }
+        let hit = gold_uuids.iter().filter(|g| topk.contains(g)).count();
+        let recall = hit as f64 / gold_uuids.len() as f64;
+        sum_recall += recall;
+        scored += 1;
+        let entry = by_cat.entry(case.category.clone()).or_insert((0.0, 0));
+        entry.0 += recall;
+        entry.1 += 1;
+
+        if (qi + 1) % 25 == 0 {
+            eprintln!(
+                "  longmemeval: {}/{} questions, running recall@{k}={:.4}",
+                qi + 1,
+                cases.len(),
+                sum_recall / scored as f64
+            );
+        }
+
+        // Reclaim disk — each haystack is a full store.
+        drop(manager);
+        let _ = std::fs::remove_dir_all(&q_storage);
+    }
+
+    let by_category: BTreeMap<String, (f64, usize)> = by_cat
+        .into_iter()
+        .map(|(c, (s, n))| (c, (s / n.max(1) as f64, n)))
+        .collect();
+
+    Ok(LongMemEvalReport {
+        questions: scored,
+        recall_at_k: if scored > 0 {
+            sum_recall / scored as f64
+        } else {
+            0.0
+        },
+        by_category,
+        k,
+        ner_backend,
+    })
+}
+
 /// every component's contribution — "don't fly blind".
 ///
 /// Only QUERY-TIME flags are ablatable here (they are read per-recall against the
@@ -2096,6 +2248,83 @@ mod tests {
     /// Run explicitly:
     ///   SHODH_MAX_CASES=300 SHODH_MAX_CORPUS=1500 cargo test --release \
     ///     export_fusion_training_data -- --ignored --nocapture
+    /// Graph census diff between two harness repeat storages — the
+    /// determinism-hunt diagnostic. Opens the persisted entity graphs of two
+    /// completed repeats and prints set differences in entities (name+labels)
+    /// and edges (from→to, relation type), naming the ingest path that varies.
+    /// Run explicitly:
+    ///   SHODH_CENSUS_A=<path>/repeat_0/recall-eval/graph \
+    ///   SHODH_CENSUS_B=<path>/repeat_1/recall-eval/graph \
+    ///   cargo test --release graph_census_diff -- --ignored --nocapture
+    #[test]
+    #[ignore = "offline diagnostic over existing repeat storages — run explicitly"]
+    fn graph_census_diff() {
+        let path_a = std::env::var("SHODH_CENSUS_A").expect("SHODH_CENSUS_A unset");
+        let path_b = std::env::var("SHODH_CENSUS_B").expect("SHODH_CENSUS_B unset");
+        let census = |p: &str| {
+            let g = crate::graph_memory::GraphMemory::new(std::path::Path::new(p), None)
+                .expect("open graph storage");
+            let ents = g.get_all_entities().expect("entities");
+            let names: std::collections::BTreeMap<String, String> = ents
+                .iter()
+                .map(|e| (e.name.clone(), format!("{:?}", e.labels)))
+                .collect();
+            let by_uuid: std::collections::HashMap<uuid::Uuid, String> =
+                ents.iter().map(|e| (e.uuid, e.name.clone())).collect();
+            let mut edges: std::collections::BTreeMap<String, String> = Default::default();
+            for r in g.get_all_relationships().expect("relationships") {
+                let f = by_uuid
+                    .get(&r.from_entity)
+                    .cloned()
+                    .unwrap_or_else(|| r.from_entity.to_string());
+                let t = by_uuid
+                    .get(&r.to_entity)
+                    .cloned()
+                    .unwrap_or_else(|| r.to_entity.to_string());
+                // Weight included so the diff catches edges that exist in both
+                // repeats but accumulated different strengths.
+                edges.insert(
+                    format!("{f} -[{:?}]-> {t}", r.relation_type),
+                    format!("{:.9}", r.strength),
+                );
+            }
+            (names, edges)
+        };
+        let (ents_a, edges_a) = census(&path_a);
+        let (ents_b, edges_b) = census(&path_b);
+        println!(
+            "A: {} entities, {} edge keys | B: {} entities, {} edge keys",
+            ents_a.len(),
+            edges_a.len(),
+            ents_b.len(),
+            edges_b.len()
+        );
+        for (n, l) in &ents_a {
+            match ents_b.get(n) {
+                None => println!("ENTITY only in A: {n} {l}"),
+                Some(lb) if lb != l => println!("ENTITY labels differ: {n} A={l} B={lb}"),
+                _ => {}
+            }
+        }
+        for n in ents_b.keys() {
+            if !ents_a.contains_key(n) {
+                println!("ENTITY only in B: {n} {}", ents_b[n]);
+            }
+        }
+        for (e, c) in &edges_a {
+            match edges_b.get(e) {
+                None => println!("EDGE only in A: {e} (x{c})"),
+                Some(cb) if cb != c => println!("EDGE count differs: {e} A={c} B={cb}"),
+                _ => {}
+            }
+        }
+        for e in edges_b.keys() {
+            if !edges_a.contains_key(e) {
+                println!("EDGE only in B: {e} (x{})", edges_b[e]);
+            }
+        }
+    }
+
     #[test]
     #[ignore = "training-data export — run explicitly"]
     fn export_fusion_training_data() {

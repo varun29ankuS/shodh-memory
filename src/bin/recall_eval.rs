@@ -254,6 +254,18 @@ struct Args {
     #[arg(long)]
     lineage: Option<PathBuf>,
 
+    /// LongMemEval-S (ICLR 2025, current SOTA long-term memory benchmark): path
+    /// to the fixture dir built by benchmarks/longmemeval_to_harness.py
+    /// (manifest.jsonl + corpora/). Each question has its own ~48-session
+    /// haystack, so this loops mini-evals scoring turn-level recall@k against
+    /// `has_answer` gold. Short-circuits the normal suite.
+    #[arg(long)]
+    longmemeval: Option<PathBuf>,
+
+    /// LongMemEval question cap for a cheap pilot (default: all).
+    #[arg(long)]
+    longmemeval_limit: Option<usize>,
+
     /// Simulated edge age in days, applied AFTER ingest and BEFORE queries
     /// (decay study). When `> 0`, the harness ages the knowledge-graph edges via
     /// `simulate_edge_aging` at the production ~6h cadence, so recall quality is
@@ -342,6 +354,28 @@ fn run(args: &Args) -> Result<i32> {
         layer_modes: args.layer.to_modes(),
         age_days: args.age_days,
     };
+
+    // LongMemEval-S short-circuits the normal suite: each question has its own
+    // haystack, so it loops per-question ingest+recall instead of one corpus.
+    if let Some(lme_dir) = &args.longmemeval {
+        let report = shodh_memory::recall_harness::runner::run_longmemeval(
+            lme_dir,
+            &storage_path,
+            args.longmemeval_limit,
+            10,
+        )
+        .context("LongMemEval run")?;
+        println!(
+            "LongMemEval-S: {} questions (NER={}) — recall@{} = {:.4}",
+            report.questions, report.ner_backend, report.k, report.recall_at_k
+        );
+        let mut cats: Vec<_> = report.by_category.iter().collect();
+        cats.sort_by(|a, b| a.0.cmp(b.0));
+        for (cat, (r, n)) in cats {
+            println!("  {cat:18} n={n:<4} recall@{} = {r:.4}", report.k);
+        }
+        return Ok(EXIT_PASS);
+    }
 
     // Graph-reachability diagnostic short-circuits the recall run entirely.
     if let Some(reach_path) = &args.graph_reachability {
