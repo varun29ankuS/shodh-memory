@@ -2096,6 +2096,83 @@ mod tests {
     /// Run explicitly:
     ///   SHODH_MAX_CASES=300 SHODH_MAX_CORPUS=1500 cargo test --release \
     ///     export_fusion_training_data -- --ignored --nocapture
+    /// Graph census diff between two harness repeat storages — the
+    /// determinism-hunt diagnostic. Opens the persisted entity graphs of two
+    /// completed repeats and prints set differences in entities (name+labels)
+    /// and edges (from→to, relation type), naming the ingest path that varies.
+    /// Run explicitly:
+    ///   SHODH_CENSUS_A=<path>/repeat_0/recall-eval/graph \
+    ///   SHODH_CENSUS_B=<path>/repeat_1/recall-eval/graph \
+    ///   cargo test --release graph_census_diff -- --ignored --nocapture
+    #[test]
+    #[ignore = "offline diagnostic over existing repeat storages — run explicitly"]
+    fn graph_census_diff() {
+        let path_a = std::env::var("SHODH_CENSUS_A").expect("SHODH_CENSUS_A unset");
+        let path_b = std::env::var("SHODH_CENSUS_B").expect("SHODH_CENSUS_B unset");
+        let census = |p: &str| {
+            let g = crate::graph_memory::GraphMemory::new(std::path::Path::new(p), None)
+                .expect("open graph storage");
+            let ents = g.get_all_entities().expect("entities");
+            let names: std::collections::BTreeMap<String, String> = ents
+                .iter()
+                .map(|e| (e.name.clone(), format!("{:?}", e.labels)))
+                .collect();
+            let by_uuid: std::collections::HashMap<uuid::Uuid, String> =
+                ents.iter().map(|e| (e.uuid, e.name.clone())).collect();
+            let mut edges: std::collections::BTreeMap<String, String> = Default::default();
+            for r in g.get_all_relationships().expect("relationships") {
+                let f = by_uuid
+                    .get(&r.from_entity)
+                    .cloned()
+                    .unwrap_or_else(|| r.from_entity.to_string());
+                let t = by_uuid
+                    .get(&r.to_entity)
+                    .cloned()
+                    .unwrap_or_else(|| r.to_entity.to_string());
+                // Weight included so the diff catches edges that exist in both
+                // repeats but accumulated different strengths.
+                edges.insert(
+                    format!("{f} -[{:?}]-> {t}", r.relation_type),
+                    format!("{:.9}", r.strength),
+                );
+            }
+            (names, edges)
+        };
+        let (ents_a, edges_a) = census(&path_a);
+        let (ents_b, edges_b) = census(&path_b);
+        println!(
+            "A: {} entities, {} edge keys | B: {} entities, {} edge keys",
+            ents_a.len(),
+            edges_a.len(),
+            ents_b.len(),
+            edges_b.len()
+        );
+        for (n, l) in &ents_a {
+            match ents_b.get(n) {
+                None => println!("ENTITY only in A: {n} {l}"),
+                Some(lb) if lb != l => println!("ENTITY labels differ: {n} A={l} B={lb}"),
+                _ => {}
+            }
+        }
+        for n in ents_b.keys() {
+            if !ents_a.contains_key(n) {
+                println!("ENTITY only in B: {n} {}", ents_b[n]);
+            }
+        }
+        for (e, c) in &edges_a {
+            match edges_b.get(e) {
+                None => println!("EDGE only in A: {e} (x{c})"),
+                Some(cb) if cb != c => println!("EDGE count differs: {e} A={c} B={cb}"),
+                _ => {}
+            }
+        }
+        for e in edges_b.keys() {
+            if !edges_a.contains_key(e) {
+                println!("EDGE only in B: {e} (x{})", edges_b[e]);
+            }
+        }
+    }
+
     #[test]
     #[ignore = "training-data export — run explicitly"]
     fn export_fusion_training_data() {

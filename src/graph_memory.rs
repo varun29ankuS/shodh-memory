@@ -557,8 +557,13 @@ impl LtpStatus {
         match self {
             Self::None => 1.0,
             Self::Burst { detected_at } => {
-                // Check if burst has expired
-                let hours_since = (Utc::now() - *detected_at).num_hours();
+                // Check if burst has expired. Uses the frozen scoring clock
+                // (SHODH_EVAL_NOW) because this feeds effective_strength() on
+                // the read path: a live clock makes the burst-protection factor
+                // flip between recall repeats minutes apart, wobbling edge
+                // strength and graph activation. Production leaves the env
+                // unset, so this is Utc::now() there.
+                let hours_since = (crate::memory::scoring_now() - *detected_at).num_hours();
                 if hours_since > LTP_BURST_DURATION_HOURS {
                     1.0 // Expired, normal decay
                 } else {
@@ -580,7 +585,9 @@ impl LtpStatus {
         use crate::constants::LTP_BURST_DURATION_HOURS;
         match self {
             Self::Burst { detected_at } => {
-                (Utc::now() - *detected_at).num_hours() > LTP_BURST_DURATION_HOURS
+                // Frozen scoring clock on the read path (see decay_factor).
+                (crate::memory::scoring_now() - *detected_at).num_hours()
+                    > LTP_BURST_DURATION_HOURS
             }
             _ => false,
         }
@@ -1260,7 +1267,13 @@ impl RelationshipEdge {
     pub fn effective_strength(&self) -> f32 {
         use crate::decay::tier_decay_factor;
 
-        let now = Utc::now();
+        // Use the frozen scoring clock (SHODH_EVAL_NOW) on the eval path: this
+        // read-only decay feeds spreading-activation strength, and a live clock
+        // makes edges decay measurably between recall repeats minutes apart
+        // (L1Working edges decay over hours), wobbling episode activations and
+        // flipping near-tie graph-leg ranks. Production leaves SHODH_EVAL_NOW
+        // unset, so this is `Utc::now()` there — identical behaviour.
+        let now = crate::memory::scoring_now();
         let elapsed = now.signed_duration_since(self.last_activated);
         let hours_elapsed = elapsed.num_seconds() as f64 / 3600.0;
 

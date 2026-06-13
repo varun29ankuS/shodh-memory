@@ -194,8 +194,14 @@ fn spread_single_direction(
         .unwrap_or(false);
 
     for hop in 1..=max_hops {
-        let current_activated: Vec<(Uuid, f32)> =
+        // Deterministic spread order: targets accumulate `+= spread_amount`
+        // below, and f32 addition is non-associative, so a per-process-random
+        // HashMap iteration order produces slightly different sums and flips
+        // near-tie ranks between repeats (the query-time residual after the
+        // ingest-order fixes). Sorting by Uuid pins the accumulation order.
+        let mut current_activated: Vec<(Uuid, f32)> =
             activation_map.iter().map(|(id, act)| (*id, *act)).collect();
+        current_activated.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         for (entity_uuid, source_activation) in current_activated {
             if source_activation < threshold {
@@ -1280,9 +1286,14 @@ pub fn spreading_activation_retrieve_with_stats(
                 current_threshold
             );
 
-            // Clone to avoid borrow issues
-            let current_activated: Vec<(Uuid, f32)> =
+            // Clone to avoid borrow issues. Sort by Uuid so the `+=`
+            // accumulation into shared targets below is order-deterministic:
+            // f32 addition is non-associative, and HashMap iteration order
+            // varies per process, which otherwise flips near-tie ranks
+            // between repeats.
+            let mut current_activated: Vec<(Uuid, f32)> =
                 activation_map.iter().map(|(id, act)| (*id, *act)).collect();
+            current_activated.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
             for (entity_uuid, source_activation) in current_activated {
                 // Only spread from entities with sufficient activation
@@ -1515,7 +1526,17 @@ pub fn spreading_activation_retrieve_with_stats(
     // can reward episodes activated by MULTIPLE query seeds.
     let mut activated_memories: HashMap<Uuid, (f32, HashSet<Uuid>, EpisodicNode)> = HashMap::new();
 
-    for (entity_uuid, entity_activation) in &activation_map {
+    // Deterministic episode accumulation: an episode connected to several
+    // activated entities sums their activations via `current.0 +=` below.
+    // f32 addition is non-associative, so iterating `activation_map` in
+    // per-process-random HashMap order yields slightly different episode
+    // scores and flips near-tie graph-leg ranks between repeats. Sort the
+    // source entities by Uuid to pin the summation order. This is the
+    // dominant query-time residual: episode score IS the graph-leg ranking.
+    let mut activation_entries: Vec<(&Uuid, &f32)> = activation_map.iter().collect();
+    activation_entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+    for (entity_uuid, entity_activation) in activation_entries {
         let episodes = graph.get_episodes_by_entity(entity_uuid)?;
         let is_seed = seed_set.contains(entity_uuid);
 
