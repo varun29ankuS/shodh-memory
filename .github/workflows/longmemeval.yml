@@ -19,7 +19,7 @@ on:
         required: false
         default: '50'
       extra_env:
-        description: 'Extra SHODH_* flags, space-separated KEY=VAL.'
+        description: 'Extra SHODH_* flags, space-separated KEY=VAL (e.g. SHODH_PATH_STRENGTH=1 to arm the path-strength discrimination analysis).'
         required: false
         default: ''
 
@@ -87,6 +87,10 @@ jobs:
       - name: Run LongMemEval
         run: |
           for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          # Always arm the feature export; path_strength values are 0 unless
+          # SHODH_PATH_STRENGTH=1 is passed via extra_env (then the analysis
+          # step below reports whether it discriminates gold).
+          export SHODH_FUSION_FEATURE_EXPORT="$PWD/lme_features.jsonl"
           ./target/release/recall-eval \
             --longmemeval tests/recall/longmemeval \
             --output unused.json \
@@ -104,3 +108,34 @@ jobs:
             grep -E "NER_BACKEND|LongMemEval-S:|recall@" longmemeval.log || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Path-strength discrimination
+        if: always()
+        run: |
+          [ -s lme_features.jsonl ] || { echo "no feature export — pass SHODH_PATH_STRENGTH=1 via extra_env"; exit 0; }
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, collections
+          rows = [json.loads(l) for l in open('lme_features.jsonl') if l.strip()]
+          # Per category: mean path_strength for gold vs non-gold candidates, and
+          # the fraction of gold candidates reached by ANY path (path_strength>0).
+          agg = collections.defaultdict(lambda: {'g':[], 'ng':[], 'gpos':0, 'gn':0})
+          for r in rows:
+              cat = r.get('category','?')
+              for c in r['features'].get('candidates', []):
+                  ps = c.get('path_strength', 0.0)
+                  if c.get('is_gold'):
+                      agg[cat]['g'].append(ps); agg[cat]['gn'] += 1
+                      if ps > 0: agg[cat]['gpos'] += 1
+                  else:
+                      agg[cat]['ng'].append(ps)
+          def mean(x): return sum(x)/len(x) if x else 0.0
+          print("\n## Path-strength discrimination (SHODH_PATH_STRENGTH)\n")
+          print("Does best-path strength separate gold from non-gold candidates? Lift>1 and gold-reached% high = real multi-hop signal.\n")
+          print("| category | gold mean | non-gold mean | lift | gold reached by path |")
+          print("| --- | --- | --- | --- | --- |")
+          for cat in sorted(agg):
+              a = agg[cat]; gm, ngm = mean(a['g']), mean(a['ng'])
+              lift = (gm/ngm) if ngm>0 else float('inf')
+              gpct = 100.0*a['gpos']/a['gn'] if a['gn'] else 0.0
+              print(f"| {cat} | {gm:.4f} | {ngm:.4f} | {lift:.2f} | {gpct:.0f}% |")
+          PY

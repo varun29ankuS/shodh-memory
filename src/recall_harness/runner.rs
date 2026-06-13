@@ -1068,6 +1068,15 @@ pub fn run_longmemeval(
     let mut by_cat: HashMap<String, (f64, usize)> = HashMap::new();
     let mut ner_backend = String::from("unknown");
 
+    // Optional per-candidate fusion-feature export (path_strength discrimination).
+    let feature_export_path: Option<std::path::PathBuf> =
+        std::env::var("SHODH_FUSION_FEATURE_EXPORT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from);
+    let feature_export = feature_export_path.is_some();
+    let mut feature_lines: Vec<String> = Vec::new();
+
     for (qi, case) in cases.iter().enumerate() {
         let corpus_path = base_dir.join(&case.corpus);
         let corpus_txt = std::fs::read_to_string(&corpus_path)
@@ -1113,10 +1122,9 @@ pub fn run_longmemeval(
             ..Default::default()
         };
         manager.annotate_query_ner(&mut query);
-        let memories = system.read().recall(&query).unwrap_or_default();
-        let topk: HashSet<Uuid> = memories.iter().take(k).map(|m| m.id.0).collect();
 
-        // Turn-level recall@k: fraction of gold `has_answer` turns in the top-k.
+        // Gold (turn-level `has_answer` mapped through ingest) — needed before
+        // recall to arm the fusion-feature export.
         let gold_uuids: Vec<Uuid> = case
             .gold_ids
             .iter()
@@ -1127,6 +1135,30 @@ pub fn run_longmemeval(
             let _ = std::fs::remove_dir_all(&q_storage);
             continue;
         }
+
+        // Per-candidate feature export (SHODH_FUSION_FEATURE_EXPORT) — captures
+        // path_strength + is_gold per candidate so we can test whether the
+        // multi-hop path signal discriminates gold on this benchmark.
+        if feature_export {
+            crate::memory::fusion_features::begin(
+                gold_uuids
+                    .iter()
+                    .map(|u| crate::memory::types::MemoryId(*u))
+                    .collect(),
+            );
+        }
+        let memories = system.read().recall(&query).unwrap_or_default();
+        if feature_export {
+            if let Some(feat) = crate::memory::fusion_features::take() {
+                if let Ok(j) = serde_json::to_string(&feat) {
+                    feature_lines.push(format!(
+                        "{{\"case_id\":\"{}\",\"category\":\"{}\",\"features\":{j}}}",
+                        case.id, case.category
+                    ));
+                }
+            }
+        }
+        let topk: HashSet<Uuid> = memories.iter().take(k).map(|m| m.id.0).collect();
         let hit = gold_uuids.iter().filter(|g| topk.contains(g)).count();
         let recall = hit as f64 / gold_uuids.len() as f64;
         sum_recall += recall;
@@ -1147,6 +1179,18 @@ pub fn run_longmemeval(
         // Reclaim disk — each haystack is a full store.
         drop(manager);
         let _ = std::fs::remove_dir_all(&q_storage);
+    }
+
+    if let Some(path) = &feature_export_path {
+        if let Err(e) = std::fs::write(path, feature_lines.join("\n")) {
+            tracing::warn!("LongMemEval feature export write failed: {e}");
+        } else {
+            eprintln!(
+                "LongMemEval feature export: {} query rows -> {}",
+                feature_lines.len(),
+                path.display()
+            );
+        }
     }
 
     let by_category: BTreeMap<String, (f64, usize)> = by_cat
