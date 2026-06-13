@@ -2240,6 +2240,13 @@ impl MemorySystem {
         // cause's match on the effect term).
         let mut causal_origin_entities: Vec<(uuid::Uuid, f32)> = Vec::new();
 
+        // Per-candidate best-path strength from the graph leg (SHODH_PATH_STRENGTH).
+        // Populated inside the graph block; read by the fusion-feature export so
+        // the fitted gate can learn a per-query weight for the multi-hop path
+        // signal. Empty (and unused) when the flag is off.
+        let mut graph_path_strength: std::collections::HashMap<MemoryId, f32> =
+            std::collections::HashMap::new();
+
         #[allow(clippy::type_complexity)]
         let (
             graph_results,
@@ -2629,6 +2636,13 @@ impl MemorySystem {
                     sa_stats.entities_activated,
                     sa_stats.graph_candidates,
                 );
+
+                // Capture the per-episode best-path strength before consuming the
+                // activated set (SHODH_PATH_STRENGTH; map is empty otherwise).
+                graph_path_strength = activated_memories
+                    .iter()
+                    .map(|am| (am.memory.id.clone(), am.path_strength))
+                    .collect();
 
                 // Map ActivatedMemory → (MemoryId, activation, hebbian_factor) for RRF fusion
                 let mut r: Vec<(MemoryId, f32, f32)> = activated_memories
@@ -3606,6 +3620,13 @@ impl MemorySystem {
                         union.entry(id).or_insert((0.0, 0.0, 0.0)).2 =
                             (*a / max_act).clamp(0.0, 1.0);
                     }
+                    // Pool-max for query-relative path-strength normalization (the
+                    // multi-hop feature; all zeros when SHODH_PATH_STRENGTH is off).
+                    let max_path = graph_path_strength
+                        .values()
+                        .copied()
+                        .fold(0.0f32, f32::max)
+                        .max(1e-6);
                     let candidates: Vec<crate::memory::fusion_features::CandidateRow> = union
                         .into_iter()
                         .map(|(id, (vec, bm25, graph))| {
@@ -3613,6 +3634,10 @@ impl MemorySystem {
                                 vec,
                                 bm25,
                                 graph,
+                                path_strength: graph_path_strength
+                                    .get(id)
+                                    .map(|p| (p / max_path).clamp(0.0, 1.0))
+                                    .unwrap_or(0.0),
                                 is_gold: gold.contains(id),
                             }
                         })

@@ -39,6 +39,11 @@ pub struct CandidateRow {
     pub bm25: f32,
     /// Query-relative graph activation (a / max_activation); 0 = not reached.
     pub graph: f32,
+    /// Best-path strength to this candidate (max-product edge-weight path from a
+    /// query seed), normalized to the pool max. The multi-hop signal — distinct
+    /// from `graph` (diffuse summed activation). 0 unless SHODH_PATH_STRENGTH.
+    #[serde(default)]
+    pub path_strength: f32,
     pub is_gold: bool,
 }
 

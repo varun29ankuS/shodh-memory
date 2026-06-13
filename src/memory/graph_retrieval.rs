@@ -63,6 +63,13 @@ pub struct ActivatedMemory {
     pub semantic_score: f32,
     pub linguistic_score: f32,
     pub final_score: f32,
+    /// Best-path strength to this episode: the max over its entities of the
+    /// max-product-of-edge-weights path from a query seed (threshold-free
+    /// `reachable_inject`). 0.0 unless SHODH_PATH_STRENGTH is set. This is the
+    /// multi-hop signal the 2025-26 literature (PropRAG, S-Path-RAG) ranks on —
+    /// "reached by a strong reasoning path" vs "diffusely activated" — exported
+    /// as a fusion feature so the fitted gate can weight it per-query.
+    pub path_strength: f32,
 }
 
 /// Calculate density-dependent graph weight (SHO-26, corrected)
@@ -1544,9 +1551,29 @@ pub fn spreading_activation_retrieve_with_stats(
     let mut activation_entries: Vec<(&Uuid, &f32)> = activation_map.iter().collect();
     activation_entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
+    // Path-strength feature (SHODH_PATH_STRENGTH, default off): a threshold-free
+    // best-path map (entity → max-product edge-weight path from a seed). Folded
+    // per-episode as the max over its entities. This is the multi-hop signal the
+    // path-RAG literature ranks on; exported as a fusion feature, no ranking
+    // change here. Computed once when the flag is set; empty otherwise (no cost).
+    let path_feature = std::env::var("SHODH_PATH_STRENGTH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let path_map: HashMap<Uuid, f32> = if path_feature {
+        reachable_inject(graph, &seed_activations, intent_ref, false).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let mut episode_path: HashMap<Uuid, f32> = HashMap::new();
+
     for (entity_uuid, entity_activation) in activation_entries {
         let episodes = graph.get_episodes_by_entity(entity_uuid)?;
         let is_seed = seed_set.contains(entity_uuid);
+        let entity_path = if path_feature {
+            path_map.get(entity_uuid).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        };
 
         for episode in episodes {
             // Accumulate activation for each episode (might be connected to multiple entities)
@@ -1558,6 +1585,12 @@ pub fn spreading_activation_retrieve_with_stats(
             // G5: record which DISTINCT query seeds reach this episode.
             if is_seed {
                 current.1.insert(*entity_uuid);
+            }
+            if path_feature {
+                let e = episode_path.entry(episode.uuid).or_insert(0.0);
+                if entity_path > *e {
+                    *e = entity_path;
+                }
             }
         }
     }
@@ -1604,6 +1637,7 @@ pub fn spreading_activation_retrieve_with_stats(
     let now = crate::memory::scoring_now();
 
     for (_episode_uuid, (raw_activation, covered_seeds, episode)) in activated_memories {
+        let episode_path_strength = episode_path.get(&_episode_uuid).copied().unwrap_or(0.0);
         // G5: scale activation by distinct query-seed coverage. An episode
         // reached by 2 distinct query seeds (e.g. speaker AND topic) is the
         // multi_hop signal; one reached by a single ubiquitous seed (a hub) is
@@ -1683,6 +1717,7 @@ pub fn spreading_activation_retrieve_with_stats(
                 semantic_score,
                 linguistic_score,
                 final_score,
+                path_strength: episode_path_strength,
             });
         }
     }
