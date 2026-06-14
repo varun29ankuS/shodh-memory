@@ -113,7 +113,7 @@ jobs:
         if: always()
         run: |
           [ -s lme_features.jsonl ] || { echo "no feature export — pass SHODH_PATH_STRENGTH=1 via extra_env"; exit 0; }
-          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, collections
           rows = [json.loads(l) for l in open('lme_features.jsonl') if l.strip()]
           # Per category: mean path_strength for gold vs non-gold candidates, and
