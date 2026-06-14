@@ -1384,15 +1384,28 @@ impl MemorySystem {
             .unwrap_or(false)
         {
             if let Some(qt) = query.query_text.as_deref() {
-                if let Some(bridge) = self.bridge_entity(&result.memories, qt) {
-                    let mut q2 = query.clone();
-                    q2.query_text = Some(format!("{qt} {bridge}"));
-                    if let Ok(hop2) = self.recall_inner(&q2, false) {
-                        return Ok(Self::interleave_dedup(
-                            result.memories,
-                            hop2.memories,
-                            query.max_results.max(1),
-                        ));
+                // Intent gate: only multi-hop-shaped queries get a second hop.
+                // LongMemEval showed the unconditional second hop CRATERS
+                // single_hop (~0.95→0.75): the interleave displaces hop-1's
+                // already-correct answer with hop-2 bridge noise on queries
+                // that never needed bridging. A multi-hop question references
+                // 2+ things to connect (or carries explicit relational
+                // structure); a single-attribute lookup does not — so it skips
+                // decomposition entirely and is left exactly as before.
+                let analysis = crate::memory::query_parser::analyze_query(qt);
+                let multi_hop_shaped =
+                    analysis.focal_entities.len() >= 2 || analysis.relational_context.len() >= 2;
+                if multi_hop_shaped {
+                    if let Some(bridge) = self.bridge_entity(&result.memories, qt) {
+                        let mut q2 = query.clone();
+                        q2.query_text = Some(format!("{qt} {bridge}"));
+                        if let Ok(hop2) = self.recall_inner(&q2, false) {
+                            return Ok(Self::interleave_dedup(
+                                result.memories,
+                                hop2.memories,
+                                query.max_results.max(1),
+                            ));
+                        }
                     }
                 }
             }
