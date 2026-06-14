@@ -1370,7 +1370,93 @@ impl MemorySystem {
     }
 
     pub fn recall(&self, query: &Query) -> Result<Vec<SharedMemory>> {
-        Ok(self.recall_inner(query, false)?.memories)
+        let result = self.recall_inner(query, false)?;
+        // Multi-hop query decomposition (SHODH_MULTIHOP_DECOMP, default off).
+        // LongMemEval showed multi-hop gold is NOT graph-reachable from the
+        // query seeds — the bridge spans sessions with no shared entity — so
+        // path/graph ranking can't surface it. Iterative retrieval bridges it
+        // WITHOUT an LLM: the first hop's top results name the bridge entity
+        // (already extracted at ingest into experience.entities); a second hop
+        // seeded by that bridge reaches the answer the first hop missed. The two
+        // hops are interleaved so the second-hop answer lands high, not appended.
+        if std::env::var("SHODH_MULTIHOP_DECOMP")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            if let Some(qt) = query.query_text.as_deref() {
+                if let Some(bridge) = self.bridge_entity(&result.memories, qt) {
+                    let mut q2 = query.clone();
+                    q2.query_text = Some(format!("{qt} {bridge}"));
+                    if let Ok(hop2) = self.recall_inner(&q2, false) {
+                        return Ok(Self::interleave_dedup(
+                            result.memories,
+                            hop2.memories,
+                            query.max_results.max(1),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(result.memories)
+    }
+
+    /// The consensus "bridge" entity for a multi-hop second hop: the entity most
+    /// often named across the first hop's top results that the query did not
+    /// already mention. Uses entities stored at ingest — no model call.
+    fn bridge_entity(&self, memories: &[SharedMemory], query_text: &str) -> Option<String> {
+        const TOP_N: usize = 3;
+        let ql = query_text.to_lowercase();
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for mem in memories.iter().take(TOP_N) {
+            let mut seen_here: HashSet<String> = HashSet::new();
+            for ent in &mem.experience.entities {
+                let el = ent.to_lowercase();
+                // Skip entities already in the query (not a NEW bridge) and
+                // count each entity at most once per memory (consensus, not
+                // within-memory frequency).
+                if el.len() < 3 || ql.contains(&el) || !seen_here.insert(el) {
+                    continue;
+                }
+                *counts.entry(ent.clone()).or_insert(0) += 1;
+            }
+        }
+        // Require the bridge to appear in >=2 of the top results (a real bridge,
+        // not a one-off mention). Deterministic tie-break by name.
+        counts
+            .into_iter()
+            .filter(|(_, c)| *c >= 2)
+            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+            .map(|(name, _)| name)
+    }
+
+    /// Interleave two ranked recall lists (hop-1, hop-2), de-duplicated, capped
+    /// at `cap`. Round-robin so a hop-2 answer the first hop missed lands high
+    /// instead of being appended below the full first list.
+    fn interleave_dedup(
+        hop1: Vec<SharedMemory>,
+        hop2: Vec<SharedMemory>,
+        cap: usize,
+    ) -> Vec<SharedMemory> {
+        let mut out: Vec<SharedMemory> = Vec::with_capacity(cap);
+        let mut seen: HashSet<MemoryId> = HashSet::new();
+        let mut i1 = hop1.into_iter();
+        let mut i2 = hop2.into_iter();
+        loop {
+            if out.len() >= cap {
+                break;
+            }
+            let a = i1.next();
+            let b = i2.next();
+            if a.is_none() && b.is_none() {
+                break;
+            }
+            for m in [a, b].into_iter().flatten() {
+                if out.len() < cap && seen.insert(m.id.clone()) {
+                    out.push(m);
+                }
+            }
+        }
+        out
     }
 
     /// Recall with full retrieval diagnostics (per-stage timing, per-memory score attribution).
