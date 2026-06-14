@@ -9137,11 +9137,24 @@ impl MemorySystem {
                     },
                 );
             }
+
+            // Connect newly extracted facts to the knowledge graph — the
+            // timer-driven run_maintenance() path does this, but the on-demand
+            // distillation path used to leave facts orphaned (never wired into
+            // EntityNodes/edges), so graph-augmented recall couldn't reach them.
+            self.connect_facts_to_graph(&deduplicated_facts);
         }
 
-        // Advance watermark after successful extraction
+        // Advance watermark to the LAST memory's created_at, NOT now(): using now()
+        // would skip memories created during the (potentially slow) extraction cycle
+        // — they'd have created_at < now() and never be processed for facts. Mirrors
+        // run_maintenance().
         if !memories.is_empty() {
-            let new_watermark = chrono::Utc::now().timestamp_millis();
+            let new_watermark = memories
+                .iter()
+                .map(|m| m.created_at.timestamp_millis())
+                .max()
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
             self.fact_extraction_watermark
                 .store(new_watermark, std::sync::atomic::Ordering::Relaxed);
             self.long_term_memory

@@ -1486,7 +1486,13 @@ pub fn spreading_activation_retrieve_with_stats(
     // activation for every entity within REACH_HOPS of a seed (NO threshold) and merge by
     // max, so fusion can rank the reachable gold instead of never seeing it.
     if reach_inject {
-        match reachable_inject(graph, &seed_activations, intent_ref, false) {
+        // Honor SHODH_GRAPH_PREDICATE_WEIGHTS here too — the other graph passes (PPR,
+        // spreading, traversal) all weight edges by predicate type when it's set;
+        // reachable injection used to hardcode `false`, silently dropping that signal.
+        let pred_w = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        match reachable_inject(graph, &seed_activations, intent_ref, pred_w) {
             Ok(reach) => {
                 let before = activation_map.len();
                 for (u, a) in reach {

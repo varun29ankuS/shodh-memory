@@ -1176,7 +1176,10 @@ impl RelationshipEdge {
             EdgeTier::L2Episodic | EdgeTier::L3Semantic => {
                 // L2/L3: Wixted 2004 hybrid (exponential consolidation → power-law long-term)
                 let days = hours_elapsed / 24.0;
-                let is_potentiated = ltp_factor < 0.5; // Weekly or Full LTP
+                // Burst/Weekly/Full LTP all use the potentiated (slower) power-law.
+                // decay_factor() returns exactly 0.5 for Burst, so `<` would exclude it
+                // (off-by-one) and decay Burst edges at the non-potentiated rate.
+                let is_potentiated = ltp_factor <= 0.5;
                 let decay = crate::decay::hybrid_decay_factor(days, is_potentiated);
                 let prune_threshold = self.tier.prune_threshold();
                 // Min age before pruning: 30 days for L2, 90 days for L3
@@ -1286,7 +1289,8 @@ impl RelationshipEdge {
             EdgeTier::L2Episodic | EdgeTier::L3Semantic => {
                 // Wixted 2004 hybrid: exponential consolidation → power-law long-term
                 let days = hours_elapsed / 24.0;
-                let is_potentiated = ltp_factor < 0.5;
+                // Inclusive: Burst decay_factor() == 0.5 must take the potentiated path.
+                let is_potentiated = ltp_factor <= 0.5;
                 (
                     crate::decay::hybrid_decay_factor(days, is_potentiated),
                     false,
@@ -2474,23 +2478,27 @@ impl GraphMemory {
             stemmed_index.insert(stemmed_name.clone(), entity.uuid);
         }
 
-        // Update entity embedding cache for future concept merges
+        // Update entity embedding cache for future concept merges.
+        // Recency-of-mention ordering: the front is the least-recently-mentioned
+        // entry (the eviction victim), the back is the most recent. A re-mention
+        // counts as an access and moves the entry to the back, so the drain below
+        // removes genuinely cold entities rather than merely the earliest-added
+        // (which may still be hot). Only matters once the graph exceeds
+        // ENTITY_EMBEDDING_CACHE_MAX (10k) distinct embedded entities.
         if let Some(ref emb) = entity.name_embedding {
             let mut cache = self.entity_embedding_cache.write();
             if is_new_entity {
                 cache.push((entity.uuid, emb.clone()));
-                // Evict oldest entries when cache exceeds the configured maximum.
-                // Oldest entries (index 0) are typically the least recently mentioned
-                // since they were loaded at startup or added earliest.
                 if cache.len() > ENTITY_EMBEDDING_CACHE_MAX {
                     let excess = cache.len() - ENTITY_EMBEDDING_CACHE_MAX;
                     cache.drain(..excess);
                 }
-            } else {
-                // Update existing entry in cache (embedding may have changed)
-                if let Some(entry) = cache.iter_mut().find(|(uuid, _)| *uuid == entity.uuid) {
-                    entry.1 = emb.clone();
-                }
+            } else if let Some(pos) = cache.iter().position(|(uuid, _)| *uuid == entity.uuid) {
+                // Re-mention: refresh the (possibly changed) embedding and promote
+                // to the back as the most-recently-accessed entry.
+                let mut entry = cache.remove(pos);
+                entry.1 = emb.clone();
+                cache.push(entry);
             }
         }
 
