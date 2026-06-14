@@ -1384,28 +1384,25 @@ impl MemorySystem {
             .unwrap_or(false)
         {
             if let Some(qt) = query.query_text.as_deref() {
-                // Intent gate: only multi-hop-shaped queries get a second hop.
-                // LongMemEval showed the unconditional second hop CRATERS
-                // single_hop (~0.95→0.75): the interleave displaces hop-1's
-                // already-correct answer with hop-2 bridge noise on queries
-                // that never needed bridging. A multi-hop question references
-                // 2+ things to connect (or carries explicit relational
-                // structure); a single-attribute lookup does not — so it skips
-                // decomposition entirely and is left exactly as before.
-                let analysis = crate::memory::query_parser::analyze_query(qt);
-                let multi_hop_shaped =
-                    analysis.focal_entities.len() >= 2 || analysis.relational_context.len() >= 2;
-                if multi_hop_shaped {
-                    if let Some(bridge) = self.bridge_entity(&result.memories, qt) {
-                        let mut q2 = query.clone();
-                        q2.query_text = Some(format!("{qt} {bridge}"));
-                        if let Ok(hop2) = self.recall_inner(&q2, false) {
-                            return Ok(Self::interleave_dedup(
-                                result.memories,
-                                hop2.memories,
-                                query.max_results.max(1),
-                            ));
-                        }
+                if let Some(bridge) = self.bridge_entity(&result.memories, qt) {
+                    let mut q2 = query.clone();
+                    q2.query_text = Some(format!("{qt} {bridge}"));
+                    if let Ok(hop2) = self.recall_inner(&q2, false) {
+                        // Baleen-aligned merge: reciprocal-rank fusion of the two
+                        // hops, NOT a positional interleave. An interleave
+                        // displaces hop-1's already-correct answer (cratered
+                        // single_hop ~0.95→0.75); RRF preserves it — a hop-1
+                        // rank-1 answer keeps the top fused score regardless of
+                        // hop-2, while a hop-2 rank-1 answer (the multi-hop
+                        // bridge find) also scores high and rises. No gate
+                        // needed: the merge is safe on single-hop by
+                        // construction. ("Accumulate, don't displace" — Baleen,
+                        // Khattab & Potts, NeurIPS 2021.)
+                        return Ok(Self::rrf_merge(
+                            result.memories,
+                            hop2.memories,
+                            query.max_results.max(1),
+                        ));
                     }
                 }
             }
@@ -1442,34 +1439,37 @@ impl MemorySystem {
             .map(|(name, _)| name)
     }
 
-    /// Interleave two ranked recall lists (hop-1, hop-2), de-duplicated, capped
-    /// at `cap`. Round-robin so a hop-2 answer the first hop missed lands high
-    /// instead of being appended below the full first list.
-    fn interleave_dedup(
+    /// Reciprocal-rank fusion of two ranked recall lists (hop-1, hop-2), capped
+    /// at `cap`. Each memory scores `sum over hops of 1/(rank + k)`; a candidate
+    /// strong in EITHER hop ranks high, and one strong in BOTH ranks highest.
+    /// Unlike a positional interleave this never displaces a correct hop-1
+    /// answer (it keeps its 1/(1+k) score), which is why it is safe on
+    /// single-hop queries without an intent gate.
+    fn rrf_merge(
         hop1: Vec<SharedMemory>,
         hop2: Vec<SharedMemory>,
         cap: usize,
     ) -> Vec<SharedMemory> {
-        let mut out: Vec<SharedMemory> = Vec::with_capacity(cap);
-        let mut seen: HashSet<MemoryId> = HashSet::new();
-        let mut i1 = hop1.into_iter();
-        let mut i2 = hop2.into_iter();
-        loop {
-            if out.len() >= cap {
-                break;
-            }
-            let a = i1.next();
-            let b = i2.next();
-            if a.is_none() && b.is_none() {
-                break;
-            }
-            for m in [a, b].into_iter().flatten() {
-                if out.len() < cap && seen.insert(m.id.clone()) {
-                    out.push(m);
-                }
-            }
+        const K: f32 = 60.0; // standard RRF constant
+        let mut score: std::collections::HashMap<MemoryId, f32> = std::collections::HashMap::new();
+        let mut mem: std::collections::HashMap<MemoryId, SharedMemory> =
+            std::collections::HashMap::new();
+        for (rank, m) in hop1.into_iter().enumerate() {
+            *score.entry(m.id.clone()).or_insert(0.0) += 1.0 / (rank as f32 + 1.0 + K);
+            mem.entry(m.id.clone()).or_insert(m);
         }
-        out
+        for (rank, m) in hop2.into_iter().enumerate() {
+            *score.entry(m.id.clone()).or_insert(0.0) += 1.0 / (rank as f32 + 1.0 + K);
+            mem.entry(m.id.clone()).or_insert(m);
+        }
+        let mut ranked: Vec<(MemoryId, f32)> = score.into_iter().collect();
+        // Score desc, deterministic id tie-break.
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        ranked
+            .into_iter()
+            .take(cap)
+            .filter_map(|(id, _)| mem.remove(&id))
+            .collect()
     }
 
     /// Recall with full retrieval diagnostics (per-stage timing, per-memory score attribution).
