@@ -1077,6 +1077,11 @@ pub fn run_longmemeval(
     let feature_export = feature_export_path.is_some();
     let mut feature_lines: Vec<String> = Vec::new();
 
+    // Edge-type census, aggregated across every question's (fresh) graph: does
+    // the conversational corpus actually yield TYPED and CAUSAL structure for
+    // the substrate/lineage walk to traverse, or is it co-occurrence soup?
+    let mut census: HashMap<String, usize> = HashMap::new();
+
     for (qi, case) in cases.iter().enumerate() {
         let corpus_path = base_dir.join(&case.corpus);
         let corpus_txt = std::fs::read_to_string(&corpus_path)
@@ -1113,6 +1118,14 @@ pub fn run_longmemeval(
         }
 
         let id_map = ingest_corpus(&manager, &corpus)?;
+        // Accumulate this question's graph edge-type distribution.
+        if let Ok(graph) = manager.get_user_graph(EVAL_USER) {
+            if let Ok(dist) = graph.read().relation_type_distribution() {
+                for (t, c) in dist {
+                    *census.entry(t).or_insert(0) += c;
+                }
+            }
+        }
         let system = manager.get_user_memory(EVAL_USER)?;
 
         let mut query = Query {
@@ -1191,6 +1204,39 @@ pub fn run_longmemeval(
                 path.display()
             );
         }
+    }
+
+    // Aggregate edge-type census across all questions. generic = co-occurrence
+    // bridges the walk can't use; causal = Causes/Triggers/ResultsIn (the
+    // lineage walk's fuel). Tells us if conversational data yields structure.
+    let total: usize = census.values().sum();
+    if total > 0 {
+        let generic: usize = census
+            .iter()
+            .filter(|(t, _)| {
+                t.as_str() == "CoOccurs" || t.as_str() == "RelatedTo" || t.as_str() == "CoRetrieved"
+            })
+            .map(|(_, c)| c)
+            .sum();
+        let causal: usize = census
+            .iter()
+            .filter(|(t, _)| {
+                t.as_str() == "Causes" || t.as_str() == "Triggers" || t.as_str() == "ResultsIn"
+            })
+            .map(|(_, c)| c)
+            .sum();
+        let mut breakdown: Vec<(&String, &usize)> = census.iter().collect();
+        breakdown.sort_by(|a, b| b.1.cmp(a.1));
+        let bd = breakdown
+            .iter()
+            .map(|(t, c)| format!("{t}={c}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!(
+            "EDGE_TYPE_DISTRIBUTION total={total} typed_pct={:.1} causal={causal} causal_pct={:.2} {bd}",
+            100.0 * (total - generic) as f64 / total as f64,
+            100.0 * causal as f64 / total as f64,
+        );
     }
 
     let by_category: BTreeMap<String, (f64, usize)> = by_cat
