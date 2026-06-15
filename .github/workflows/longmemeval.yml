@@ -105,7 +105,7 @@ jobs:
             echo '> NOT comparable to headline LongMemEval answer-accuracy SOTA (which reads retrieved context with a large LLM). This is the retrieval half: does our memory surface the gold evidence turns?'
             echo ""
             echo '```'
-            grep -E "NER_BACKEND|LongMemEval-S:|recall@|EDGE_TYPE_DISTRIBUTION" longmemeval.log || true
+            grep -E "NER_BACKEND|LongMemEval-S:|recall@|EDGE_TYPE_DISTRIBUTION|GOLD_FUNNEL" longmemeval.log || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

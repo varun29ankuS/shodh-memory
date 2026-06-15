@@ -1082,6 +1082,19 @@ pub fn run_longmemeval(
     // the substrate/lineage walk to traverse, or is it co-occurrence soup?
     let mut census: HashMap<String, usize> = HashMap::new();
 
+    // SHODH_LME_FUNNEL: per-category gold-rank funnel. Arms gold_funnel per
+    // question (begin/take) so the shared recall path records the best gold rank
+    // at each pipeline stage (graph → vector → hybrid → fusion → final). Answers
+    // the retrieval-vs-ranking question per category: is multi_hop gold ABSENT
+    // from the pool (low present% at vector/hybrid → retrieval-recall lever) or
+    // PRESENT-but-demoted (high present% early, lost by final → ranking lever)?
+    // Opt-in; default off → no funnel arming, byte-identical to today.
+    let funnel_on = std::env::var("SHODH_LME_FUNNEL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    // category -> stage -> (present_count, rank_sum_over_present, recorded_count)
+    let mut funnel_agg: HashMap<String, HashMap<String, (usize, usize, usize)>> = HashMap::new();
+
     for (qi, case) in cases.iter().enumerate() {
         let corpus_path = base_dir.join(&case.corpus);
         let corpus_txt = std::fs::read_to_string(&corpus_path)
@@ -1160,6 +1173,14 @@ pub fn run_longmemeval(
                     .collect(),
             );
         }
+        if funnel_on {
+            crate::memory::gold_funnel::begin(
+                gold_uuids
+                    .iter()
+                    .map(|u| crate::memory::types::MemoryId(*u))
+                    .collect(),
+            );
+        }
         let memories = system.read().recall(&query).unwrap_or_default();
         if feature_export {
             if let Some(feat) = crate::memory::fusion_features::take() {
@@ -1168,6 +1189,19 @@ pub fn run_longmemeval(
                         "{{\"case_id\":\"{}\",\"category\":\"{}\",\"features\":{j}}}",
                         case.id, case.category
                     ));
+                }
+            }
+        }
+        if funnel_on {
+            if let Some(stages) = crate::memory::gold_funnel::take() {
+                let cat_funnel = funnel_agg.entry(case.category.clone()).or_default();
+                for (stage, rank) in stages {
+                    let e = cat_funnel.entry(stage).or_insert((0, 0, 0));
+                    e.2 += 1; // recorded this stage for this question
+                    if let Some(r) = rank {
+                        e.0 += 1; // a gold turn was present in the stage's list
+                        e.1 += r; // accumulate best-rank for the mean
+                    }
                 }
             }
         }
@@ -1237,6 +1271,36 @@ pub fn run_longmemeval(
             100.0 * (total - generic) as f64 / total as f64,
             100.0 * causal as f64 / total as f64,
         );
+    }
+
+    // Per-category gold funnel: where does the gold turn die? High present% at
+    // vector/hybrid but lost by final ⇒ ranking problem (in-pool, demoted). Low
+    // present% at vector/hybrid ⇒ retrieval problem (gold never pooled). rank is
+    // the BEST gold rank in that stage's full (uncapped) list; final is capped to k.
+    if funnel_on && !funnel_agg.is_empty() {
+        const STAGE_ORDER: [&str; 5] = ["graph", "vector", "hybrid", "fusion", "final"];
+        let mut cats: Vec<&String> = funnel_agg.keys().collect();
+        cats.sort();
+        eprintln!(
+            "GOLD_FUNNEL (present = a gold turn appears in the stage's candidate list; rank 0 = best):"
+        );
+        for cat in cats {
+            let stages = &funnel_agg[cat];
+            eprintln!("  {cat}:");
+            for stage in STAGE_ORDER {
+                if let Some((present, rank_sum, recorded)) = stages.get(stage).copied() {
+                    let pct = 100.0 * present as f64 / recorded.max(1) as f64;
+                    let mean_rank = if present > 0 {
+                        format!("{:.1}", rank_sum as f64 / present as f64)
+                    } else {
+                        "-".to_string()
+                    };
+                    eprintln!(
+                        "    GOLD_FUNNEL {cat} {stage:7} present={present}/{recorded} ({pct:.0}%) mean_best_rank={mean_rank}"
+                    );
+                }
+            }
+        }
     }
 
     let by_category: BTreeMap<String, (f64, usize)> = by_cat
