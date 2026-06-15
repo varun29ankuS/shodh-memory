@@ -163,6 +163,36 @@ pub fn calculate_adaptive_hops(graph_density: Option<f32>) -> usize {
     }
 }
 
+/// Unity ceiling for the SHODH_HOP_GAIN per-hop law: a relay preserves activation,
+/// it never amplifies. Regeneration here means "do not lose the signal along a good
+/// edge," not "grow it" — amplification would let an excitable medium seize (every
+/// node lights up). The existing per-hop max-normalisation is the second backstop.
+const HOP_GAIN_MAX: f32 = 1.0;
+
+/// SHODH_HOP_GAIN — the "excitable medium" per-hop law (default off, scoring-only).
+///
+/// The default spread multiplies an absolute-hop exponential `exp(-rate·hop)` by the
+/// edge strength every hop, so a distal target collapses below threshold by distance
+/// alone — a lossy cable. This law instead makes the per-hop gain a function of edge
+/// *quality*: a strong, typed edge (e.g. `Causes`, strength≈1 → gain capped at unity)
+/// relays activation losslessly like a re-firing nerve, while a weak co-occurrence
+/// edge attenuates. Activation then propagates by edge *meaning*, not distance, so a
+/// multi-hop target reachable along a typed chain survives. The relation-type weight
+/// is the calibration and is folded in here. Bounded by `HOP_GAIN_MAX`; stability is
+/// held by the unchanged max-normalisation downstream. Belongs on the iterative BFS
+/// spread (SHODH_PPR=0): PPR is a stationary solve with no per-hop seam.
+#[inline]
+fn hop_gain_base_spread(
+    source_activation: f32,
+    effective: f32,
+    spreading_weight: f32,
+    tier_trust: f32,
+    degree_norm: f32,
+) -> f32 {
+    let gain = (effective * spreading_weight).clamp(0.0, HOP_GAIN_MAX);
+    source_activation * gain * tier_trust * degree_norm
+}
+
 /// Spread activation from a set of seed entities for a fixed number of hops
 ///
 /// This is a single-direction spread used by bidirectional algorithm.
@@ -197,6 +227,12 @@ fn spread_single_direction(
     // flows along meaningful predicates (causal/structural) rather than mere
     // co-occurrence. Read once; applied per edge below. Default off → unchanged.
     let predicate_weights = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    // SHODH_HOP_GAIN: excitable-medium per-hop law (see hop_gain_base_spread).
+    // Overrides both spread_fix and the default decay; default off → unchanged.
+    let hop_gain = std::env::var("SHODH_HOP_GAIN")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
@@ -243,7 +279,18 @@ fn spread_single_direction(
                 };
 
                 let effective = edge.effective_strength();
-                let base_spread = if spread_fix {
+                let base_spread = if hop_gain {
+                    // Excitable-medium relay: edge-quality gain (typed/strong ≈ unity,
+                    // co-occurrence attenuates), no absolute-hop decay. The relation
+                    // type weight is the calibration, so it is folded in here.
+                    hop_gain_base_spread(
+                        source_activation,
+                        effective,
+                        edge.relation_type.spreading_weight(),
+                        tier_trust,
+                        degree_norm,
+                    )
+                } else if spread_fix {
                     // Additive priors + fixed hop decay: distal targets retain
                     // meaningful activation instead of collapsing below threshold.
                     // effective is used ONCE (strength prior), not twice.
@@ -263,8 +310,8 @@ fn spread_single_direction(
 
                 // Lever-1: scale by the relation type's intrinsic spreading weight
                 // so a real predicate (e.g. Causes 1.3) carries more activation than
-                // bare co-occurrence (0.5).
-                let base_spread = if predicate_weights {
+                // bare co-occurrence (0.5). The hop-gain law already folds this in.
+                let base_spread = if predicate_weights && !hop_gain {
                     base_spread * edge.relation_type.spreading_weight()
                 } else {
                     base_spread
@@ -1289,6 +1336,10 @@ pub fn spreading_activation_retrieve_with_stats(
         let predicate_weights = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        // SHODH_HOP_GAIN: excitable-medium per-hop law (see hop_gain_base_spread).
+        let hop_gain = std::env::var("SHODH_HOP_GAIN")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         for hop in 1..=SPREADING_MAX_HOPS {
             stats.graph_hops = hop;
@@ -1346,13 +1397,24 @@ pub fn spreading_activation_retrieve_with_stats(
 
                     // SHO-26: Importance-weighted decay (using effective_strength for time-aware decay)
                     let effective = edge.effective_strength();
-                    let decay_rate = calculate_importance_weighted_decay(effective);
-                    let decay = (-decay_rate * hop as f32).exp();
-
-                    let base_spread =
-                        source_activation * decay * effective * tier_trust * degree_norm;
-                    // Lever-1: scale by relation type's intrinsic spreading weight.
-                    let base_spread = if predicate_weights {
+                    let base_spread = if hop_gain {
+                        // Excitable-medium relay (SHODH_HOP_GAIN): edge-quality gain
+                        // replaces the absolute-hop decay; type weight folded in.
+                        hop_gain_base_spread(
+                            source_activation,
+                            effective,
+                            edge.relation_type.spreading_weight(),
+                            tier_trust,
+                            degree_norm,
+                        )
+                    } else {
+                        let decay_rate = calculate_importance_weighted_decay(effective);
+                        let decay = (-decay_rate * hop as f32).exp();
+                        source_activation * decay * effective * tier_trust * degree_norm
+                    };
+                    // Lever-1: scale by relation type's intrinsic spreading weight
+                    // (already folded into the hop-gain law above, so skip there).
+                    let base_spread = if predicate_weights && !hop_gain {
                         base_spread * edge.relation_type.spreading_weight()
                     } else {
                         base_spread
