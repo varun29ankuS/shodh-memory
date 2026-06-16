@@ -1095,6 +1095,33 @@ pub fn run_longmemeval(
     // category -> stage -> (present_count, rank_sum_over_present, recorded_count)
     let mut funnel_agg: HashMap<String, HashMap<String, (usize, usize, usize)>> = HashMap::new();
 
+    // SHODH_CAUSAL_CUE_CENSUS: count causal-cue phrases in the RAW corpus text and
+    // compare to the causal EDGES the typer emits (EDGE_TYPE_DISTRIBUTION causal=).
+    // cue ≫ edges ⇒ EXTRACTION wall — causal language is present but the entity-pair
+    // typer can't catch clause/event-level causation (justifies the Stanford
+    // OpenIE/CATENA parser build). cue ≈ edges ⇒ DATA wall — little causation to
+    // extract, causal lineage stays parked. Lexical occurrence count = an UPPER
+    // bound on causal relations (a cue need not bracket two entities). Default off.
+    let cue_census = std::env::var("SHODH_CAUSAL_CUE_CENSUS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    const CAUSAL_CUES: [&str; 12] = [
+        "because",
+        "due to",
+        "led to",
+        "leading to",
+        "resulted in",
+        "as a result",
+        "that's why",
+        "therefore",
+        "consequently",
+        "caused",
+        "thanks to",
+        "brought about",
+    ];
+    let mut cue_counts: HashMap<&'static str, usize> = HashMap::new();
+    let mut cue_turns_scanned = 0usize;
+
     for (qi, case) in cases.iter().enumerate() {
         let corpus_path = base_dir.join(&case.corpus);
         let corpus_txt = std::fs::read_to_string(&corpus_path)
@@ -1105,6 +1132,21 @@ pub fn run_longmemeval(
             .map(serde_json::from_str)
             .collect::<std::result::Result<_, _>>()
             .context("parsing LongMemEval corpus")?;
+
+        // Causal-cue census over the same turn text the typer sees (occurrence
+        // count per cue, lowercased). Compared at the end to the causal edges.
+        if cue_census {
+            for item in &corpus {
+                let lc = item.content.to_lowercase();
+                cue_turns_scanned += 1;
+                for cue in CAUSAL_CUES {
+                    let n = lc.matches(cue).count();
+                    if n > 0 {
+                        *cue_counts.entry(cue).or_insert(0) += n;
+                    }
+                }
+            }
+        }
 
         // Fresh, isolated storage per question so haystacks never bleed across.
         let q_storage = storage_root.join(format!("q{qi}"));
@@ -1271,6 +1313,29 @@ pub fn run_longmemeval(
             100.0 * (total - generic) as f64 / total as f64,
             100.0 * causal as f64 / total as f64,
         );
+
+        // Causal-cue vs causal-edge: the data-wall / extraction-wall discriminator.
+        // ratio = causal cues in text / causal edges typed. ≫1 ⇒ extraction wall
+        // (language present, typer blind to clause/event causation → parser build
+        // justified); ≈1 ⇒ data wall (little causation; causal lineage stays parked).
+        if cue_census && cue_turns_scanned > 0 {
+            let total_cues: usize = cue_counts.values().sum();
+            let mut bdc: Vec<(&&str, &usize)> = cue_counts.iter().collect();
+            bdc.sort_by(|a, b| b.1.cmp(a.1));
+            let cue_bd = bdc
+                .iter()
+                .map(|(c, n)| format!("{c}={n}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let ratio = if causal > 0 {
+                total_cues as f64 / causal as f64
+            } else {
+                f64::INFINITY
+            };
+            eprintln!(
+                "CAUSAL_CUE_CENSUS turns={cue_turns_scanned} causal_cues={total_cues} causal_edges={causal} cue_per_edge={ratio:.1} (cues lexical = upper bound on causal relations) {cue_bd}"
+            );
+        }
     }
 
     // Per-category gold funnel: where does the gold turn die? High present% at
