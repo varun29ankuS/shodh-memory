@@ -1370,6 +1370,27 @@ impl MemorySystem {
     }
 
     pub fn recall(&self, query: &Query) -> Result<Vec<SharedMemory>> {
+        // Companion-coverage re-rank (SHODH_COMPANION_RERANK, default off). The gold
+        // funnel showed multi_hop answers are spread across SEVERAL evidence turns:
+        // the best one is retrieved (rank ~2) but the companion turns sit at rank
+        // 11-50 and miss the top-k cut (present 86% vs recall 56%; single_hop, which
+        // is single-gold, has present≈recall). Retrieve a deeper pool and boost any
+        // deep candidate that shares an entity with a top anchor — "find one piece
+        // of the story, surface the related pieces." Anchors keep their high base
+        // rank score (accumulate, never displace — Baleen, Khattab & Potts 2021).
+        if query.query_text.is_some()
+            && std::env::var("SHODH_COMPANION_RERANK")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        {
+            const COMPANION_EXPAND: usize = 5;
+            let k = query.max_results.max(1);
+            let mut deep_q = query.clone();
+            deep_q.max_results = k.saturating_mul(COMPANION_EXPAND).max(k);
+            let deep = self.recall_inner(&deep_q, false)?;
+            return Ok(self.companion_rerank(deep.memories, k));
+        }
+
         let result = self.recall_inner(query, false)?;
         // Multi-hop query decomposition (SHODH_MULTIHOP_DECOMP, default off).
         // LongMemEval showed multi-hop gold is NOT graph-reachable from the
@@ -1470,6 +1491,61 @@ impl MemorySystem {
             .take(cap)
             .filter_map(|(id, _)| mem.remove(&id))
             .collect()
+    }
+
+    /// Companion-coverage re-rank: given a deep ranked pool, boost candidates that
+    /// share an entity with a top-anchor result so the scattered companion evidence
+    /// of a multi-hop answer rises into top-k. Score = base position score (1/(rank+1))
+    /// + weight × (distinct anchor entities shared, capped). Anchors (top-ANCHORS) keep
+    /// their base score only, so a correct primary cannot be displaced out of the head.
+    /// Deterministic: original-rank tie-break. SHODH_COMPANION_WEIGHT tunes the lift.
+    fn companion_rerank(&self, deep: Vec<SharedMemory>, k: usize) -> Vec<SharedMemory> {
+        const ANCHORS: usize = 3;
+        const SHARED_CAP: usize = 3;
+        if deep.len() <= k {
+            return deep.into_iter().take(k).collect();
+        }
+        let weight: f32 = std::env::var("SHODH_COMPANION_WEIGHT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.10);
+
+        // Anchor entity set: the top results' entities (lowercased), skipping
+        // trivially short tokens.
+        let mut anchor_ents: HashSet<String> = HashSet::new();
+        for m in deep.iter().take(ANCHORS) {
+            for e in &m.experience.entities {
+                let el = e.to_lowercase();
+                if el.len() >= 3 {
+                    anchor_ents.insert(el);
+                }
+            }
+        }
+
+        let mut scored: Vec<(f32, usize, SharedMemory)> = deep
+            .into_iter()
+            .enumerate()
+            .map(|(rank, m)| {
+                let base = 1.0 / (rank as f32 + 1.0);
+                let shared = if rank < ANCHORS {
+                    0 // an anchor is not its own companion
+                } else {
+                    m.experience
+                        .entities
+                        .iter()
+                        .map(|e| e.to_lowercase())
+                        .filter(|el| el.len() >= 3 && anchor_ents.contains(el))
+                        .collect::<HashSet<_>>()
+                        .len()
+                        .min(SHARED_CAP)
+                };
+                let score = base + weight * shared as f32;
+                (score, rank, m)
+            })
+            .collect();
+        // Score desc; original-rank tie-break (deterministic, stable).
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        scored.into_iter().take(k).map(|(_, _, m)| m).collect()
     }
 
     /// Recall with full retrieval diagnostics (per-stage timing, per-memory score attribution).
