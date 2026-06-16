@@ -34,7 +34,7 @@ struct Exemplar {
 /// recur here.
 fn exemplar_specs() -> Vec<(RelationType, bool, &'static str)> {
     use RelationType::*;
-    vec![
+    let mut specs = vec![
         // Causal — the lineage backbone.
         (Causes, true, "x caused y"),
         (Causes, true, "x led to y"),
@@ -73,7 +73,35 @@ fn exemplar_specs() -> Vec<(RelationType, bool, &'static str)> {
         (AssociatedWith, true, "x attended y"),
         (AssociatedWith, true, "x went to y"),
         (AssociatedWith, true, "x participated in y"),
-    ]
+    ];
+
+    // SHODH_CAUSAL_VERB_CLASSES (default off): extend the 4 causal exemplars with
+    // CATENA-style causative-verb classes (CAUSE/TRIGGER/RESULT), targeting the
+    // high-frequency causal cues the corpus census found UNCOVERED by the base set
+    // (due to=470, leading to=276, as a result=94, resulted in=66, triggered, ...).
+    // The cue census measured ~18× more causal statements than causal edges typed
+    // — this is the cheap, parser-free first step at closing that extraction gap.
+    // Direction lives in the exemplar (effect-first carries x_is_source=false).
+    let causal_verb_classes = std::env::var("SHODH_CAUSAL_VERB_CLASSES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if causal_verb_classes {
+        specs.extend_from_slice(&[
+            // Cause-first.
+            (ResultsIn, true, "x resulted in y"),
+            (Causes, true, "x leading to y"),
+            (Triggers, true, "x triggered y"),
+            (Triggers, true, "x sparked y"),
+            (Causes, true, "x brought about y"),
+            (Causes, true, "x gave rise to y"),
+            // Effect-first (the inversion-safe direction).
+            (Causes, false, "x due to y"),
+            (Causes, false, "x as a result of y"),
+            (Triggers, false, "x was triggered by y"),
+            (ResultsIn, false, "x was the result of y"),
+        ]);
+    }
+    specs
 }
 
 pub struct RelationTyper {
