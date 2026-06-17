@@ -364,11 +364,15 @@ fn run(args: &Args) -> Result<i32> {
     // LongMemEval-S short-circuits the normal suite: each question has its own
     // haystack, so it loops per-question ingest+recall instead of one corpus.
     if let Some(lme_dir) = &args.longmemeval {
+        // `--layer all` runs the cumulative ladder on each question's own haystack;
+        // `--layer full` (default) runs only the production pass (byte-identical).
+        let layer_modes = args.layer.to_modes();
         let report = shodh_memory::recall_harness::runner::run_longmemeval(
             lme_dir,
             &storage_path,
             args.longmemeval_limit,
             10,
+            &layer_modes,
         )
         .context("LongMemEval run")?;
         println!(
@@ -379,6 +383,18 @@ fn run(args: &Args) -> Result<i32> {
         cats.sort_by(|a, b| a.0.cmp(b.0));
         for (cat, (r, n)) in cats {
             println!("  {cat:18} n={n:<4} recall@{} = {r:.4}", report.k);
+        }
+        if report.layers.len() > 1 {
+            println!("  per-layer ablation (recall@{}, same benchmark):", report.k);
+            for mode in LayerMode::ALL {
+                if let Some((r, n)) = report.layers.get(mode.report_key()) {
+                    println!(
+                        "    {:14} n={n:<4} recall@{} = {r:.4}",
+                        mode.report_key(),
+                        report.k
+                    );
+                }
+            }
         }
         return Ok(EXIT_PASS);
     }
