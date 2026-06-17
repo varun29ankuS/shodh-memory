@@ -1383,12 +1383,36 @@ impl MemorySystem {
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false)
         {
-            const COMPANION_EXPAND: usize = 5;
-            let k = query.max_results.max(1);
-            let mut deep_q = query.clone();
-            deep_q.max_results = k.saturating_mul(COMPANION_EXPAND).max(k);
-            let deep = self.recall_inner(&deep_q, false)?;
-            return Ok(self.companion_rerank(deep.memories, k));
+            // Multi-hop intent gate. Companion coverage only helps when the answer
+            // is spread across SEVERAL evidence turns — which a query naming ≥2
+            // distinct entities (speaker AND topic) signals. A single-entity query
+            // (single_hop / temporal) has ONE gold turn, so boosting entity-sharing
+            // neighbours only displaces it (the measured trade: single 0.917→0.833).
+            // This is the same multi-seed discriminator as SEED_COVERAGE_BONUS, which
+            // leaves single-seed queries untouched. SHODH_COMPANION_MIN_ENTS=0
+            // reproduces the ungated behaviour for an A/B.
+            let min_ents: usize = std::env::var("SHODH_COMPANION_MIN_ENTS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2);
+            let distinct_ents = query
+                .ner_entities
+                .as_ref()
+                .map(|v| {
+                    v.iter()
+                        .map(|s| s.to_lowercase())
+                        .collect::<HashSet<String>>()
+                        .len()
+                })
+                .unwrap_or(0);
+            if distinct_ents >= min_ents {
+                const COMPANION_EXPAND: usize = 5;
+                let k = query.max_results.max(1);
+                let mut deep_q = query.clone();
+                deep_q.max_results = k.saturating_mul(COMPANION_EXPAND).max(k);
+                let deep = self.recall_inner(&deep_q, false)?;
+                return Ok(self.companion_rerank(deep.memories, k));
+            }
         }
 
         let result = self.recall_inner(query, false)?;
