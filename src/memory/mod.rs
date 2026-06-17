@@ -1383,14 +1383,17 @@ impl MemorySystem {
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false)
         {
-            // Multi-hop intent gate. Companion coverage only helps when the answer
-            // is spread across SEVERAL evidence turns — which a query naming ≥2
-            // distinct entities (speaker AND topic) signals. A single-entity query
-            // (single_hop / temporal) has ONE gold turn, so boosting entity-sharing
-            // neighbours only displaces it (the measured trade: single 0.917→0.833).
-            // This is the same multi-seed discriminator as SEED_COVERAGE_BONUS, which
-            // leaves single-seed queries untouched. SHODH_COMPANION_MIN_ENTS=0
-            // reproduces the ungated behaviour for an A/B.
+            // SHODH_COMPANION_GRAPH selects the PHASE-2 graph-seeded re-rank: boost
+            // deep candidates connected to a top anchor by a real 1-hop relationship
+            // EDGE, not merely by a shared surface entity. Graph connectivity is the
+            // multi-hop discriminator, so the graph path does NOT apply the query
+            // entity-count gate below (that gate, query-NER ≥2 distinct entities, was
+            // measured inert on LongMemEval — run 27669611689 == baseline, because the
+            // multi_hop questions rarely NAME two entities). Surface mode keeps the
+            // gate for its A/B; SHODH_COMPANION_MIN_ENTS=0 reproduces the ungated path.
+            let graph_mode = std::env::var("SHODH_COMPANION_GRAPH")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
             let min_ents: usize = std::env::var("SHODH_COMPANION_MIN_ENTS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -1405,13 +1408,17 @@ impl MemorySystem {
                         .len()
                 })
                 .unwrap_or(0);
-            if distinct_ents >= min_ents {
+            if graph_mode || distinct_ents >= min_ents {
                 const COMPANION_EXPAND: usize = 5;
                 let k = query.max_results.max(1);
                 let mut deep_q = query.clone();
                 deep_q.max_results = k.saturating_mul(COMPANION_EXPAND).max(k);
                 let deep = self.recall_inner(&deep_q, false)?;
-                return Ok(self.companion_rerank(deep.memories, k));
+                return Ok(if graph_mode {
+                    self.graph_companion_rerank(deep.memories, k)
+                } else {
+                    self.companion_rerank(deep.memories, k)
+                });
             }
         }
 
@@ -1568,6 +1575,124 @@ impl MemorySystem {
             })
             .collect();
         // Score desc; original-rank tie-break (deterministic, stable).
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        scored.into_iter().take(k).map(|(_, _, m)| m).collect()
+    }
+
+    /// Graph-seeded companion re-rank (SHODH_COMPANION_GRAPH) — phase 2 of the
+    /// multi-evidence-coverage fix. The surface `companion_rerank` boosts deep
+    /// candidates that merely SHARE A SURFACE ENTITY with a top anchor; at the token
+    /// level a single-hop distractor and a multi-hop co-gold turn are
+    /// indistinguishable, which is why that lift (+0.06 multi) and its trade
+    /// (−0.08 single) proved inseparable. Here a candidate is instead boosted by how
+    /// many DISTINCT anchor entities it connects to through a real 1-hop relationship
+    /// EDGE in the knowledge graph — the relational signal surface co-occurrence
+    /// lacks. SHODH_COMPANION_GRAPH_TYPED=1 restricts the walk to typed edges
+    /// (excludes CoOccurs / CoRetrieved / RelatedTo), the sharpest test of whether
+    /// the ontology graph beats bare co-occurrence. Accumulate-not-displace: the
+    /// top-ANCHORS keep base score, so a correct primary stays in the head.
+    /// SHODH_COMPANION_WEIGHT tunes the lift; SHODH_COMPANION_HOP_STRENGTH gates the
+    /// minimum edge strength walked. Deterministic (original-rank tie-break).
+    fn graph_companion_rerank(&self, deep: Vec<SharedMemory>, k: usize) -> Vec<SharedMemory> {
+        const ANCHORS: usize = 3;
+        const EDGE_LIMIT: usize = 32;
+        const CONN_CAP: usize = 3;
+        if deep.len() <= k {
+            return deep.into_iter().take(k).collect();
+        }
+        let Some(graph) = self.graph_memory.as_ref() else {
+            return deep.into_iter().take(k).collect();
+        };
+        let weight: f32 = std::env::var("SHODH_COMPANION_WEIGHT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.10);
+        let min_strength: f32 = std::env::var("SHODH_COMPANION_HOP_STRENGTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        let typed_only = std::env::var("SHODH_COMPANION_GRAPH_TYPED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let g = graph.read();
+
+        // Resolve the top anchors' entities to graph nodes.
+        let mut anchor_nodes: HashSet<uuid::Uuid> = HashSet::new();
+        for m in deep.iter().take(ANCHORS) {
+            for e in &m.experience.entities {
+                if e.trim().len() < 3 {
+                    continue;
+                }
+                if let Ok(Some(ent)) = g.find_entity_by_name(e.as_str()) {
+                    anchor_nodes.insert(ent.uuid);
+                }
+            }
+        }
+        if anchor_nodes.is_empty() {
+            return deep.into_iter().take(k).collect();
+        }
+
+        // 1-hop relationship neighbours of the anchor entities.
+        // neighbour node -> count of DISTINCT anchor entities it links to.
+        let mut companion_conn: std::collections::HashMap<uuid::Uuid, usize> =
+            std::collections::HashMap::new();
+        for an in &anchor_nodes {
+            let Ok(edges) = g.get_entity_relationships_limited(an, Some(EDGE_LIMIT)) else {
+                continue;
+            };
+            let mut reached: HashSet<uuid::Uuid> = HashSet::new();
+            for edge in edges {
+                if edge.effective_strength() < min_strength {
+                    continue;
+                }
+                if typed_only {
+                    let rt = edge.relation_type.as_str();
+                    if rt == "CoOccurs" || rt == "CoRetrieved" || rt == "RelatedTo" {
+                        continue;
+                    }
+                }
+                if reached.insert(edge.to_entity) {
+                    *companion_conn.entry(edge.to_entity).or_insert(0) += 1;
+                }
+            }
+        }
+        if companion_conn.is_empty() {
+            return deep.into_iter().take(k).collect();
+        }
+
+        // A candidate below the anchors is boosted by how many distinct anchor
+        // entities its OWN entities are graph-connected to (capped).
+        let mut scored: Vec<(f32, usize, SharedMemory)> = deep
+            .into_iter()
+            .enumerate()
+            .map(|(rank, m)| {
+                let base = 1.0 / (rank as f32 + 1.0);
+                let conn = if rank < ANCHORS {
+                    0
+                } else {
+                    let mut counted: HashSet<uuid::Uuid> = HashSet::new();
+                    let mut c = 0usize;
+                    for e in &m.experience.entities {
+                        if e.trim().len() < 3 {
+                            continue;
+                        }
+                        if let Ok(Some(ent)) = g.find_entity_by_name(e.as_str()) {
+                            if anchor_nodes.contains(&ent.uuid) {
+                                continue;
+                            }
+                            if let Some(n) = companion_conn.get(&ent.uuid) {
+                                if counted.insert(ent.uuid) {
+                                    c += *n;
+                                }
+                            }
+                        }
+                    }
+                    c.min(CONN_CAP)
+                };
+                (base + weight * conn as f32, rank, m)
+            })
+            .collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         scored.into_iter().take(k).map(|(_, _, m)| m).collect()
     }
