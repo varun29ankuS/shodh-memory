@@ -721,7 +721,15 @@ impl MiniLMEmbedder {
     /// Generate embedding using ONNX Runtime (production)
     ///
     /// Lazily loads the model on first call if not already loaded.
-    fn generate_embedding_onnx(&self, text: &str) -> Result<Vec<f32>> {
+    /// Shared ONNX forward pass for both the pooled (`generate_embedding_onnx`)
+    /// and per-token (`encode_tokens`) paths, so the two can never drift. Returns
+    /// the raw `[max_length * native_hidden]` model output (row-major, sequence ×
+    /// hidden), the padded attention mask, and the tokenizer `Encoding` (carrying
+    /// token→char offsets and ids). The pooled path's arithmetic is unchanged —
+    /// this only hoists the tokenize+run+extract block verbatim, so the stored
+    /// embedding stays byte-identical (see the platform-flip determinism note in
+    /// state.rs::process_experience_into_graph).
+    fn run_onnx_raw(&self, text: &str) -> Result<(Vec<f32>, Vec<i64>, tokenizers::Encoding)> {
         // Lazy load model on first use
         tracing::debug!("ONNX: ensuring model loaded...");
         let model = self.ensure_model_loaded()?;
@@ -793,6 +801,12 @@ impl MiniLMEmbedder {
         // Extract embeddings
         let output_tensor = outputs[0].try_extract_tensor::<f32>()?;
         let (_shape, output_data) = output_tensor;
+        Ok((output_data.to_vec(), attention, encoding))
+    }
+
+    /// Generate embedding using ONNX Runtime (production), pooled path.
+    fn generate_embedding_onnx(&self, text: &str) -> Result<Vec<f32>> {
+        let (output_data, attention, _encoding) = self.run_onnx_raw(text)?;
 
         // Mean pooling over sequence dimension, at the model's native hidden
         // size (the output stride). Equals `dimension` for native-384 models;
@@ -820,6 +834,47 @@ impl MiniLMEmbedder {
 
         // Scrub NaN/Inf, Matryoshka-truncate to `dimension`, then L2 normalize.
         Ok(self.finalize_pooled(pooled))
+    }
+
+    /// Per-token encoder output — the dependency parser's input (Increment 0 of the
+    /// OpenIE substrate). Returns one `native_hidden`-wide vector per ATTENDED
+    /// (non-pad) wordpiece, with its token→char offsets and id, so the biaffine
+    /// parser can map wordpieces to UD words (first-subword) and back to surface
+    /// spans. ONNX-only: the simplified hash fallback has no per-token structure, so
+    /// this errors there rather than fabricating vectors. Shares the exact forward
+    /// pass with the pooled path (`run_onnx_raw`); mean-pooling these rows over the
+    /// attended tokens reproduces the pre-finalize pooled vector.
+    pub fn encode_tokens(&self, text: &str) -> Result<TokenEncoding> {
+        let (output_data, attention, encoding) = self.run_onnx_raw(text)?;
+        let hidden = self.native_hidden;
+        let offsets = encoding.get_offsets();
+        let ids = encoding.get_ids();
+        let special = encoding.get_special_tokens_mask();
+
+        let mut token_vecs: Vec<Vec<f32>> = Vec::new();
+        let mut out_offsets: Vec<(usize, usize)> = Vec::new();
+        let mut out_ids: Vec<u32> = Vec::new();
+        let mut out_special: Vec<bool> = Vec::new();
+        for (seq_idx, &att) in attention.iter().enumerate() {
+            if att != 1 {
+                continue;
+            }
+            let start = seq_idx * hidden;
+            let Some(row) = output_data.get(start..start + hidden) else {
+                break; // attended tokens always lie within the output; guard defensively
+            };
+            token_vecs.push(row.to_vec());
+            out_offsets.push(offsets.get(seq_idx).copied().unwrap_or((0, 0)));
+            out_ids.push(ids.get(seq_idx).copied().unwrap_or(0));
+            out_special.push(special.get(seq_idx).copied().unwrap_or(0) == 1);
+        }
+        Ok(TokenEncoding {
+            token_vecs,
+            offsets: out_offsets,
+            ids: out_ids,
+            is_special: out_special,
+            hidden,
+        })
     }
 
     /// Generate embeddings for multiple texts in a single ONNX batch
@@ -1152,6 +1207,23 @@ impl Embedder for MiniLMEmbedder {
             }
         }
     }
+}
+
+/// Per-token encoder output produced by [`MiniLMEmbedder::encode_tokens`] — the
+/// input the biaffine dependency parser consumes. One entry per attended
+/// (non-pad) wordpiece, all vectors parallel by index.
+#[derive(Debug, Clone)]
+pub struct TokenEncoding {
+    /// One row per attended token, each `hidden` long (the model's native hidden size).
+    pub token_vecs: Vec<Vec<f32>>,
+    /// `(start, end)` char offsets into the original text, parallel to `token_vecs`.
+    pub offsets: Vec<(usize, usize)>,
+    /// Wordpiece ids, parallel to `token_vecs`.
+    pub ids: Vec<u32>,
+    /// True for special tokens (`[CLS]` / `[SEP]`), parallel to `token_vecs`.
+    pub is_special: Vec<bool>,
+    /// Native hidden size — the row width of every `token_vecs` entry.
+    pub hidden: usize,
 }
 
 #[cfg(test)]
