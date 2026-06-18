@@ -3619,6 +3619,61 @@ impl MultiUserMemoryManager {
                 }
             }
         }
+
+        // OpenIE clause-level causal edges (SHODH_OPENIE, default off). Direct edge
+        // creation — NOT bounded by the 20-pair typing budget above — for the
+        // clause/event-level causation the entity-pair loop structurally misses (it
+        // needs BOTH entities + a cue in ONE sentence; the census found ~17.8 causal
+        // cues per edge it catches). Each clause head resolves to a content-word node
+        // already added this memory; the edge is a directed Triggers cause→effect,
+        // with direction set by the CATENA signal class, not entity order.
+        if std::env::var("SHODH_OPENIE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            let name_to_uuid: HashMap<String, uuid::Uuid> = entity_uuids
+                .iter()
+                .map(|(name, id, _)| (name.to_lowercase(), *id))
+                .collect();
+            let mut clause_edges = 0usize;
+            for triple in crate::openie::extract_clause_triples(&experience.content) {
+                let (Some(&from_entity), Some(&to_entity)) = (
+                    name_to_uuid.get(&triple.head_a),
+                    name_to_uuid.get(&triple.head_b),
+                ) else {
+                    continue;
+                };
+                if from_entity == to_entity {
+                    continue;
+                }
+                let edge = RelationshipEdge {
+                    uuid: uuid::Uuid::new_v4(),
+                    from_entity,
+                    to_entity,
+                    relation_type: triple.relation,
+                    strength: 0.4,
+                    created_at: now,
+                    valid_at: now,
+                    invalidated_at: None,
+                    source_episode_id: Some(memory_id.0),
+                    context: truncated_context.clone(),
+                    last_activated: now,
+                    activation_count: 1,
+                    ltp_status: LtpStatus::None,
+                    tier: EdgeTier::L1Working,
+                    activation_timestamps: None,
+                    entity_confidence: None,
+                    forman_curvature: None,
+                    endpoint_selectivity: None,
+                };
+                if graph_guard.add_relationship(edge).is_ok() {
+                    clause_edges += 1;
+                }
+            }
+            if clause_edges > 0 {
+                tracing::debug!("OpenIE clause edges added: {clause_edges}");
+            }
+        }
         // Lock released here
 
         if typed_semantic
