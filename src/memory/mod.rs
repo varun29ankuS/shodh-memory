@@ -1614,6 +1614,16 @@ impl MemorySystem {
         let typed_only = std::env::var("SHODH_COMPANION_GRAPH_TYPED")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        // Minimum distinct-anchor connection multiplicity for a candidate to be
+        // boosted. =1 boosts any graph-connected candidate; =2 requires it to bridge
+        // TWO anchor entities (the multi-seed discriminator, like SEED_COVERAGE_BONUS),
+        // which protects single-hop queries — their distractors touch only one anchor,
+        // while a multi-hop co-gold turn bridges several.
+        let min_conn: usize = std::env::var("SHODH_COMPANION_MIN_CONN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(1);
 
         let g = graph.read();
 
@@ -1688,13 +1698,39 @@ impl MemorySystem {
                             }
                         }
                     }
-                    c.min(CONN_CAP)
+                    if c >= min_conn {
+                        c.min(CONN_CAP)
+                    } else {
+                        0
+                    }
                 };
                 (base + weight * conn as f32, rank, m)
             })
             .collect();
-        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        scored.into_iter().take(k).map(|(_, _, m)| m).collect()
+        // Freeze the original top-ANCHORS in place — a correct single-hop primary in
+        // the head can never be displaced by a boosted companion — and re-rank only
+        // the tail for the remaining slots. The unfrozen path let a high-connectivity
+        // companion outscore an anchor (base 1/(rank+1) + weight·conn can exceed the
+        // anchor's base), which is the single_hop 0.917→0.750 trade. SHODH_COMPANION_FREEZE=0
+        // restores the unfrozen behaviour for an A/B.
+        let freeze_anchors = std::env::var("SHODH_COMPANION_FREEZE")
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
+        if freeze_anchors {
+            let (mut anchors, mut tail): (Vec<_>, Vec<_>) =
+                scored.into_iter().partition(|(_, rank, _)| *rank < ANCHORS);
+            anchors.sort_by_key(|(_, rank, _)| *rank);
+            tail.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            anchors
+                .into_iter()
+                .chain(tail)
+                .take(k)
+                .map(|(_, _, m)| m)
+                .collect()
+        } else {
+            scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            scored.into_iter().take(k).map(|(_, _, m)| m).collect()
+        }
     }
 
     /// Recall with full retrieval diagnostics (per-stage timing, per-memory score attribution).
