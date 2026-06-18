@@ -1715,12 +1715,35 @@ pub fn extract_directed_predicate(
         .map(|i| hi + i)
         .unwrap_or(lc.len());
     let sentence = &lc[sent_start..sent_end];
-    let rt = predicate_from_cues(sentence)?;
-    // Effect-first constructions: the earlier mention is the EFFECT, not the cause.
-    const EFFECT_FIRST_CUES: [&str; 4] = ["because of", "due to", "caused by", "triggered by"];
-    let effect_first = EFFECT_FIRST_CUES.iter().any(|c| sentence.contains(c));
     let a_first = pa < pb;
-    Some((rt, if effect_first { !a_first } else { a_first }))
+    if let Some(rt) = predicate_from_cues(sentence) {
+        // Effect-first constructions: the earlier mention is the EFFECT, not the cause.
+        const EFFECT_FIRST_CUES: [&str; 4] = ["because of", "due to", "caused by", "triggered by"];
+        let effect_first = EFFECT_FIRST_CUES.iter().any(|c| sentence.contains(c));
+        return Some((rt, if effect_first { !a_first } else { a_first }));
+    }
+    // OpenIE-lite fallback (SHODH_OPENIE, default off): when the substring cue bag
+    // misses, POS-tag the span BETWEEN the two mentions and type the edge by the
+    // relational VERB connecting them (subject → object by surface order). This
+    // catches the relational verbs the ~30 hardcoded cues do not enumerate,
+    // densifying the typed edges the graph companion re-rank depends on. Default
+    // off keeps the baseline byte-identical.
+    let openie = std::env::var("SHODH_OPENIE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if openie {
+        let between = if a_first {
+            lc.get(pa + a.len()..pb)
+        } else {
+            lc.get(pb + b.len()..pa)
+        };
+        if let Some(between) = between {
+            if let Some(rt) = crate::openie::relation_from_between(between) {
+                return Some((rt, a_first));
+            }
+        }
+    }
+    None
 }
 
 /// Infer a typed relation between two entities based on their labels.
