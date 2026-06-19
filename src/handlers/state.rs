@@ -3631,17 +3631,41 @@ impl MultiUserMemoryManager {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
         {
-            let name_to_uuid: HashMap<String, uuid::Uuid> = entity_uuids
-                .iter()
-                .map(|(name, id, _)| (name.to_lowercase(), *id))
-                .collect();
+            // Concept node for a clause head: get-or-create (add_entity dedupes by
+            // exact / case / stem name). name_embedding = None keeps dedup
+            // deterministic (name-only, no embedding-argmax platform flip), and ONLY
+            // clause-head nodes are added — NOT every content word — so the causal
+            // edges land on the lean NER graph with no co-occurrence explosion.
+            let concept_label = EntityLabel::Other("Concept".to_string());
+            let make_concept = |name: &str| EntityNode {
+                uuid: uuid::Uuid::new_v4(),
+                name: name.to_string(),
+                labels: vec![concept_label.clone()],
+                created_at: now,
+                last_seen_at: now,
+                mention_count: 1,
+                summary: String::new(),
+                attributes: HashMap::new(),
+                name_embedding: None,
+                salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
+                    &concept_label,
+                    false,
+                ),
+                is_proper_noun: false,
+                selectivity: None,
+            };
             let mut clause_edges = 0usize;
             for triple in crate::openie::extract_clause_triples(&experience.content) {
-                let (Some(&from_entity), Some(&to_entity)) = (
-                    name_to_uuid.get(&triple.head_a),
-                    name_to_uuid.get(&triple.head_b),
-                ) else {
+                if triple.head_a.len() < 3 || triple.head_b.len() < 3 {
                     continue;
+                }
+                let from_entity = match graph_guard.add_entity(make_concept(&triple.head_a)) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                let to_entity = match graph_guard.add_entity(make_concept(&triple.head_b)) {
+                    Ok(u) => u,
+                    Err(_) => continue,
                 };
                 if from_entity == to_entity {
                     continue;
