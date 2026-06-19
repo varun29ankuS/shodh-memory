@@ -52,33 +52,34 @@ jobs:
           [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
           [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
 
-      - name: Lineage fusion A/B — does magnitude-preserving fusion rank the origin #1?
+      - name: Lineage A/B — causal-origin answer placement (off vs on)
         run: |
           set -o pipefail
-          # OpenIE on in EVERY arm so reachability is controlled; only the FUSION
-          # mode varies. The causal-origin injection sets the traced root to 2x the
-          # graph leg's score — RRF discards that magnitude (P@1=0); SUM / ACT-R keep
-          # it, so the root should win #1 with no new boost. Root cause = RRF.
-          run() { RUST_LOG=shodh_memory=info SHODH_OPENIE=1 SHODH_CAUSAL_ORIGIN_DEBUG=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_QUERY_NER=1 "$@"; }
-          echo "=== baseline (default RRF / fitted-gate fusion) ==="
-          run ./target/release/recall-eval --suite locomo --output l-rrf.json --lineage lineage.json --storage ./s-rrf > diag.log 2>&1 || { tail -20 diag.log; exit 1; }
-          echo "=== SUM fusion (magnitude-preserving) ==="
-          SHODH_FUSION_SUM=1 run ./target/release/recall-eval --suite locomo --output l-sum.json --lineage lin_sum.json --storage ./s-sum > d_sum.log 2>&1 || { tail -20 d_sum.log; exit 1; }
-          echo "=== ACT-R fusion (magnitude-preserving) ==="
-          SHODH_ACTR_FUSION=1 run ./target/release/recall-eval --suite locomo --output l-actr.json --lineage lin_actr.json --storage ./s-actr > d_actr.log 2>&1 || { tail -20 d_actr.log; exit 1; }
+          # The backward walk traces THE root (funnel: cue=true origins=1), but the
+          # root shares no token with the effect-named query, so it has no vector/BM25
+          # mass and the pre-fusion graph-leg injection loses under any fusion mode.
+          # Layer 4.95 places the traced root ABOVE the global fused max post-fusion:
+          # a structurally-certain answer, not a similarity candidate. Test off vs on;
+          # the direct-cause CONTROL P@1 must NOT move (only origin queries are touched).
+          run() { RUST_LOG=shodh_memory=info SHODH_CAUSAL_ORIGIN_DEBUG=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_QUERY_NER=1 "$@"; }
+          echo "=== boost OFF ==="
+          SHODH_CAUSAL_ORIGIN_BOOST=0 run ./target/release/recall-eval --suite locomo --output l-off.json --lineage lin_off.json --storage ./s-off > diag.log 2>&1 || { tail -20 diag.log; exit 1; }
+          echo "=== boost ON (post-fusion answer placement) ==="
+          SHODH_CAUSAL_ORIGIN_BOOST=1 run ./target/release/recall-eval --suite locomo --output l-on.json --lineage lin_on.json --storage ./s-on > diag_on.log 2>&1 || { tail -20 diag_on.log; exit 1; }
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
           def full(f):
               r = [x for x in json.load(open(f))['rows'] if x['layer'] == 'full'][0]
-              return r['multihop_p_at_1'], r.get('multihop_recall_at_10')
-          print("## Lineage fusion A/B — root-cause P@1 (RRF destroys magnitude?)\n")
-          for name, f in [("RRF / fitted (baseline)", "lineage.json"),
-                          ("SUM (magnitude)", "lin_sum.json"),
-                          ("ACT-R (magnitude)", "lin_actr.json")]:
-              p, rr = full(f)
-              print(f"- {name:24} P@1={p:.3f}  r@10={rr}")
+              return r['multihop_p_at_1'], r.get('multihop_recall_at_10'), r.get('onehop_p_at_1')
+          op, orr, oh = full('lin_off.json')
+          np_, nrr, nh = full('lin_on.json')
+          print("## Lineage A/B — causal-origin answer placement (post-fusion)\n")
+          print(f"- boost OFF: root P@1={op:.3f}  r@10={orr}  | direct-control P@1={oh:.3f}")
+          print(f"- boost ON : root P@1={np_:.3f}  r@10={nrr}  | direct-control P@1={nh:.3f}")
+          print(f"- delta root P@1: {np_ - op:+.3f}   (control delta: {nh - oh:+.3f}, must be 0)")
           PY
-          tail -3 diag.log
+          echo '### causal funnel (corrected regex)' | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -oE "CAUSAL_FUNNEL qents=[0-9]+ strict=[0-9]+ cue=[a-z]+ origins=[0-9]+" diag.log | sort | uniq -c | sort -rn | head | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Diagnose
         if: always()

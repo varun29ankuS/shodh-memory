@@ -2599,6 +2599,11 @@ impl MemorySystem {
         // trace finds the root but the lone BM25 bridge token loses to the direct
         // cause's match on the effect term).
         let mut causal_origin_entities: Vec<(uuid::Uuid, f32)> = Vec::new();
+        // Episode ids of the traced causal roots (populated by the Layer-2 origin
+        // injection), so the post-fusion answer placement (Layer 4.95) can lift the
+        // root ABOVE the global fused max — a structurally-certain answer, not a
+        // similarity candidate to be diluted by RRF.
+        let mut causal_origin_episode_ids: Vec<MemoryId> = Vec::new();
 
         // Per-candidate best-path strength from the graph leg (SHODH_PATH_STRENGTH).
         // Populated inside the graph block; read by the fusion-feature export so
@@ -3047,6 +3052,7 @@ impl MemorySystem {
                                 let in_scope =
                                     episode_candidates.as_ref().is_none_or(|c| c.contains(&mid));
                                 if in_scope && seen.insert(mid.clone()) {
+                                    causal_origin_episode_ids.push(mid.clone());
                                     r.push((mid, inject_score, inject_score));
                                 }
                             }
@@ -4476,6 +4482,34 @@ impl MemorySystem {
             // Pre-sort and limit candidates before expensive re-ranking.
             // Only look up graph entities for the top 2x max_results candidates,
             // not all fused results (avoids 100s of RocksDB reads).
+            // ===========================================================================
+            // LAYER 4.95: CAUSAL-ORIGIN ANSWER PLACEMENT (SHODH_CAUSAL_ORIGIN_BOOST)
+            // ===========================================================================
+            // For an origin-intent query, the backward causal walk DETERMINISTICALLY
+            // traced THE root cause. That root IS the answer — but it shares no lexical
+            // token with the effect-named query, so it carries no vector/BM25 mass, and
+            // the pre-fusion graph-leg injection (2x graph max) loses to the direct-cause
+            // distractor under any fusion mode (RRF and ACT-R both measured P@1=0). A
+            // structurally-certain answer must not compete on the soft-similarity scale:
+            // place the traced root(s) ABOVE the global fused max here, post-fusion. Only
+            // fires for origin queries (ids non-empty); a strict no-op otherwise, so no
+            // other category can regress. SHODH_CAUSAL_ORIGIN_BOOST=0 disables for A/B.
+            let origin_answer_boost = std::env::var("SHODH_CAUSAL_ORIGIN_BOOST")
+                .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+                .unwrap_or(true);
+            if origin_answer_boost && !causal_origin_episode_ids.is_empty() {
+                let global_max = fused.values().copied().fold(0.0f32, f32::max).max(0.01);
+                for (i, mid) in causal_origin_episode_ids.iter().enumerate() {
+                    // Best-supported root highest; later roots a hair lower for a
+                    // deterministic order. All sit above any similarity candidate.
+                    let target = global_max * (2.0 - (i as f32) * 0.01).max(1.5);
+                    let slot = fused.entry(mid.clone()).or_insert(0.0);
+                    if *slot < target {
+                        *slot = target;
+                    }
+                }
+            }
+
             let mut res: Vec<_> = fused.into_iter().collect();
             // Score desc; tie-break by MemoryId for stable rerank-budget cutoff.
             // The cutoff at `rerank_budget` makes order at the boundary semantically
