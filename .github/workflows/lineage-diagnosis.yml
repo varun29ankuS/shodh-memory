@@ -24,7 +24,7 @@ on:
 jobs:
   lineage-diag:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 160
     env:
       SHODH_MAX_CASES: "300"
       SHODH_MAX_CORPUS: "1500"
@@ -52,11 +52,26 @@ jobs:
           [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
           [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
 
-      - name: Lineage harness — fully instrumented
+      - name: Lineage A/B — OpenIE off vs on
         run: |
           set -o pipefail
-          RUST_LOG=shodh_memory=info SHODH_CAUSAL_ORIGIN_DEBUG=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_QUERY_NER=1 \
-            ./target/release/recall-eval --suite locomo --output l-main.json --lineage lineage.json --storage ./s-l > diag.log 2>&1 || { tail -20 diag.log; exit 1; }
+          run() { RUST_LOG=shodh_memory=info SHODH_CAUSAL_ORIGIN_DEBUG=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_QUERY_NER=1 "$@"; }
+          echo "=== baseline (SHODH_OPENIE off) ==="
+          run ./target/release/recall-eval --suite locomo --output l-base.json --lineage lineage_base.json --storage ./s-base > diag_base.log 2>&1 || { tail -20 diag_base.log; exit 1; }
+          echo "=== SHODH_OPENIE on (clause-level causal extraction) ==="
+          SHODH_OPENIE=1 run ./target/release/recall-eval --suite locomo --output l-main.json --lineage lineage.json --storage ./s-l > diag.log 2>&1 || { tail -20 diag.log; exit 1; }
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def full(f):
+              r = [x for x in json.load(open(f))['rows'] if x['layer'] == 'full'][0]
+              return r['multihop_p_at_1'], r.get('multihop_recall_at_10')
+          bp, br = full('lineage_base.json')
+          op, orr = full('lineage.json')
+          print("## Lineage A/B — root-cause retrieval (planted causal chains)\n")
+          print(f"- baseline  : P@1={bp:.3f}  r@10={br}")
+          print(f"- SHODH_OPENIE: P@1={op:.3f}  r@10={orr}")
+          print(f"- delta P@1 : {op - bp:+.3f}")
+          PY
           tail -3 diag.log
 
       - name: Diagnose
