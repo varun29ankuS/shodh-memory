@@ -52,25 +52,31 @@ jobs:
           [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
           [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
 
-      - name: Lineage A/B — OpenIE off vs on
+      - name: Lineage fusion A/B — does magnitude-preserving fusion rank the origin #1?
         run: |
           set -o pipefail
-          run() { RUST_LOG=shodh_memory=info SHODH_CAUSAL_ORIGIN_DEBUG=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_QUERY_NER=1 "$@"; }
-          echo "=== baseline (SHODH_OPENIE off) ==="
-          run ./target/release/recall-eval --suite locomo --output l-base.json --lineage lineage_base.json --storage ./s-base > diag_base.log 2>&1 || { tail -20 diag_base.log; exit 1; }
-          echo "=== SHODH_OPENIE on (clause-level causal extraction) ==="
-          SHODH_OPENIE=1 run ./target/release/recall-eval --suite locomo --output l-main.json --lineage lineage.json --storage ./s-l > diag.log 2>&1 || { tail -20 diag.log; exit 1; }
+          # OpenIE on in EVERY arm so reachability is controlled; only the FUSION
+          # mode varies. The causal-origin injection sets the traced root to 2x the
+          # graph leg's score — RRF discards that magnitude (P@1=0); SUM / ACT-R keep
+          # it, so the root should win #1 with no new boost. Root cause = RRF.
+          run() { RUST_LOG=shodh_memory=info SHODH_OPENIE=1 SHODH_CAUSAL_ORIGIN_DEBUG=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_QUERY_NER=1 "$@"; }
+          echo "=== baseline (default RRF / fitted-gate fusion) ==="
+          run ./target/release/recall-eval --suite locomo --output l-rrf.json --lineage lineage.json --storage ./s-rrf > diag.log 2>&1 || { tail -20 diag.log; exit 1; }
+          echo "=== SUM fusion (magnitude-preserving) ==="
+          SHODH_FUSION_SUM=1 run ./target/release/recall-eval --suite locomo --output l-sum.json --lineage lin_sum.json --storage ./s-sum > d_sum.log 2>&1 || { tail -20 d_sum.log; exit 1; }
+          echo "=== ACT-R fusion (magnitude-preserving) ==="
+          SHODH_ACTR_FUSION=1 run ./target/release/recall-eval --suite locomo --output l-actr.json --lineage lin_actr.json --storage ./s-actr > d_actr.log 2>&1 || { tail -20 d_actr.log; exit 1; }
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
           def full(f):
               r = [x for x in json.load(open(f))['rows'] if x['layer'] == 'full'][0]
               return r['multihop_p_at_1'], r.get('multihop_recall_at_10')
-          bp, br = full('lineage_base.json')
-          op, orr = full('lineage.json')
-          print("## Lineage A/B — root-cause retrieval (planted causal chains)\n")
-          print(f"- baseline  : P@1={bp:.3f}  r@10={br}")
-          print(f"- SHODH_OPENIE: P@1={op:.3f}  r@10={orr}")
-          print(f"- delta P@1 : {op - bp:+.3f}")
+          print("## Lineage fusion A/B — root-cause P@1 (RRF destroys magnitude?)\n")
+          for name, f in [("RRF / fitted (baseline)", "lineage.json"),
+                          ("SUM (magnitude)", "lin_sum.json"),
+                          ("ACT-R (magnitude)", "lin_actr.json")]:
+              p, rr = full(f)
+              print(f"- {name:24} P@1={p:.3f}  r@10={rr}")
           PY
           tail -3 diag.log
 
