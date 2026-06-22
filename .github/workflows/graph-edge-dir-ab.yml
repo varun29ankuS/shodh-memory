@@ -1,110 +1,131 @@
-name: graph edge-direction A/B — does fixing the self-loop move multi_hop?
+name: graph edge-direction A/B (LongMemEval) — does fixing the self-loop move multi_hop?
 
 # AUDIT (2026-06-22): every graph traversal (spread/PPR/reach/beam) took edge.to_entity
 # as the neighbour, but edges are indexed under BOTH endpoints, so every incoming edge
-# resolved to the source itself — a self-loop that made ~half the graph inert. The prior
-# "graph disconnected from multi_hop, 5 runs" verdict was measured on that half-wired
+# resolved to the source itself — a self-loop. The "graph disconnected from multi_hop,
+# 5 runs" verdict (multi_hop 0.5595) was measured ON LongMemEval, on that half-wired
 # graph. SHODH_GRAPH_EDGE_DIR=1 routes to the true non-source endpoint.
 #   A = control            (flag off — legacy to_entity-only, bit-identical to main)
-#   B = SHODH_GRAPH_EDGE_DIR=1                 (direction fix, default graph engine)
-#   C = SHODH_GRAPH_EDGE_DIR=1 SHODH_PPR=1     (direction fix on the PPR engine)
-# Read: if the fix was binding, B/C graph-stage present% rises toward the reachability
-# ceiling and multi_hop recall@10 lifts WITHOUT trading single_hop. Directional only:
-# repeats=1 on capped-300 (inflated vs full scale) — a winner must be re-confirmed at
-# full corpus with --repeats >1 and a pinned NER mode before flipping the default.
+#   B = SHODH_GRAPH_EDGE_DIR=1   (direction fix)
+# Run on LongMemEval-S (the production benchmark; LongMemEval also HARD-REFUSES fallback
+# NER, so this measures on neural NER, unlike the capped LoCoMo ablations). Read: if the
+# self-loop was binding, multi_hop recall@10 lifts with single_hop HELD. If multi_hop is
+# bit-identical, the coverage-ceiling verdict survives a correctly-wired graph.
+# Directional: limit=50 representative mix; a winner needs the full 479 + repeats before
+# flipping the default.
 
 on:
   workflow_dispatch:
+    inputs:
+      limit:
+        description: 'LongMemEval questions per arm (representative via --shuffle). Blank = all 479.'
+        required: false
+        default: '50'
   push:
     paths: ['.github/workflows/graph-edge-dir-ab.yml', 'src/memory/graph_retrieval.rs']
     branches: [fix/graph-edge-direction]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-dir-ab-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  edge-dir:
+  edge-dir-lme:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
-    env:
-      SHODH_MAX_CASES: "300"
-      SHODH_MAX_CORPUS: "1500"
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: recall-eval
-      - name: Install LLVM
+      - name: Install LLVM (ONNX runtime build dep)
         run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
       - name: Build recall-eval
         run: cargo build --release --bin recall-eval
-      - name: Cache MiniLM
+      - name: Cache embedder model
         uses: actions/cache@v4
         with:
           path: ~/.cache/shodh-memory/models
           key: shodh-models-minilm-c9745ed1
-      - name: Pre-fetch MiniLM
+      - name: Pre-fetch MiniLM embedder model
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Download LongMemEval-S + build fixtures (shared by both arms)
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          JSON=$(python3 - <<'PY'
+          from huggingface_hub import hf_hub_download
+          print(hf_hub_download(repo_id='xiaowu0162/longmemeval-cleaned',
+                                filename='longmemeval_s_cleaned.json',
+                                repo_type='dataset'))
+          PY
+          )
+          echo "dataset: $JSON"
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
+            ${{ github.event.inputs.limit != '' && format('--limit {0}', github.event.inputs.limit) || '--limit 50' }}
+          wc -l tests/recall/longmemeval/manifest.jsonl
+
+      - name: A — control (legacy to_entity)
         run: |
           set -o pipefail
-          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
-          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
-          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
-          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
-          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
-
-      - name: A recall — control (legacy to_entity)
-        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
-      - name: B recall — edge-direction fix
-        run: set -o pipefail; SHODH_GRAPH_EDGE_DIR=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
-      - name: C recall — edge-direction fix + PPR
-        run: set -o pipefail; SHODH_GRAPH_EDGE_DIR=1 SHODH_PPR=1 ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
-      - name: A funnel — control
-        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
-      - name: B funnel — edge-direction fix
-        run: set -o pipefail; SHODH_GRAPH_EDGE_DIR=1 ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb 2>&1 | tail -3
+          ./target/release/recall-eval --longmemeval tests/recall/longmemeval \
+            --output /dev/null --storage ./lme-a 2>&1 | tee a.log
+      - name: B — edge-direction fix
+        run: |
+          set -o pipefail
+          SHODH_GRAPH_EDGE_DIR=1 ./target/release/recall-eval --longmemeval tests/recall/longmemeval \
+            --output /dev/null --storage ./lme-b 2>&1 | tee b.log
 
       - name: Compare
         if: always()
         run: |
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
-          import json
-          def load(f):
-              try: return json.load(open(f))
-              except Exception: return None
-          arms={'control':load('a.json'),'dir_fix':load('b.json'),'dir_fix+ppr':load('c.json')}
-          names=list(arms.keys())
-          def m(d,cat,k='recall@10'):
-              if not d: return float('nan')
-              src = d['layers']['full'] if cat=='ALL' else d['by_category'].get(cat,{})
-              return src.get(k,float('nan'))
-          print("## graph edge-direction A/B — recall@10 (capped-300, directional)\n")
-          print("| cat | "+" | ".join(names)+" |")
-          print("| --- "*(len(names)+1)+"|")
-          for cat in ('ALL','single_hop','multi_hop','temporal','open_domain'):
-              print(f"| {cat} | "+" | ".join(f"{m(arms[n],cat):.4f}" for n in names)+" |")
-          for cat in ('ALL','single_hop','multi_hop','temporal'):
-              print(f"\n**Δ {cat} vs control:** "+", ".join(f"{n} {m(arms[n],cat)-m(arms['control'],cat):+.4f}" for n in names if n!='control'))
-          def g(fn,stage,k):
-              if not fn: return float('nan')
-              for r in fn.get('overall',[]):
-                  if r['stage']==stage: return r.get(k,float('nan'))
-              return float('nan')
-          fa=load('fa.json'); fb=load('fb.json')
-          print("\n### funnel — control vs dir_fix (graph-stage present% = the connectivity metric the fix targets)\n| stage.metric | control | dir_fix |")
-          print("| --- | --- | --- |")
-          for st in ('graph','fusion'):
-              for k in ('present_pct','top10_pct','mean_rank_when_present'):
-                  print(f"| {st} {k} | {g(fa,st,k):.2f} | {g(fb,st,k):.2f} |")
-          print("\n**Decision:** the fix WINS only if multi_hop recall@10 rises with single_hop HELD "
-                "(no trade) AND the funnel's graph present% moves up — that is the falsifiable claim that "
-                "the self-loop, not a coverage ceiling, was binding. If multi_hop is flat AND present% is "
-                "flat, the half-wired graph was not the multi_hop constraint after all (the coverage-ceiling "
-                "verdict survives a correctly-wired graph). Either way the fix is a correctness improvement; "
-                "a recall WIN gates flipping SHODH_GRAPH_EDGE_DIR on by default (full-corpus + repeats>1 confirm first).")
+          import re
+          def parse(fn):
+              overall=float('nan'); cats={}; ner='?'
+              try: text=open(fn).read()
+              except FileNotFoundError: return overall,cats,ner
+              for line in text.splitlines():
+                  mo=re.search(r'LongMemEval-S:\s*\d+\s*questions\s*\(NER=(\w+)\).*recall@\d+\s*=\s*([0-9.]+)', line)
+                  if mo: ner=mo.group(1); overall=float(mo.group(2))
+                  mc=re.match(r'\s+(\w+)\s+n=(\d+)\s+recall@\d+\s*=\s*([0-9.]+)', line)
+                  if mc: cats[mc.group(1)]=float(mc.group(3))
+              return overall,cats,ner
+          ao,ac,an=parse('a.log'); bo,bc,bn=parse('b.log')
+          print("## graph edge-direction A/B on LongMemEval-S — turn-level recall@10\n")
+          print(f"_NER backend: control={an}, dir_fix={bn} (LongMemEval refuses fallback NER)_\n")
+          allcats=sorted(set(ac)|set(bc))
+          print("| category | control | dir_fix | delta |")
+          print("| --- | --- | --- | --- |")
+          def fmt(x): return f"{x:.4f}" if x==x else "nan"
+          print(f"| **ALL** | {fmt(ao)} | {fmt(bo)} | {bo-ao:+.4f} |")
+          for c in allcats:
+              a=ac.get(c,float('nan')); b=bc.get(c,float('nan'))
+              d=(b-a) if (a==a and b==b) else float('nan')
+              star=" <-- multi_hop" if c=='multi_hop' else ""
+              print(f"| {c}{star} | {fmt(a)} | {fmt(b)} | {d:+.4f} |")
+          print("\n**Decision:** the fix WINS on multi_hop only if its recall@10 rises with single_hop HELD. "
+                "If multi_hop is bit-identical (as on the LoCoMo pilot), the coverage-ceiling verdict survives a "
+                "correctly-wired graph and the lever is elsewhere (entity-resolution / learnable q->relation). Either "
+                "way the fix is a correctness improvement; a recall WIN gates flipping SHODH_GRAPH_EDGE_DIR on by "
+                "default after a full-479 + repeats confirm. These arms are limit=50 representative, directional only.")
           PY
 
-      - name: Upload JSON
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: graph-edge-dir-json
-          path: "*.json"
+          name: edge-dir-lme-logs
+          path: "*.log"
           if-no-files-found: warn
