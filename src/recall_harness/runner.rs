@@ -1029,6 +1029,7 @@ struct LongMemEvalCase {
 pub struct LongMemEvalReport {
     pub questions: usize,
     pub recall_at_k: f64,
+    pub p_at_1: f64,
     pub by_category: BTreeMap<String, (f64, usize)>,
     pub k: usize,
     pub ner_backend: String,
@@ -1064,6 +1065,7 @@ pub fn run_longmemeval(
     }
 
     let mut sum_recall = 0.0f64;
+    let mut sum_p1 = 0.0f64;
     let mut scored = 0usize;
     let mut by_cat: HashMap<String, (f64, usize)> = HashMap::new();
     let mut ner_backend = String::from("unknown");
@@ -1130,6 +1132,15 @@ pub fn run_longmemeval(
         let hit = gold_uuids.iter().filter(|g| topk.contains(g)).count();
         let recall = hit as f64 / gold_uuids.len() as f64;
         sum_recall += recall;
+        // p@1: is the single top-ranked memory a gold turn? A finer signal than
+        // recall@10, which only moves when gold crosses the top-k boundary.
+        if memories
+            .first()
+            .map(|m| gold_uuids.contains(&m.id.0))
+            .unwrap_or(false)
+        {
+            sum_p1 += 1.0;
+        }
         scored += 1;
         let entry = by_cat.entry(case.category.clone()).or_insert((0.0, 0));
         entry.0 += recall;
@@ -1154,10 +1165,23 @@ pub fn run_longmemeval(
         .map(|(c, (s, n))| (c, (s / n.max(1) as f64, n)))
         .collect();
 
+    // Proof-of-execution for the edge-direction fix: with the flag off this is
+    // always 0; with it on, a non-zero count proves the patched traversal ran
+    // and changed targets, independent of whether recall@10 moved.
+    eprintln!(
+        "EDGE_DIR_FLIPS={}",
+        crate::memory::graph_retrieval::edge_dir_flip_count()
+    );
+
     Ok(LongMemEvalReport {
         questions: scored,
         recall_at_k: if scored > 0 {
             sum_recall / scored as f64
+        } else {
+            0.0
+        },
+        p_at_1: if scored > 0 {
+            sum_p1 / scored as f64
         } else {
             0.0
         },

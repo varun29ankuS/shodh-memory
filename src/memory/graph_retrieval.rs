@@ -492,6 +492,19 @@ fn ppr_intern(
 /// `current` is always one endpoint (the edge came from its index), so when it is
 /// the `to`, the neighbour is `from`. With `dir_fix` off, the exact legacy
 /// behaviour is preserved so it can serve as the A/B control.
+/// Diagnostic counter: how many times the direction fix actually changed the
+/// traversal target (the current node was the `to` endpoint, so the true
+/// neighbour is `from`). Zero overhead when the fix is off, because the
+/// increment is gated behind the same `dir_fix` branch. Lets an eval prove the
+/// fix executed and altered traversal even when a coarse metric like recall@10
+/// does not move.
+static EDGE_DIR_FLIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Total edge-direction flips since process start (see [`edge_neighbor`]).
+pub fn edge_dir_flip_count() -> u64 {
+    EDGE_DIR_FLIPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[inline]
 fn edge_neighbor(
     edge: &crate::graph_memory::RelationshipEdge,
@@ -499,6 +512,7 @@ fn edge_neighbor(
     dir_fix: bool,
 ) -> Uuid {
     if dir_fix && edge.from_entity != *current {
+        EDGE_DIR_FLIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         edge.from_entity
     } else {
         edge.to_entity

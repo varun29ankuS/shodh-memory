@@ -93,33 +93,42 @@ jobs:
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import re
           def parse(fn):
-              overall=float('nan'); cats={}; ner='?'
+              overall=float('nan'); p1=float('nan'); cats={}; ner='?'; flips=None
               try: text=open(fn).read()
-              except FileNotFoundError: return overall,cats,ner
+              except FileNotFoundError: return overall,p1,cats,ner,flips
               for line in text.splitlines():
                   mo=re.search(r'LongMemEval-S:\s*\d+\s*questions\s*\(NER=(\w+)\).*recall@\d+\s*=\s*([0-9.]+)', line)
                   if mo: ner=mo.group(1); overall=float(mo.group(2))
+                  mp=re.search(r'p@1\s*=\s*([0-9.]+)', line)
+                  if mp: p1=float(mp.group(1))
+                  mf=re.search(r'EDGE_DIR_FLIPS=(\d+)', line)
+                  if mf: flips=int(mf.group(1))
                   mc=re.match(r'\s+(\w+)\s+n=(\d+)\s+recall@\d+\s*=\s*([0-9.]+)', line)
                   if mc: cats[mc.group(1)]=float(mc.group(3))
-              return overall,cats,ner
-          ao,ac,an=parse('a.log'); bo,bc,bn=parse('b.log')
-          print("## graph edge-direction A/B on LongMemEval-S — turn-level recall@10\n")
+              return overall,p1,cats,ner,flips
+          ao,ap,ac,an,af=parse('a.log'); bo,bp,bc,bn,bf=parse('b.log')
+          print("## graph edge-direction A/B on LongMemEval-S — turn-level recall@10 + p@1\n")
           print(f"_NER backend: control={an}, dir_fix={bn} (LongMemEval refuses fallback NER)_\n")
-          allcats=sorted(set(ac)|set(bc))
-          print("| category | control | dir_fix | delta |")
-          print("| --- | --- | --- | --- |")
+          print(f"**Proof of execution — EDGE_DIR_FLIPS: control={af}, dir_fix={bf}.** "
+                f"A non-zero dir_fix count proves the patched traversal ran and changed targets; "
+                f"control must be 0. If flips>0 AND every metric below is bit-identical, the fix "
+                f"genuinely ran but was inconsequential to the fused output (graph leg redundant under "
+                f"BM25/vector), NOT a dead flag.\n")
           def fmt(x): return f"{x:.4f}" if x==x else "nan"
-          print(f"| **ALL** | {fmt(ao)} | {fmt(bo)} | {bo-ao:+.4f} |")
-          for c in allcats:
+          print("| metric | control | dir_fix | delta |")
+          print("| --- | --- | --- | --- |")
+          print(f"| **recall@10 ALL** | {fmt(ao)} | {fmt(bo)} | {bo-ao:+.4f} |")
+          print(f"| **p@1 ALL** | {fmt(ap)} | {fmt(bp)} | {bp-ap:+.4f} |")
+          for c in sorted(set(ac)|set(bc)):
               a=ac.get(c,float('nan')); b=bc.get(c,float('nan'))
               d=(b-a) if (a==a and b==b) else float('nan')
               star=" <-- multi_hop" if c=='multi_hop' else ""
-              print(f"| {c}{star} | {fmt(a)} | {fmt(b)} | {d:+.4f} |")
-          print("\n**Decision:** the fix WINS on multi_hop only if its recall@10 rises with single_hop HELD. "
-                "If multi_hop is bit-identical (as on the LoCoMo pilot), the coverage-ceiling verdict survives a "
-                "correctly-wired graph and the lever is elsewhere (entity-resolution / learnable q->relation). Either "
-                "way the fix is a correctness improvement; a recall WIN gates flipping SHODH_GRAPH_EDGE_DIR on by "
-                "default after a full-479 + repeats confirm. These arms are limit=50 representative, directional only.")
+              print(f"| recall@10 {c}{star} | {fmt(a)} | {fmt(b)} | {d:+.4f} |")
+          print("\n**Read:** flips>0 + all-deltas-zero (incl p@1) ⇒ the fix executed and altered traversal "
+                "but did not change the fused ranking at all on these 50 questions — the graph leg is "
+                "non-load-bearing in the full LongMemEval fusion; the coverage-ceiling verdict holds. "
+                "flips>0 + p@1 moves but recall@10 flat ⇒ ranking changed below the top-10 threshold. "
+                "flips==0 ⇒ the flag never fired and the A/B is invalid. Directional: limit=50.")
           PY
 
       - name: Upload logs

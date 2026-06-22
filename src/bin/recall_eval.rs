@@ -372,8 +372,8 @@ fn run(args: &Args) -> Result<i32> {
         )
         .context("LongMemEval run")?;
         println!(
-            "LongMemEval-S: {} questions (NER={}) — recall@{} = {:.4}",
-            report.questions, report.ner_backend, report.k, report.recall_at_k
+            "LongMemEval-S: {} questions (NER={}) — recall@{} = {:.4} — p@1 = {:.4}",
+            report.questions, report.ner_backend, report.k, report.recall_at_k, report.p_at_1
         );
         let mut cats: Vec<_> = report.by_category.iter().collect();
         cats.sort_by(|a, b| a.0.cmp(b.0));
