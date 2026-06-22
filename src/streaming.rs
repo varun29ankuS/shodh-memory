@@ -831,6 +831,15 @@ impl StreamingMemoryExtractor {
                 severity,
                 data,
             } => {
+                // Release the outer write guard before re-acquiring below.
+                // `tokio::sync::RwLock` is NOT reentrant, so holding the
+                // `sessions.write()` taken at the top of this method while this
+                // arm calls `sessions.read()`/`sessions.write()` again
+                // self-deadlocks (the Content/Flush/Close arms drop it for the
+                // same reason). `session.touch()` above already recorded
+                // activity; the buffer write below re-locks and re-fetches.
+                drop(sessions);
+
                 // Check if this event type triggers immediate extraction
                 let is_trigger = {
                     let sessions = self.sessions.read().await;
@@ -886,6 +895,11 @@ impl StreamingMemoryExtractor {
                 timestamp,
                 units,
             } => {
+                // Release the outer write guard before re-acquiring below — the
+                // non-reentrant RwLock would otherwise self-deadlock (see the
+                // Event arm). `session.touch()` above already recorded activity.
+                drop(sessions);
+
                 // Format sensor reading as content
                 let mut parts: Vec<String> = Vec::new();
                 for (key, value) in &values {
