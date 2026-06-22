@@ -385,7 +385,10 @@ fn run(args: &Args) -> Result<i32> {
             println!("  {cat:18} n={n:<4} recall@{} = {r:.4}", report.k);
         }
         if report.layers.len() > 1 {
-            println!("  per-layer ablation (recall@{}, same benchmark):", report.k);
+            println!(
+                "  per-layer ablation (recall@{}, same benchmark):",
+                report.k
+            );
             for mode in LayerMode::ALL {
                 if let Some((r, n)) = report.layers.get(mode.report_key()) {
                     println!(
