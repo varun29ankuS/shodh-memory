@@ -447,11 +447,7 @@ pub fn compare_to_baseline(
                 base_cat.recall_at_10,
                 cur_cat.recall_at_10,
             );
-            check(
-                &format!("p@1[{category}]"),
-                base_cat.p_at_1,
-                cur_cat.p_at_1,
-            );
+            check(&format!("p@1[{category}]"), base_cat.p_at_1, cur_cat.p_at_1);
         }
     }
 
@@ -793,7 +789,9 @@ mod tests {
 
         let failures = compare_to_baseline(&baseline, &current, 2.0);
         assert!(
-            failures.iter().any(|f| f.detail.contains("recall@10[multi_hop]")),
+            failures
+                .iter()
+                .any(|f| f.detail.contains("recall@10[multi_hop]")),
             "per-category gate must flag the multi_hop collapse: {failures:?}"
         );
         // The single_hop improvement must NOT be flagged.
