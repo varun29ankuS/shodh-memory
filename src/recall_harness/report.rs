@@ -431,6 +431,30 @@ pub fn compare_to_baseline(
     check("mrr", base_full.mrr, cur_full.mrr);
     check("p@1", base_full.p_at_1, cur_full.p_at_1);
 
+    // Per-category regression gate. The aggregate `full` metrics above can stay
+    // flat while a single category (e.g. `multi_hop`) collapses — the average
+    // hides it, so a change that trades one category for another passes CI
+    // unnoticed. Gate every category present in BOTH reports on recall@10 and
+    // p@1 so a category-level regression fails even when the headline holds.
+    // Categories absent from the baseline (older baselines, or a newly added
+    // category) are skipped — `base <= 0.0` inside `check` already no-ops, and a
+    // missing key never fabricates a failure, mirroring the `repeats`/latency
+    // back-compat defaults elsewhere in this module.
+    for (category, base_cat) in &baseline.by_category {
+        if let Some(cur_cat) = current.by_category.get(category) {
+            check(
+                &format!("recall@10[{category}]"),
+                base_cat.recall_at_10,
+                cur_cat.recall_at_10,
+            );
+            check(
+                &format!("p@1[{category}]"),
+                base_cat.p_at_1,
+                cur_cat.p_at_1,
+            );
+        }
+    }
+
     failures
 }
 
@@ -733,6 +757,62 @@ mod tests {
         let failures = compare_to_baseline(&baseline, &current, 2.0);
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].kind, "infrastructure");
+    }
+
+    fn category(recall: f64, p1: f64) -> CategoryReport {
+        CategoryReport {
+            ndcg_at_10: recall,
+            recall_at_10: recall,
+            precision_at_10: recall,
+            mrr: recall,
+            p_at_1: p1,
+            map: recall,
+            case_count: 10,
+        }
+    }
+
+    #[test]
+    fn category_collapse_under_flat_aggregate_is_flagged() {
+        // The aggregate `full` layer is BIT-IDENTICAL across baseline and current,
+        // but `multi_hop` recall halves while `single_hop` rises to compensate.
+        // The old aggregate-only gate passed this; the per-category gate must not.
+        let mut baseline = report_with_full(0.60, 0.70, 0.50, 0.40);
+        let mut current = report_with_full(0.60, 0.70, 0.50, 0.40);
+        baseline
+            .by_category
+            .insert("single_hop".to_string(), category(0.70, 0.40));
+        baseline
+            .by_category
+            .insert("multi_hop".to_string(), category(0.70, 0.40));
+        current
+            .by_category
+            .insert("single_hop".to_string(), category(0.95, 0.40));
+        current
+            .by_category
+            .insert("multi_hop".to_string(), category(0.45, 0.40));
+
+        let failures = compare_to_baseline(&baseline, &current, 2.0);
+        assert!(
+            failures.iter().any(|f| f.detail.contains("recall@10[multi_hop]")),
+            "per-category gate must flag the multi_hop collapse: {failures:?}"
+        );
+        // The single_hop improvement must NOT be flagged.
+        assert!(
+            !failures.iter().any(|f| f.detail.contains("single_hop")),
+            "an improving category must not be flagged: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn missing_category_in_current_does_not_fabricate_failure() {
+        // A baseline category absent from the current report (renamed/removed)
+        // must be skipped, not reported as a -100% regression.
+        let mut baseline = report_with_full(0.60, 0.70, 0.50, 0.40);
+        let current = report_with_full(0.60, 0.70, 0.50, 0.40);
+        baseline
+            .by_category
+            .insert("temporal".to_string(), category(0.80, 0.50));
+        assert!(compare_to_baseline(&baseline, &current, 2.0).is_empty());
     }
 
     // -------------------- RH-12 (#272) -------------------------------------
