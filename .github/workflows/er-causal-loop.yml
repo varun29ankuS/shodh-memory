@@ -68,13 +68,13 @@ jobs:
           [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
 
       - name: A — control · entity linking
-        run: set -o pipefail; ./target/release/recall-eval --linking link_a.json --storage ./s-la 2>&1 | tee la.log
+        run: set -o pipefail; ./target/release/recall-eval --output /dev/null --linking link_a.json --storage ./s-la 2>&1 | tee la.log
       - name: A — control · causal lineage
-        run: set -o pipefail; ./target/release/recall-eval --lineage lin_a.json --mh-chains "$CHAINS" --storage ./s-na 2>&1 | tee na.log
+        run: set -o pipefail; ./target/release/recall-eval --output /dev/null --lineage lin_a.json --mh-chains "$CHAINS" --storage ./s-na 2>&1 | tee na.log
       - name: B — candidate · entity linking
-        run: set -o pipefail; env $FLAG ./target/release/recall-eval --linking link_b.json --storage ./s-lb 2>&1 | tee lb.log
+        run: set -o pipefail; env $FLAG ./target/release/recall-eval --output /dev/null --linking link_b.json --storage ./s-lb 2>&1 | tee lb.log
       - name: B — candidate · causal lineage
-        run: set -o pipefail; env $FLAG ./target/release/recall-eval --lineage lin_b.json --mh-chains "$CHAINS" --storage ./s-nb 2>&1 | tee nb.log
+        run: set -o pipefail; env $FLAG ./target/release/recall-eval --output /dev/null --lineage lin_b.json --mh-chains "$CHAINS" --storage ./s-nb 2>&1 | tee nb.log
 
       - name: Compare (isolated deltas)
         if: always()
