@@ -1,0 +1,135 @@
+name: ER + causal improvement loop (isolated A/B)
+
+# The measurement engine for the entity-resolution + causal-chain improvement loop.
+# Runs TWO fast harnesses for control vs a candidate flag, in isolation, and reports
+# per-metric deltas so each iteration is "isolated and improved or reverted":
+#   * --linking  : query->graph entity-LINKING accuracy (precision = no false links =
+#                  the catastrophic-merge analog; recall = right seeds found; no-seed%).
+#   * --lineage  : planted causal-chain retrieval (root-cause p@1/recall vs direct control).
+# Iteration N changes the `flag` input (a candidate SHODH_* lever) and reads the deltas.
+# WIN rubric: ER  -> link recall UP and/or no-seed% DOWN with precision HELD (never trade
+#                    precision for recall — a wrong link is worse than a missing one).
+#             causal -> root-cause p@1/recall UP with the direct-cause control HELD.
+
+on:
+  workflow_dispatch:
+    inputs:
+      flag:
+        description: 'Candidate lever for arm B, e.g. "SHODH_EVAL_NAME_EMB=1" (space-separated KEY=VAL ok)'
+        required: false
+        default: 'SHODH_EVAL_NAME_EMB=1'
+      chains:
+        description: 'Lineage chain count (--mh-chains)'
+        required: false
+        default: '120'
+  push:
+    paths:
+      - '.github/workflows/er-causal-loop.yml'
+      - 'src/recall_harness/lineage_harness.rs'
+      - 'src/recall_harness/runner.rs'
+      - 'src/graph_memory.rs'
+    branches: [exp/er-causal-loop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: er-causal-loop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  er-causal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      FLAG: ${{ github.event.inputs.flag || 'SHODH_EVAL_NAME_EMB=1' }}
+      CHAINS: ${{ github.event.inputs.chains || '120' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A — control · entity linking
+        run: set -o pipefail; ./target/release/recall-eval --linking link_a.json --storage ./s-la 2>&1 | tee la.log
+      - name: A — control · causal lineage
+        run: set -o pipefail; ./target/release/recall-eval --lineage lin_a.json --mh-chains "$CHAINS" --storage ./s-na 2>&1 | tee na.log
+      - name: B — candidate · entity linking
+        run: set -o pipefail; env $FLAG ./target/release/recall-eval --linking link_b.json --storage ./s-lb 2>&1 | tee lb.log
+      - name: B — candidate · causal lineage
+        run: set -o pipefail; env $FLAG ./target/release/recall-eval --lineage lin_b.json --mh-chains "$CHAINS" --storage ./s-nb 2>&1 | tee nb.log
+
+      - name: Compare (isolated deltas)
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re, json
+          def link(fn):
+              # parse the "| ALL | cases | NER | linked | no-seed% | mentions | precision | RECALL |" row
+              try: t=open(fn).read()
+              except FileNotFoundError: return {}
+              for line in t.splitlines():
+                  m=re.match(r'\|\s*ALL\s*\|\s*(\d+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|', line)
+                  if m: return dict(cases=int(m.group(1)), no_seed=float(m.group(4)),
+                                    precision=float(m.group(6)), recall=float(m.group(7)))
+              return {}
+          def lin(fn):
+              try: d=json.load(open(fn))
+              except Exception: return {}
+              rows=d.get('rows',[])
+              full=next((r for r in rows if r.get('layer')=='full'), rows[-1] if rows else {})
+              return dict(p1=full.get('multihop_p_at_1',float('nan')),
+                          rec=full.get('multihop_recall_at_10',float('nan')),
+                          ctrl_p1=full.get('onehop_p_at_1',float('nan')))
+          la,lb=link('la.log'),link('lb.log')
+          na,nb=lin('lin_a.json'),lin('lin_b.json')
+          import os
+          flag=os.environ.get('FLAG','?')
+          print(f"## ER + causal loop — control vs `{flag}` (isolated)\n")
+          def d(x,y):
+              return f"{y-x:+.4f}" if (x==x and y==y) else "n/a"
+          print("### Entity resolution (--linking)")
+          print("| metric | control | candidate | delta |")
+          print("| --- | --- | --- | --- |")
+          for k,lbl in [('precision','link precision (no false links)'),('recall','link recall'),('no_seed','no-seed %')]:
+              x,y=la.get(k,float('nan')),lb.get(k,float('nan'))
+              print(f"| {lbl} | {x} | {y} | {d(x,y)} |")
+          print("\n### Causal chains (--lineage, root-cause)")
+          print("| metric | control | candidate | delta |")
+          print("| --- | --- | --- | --- |")
+          for k,lbl in [('p1','root-cause p@1'),('rec','root-cause recall@10'),('ctrl_p1','direct-cause control p@1')]:
+              x,y=na.get(k,float('nan')),nb.get(k,float('nan'))
+              print(f"| {lbl} | {x} | {y} | {d(x,y)} |")
+          print("\n**Decision rubric:** ER WIN = link recall up and/or no-seed down with **precision held** "
+                "(never trade precision — a false link/merge is worse than a missing one). "
+                "Causal WIN = root-cause p@1/recall up with the direct-cause control held. "
+                "Bit-identical everywhere ⇒ the lever did not fire on these harnesses (revert, try the next).")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: er-causal-loop
+          path: |
+            *.log
+            lin_*.json
+            link_*.json
+          if-no-files-found: warn
