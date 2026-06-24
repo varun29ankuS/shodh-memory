@@ -17,7 +17,7 @@ on:
       flag:
         description: 'Candidate lever for arm B, e.g. "SHODH_EVAL_NAME_EMB=1" (space-separated KEY=VAL ok)'
         required: false
-        default: 'SHODH_EVAL_NAME_EMB=1'
+        default: 'SHODH_EVAL_NAME_EMB=1 SHODH_NAME_MERGE_TOKEN_GATE=1'
       chains:
         description: 'Lineage chain count (--mh-chains)'
         required: false
@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      FLAG: ${{ github.event.inputs.flag || 'SHODH_EVAL_NAME_EMB=1' }}
+      FLAG: ${{ github.event.inputs.flag || 'SHODH_EVAL_NAME_EMB=1 SHODH_NAME_MERGE_TOKEN_GATE=1' }}
       CHAINS: ${{ github.event.inputs.chains || '120' }}
     steps:
       - uses: actions/checkout@v4

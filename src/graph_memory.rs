@@ -2376,13 +2376,47 @@ impl GraphMemory {
                     }
                 }
                 if let Some((matched_uuid, sim)) = best_match {
-                    tracing::debug!(
-                        "Concept merge: '{}' matched existing entity {} (cosine={:.3})",
-                        entity.name,
-                        matched_uuid,
-                        sim
-                    );
-                    existing_uuid = Some(matched_uuid);
+                    // Content-token gate (SHODH_NAME_MERGE_TOKEN_GATE, default off):
+                    // require a shared proper-noun (capitalized) token between the two
+                    // names, so templated near-synonyms whose embedding is dominated by
+                    // a shared template — e.g. "the Vornak incident" vs "the Meslin
+                    // incident" — are NOT merged, while real name variants ("Rajesh
+                    // Kumar"/"R. Kumar", "Mohammed Ali"/"Muhammad Ali") still merge on
+                    // the shared surname. Cosine is still required above, so this can
+                    // only PREVENT a merge, never create a false one.
+                    let token_gate = std::env::var("SHODH_NAME_MERGE_TOKEN_GATE")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
+                    let allow = if token_gate {
+                        let proper_tokens = |s: &str| -> std::collections::HashSet<String> {
+                            s.split_whitespace()
+                                .filter(|w| w.chars().next().is_some_and(|c| c.is_uppercase()))
+                                .map(|w| {
+                                    w.trim_matches(|c: char| !c.is_alphanumeric())
+                                        .to_lowercase()
+                                })
+                                .filter(|w| w.len() >= 2)
+                                .collect()
+                        };
+                        match self.get_entity(&matched_uuid)? {
+                            Some(m) => proper_tokens(&entity.name)
+                                .intersection(&proper_tokens(&m.name))
+                                .next()
+                                .is_some(),
+                            None => true,
+                        }
+                    } else {
+                        true
+                    };
+                    if allow {
+                        tracing::debug!(
+                            "Concept merge: '{}' matched existing entity {} (cosine={:.3})",
+                            entity.name,
+                            matched_uuid,
+                            sim
+                        );
+                        existing_uuid = Some(matched_uuid);
+                    }
                 }
             }
         }
