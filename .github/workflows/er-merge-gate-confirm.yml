@@ -1,0 +1,122 @@
+name: ER merge-gate — LongMemEval default-flip confirm
+
+# The gate to making the content-token merge gate a NON-OPTIONAL default.
+# Embedding concept-merge is already the production default (entity names are
+# embedded at ingest). The proper-noun token gate hardens it against the
+# catastrophic templated over-merge. This run confirms the gate does not regress
+# the full benchmark before it is flipped on by default.
+#   A = production today : SHODH_EVAL_NAME_EMB=1                              (name-emb on, gate OFF)
+#   B = proposed default : SHODH_EVAL_NAME_EMB=1 SHODH_NAME_MERGE_TOKEN_GATE=1 (gate ON)
+# CONFIRM = B recall@10 >= A across categories (the gate only PREVENTS bad merges,
+# so it should be neutral-or-better). A regression means the gate blocks good
+# merges and must be tightened before any default flip.
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'LongMemEval questions per arm (blank = all 479)'
+        required: false
+        default: '50'
+  push:
+    paths:
+      - '.github/workflows/er-merge-gate-confirm.yml'
+      - 'src/graph_memory.rs'
+    branches: [exp/er-causal-loop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: er-gate-confirm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+      - name: Download LongMemEval-S + fixtures
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          JSON=$(python3 - <<'PY'
+          from huggingface_hub import hf_hub_download
+          print(hf_hub_download(repo_id='xiaowu0162/longmemeval-cleaned',
+                                filename='longmemeval_s_cleaned.json', repo_type='dataset'))
+          PY
+          )
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
+            ${{ github.event.inputs.limit != '' && format('--limit {0}', github.event.inputs.limit) || '--limit 50' }}
+          wc -l tests/recall/longmemeval/manifest.jsonl
+
+      - name: A — production (name-emb, no gate)
+        run: |
+          set -o pipefail
+          env SHODH_EVAL_NAME_EMB=1 ./target/release/recall-eval --longmemeval tests/recall/longmemeval \
+            --output /dev/null --storage ./lme-a 2>&1 | tee a.log
+      - name: B — proposed default (name-emb + gate)
+        run: |
+          set -o pipefail
+          env SHODH_EVAL_NAME_EMB=1 SHODH_NAME_MERGE_TOKEN_GATE=1 ./target/release/recall-eval --longmemeval tests/recall/longmemeval \
+            --output /dev/null --storage ./lme-b 2>&1 | tee b.log
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re
+          def parse(fn):
+              overall=float('nan'); p1=float('nan'); cats={}
+              try: t=open(fn).read()
+              except FileNotFoundError: return overall,p1,cats
+              for line in t.splitlines():
+                  mo=re.search(r'LongMemEval-S:.*recall@\d+\s*=\s*([0-9.]+)', line)
+                  if mo: overall=float(mo.group(1))
+                  mp=re.search(r'p@1\s*=\s*([0-9.]+)', line)
+                  if mp: p1=float(mp.group(1))
+                  mc=re.match(r'\s+(\w+)\s+n=(\d+)\s+recall@\d+\s*=\s*([0-9.]+)', line)
+                  if mc: cats[mc.group(1)]=float(mc.group(3))
+              return overall,p1,cats
+          ao,ap,ac=parse('a.log'); bo,bp,bc=parse('b.log')
+          def d(x,y): return f"{y-x:+.4f}" if (x==x and y==y) else "n/a"
+          print("## ER merge-gate confirm on LongMemEval-S — production vs gated\n")
+          print("| metric | prod (no gate) | gated | delta |")
+          print("| --- | --- | --- | --- |")
+          print(f"| recall@10 ALL | {ao:.4f} | {bo:.4f} | {d(ao,bo)} |")
+          print(f"| p@1 ALL | {ap:.4f} | {bp:.4f} | {d(ap,bp)} |")
+          for c in sorted(set(ac)|set(bc)):
+              x,y=ac.get(c,float('nan')),bc.get(c,float('nan'))
+              print(f"| recall@10 {c} | {x:.4f} | {y:.4f} | {d(x,y)} |")
+          print("\n**Confirm:** the gate flips to DEFAULT (always-on, flag removed) iff gated recall@10 "
+                ">= production across categories — it only PREVENTS bad merges, so neutral-or-better is "
+                "the pass. A regression = the gate blocks good merges; tighten before flipping.")
+          PY
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: er-gate-confirm
+          path: "*.log"
+          if-no-files-found: warn

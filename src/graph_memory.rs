@@ -2399,10 +2399,18 @@ impl GraphMemory {
                                 .collect()
                         };
                         match self.get_entity(&matched_uuid)? {
-                            Some(m) => proper_tokens(&entity.name)
-                                .intersection(&proper_tokens(&m.name))
-                                .next()
-                                .is_some(),
+                            Some(m) => {
+                                let a = proper_tokens(&entity.name);
+                                let b = proper_tokens(&m.name);
+                                // Only constrain proper-noun-bearing names. Lowercase
+                                // concept synonyms ("authentication"/"auth") carry no
+                                // proper tokens — leave those to cosine (Tier-4's
+                                // original purpose). Block only proper-noun entities
+                                // that share no discriminative token.
+                                a.is_empty()
+                                    || b.is_empty()
+                                    || a.intersection(&b).next().is_some()
+                            }
                             None => true,
                         }
                     } else {
