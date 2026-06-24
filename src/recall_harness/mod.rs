@@ -14,6 +14,7 @@ pub mod decay_sim;
 pub mod fixtures;
 pub mod forgetting_harness;
 pub mod lineage_harness;
+pub mod merge_harness;
 pub mod metrics;
 pub mod multihop;
 pub mod ontology_harness;

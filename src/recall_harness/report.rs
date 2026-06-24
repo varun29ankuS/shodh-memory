@@ -511,6 +511,23 @@ pub struct LinkingReport {
     pub by_category: BTreeMap<String, LinkingRow>,
 }
 
+/// ER merge-quality (cross-document entity resolution). Plants known coref clusters
+/// (same entity, surface variants) plus distinct entities with tempting collisions,
+/// and scores the pairwise merge decisions. `false_merge_rate` is the catastrophic
+/// metric — distinct entities wrongly fused.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MergeReport {
+    pub git_sha: String,
+    pub mentions: usize,
+    pub true_clusters: usize,
+    pub merge_precision: f64,
+    pub merge_recall: f64,
+    pub false_merge_rate: f64,
+    pub false_merges: usize,
+    pub correct_merges: usize,
+    pub missed_merges: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FunnelReport {
     pub suite: String,

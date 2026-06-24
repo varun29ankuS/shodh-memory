@@ -260,6 +260,11 @@ struct Args {
     #[arg(long)]
     lineage: Option<PathBuf>,
 
+    /// ER merge-quality: planted coref clusters + distinct collisions; reports merge
+    /// precision/recall and the catastrophic false-merge rate (cross-doc resolution).
+    #[arg(long)]
+    merge: Option<PathBuf>,
+
     /// LongMemEval-S (ICLR 2025, current SOTA long-term memory benchmark): path
     /// to the fixture dir built by benchmarks/longmemeval_to_harness.py
     /// (manifest.jsonl + corpora/). Each question has its own ~48-session
@@ -499,6 +504,15 @@ fn run(args: &Args) -> Result<i32> {
             "direct-cause control",
             "root-cause is reachable only by chaining past the lexical direct-cause distractor; if it stays ~0 across layers, causal/lineage retrieval is not exercised in eval.",
         );
+        return Ok(EXIT_PASS);
+    }
+
+    // ER merge-quality diagnostic.
+    if let Some(m_path) = &args.merge {
+        let report = shodh_memory::recall_harness::merge_harness::analyze_merge(&inputs)
+            .context("merge analysis")?;
+        std::fs::write(m_path, serde_json::to_string_pretty(&report)?)?;
+        summarise_merge(&report);
         return Ok(EXIT_PASS);
     }
 
@@ -978,6 +992,29 @@ fn summarise(report: &Report) {
 /// Resolve the current git SHA by shelling out. Returns an error rather
 /// than panicking so the binary can still produce a report when run from a
 /// non-git checkout (e.g. a release tarball).
+fn summarise_merge(r: &shodh_memory::recall_harness::report::MergeReport) {
+    println!("## ER merge quality (sha={})", r.git_sha);
+    println!(
+        "\n| mentions | true entities | merge precision | merge recall | FALSE-MERGE rate | false | correct | missed |"
+    );
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
+    println!(
+        "| {} | {} | {:.3} | {:.3} | {:.3} | {} | {} | {} |",
+        r.mentions,
+        r.true_clusters,
+        r.merge_precision,
+        r.merge_recall,
+        r.false_merge_rate,
+        r.false_merges,
+        r.correct_merges,
+        r.missed_merges
+    );
+    println!(
+        "\nFALSE-MERGE rate is the catastrophic metric — distinct entities wrongly fused. \
+         A lever that lifts merge_recall while raising false_merge_rate is a NET LOSS for ER."
+    );
+}
+
 fn summarise_linking(report: &shodh_memory::recall_harness::report::LinkingReport) {
     use shodh_memory::recall_harness::report::LinkingRow;
     println!(

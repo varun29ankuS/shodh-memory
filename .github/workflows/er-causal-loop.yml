@@ -26,7 +26,9 @@ on:
     paths:
       - '.github/workflows/er-causal-loop.yml'
       - 'src/recall_harness/lineage_harness.rs'
+      - 'src/recall_harness/merge_harness.rs'
       - 'src/recall_harness/runner.rs'
+      - 'src/bin/recall_eval.rs'
       - 'src/graph_memory.rs'
     branches: [exp/er-causal-loop]
 
@@ -75,6 +77,10 @@ jobs:
         run: set -o pipefail; env $FLAG ./target/release/recall-eval --output /dev/null --linking link_b.json --storage ./s-lb 2>&1 | tee lb.log
       - name: B — candidate · causal lineage
         run: set -o pipefail; env $FLAG ./target/release/recall-eval --output /dev/null --lineage lin_b.json --mh-chains "$CHAINS" --storage ./s-nb 2>&1 | tee nb.log
+      - name: A — control · merge quality
+        run: set -o pipefail; ./target/release/recall-eval --output /dev/null --merge merge_a.json --storage ./s-ma 2>&1 | tee ma.log
+      - name: B — candidate · merge quality
+        run: set -o pipefail; env $FLAG ./target/release/recall-eval --output /dev/null --merge merge_b.json --storage ./s-mb 2>&1 | tee mb.log
 
       - name: Compare (isolated deltas)
         if: always()
@@ -117,6 +123,18 @@ jobs:
           for k,lbl in [('p1','root-cause p@1'),('rec','root-cause recall@10'),('ctrl_p1','direct-cause control p@1')]:
               x,y=na.get(k,float('nan')),nb.get(k,float('nan'))
               print(f"| {lbl} | {x} | {y} | {d(x,y)} |")
+          def mrg(fn):
+              try: dd=json.load(open(fn))
+              except Exception: return {}
+              return dict(prec=dd.get('merge_precision',float('nan')), rec=dd.get('merge_recall',float('nan')),
+                          fmr=dd.get('false_merge_rate',float('nan')))
+          ma_,mb_=mrg('merge_a.json'),mrg('merge_b.json')
+          print("\n### Merge quality (--merge, cross-doc resolution — the false-merge guard)")
+          print("| metric | control | candidate | delta |")
+          print("| --- | --- | --- | --- |")
+          for k,lbl in [('prec','merge precision'),('rec','merge recall'),('fmr','FALSE-MERGE rate (catastrophic)')]:
+              x,y=ma_.get(k,float('nan')),mb_.get(k,float('nan'))
+              print(f"| {lbl} | {x} | {y} | {d(x,y)} |")
           print("\n**Decision rubric:** ER WIN = link recall up and/or no-seed down with **precision held** "
                 "(never trade precision — a false link/merge is worse than a missing one). "
                 "Causal WIN = root-cause p@1/recall up with the direct-cause control held. "
@@ -132,4 +150,5 @@ jobs:
             *.log
             lin_*.json
             link_*.json
+            merge_*.json
           if-no-files-found: warn
