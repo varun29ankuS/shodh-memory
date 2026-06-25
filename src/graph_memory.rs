@@ -1581,14 +1581,65 @@ fn person_person_knows() -> bool {
 
 /// Match relational cue phrases in ALREADY-LOWERCASED text → a typed predicate.
 /// Shared by the whole-text and span-scoped extractors below.
-fn predicate_from_cues(t: &str) -> Option<RelationType> {
+fn predicate_from_cues(t: &str, catena: bool) -> Option<RelationType> {
     use RelationType::*;
     let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
 
-    // Ordered by signal strength; first match wins. Cue fragments are chosen to
-    // survive an entity splitting the verb phrase ("X set Y in motion") — real text
-    // rarely keeps a relational verb contiguous, so matching only "set in motion"
-    // would miss the relation it is meant to capture.
+    // CATENA sieves 1+2 (SHODH_CATENA): a comprehensive causal lexicon — causative-verb
+    // classes (FrameNet "Causation" / VerbNet causal frames) + enabling verbs + causal
+    // discourse markers — classed by strength. Closed lexicon, no parser. Checked FIRST
+    // in CATENA mode so causal text is typed before the generic relation cues; direction
+    // for the effect-first (passive / consequence) markers is set in
+    // extract_directed_predicate, and verified by temporal precedence at edge creation.
+    if catena {
+        // (a) STRONG causative verbs -> Causes (high-confidence, agentive causation).
+        if has(&[
+            "in motion", "set off", "caused", "causing", "cause of",
+            "bring about", "brought about", "bringing about",
+            "give rise", "gave rise", "gives rise", "giving rise",
+            "lead to", "led to", "leads to", "leading to", "led directly to",
+            "result in", "resulted in", "results in", "resulting in",
+            "produce", "produced", "produces", "producing",
+            "generate", "generated", "generates",
+            "induce", "induced", "induces", "provoke", "provoked", "provokes",
+            "precipitate", "precipitated", "precipitates",
+            "prompt", "prompted", "prompts", "spark", "sparked", "sparks",
+            "trigger", "triggered", "triggers", "triggering",
+            "engender", "engendered", "occasion", "occasioned",
+            "drove", "drives", "driving", "fuel", "fueled", "fuelled",
+            "catalyse", "catalysed", "catalyze", "catalyzed",
+            "ignite", "ignited", "instigate", "instigated", "foment", "fomented",
+            "beget", "begot", "spawn", "spawned", "stir up", "stirred up",
+            "bring on", "brought on", "give way to", "gave way to",
+            "usher in", "ushered in", "kindle", "kindled", "unleash", "unleashed",
+            "set the stage for", "gave way", "spurred", "spur",
+        ]) {
+            return Some(Causes);
+        }
+        // (b) ENABLING causation + causal discourse / consequence markers -> Triggers
+        //     (weaker / linking causation, incl. the effect-first connectives).
+        if has(&[
+            "enable", "enabled", "enables", "enabling",
+            "allow", "allowed", "allows", "allowing",
+            "permit", "permitted", "permits", "facilitate", "facilitated", "facilitates",
+            "make possible", "made possible", "makes possible",
+            "pave the way", "paved the way", "open the door", "opened the door",
+            "because", "because of", "since", "as a result", "as a result of",
+            "consequently", "therefore", "hence", "thus", "due to", "owing to",
+            "thanks to", "on account of", "in response to", "in the wake of",
+            "stemmed from", "stem from", "stems from", "stemming from",
+            "arose from", "arise from", "arising from", "arises from",
+            "derived from", "derive from", "derives from",
+            "resulted from", "resulting from", "results from",
+            "followed directly from", "followed from", "follows from",
+            "consequence of", "by virtue of", "as a consequence",
+            "contributed to", "contributing to", "contribute to", "contributes to",
+        ]) {
+            return Some(Triggers);
+        }
+    }
+
+    // Base (non-CATENA) causal cues — UNCHANGED so the default path stays byte-identical.
     if has(&[
         "in motion",
         "brought about",
@@ -1660,7 +1711,7 @@ fn predicate_from_cues(t: &str) -> Option<RelationType> {
 /// simple single-relation path and unit tests. Prefer `extract_directed_predicate`
 /// at edge-creation time.
 pub fn extract_predicate_from_text(text: &str) -> Option<RelationType> {
-    predicate_from_cues(&text.to_ascii_lowercase())
+    predicate_from_cues(&text.to_ascii_lowercase(), false)
 }
 
 /// Span-scoped, DIRECTION-aware predicate recovery. Locates both entity mentions,
@@ -1715,10 +1766,72 @@ pub fn extract_directed_predicate(
         .map(|i| hi + i)
         .unwrap_or(lc.len());
     let sentence = &lc[sent_start..sent_end];
-    let rt = predicate_from_cues(sentence)?;
+    let catena = std::env::var("SHODH_CATENA")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let rt = predicate_from_cues(sentence, catena)?;
     // Effect-first constructions: the earlier mention is the EFFECT, not the cause.
-    const EFFECT_FIRST_CUES: [&str; 4] = ["because of", "due to", "caused by", "triggered by"];
-    let effect_first = EFFECT_FIRST_CUES.iter().any(|c| sentence.contains(c));
+    const EFFECT_FIRST_BASE: &[&str] = &["because of", "due to", "caused by", "triggered by"];
+    // CATENA: the expanded lexicon's effect-first (passive / consequence) markers,
+    // where surface order contradicts causal order. This is the lexical half of the
+    // temporal-precedence sieve — for these cues the grammar alone fixes direction.
+    const EFFECT_FIRST_CATENA: &[&str] = &[
+        // passive causatives (the effect is the grammatical subject, mentioned first)
+        "caused by",
+        "triggered by",
+        "induced by",
+        "provoked by",
+        "prompted by",
+        "produced by",
+        "generated by",
+        "driven by",
+        "brought about by",
+        "set off by",
+        // consequence / origin connectives (effect stated, then its source)
+        "because of",
+        "due to",
+        "owing to",
+        "thanks to",
+        "on account of",
+        "as a result of",
+        "as a consequence",
+        "consequence of",
+        "in response to",
+        "in the wake of",
+        "by virtue of",
+        "followed directly from",
+        "followed from",
+        "follows from",
+        "stemmed from",
+        "stem from",
+        "stems from",
+        "stemming from",
+        "arose from",
+        "arise from",
+        "arising from",
+        "arises from",
+        "derived from",
+        "derive from",
+        "derives from",
+        "resulted from",
+        "resulting from",
+        "results from",
+    ];
+    // CATENA precision sieve: suppress causation the sentence NEGATES ("did not
+    // cause", "without triggering", "failed to lead to") — asserting it would write a
+    // false causal edge, the counterclaim failure mode. Conservative (any negator in
+    // the causal clause), consistent with CATENA's precision-over-recall stance.
+    if catena {
+        const NEGATORS: &[&str] = &[
+            "not ", "n't ", "never ", "without ", "failed to ", "unable to ",
+            "no longer ", "did not", "does not", "do not", "cannot", "rather than ",
+        ];
+        if NEGATORS.iter().any(|n| sentence.contains(n)) {
+            return None;
+        }
+    }
+    let cues = if catena { EFFECT_FIRST_CATENA } else { EFFECT_FIRST_BASE };
+    let effect_first = cues.iter().any(|c| sentence.contains(c));
     let a_first = pa < pb;
     Some((rt, if effect_first { !a_first } else { a_first }))
 }
