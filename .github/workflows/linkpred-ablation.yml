@@ -1,0 +1,127 @@
+# Link-prediction ablation — does inferring embedding-space "missing bridges"
+# help multi-hop WITHOUT polluting the graph? (SHODH_GRAPH_LINKPRED.)
+#
+# Both arms run the heavy maintenance pass (SHODH_EVAL_CONSOLIDATE=1) so the hook
+# fires identically; only B turns on link prediction:
+#   A = consolidation only
+#   B = consolidation + SHODH_GRAPH_LINKPRED=1   (infer embedding-similar bridges)
+# Reports recall@10 (overall + per-category, esp. multi_hop) and edges added /
+# inferred. Compare step strips ANSI before parsing the tracing logs.
+name: Link-Prediction Ablation
+on:
+  push:
+    branches: ['exp/pmi-edge-gate', 'exp/graph-linkpred']
+    paths: ['src/graph_memory.rs', 'src/memory/mod.rs', '.github/workflows/linkpred-ablation.yml']
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'recall suite: locomo or locomo-gate (fast)'
+        required: false
+        default: 'locomo-gate'
+      min_cosine:
+        description: 'SHODH_GRAPH_LINKPRED_MIN (cosine threshold)'
+        required: false
+        default: '0.70'
+
+permissions:
+  contents: read
+concurrency:
+  group: linkpred-ablation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ablation:
+    name: Link-pred A/B
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Arm A — consolidation only
+        env:
+          SHODH_EVAL_CONSOLIDATE: '1'
+          RUST_LOG: shodh_memory::handlers::state=info,shodh_memory::memory=info
+        run: |
+          ./target/release/recall-eval \
+            --suite "${{ github.event.inputs.suite || 'locomo-gate' }}" \
+            --output a-recall.json --storage ./a-storage 2>a.log | tee a-stdout.log
+
+      - name: Arm B — consolidation + link prediction
+        env:
+          SHODH_EVAL_CONSOLIDATE: '1'
+          SHODH_GRAPH_LINKPRED: '1'
+          SHODH_GRAPH_LINKPRED_MIN: ${{ github.event.inputs.min_cosine || '0.70' }}
+          RUST_LOG: shodh_memory::handlers::state=info,shodh_memory::memory=info
+        run: |
+          ./target/release/recall-eval \
+            --suite "${{ github.event.inputs.suite || 'locomo-gate' }}" \
+            --output b-recall.json --storage ./b-storage 2>b.log | tee b-stdout.log
+
+      - name: Compare — multi-hop recall + edges added/inferred
+        run: |
+          echo "## Link-prediction ablation (min_cosine=${{ github.event.inputs.min_cosine || '0.70' }})" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, re, sys
+          ANSI=re.compile(r'\x1b\[[0-9;]*m')
+          def load(f):
+              d=json.load(open(f)); return d,(d['layers'].get('full') or next(iter(d['layers'].values())))
+          def stats(f):
+              e=dict(generic=0,cue=0,semantic=0,pair_table=0,learned=0,fragment_blocked=0,pmi_gated=0); inferred=0
+              for line in open(f,errors='ignore'):
+                  l=ANSI.sub('',line)
+                  if 'edge typing provenance' in l:
+                      for k,v in re.findall(r'(\w+)=(\d+)',l):
+                          if k in e: e[k]+=int(v)
+                  m=re.search(r'linkpred maintenance pass.*', l)
+                  for k,v in re.findall(r'inferred=(\d+)', l):
+                      pass
+                  mm=re.search(r'inferred=(\d+)', l)
+                  if mm and 'linkpred' in l: inferred+=int(mm.group(1))
+              e['stored']=e['generic']+e['cue']+e['semantic']+e['pair_table']+e['learned']+e['fragment_blocked']
+              e['inferred']=inferred
+              return e
+          da,fa=load('a-recall.json'); db,fb=load('b-recall.json')
+          ea,eb=stats('a.log'),stats('b.log')
+          print("### recall@10 (A=consolidate  B=+linkpred)")
+          for m in ('recall@10','ndcg@10','mrr'):
+              print(f"- {m}: A {fa[m]:.4f}  B {fb[m]:.4f}  delta {fb[m]-fa[m]:+.4f}")
+          print("\n### per-category recall@10 (multi_hop is the target)")
+          print("| category | A | B | delta |"); print("| --- | --- | --- | --- |")
+          for c in sorted(da['by_category']):
+              a=da['by_category'][c]['recall@10']; b=db['by_category'].get(c,{}).get('recall@10',0)
+              print(f"| {c} | {a:.3f} | {b:.3f} | {b-a:+.3f} |")
+          print(f"\n### graph: stored edges A {ea['stored']} -> B {eb['stored']} (delta {eb['stored']-ea['stored']}); linkpred inferred (B): {eb['inferred']}")
+          PY
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkpred-ablation
+          path: |
+            a-recall.json
+            b-recall.json
+            a.log
+            b.log
