@@ -4937,6 +4937,30 @@ impl MemorySystem {
                     .then_with(|| a.id.cmp(&b.id))
             });
 
+            // LAYER 4.95-FINAL: re-assert the causal-origin answer at the TOP, after all
+            // full-mode re-ranking (linguistic re-sort, competition demotion) that
+            // displaced the post-fusion placement — the cause of full-mode root-cause
+            // P@1 0.52 vs +facts 1.0 ("8 cases survived +facts then vanished at full").
+            // A structurally-certain origin must not be re-ranked by soft-similarity
+            // boosts; move the traced root(s) to the front in support order. Gated by
+            // SHODH_CAUSAL_ORIGIN_FINAL; strict no-op when no origin was traced, so no
+            // other category can regress.
+            let origin_final = std::env::var("SHODH_CAUSAL_ORIGIN_FINAL")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if origin_final && !causal_origin_episode_ids.is_empty() {
+                let mut front = 0usize;
+                for oid in &causal_origin_episode_ids {
+                    if let Some(cur) = memories.iter().position(|m| &m.id == oid) {
+                        if cur != front {
+                            let item = memories.remove(cur);
+                            memories.insert(front, item);
+                        }
+                        front += 1;
+                    }
+                }
+            }
+
             // Post-Layer-5 graph-exclusive rank reserve: ensure each reserved
             // candidate present in `memories` lands within the kept window by
             // promoting it to the window tail (displacing the lowest-scored
