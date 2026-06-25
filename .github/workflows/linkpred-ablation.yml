@@ -62,6 +62,7 @@ jobs:
       - name: Arm A — consolidation only
         env:
           SHODH_EVAL_CONSOLIDATE: '1'
+          SHODH_EVAL_NAME_EMB: '1'   # populate entity name_embedding (prod-faithful) so linkpred has vectors
           RUST_LOG: shodh_memory::handlers::state=info,shodh_memory::memory=info
         run: |
           ./target/release/recall-eval \
@@ -71,6 +72,7 @@ jobs:
       - name: Arm B — consolidation + link prediction
         env:
           SHODH_EVAL_CONSOLIDATE: '1'
+          SHODH_EVAL_NAME_EMB: '1'
           SHODH_GRAPH_LINKPRED: '1'
           SHODH_GRAPH_LINKPRED_MIN: ${{ github.event.inputs.min_cosine || '0.70' }}
           RUST_LOG: shodh_memory::handlers::state=info,shodh_memory::memory=info
