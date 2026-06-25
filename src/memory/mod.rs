@@ -4919,9 +4919,11 @@ impl MemorySystem {
         // demotion) AND move them to the front, so they survive both the conditional final
         // sort and the no-sort path. Strict no-op for non-origin queries — no other
         // category can regress.
+        // DEFAULT ON: strict no-op for non-origin queries; full-mode root-cause P@1
+        // 0.52->1.00 on the hard harness, LongMemEval bit-identical. Opt out with =0.
         let origin_final = std::env::var("SHODH_CAUSAL_ORIGIN_FINAL")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
         if origin_final && layer_full && !causal_origin_episode_ids.is_empty() {
             let cur_max = memories
                 .iter()

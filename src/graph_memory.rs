@@ -1879,9 +1879,11 @@ pub fn extract_directed_predicate(
         .map(|i| hi + i)
         .unwrap_or(lc.len());
     let sentence = &lc[sent_start..sent_end];
+    // DEFAULT ON (LongMemEval-50 bit-identical 0.7660 with CATENA vs baseline, run
+    // 28183617370; hard-harness root-cause P@1 0.58->1.00). Opt out with SHODH_CATENA=0.
     let catena = std::env::var("SHODH_CATENA")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+        .unwrap_or(true);
     let rt = predicate_from_cues(sentence, catena)?;
     // Effect-first constructions: the earlier mention is the EFFECT, not the cause.
     const EFFECT_FIRST_BASE: &[&str] = &["because of", "due to", "caused by", "triggered by"];
