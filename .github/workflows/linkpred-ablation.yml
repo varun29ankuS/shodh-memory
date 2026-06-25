@@ -63,7 +63,7 @@ jobs:
         env:
           SHODH_EVAL_CONSOLIDATE: '1'
           SHODH_EVAL_NAME_EMB: '1'   # populate entity name_embedding (prod-faithful) so linkpred has vectors
-          RUST_LOG: shodh_memory::handlers::state=info,shodh_memory::memory=info
+          RUST_LOG: shodh_memory::handlers::state=info,shodh_memory::memory=info,shodh_memory::graph_memory=info
         run: |
           ./target/release/recall-eval \
             --suite "${{ github.event.inputs.suite || 'locomo-gate' }}" \
@@ -74,8 +74,9 @@ jobs:
           SHODH_EVAL_CONSOLIDATE: '1'
           SHODH_EVAL_NAME_EMB: '1'
           SHODH_GRAPH_LINKPRED: '1'
+          SHODH_GRAPH_LINKPRED_CONTEXT: '1'   # increment 2: neighbour-centroid (relational) vectors, not bare name
           SHODH_GRAPH_LINKPRED_MIN: ${{ github.event.inputs.min_cosine || '0.50' }}
-          RUST_LOG: shodh_memory::handlers::state=info,shodh_memory::memory=info
+          RUST_LOG: shodh_memory::handlers::state=info,shodh_memory::memory=info,shodh_memory::graph_memory=info
         run: |
           ./target/release/recall-eval \
             --suite "${{ github.event.inputs.suite || 'locomo-gate' }}" \

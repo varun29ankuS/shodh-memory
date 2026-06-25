@@ -5811,26 +5811,75 @@ impl GraphMemory {
     /// embedded entities (`mention_count >= 2`); one-shot mentions and recogniser
     /// fragments are noise. Returns the number of edges touched.
     pub fn infer_embedding_edges(&self, min_cosine: f32, max_degree: usize) -> Result<usize> {
+        use std::collections::HashMap;
         let entities = self.get_all_entities()?;
+        // Per-entity vector to compare. Default = bare name embedding. With
+        // SHODH_GRAPH_LINKPRED_CONTEXT=1, use the centroid of each entity's graph
+        // neighbours' name embeddings — RELATIONAL context (who it connects to),
+        // which captures bridge similarity that near-orthogonal bare-name cosine
+        // misses (name cosine inferred almost nothing: only literally similar
+        // surface names, which the Tier-4 merge has already collapsed).
+        let use_context = std::env::var("SHODH_GRAPH_LINKPRED_CONTEXT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let name_vec: HashMap<uuid::Uuid, &Vec<f32>> = entities
+            .iter()
+            .filter_map(|e| e.name_embedding.as_ref().map(|v| (e.uuid, v)))
+            .collect();
+        let vectors: HashMap<uuid::Uuid, Vec<f32>> = if use_context {
+            let rels = self.get_all_relationships()?;
+            let mut adj: HashMap<uuid::Uuid, Vec<uuid::Uuid>> = HashMap::new();
+            for r in &rels {
+                adj.entry(r.from_entity).or_default().push(r.to_entity);
+                adj.entry(r.to_entity).or_default().push(r.from_entity);
+            }
+            let mut out = HashMap::new();
+            for e in &entities {
+                let Some(nbrs) = adj.get(&e.uuid) else {
+                    continue;
+                };
+                let mut centroid: Vec<f32> = Vec::new();
+                let mut n = 0u32;
+                for nb in nbrs {
+                    if let Some(v) = name_vec.get(nb) {
+                        if centroid.is_empty() {
+                            centroid = vec![0.0; v.len()];
+                        }
+                        if centroid.len() == v.len() {
+                            for (c, x) in centroid.iter_mut().zip(v.iter()) {
+                                *c += x;
+                            }
+                            n += 1;
+                        }
+                    }
+                }
+                if n > 0 {
+                    for c in centroid.iter_mut() {
+                        *c /= n as f32;
+                    }
+                    out.insert(e.uuid, centroid);
+                }
+            }
+            out
+        } else {
+            name_vec.iter().map(|(k, v)| (*k, (*v).clone())).collect()
+        };
         let cand: Vec<&EntityNode> = entities
             .iter()
-            .filter(|e| e.name_embedding.is_some() && e.mention_count >= 2)
+            .filter(|e| vectors.contains_key(&e.uuid) && e.mention_count >= 2)
             .collect();
         let now = Utc::now();
         let mut inferred = 0usize;
         let mut max_seen = 0.0f32; // diagnostic: highest pairwise cosine observed
         for (i, ei) in cand.iter().enumerate() {
-            let emb_i = ei.name_embedding.as_ref().unwrap();
+            let vi = &vectors[&ei.uuid];
             // rank the OTHER candidates by cosine; take the strongest above threshold
             let mut scored: Vec<(f32, &EntityNode)> = Vec::new();
             for (j, ej) in cand.iter().enumerate() {
                 if j == i {
                     continue;
                 }
-                let s = crate::similarity::cosine_similarity(
-                    emb_i,
-                    ej.name_embedding.as_ref().unwrap(),
-                );
+                let s = crate::similarity::cosine_similarity(vi, &vectors[&ej.uuid]);
                 if s > max_seen {
                     max_seen = s;
                 }
@@ -5854,7 +5903,12 @@ impl GraphMemory {
                     valid_at: now,
                     invalidated_at: None,
                     source_episode_id: None,
-                    context: "linkpred:embedding".to_string(),
+                    context: (if use_context {
+                        "linkpred:context"
+                    } else {
+                        "linkpred:embedding"
+                    })
+                    .to_string(),
                     last_activated: now,
                     activation_count: 1,
                     ltp_status: LtpStatus::Burst { detected_at: now },
@@ -5873,6 +5927,7 @@ impl GraphMemory {
             total_entities = entities.len(),
             candidates = cand.len(),
             max_cosine = max_seen,
+            context = use_context,
             inferred,
             "linkpred diag"
         );
