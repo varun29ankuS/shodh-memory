@@ -3362,6 +3362,23 @@ impl MultiUserMemoryManager {
         let pmi_edges: bool = std::env::var("SHODH_GRAPH_PMI_EDGES")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        // PMI² EDGE GATE (Stanford OpenIE precision filter). Where SHODH_GRAPH_PMI_EDGES
+        // only DOWN-WEIGHTS a kept edge, this PRUNES a GENERIC co-occurrence edge whose
+        // pointwise mutual information is below SHODH_GRAPH_PMI_GATE_MIN — i.e. incidental
+        // co-occurrence (two entities sharing a passage by chance, dominated by a ubiquitous
+        // endpoint) is never stored at all. Typed edges (cue/semantic/learned/label) and
+        // fragment bridges always survive — they carry grounding the PMI lacks. The point:
+        // a co-occurrence graph is >80% incidental edges; dropping them shrinks the graph
+        // AND removes noise. Default OFF — A/B for graph SIZE + edge precision, not just recall@10.
+        let pmi_gate: bool = std::env::var("SHODH_GRAPH_PMI_GATE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        // PPMI floor by default: prune generic edges whose PMI < 0.0 (they co-occur no more
+        // than chance). Raise it to prune more aggressively; lower (negative) to keep more.
+        let pmi_gate_min: f32 = std::env::var("SHODH_GRAPH_PMI_GATE_MIN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
         // N (total episodes) and its log (the PMI normalizer), read once outside the
         // O(n^2) pair loop. mention_count is the per-entity document-frequency proxy.
         let total_episodes = graph_guard.total_episode_count().max(1) as f32;
@@ -3388,6 +3405,7 @@ impl MultiUserMemoryManager {
         let mut typed_learned = 0usize;
         let mut untyped_generic = 0usize;
         let mut typed_blocked_fragment = 0usize;
+        let mut pmi_gated = 0usize;
 
         // SHODH_LEARNED_PAIRS: the learned label-pair table (Stanford-1, PMI²
         // relation mapping) — every cue hit records (label-pair, relation,
@@ -3593,6 +3611,32 @@ impl MultiUserMemoryManager {
                     label_relation
                 };
 
+                // PMI² gate (Stanford OpenIE precision filter): drop an INCIDENTAL
+                // generic co-occurrence edge at birth. Only fires on generic
+                // (CoOccurs/RelatedTo), NON-fragment edges — typed edges and fragment
+                // bridges are never pruned. PMI = log2(N / (df_i·df_j)) at birth (co=1);
+                // below the floor means the pair co-occurs no more than chance → noise.
+                if pmi_gate
+                    && !(fragment_of_comention[i] || fragment_of_comention[j])
+                    && matches!(
+                        relation_type,
+                        crate::graph_memory::RelationType::CoOccurs
+                            | crate::graph_memory::RelationType::RelatedTo
+                    )
+                {
+                    let df_i =
+                        rep_i.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
+                    let df_j =
+                        rep_j.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
+                    let pmi = (total_episodes / (df_i * df_j)).log2();
+                    if pmi < pmi_gate_min {
+                        pmi_gated += 1;
+                        // it was tallied as generic above; move the tally to pmi_gated
+                        untyped_generic = untyped_generic.saturating_sub(1);
+                        continue;
+                    }
+                }
+
                 let edge = RelationshipEdge {
                     uuid: uuid::Uuid::new_v4(),
                     from_entity,
@@ -3627,6 +3671,7 @@ impl MultiUserMemoryManager {
             + typed_learned
             + untyped_generic
             + typed_blocked_fragment
+            + pmi_gated
             > 0
         {
             tracing::info!(
@@ -3636,6 +3681,7 @@ impl MultiUserMemoryManager {
                 learned = typed_learned,
                 generic = untyped_generic,
                 fragment_blocked = typed_blocked_fragment,
+                pmi_gated = pmi_gated,
                 "edge typing provenance"
             );
         }
