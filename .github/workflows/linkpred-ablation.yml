@@ -21,7 +21,7 @@ on:
       min_cosine:
         description: 'SHODH_GRAPH_LINKPRED_MIN (cosine threshold)'
         required: false
-        default: '0.70'
+        default: '0.50'
 
 permissions:
   contents: read
@@ -74,7 +74,7 @@ jobs:
           SHODH_EVAL_CONSOLIDATE: '1'
           SHODH_EVAL_NAME_EMB: '1'
           SHODH_GRAPH_LINKPRED: '1'
-          SHODH_GRAPH_LINKPRED_MIN: ${{ github.event.inputs.min_cosine || '0.70' }}
+          SHODH_GRAPH_LINKPRED_MIN: ${{ github.event.inputs.min_cosine || '0.50' }}
           RUST_LOG: shodh_memory::handlers::state=info,shodh_memory::memory=info
         run: |
           ./target/release/recall-eval \
@@ -83,7 +83,7 @@ jobs:
 
       - name: Compare — multi-hop recall + edges added/inferred
         run: |
-          echo "## Link-prediction ablation (min_cosine=${{ github.event.inputs.min_cosine || '0.70' }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Link-prediction ablation (min_cosine=${{ github.event.inputs.min_cosine || '0.50' }})" >> "$GITHUB_STEP_SUMMARY"
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, re, sys
           ANSI=re.compile(r'\x1b\[[0-9;]*m')

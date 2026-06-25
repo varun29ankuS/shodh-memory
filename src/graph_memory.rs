@@ -5818,23 +5818,26 @@ impl GraphMemory {
             .collect();
         let now = Utc::now();
         let mut inferred = 0usize;
+        let mut max_seen = 0.0f32; // diagnostic: highest pairwise cosine observed
         for (i, ei) in cand.iter().enumerate() {
             let emb_i = ei.name_embedding.as_ref().unwrap();
             // rank the OTHER candidates by cosine; take the strongest above threshold
-            let mut scored: Vec<(f32, &EntityNode)> = cand
-                .iter()
-                .enumerate()
-                .filter_map(|(j, ej)| {
-                    if j == i {
-                        return None;
-                    }
-                    let s = crate::similarity::cosine_similarity(
-                        emb_i,
-                        ej.name_embedding.as_ref().unwrap(),
-                    );
-                    (s >= min_cosine).then_some((s, *ej))
-                })
-                .collect();
+            let mut scored: Vec<(f32, &EntityNode)> = Vec::new();
+            for (j, ej) in cand.iter().enumerate() {
+                if j == i {
+                    continue;
+                }
+                let s = crate::similarity::cosine_similarity(
+                    emb_i,
+                    ej.name_embedding.as_ref().unwrap(),
+                );
+                if s > max_seen {
+                    max_seen = s;
+                }
+                if s >= min_cosine {
+                    scored.push((s, *ej));
+                }
+            }
             scored.sort_by(|a, b| b.0.total_cmp(&a.0));
             for (s, ej) in scored.into_iter().take(max_degree) {
                 let rt = infer_relation_type_for_pair(
@@ -5866,9 +5869,13 @@ impl GraphMemory {
                 }
             }
         }
-        if inferred > 0 {
-            tracing::info!(inferred_edges = inferred, "linkpred embedding edges inferred");
-        }
+        tracing::info!(
+            total_entities = entities.len(),
+            candidates = cand.len(),
+            max_cosine = max_seen,
+            inferred,
+            "linkpred diag"
+        );
         Ok(inferred)
     }
 
