@@ -1,0 +1,117 @@
+# Embedder ablation — does a stronger embedder lift LongMemEval recall@10?
+#
+# The embedder feeds the VECTOR leg, which carries recall@10 (unlike NER/graph,
+# which is redundant in fusion). So this is the one lever with a real shot at the
+# headline 0.766. Step 1 (this run) tests nomic-768 — already supported (mean pool,
+# 768-native, prefixes), zero hot-path code. If it moves recall, the CLS-pooling work
+# for Granite/Arctic is justified. One shared fixture, two arms:
+#   A = MiniLM-L6 (current, 384-dim)
+#   B = nomic-embed-text-v1.5 at native 768 (SHODH_EMBEDDER=nomic, SHODH_TEXT_DIM=768)
+name: Embedder Ablation
+on:
+  push:
+    branches: ['exp/embedder-test']
+    paths: ['.github/workflows/embedder-ablation.yml', 'src/embeddings/**']
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'LongMemEval questions'
+        required: false
+        default: '50'
+
+permissions:
+  contents: read
+concurrency:
+  group: embedder-ablation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ablation:
+    name: Embedder A/B
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+
+      - name: Cache MiniLM embedder
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM (baseline arm)
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Download nomic-embed-text-v1.5 ONNX (768)
+        run: |
+          NOMIC_DIR="$HOME/models/nomic-v1.5"
+          mkdir -p "$NOMIC_DIR"
+          B="https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main"
+          curl -fL --retry 5 --retry-all-errors -o "$NOMIC_DIR/model.onnx"     "$B/onnx/model.onnx"
+          curl -fL --retry 5 --retry-all-errors -o "$NOMIC_DIR/tokenizer.json" "$B/tokenizer.json"
+          ls -la "$NOMIC_DIR"
+          echo "NOMIC_DIR=$NOMIC_DIR" >> "$GITHUB_ENV"
+
+      - name: Build ONE shared LongMemEval fixture
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          JSON=$(python3 - <<'PY'
+          from huggingface_hub import hf_hub_download
+          print(hf_hub_download(repo_id='xiaowu0162/longmemeval-cleaned',
+                                filename='longmemeval_s_cleaned.json', repo_type='dataset'))
+          PY
+          )
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
+            --limit ${{ github.event.inputs.limit || '50' }}
+          wc -l tests/recall/longmemeval/manifest.jsonl
+
+      - name: Arm A — MiniLM-L6 (384, baseline)
+        run: |
+          ./target/release/recall-eval --longmemeval tests/recall/longmemeval \
+            --output unused-a.json --storage ./a-storage 2>&1 | tee a.log
+          grep -E "LongMemEval-S:|recall@10" a.log | tee a-summary.txt || true
+
+      - name: Arm B — nomic-embed-text-v1.5 (native 768)
+        env:
+          SHODH_EMBEDDER: nomic
+          SHODH_MODEL_PATH: /home/runner/models/nomic-v1.5
+          SHODH_TEXT_DIM: '768'
+          SHODH_USE_QUANTIZED_MODEL: '0'
+        run: |
+          ./target/release/recall-eval --longmemeval tests/recall/longmemeval \
+            --output unused-b.json --storage ./b-storage 2>&1 | tee b.log
+          grep -E "LongMemEval-S:|recall@10" b.log | tee b-summary.txt || true
+
+      - name: Compare
+        if: always()
+        run: |
+          echo "## Embedder ablation — MiniLM-L6 (384) vs nomic-768" >> "$GITHUB_STEP_SUMMARY"
+          echo '### A — MiniLM-L6' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat a-summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo '### B — nomic-768' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat b-summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedder-ablation
+          path: |
+            a.log
+            b.log
+            a-summary.txt
+            b-summary.txt
