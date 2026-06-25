@@ -101,6 +101,131 @@ pub fn generate_lineage_fixtures(chains: usize) -> (Vec<CorpusItem>, Vec<SmokeCa
     (corpus, cases)
 }
 
+/// HARDER lineage fixtures (`SHODH_LINEAGE_HARD=1`). Four upgrades over the easy
+/// generator (which is solved at ~0.88, so it can't show causal gains):
+/// 1. **3 causal hops** (a→b→c→d), root cause three back — deeper reachability.
+/// 2. **Realistic entity names** (not synthetic "Vornak") — exercises NER + resolution.
+/// 3. **Varied + INVERTED causal cues** — half the links are passive ("d was caused by
+///    c"), so surface word-order ≠ causal order; only the event TIMESTAMP (cause logged
+///    before effect) recovers direction. This is exactly the CATENA temporal-precedence
+///    sieve's job, and the current cue-template extractor cannot do it.
+/// 4. **Per-chain distractor** that mentions the effect without being on the causal path.
+pub fn generate_lineage_fixtures_hard(chains: usize) -> (Vec<CorpusItem>, Vec<SmokeCase>) {
+    const HARD_EVENTS: &[&str] = &[
+        "the Meridian budget cut",
+        "the Aurora launch delay",
+        "the Cresswell resignation",
+        "the Northwind contract loss",
+        "the Halcyon data breach",
+        "the Pinnacle merger",
+        "the Sterling audit finding",
+        "the Vanguard recall",
+        "the Beacon network outage",
+        "the Temple Road protest",
+        "the Larkin layoffs",
+        "the Orion cost overrun",
+        "the Sable supply shortage",
+        "the Quillon court ruling",
+        "the Marrow plant strike",
+        "the Dunmore chemical spill",
+        "the Castille trade embargo",
+        "the Faraday patent dispute",
+        "the Wexler scandal",
+        "the Ardent loan default",
+    ];
+    let ev = |n: usize| -> String {
+        let base = HARD_EVENTS[n % HARD_EVENTS.len()];
+        let block = n / HARD_EVENTS.len();
+        if block == 0 {
+            base.to_string()
+        } else {
+            format!("{base} ({})", block + 1)
+        }
+    };
+    // Causal phrasings; variants 3-5 are INVERTED (effect mentioned first), so word
+    // order contradicts causal order and only the timestamp disambiguates direction.
+    let link = |cause: &str, effect: &str, variant: usize| -> String {
+        match variant % 6 {
+            0 => format!("{cause} led to {effect}."),
+            1 => format!("{cause} triggered {effect}."),
+            2 => format!("{cause} set {effect} in motion."),
+            3 => format!("{effect} was caused by {cause}."),
+            4 => format!("{effect} followed directly from {cause}."),
+            _ => format!("{effect}, a direct consequence of {cause}."),
+        }
+    };
+    let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let mut corpus: Vec<CorpusItem> = Vec::with_capacity(chains * 4);
+    let mut cases: Vec<SmokeCase> = Vec::with_capacity(chains * 2);
+
+    for i in 0..chains {
+        let a = ev(4 * i); // root cause
+        let b = ev(4 * i + 1);
+        let c = ev(4 * i + 2);
+        let d = ev(4 * i + 3); // observed effect
+        let m1 = format!("lin-h-root-{i:04}"); // a → b
+        let m2 = format!("lin-h-mid-{i:04}"); // b → c
+        let m3 = format!("lin-h-prox-{i:04}"); // c → d (mentions d)
+
+        // Timestamps follow CAUSAL order (a before b before c before d) regardless of
+        // surface phrasing — the temporal-precedence signal the sieve must exploit.
+        corpus.push(CorpusItem {
+            id: m1.clone(),
+            content: link(&a, &b, i),
+            memory_type: "fact".to_string(),
+            tags: vec![a.clone(), b.clone()],
+            created_at: base + chrono::Duration::minutes(4 * i as i64),
+        });
+        corpus.push(CorpusItem {
+            id: m2.clone(),
+            content: link(&b, &c, i + 2),
+            memory_type: "fact".to_string(),
+            tags: vec![b.clone(), c.clone()],
+            created_at: base + chrono::Duration::minutes(4 * i as i64 + 1),
+        });
+        corpus.push(CorpusItem {
+            id: m3.clone(),
+            content: link(&c, &d, i + 4),
+            memory_type: "fact".to_string(),
+            tags: vec![c.clone(), d.clone()],
+            created_at: base + chrono::Duration::minutes(4 * i as i64 + 2),
+        });
+        // Distractor: mentions the effect d but carries NO causal link back.
+        corpus.push(CorpusItem {
+            id: format!("lin-h-dist-{i:04}"),
+            content: format!("{d} was reviewed at the quarterly briefing."),
+            memory_type: "fact".to_string(),
+            tags: vec![d.clone()],
+            created_at: base + chrono::Duration::minutes(4 * i as i64 + 3),
+        });
+
+        // Root-cause case: gold = m1 (a→b), THREE causal hops back (d←c←b←a). Reachable
+        // only by chaining; m3 (mentions d) and the distractor are hard negatives.
+        cases.push(SmokeCase {
+            id: format!("lin-h-why-{i:04}"),
+            category: SmokeCategory::MultiHop,
+            query: format!("What was the original root cause behind {d}?"),
+            fixture_corpus_id: "lineage".to_string(),
+            relevant: vec![RelevanceJudgement {
+                corpus_item_id: m1,
+                grade: 3,
+            }],
+        });
+        // Control: direct cause of d (gold = m3, which mentions d → BM25-solvable).
+        cases.push(SmokeCase {
+            id: format!("lin-h-direct-{i:04}"),
+            category: SmokeCategory::SingleHop,
+            query: format!("What directly brought about {d}?"),
+            fixture_corpus_id: "lineage".to_string(),
+            relevant: vec![RelevanceJudgement {
+                corpus_item_id: m3,
+                grade: 3,
+            }],
+        });
+    }
+    (corpus, cases)
+}
+
 fn write_fixtures(
     dir: &std::path::Path,
     corpus: &[CorpusItem],
@@ -128,7 +253,14 @@ fn write_fixtures(
 /// recall on the root-cause cases (2 causal hops) vs the direct-cause control.
 /// `multihop_*` = root-cause, `onehop_*` = direct control.
 pub fn analyze_lineage(inputs: &RunInputs, chains: usize) -> Result<MultiHopReport> {
-    let (corpus, cases) = generate_lineage_fixtures(chains);
+    let hard = std::env::var("SHODH_LINEAGE_HARD")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let (corpus, cases) = if hard {
+        generate_lineage_fixtures_hard(chains)
+    } else {
+        generate_lineage_fixtures(chains)
+    };
     let why_cases = cases
         .iter()
         .filter(|c| c.category == SmokeCategory::MultiHop)
