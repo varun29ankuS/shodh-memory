@@ -4910,6 +4910,44 @@ impl MemorySystem {
             self.expand_with_hierarchy(&mut memories, &mut seen_ids);
         }
 
+        // LAYER 4.95-FINAL: re-assert the causal-origin answer above ALL full-mode
+        // re-ranking (linguistic re-sort, competition DEMOTION, hierarchy expansion)
+        // that displaced the post-fusion placement — the full-mode root-cause P@1 0.52
+        // vs +facts 1.0 regression. Runs UNCONDITIONALLY in full mode: the prior attempt
+        // sat inside the `len>max` sort block, which is skipped for small result sets, so
+        // it never fired. Re-boost the traced root(s) above the current max (undoing any
+        // demotion) AND move them to the front, so they survive both the conditional final
+        // sort and the no-sort path. Strict no-op for non-origin queries — no other
+        // category can regress.
+        let origin_final = std::env::var("SHODH_CAUSAL_ORIGIN_FINAL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if origin_final && layer_full && !causal_origin_episode_ids.is_empty() {
+            let cur_max = memories
+                .iter()
+                .filter_map(|m| m.score)
+                .fold(0.0f32, f32::max)
+                .max(0.01);
+            for (i, oid) in causal_origin_episode_ids.iter().enumerate() {
+                if let Some(m) = memories.iter_mut().find(|m| &m.id == oid) {
+                    let target = cur_max * (2.0 - (i as f32) * 0.01).max(1.5);
+                    let mut cloned: Memory = m.as_ref().clone();
+                    cloned.set_score(target);
+                    *m = Arc::new(cloned);
+                }
+            }
+            let mut front = 0usize;
+            for oid in &causal_origin_episode_ids {
+                if let Some(cur) = memories.iter().position(|m| &m.id == oid) {
+                    if cur != front {
+                        let item = memories.remove(cur);
+                        memories.insert(front, item);
+                    }
+                    front += 1;
+                }
+            }
+        }
+
         // Re-sort by score and trim to max_results after expansion.
         // Conscious restructure (SHODH_FUSION_V2): this is the SINGLE arbiter — the
         // linguistic signal is already folded into .score above — so sort by .score
@@ -4936,30 +4974,6 @@ impl MemorySystem {
                     .then_with(|| b.created_at.cmp(&a.created_at))
                     .then_with(|| a.id.cmp(&b.id))
             });
-
-            // LAYER 4.95-FINAL: re-assert the causal-origin answer at the TOP, after all
-            // full-mode re-ranking (linguistic re-sort, competition demotion) that
-            // displaced the post-fusion placement — the cause of full-mode root-cause
-            // P@1 0.52 vs +facts 1.0 ("8 cases survived +facts then vanished at full").
-            // A structurally-certain origin must not be re-ranked by soft-similarity
-            // boosts; move the traced root(s) to the front in support order. Gated by
-            // SHODH_CAUSAL_ORIGIN_FINAL; strict no-op when no origin was traced, so no
-            // other category can regress.
-            let origin_final = std::env::var("SHODH_CAUSAL_ORIGIN_FINAL")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            if origin_final && !causal_origin_episode_ids.is_empty() {
-                let mut front = 0usize;
-                for oid in &causal_origin_episode_ids {
-                    if let Some(cur) = memories.iter().position(|m| &m.id == oid) {
-                        if cur != front {
-                            let item = memories.remove(cur);
-                            memories.insert(front, item);
-                        }
-                        front += 1;
-                    }
-                }
-            }
 
             // Post-Layer-5 graph-exclusive rank reserve: ensure each reserved
             // candidate present in `memories` lands within the kept window by
