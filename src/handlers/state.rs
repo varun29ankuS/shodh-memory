@@ -3624,10 +3624,8 @@ impl MultiUserMemoryManager {
                             | crate::graph_memory::RelationType::RelatedTo
                     )
                 {
-                    let df_i =
-                        rep_i.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
-                    let df_j =
-                        rep_j.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
+                    let df_i = rep_i.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
+                    let df_j = rep_j.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
                     let pmi = (total_episodes / (df_i * df_j)).log2();
                     if pmi < pmi_gate_min {
                         pmi_gated += 1;
