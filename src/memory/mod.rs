@@ -8126,6 +8126,29 @@ impl MemorySystem {
         // 1. Consolidation: promote memories between tiers
         self.consolidate_if_needed()?;
 
+        // 1b. Embedding-space link prediction (SHODH_GRAPH_LINKPRED): infer the
+        // "missing bridges" between semantically-similar entities that never
+        // co-occurred — the multi-hop edges Hebbian co-activation can't create.
+        // Heavy + graph-wide (O(n^2) over recurring entities), so heavy pass only.
+        if is_heavy
+            && std::env::var("SHODH_GRAPH_LINKPRED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        {
+            let min_cosine = std::env::var("SHODH_GRAPH_LINKPRED_MIN")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.70f32);
+            if let Some(graph) = self.graph_memory.as_ref() {
+                match graph.read().infer_embedding_edges(min_cosine, 8) {
+                    Ok(n) => {
+                        tracing::info!(inferred = n, min_cosine, "linkpred maintenance pass")
+                    }
+                    Err(e) => tracing::debug!("linkpred maintenance failed: {e}"),
+                }
+            }
+        }
+
         // 2. Decay activation on all in-memory memories (working + session)
         let mut decayed_count = 0;
         let mut at_risk_count = 0;

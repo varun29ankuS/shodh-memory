@@ -5798,6 +5798,80 @@ impl GraphMemory {
         Ok(relationships)
     }
 
+    /// Embedding-space link prediction (`SHODH_GRAPH_LINKPRED`).
+    ///
+    /// Infers edges between entities whose frozen MiniLM `name_embedding`s are
+    /// highly similar but which never co-occurred — the multi-hop "missing bridge"
+    /// that Hebbian co-activation can never create (it needs the entities to fire
+    /// together). Scores each candidate pair by cosine and adds an edge above
+    /// `min_cosine`. Reuses [`add_relationship`]'s dedup: an already-connected
+    /// same-type pair is reinforced rather than duplicated, so only genuinely
+    /// missing bridges create new edges. Capped at `max_degree` new edges per
+    /// entity to keep the pass tractable and avoid hubs. Restricted to recurring,
+    /// embedded entities (`mention_count >= 2`); one-shot mentions and recogniser
+    /// fragments are noise. Returns the number of edges touched.
+    pub fn infer_embedding_edges(&self, min_cosine: f32, max_degree: usize) -> Result<usize> {
+        let entities = self.get_all_entities()?;
+        let cand: Vec<&EntityNode> = entities
+            .iter()
+            .filter(|e| e.name_embedding.is_some() && e.mention_count >= 2)
+            .collect();
+        let now = Utc::now();
+        let mut inferred = 0usize;
+        for (i, ei) in cand.iter().enumerate() {
+            let emb_i = ei.name_embedding.as_ref().unwrap();
+            // rank the OTHER candidates by cosine; take the strongest above threshold
+            let mut scored: Vec<(f32, &EntityNode)> = cand
+                .iter()
+                .enumerate()
+                .filter_map(|(j, ej)| {
+                    if j == i {
+                        return None;
+                    }
+                    let s = crate::similarity::cosine_similarity(
+                        emb_i,
+                        ej.name_embedding.as_ref().unwrap(),
+                    );
+                    (s >= min_cosine).then_some((s, *ej))
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+            for (s, ej) in scored.into_iter().take(max_degree) {
+                let rt = infer_relation_type_for_pair(
+                    ei.labels.first().unwrap_or(&EntityLabel::Concept),
+                    ej.labels.first().unwrap_or(&EntityLabel::Concept),
+                );
+                let edge = RelationshipEdge {
+                    uuid: uuid::Uuid::new_v4(),
+                    from_entity: ei.uuid,
+                    to_entity: ej.uuid,
+                    relation_type: rt,
+                    strength: s,
+                    created_at: now,
+                    valid_at: now,
+                    invalidated_at: None,
+                    source_episode_id: None,
+                    context: "linkpred:embedding".to_string(),
+                    last_activated: now,
+                    activation_count: 1,
+                    ltp_status: LtpStatus::Burst { detected_at: now },
+                    tier: EdgeTier::L2Episodic,
+                    activation_timestamps: None,
+                    entity_confidence: Some(s),
+                    forman_curvature: None,
+                    endpoint_selectivity: None,
+                };
+                if self.add_relationship(edge).is_ok() {
+                    inferred += 1;
+                }
+            }
+        }
+        if inferred > 0 {
+            tracing::info!(inferred_edges = inferred, "linkpred embedding edges inferred");
+        }
+        Ok(inferred)
+    }
+
     /// Get all episodes in the graph
     pub fn get_all_episodes(&self) -> Result<Vec<EpisodicNode>> {
         let mut episodes = Vec::new();
