@@ -1,0 +1,158 @@
+# Does a long-context embedder earn its keep by changing CHUNK GRANULARITY?
+#
+# At turn granularity (both capped 256 tok) granite-97m TIED MiniLM everywhere
+# (multi_hop bit-identical 0.588) — the embedder is not the lever at fixed
+# granularity. This tests the one thing only a 32K model can do: embed a WHOLE
+# SESSION as one unit. Companions co-located in a session -> one retrieval gets
+# the evidence set -> may attack the multi_hop coverage wall.
+#
+# Same session-level fixture + gold (answer-session) across arms:
+#   minilm   — 256 tok  -> truncates each session to its first ~200 tokens
+#   granite97 — 1024 tok -> reads 4x more of the session than MiniLM
+# Session-level recall@10 (NOT comparable to the turn-level 0.78; compare arms only).
+name: Embedder Session-Granularity
+on:
+  push:
+    branches: ['exp/granite97']
+    paths: ['.github/workflows/embedder-session-granularity.yml']
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'questions (session-level, deterministic shuffled mix)'
+        required: false
+        default: '30'
+
+permissions:
+  contents: read
+concurrency:
+  group: embedder-session-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pooling-unittest:
+    name: Pooling sanity (unit test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Pooling unit tests
+        run: cargo test --release -p shodh-memory --lib pool_tokens -- --nocapture
+
+  session:
+    name: ${{ matrix.arm }}
+    needs: pooling-unittest
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arm: minilm
+            embedder: ''
+            dim: '384'
+            max_length: '256'           # MiniLM's hard limit — truncates the session
+            model_path: '/home/runner/.cache/shodh-memory/models/minilm-l6'
+            use_quant: '1'
+          - arm: granite97
+            embedder: 'granite-small'   # 384 CLS, 98MB int8, 32K positions
+            dim: '384'
+            max_length: '1024'          # 4x MiniLM's 256 — captures far more of the session
+            repo: 'ibm-granite/granite-embedding-97m-multilingual-r2'
+            model_path: '/home/runner/models/granite97'
+            use_quant: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$B/tokenizer.json"
+
+      - name: Download ${{ matrix.arm }} INT8 ONNX
+        if: ${{ matrix.embedder != '' }}
+        run: |
+          DIR="$HOME/models/${{ matrix.arm }}"
+          mkdir -p "$DIR"
+          B="https://huggingface.co/${{ matrix.repo }}/resolve/main"
+          dl_model() {
+            local dir="$1"; shift
+            for f in "$@"; do
+              if curl -fL --retry 5 --retry-all-errors -o "$dir/model.onnx" "$B/$f"; then
+                echo "  graph: $f"; local dn
+                dn="$(basename "${f%.onnx}").onnx_data"
+                if curl -fL --retry 4 --retry-all-errors -o "$dir/$dn" "$B/${f%.onnx}.onnx_data"; then
+                  echo "  external data: $dn"
+                else rm -f "$dir/$dn"; echo "  (single-file)"; fi
+                return 0
+              fi
+            done
+            echo "  FAILED"; return 1
+          }
+          dl_model "$DIR" onnx/model_int8.onnx onnx/model_quint8_avx2.onnx onnx/model_quantized.onnx onnx/model.onnx
+          curl -fL --retry 5 --retry-all-errors -o "$DIR/tokenizer.json" "$B/tokenizer.json"
+          ls -la "$DIR"
+
+      - name: Build SESSION-granularity fixture (shared, shuffled mix)
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          JSON=$(python3 - <<'PY'
+          from huggingface_hub import hf_hub_download
+          print(hf_hub_download(repo_id='xiaowu0162/longmemeval-cleaned',
+                                filename='longmemeval_s_cleaned.json', repo_type='dataset'))
+          PY
+          )
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
+            --session-granularity --limit ${{ github.event.inputs.limit || '30' }}
+          wc -l tests/recall/longmemeval/manifest.jsonl
+          echo "category mix:"; grep -oE '"category"[ :]+"[a-z_]+"' tests/recall/longmemeval/manifest.jsonl | sort | uniq -c || true
+
+      - name: Run ${{ matrix.arm }} (max_length ${{ matrix.max_length }})
+        env:
+          SHODH_EMBEDDER: ${{ matrix.embedder }}
+          SHODH_MODEL_PATH: ${{ matrix.model_path }}
+          SHODH_TEXT_DIM: ${{ matrix.dim }}
+          SHODH_USE_QUANTIZED_MODEL: ${{ matrix.use_quant }}
+          SHODH_MAX_LENGTH: ${{ matrix.max_length }}
+        run: |
+          N=${{ github.event.inputs.limit || '30' }}
+          START=$(date +%s)
+          ./target/release/recall-eval --longmemeval tests/recall/longmemeval \
+            --output unused.json --storage ./storage-${{ matrix.arm }} 2>&1 | tee run.log
+          ELAPSED=$(( $(date +%s) - START ))
+          echo "### ${{ matrix.arm }} (max_length ${{ matrix.max_length }}, session-granularity)" > summary.txt
+          grep -E "LongMemEval-S:|recall@10|single_hop|multi_hop|temporal|knowledge" run.log >> summary.txt || true
+          echo "speed: ${ELAPSED}s total / n=${N} = $(( ELAPSED / N ))s per question" >> summary.txt
+          cat summary.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload ${{ matrix.arm }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: session-${{ matrix.arm }}
+          path: |
+            run.log
+            summary.txt

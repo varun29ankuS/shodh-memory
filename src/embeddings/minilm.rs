@@ -176,7 +176,7 @@ impl EmbeddingConfig {
         Self {
             model_path: base_path.join(model_filename),
             tokenizer_path: base_path.join("tokenizer.json"),
-            max_length: 256,
+            max_length: configured_max_length(),
             use_quantized,
             embed_timeout_ms,
         }
@@ -279,6 +279,22 @@ pub fn configured_text_dim() -> usize {
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|d| [128, 256, 384, 512, 768, 1024].contains(d))
             .unwrap_or(384)
+    })
+}
+
+/// The tokenizer truncation length. Default 256 (MiniLM's limit — content beyond
+/// is dropped). Long-context models (granite/harrier, 32K) can read whole sessions
+/// when raised via `SHODH_MAX_LENGTH`. Clamped to [16, 32768]; a 256-token model
+/// given a larger value will still error at inference, so only raise it for a model
+/// whose positions support it.
+pub fn configured_max_length() -> usize {
+    static ML: OnceLock<usize> = OnceLock::new();
+    *ML.get_or_init(|| {
+        std::env::var("SHODH_MAX_LENGTH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| (16..=32768).contains(&n))
+            .unwrap_or(256)
     })
 }
 

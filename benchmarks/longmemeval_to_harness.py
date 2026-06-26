@@ -85,7 +85,9 @@ def iso(raw: str) -> str:
     return datetime(2023, 1, 1, tzinfo=timezone.utc).isoformat()
 
 
-def convert(data: list, out_dir: str, limit: int | None) -> dict:
+def convert(
+    data: list, out_dir: str, limit: int | None, session_granularity: bool = False
+) -> dict:
     corpora_dir = os.path.join(out_dir, "corpora")
     os.makedirs(corpora_dir, exist_ok=True)
     manifest: list[dict] = []
@@ -104,6 +106,36 @@ def convert(data: list, out_dir: str, limit: int | None) -> dict:
         for si, session in enumerate(sessions):
             sid = sids[si] if si < len(sids) else f"s{si}"
             created = iso(dates[si] if si < len(dates) else "")
+            if session_granularity:
+                # One CorpusItem per SESSION: the whole conversation as a single
+                # retrievable unit (tests a long-context embedder's ability to embed
+                # the full session vs a 256-token model that truncates it). A session
+                # is gold if any of its turns carries has_answer. gold is therefore
+                # session-level, so recall@10 is measured over sessions, not turns.
+                parts: list[str] = []
+                is_gold = False
+                for turn in session:
+                    c = (turn.get("content") or "").strip()
+                    if not c:
+                        continue
+                    parts.append(f"{turn.get('role', 'user')}: {c}")
+                    if turn.get("has_answer") is True:
+                        is_gold = True
+                if not parts:
+                    continue
+                sess_id = f"{qid}::{sid}"
+                corpus.append(
+                    {
+                        "id": sess_id,
+                        "content": "\n".join(parts),
+                        "memory_type": "conversation",
+                        "tags": [sid],
+                        "created_at": created,
+                    }
+                )
+                if is_gold:
+                    gold_ids.append(sess_id)
+                continue
             for ti, turn in enumerate(session):
                 content = (turn.get("content") or "").strip()
                 if not content:
@@ -173,6 +205,13 @@ def main() -> None:
         help="deterministically reorder so any --limit prefix is a representative "
         "category mix (the source is type-ordered)",
     )
+    ap.add_argument(
+        "--session-granularity",
+        action="store_true",
+        help="emit one CorpusItem per SESSION (whole conversation) instead of per "
+        "turn; gold becomes session-level. Tests a long-context embedder vs a "
+        "256-token model that truncates the session.",
+    )
     args = ap.parse_args()
 
     with open(args.input, encoding="utf-8") as f:
@@ -187,11 +226,12 @@ def main() -> None:
         # a representative mix of categories.
         data.sort(key=lambda q: hashlib.md5(q["question_id"].encode()).hexdigest())
 
-    stats = convert(data, args.out, args.limit)
+    stats = convert(data, args.out, args.limit, args.session_granularity)
+    unit = "sessions" if args.session_granularity else "turns"
     print(
         f"LongMemEval -> harness: {stats['questions']} questions, "
-        f"{stats['turns']} turns, {stats['gold_turns']} gold turns, "
-        f"{stats['no_gold']} skipped (no turn-level gold). Out: {args.out}"
+        f"{stats['turns']} {unit}, {stats['gold_turns']} gold {unit}, "
+        f"{stats['no_gold']} skipped (no gold). Out: {args.out}"
     )
 
 
