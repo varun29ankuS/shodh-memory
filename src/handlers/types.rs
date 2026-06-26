@@ -269,7 +269,7 @@ pub struct UpsertRequest {
     pub user_id: String,
     pub external_id: String,
     pub content: String,
-    #[serde(default)]
+    #[serde(default, alias = "type", alias = "experience_type")]
     pub memory_type: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -840,6 +840,17 @@ mod tests {
     }
 
     #[test]
+    fn test_remember_request_accepts_type_alias() {
+        let json = json!({
+            "user_id": "test-user",
+            "content": "test content",
+            "type": "Decision"
+        });
+        let req: RememberRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.memory_type, Some("Decision".to_string()));
+    }
+
+    #[test]
     fn test_recall_request_defaults() {
         let json = json!({
             "user_id": "test-user",
@@ -907,6 +918,18 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_remember_request_accepts_type_alias() {
+        let json = json!({
+            "user_id": "test-user",
+            "memories": [
+                {"content": "memory 1", "type": "Learning"}
+            ]
+        });
+        let req: BatchRememberRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.memories[0].memory_type, Some("Learning".to_string()));
+    }
+
+    #[test]
     fn test_upsert_request() {
         let json = json!({
             "user_id": "test-user",
@@ -916,6 +939,18 @@ mod tests {
         let req: UpsertRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.external_id, "linear:SHO-123");
         assert_eq!(req.change_type, "content_updated"); // default
+    }
+
+    #[test]
+    fn test_upsert_request_accepts_type_alias() {
+        let json = json!({
+            "user_id": "test-user",
+            "external_id": "linear:SHO-123",
+            "content": "issue content",
+            "type": "Context"
+        });
+        let req: UpsertRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.memory_type, Some("Context".to_string()));
     }
 
     #[test]

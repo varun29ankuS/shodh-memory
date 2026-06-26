@@ -777,7 +777,9 @@ components:
           minLength: 1
           description: The memory content to store
         type:
-          $ref: '#/components/schemas/MemoryType'
+          allOf:
+            - $ref: '#/components/schemas/MemoryType'
+          description: Preferred request field for memory classification. The server also accepts `memory_type` and `experience_type` as aliases.
         tags:
           type: array
           items:
