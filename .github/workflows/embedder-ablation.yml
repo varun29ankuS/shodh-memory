@@ -61,7 +61,9 @@ jobs:
           NOMIC_DIR="$HOME/models/nomic-v1.5"
           mkdir -p "$NOMIC_DIR"
           B="https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main"
-          curl -fL --retry 5 --retry-all-errors -o "$NOMIC_DIR/model.onnx"     "$B/onnx/model.onnx"
+          # int8-quantized ONNX (fp32 was impractically slow on CI); saved AS model.onnx
+          # so the loader picks it with SHODH_USE_QUANTIZED_MODEL=0 — no filename risk.
+          curl -fL --retry 5 --retry-all-errors -o "$NOMIC_DIR/model.onnx"     "$B/onnx/model_quantized.onnx"
           curl -fL --retry 5 --retry-all-errors -o "$NOMIC_DIR/tokenizer.json" "$B/tokenizer.json"
           ls -la "$NOMIC_DIR"
           echo "NOMIC_DIR=$NOMIC_DIR" >> "$GITHUB_ENV"
