@@ -118,15 +118,30 @@ jobs:
           # Save the int8 graph AS model.onnx so the loader picks it with
           # SHODH_USE_QUANTIZED_MODEL=0 (no quantized-filename guessing). Try the
           # common int8 export names in order; fp32 only as last resort.
-          dl_first() {
-            local dest="$1"; shift
+          #
+          # External-data ONNX (e.g. onnx-community harrier) keeps weights in a
+          # sibling "<basename>.onnx_data" that the graph references BY NAME — the
+          # graph alone won't load. So for whichever candidate wins, also fetch its
+          # "<basename>.onnx_data" under that exact name (ONNX resolves it relative
+          # to the .onnx dir). Harmless 404 for single-file models.
+          dl_model() {
+            local dir="$1"; shift
             for f in "$@"; do
-              if curl -fL --retry 5 --retry-all-errors -o "$dest" "$B/$f"; then
-                echo "  got $f"; return 0; fi
+              if curl -fL --retry 5 --retry-all-errors -o "$dir/model.onnx" "$B/$f"; then
+                echo "  graph: $f -> model.onnx"
+                local dn
+                dn="$(basename "${f%.onnx}").onnx_data"   # e.g. model_quantized.onnx_data
+                if curl -fL --retry 4 --retry-all-errors -o "$dir/$dn" "$B/${f%.onnx}.onnx_data"; then
+                  echo "  external data: $dn ($(du -h "$dir/$dn" | cut -f1))"
+                else
+                  rm -f "$dir/$dn"; echo "  (single-file, no external data)"
+                fi
+                return 0
+              fi
             done
-            echo "  FAILED all candidates: $*"; return 1
+            echo "  FAILED all candidates"; return 1
           }
-          dl_first "$DIR/model.onnx" \
+          dl_model "$DIR" \
             onnx/model_int8.onnx onnx/model_quantized.onnx onnx/model_uint8.onnx onnx/model.onnx
           curl -fL --retry 5 --retry-all-errors -o "$DIR/tokenizer.json" "$B/tokenizer.json"
           ls -la "$DIR"
