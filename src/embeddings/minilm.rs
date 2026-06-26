@@ -357,9 +357,14 @@ fn embedder_pooling() -> Pooling {
         .to_lowercase()
         .as_str()
     {
+        // granite-r2 (768-native 311m) AND granite-small (384-native 97m) both pool
+        // on CLS; they differ only in hidden size (see embedder_native768 — "granite"
+        // is 768, "granite-small" is NOT listed there, so it stays 384-native).
         "granite"
         | "granite-r2"
         | "granite-embedding-r2"
+        | "granite-small"
+        | "granite-97m"
         | "arctic"
         | "arctic-embed"
         | "arctic-embed-m" => Pooling::Cls,

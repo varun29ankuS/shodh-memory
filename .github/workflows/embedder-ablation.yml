@@ -77,6 +77,12 @@ jobs:
             repo: 'ibm-granite/granite-embedding-311m-multilingual-r2'
             model_path: '/home/runner/models/granite'
             use_quant: '0'
+          - arm: granite97
+            embedder: 'granite-small'          # CLS pooling, 384-native (98MB int8)
+            dim: '384'
+            repo: 'ibm-granite/granite-embedding-97m-multilingual-r2'
+            model_path: '/home/runner/models/granite97'
+            use_quant: '0'
           - arm: harrier
             embedder: 'harrier'
             dim: '768'
