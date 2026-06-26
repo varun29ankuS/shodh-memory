@@ -60,34 +60,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Trimmed to the viable small set: MiniLM baseline + granite-97m (98MB int8,
+          # 384-dim, auditable, multilingual). nomic comes from the parallel run on
+          # exp/embedder-test; the heavy granite-311m + harrier were dropped (too slow
+          # for the edge thesis).
           - arm: minilm
             embedder: ''
             dim: '384'
             model_path: '/home/runner/.cache/shodh-memory/models/minilm-l6'
             use_quant: '1'
-          - arm: nomic
-            embedder: 'nomic'
-            dim: '768'
-            repo: 'nomic-ai/nomic-embed-text-v1.5'
-            model_path: '/home/runner/models/nomic'
-            use_quant: '0'
-          - arm: granite
-            embedder: 'granite'
-            dim: '768'
-            repo: 'ibm-granite/granite-embedding-311m-multilingual-r2'
-            model_path: '/home/runner/models/granite'
-            use_quant: '0'
           - arm: granite97
             embedder: 'granite-small'          # CLS pooling, 384-native (98MB int8)
             dim: '384'
             repo: 'ibm-granite/granite-embedding-97m-multilingual-r2'
             model_path: '/home/runner/models/granite97'
-            use_quant: '0'
-          - arm: harrier
-            embedder: 'harrier'
-            dim: '768'
-            repo: 'onnx-community/harrier-oss-v1-270m-ONNX'
-            model_path: '/home/runner/models/harrier'
             use_quant: '0'
     steps:
       - uses: actions/checkout@v4
