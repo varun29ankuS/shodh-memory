@@ -45,7 +45,11 @@ jobs:
       - name: Install LLVM (ONNX runtime build dep)
         run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
       - name: Pooling unit tests
-        run: cargo test --release -p shodh-memory pool_tokens -- --nocapture
+        # --lib: test only the library target (where pool_tokens lives). Avoids
+        # building the recall_eval bin's test harness, which has a pre-existing
+        # link issue unrelated to this change (the bin itself builds fine via
+        # `cargo build --bin` in the matrix below).
+        run: cargo test --release -p shodh-memory --lib pool_tokens -- --nocapture
 
   ablation:
     name: ${{ matrix.arm }}
