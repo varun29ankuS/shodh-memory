@@ -141,8 +141,12 @@ jobs:
             done
             echo "  FAILED all candidates"; return 1
           }
+          # Candidate int8 names vary by exporter: transformers.js/IBM use
+          # model_quint8_avx2.onnx; onnx-community uses model_int8/model_quantized.
+          # fp32 model.onnx is the last-resort fallback (slow — avoid).
           dl_model "$DIR" \
-            onnx/model_int8.onnx onnx/model_quantized.onnx onnx/model_uint8.onnx onnx/model.onnx
+            onnx/model_int8.onnx onnx/model_quint8_avx2.onnx onnx/model_quantized.onnx \
+            onnx/model_uint8.onnx onnx/model.onnx
           curl -fL --retry 5 --retry-all-errors -o "$DIR/tokenizer.json" "$B/tokenizer.json"
           ls -la "$DIR"
 
