@@ -1,12 +1,16 @@
 # Embedder ablation — does a stronger embedder lift LongMemEval recall@10?
 #
 # The embedder feeds the VECTOR leg, which carries recall@10 (unlike NER/graph,
-# which is redundant in fusion). So this is the one lever with a real shot at the
-# headline 0.766. Step 1 (this run) tests nomic-768 — already supported (mean pool,
-# 768-native, prefixes), zero hot-path code. If it moves recall, the CLS-pooling work
-# for Granite/Arctic is justified. One shared fixture, two arms:
-#   A = MiniLM-L6 (current, 384-dim)
-#   B = nomic-embed-text-v1.5 at native 768 (SHODH_EMBEDDER=nomic, SHODH_TEXT_DIM=768)
+# redundant in fusion). This is the one lever with a real shot at the headline 0.766.
+#
+# Four-way, all INT8 ONNX, on ONE deterministic fixture (first-N, no shuffle, so
+# every arm sees the SAME questions). Each embedder is its own matrix job (full 6h
+# budget, parallel) gated behind a fast pooling unit-test (a mis-wired pooling mode
+# silently corrupts every embedding — caught here, before any 1h+ recall arm):
+#   minilm  — MiniLM-L6   384  Mean        (baseline)
+#   nomic   — nomic v1.5   768  Mean
+#   granite — granite-r2   768  CLS         (IBM, auditable, Apache-2.0)
+#   harrier — harrier-270m 768  LastToken   (Microsoft, MTEB 66.5, MIT)
 name: Embedder Ablation
 on:
   push:
@@ -15,9 +19,9 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: 'LongMemEval questions'
+        description: 'LongMemEval questions (deterministic first-N)'
         required: false
-        default: '50'
+        default: '20'
 
 permissions:
   contents: read
@@ -26,10 +30,55 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Fast gate: the pooling index arithmetic (CLS=first, LastToken=last-attended,
+  # Mean=avg, + batch base offset). A bug here makes every recall number a lie.
+  pooling-unittest:
+    name: Pooling sanity (unit test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Pooling unit tests
+        run: cargo test --release -p shodh-memory pool_tokens -- --nocapture
+
   ablation:
-    name: Embedder A/B
+    name: ${{ matrix.arm }}
+    needs: pooling-unittest
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arm: minilm
+            embedder: ''
+            dim: '384'
+            model_path: '/home/runner/.cache/shodh-memory/models/minilm-l6'
+            use_quant: '1'
+          - arm: nomic
+            embedder: 'nomic'
+            dim: '768'
+            repo: 'nomic-ai/nomic-embed-text-v1.5'
+            model_path: '/home/runner/models/nomic'
+            use_quant: '0'
+          - arm: granite
+            embedder: 'granite'
+            dim: '768'
+            repo: 'ibm-granite/granite-embedding-311m-multilingual-r2'
+            model_path: '/home/runner/models/granite'
+            use_quant: '0'
+          - arm: harrier
+            embedder: 'harrier'
+            dim: '768'
+            repo: 'onnx-community/harrier-oss-v1-270m-ONNX'
+            model_path: '/home/runner/models/harrier'
+            use_quant: '0'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -46,29 +95,39 @@ jobs:
         with:
           path: ~/.cache/shodh-memory/models
           key: shodh-models-minilm-c9745ed1
-      - name: Pre-fetch MiniLM (baseline arm)
+      - name: Pre-fetch MiniLM
         run: |
           MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
           mkdir -p "$MODEL_DIR"
           PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
-          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
           dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
-          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
-          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$B/tokenizer.json"
 
-      - name: Download nomic-embed-text-v1.5 ONNX (768)
+      - name: Download ${{ matrix.arm }} INT8 ONNX
+        if: ${{ matrix.embedder != '' }}
         run: |
-          NOMIC_DIR="$HOME/models/nomic-v1.5"
-          mkdir -p "$NOMIC_DIR"
-          B="https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main"
-          # int8-quantized ONNX (fp32 was impractically slow on CI); saved AS model.onnx
-          # so the loader picks it with SHODH_USE_QUANTIZED_MODEL=0 — no filename risk.
-          curl -fL --retry 5 --retry-all-errors -o "$NOMIC_DIR/model.onnx"     "$B/onnx/model_quantized.onnx"
-          curl -fL --retry 5 --retry-all-errors -o "$NOMIC_DIR/tokenizer.json" "$B/tokenizer.json"
-          ls -la "$NOMIC_DIR"
-          echo "NOMIC_DIR=$NOMIC_DIR" >> "$GITHUB_ENV"
+          DIR="$HOME/models/${{ matrix.arm }}"
+          mkdir -p "$DIR"
+          B="https://huggingface.co/${{ matrix.repo }}/resolve/main"
+          # Save the int8 graph AS model.onnx so the loader picks it with
+          # SHODH_USE_QUANTIZED_MODEL=0 (no quantized-filename guessing). Try the
+          # common int8 export names in order; fp32 only as last resort.
+          dl_first() {
+            local dest="$1"; shift
+            for f in "$@"; do
+              if curl -fL --retry 5 --retry-all-errors -o "$dest" "$B/$f"; then
+                echo "  got $f"; return 0; fi
+            done
+            echo "  FAILED all candidates: $*"; return 1
+          }
+          dl_first "$DIR/model.onnx" \
+            onnx/model_int8.onnx onnx/model_quantized.onnx onnx/model_uint8.onnx onnx/model.onnx
+          curl -fL --retry 5 --retry-all-errors -o "$DIR/tokenizer.json" "$B/tokenizer.json"
+          ls -la "$DIR"
 
-      - name: Build ONE shared LongMemEval fixture
+      - name: Build deterministic LongMemEval fixture (first-N, shared across arms)
         run: |
           python3 -m pip install --quiet huggingface_hub
           JSON=$(python3 - <<'PY'
@@ -77,43 +136,28 @@ jobs:
                                 filename='longmemeval_s_cleaned.json', repo_type='dataset'))
           PY
           )
-          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
-            --limit ${{ github.event.inputs.limit || '50' }}
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" \
+            --limit ${{ github.event.inputs.limit || '20' }}
           wc -l tests/recall/longmemeval/manifest.jsonl
 
-      - name: Arm A — MiniLM-L6 (384, baseline)
-        run: |
-          ./target/release/recall-eval --longmemeval tests/recall/longmemeval \
-            --output unused-a.json --storage ./a-storage 2>&1 | tee a.log
-          grep -E "LongMemEval-S:|recall@10" a.log | tee a-summary.txt || true
-
-      - name: Arm B — nomic-embed-text-v1.5 (native 768)
+      - name: Run ${{ matrix.arm }}
         env:
-          SHODH_EMBEDDER: nomic
-          SHODH_MODEL_PATH: /home/runner/models/nomic-v1.5
-          SHODH_TEXT_DIM: '768'
-          SHODH_USE_QUANTIZED_MODEL: '0'
+          SHODH_EMBEDDER: ${{ matrix.embedder }}
+          SHODH_MODEL_PATH: ${{ matrix.model_path }}
+          SHODH_TEXT_DIM: ${{ matrix.dim }}
+          SHODH_USE_QUANTIZED_MODEL: ${{ matrix.use_quant }}
         run: |
           ./target/release/recall-eval --longmemeval tests/recall/longmemeval \
-            --output unused-b.json --storage ./b-storage 2>&1 | tee b.log
-          grep -E "LongMemEval-S:|recall@10" b.log | tee b-summary.txt || true
+            --output unused.json --storage ./storage-${{ matrix.arm }} 2>&1 | tee run.log
+          echo "### ${{ matrix.arm }} (dim ${{ matrix.dim }}, embedder='${{ matrix.embedder }}')" > summary.txt
+          grep -E "LongMemEval-S:|recall@10|single_hop|multi_hop|temporal|knowledge" run.log >> summary.txt || true
+          cat summary.txt >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Compare
-        if: always()
-        run: |
-          echo "## Embedder ablation — MiniLM-L6 (384) vs nomic-768" >> "$GITHUB_STEP_SUMMARY"
-          echo '### A — MiniLM-L6' >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat a-summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo '### B — nomic-768' >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat b-summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload
+      - name: Upload ${{ matrix.arm }}
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: embedder-ablation
+          name: embedder-${{ matrix.arm }}
           path: |
-            a.log
-            b.log
-            a-summary.txt
-            b-summary.txt
+            run.log
+            summary.txt

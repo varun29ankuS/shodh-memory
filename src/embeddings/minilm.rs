@@ -225,6 +225,9 @@ pub struct MiniLMEmbedder {
     query_prefix: String,
     /// Asymmetric instruction prefix prepended to DOCUMENT text before encoding.
     doc_prefix: String,
+    /// Token-pooling strategy (Mean/CLS/LastToken), selected per model from
+    /// `SHODH_EMBEDDER`. MiniLM = Mean (default, byte-identical to before).
+    pooling: Pooling,
 }
 
 /// Resolve the (query, document) instruction prefixes from `SHODH_EMBEDDER`.
@@ -249,6 +252,10 @@ fn embedder_prefixes() -> (String, String) {
             "search_query: ".to_string(),
             "search_document: ".to_string(),
         ),
+        // arctic-embed-m-v2.0: query instruction, no doc prefix (CLS-pooled).
+        "arctic" | "arctic-embed" | "arctic-embed-m" => ("query: ".to_string(), String::new()),
+        // granite-r2 (CLS) and harrier (last-token) are used symmetrically here —
+        // no instruction prefix → fall through to the default empty pair.
         _ => (String::new(), String::new()),
     }
 }
@@ -293,11 +300,123 @@ fn embedder_is_nomic() -> bool {
 ///   Matryoshka-truncated to the edge envelope).
 /// - all others: native-384, `(384, 384)` — byte-identical to before.
 fn embedder_dims() -> (usize, usize) {
-    if embedder_is_nomic() {
+    if embedder_native768() {
         (768, configured_text_dim())
     } else {
         (384, 384)
     }
+}
+
+/// True when `SHODH_EMBEDDER` selects a native-768 model (pooled wide, then
+/// optionally Matryoshka-truncated to `configured_text_dim()`). nomic + the
+/// 768-dim retrieval upgrades (granite-r2, arctic-embed, harrier). All others
+/// are native-384 and emit `(384, 384)`.
+fn embedder_native768() -> bool {
+    matches!(
+        std::env::var("SHODH_EMBEDDER")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "nomic"
+            | "nomic-embed-text"
+            | "nomic-embed-text-v1.5"
+            | "granite"
+            | "granite-r2"
+            | "granite-embedding-r2"
+            | "arctic"
+            | "arctic-embed"
+            | "arctic-embed-m"
+            | "harrier"
+            | "harrier-270m"
+            | "harrier-oss-v1"
+    )
+}
+
+/// Sentence-vector pooling strategy over the model's per-token output. Different
+/// architectures need different reductions — getting this wrong silently corrupts
+/// EVERY embedding (the recall number becomes meaningless), so it is selected
+/// explicitly per model rather than assumed.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Pooling {
+    /// Mean over non-padding tokens. BERT encoders trained with mean pooling
+    /// (MiniLM, e5, bge, gte, nomic).
+    Mean,
+    /// First token ([CLS], position 0). Granite-r2 and Arctic-Embed use the CLS
+    /// hidden state as the sentence vector.
+    Cls,
+    /// Last non-padding token. Decoder-only embedders (Harrier) read the final
+    /// token's hidden state.
+    LastToken,
+}
+
+/// Resolve the pooling strategy from `SHODH_EMBEDDER`. Default `Mean` keeps every
+/// existing embedder byte-identical.
+fn embedder_pooling() -> Pooling {
+    match std::env::var("SHODH_EMBEDDER")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "granite"
+        | "granite-r2"
+        | "granite-embedding-r2"
+        | "arctic"
+        | "arctic-embed"
+        | "arctic-embed-m" => Pooling::Cls,
+        "harrier" | "harrier-270m" | "harrier-oss-v1" => Pooling::LastToken,
+        _ => Pooling::Mean,
+    }
+}
+
+/// Reduce one item's `[seq_len, hidden]` slice of the model output into a single
+/// `hidden`-wide vector per `mode`. `base` is the flat offset where this item's
+/// block starts (0 for a single input; `batch_idx * max_length * hidden` in a
+/// batch). `attended(seq_idx)` is true for non-padding positions. Pure function
+/// of its inputs so the index arithmetic is unit-testable without a live model.
+fn pool_tokens(
+    mode: Pooling,
+    output_data: &[f32],
+    base: usize,
+    max_length: usize,
+    hidden: usize,
+    attended: impl Fn(usize) -> bool,
+) -> Vec<f32> {
+    let mut pooled = vec![0.0f32; hidden];
+    match mode {
+        Pooling::Cls => {
+            // [CLS] is always position 0.
+            pooled.copy_from_slice(&output_data[base..base + hidden]);
+        }
+        Pooling::LastToken => {
+            // Robust to either padding side: the last seq position with mask==1.
+            let mut last = 0usize;
+            for seq_idx in 0..max_length {
+                if attended(seq_idx) {
+                    last = seq_idx;
+                }
+            }
+            let s = base + last * hidden;
+            pooled.copy_from_slice(&output_data[s..s + hidden]);
+        }
+        Pooling::Mean => {
+            let mut mask_sum = 0.0f32;
+            for seq_idx in 0..max_length {
+                if attended(seq_idx) {
+                    let s = base + seq_idx * hidden;
+                    for (d, pv) in pooled.iter_mut().enumerate() {
+                        *pv += output_data[s + d];
+                    }
+                    mask_sum += 1.0;
+                }
+            }
+            if mask_sum > 0.0 {
+                for v in &mut pooled {
+                    *v /= mask_sum;
+                }
+            }
+        }
+    }
+    pooled
 }
 
 impl MiniLMEmbedder {
@@ -496,6 +615,7 @@ impl MiniLMEmbedder {
             apply_prenorm: embedder_is_nomic(),
             query_prefix,
             doc_prefix,
+            pooling: embedder_pooling(),
         };
 
         // If not lazy loading, initialize now
@@ -584,6 +704,7 @@ impl MiniLMEmbedder {
             apply_prenorm: embedder_is_nomic(),
             query_prefix,
             doc_prefix,
+            pooling: embedder_pooling(),
         })
     }
 
@@ -794,29 +915,16 @@ impl MiniLMEmbedder {
         let output_tensor = outputs[0].try_extract_tensor::<f32>()?;
         let (_shape, output_data) = output_tensor;
 
-        // Mean pooling over sequence dimension, at the model's native hidden
-        // size (the output stride). Equals `dimension` for native-384 models;
-        // wider for Matryoshka models (truncated in finalize_pooled).
-        let hidden = self.native_hidden;
-        let mut pooled = vec![0.0; hidden];
-        let mut mask_sum = 0.0;
-
-        for (seq_idx, &att) in attention.iter().enumerate() {
-            if att == 1 {
-                for (dim_idx, pooled_val) in pooled.iter_mut().enumerate() {
-                    let idx = seq_idx * hidden + dim_idx;
-                    *pooled_val += output_data[idx];
-                }
-                mask_sum += 1.0;
-            }
-        }
-
-        // Average
-        if mask_sum > 0.0 {
-            for val in &mut pooled {
-                *val /= mask_sum;
-            }
-        }
+        // Pool per the model's strategy (Mean/CLS/LastToken) at the native hidden
+        // size (the output stride; wider than `dimension` for Matryoshka models).
+        let pooled = pool_tokens(
+            self.pooling,
+            output_data,
+            0,
+            attention.len(),
+            self.native_hidden,
+            |seq_idx| attention[seq_idx] == 1,
+        );
 
         // Scrub NaN/Inf, Matryoshka-truncate to `dimension`, then L2 normalize.
         Ok(self.finalize_pooled(pooled))
@@ -919,34 +1027,22 @@ impl MiniLMEmbedder {
         let output_tensor = outputs[0].try_extract_tensor::<f32>()?;
         let (_shape, output_data) = output_tensor;
 
-        // Mean pooling for each item in batch, at the model's native hidden size
-        // (the output stride). Wider than `dimension` for Matryoshka models.
+        // Pool each batch item per the model's strategy at the native hidden size
+        // (the output stride; wider than `dimension` for Matryoshka models).
         let hidden = self.native_hidden;
         let mut results = Vec::with_capacity(batch_size);
 
         for batch_idx in 0..batch_size {
-            let mut pooled = vec![0.0; hidden];
-            let mut mask_sum = 0.0;
-
-            let batch_offset = batch_idx * max_length * hidden;
+            let base = batch_idx * max_length * hidden;
             let attention_offset = batch_idx * max_length;
-
-            for seq_idx in 0..max_length {
-                if attention_masks[attention_offset + seq_idx] == 1 {
-                    for (dim_idx, pooled_val) in pooled.iter_mut().enumerate().take(hidden) {
-                        let idx = batch_offset + seq_idx * hidden + dim_idx;
-                        *pooled_val += output_data[idx];
-                    }
-                    mask_sum += 1.0;
-                }
-            }
-
-            // Average
-            if mask_sum > 0.0 {
-                for val in &mut pooled {
-                    *val /= mask_sum;
-                }
-            }
+            let pooled = pool_tokens(
+                self.pooling,
+                output_data,
+                base,
+                max_length,
+                hidden,
+                |seq_idx| attention_masks[attention_offset + seq_idx] == 1,
+            );
 
             // Scrub NaN/Inf, Matryoshka-truncate to `dimension`, then L2 normalize.
             results.push(self.finalize_pooled(pooled));
@@ -1157,6 +1253,51 @@ impl Embedder for MiniLMEmbedder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pool_tokens_modes() {
+        // One item: 3 tokens x hidden=2 -> [1,2 | 3,4 | 5,6]; token 2 is padding.
+        let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let attended = |s: usize| [true, true, false][s];
+
+        // CLS = first token (position 0).
+        assert_eq!(
+            pool_tokens(Pooling::Cls, &data, 0, 3, 2, attended),
+            vec![1.0, 2.0]
+        );
+        // LastToken = last NON-padding token (seq 1), not the padded seq 2.
+        assert_eq!(
+            pool_tokens(Pooling::LastToken, &data, 0, 3, 2, attended),
+            vec![3.0, 4.0]
+        );
+        // Mean over non-padding tokens (seq 0,1) -> [(1+3)/2, (2+4)/2].
+        assert_eq!(
+            pool_tokens(Pooling::Mean, &data, 0, 3, 2, attended),
+            vec![2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn test_pool_tokens_batch_offset() {
+        // Two items: item0 [1..6], item1 [7..12]; hidden=2, len=3, all attended.
+        let data = vec![
+            1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+        ];
+        let all = |_s: usize| true;
+        // Item 1 starts at base = 1 * 3 * 2 = 6 — the batch-offset arithmetic.
+        assert_eq!(
+            pool_tokens(Pooling::Cls, &data, 6, 3, 2, all),
+            vec![7.0, 8.0]
+        );
+        assert_eq!(
+            pool_tokens(Pooling::LastToken, &data, 6, 3, 2, all),
+            vec![11.0, 12.0]
+        );
+        assert_eq!(
+            pool_tokens(Pooling::Mean, &data, 6, 3, 2, all),
+            vec![9.0, 10.0]
+        );
+    }
 
     #[test]
     fn test_minilm_creation() {
