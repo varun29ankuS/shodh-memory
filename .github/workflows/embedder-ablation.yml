@@ -170,10 +170,14 @@ jobs:
           SHODH_TEXT_DIM: ${{ matrix.dim }}
           SHODH_USE_QUANTIZED_MODEL: ${{ matrix.use_quant }}
         run: |
+          N=${{ github.event.inputs.limit || '20' }}
+          START=$(date +%s)
           ./target/release/recall-eval --longmemeval tests/recall/longmemeval \
             --output unused.json --storage ./storage-${{ matrix.arm }} 2>&1 | tee run.log
+          ELAPSED=$(( $(date +%s) - START ))
           echo "### ${{ matrix.arm }} (dim ${{ matrix.dim }}, embedder='${{ matrix.embedder }}')" > summary.txt
           grep -E "LongMemEval-S:|recall@10|single_hop|multi_hop|temporal|knowledge" run.log >> summary.txt || true
+          echo "speed: ${ELAPSED}s total / n=${N} = $(( ELAPSED / N ))s per question" >> summary.txt
           cat summary.txt >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload ${{ matrix.arm }}
