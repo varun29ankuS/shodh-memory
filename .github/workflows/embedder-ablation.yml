@@ -142,7 +142,7 @@ jobs:
           curl -fL --retry 5 --retry-all-errors -o "$DIR/tokenizer.json" "$B/tokenizer.json"
           ls -la "$DIR"
 
-      - name: Build deterministic LongMemEval fixture (first-N, shared across arms)
+      - name: Build deterministic mixed-category LongMemEval fixture (shared across arms)
         run: |
           python3 -m pip install --quiet huggingface_hub
           JSON=$(python3 - <<'PY'
@@ -151,9 +151,14 @@ jobs:
                                 filename='longmemeval_s_cleaned.json', repo_type='dataset'))
           PY
           )
-          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" \
+          # --shuffle is a DETERMINISTIC md5-hash reorder (same mix every run, so all
+          # arms stay comparable). The source is type-ordered, so without it a --limit
+          # prefix is all single_hop (saturated). With it, the prefix is a representative
+          # category mix (single_hop / multi_hop / temporal / knowledge_update).
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
             --limit ${{ github.event.inputs.limit || '20' }}
           wc -l tests/recall/longmemeval/manifest.jsonl
+          echo "category mix:"; grep -oE '"category"[ :]+"[a-z_]+"' tests/recall/longmemeval/manifest.jsonl | sort | uniq -c || true
 
       - name: Run ${{ matrix.arm }}
         env:
