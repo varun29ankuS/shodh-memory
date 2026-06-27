@@ -16,6 +16,7 @@
 //! - Full offline operation
 
 pub mod ab_testing;
+pub mod anomaly;
 pub mod auth;
 pub mod backup;
 pub mod config;
