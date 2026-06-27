@@ -17,6 +17,7 @@ pub mod chunking;
 pub mod circuit_breaker;
 pub mod downloader;
 pub mod gliner;
+pub mod glirel;
 pub mod keywords;
 pub mod minilm;
 pub mod ner;
