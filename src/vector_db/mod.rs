@@ -79,7 +79,12 @@ impl Default for BackendConfig {
             force_backend: None,
             use_pq: true,
             spann_probes: 20,
-            vamana_max_degree: 32,
+            // R=48 + construction L=100 + query efSearch=100 (the latter rides on
+            // VamanaConfig::default via new_vamana's ..Default) = measured ANN
+            // recall@10 ~1.0 vs exact (R=32/L=100 was ~0.68). new_vamana overrides
+            // max_degree/search_list_size from here, so the recall fix MUST live in
+            // BackendConfig — VamanaConfig::default alone is inert for production.
+            vamana_max_degree: 48,
             vamana_search_list_size: 100,
         }
     }
