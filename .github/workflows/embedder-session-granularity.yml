@@ -20,7 +20,7 @@ on:
       limit:
         description: 'questions (session-level, deterministic shuffled mix)'
         required: false
-        default: '30'
+        default: '20'
 
 permissions:
   contents: read
@@ -62,7 +62,7 @@ jobs:
           - arm: granite97
             embedder: 'granite-small'   # 384 CLS, 98MB int8, 32K positions
             dim: '384'
-            max_length: '1024'          # 4x MiniLM's 256 — captures far more of the session
+            max_length: '512'           # 2x MiniLM — tractable; 1024 didn't finish 30q in 6h
             repo: 'ibm-granite/granite-embedding-97m-multilingual-r2'
             model_path: '/home/runner/models/granite97'
             use_quant: '0'
