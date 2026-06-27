@@ -1,0 +1,111 @@
+# Does GLiNER NER (vs bundled TinyBERT) lift LongMemEval recall — through the REAL
+# shodh pipeline, via the SHODH_NER_REPLAY hook (no Rust port, no parallel code).
+#
+# HONEST PRIOR: the graph leg (which NER feeds) was measured DISCONNECTED from
+# recall@10 (5 runs). So this may be NULL — that would confirm extraction quality is
+# the KG/anomaly lever, not the recall lever. The counter-hypothesis: a genuinely
+# cleaner typed graph overturns the disconnect. Either way we read it straight.
+#
+# A = baseline (shodh's bundled NER) ; B = GLiNER (replay map), same fixture.
+name: GLiNER NER Ablation
+on:
+  push:
+    branches: ['exp/gliner-ner']
+    paths: ['.github/workflows/gliner-ner-ablation.yml', 'benchmarks/build_gliner_replay.py', 'src/embeddings/ner.rs']
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'LongMemEval questions (GLiNER extraction is the slow part)'
+        required: false
+        default: '15'
+
+permissions:
+  contents: read
+concurrency:
+  group: gliner-ner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ablation:
+    name: GLiNER vs TinyBERT (LongMemEval)
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+
+      - name: Cache MiniLM embedder
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$B/tokenizer.json"
+
+      - name: Build LongMemEval fixture
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          JSON=$(python3 - <<'PY'
+          from huggingface_hub import hf_hub_download
+          print(hf_hub_download(repo_id='xiaowu0162/longmemeval-cleaned',
+                                filename='longmemeval_s_cleaned.json', repo_type='dataset'))
+          PY
+          )
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
+            --limit ${{ github.event.inputs.limit || '15' }}
+          echo "corpus texts:"; cat tests/recall/longmemeval/corpora/*.jsonl | wc -l
+
+      - name: Build GLiNER replay map (extract entities through GLiNER)
+        run: |
+          python3 -m pip install --quiet gliner
+          python3 benchmarks/build_gliner_replay.py \
+            "tests/recall/longmemeval/corpora/*.jsonl" gliner_replay.json 2>&1 | tail -8
+
+      - name: Arm A — baseline NER (bundled)
+        run: |
+          ./target/release/recall-eval --longmemeval tests/recall/longmemeval \
+            --output unused-a.json --storage ./a-storage 2>&1 | tee a.log
+          grep -E "LongMemEval-S:|recall@10|single_hop|multi_hop|temporal|knowledge|NER_BACKEND" a.log | tee a-summary.txt || true
+
+      - name: Arm B — GLiNER (replay map)
+        env:
+          SHODH_NER_REPLAY: gliner_replay.json
+        run: |
+          ./target/release/recall-eval --longmemeval tests/recall/longmemeval \
+            --output unused-b.json --storage ./b-storage 2>&1 | tee b.log
+          grep -E "LongMemEval-S:|recall@10|single_hop|multi_hop|temporal|knowledge|NER_REPLAY ACTIVE" b.log | tee b-summary.txt || true
+
+      - name: Compare
+        if: always()
+        run: |
+          echo "## GLiNER vs baseline NER — LongMemEval recall@10" >> "$GITHUB_STEP_SUMMARY"
+          echo '### A — baseline (bundled NER)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat a-summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo '### B — GLiNER (replay)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"; cat b-summary.txt 2>/dev/null >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gliner-ner-ablation
+          path: |
+            a.log
+            b.log
+            a-summary.txt
+            b-summary.txt
+            gliner_replay.json
