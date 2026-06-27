@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>shodh — Memory Dashboard</title>
+<!-- Web parallel to the TUI: LLM-free search (/api/recall) + the knowledge graph
+     with typed relationships and document provenance (/api/graph/{user}/export).
+     Served by shodh itself at /dashboard — sovereign, local, no LLM, no cloud.
+     CDN libs here for convenience; vendor them locally for an air-gapped build. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+<style>
+  :root{--bg:#0e1117;--panel:#161b22;--line:#30363d;--txt:#e6edf3;--accent:#58a6ff;--mut:#8b949e;}
+  *{box-sizing:border-box;font-family:'Segoe UI',system-ui,sans-serif;}
+  body{margin:0;background:var(--bg);color:var(--txt);height:100vh;display:flex;flex-direction:column;overflow:hidden;}
+  header{display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel);}
+  header h1{font-size:15px;margin:0;white-space:nowrap;} header h1 span{color:var(--accent);}
+  header .tag{font-size:10px;color:var(--mut);border:1px solid var(--line);border-radius:10px;padding:2px 7px;}
+  #q{flex:1;background:#0d1117;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:13px;}
+  #uid{width:90px;background:#0d1117;color:var(--mut);border:1px solid var(--line);border-radius:6px;padding:8px;font-size:12px;}
+  button{background:#0d1117;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer;}
+  button:hover{border-color:var(--accent);}
+  main{flex:1;display:flex;min-height:0;}
+  #results{width:360px;border-right:1px solid var(--line);overflow-y:auto;padding:10px;background:var(--panel);}
+  #cy{flex:1;}
+  #detail{width:300px;border-left:1px solid var(--line);background:var(--panel);padding:12px;overflow-y:auto;font-size:12px;}
+  .sec{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--mut);margin:2px 0 8px;}
+  .res{border:1px solid var(--line);border-radius:8px;padding:9px;margin-bottom:8px;cursor:pointer;background:#0d1117;}
+  .res:hover{border-color:var(--accent);} .res .meta{font-size:10px;color:var(--mut);margin-top:5px;display:flex;gap:8px;}
+  .res .sc{color:var(--accent);} .ev{padding:4px 0;border-top:1px solid var(--line);color:#c9d1d9;font-size:11px;}
+  .rel{font-size:14px;margin:4px 0 8px;} .rel b{color:var(--accent);} .muted{color:var(--mut);}
+</style>
+</head>
+<body>
+<header>
+  <h1><span>shodh</span> Dashboard</h1>
+  <span class="tag">LLM-free</span><span class="tag">deterministic</span>
+  <input id="uid" value="default" title="user_id"/>
+  <input id="q" placeholder="🔍 search memory (deterministic recall — no LLM) … Enter"/>
+  <button id="go">Search</button>
+  <button id="reloadg">Reload graph</button>
+</header>
+<main>
+  <div id="results"><div class="sec">Search results</div><div class="muted" style="font-size:12px">Type a query and press Enter — ranked by shodh's hybrid recall (vector + BM25 + graph), no LLM.</div></div>
+  <div id="cy"></div>
+  <div id="detail"><div class="sec">Detail / provenance</div><div class="muted">Click a node or a relationship edge.</div></div>
+</main>
+<script>
+const TYPEC={organization:"#58a6ff",company:"#79c0ff",person:"#3fb950",location:"#8b949e",
+  entity:"#58a6ff",episode:"#f0883e",memory:"#d2a8ff",missile:"#f85149",aircraft:"#f0883e",_d:"#6e7681"};
+const tc=t=>TYPEC[t]||TYPEC._d;
+let cy;
+function uid(){return document.getElementById('uid').value.trim()||'default';}
+function fail(m){document.getElementById('results').innerHTML='<div class="sec">Search results</div><div style="color:#f85149;font-size:12px">'+m+'</div>';}
+
+// ---- LLM-free search via /api/recall ----
+async function search(){
+  const q=document.getElementById('q').value.trim(); if(!q)return;
+  const box=document.getElementById('results');
+  box.innerHTML='<div class="sec">Search results</div><div class="muted">searching…</div>';
+  try{
+    const t0=performance.now();
+    const r=await fetch('/api/recall',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({user_id:uid(),query:q,limit:10,mode:'hybrid'})});
+    if(!r.ok) throw new Error('recall '+r.status);
+    const d=await r.json(); const ms=Math.round(performance.now()-t0);
+    const mems=d.memories||[];                       // RecallResponse.memories (verified)
+    let h='<div class="sec">Search results · '+(d.count!=null?d.count:mems.length)+' hits · '+ms+'ms · no LLM</div>';
+    if(!mems.length) h+='<div class="muted">no matches</div>';
+    for(const m of mems){
+      const c=(m.experience&&m.experience.content)||'';   // RecallExperience.content (verified)
+      const sc=(typeof m.score==='number')?m.score.toFixed(3):m.score;
+      h+=`<div class="res" data-id="${m.id||''}"><div>${c.slice(0,180)}</div>`+
+         `<div class="meta"><span class="sc">score ${sc}</span>`+
+         `<span>${m.tier||''}</span><span>${(m.created_at||'').slice(0,10)}</span></div></div>`;
+    }
+    box.innerHTML=h;
+    box.querySelectorAll('.res').forEach(el=>el.onclick=()=>focusNode(el.dataset.id, el.querySelector('div').textContent));
+  }catch(e){ fail('search failed: '+e.message+' — is the shodh server running on :3030?'); }
+}
+function focusNode(id,text){
+  document.getElementById('detail').innerHTML='<div class="sec">Result</div><div>'+(text||'').slice(0,400)+'</div>';
+  if(!cy||!id)return; const n=cy.getElementById(id);
+  if(n&&n.length){ cy.elements().removeClass('hl'); n.addClass('hl'); cy.animate({center:{eles:n},zoom:1.4},{duration:350}); }
+}
+
+// ---- graph + typed relationships + provenance via /api/graph/{user}/export ----
+async function loadGraph(){
+  try{
+    const r=await fetch('/api/graph/'+uid()+'/export'); if(!r.ok) throw new Error('export '+r.status);
+    const g=await r.json();
+    const nodes=(g.nodes||[]).map(n=>({data:{id:String(n.id),
+      label:(n.label||n.id||'').toString().slice(0,40),type:n.type||'entity'}}));
+    const ids=new Set(nodes.map(n=>n.data.id));
+    const edges=(g.edges||[]).filter(e=>ids.has(String(e.source))&&ids.has(String(e.target)))
+      .map((e,i)=>({data:{id:'e'+i,source:String(e.source),target:String(e.target),
+        label:e.label||'',attrs:e.attributes||{}}}));   // ExportEdge: label=RelationType, attributes={strength,tier,created_at,source_episode_id}
+    if(cy)cy.destroy();
+    cy=cytoscape({container:document.getElementById('cy'),elements:[...nodes,...edges],wheelSensitivity:.2,
+      style:[
+        {selector:'node',style:{'background-color':e=>tc(e.data('type')),'label':'data(label)','color':'#e6edf3',
+          'font-size':9,'width':18,'height':18,'text-valign':'bottom','text-margin-y':2,'min-zoomed-font-size':7}},
+        {selector:'edge',style:{'width':1.4,'line-color':'#475569','target-arrow-color':'#475569',
+          'target-arrow-shape':'triangle','curve-style':'bezier','label':'data(label)','font-size':7,
+          'color':'#9da7b3','text-rotation':'autorotate','text-background-color':'#0e1117',
+          'text-background-opacity':.85,'min-zoomed-font-size':6,'opacity':.8}},
+        {selector:'.hl',style:{'border-width':3,'border-color':'#f0f6fc','line-color':'#f0f6fc',
+          'target-arrow-color':'#f0f6fc','opacity':1,'z-index':99}}
+      ],
+      layout:{name:'cose',animate:false,padding:40}});
+    document.getElementById('cy').setAttribute('data-n', nodes.length);
+    cy.on('tap','node',ev=>{const n=ev.target;
+      document.getElementById('detail').innerHTML='<div class="sec">Entity</div><div class="rel"><b>'+n.data('label')+'</b></div>'+
+        '<div class="muted">type: '+n.data('type')+' · degree '+n.degree()+'</div>';});
+    cy.on('tap','edge',ev=>{const e=ev.target; const a=e.data('attrs')||{};
+      const prov=a.source_episode_id?('episode '+a.source_episode_id):'(no source episode)';
+      document.getElementById('detail').innerHTML='<div class="sec">Relationship</div>'+
+        '<div class="rel">'+e.source().data('label')+' —<b>'+(e.data('label')||'related')+'</b>→ '+e.target().data('label')+'</div>'+
+        '<div class="ev">strength '+(a.strength!=null?Number(a.strength).toFixed(2):'—')+' · tier '+(a.tier||'—')+'</div>'+
+        '<div class="ev">created '+((a.created_at||'').toString().slice(0,10)||'—')+'</div>'+
+        '<div class="ev">provenance: '+prov+'</div>';});
+  }catch(e){ document.getElementById('detail').innerHTML='<div class="sec">Detail</div><div style="color:#f85149">graph load failed: '+e.message+'</div>'; }
+}
+
+document.getElementById('go').onclick=search;
+document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search();});
+document.getElementById('reloadg').onclick=loadGraph;
+loadGraph();
+</script>
+</body>
+</html>

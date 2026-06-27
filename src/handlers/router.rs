@@ -75,7 +75,8 @@ pub fn build_public_routes(state: AppState) -> Router {
         // =================================================================
         // GRAPH VISUALIZATION (PUBLIC - HTML VIEWER ONLY)
         // =================================================================
-        .route("/graph/view", get(visualization::graph_view));
+        .route("/graph/view", get(visualization::graph_view))
+        .route("/dashboard", get(visualization::dashboard));
 
     // /metrics is an authenticated route by default; expose it here only when
     // the operator has explicitly opted in via SHODH_METRICS_PUBLIC.
