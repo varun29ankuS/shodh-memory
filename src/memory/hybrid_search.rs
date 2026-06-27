@@ -23,9 +23,41 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, Value, STORED, STRING, TEXT};
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
+};
+use tantivy::tokenizer::{
+    Language, LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, TextAnalyzer,
+};
 use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument};
 use tracing::{debug, info};
+
+/// Name of the custom English text analyzer registered on the BM25 index.
+///
+/// The analyzer applies Porter2 (Snowball English) stemming at INDEX time so the
+/// stored postings are stems ("running" → "run"). The same analyzer is consulted
+/// by Tantivy's `QueryParser`, so query terms are stemmed identically — a query
+/// for "running" and a document containing "ran"/"runs"/"running" share the
+/// stem "run" and match. Without this, the schema's bare `TEXT` fields used the
+/// "default" analyzer (lowercase only, no stemming) and morphological variants
+/// silently failed to match.
+///
+/// Tantivy's `Stemmer` wraps the same `rust-stemmers` Porter2/English used
+/// elsewhere in the codebase (graph entity matching, query IC analysis), so no
+/// new dependency is introduced and the stemming is byte-identical to the
+/// app-level stemming.
+const SHODH_EN_TOKENIZER: &str = "shodh_en";
+
+/// Build the custom English analyzer: simple word splitting → drop pathological
+/// long tokens (defensive, matches Tantivy's own `en_stem` preset) → lowercase
+/// → Porter2 English stemming.
+fn shodh_en_analyzer() -> TextAnalyzer {
+    TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(RemoveLongFilter::limit(40))
+        .filter(LowerCaser)
+        .filter(Stemmer::new(Language::English))
+        .build()
+}
 
 use super::types::MemoryId;
 use crate::embeddings::minilm::MiniLMEmbedder;
@@ -155,17 +187,32 @@ impl BM25Index {
     pub fn new(path: &Path) -> Result<Self> {
         let mut schema_builder = Schema::builder();
 
+        // Stemmed text indexing: route the tokenized fields through the custom
+        // `shodh_en` analyzer (Porter2 stemming) instead of the bare "default"
+        // tokenizer. `WithFreqsAndPositions` matches the `TEXT` preset's posting
+        // option so phrase queries (used by `search_with_term_and_phrase_weights`)
+        // keep working. The tokenizer NAME is persisted in the on-disk schema, so
+        // the analyzer MUST be registered under the same name on every open
+        // (see registration below) or QueryParser/indexing will fail to resolve it.
+        let stemmed_indexing = TextFieldIndexing::default()
+            .set_tokenizer(SHODH_EN_TOKENIZER)
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+        let stemmed_text = TextOptions::default().set_indexing_options(stemmed_indexing.clone());
+        let stemmed_text_stored = TextOptions::default()
+            .set_indexing_options(stemmed_indexing)
+            .set_stored();
+
         // Memory ID (stored, not tokenized)
         schema_builder.add_text_field("id", STRING | STORED);
 
-        // Main content (tokenized for BM25)
-        schema_builder.add_text_field("content", TEXT | STORED);
+        // Main content (stemmed, stored for retrieval of the id payload)
+        schema_builder.add_text_field("content", stemmed_text_stored);
 
-        // Tags (tokenized)
-        schema_builder.add_text_field("tags", TEXT);
+        // Tags (stemmed)
+        schema_builder.add_text_field("tags", stemmed_text.clone());
 
-        // Entities (tokenized)
-        schema_builder.add_text_field("entities", TEXT);
+        // Entities (stemmed)
+        schema_builder.add_text_field("entities", stemmed_text);
 
         let schema = schema_builder.build();
 
@@ -179,6 +226,18 @@ impl BM25Index {
         } else {
             Index::create_in_dir(path, schema).context("Failed to create BM25 index")?
         };
+
+        // Register the custom stemming analyzer under the name the schema's text
+        // fields reference. This is required on BOTH paths: on create the writer
+        // needs it to tokenize incoming docs, and on open the schema loaded from
+        // disk names `shodh_en` for content/tags/entities. `TokenizerManager`
+        // overwrites any prior registration of the same name, so this is
+        // idempotent. The same `Index` handle backs the writer and every
+        // `QueryParser::for_index` call, so registering here makes index-time and
+        // query-time tokenization use one identical analyzer.
+        index
+            .tokenizers()
+            .register(SHODH_EN_TOKENIZER, shodh_en_analyzer());
 
         // Resolve field handles from the index's actual schema (which may have
         // been loaded from disk). Using builder-created handles would be wrong
@@ -1166,6 +1225,93 @@ mod tests {
         let results = index.search("SIGHUP", 10).unwrap();
         assert!(!results.is_empty(), "BM25 should find SIGHUP");
         assert_eq!(results[0].0, id1, "Exact keyword match should win");
+    }
+
+    #[test]
+    fn test_bm25_index_time_stemming_matches_morphological_variants() {
+        // Proves the custom `shodh_en` analyzer stems at INDEX time so a query
+        // term and a document's inflected form collapse to the same stem and
+        // match. Under the old bare-`TEXT` (default tokenizer, no stemming)
+        // schema every one of these queries would miss its document.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let index = BM25Index::new(temp_dir.path()).unwrap();
+
+        let running = MemoryId(uuid::Uuid::new_v4());
+        let studies = MemoryId(uuid::Uuid::new_v4());
+        let organized = MemoryId(uuid::Uuid::new_v4());
+
+        index
+            .upsert(
+                &running,
+                "She enjoys running marathons every weekend",
+                &[],
+                &[],
+            )
+            .unwrap();
+        index
+            .upsert(
+                &studies,
+                "He studies astrophysics at the university",
+                &[],
+                &[],
+            )
+            .unwrap();
+        index
+            .upsert(
+                &organized,
+                "They organized a charity fundraiser last month",
+                &["organization".to_string()],
+                &[],
+            )
+            .unwrap();
+
+        index.commit().unwrap();
+        index.reload().unwrap();
+
+        // Query stem "run" must reach the document containing "running".
+        let results = index.search("run", 10).unwrap();
+        assert!(
+            results.iter().any(|(id, _)| *id == running),
+            "stemmed query 'run' must match document containing 'running'"
+        );
+
+        // "study" must reach "studies".
+        let results = index.search("study", 10).unwrap();
+        assert!(
+            results.iter().any(|(id, _)| *id == studies),
+            "stemmed query 'study' must match document containing 'studies'"
+        );
+
+        // "organize" must reach "organized" in content AND "organization" in tags.
+        let results = index.search("organize", 10).unwrap();
+        assert!(
+            results.iter().any(|(id, _)| *id == organized),
+            "stemmed query 'organize' must match 'organized'/'organization'"
+        );
+    }
+
+    #[test]
+    fn test_bm25_stemming_survives_reopen() {
+        // The tokenizer name is persisted in the on-disk schema; reopening the
+        // index must re-register the same analyzer so queries still stem. A miss
+        // here would mean a cold-started server silently loses stemmed recall.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let id = MemoryId(uuid::Uuid::new_v4());
+        {
+            let index = BM25Index::new(temp_dir.path()).unwrap();
+            index
+                .upsert(&id, "The committee approved the proposals", &[], &[])
+                .unwrap();
+            index.commit().unwrap();
+        }
+        // Reopen: schema is loaded from disk, analyzer re-registered in `new`.
+        let reopened = BM25Index::new(temp_dir.path()).unwrap();
+        reopened.reload().unwrap();
+        let results = reopened.search("proposal", 10).unwrap();
+        assert!(
+            results.iter().any(|(rid, _)| *rid == id),
+            "after reopen, stemmed query 'proposal' must match 'proposals'"
+        );
     }
 
     #[test]
