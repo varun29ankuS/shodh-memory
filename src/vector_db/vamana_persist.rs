@@ -364,6 +364,7 @@ impl VamanaIndex {
             dimension,
             use_mmap: false, // Loaded into memory
             distance_metric: header.distance_metric_enum(),
+            search_ef: None,
         };
 
         let index = VamanaIndex {

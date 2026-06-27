@@ -74,6 +74,13 @@ pub struct VamanaConfig {
     /// Distance metric for similarity calculation
     /// Default: NormalizedDotProduct (assumes L2-normalized vectors)
     pub distance_metric: DistanceMetric,
+
+    /// Query-time search beam (efSearch), decoupled from construction `L`.
+    /// `None` → the query beam is just `k`. `Some(ef)` widens the query beam to
+    /// `max(k, ef)` so a graph built with a small (cheap-to-build) construction
+    /// `L` can still be searched deeply enough to recover recall — shifting cost
+    /// from ingest (construction) to query, without touching stored memory.
+    pub search_ef: Option<usize>,
 }
 
 impl Default for VamanaConfig {
@@ -82,16 +89,19 @@ impl Default for VamanaConfig {
             // Recall-first defaults for shodh's actual scale (thousands–millions of
             // vectors, NOT billions). Measured ANN recall@10 vs exact brute-force:
             // R=32/L=75-class → ~0.68; R=48/L=200 → ~1.0 (clustered + real MiniLM).
-            // R=48 adds only ~tens of MB of edges at our scale (the R=32 "billion-scale"
-            // frugality solved a problem we don't have); L=200 widens the search beam
-            // (per-query compute) for recall. Memory-frugal query efSearch decoupling is
-            // a future optimization for edge/billion-scale deployments.
+            // Cost split: construction `L` drives ingest cost (per-insert build beam);
+            // query cost is just the search beam. We keep construction `L` MODEST (100)
+            // for cheap ingest and recover recall with a wider query `efSearch` (100) —
+            // shifting cost ingest→query without growing stored memory. R=48 adds only
+            // ~tens of MB of edges at our scale (the R=32 default was a billion-scale
+            // memory tuning we don't need).
             max_degree: 48,                             // R=48 — recall-safe at our scale
-            search_list_size: 200,                      // L=200 — construction + search beam
+            search_list_size: 100,                      // construction L — modest (cheap ingest)
             alpha: 1.2,                                 // Standard α for pruning
             dimension: 384,                             // MiniLM dimension
             use_mmap: true,                             // Disk-based for large datasets
             distance_metric: DistanceMetric::default(), // NormalizedDotProduct for MiniLM
+            search_ef: Some(100),                       // query beam — recovers recall on a cheap graph
         }
     }
 }
@@ -795,11 +805,17 @@ impl VamanaIndex {
         let deleted_count = deleted.len();
 
         // Request extra candidates to account for deleted vectors
-        let search_k = if deleted_count > 0 {
+        let mut search_k = if deleted_count > 0 {
             k + deleted_count.min(k * 2)
         } else {
             k
         };
+        // Widen the query beam to efSearch (decoupled from construction L). A graph
+        // built with a small, cheap-to-build construction L is searched more deeply
+        // at query time to recover recall — cost shifts ingest→query, memory unchanged.
+        if let Some(ef) = self.config.search_ef {
+            search_k = search_k.max(ef);
+        }
 
         let candidates = self.greedy_search(query, search_k, entry)?;
 
@@ -1698,11 +1714,12 @@ mod tests {
     fn ann_recall_at_10_meets_target() {
         let n = 2000usize;
         let dim = 384usize;
-        let (r, l) = (48usize, 200usize); // matches VamanaConfig::default (shipped)
+        let (r, build_l, query_ef) = (48usize, 100usize, 100usize); // cheap construction + query efSearch
         let mut index = VamanaIndex::new(VamanaConfig {
             dimension: dim,
             max_degree: r,
-            search_list_size: l,
+            search_list_size: build_l,
+            search_ef: Some(query_ef),
             alpha: 1.2,
             use_mmap: false,
             ..Default::default()
@@ -1733,7 +1750,7 @@ mod tests {
         index.build(vectors).unwrap();
         let recall = index.estimate_recall(200, 10).unwrap();
         println!(
-            "ANN_RECALL@10 = {recall:.4}  (n={n} dim={dim} clustered=40 R={r} L={l} alpha=1.2, quality build)"
+            "ANN_RECALL@10 = {recall:.4}  (n={n} dim={dim} clustered=40 R={r} buildL={build_l} ef={query_ef} alpha=1.2)"
         );
         assert!(
             recall >= 0.90,
@@ -1966,6 +1983,7 @@ mod tests {
             alpha: 1.2,
             use_mmap: false,
             distance_metric: DistanceMetric::NormalizedDotProduct,
+            search_ef: None,
         })
         .unwrap();
 
@@ -2020,6 +2038,7 @@ mod tests {
             alpha: 1.2,
             use_mmap: false,
             distance_metric: DistanceMetric::NormalizedDotProduct,
+            search_ef: None,
         })
         .unwrap();
 
@@ -2048,6 +2067,7 @@ mod tests {
             alpha: 1.2,
             use_mmap: false,
             distance_metric: DistanceMetric::NormalizedDotProduct,
+            search_ef: None,
         })
         .unwrap();
         loaded.load(dir.path()).unwrap();
