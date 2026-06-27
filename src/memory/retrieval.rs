@@ -1606,6 +1606,49 @@ impl RetrievalEngine {
         Ok(())
     }
 
+    /// Restore graph quality if incremental inserts have degraded the topology.
+    ///
+    /// Every production write reaches the index through `add_vector()`, which
+    /// builds neighbors with greedy top-k selection and skips `robust_prune`.
+    /// The graph therefore loses the long-range alpha-RNG edges that give Vamana
+    /// its recall at low degree (documented 5-15% recall@10 loss). Neither the
+    /// deletion-compaction path (`auto_rebuild_index_if_needed`, gated on the 30%
+    /// deletion ratio) nor the 10,000-insert `needs_rebuild()` threshold restores
+    /// that topology in a session that ingests fewer vectors — so without this
+    /// hook the live graph runs degraded indefinitely.
+    ///
+    /// This calls `force_quality_rebuild()` (full bulk alpha-RNG construction)
+    /// once accumulated incremental inserts reach `REPAIR_THRESHOLD`. Unlike
+    /// Vamana's internal `auto_rebuild_if_needed`, `force_quality_rebuild`
+    /// rebuilds the id mapping positionally and persists it to RocksDB, so there
+    /// is no id corruption — the invariant that made the internal rebuild
+    /// unusable. Returns true if a rebuild ran.
+    ///
+    /// Triggering at `REPAIR_THRESHOLD` (rather than the heavier
+    /// `REBUILD_THRESHOLD`) keeps the live graph close to a freshly-built one
+    /// while bounding rebuild frequency: a full alpha-RNG build is amortized over
+    /// at least `REPAIR_THRESHOLD` inserts.
+    pub fn maintain_graph_quality_if_needed(&self) -> Result<bool> {
+        // Cheap O(1) gate under a read lock — avoid the rebuild write lock unless
+        // the graph has actually accumulated enough greedy inserts to matter.
+        {
+            let index = self.vector_index.read();
+            if index.is_rebuilding()
+                || index.incremental_insert_count()
+                    < crate::vector_db::vamana::REPAIR_THRESHOLD
+            {
+                return Ok(false);
+            }
+        }
+
+        info!(
+            "Vamana graph quality maintenance: incremental inserts reached repair threshold, \
+             running bulk alpha-RNG rebuild"
+        );
+        self.force_quality_rebuild()?;
+        Ok(true)
+    }
+
     /// Check if vector index needs rebuild and rebuild if necessary
     ///
     /// Returns true if rebuild was performed.
@@ -2613,5 +2656,63 @@ mod tests {
         engine
             .force_quality_rebuild()
             .expect("no-op rebuild must succeed");
+    }
+
+    /// The production maintenance hook must NOT rebuild below the repair
+    /// threshold (a full alpha-RNG build is expensive — it may only be amortized
+    /// over many inserts), and must leave search intact when it no-ops. The
+    /// rebuild-fires-correctly path is covered end-to-end by
+    /// `test_force_quality_rebuild_resets_counter_and_preserves_mapping`; this
+    /// test pins the gating contract so the hook can't silently rebuild on every
+    /// maintenance cycle.
+    #[test]
+    fn test_maintain_graph_quality_no_op_below_threshold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(
+            crate::memory::storage::MemoryStorage::new(dir.path(), None).expect("storage"),
+        );
+        let embedder = Arc::new(
+            crate::embeddings::minilm::MiniLMEmbedder::new_simplified(
+                crate::embeddings::minilm::EmbeddingConfig::default(),
+            )
+            .expect("simplified embedder"),
+        );
+        let engine = RetrievalEngine::new(storage, embedder).expect("engine");
+
+        let dim = crate::embeddings::minilm::configured_text_dim();
+        // A handful of inserts — well under REPAIR_THRESHOLD (1000).
+        for i in 0..10 {
+            let v = test_vector(i, dim);
+            let vid = engine
+                .vector_index
+                .write()
+                .add_vector(v.clone())
+                .expect("add_vector");
+            engine
+                .id_mapping
+                .write()
+                .insert(MemoryId(uuid::Uuid::new_v4()), vid);
+        }
+
+        assert!(
+            engine.index_health().incremental_inserts
+                < crate::vector_db::vamana::REPAIR_THRESHOLD,
+            "precondition: inserts must be below the repair threshold"
+        );
+
+        let rebuilt = engine
+            .maintain_graph_quality_if_needed()
+            .expect("maintenance must not error");
+        assert!(
+            !rebuilt,
+            "maintenance must be a no-op below the repair threshold"
+        );
+
+        // Counter untouched — proves no rebuild happened.
+        assert_eq!(
+            engine.index_health().incremental_inserts,
+            9,
+            "no-op maintenance must not reset the incremental counter"
+        );
     }
 }

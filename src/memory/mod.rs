@@ -7119,6 +7119,17 @@ impl MemorySystem {
         self.retriever.auto_rebuild_index_if_needed()
     }
 
+    /// Restore Vamana graph quality if incremental inserts have degraded it.
+    ///
+    /// Production writes go through `add_vector()` (greedy neighbors, no
+    /// `robust_prune`), so the live graph loses the alpha-RNG long-range edges
+    /// over time. This runs a bulk alpha-RNG rebuild once accumulated inserts
+    /// reach the repair threshold, preserving the id mapping. Returns `Ok(true)`
+    /// if a rebuild was performed. Called from the heavy maintenance cycle.
+    pub fn maintain_graph_quality_if_needed(&self) -> Result<bool> {
+        self.retriever.maintain_graph_quality_if_needed()
+    }
+
     /// Auto-repair index integrity and compact if needed
     ///
     /// Called during maintenance to ensure storage↔index consistency:
@@ -7131,7 +7142,10 @@ impl MemorySystem {
         // Check index health first (fast operation)
         let health = self.index_health();
 
-        // Auto-compact if deletion ratio exceeds threshold
+        // Auto-compact if deletion ratio exceeds threshold. A successful
+        // compaction performs a full RocksDB rebuild (bulk alpha-RNG) and resets
+        // the incremental-insert counter, so it already restores graph quality.
+        let mut compacted = false;
         if health.needs_compaction {
             tracing::info!(
                 "Index compaction triggered: {:.1}% deleted ({} of {} vectors)",
@@ -7139,8 +7153,24 @@ impl MemorySystem {
                 health.deleted_count,
                 health.total_vectors
             );
-            if let Err(e) = self.auto_rebuild_index_if_needed() {
-                tracing::warn!("Index compaction failed: {}", e);
+            match self.auto_rebuild_index_if_needed() {
+                Ok(rebuilt) => compacted = rebuilt,
+                Err(e) => tracing::warn!("Index compaction failed: {}", e),
+            }
+        }
+
+        // Restore graph quality when incremental inserts have degraded the
+        // topology but no compaction ran. Production writes use greedy neighbor
+        // selection (no robust_prune), so without this the live graph never gets
+        // the alpha-RNG long-range edges Vamana relies on for recall. Skipped
+        // when compaction just rebuilt the whole index.
+        if !compacted {
+            match self.maintain_graph_quality_if_needed() {
+                Ok(true) => tracing::info!(
+                    "Vamana graph quality restored via bulk alpha-RNG rebuild"
+                ),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("Vamana graph quality maintenance failed: {}", e),
             }
         }
 
