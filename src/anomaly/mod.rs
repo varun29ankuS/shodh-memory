@@ -30,6 +30,9 @@ pub enum AnomalyKind {
     StructuralBridge,
     /// Embedding from one community, graph edges into another — modalities disagree.
     CrossModalMismatch,
+    /// Generic anomaly from a real labeled dataset (e.g. BOND/enron) — binary ground
+    /// truth with no synthetic sub-kind.
+    Labeled,
 }
 
 /// One item in the substrate. `planted` is the ground-truth label (None = normal).
@@ -240,6 +243,50 @@ pub fn generate(p: &GenParams) -> PlantedCorpus {
         community_centers: centers,
         dim: p.dim,
     }
+}
+
+/// JSON schema for a real labeled dataset export (e.g. BOND/enron):
+/// `{"dim": D, "nodes": [{"id", "embedding": [..], "neighbors": [..], "label": 0|1}]}`.
+#[derive(serde::Deserialize)]
+struct RealNodeJson {
+    id: usize,
+    embedding: Vec<f32>,
+    neighbors: Vec<usize>,
+    label: u8,
+}
+#[derive(serde::Deserialize)]
+struct RealCorpusJson {
+    nodes: Vec<RealNodeJson>,
+    dim: usize,
+}
+
+/// Load a real labeled graph (e.g. the BOND/enron export) into a [`PlantedCorpus`]
+/// so detectors run on real intelligence-style data with real needles, scored by
+/// the same [`evaluate`] harness as the synthetic plants. Label != 0 → anomaly.
+pub fn load_real(path: &std::path::Path) -> anyhow::Result<PlantedCorpus> {
+    let txt = std::fs::read_to_string(path)?;
+    let j: RealCorpusJson = serde_json::from_str(&txt)?;
+    let dim = j.dim;
+    let items = j
+        .nodes
+        .into_iter()
+        .map(|n| AnomalyItem {
+            id: n.id,
+            embedding: n.embedding,
+            community: 0,
+            neighbors: n.neighbors,
+            planted: if n.label != 0 {
+                Some(AnomalyKind::Labeled)
+            } else {
+                None
+            },
+        })
+        .collect();
+    Ok(PlantedCorpus {
+        items,
+        community_centers: Vec::new(),
+        dim,
+    })
 }
 
 /// A detector returns one anomalousness score per item (higher = more anomalous).
