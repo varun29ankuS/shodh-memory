@@ -1,0 +1,153 @@
+# PMI² edge-gate — LongMemEval default-flip confirm.
+#
+# The decisive benchmark: SHODH_GRAPH_PMI_GATE cannot become a default until it's
+# confirmed neutral-or-better on LongMemEval-S (the headline 0.766 retrieval number).
+# One shared fixture (same questions, --shuffle pinned by building it ONCE), then two
+# arms on it:
+#   A = control            (full co-occurrence graph)
+#   B = SHODH_GRAPH_PMI_GATE=1   (incidental co-occurrence pruned at birth)
+# PASS = B recall@10 >= A across categories. The gate only PREVENTS edges, so the bet
+# is neutral-or-better, with the graph far smaller.
+name: PMI Gate — LongMemEval Confirm
+on:
+  push:
+    branches: ['exp/pmi-edge-gate']
+    paths: ['.github/workflows/pmi-gate-longmemeval.yml']
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'LongMemEval questions (representative mix). Blank = all 479.'
+        required: false
+        default: '50'
+      gate_min:
+        description: 'SHODH_GRAPH_PMI_GATE_MIN (PMI floor).'
+        required: false
+        default: '0.0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pmi-gate-lme-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  confirm:
+    name: PMI gate LongMemEval A/B
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Download LongMemEval-S + build ONE shared fixture
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          JSON=$(python3 - <<'PY'
+          from huggingface_hub import hf_hub_download
+          print(hf_hub_download(repo_id='xiaowu0162/longmemeval-cleaned',
+                                filename='longmemeval_s_cleaned.json',
+                                repo_type='dataset'))
+          PY
+          )
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
+            ${{ github.event.inputs.limit != '' && format('--limit {0}', github.event.inputs.limit) || '--limit 50' }}
+          wc -l tests/recall/longmemeval/manifest.jsonl
+
+      - name: Arm A — control (no gate)
+        env:
+          RUST_LOG: shodh_memory::handlers::state=info
+        run: |
+          ./target/release/recall-eval \
+            --longmemeval tests/recall/longmemeval \
+            --output unused-a.json \
+            --storage ./lme-a-storage 2>a.log | tee a-stdout.log
+          grep -E "LongMemEval-S:|recall@" a-stdout.log a.log | tee a-summary.txt || true
+
+      - name: Arm B — SHODH_GRAPH_PMI_GATE=1
+        env:
+          SHODH_GRAPH_PMI_GATE: '1'
+          SHODH_GRAPH_PMI_GATE_MIN: ${{ github.event.inputs.gate_min || '0.0' }}
+          RUST_LOG: shodh_memory::handlers::state=info
+        run: |
+          ./target/release/recall-eval \
+            --longmemeval tests/recall/longmemeval \
+            --output unused-b.json \
+            --storage ./lme-b-storage 2>b.log | tee b-stdout.log
+          grep -E "LongMemEval-S:|recall@" b-stdout.log b.log | tee b-summary.txt || true
+
+      - name: Compare — recall (A vs B) + edges pruned
+        if: always()
+        run: |
+          echo "## PMI gate — LongMemEval confirm (gate_min=${{ github.event.inputs.gate_min || '0.0' }})" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re
+          def overall(f):
+              try: t = open(f, errors='ignore').read()
+              except FileNotFoundError: return None
+              m = re.search(r'LongMemEval-S:.*?recall@10\s*=\s*([0-9.]+)', t)
+              return float(m.group(1)) if m else None
+          def edges(f):
+              tot = dict(generic=0, pmi_gated=0, cue=0, semantic=0, pair_table=0, learned=0)
+              try: lines = open(f, errors='ignore')
+              except FileNotFoundError: return tot
+              for line in lines:
+                  if 'edge typing provenance' not in line: continue
+                  for k,v in re.findall(r'(\w+)=(\d+)', line):
+                      if k in tot: tot[k]+=int(v)
+              return tot
+          a, b = overall('a-stdout.log') or overall('a.log'), overall('b-stdout.log') or overall('b.log')
+          ea, eb = edges('a.log'), edges('b.log')
+          print("### recall@10 (overall)")
+          if a is not None and b is not None:
+              print(f"- A control: **{a:.4f}**  ·  B gated: **{b:.4f}**  ·  Δ {b-a:+.4f}")
+              print(f"- verdict: {'PASS (neutral-or-better)' if b>=a-1e-9 else 'REGRESSION'}")
+          else:
+              print(f"- could not parse (A={a}, B={b}) — see a-summary.txt / b-summary.txt artifacts")
+          ta = ea['generic']+ea['cue']+ea['semantic']+ea['pair_table']+ea['learned']
+          tb = eb['generic']+eb['cue']+eb['semantic']+eb['pair_table']+eb['learned']
+          print("\n### graph size")
+          print(f"- stored edges A: {ta}  ·  B: {tb}  ·  Δ {tb-ta}")
+          print(f"- generic co-occ A: {ea['generic']}  ·  B: {eb['generic']}  ·  pruned (pmi_gated): {eb['pmi_gated']}")
+          if ta: print(f"- **graph shrank {100.0*(ta-tb)/ta:.1f}%**")
+          print("\n### per-category recall@10 (A control)")
+          print('```'); print(open('a-summary.txt', errors='ignore').read() if __import__('os').path.exists('a-summary.txt') else '(none)'); print('```')
+          print("### per-category recall@10 (B gated)")
+          print('```'); print(open('b-summary.txt', errors='ignore').read() if __import__('os').path.exists('b-summary.txt') else '(none)'); print('```')
+          PY
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pmi-gate-longmemeval
+          path: |
+            a.log
+            b.log
+            a-summary.txt
+            b-summary.txt
