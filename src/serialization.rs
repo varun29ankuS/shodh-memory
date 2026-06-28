@@ -168,9 +168,8 @@ pub fn try_decode_compat<T: DeserializeOwned>(
                 let mut extended = Vec::with_capacity(payload.len() + default_suffix.len());
                 extended.extend_from_slice(payload);
                 extended.extend_from_slice(default_suffix);
-                let val = postcard::from_bytes::<T>(&extended).map_err(|e| {
-                    anyhow::anyhow!("postcard decode (compat retry): {e}")
-                })?;
+                let val = postcard::from_bytes::<T>(&extended)
+                    .map_err(|e| anyhow::anyhow!("postcard decode (compat retry): {e}"))?;
                 return Ok((val, true));
             }
             Err(e) => return Err(anyhow::anyhow!("postcard decode (tagged): {e}")),

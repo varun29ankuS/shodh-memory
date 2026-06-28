@@ -4475,9 +4475,7 @@ impl GraphMemory {
 
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
-                if let Ok((mut edge, _)) =
-                    decode_relationship_edge(&value)
-                {
+                if let Ok((mut edge, _)) = decode_relationship_edge(&value) {
                     let _ = edge.strengthen();
                     match crate::serialization::encode(&edge) {
                         Ok(encoded) => {
@@ -4534,9 +4532,7 @@ impl GraphMemory {
 
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
-                if let Ok((mut edge, _)) =
-                    decode_relationship_edge(&value)
-                {
+                if let Ok((mut edge, _)) = decode_relationship_edge(&value) {
                     let _ = edge.strengthen_with_importance(importance);
                     match crate::serialization::encode(&edge) {
                         Ok(encoded) => {
@@ -4589,9 +4585,7 @@ impl GraphMemory {
 
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
-                if let Ok((mut edge, _)) =
-                    decode_relationship_edge(&value)
-                {
+                if let Ok((mut edge, _)) = decode_relationship_edge(&value) {
                     // Fully potentiated edges are protected from batch weakening
                     if matches!(edge.ltp_status, LtpStatus::Full) {
                         continue;
