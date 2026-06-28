@@ -2,129 +2,714 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<title>shodh — Memory Dashboard</title>
-<!-- Web parallel to the TUI: LLM-free search (/api/recall) + the knowledge graph
-     with typed relationships and document provenance (/api/graph/{user}/export).
-     Served by shodh itself at /dashboard — sovereign, local, no LLM, no cloud.
-     CDN libs here for convenience; vendor them locally for an air-gapped build. -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>shodh — Associative Memory</title>
+<!--
+  shodh web dashboard — the visualization of ASSOCIATIVE RECALL.
+  A single cue surfaces a CASCADE of associated memories AND the causal chains
+  linking them, lit up together — the brain's spreading activation, made visible.
+  This is the demo for drones/robots: one recall brings up the relevant memories
+  + causal context, like a mind remembering. Sovereign, local, no LLM, no cloud.
+
+  Wiring (all verified against src/ serde structs):
+    GET  /api/events?user_id=&api_key=        SSE — RETRIEVE / PROACTIVE_CONTEXT events
+    POST /api/recall                          {user_id,query,limit,mode} -> surfaces a cascade
+    GET  /api/graph/{user}/universe           stars[] + connections[]  (the spreading-activation graph)
+    GET  /api/users/{user}/stats              tiers / vector / retrievals
+    GET  /api/graph/{user}/stats              entities / relationships / episodes
+    GET  /api/context_status                  connected LLM sessions (model, token%, dir)
+    POST /api/todos/list  POST /api/todos/stats
+  Auth: X-API-Key header for fetch; ?api_key= query for the EventSource stream.
+  CDN d3 for convenience; vendor locally for an air-gapped build.
+-->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
 <style>
-  :root{--bg:#0e1117;--panel:#161b22;--line:#30363d;--txt:#e6edf3;--accent:#58a6ff;--mut:#8b949e;}
-  *{box-sizing:border-box;font-family:'Segoe UI',system-ui,sans-serif;}
-  body{margin:0;background:var(--bg);color:var(--txt);height:100vh;display:flex;flex-direction:column;overflow:hidden;}
-  header{display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--panel);}
-  header h1{font-size:15px;margin:0;white-space:nowrap;} header h1 span{color:var(--accent);}
-  header .tag{font-size:10px;color:var(--mut);border:1px solid var(--line);border-radius:10px;padding:2px 7px;}
-  #q{flex:1;background:#0d1117;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:13px;}
-  #uid{width:90px;background:#0d1117;color:var(--mut);border:1px solid var(--line);border-radius:6px;padding:8px;font-size:12px;}
-  button{background:#0d1117;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:8px 12px;font-size:13px;cursor:pointer;}
-  button:hover{border-color:var(--accent);}
-  main{flex:1;display:flex;min-height:0;}
-  #results{width:360px;border-right:1px solid var(--line);overflow-y:auto;padding:10px;background:var(--panel);}
-  #cy{flex:1;}
-  #detail{width:300px;border-left:1px solid var(--line);background:var(--panel);padding:12px;overflow-y:auto;font-size:12px;}
-  .sec{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--mut);margin:2px 0 8px;}
-  .res{border:1px solid var(--line);border-radius:8px;padding:9px;margin-bottom:8px;cursor:pointer;background:#0d1117;}
-  .res:hover{border-color:var(--accent);} .res .meta{font-size:10px;color:var(--mut);margin-top:5px;display:flex;gap:8px;}
-  .res .sc{color:var(--accent);} .ev{padding:4px 0;border-top:1px solid var(--line);color:#c9d1d9;font-size:11px;}
-  .rel{font-size:14px;margin:4px 0 8px;} .rel b{color:var(--accent);} .muted{color:var(--mut);}
+:root{
+  --bg:#0b0e14; --bg2:#0e1117; --panel:#121722; --panel2:#161b26; --line:#222a38;
+  --line2:#2c3647; --txt:#e6edf3; --txt2:#aab4c2; --mut:#6e7a8c; --accent:#58a6ff;
+  --saffron:#ffb782; --gold:#ffd682; --turmeric:#ffc878; --maroon:#ff8c8c;
+  --deepblue:#82a0dc; --live:#96e6aa; --strong:#78c878; --medium:#e6c864; --weak:#787878;
+  --create:#b4e6b4; --retrieve:#ffc896; --proactive:#b4dcff; --update:#ffe082; --del:#ff8c8c;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;height:100%;}
+body{
+  background:radial-gradient(1200px 700px at 78% -8%,#10151f 0,var(--bg) 60%);
+  color:var(--txt); height:100vh; display:flex; flex-direction:column; overflow:hidden;
+  font-family:"Inter","Segoe UI",system-ui,-apple-system,sans-serif;
+  font-size:13px; -webkit-font-smoothing:antialiased;
+}
+::-webkit-scrollbar{width:8px;height:8px;}
+::-webkit-scrollbar-thumb{background:#2a3343;border-radius:6px;}
+::-webkit-scrollbar-track{background:transparent;}
+.mono{font-family:"JetBrains Mono","SF Mono",ui-monospace,Consolas,monospace;}
+
+/* ── Header ───────────────────────────────────────────── */
+header{
+  display:flex;align-items:center;gap:14px;padding:11px 16px;
+  border-bottom:1px solid var(--line);background:linear-gradient(180deg,var(--panel) 0,#10141d 100%);
+  flex-shrink:0;
+}
+.brand{display:flex;align-items:center;gap:9px;}
+.brand .logo{font-size:18px;font-weight:700;letter-spacing:.5px;}
+.brand .logo b{background:linear-gradient(90deg,#ffb782,#ffd682);-webkit-background-clip:text;background-clip:text;color:transparent;}
+.brand .sub{font-size:10px;color:var(--mut);letter-spacing:1.5px;text-transform:uppercase;margin-top:1px;}
+.pulse{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.5px;}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--mut);box-shadow:0 0 0 0 rgba(150,230,170,.6);}
+.pulse.on .dot{background:var(--live);animation:beat 1.8s ease-in-out infinite;}
+.pulse.on{color:var(--live);}
+@keyframes beat{0%,100%{box-shadow:0 0 0 0 rgba(150,230,170,.5);}50%{box-shadow:0 0 0 7px rgba(150,230,170,0);}}
+.stats-strip{display:flex;gap:18px;margin-left:6px;}
+.stat{display:flex;flex-direction:column;line-height:1.15;}
+.stat .v{font-size:14px;font-weight:700;font-variant-numeric:tabular-nums;}
+.stat .k{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.7px;}
+.spark{margin-left:auto;display:flex;align-items:flex-end;gap:2px;height:26px;}
+.spark .bar{width:3px;background:linear-gradient(180deg,#58a6ff,#2f6fbf);border-radius:1px;min-height:2px;transition:height .25s;}
+.usel{margin-left:14px;display:flex;align-items:center;gap:6px;}
+.usel label{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.6px;}
+select,input,button{font-family:inherit;}
+select{background:var(--bg2);color:var(--txt);border:1px solid var(--line2);border-radius:6px;padding:6px 8px;font-size:12px;}
+.tag{font-size:9.5px;color:var(--gold);border:1px solid var(--line2);border-radius:20px;padding:2px 9px;letter-spacing:.5px;background:#13161f;}
+
+/* ── Layout ───────────────────────────────────────────── */
+main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
+.col{min-height:0;display:flex;flex-direction:column;overflow:hidden;}
+.col.left{border-right:1px solid var(--line);background:var(--panel);}
+.col.right{border-left:1px solid var(--line);background:var(--panel);}
+.col.center{position:relative;background:radial-gradient(900px 600px at 50% 40%,#0d1119 0,var(--bg) 80%);}
+.sechd{display:flex;align-items:center;gap:8px;padding:11px 14px 9px;font-size:10px;text-transform:uppercase;
+  letter-spacing:1.2px;color:var(--mut);border-bottom:1px solid var(--line);flex-shrink:0;}
+.sechd b{color:var(--turmeric);font-weight:700;}
+.sechd .cnt{margin-left:auto;color:var(--mut);font-size:10px;}
+
+/* ── Cue bar (the recall trigger) ─────────────────────── */
+.cuebar{padding:12px 14px;border-bottom:1px solid var(--line);flex-shrink:0;}
+.cuebar .row{display:flex;gap:8px;}
+#cue{flex:1;background:var(--bg2);color:var(--txt);border:1px solid var(--line2);border-radius:8px;
+  padding:10px 12px;font-size:13px;}
+#cue:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(88,166,255,.12);}
+#cue::placeholder{color:var(--mut);}
+.cuebar button{background:linear-gradient(180deg,#1d2738,#141b27);color:var(--gold);border:1px solid var(--line2);
+  border-radius:8px;padding:0 16px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;}
+.cuebar button:hover{border-color:var(--gold);color:#fff;}
+.cuebar .hint{margin-top:7px;font-size:10px;color:var(--mut);}
+.cuebar .hint b{color:var(--retrieve);}
+
+/* ── River (the cascade feed) ─────────────────────────── */
+.river{flex:1;overflow-y:auto;padding:10px 12px;}
+.empty{color:var(--mut);font-size:12px;padding:18px 6px;line-height:1.6;}
+.empty b{color:var(--txt2);}
+
+.cascade{border:1px solid var(--line2);border-radius:12px;margin-bottom:14px;background:linear-gradient(180deg,#131a26,#0f141d);
+  overflow:hidden;animation:rise .45s cubic-bezier(.2,.8,.2,1);position:relative;}
+@keyframes rise{from{opacity:0;transform:translateY(10px) scale(.99);}to{opacity:1;transform:none;}}
+.cascade.sel{border-color:var(--retrieve);box-shadow:0 0 0 1px rgba(255,200,150,.25),0 8px 28px rgba(0,0,0,.45);}
+.cascade.glow::before{content:"";position:absolute;inset:0;border-radius:12px;pointer-events:none;
+  box-shadow:0 0 0 1px rgba(255,200,150,.5);animation:fade 2s ease-out forwards;}
+@keyframes fade{from{opacity:1;}to{opacity:0;}}
+
+.casc-hd{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--line);}
+.casc-hd .ico{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:12px;flex-shrink:0;}
+.casc-hd .ttl{flex:1;min-width:0;}
+.casc-hd .cue-q{font-size:13px;font-weight:600;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.casc-hd .cue-q em{font-style:normal;color:var(--retrieve);}
+.casc-hd .cue-meta{font-size:10px;color:var(--mut);margin-top:2px;display:flex;gap:9px;}
+.casc-hd .cue-meta .n{color:var(--turmeric);font-weight:600;}
+.casc-hd .t{font-size:10px;color:var(--mut);white-space:nowrap;}
+
+.casc-body{padding:4px 12px 12px;}
+.cband{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);margin:10px 0 7px;display:flex;align-items:center;gap:7px;}
+.cband::after{content:"";flex:1;height:1px;background:var(--line);}
+.cband .bdg{color:var(--deepblue);font-weight:700;}
+
+/* surfaced memory rows, ranked by score */
+.mem{display:flex;gap:9px;padding:8px;border-radius:8px;margin-bottom:6px;background:#0e131c;
+  border:1px solid #1a2230;cursor:pointer;transition:.12s;}
+.mem:hover{border-color:var(--line2);background:#111722;}
+.mem .rank{font-size:10px;font-weight:700;color:var(--mut);width:16px;text-align:right;padding-top:1px;font-variant-numeric:tabular-nums;}
+.mem .body{flex:1;min-width:0;}
+.mem .txt{font-size:11.5px;line-height:1.45;color:var(--txt2);max-height:48px;overflow:hidden;}
+.mem .mrow{display:flex;align-items:center;gap:9px;margin-top:5px;}
+.scorebar{flex:1;height:4px;border-radius:3px;background:#1a2230;overflow:hidden;max-width:90px;}
+.scorebar i{display:block;height:100%;background:linear-gradient(90deg,#58a6ff,#96e6aa);}
+.mem .sc{font-size:9.5px;color:var(--accent);font-weight:700;font-variant-numeric:tabular-nums;}
+.mem .tier{font-size:9px;color:var(--mut);border:1px solid var(--line2);border-radius:10px;padding:0 6px;}
+
+/* causal chain links (the associative wiring) */
+.chain{display:flex;align-items:center;gap:7px;padding:6px 8px;border-radius:8px;margin-bottom:5px;
+  background:#0d1119;border:1px solid #1a2230;font-size:10.5px;cursor:pointer;}
+.chain:hover{border-color:var(--line2);}
+.chain .node{padding:2px 7px;border-radius:6px;background:#15202e;color:var(--txt2);max-width:120px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.chain .rel{display:flex;flex-direction:column;align-items:center;color:var(--deepblue);min-width:64px;}
+.chain .rel .name{font-size:8.5px;letter-spacing:.4px;text-transform:uppercase;}
+.chain .rel .arr{font-size:13px;line-height:.8;color:var(--medium);}
+.chain .conf{margin-left:auto;font-size:9px;color:var(--mut);font-variant-numeric:tabular-nums;}
+
+/* ── Center: graph ────────────────────────────────────── */
+.gtop{position:absolute;top:0;left:0;right:0;z-index:5;display:flex;align-items:center;gap:10px;
+  padding:11px 14px;pointer-events:none;}
+.gtop .lbl{font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:var(--mut);}
+.gtop .lbl b{color:var(--turmeric);}
+.gtop .activ{margin-left:auto;font-size:10px;color:var(--retrieve);background:#1a1410;border:1px solid #4a3318;
+  border-radius:20px;padding:3px 11px;opacity:0;transition:.3s;pointer-events:auto;display:flex;align-items:center;gap:6px;}
+.gtop .activ.on{opacity:1;}
+.gtop .activ .x{cursor:pointer;color:var(--mut);font-weight:700;}
+.gtop .activ .x:hover{color:#fff;}
+#graph{width:100%;height:100%;display:block;cursor:grab;}
+#graph:active{cursor:grabbing;}
+.glegend{position:absolute;bottom:12px;left:14px;z-index:5;display:flex;gap:14px;font-size:9.5px;color:var(--mut);
+  background:rgba(11,14,20,.7);border:1px solid var(--line);border-radius:8px;padding:7px 11px;backdrop-filter:blur(4px);}
+.glegend .it{display:flex;align-items:center;gap:5px;}
+.glegend .sw{width:14px;height:3px;border-radius:2px;}
+.glegend .swn{width:9px;height:9px;border-radius:50%;}
+.node-l{font-size:9px;fill:var(--txt2);pointer-events:none;}
+.edge-l{font-size:7.5px;fill:#8c97a6;pointer-events:none;}
+.gloading{position:absolute;inset:0;display:grid;place-items:center;color:var(--mut);font-size:12px;}
+
+/* ── Right column panels ──────────────────────────────── */
+.col.right{overflow-y:auto;}
+.panel{border-bottom:1px solid var(--line);padding:12px 14px;}
+.panel h3{margin:0 0 10px;font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:var(--turmeric);font-weight:700;}
+.kv{display:flex;align-items:center;gap:8px;margin-bottom:7px;font-size:11.5px;}
+.kv .label{color:var(--txt2);width:78px;flex-shrink:0;}
+.kv .meter{flex:1;height:7px;border-radius:4px;background:#161d29;overflow:hidden;}
+.kv .meter i{display:block;height:100%;border-radius:4px;}
+.kv .num{color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums;min-width:40px;text-align:right;}
+.gridkv{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;}
+.gridkv .c .v{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums;}
+.gridkv .c .l{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.6px;}
+
+/* sessions / LLMs */
+.sess{border:1px solid var(--line2);border-radius:8px;padding:9px;margin-bottom:8px;background:#0e131c;}
+.sess .top{display:flex;align-items:center;gap:7px;font-size:11px;}
+.sess .model{font-weight:600;color:var(--deepblue);}
+.sess .dir{margin-left:auto;color:var(--mut);font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px;}
+.sess .tok{margin-top:7px;height:6px;border-radius:4px;background:#161d29;overflow:hidden;}
+.sess .tok i{display:block;height:100%;}
+.sess .tl{display:flex;justify-content:space-between;margin-top:4px;font-size:9px;color:var(--mut);}
+.none{color:var(--mut);font-size:11px;font-style:italic;}
+
+/* detail (selected node/edge/memory) */
+#detail .rel{font-size:13px;margin:2px 0 8px;line-height:1.5;}
+#detail .rel b{color:var(--retrieve);}
+#detail .line{font-size:11px;color:var(--txt2);padding:4px 0;border-top:1px solid var(--line);}
+#detail .line span{color:var(--mut);}
+.miss{font-size:10px;color:var(--mut);line-height:1.6;}
+.miss b{color:var(--txt2);}
 </style>
 </head>
 <body>
 <header>
-  <h1><span>shodh</span> Dashboard</h1>
-  <span class="tag">LLM-free</span><span class="tag">deterministic</span>
-  <input id="uid" value="default" title="user_id"/>
-  <input id="q" placeholder="🔍 search memory (deterministic recall — no LLM) … Enter"/>
-  <button id="go">Search</button>
-  <button id="reloadg">Reload graph</button>
+  <div class="brand">
+    <div>
+      <div class="logo"><b>shodh</b></div>
+      <div class="sub">Associative Memory</div>
+    </div>
+  </div>
+  <div class="pulse" id="pulse"><span class="dot"></span><span id="pulse-t">connecting…</span></div>
+  <div class="stats-strip" id="stats-strip"></div>
+  <div class="spark" id="spark" title="events / tick"></div>
+  <div class="usel">
+    <label>user</label>
+    <select id="user">
+      <option value="powerhouse-kg">powerhouse-kg</option>
+      <option value="defence-live">defence-live</option>
+      <option value="default">default</option>
+    </select>
+    <span class="tag">LLM-FREE</span>
+    <span class="tag">DETERMINISTIC</span>
+    <span class="tag">ON-DEVICE</span>
+  </div>
 </header>
+
 <main>
-  <div id="results"><div class="sec">Search results</div><div class="muted" style="font-size:12px">Type a query and press Enter — ranked by shodh's hybrid recall (vector + BM25 + graph), no LLM.</div></div>
-  <div id="cy"></div>
-  <div id="detail"><div class="sec">Detail / provenance</div><div class="muted">Click a node or a relationship edge.</div></div>
+  <!-- LEFT: the recall river (cascade feed) -->
+  <div class="col left">
+    <div class="cuebar">
+      <div class="row">
+        <input id="cue" placeholder="cue a recall — e.g. radar development …"/>
+        <button id="recall">Recall</button>
+      </div>
+      <div class="hint">One cue → a <b>cascade</b> of associated memories + the causal chains that surface with them. Live recalls stream in automatically.</div>
+    </div>
+    <div class="sechd"><b>RECALL RIVER</b> · associative cascade <span class="cnt" id="river-cnt"></span></div>
+    <div class="river" id="river">
+      <div class="empty">Waiting for the first recall.<br><br>Type a cue above and press <b>Recall</b>, or trigger one from any connected agent — each recall blooms into the memories it surfaced and the <b>causal chains</b> that lit up with them.</div>
+    </div>
+  </div>
+
+  <!-- CENTER: the spreading-activation graph -->
+  <div class="col center">
+    <div class="gtop">
+      <div class="lbl">KNOWLEDGE GRAPH · <b id="g-user">…</b> · <span id="g-meta">…</span></div>
+      <div class="activ" id="activ"><span id="activ-t"></span><span class="x" id="activ-x">✕</span></div>
+    </div>
+    <div class="gloading" id="gloading">building graph…</div>
+    <svg id="graph"></svg>
+    <div class="glegend">
+      <div class="it"><span class="swn" style="background:#82a0dc"></span>org</div>
+      <div class="it"><span class="swn" style="background:#96e6aa"></span>location</div>
+      <div class="it"><span class="swn" style="background:#d2a8ff"></span>artifact</div>
+      <div class="it"><span class="swn" style="background:#ffc896"></span>person</div>
+      <span style="color:#2c3647">│</span>
+      <div class="it"><span class="sw" style="background:#78c878"></span>strong</div>
+      <div class="it"><span class="sw" style="background:#e6c864"></span>medium</div>
+      <div class="it"><span class="sw" style="background:#787878"></span>weak</div>
+    </div>
+  </div>
+
+  <!-- RIGHT: stats / sessions / detail -->
+  <div class="col right">
+    <div class="panel">
+      <h3>Memory Tiers</h3>
+      <div id="tiers"></div>
+    </div>
+    <div class="panel">
+      <h3>Graph</h3>
+      <div class="gridkv" id="graphstats"></div>
+    </div>
+    <div class="panel">
+      <h3>Connected LLMs</h3>
+      <div id="sessions"><div class="none">no active sessions</div></div>
+    </div>
+    <div class="panel">
+      <h3>Todos</h3>
+      <div id="todos"><div class="none">none</div></div>
+    </div>
+    <div class="panel" style="border-bottom:none">
+      <h3>Detail / Provenance</h3>
+      <div id="detail"><div class="miss">Click a graph node, an edge, a surfaced memory, or a causal chain.</div></div>
+    </div>
+  </div>
 </main>
+
 <script>
-const TYPEC={organization:"#58a6ff",company:"#79c0ff",person:"#3fb950",location:"#8b949e",
-  entity:"#58a6ff",episode:"#f0883e",memory:"#d2a8ff",missile:"#f85149",aircraft:"#f0883e",_d:"#6e7681"};
-const tc=t=>TYPEC[t]||TYPEC._d;
-let cy;
-function uid(){return document.getElementById('uid').value.trim()||'default';}
-function fail(m){document.getElementById('results').innerHTML='<div class="sec">Search results</div><div style="color:#f85149;font-size:12px">'+m+'</div>';}
+"use strict";
+// ── config: dev override injected by the dev-copy script; defaults to same-origin ──
+const API_BASE = window.__SHODH_API_BASE__ || "";
+const API_KEY  = window.__SHODH_API_KEY__  || "";
+const H = API_KEY ? {"X-API-Key":API_KEY} : {};
+const POST_H = Object.assign({"Content-Type":"application/json"}, H);
 
-// ---- LLM-free search via /api/recall ----
-async function search(){
-  const q=document.getElementById('q').value.trim(); if(!q)return;
-  const box=document.getElementById('results');
-  box.innerHTML='<div class="sec">Search results</div><div class="muted">searching…</div>';
-  try{
-    const t0=performance.now();
-    const r=await fetch('/api/recall',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({user_id:uid(),query:q,limit:10,mode:'hybrid'})});
-    if(!r.ok) throw new Error('recall '+r.status);
-    const d=await r.json(); const ms=Math.round(performance.now()-t0);
-    const mems=d.memories||[];                       // RecallResponse.memories (verified)
-    let h='<div class="sec">Search results · '+(d.count!=null?d.count:mems.length)+' hits · '+ms+'ms · no LLM</div>';
-    if(!mems.length) h+='<div class="muted">no matches</div>';
-    for(const m of mems){
-      const c=(m.experience&&m.experience.content)||'';   // RecallExperience.content (verified)
-      const sc=(typeof m.score==='number')?m.score.toFixed(3):m.score;
-      h+=`<div class="res" data-id="${m.id||''}"><div>${c.slice(0,180)}</div>`+
-         `<div class="meta"><span class="sc">score ${sc}</span>`+
-         `<span>${m.tier||''}</span><span>${(m.created_at||'').slice(0,10)}</span></div></div>`;
-    }
-    box.innerHTML=h;
-    box.querySelectorAll('.res').forEach(el=>el.onclick=()=>focusNode(el.dataset.id, el.querySelector('div').textContent));
-  }catch(e){ fail('search failed: '+e.message+' — is the shodh server running on :3030?'); }
-}
-function focusNode(id,text){
-  document.getElementById('detail').innerHTML='<div class="sec">Result</div><div>'+(text||'').slice(0,400)+'</div>';
-  if(!cy||!id)return; const n=cy.getElementById(id);
-  if(n&&n.length){ cy.elements().removeClass('hl'); n.addClass('hl'); cy.animate({center:{eles:n},zoom:1.4},{duration:350}); }
+const TYPEC = {org:"#82a0dc",organization:"#82a0dc",company:"#82a0dc",location:"#96e6aa",loc:"#96e6aa",
+  gpe:"#96e6aa",person:"#ffc896",per:"#ffc896",artifact:"#d2a8ff",technology:"#d2a8ff",tech:"#d2a8ff",
+  product:"#d2a8ff",entity:"#58a6ff",event:"#ffd682",_d:"#8a94a4"};
+const tc = t => TYPEC[(t||"").toLowerCase()] || TYPEC._d;
+// edge strength colour — matches TUI CONN_STRONG/MEDIUM/WEAK thresholds
+const ec = s => s>=0.7 ? "#78c878" : s>=0.4 ? "#e6c864" : "#787878";
+const EVCOL = {RETRIEVE:"#ffc896",PROACTIVE_CONTEXT:"#b4dcff",CREATE:"#b4e6b4",UPDATE:"#ffe082",DELETE:"#ff8c8c"};
+const EVICO = {RETRIEVE:"◎",PROACTIVE_CONTEXT:"◉",CREATE:"●",UPDATE:"◐",DELETE:"○"};
+
+const $ = id => document.getElementById(id);
+const user = () => $("user").value;
+const esc = s => (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+async function api(path, opts){ const r = await fetch(API_BASE+path, opts); if(!r.ok) throw new Error(path+" → "+r.status); return r.json(); }
+const fmt = n => n>=1000 ? (n/1000).toFixed(n>=10000?0:1)+"k" : String(n);
+function relName(r){ if(typeof r!=="string") r=String(r); const m=r.match(/Custom\("(.+)"\)/); return (m?m[1]:r).replace(/([a-z])([A-Z])/g,"$1 $2"); }
+function ago(ts){ const s=(Date.now()-new Date(ts).getTime())/1000; if(s<60)return Math.max(0,Math.round(s))+"s"; if(s<3600)return Math.round(s/60)+"m"; return Math.round(s/3600)+"h"; }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  GRAPH — the spreading-activation map. Lights up on recall.
+// ════════════════════════════════════════════════════════════════════════════
+let G = {nodes:[],links:[],byId:new Map(),byName:new Map(),sim:null,refs:null,activeSet:null,activeCore:null};
+const svg = d3.select("#graph");
+let gZoom, gRoot;
+
+function graphInit(){
+  svg.selectAll("*").remove();
+  gRoot = svg.append("g");
+  gZoom = d3.zoom().scaleExtent([0.2,4]).on("zoom", e => gRoot.attr("transform", e.transform));
+  svg.call(gZoom);
+  svg.append("defs").append("marker").attr("id","arrow").attr("viewBox","0 -5 10 10")
+    .attr("refX",18).attr("refY",0).attr("markerWidth",6).attr("markerHeight",6).attr("orient","auto")
+    .append("path").attr("d","M0,-4L8,0L0,4").attr("fill","#3a4150");
 }
 
-// ---- graph + typed relationships + provenance via /api/graph/{user}/export ----
 async function loadGraph(){
+  $("gloading").style.display="grid"; $("gloading").textContent="building graph…";
+  $("g-user").textContent = user();
   try{
-    const r=await fetch('/api/graph/'+uid()+'/export'); if(!r.ok) throw new Error('export '+r.status);
-    const g=await r.json();
-    const nodes=(g.nodes||[]).map(n=>({data:{id:String(n.id),
-      label:(n.label||n.id||'').toString().slice(0,40),type:n.type||'entity'}}));
-    const ids=new Set(nodes.map(n=>n.data.id));
-    const edges=(g.edges||[]).filter(e=>ids.has(String(e.source))&&ids.has(String(e.target)))
-      .map((e,i)=>({data:{id:'e'+i,source:String(e.source),target:String(e.target),
-        label:e.label||'',attrs:e.attributes||{}}}));   // ExportEdge: label=RelationType, attributes={strength,tier,created_at,source_episode_id}
-    if(cy)cy.destroy();
-    cy=cytoscape({container:document.getElementById('cy'),elements:[...nodes,...edges],wheelSensitivity:.2,
-      style:[
-        {selector:'node',style:{'background-color':e=>tc(e.data('type')),'label':'data(label)','color':'#e6edf3',
-          'font-size':9,'width':18,'height':18,'text-valign':'bottom','text-margin-y':2,'min-zoomed-font-size':7}},
-        {selector:'edge',style:{'width':1.4,'line-color':'#475569','target-arrow-color':'#475569',
-          'target-arrow-shape':'triangle','curve-style':'bezier','label':'data(label)','font-size':7,
-          'color':'#9da7b3','text-rotation':'autorotate','text-background-color':'#0e1117',
-          'text-background-opacity':.85,'min-zoomed-font-size':6,'opacity':.8}},
-        {selector:'.hl',style:{'border-width':3,'border-color':'#f0f6fc','line-color':'#f0f6fc',
-          'target-arrow-color':'#f0f6fc','opacity':1,'z-index':99}}
-      ],
-      layout:{name:'cose',animate:false,padding:40}});
-    document.getElementById('cy').setAttribute('data-n', nodes.length);
-    cy.on('tap','node',ev=>{const n=ev.target;
-      document.getElementById('detail').innerHTML='<div class="sec">Entity</div><div class="rel"><b>'+n.data('label')+'</b></div>'+
-        '<div class="muted">type: '+n.data('type')+' · degree '+n.degree()+'</div>';});
-    cy.on('tap','edge',ev=>{const e=ev.target; const a=e.data('attrs')||{};
-      const prov=a.source_episode_id?('episode '+a.source_episode_id):'(no source episode)';
-      document.getElementById('detail').innerHTML='<div class="sec">Relationship</div>'+
-        '<div class="rel">'+e.source().data('label')+' —<b>'+(e.data('label')||'related')+'</b>→ '+e.target().data('label')+'</div>'+
-        '<div class="ev">strength '+(a.strength!=null?Number(a.strength).toFixed(2):'—')+' · tier '+(a.tier||'—')+'</div>'+
-        '<div class="ev">created '+((a.created_at||'').toString().slice(0,10)||'—')+'</div>'+
-        '<div class="ev">provenance: '+prov+'</div>';});
-  }catch(e){ document.getElementById('detail').innerHTML='<div class="sec">Detail</div><div style="color:#f85149">graph load failed: '+e.message+'</div>'; }
+    const u = await api("/api/graph/"+encodeURIComponent(user())+"/universe", {headers:H});
+    let stars = u.stars||[], conns = u.connections||[];
+    // bound dense graphs (e.g. defence-live ~2k nodes) — keep top by degree, then salience
+    const deg = new Map();
+    conns.forEach(c=>{deg.set(c.from_id,(deg.get(c.from_id)||0)+1);deg.set(c.to_id,(deg.get(c.to_id)||0)+1);});
+    const totalStars = stars.length;
+    const NODE_CAP = 180;
+    if(stars.length>NODE_CAP){
+      stars = stars.map(s=>({...s,_d:deg.get(s.id)||0}))
+        .sort((a,b)=>(b._d-a._d)||(b.salience-a.salience)).slice(0,NODE_CAP);
+    }
+    const keep = new Set(stars.map(s=>s.id));
+    conns = conns.filter(c=>keep.has(c.from_id)&&keep.has(c.to_id));
+
+    G.nodes = stars.map(s=>({id:s.id,name:s.name,type:s.entity_type,sal:s.salience,
+      ment:s.mention_count,deg:deg.get(s.id)||0}));
+    G.links = conns.map(c=>({source:c.from_id,target:c.to_id,rel:relName(c.relation_type),str:c.strength}));
+    G.byId = new Map(G.nodes.map(n=>[n.id,n]));
+    G.byName = new Map(G.nodes.map(n=>[n.name.toLowerCase(),n]));
+    $("g-meta").textContent = G.nodes.length+" entities · "+G.links.length+" edges"+(G.nodes.length<totalStars?" (top "+G.nodes.length+" of "+totalStars+")":"");
+    render();
+  }catch(e){
+    $("gloading").style.display="grid"; $("gloading").textContent = "graph load failed: "+e.message;
+    G.nodes=[];G.links=[];G.refs=null;
+  }
 }
 
-document.getElementById('go').onclick=search;
-document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search();});
-document.getElementById('reloadg').onclick=loadGraph;
-loadGraph();
+function render(){
+  graphInit();
+  $("gloading").style.display = G.nodes.length ? "none":"grid";
+  if(!G.nodes.length) return;
+  const W = svg.node().clientWidth, Hh = svg.node().clientHeight;
+  const maxDeg = d3.max(G.nodes, d=>d.deg) || 1;
+  const r = d => 5 + 9*Math.sqrt((d.deg)/maxDeg);
+
+  const link = gRoot.append("g").attr("stroke-opacity",.55).selectAll("line")
+    .data(G.links).join("line")
+    .attr("stroke", d=>ec(Math.min(1,d.str/3))).attr("stroke-width", d=>0.7+Math.min(2.2,d.str/2))
+    .attr("marker-end","url(#arrow)").attr("class","gl");
+
+  const elabel = gRoot.append("g").selectAll("text").data(G.links).join("text")
+    .attr("class","edge-l").text(d=>d.rel).attr("opacity",0);
+
+  const node = gRoot.append("g").selectAll("circle").data(G.nodes).join("circle")
+    .attr("class","gn").attr("r",r).attr("fill",d=>tc(d.type))
+    .attr("stroke","#0b0e14").attr("stroke-width",1.4).style("cursor","pointer")
+    .call(drag()).on("click",(e,d)=>{e.stopPropagation();selectNode(d);})
+    .on("mouseover",function(e,d){if(!G.activeSet)highlightNeighbors(d,true);})
+    .on("mouseout",function(){if(!G.activeSet)highlightNeighbors(null,false);});
+
+  const label = gRoot.append("g").selectAll("text").data(G.nodes).join("text")
+    .attr("class","node-l").text(d=>d.name.length>22?d.name.slice(0,21)+"…":d.name)
+    .attr("dx",d=>r(d)+3).attr("dy",3);
+
+  G.refs = {link,elabel,node,label,r};
+
+  G.sim = d3.forceSimulation(G.nodes)
+    .force("link", d3.forceLink(G.links).id(d=>d.id).distance(d=>60+40/(1+d.str)).strength(.18))
+    .force("charge", d3.forceManyBody().strength(-160))
+    .force("center", d3.forceCenter(W/2,Hh/2))
+    .force("collide", d3.forceCollide().radius(d=>r(d)+10))
+    .on("tick", ()=>{
+      link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y).attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);
+      elabel.attr("x",d=>(d.source.x+d.target.x)/2).attr("y",d=>(d.source.y+d.target.y)/2);
+      node.attr("cx",d=>d.x).attr("cy",d=>d.y);
+      label.attr("x",d=>d.x).attr("y",d=>d.y);
+    });
+  svg.on("click",()=>{ if(G.activeSet) return; clearHighlight(); });
+  if(G.activeSet) applyActivation();   // re-apply if a recall is selected
+}
+
+function drag(){
+  return d3.drag()
+    .on("start",(e,d)=>{if(!e.active)G.sim.alphaTarget(.3).restart();d.fx=d.x;d.fy=d.y;})
+    .on("drag",(e,d)=>{d.fx=e.x;d.fy=e.y;})
+    .on("end",(e,d)=>{if(!e.active)G.sim.alphaTarget(0);d.fx=null;d.fy=null;});
+}
+
+function highlightNeighbors(d, on){
+  if(!G.refs) return;
+  if(!on || !d){ G.refs.node.attr("opacity",1); G.refs.link.attr("stroke-opacity",.55); G.refs.label.attr("opacity",1); G.refs.elabel.attr("opacity",0); return; }
+  const nb = new Set([d.id]);
+  G.links.forEach(l=>{ if(l.source.id===d.id)nb.add(l.target.id); if(l.target.id===d.id)nb.add(l.source.id); });
+  G.refs.node.attr("opacity",n=>nb.has(n.id)?1:.12);
+  G.refs.label.attr("opacity",n=>nb.has(n.id)?1:.08);
+  G.refs.link.attr("stroke-opacity",l=>(l.source.id===d.id||l.target.id===d.id)?.95:.04);
+  G.refs.elabel.attr("opacity",l=>(l.source.id===d.id||l.target.id===d.id)?.9:0);
+}
+function clearHighlight(){ highlightNeighbors(null,false); }
+
+function selectNode(d){
+  $("detail").innerHTML = '<div class="rel"><b>'+esc(d.name)+'</b></div>'+
+    '<div class="line"><span>type</span> '+esc(d.type)+'</div>'+
+    '<div class="line"><span>degree</span> '+d.deg+' connections</div>'+
+    '<div class="line"><span>salience</span> '+(d.sal||0).toFixed(2)+'</div>'+
+    '<div class="line"><span>mentions</span> '+(d.ment||0)+'</div>';
+  if(!G.activeSet) highlightNeighbors(d,true);
+}
+
+// ── SPREADING ACTIVATION: light up the subgraph a recall surfaced ──
+function activateFromCascade(res){
+  if(!G.refs){ return; }
+  // Match surfaced-memory text to graph entities, then keep the most DISTINCTIVE
+  // matches as the lit core — so dense corpora don't light the whole graph.
+  const text = (res.memories||[]).map(m=>m.content||"").join(" ").toLowerCase();
+  const scored = [];
+  G.nodes.forEach(n=>{
+    const nm = n.name.toLowerCase();
+    if(nm.length<4) return;                       // skip 1-3 char names (too generic)
+    if(!text.includes(nm)) return;
+    // specificity: proper-noun / multi-word / higher-salience entities score higher
+    const spec = (n.name.includes(" ")?1.4:1) * (nm.length>=8?1.3:1) * (0.5+(n.sal||0));
+    scored.push({id:n.id, w:spec*(1+Math.log1p(n.deg||0))});
+  });
+  scored.sort((a,b)=>b.w-a.w);
+  // cap the lit core so it reads as a focused subgraph, not a flood
+  const cap = Math.max(8, Math.min(24, Math.round(scored.length*0.55)));
+  const hits = new Set(scored.slice(0, scored.length<=10?scored.length:cap).map(x=>x.id));
+  // Halo = one hop along the edges that connect the lit core. In a sparse graph this
+  // shows the spreading wave; in a dense co-occurrence mesh a full hop would flood, so
+  // only admit a neighbour if it bridges TWO core entities (a genuine cascade hub).
+  const avgDeg = G.nodes.length ? (2*G.links.length)/G.nodes.length : 0;
+  const dense = avgDeg > 8;
+  const halo = new Set(hits);
+  // In a sparse, curated graph one hop reveals the spreading wave. In a dense
+  // co-occurrence mesh every node is a neighbour of the core, so a hop floods the
+  // whole graph and tells you nothing — there we light only the surfaced core.
+  if(hits.size && !dense){
+    G.links.forEach(l=>{ const s=l.source.id||l.source,t=l.target.id||l.target;
+      if(hits.has(s))halo.add(t); if(hits.has(t))halo.add(s); });
+  }
+  G.activeSet = halo.size ? halo : null;
+  G.activeCore = hits;
+  applyActivation();
+  centerOn(halo);
+  const a=$("activ");
+  if(G.activeSet){ a.classList.add("on");
+    const extra=halo.size-hits.size;
+    $("activ-t").textContent="⚡ "+hits.size+" entities activated"+(extra>0?" · "+extra+" in spreading halo":""); }
+  else { a.classList.remove("on"); $("activ-t").textContent=""; }
+}
+// pan/zoom the viewport to frame the activated subgraph
+function centerOn(set){
+  if(!G.refs||!set||!set.size||!gZoom) return;
+  const pts=G.nodes.filter(n=>set.has(n.id)&&n.x!=null);
+  if(pts.length<2) return;
+  const xs=pts.map(p=>p.x), ys=pts.map(p=>p.y);
+  const minx=Math.min(...xs),maxx=Math.max(...xs),miny=Math.min(...ys),maxy=Math.max(...ys);
+  const W=svg.node().clientWidth,Hh=svg.node().clientHeight;
+  const bw=Math.max(60,maxx-minx),bh=Math.max(60,maxy-miny);
+  const k=Math.max(.35,Math.min(1.8,.82*Math.min(W/bw,Hh/bh)));
+  const cx=(minx+maxx)/2,cy=(miny+maxy)/2;
+  svg.transition().duration(700).call(gZoom.transform,
+    d3.zoomIdentity.translate(W/2,Hh/2).scale(k).translate(-cx,-cy));
+}
+function applyActivation(){
+  if(!G.refs || !G.activeSet) return;
+  const core=G.activeCore, set=G.activeSet;
+  G.refs.node.attr("opacity",n=>set.has(n.id)?1:.07)
+    .attr("stroke",n=>core.has(n.id)?"#ffc896":"#0b0e14")
+    .attr("stroke-width",n=>core.has(n.id)?2.6:1.4);
+  G.refs.label.attr("opacity",n=>set.has(n.id)?1:.05).attr("fill",n=>core.has(n.id)?"#ffd6a0":"#aab4c2");
+  G.refs.link.attr("stroke-opacity",l=>{const s=l.source.id,t=l.target.id;return (set.has(s)&&set.has(t))?.95:.03;})
+    .attr("stroke-width",l=>{const s=l.source.id,t=l.target.id;return (core.has(s)||core.has(t))?2.2:0.7;});
+  G.refs.elabel.attr("opacity",l=>{const s=l.source.id,t=l.target.id;return (set.has(s)&&set.has(t))?.85:0;});
+  // gently re-energise the layout for a "bloom"
+  if(G.sim){ G.sim.alphaTarget(.05).restart(); setTimeout(()=>{if(G.sim)G.sim.alphaTarget(0);},600); }
+}
+function deactivate(){ G.activeSet=null;G.activeCore=null;$("activ").classList.remove("on");$("activ-t").textContent="";clearHighlight();
+  document.querySelectorAll(".cascade.sel").forEach(e=>e.classList.remove("sel")); }
+$("activ-x").onclick = deactivate;
+
+// ════════════════════════════════════════════════════════════════════════════
+//  RIVER — render a recall as an associative cascade
+// ════════════════════════════════════════════════════════════════════════════
+let riverCount = 0;
+function buildCascade(ev, fresh){
+  const res = ev.results||{};
+  const mems = res.memories||[];
+  const lin  = res.lineage||[];
+  const q = res.query || ev.content_preview || "(recall)";
+  const col = EVCOL[ev.event_type]||"#ffc896";
+  const wrap = document.createElement("div");
+  wrap.className = "cascade"+(fresh?" glow":"");
+  const memIdx = new Map(mems.map((m,i)=>[m.id,{m,i}]));
+  const nick = id => { const e=memIdx.get(id); return e? ("#"+(e.i+1)) : (id||"").slice(0,6); };
+
+  let memHtml = mems.map((m,i)=>{
+    const sc = typeof m.score==="number"?m.score:0;
+    const pct = Math.max(6,Math.min(100,Math.round(sc*100)));
+    return '<div class="mem" data-mem="'+esc(m.id)+'">'+
+      '<div class="rank">'+(i+1)+'</div><div class="body">'+
+      '<div class="txt">'+esc((m.content||"").slice(0,220))+'</div>'+
+      '<div class="mrow"><div class="scorebar"><i style="width:'+pct+'%"></i></div>'+
+      '<span class="sc">'+sc.toFixed(3)+'</span>'+
+      (m.tier?'<span class="tier">'+esc(String(m.tier).replace(/Tier|Memory/g,""))+'</span>':'')+
+      '</div></div></div>';
+  }).join("");
+  if(!mems.length) memHtml = '<div class="empty" style="padding:6px">no memories surfaced</div>';
+
+  let chainHtml = lin.map(l=>{
+    return '<div class="chain" data-from="'+esc(l.from)+'" data-to="'+esc(l.to)+'">'+
+      '<span class="node">'+nick(l.from)+'</span>'+
+      '<span class="rel"><span class="name">'+esc(relName(l.relation))+'</span><span class="arr">↓</span></span>'+
+      '<span class="node">'+nick(l.to)+'</span>'+
+      '<span class="conf">'+(typeof l.confidence==="number"?l.confidence.toFixed(2):"")+'</span></div>';
+  }).join("");
+
+  wrap.innerHTML =
+    '<div class="casc-hd">'+
+      '<div class="ico" style="background:'+col+'22;color:'+col+'">'+(EVICO[ev.event_type]||"◎")+'</div>'+
+      '<div class="ttl"><div class="cue-q">cue → <em>'+esc(q)+'</em></div>'+
+      '<div class="cue-meta"><span class="n">'+mems.length+'</span> memories surfaced · '+
+        '<span class="n">'+lin.length+'</span> causal links'+
+        (res.latency_ms?' · '+Math.round(res.latency_ms)+'ms · no LLM':'')+'</div></div>'+
+      '<div class="t">'+ago(ev.timestamp||Date.now())+'</div></div>'+
+    '<div class="casc-body">'+
+      '<div class="cband">surfaced memories <span class="bdg">ranked by recall score</span></div>'+memHtml+
+      (lin.length?('<div class="cband">causal chains <span class="bdg">that lit up together</span></div>'+chainHtml):'')+
+    '</div>';
+
+  // interactions
+  wrap.querySelector(".casc-hd").onclick = ()=>{
+    document.querySelectorAll(".cascade.sel").forEach(e=>e.classList.remove("sel"));
+    wrap.classList.add("sel");
+    activateFromCascade(res);   // ← light up the graph
+  };
+  wrap.querySelectorAll(".mem").forEach(el=>el.onclick=(e)=>{e.stopPropagation();
+    const m = mems.find(x=>x.id===el.dataset.mem); if(!m)return;
+    $("detail").innerHTML = '<div class="rel">surfaced memory</div>'+
+      '<div class="line">'+esc((m.content||"").slice(0,360))+'</div>'+
+      '<div class="line"><span>score</span> '+(m.score||0).toFixed(3)+' · <span>importance</span> '+(m.importance||0).toFixed(2)+'</div>'+
+      '<div class="line"><span>tier</span> '+esc(m.tier||"—")+'</div>'+
+      '<div class="line"><span>id</span> <span class="mono">'+esc((m.id||"").slice(0,18))+'</span></div>';
+  });
+  wrap.querySelectorAll(".chain").forEach(el=>el.onclick=(e)=>{e.stopPropagation();
+    const f=el.dataset.from,t=el.dataset.to; const lk=lin.find(x=>x.from===f&&x.to===t); if(!lk)return;
+    $("detail").innerHTML = '<div class="rel">causal chain</div>'+
+      '<div class="line">'+nick(f)+' —<b> '+esc(relName(lk.relation))+' </b>→ '+nick(t)+'</div>'+
+      '<div class="line"><span>confidence</span> '+(lk.confidence||0).toFixed(3)+'</div>'+
+      '<div class="line miss">A deterministic causal edge between two surfaced memories — the wiring the cue activated.</div>';
+  });
+
+  const r = $("river");
+  const empty = r.querySelector(".empty"); if(empty) empty.remove();
+  r.prepend(wrap);
+  riverCount++; $("river-cnt").textContent = riverCount+" cascades";
+  while(r.children.length>40) r.removeChild(r.lastChild);
+  if(fresh){ document.querySelectorAll(".cascade.sel").forEach(e=>{if(e!==wrap)e.classList.remove("sel");}); wrap.classList.add("sel"); activateFromCascade(res); }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SSE stream — live recalls bloom into the river automatically
+// ════════════════════════════════════════════════════════════════════════════
+let es;
+const sparkData = new Array(28).fill(0);
+function connectStream(){
+  if(es) es.close();
+  const qs = new URLSearchParams({user_id:user()}); if(API_KEY) qs.set("api_key",API_KEY);
+  es = new EventSource(API_BASE+"/api/events?"+qs.toString());
+  const onEv = (e)=>{
+    bumpSpark(); setPulse(true);
+    let d; try{ d=JSON.parse(e.data); }catch(_){ return; }
+    if(d.event_type==="RETRIEVE"||d.event_type==="PROACTIVE_CONTEXT"){
+      if(d.results && (d.results.memories||d.results.lineage)) buildCascade(d, true);
+    }
+  };
+  ["RETRIEVE","PROACTIVE_CONTEXT","CREATE","UPDATE","DELETE","message"].forEach(t=>es.addEventListener(t,onEv));
+  es.onopen = ()=>setPulse(true);
+  es.onerror = ()=>{ setPulse(false); };
+}
+function setPulse(on){ const p=$("pulse"); p.classList.toggle("on",on); $("pulse-t").textContent = on?"LIVE":"offline"; }
+function bumpSpark(){ if(sparkData.length) sparkData[sparkData.length-1]++; }
+function drawSpark(){
+  const max=Math.max(1,...sparkData);
+  const el=$("spark"); el.innerHTML="";
+  sparkData.slice(-28).forEach(v=>{ const b=document.createElement("div"); b.className="bar";
+    b.style.height=(3+24*v/max)+"px"; el.appendChild(b); });
+}
+setInterval(()=>{ sparkData.push(0); if(sparkData.length>60)sparkData.shift(); drawSpark(); }, 1500);
+
+// ════════════════════════════════════════════════════════════════════════════
+//  RIGHT PANELS — stats, sessions, todos
+// ════════════════════════════════════════════════════════════════════════════
+function bar(label,val,max,color){
+  const pct=Math.max(0,Math.min(100,max?Math.round(100*val/max):0));
+  return '<div class="kv"><span class="label">'+label+'</span>'+
+    '<span class="meter"><i style="width:'+pct+'%;background:'+color+'"></i></span>'+
+    '<span class="num">'+fmt(val)+'</span></div>';
+}
+async function loadStats(){
+  try{
+    const s = await api("/api/users/"+encodeURIComponent(user())+"/stats",{headers:H});
+    const tot = s.total_memories||0;
+    const mx = Math.max(s.working_memory_count||0,s.session_memory_count||0,s.long_term_memory_count||0,1);
+    $("tiers").innerHTML =
+      bar("Working", s.working_memory_count||0, mx, "#b4e6b4")+
+      bar("Session", s.session_memory_count||0, mx, "#ffe082")+
+      bar("Long-term", s.long_term_memory_count||0, mx, "#d2a8ff")+
+      bar("Vector idx", s.vector_index_count||0, mx, "#58a6ff")+
+      '<div class="kv" style="margin-top:9px"><span class="label">Retrievals</span><span class="num" style="min-width:auto;color:var(--turmeric)">'+fmt(s.total_retrievals||0)+'</span>'+
+      '<span class="label" style="width:auto;margin-left:14px">Avg imp</span><span class="num">'+(s.average_importance||0).toFixed(2)+'</span></div>';
+    $("stats-strip").innerHTML =
+      '<div class="stat"><span class="v">'+fmt(tot)+'</span><span class="k">memories</span></div>'+
+      '<div class="stat"><span class="v">'+fmt(s.graph_nodes||0)+'</span><span class="k">entities</span></div>'+
+      '<div class="stat"><span class="v">'+fmt(s.graph_edges||0)+'</span><span class="k">edges</span></div>'+
+      '<div class="stat"><span class="v">'+fmt(s.total_retrievals||0)+'</span><span class="k">recalls</span></div>';
+  }catch(e){ $("tiers").innerHTML='<div class="none">stats unavailable</div>'; }
+  try{
+    const g = await api("/api/graph/"+encodeURIComponent(user())+"/stats",{headers:H});
+    $("graphstats").innerHTML =
+      '<div class="c"><div class="v" style="color:#82a0dc">'+fmt(g.entity_count||0)+'</div><div class="l">entities</div></div>'+
+      '<div class="c"><div class="v" style="color:#e6c864">'+fmt(g.relationship_count||0)+'</div><div class="l">relationships</div></div>'+
+      '<div class="c"><div class="v" style="color:#b4e6b4">'+fmt(g.episode_count||0)+'</div><div class="l">episodes</div></div>'+
+      '<div class="c"><div class="v" style="color:#d2a8ff">'+(g.entity_count? (g.relationship_count/g.entity_count).toFixed(1):"0")+'</div><div class="l">avg degree</div></div>';
+  }catch(e){ $("graphstats").innerHTML='<div class="none">graph stats unavailable</div>'; }
+}
+async function loadSessions(){
+  try{
+    const r = await api("/api/context_status",{headers:H});
+    const arr = Array.isArray(r)? r : (r? [r]:[]);
+    const live = arr.filter(s=>s && (s.session_id||s.model||s.tokens_used));
+    if(!live.length){ $("sessions").innerHTML='<div class="none">no active LLM sessions</div>'; return; }
+    const sc=["#ffd682","#ffa08c","#a0dcff","#b4ffb4"];
+    $("sessions").innerHTML = live.map((s,i)=>{
+      const pct = s.percent_used!=null? s.percent_used : (s.tokens_budget? Math.round(100*s.tokens_used/s.tokens_budget):0);
+      const col = pct>=80?"#ff8c8c":pct>=50?"#ffe082":"#96e6aa";
+      const dir = s.current_task || s.session_id || "—";
+      return '<div class="sess"><div class="top"><span class="model">'+esc(s.model||"agent")+'</span>'+
+        '<span class="dir" style="color:'+sc[i%4]+'">'+esc(String(dir).slice(0,22))+'</span></div>'+
+        '<div class="tok"><i style="width:'+Math.min(100,pct)+'%;background:'+col+'"></i></div>'+
+        '<div class="tl"><span>'+fmt(s.tokens_used||0)+' / '+fmt(s.tokens_budget||0)+' tok</span><span style="color:'+col+'">'+pct+'%</span></div></div>';
+    }).join("");
+  }catch(e){ $("sessions").innerHTML='<div class="none">unavailable</div>'; }
+}
+async function loadTodos(){
+  try{
+    const st = await api("/api/todos/stats",{method:"POST",headers:POST_H,body:JSON.stringify({user_id:user()})});
+    const s = st.stats||{};
+    if(!(s.total>0)){ $("todos").innerHTML='<div class="none">no todos</div>'; return; }
+    const ls = await api("/api/todos/list",{method:"POST",headers:POST_H,body:JSON.stringify({user_id:user(),include_completed:false,limit:6})});
+    let h = '<div class="kv"><span class="label">open</span><span class="num" style="color:var(--saffron)">'+((s.in_progress||0)+(s.todo||0)+(s.backlog||0))+'</span>'+
+      '<span class="label" style="width:auto;margin-left:12px">done</span><span class="num" style="color:var(--live)">'+(s.done||0)+'</span></div>';
+    (ls.todos||[]).slice(0,6).forEach(t=>{ const ic = t.status==="in_progress"?"◐":t.status==="done"?"☑":"○";
+      h += '<div class="line"><span>'+ic+'</span> '+esc((t.content||"").slice(0,46))+'</div>'; });
+    $("todos").innerHTML = h;
+  }catch(e){ $("todos").innerHTML='<div class="none">unavailable</div>'; }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Manual recall (fires the cue → the server emits a RETRIEVE event we also catch)
+// ════════════════════════════════════════════════════════════════════════════
+async function fireRecall(){
+  const q = $("cue").value.trim(); if(!q) return;
+  const btn=$("recall"); btn.disabled=true; btn.textContent="…";
+  try{
+    const d = await api("/api/recall",{method:"POST",headers:POST_H,
+      body:JSON.stringify({user_id:user(),query:q,limit:8,mode:"hybrid"})});
+    // The SSE stream also delivers this as a RETRIEVE event; render directly too so a
+    // manual cue is instant and robust even if the stream lags.
+    buildCascade({event_type:"RETRIEVE",timestamp:new Date().toISOString(),content_preview:q,
+      results:{query:q,memories:(d.memories||[]).map(m=>({id:m.id,
+        content:(m.experience&&m.experience.content)||m.content||"",
+        score:m.score,importance:m.importance,tier:m.tier})), lineage:d.lineage||[], count:d.count}}, true);
+  }catch(e){
+    const r=$("river"); const w=document.createElement("div"); w.className="empty";
+    w.innerHTML='recall failed: '+esc(e.message)+' — is the shodh server reachable?'; r.prepend(w);
+  }finally{ btn.disabled=false; btn.textContent="Recall"; }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Boot
+// ════════════════════════════════════════════════════════════════════════════
+$("recall").onclick = fireRecall;
+$("cue").addEventListener("keydown",e=>{if(e.key==="Enter")fireRecall();});
+$("user").addEventListener("change",()=>{ $("river").innerHTML='<div class="empty">switched user — cue a recall to see the cascade.</div>'; riverCount=0; $("river-cnt").textContent=''; deactivate(); loadGraph(); loadStats(); loadSessions(); loadTodos(); connectStream(); });
+window.addEventListener("resize",()=>{ if(G.nodes.length) render(); });
+drawSpark();
+loadGraph(); loadStats(); loadSessions(); loadTodos(); connectStream();
+setInterval(()=>{ loadStats(); loadSessions(); loadTodos(); }, 15000);
 </script>
 </body>
 </html>
