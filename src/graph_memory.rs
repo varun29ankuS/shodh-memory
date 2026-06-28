@@ -711,6 +711,140 @@ pub struct RelationshipEdge {
     /// Reference: arXiv:1811.07825 — "Forman-Ricci curvature for hypergraphs"
     #[serde(default)]
     pub forman_curvature: Option<f32>,
+
+    /// Provenance trail: every source episode that attested this edge.
+    ///
+    /// Increment 1 (robust edge provenance): an edge is rarely attested by a
+    /// single observation. Each `ProvenanceRecord` records one source episode
+    /// that contributed to this edge, with its mention count, observation
+    /// window, optional confidence, an optional char-span REFERENCE into that
+    /// episode's content, and the typing method that decided the relation type
+    /// for that attestation. This is the capture foundation for
+    /// provenance-driven corroboration and multi-hop recall.
+    ///
+    /// `#[serde(default)]` lets legacy edges (serialized before this field
+    /// existed) deserialize to an empty trail. Bounded by
+    /// `SHODH_PROVENANCE_MAX_SOURCES` (default 8) at write time.
+    #[serde(default)]
+    pub provenance: Vec<ProvenanceRecord>,
+}
+
+/// How an edge's relation type was decided for a given attestation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypingMethod {
+    Cue,
+    Semantic,
+    LabelPair,
+    Learned,
+    CoOccurrence,
+    Glirel,
+    OpenIe,
+}
+
+/// One source episode that attested an edge — the unit of provenance/corroboration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProvenanceRecord {
+    pub source_episode_id: Uuid,
+    pub mention_count: u32,
+    pub first_observed: DateTime<Utc>,
+    pub last_observed: DateTime<Utc>,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+    /// Char span (start,end) into the source episode's content — a REFERENCE, not raw text (keeps edges small).
+    #[serde(default)]
+    pub evidence_span: Option<(u32, u32)>,
+    #[serde(default)]
+    pub typed_by: Option<TypingMethod>,
+}
+
+/// Default cap on the number of provenance sources retained per edge.
+const PROVENANCE_MAX_SOURCES_DEFAULT: usize = 8;
+
+/// Resolve the provenance source cap from the environment.
+///
+/// `SHODH_PROVENANCE_MAX_SOURCES` overrides the default of 8. A value of 0 or
+/// an unparseable value falls back to the default (a cap of 0 would discard all
+/// provenance, defeating the feature).
+fn provenance_max_sources() -> usize {
+    std::env::var("SHODH_PROVENANCE_MAX_SOURCES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(PROVENANCE_MAX_SOURCES_DEFAULT)
+}
+
+/// Merge a single observation into a provenance trail, deduplicating by episode.
+///
+/// - If `record.source_episode_id` is already present, its `mention_count` is
+///   incremented (saturating), the observation window is widened, and
+///   `confidence`/`evidence_span`/`typed_by` are filled in only when the
+///   existing value is `None` and the incoming value is `Some` (never overwrite
+///   an already-known attribute).
+/// - Otherwise the record is appended.
+///
+/// After merging, the trail is capped to `provenance_max_sources()` entries,
+/// retaining the records with the highest `mention_count` (tiebreak: most recent
+/// `last_observed`). The just-merged episode is guaranteed to survive the cap.
+fn merge_provenance(trail: &mut Vec<ProvenanceRecord>, record: ProvenanceRecord) {
+    let merged_episode = record.source_episode_id;
+
+    if let Some(existing) = trail
+        .iter_mut()
+        .find(|p| p.source_episode_id == record.source_episode_id)
+    {
+        existing.mention_count = existing.mention_count.saturating_add(record.mention_count);
+        if record.last_observed > existing.last_observed {
+            existing.last_observed = record.last_observed;
+        }
+        if record.first_observed < existing.first_observed {
+            existing.first_observed = record.first_observed;
+        }
+        if existing.confidence.is_none() {
+            existing.confidence = record.confidence;
+        }
+        if existing.evidence_span.is_none() {
+            existing.evidence_span = record.evidence_span;
+        }
+        if existing.typed_by.is_none() {
+            existing.typed_by = record.typed_by;
+        }
+    } else {
+        trail.push(record);
+    }
+
+    let cap = provenance_max_sources();
+    if trail.len() > cap {
+        // Keep the strongest records (highest mention_count, then most recent),
+        // but always keep the episode we just merged in.
+        trail.sort_by(|a, b| {
+            let a_keep = a.source_episode_id == merged_episode;
+            let b_keep = b.source_episode_id == merged_episode;
+            b_keep
+                .cmp(&a_keep)
+                .then_with(|| b.mention_count.cmp(&a.mention_count))
+                .then_with(|| b.last_observed.cmp(&a.last_observed))
+        });
+        trail.truncate(cap);
+    }
+}
+
+/// Postcard encoding of the default value(s) for `RelationshipEdge` fields added
+/// AFTER the `provenance` field was introduced — currently just the single
+/// trailing `provenance: Vec<ProvenanceRecord>` (an empty Vec is the varint
+/// length `0`). Used to decode pre-provenance edges that were serialized before
+/// this field existed (postcard has no `#[serde(default)]` EOF tolerance).
+const EDGE_PROVENANCE_DEFAULT_SUFFIX: &[u8] = &[0x00];
+
+/// Decode a stored `RelationshipEdge`, tolerating legacy records written before
+/// the `provenance` field existed. See [`crate::serialization::try_decode_compat`].
+///
+/// Returns `(edge, needs_migration)` where `needs_migration = true` means the
+/// record was in an older format and would benefit from being rewritten.
+fn decode_relationship_edge(data: &[u8]) -> Result<(RelationshipEdge, bool)> {
+    crate::serialization::try_decode_compat::<RelationshipEdge>(
+        data,
+        EDGE_PROVENANCE_DEFAULT_SUFFIX,
+    )
 }
 
 fn default_last_activated() -> DateTime<Utc> {
@@ -1255,6 +1389,7 @@ impl RelationshipEdge {
             entity_confidence: None,
             forman_curvature: None,
             endpoint_selectivity: None,
+            provenance: Vec::new(),
         }
     }
 
@@ -2942,11 +3077,40 @@ impl GraphMemory {
         )? {
             // Strengthen existing edge instead of creating duplicate
             let _ = existing.strengthen();
-            existing.last_activated = Utc::now();
+            let now = Utc::now();
+            existing.last_activated = now;
 
             // Update context if new context is more informative
             if edge.context.len() > existing.context.len() {
                 existing.context = edge.context;
+            }
+
+            // Provenance capture (Increment 1, bug fix): the prior implementation
+            // strengthened the synapse but DISCARDED the new attestation's source
+            // episode. Merge the incoming attestation into the trail so every
+            // source episode that wires this edge is recorded — not just the last.
+            if edge.provenance.is_empty() {
+                // Synthesize one attestation from the incoming edge's source
+                // episode. With no source episode there is nothing to attest, so
+                // we skip rather than record a nil-UUID record.
+                if let Some(source_episode_id) = edge.source_episode_id {
+                    merge_provenance(
+                        &mut existing.provenance,
+                        ProvenanceRecord {
+                            source_episode_id,
+                            mention_count: 1,
+                            first_observed: now,
+                            last_observed: now,
+                            confidence: edge.entity_confidence,
+                            evidence_span: None,
+                            typed_by: None,
+                        },
+                    );
+                }
+            } else {
+                for record in edge.provenance.drain(..) {
+                    merge_provenance(&mut existing.provenance, record);
+                }
             }
 
             // Persist the strengthened edge
@@ -2960,6 +3124,35 @@ impl GraphMemory {
         // No existing edge - create new one
         edge.uuid = Uuid::new_v4();
         edge.created_at = Utc::now();
+
+        // Provenance capture (Increment 1): seed the trail from this edge's
+        // source episode if the caller did not already provide a richer seed.
+        // Enforce the cap regardless so a caller-seeded trail can't exceed it.
+        if edge.provenance.is_empty() {
+            if let Some(source_episode_id) = edge.source_episode_id {
+                let now = edge.created_at;
+                merge_provenance(
+                    &mut edge.provenance,
+                    ProvenanceRecord {
+                        source_episode_id,
+                        mention_count: 1,
+                        first_observed: now,
+                        last_observed: now,
+                        confidence: edge.entity_confidence,
+                        evidence_span: None,
+                        typed_by: None,
+                    },
+                );
+            }
+        } else if edge.provenance.len() > provenance_max_sources() {
+            let cap = provenance_max_sources();
+            edge.provenance.sort_by(|a, b| {
+                b.mention_count
+                    .cmp(&a.mention_count)
+                    .then_with(|| b.last_observed.cmp(&a.last_observed))
+            });
+            edge.provenance.truncate(cap);
+        }
 
         // Store relationship
         let key = edge.uuid.as_bytes();
@@ -3142,7 +3335,7 @@ impl GraphMemory {
 
         let mut edges = Vec::with_capacity(edge_uuids.len());
         for value in results.into_iter().flatten().flatten() {
-            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value) {
+            if let Ok((edge, _)) = decode_relationship_edge(&value) {
                 edges.push(edge);
             }
         }
@@ -3525,7 +3718,7 @@ impl GraphMemory {
             .db
             .iterator_cf(self.relationships_cf(), rocksdb::IteratorMode::Start);
         for (_, value) in iter.flatten() {
-            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value) {
+            if let Ok((edge, _)) = decode_relationship_edge(&value) {
                 *counts
                     .entry(edge.relation_type.as_str().to_string())
                     .or_default() += 1;
@@ -3588,7 +3781,7 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.relationships_cf(), key)? {
             Some(value) => {
-                let (edge, _) = crate::serialization::try_decode::<RelationshipEdge>(&value)?;
+                let (edge, _) = decode_relationship_edge(&value)?;
                 Ok(Some(edge))
             }
             None => Ok(None),
@@ -3607,7 +3800,7 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.relationships_cf(), key)? {
             Some(value) => {
-                let (mut edge, _) = crate::serialization::try_decode::<RelationshipEdge>(&value)?;
+                let (mut edge, _) = decode_relationship_edge(&value)?;
                 // Apply effective strength calculation (doesn't persist)
                 edge.strength = edge.effective_strength();
                 Ok(Some(edge))
@@ -3699,7 +3892,7 @@ impl GraphMemory {
             .iterator_cf(self.relationships_cf(), rocksdb::IteratorMode::Start);
         let mut edges_to_delete = Vec::new();
         for (_, value) in iter.flatten() {
-            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value) {
+            if let Ok((edge, _)) = decode_relationship_edge(&value) {
                 if edge.source_episode_id == Some(*episode_uuid) {
                     edges_to_delete.push(edge.uuid);
                 }
@@ -4283,7 +4476,7 @@ impl GraphMemory {
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
                 if let Ok((mut edge, _)) =
-                    crate::serialization::try_decode::<RelationshipEdge>(&value)
+                    decode_relationship_edge(&value)
                 {
                     let _ = edge.strengthen();
                     match crate::serialization::encode(&edge) {
@@ -4342,7 +4535,7 @@ impl GraphMemory {
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
                 if let Ok((mut edge, _)) =
-                    crate::serialization::try_decode::<RelationshipEdge>(&value)
+                    decode_relationship_edge(&value)
                 {
                     let _ = edge.strengthen_with_importance(importance);
                     match crate::serialization::encode(&edge) {
@@ -4397,7 +4590,7 @@ impl GraphMemory {
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
                 if let Ok((mut edge, _)) =
-                    crate::serialization::try_decode::<RelationshipEdge>(&value)
+                    decode_relationship_edge(&value)
                 {
                     // Fully potentiated edges are protected from batch weakening
                     if matches!(edge.ltp_status, LtpStatus::Full) {
@@ -4559,6 +4752,7 @@ impl GraphMemory {
                         entity_confidence: None,
                         forman_curvature: None,
                         endpoint_selectivity: None,
+                        provenance: Vec::new(),
                     };
 
                     let key = edge.uuid.as_bytes();
@@ -4750,6 +4944,7 @@ impl GraphMemory {
                     entity_confidence: None,
                     forman_curvature: None,
                     endpoint_selectivity: None,
+                    provenance: Vec::new(),
                 };
 
                 let key = edge.uuid.as_bytes();
@@ -4955,6 +5150,7 @@ impl GraphMemory {
                     entity_confidence: Some(confidence),
                     forman_curvature: None,
                     endpoint_selectivity: None,
+                    provenance: Vec::new(),
                 };
                 if self.add_relationship(edge).is_ok() {
                     created += 1;
@@ -5784,7 +5980,7 @@ impl GraphMemory {
             rocksdb::IteratorMode::Start,
         );
         for (_, value) in iter.flatten() {
-            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value) {
+            if let Ok((edge, _)) = decode_relationship_edge(&value) {
                 // Only include non-invalidated relationships
                 if edge.invalidated_at.is_none() {
                     relationships.push(edge);
@@ -7634,6 +7830,7 @@ mod tests {
             entity_confidence: None,
             forman_curvature: None,
             endpoint_selectivity: None,
+            provenance: Vec::new(),
         };
         // Causal chain a → b → c (cause = from_entity).
         graph
@@ -7693,6 +7890,7 @@ mod tests {
             entity_confidence: None,
             forman_curvature: None,
             endpoint_selectivity: None,
+            provenance: Vec::new(),
         };
         // Caroline --LocatedIn--> Denver; Melanie --CreatedBy--> painting;
         // plus a CoOccurs distractor edge Caroline--painting.
@@ -7869,6 +8067,7 @@ mod tests {
             entity_confidence: None, // PIPE-5: Default for tests
             forman_curvature: None,
             endpoint_selectivity: None,
+            provenance: Vec::new(),
         }
     }
 
@@ -8628,6 +8827,7 @@ mod tests {
             entity_confidence: None,    // PIPE-5: Default for tests
             forman_curvature: None,
             endpoint_selectivity: None,
+            provenance: Vec::new(),
         };
         graph.add_relationship(edge).unwrap();
 
@@ -8667,6 +8867,7 @@ mod tests {
             entity_confidence: None,
             forman_curvature: None,
             endpoint_selectivity: None,
+            provenance: Vec::new(),
         };
         let edge_id = graph.add_relationship(edge).unwrap();
         let start = graph.get_relationship(&edge_id).unwrap().unwrap().strength;
@@ -8801,6 +9002,7 @@ mod tests {
             entity_confidence: None,
             forman_curvature: None,
             endpoint_selectivity: None,
+            provenance: Vec::new(),
         };
         graph.add_relationship(edge).unwrap();
 
@@ -8869,6 +9071,7 @@ mod tests {
             entity_confidence: None,
             forman_curvature: None,
             endpoint_selectivity: None,
+            provenance: Vec::new(),
         };
         let edge_uuid = graph.add_relationship(edge).unwrap();
 
@@ -8943,6 +9146,7 @@ mod tests {
             entity_confidence: None,
             forman_curvature: None,
             endpoint_selectivity: None,
+            provenance: Vec::new(),
         };
 
         let high_edge_uuid = graph
@@ -9047,6 +9251,7 @@ mod tests {
             entity_confidence: None,
             forman_curvature: None,
             endpoint_selectivity: None,
+            provenance: Vec::new(),
         };
         graph.add_relationship(edge).unwrap()
     }
@@ -9300,6 +9505,7 @@ mod tests {
             entity_confidence: None,
             forman_curvature: Some(-5.0),
             endpoint_selectivity: Some(0.05), // very low = stop-word
+            provenance: Vec::new(),
         };
 
         let mut high_sel_edge = RelationshipEdge {
@@ -9321,6 +9527,7 @@ mod tests {
             entity_confidence: None,
             forman_curvature: Some(-5.0),
             endpoint_selectivity: Some(2.0), // high = concept, above threshold
+            provenance: Vec::new(),
         };
 
         low_sel_edge.decay();
@@ -9369,6 +9576,7 @@ mod tests {
             entity_confidence: None,
             forman_curvature: None,
             endpoint_selectivity: None, // not computed yet
+            provenance: Vec::new(),
         };
 
         let mut edge_high = RelationshipEdge {
@@ -9390,6 +9598,7 @@ mod tests {
             entity_confidence: None,
             forman_curvature: Some(-2.0),
             endpoint_selectivity: Some(5.0), // high selectivity
+            provenance: Vec::new(),
         };
 
         edge_none.decay();
@@ -9593,5 +9802,257 @@ mod tests {
             infer_relation_type_for_pair(&EntityLabel::Concept, &EntityLabel::Event),
             RelationType::CoOccurs
         );
+    }
+
+    // ===================================================================
+    // Increment 1: robust edge provenance
+    // ===================================================================
+
+    /// Build a typed edge between two entities attributed to a source episode.
+    fn provenance_edge(from: Uuid, to: Uuid, source_episode_id: Uuid) -> RelationshipEdge {
+        let now = Utc::now();
+        RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            // A non-generic type so find_relationship_between_typed matches a
+            // single edge across re-attestations.
+            relation_type: RelationType::WorksWith,
+            strength: 0.5,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: Some(source_episode_id),
+            context: String::new(),
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: Some(0.9),
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_provenance_create_seeds_from_source_episode() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let a = make_entity(&graph, "ProvCreateA");
+        let b = make_entity(&graph, "ProvCreateB");
+        let episode = Uuid::new_v4();
+
+        let edge_id = graph
+            .add_relationship(provenance_edge(a, b, episode))
+            .unwrap();
+
+        let edge = graph.get_relationship(&edge_id).unwrap().unwrap();
+        assert_eq!(
+            edge.provenance.len(),
+            1,
+            "create path must seed exactly one provenance record"
+        );
+        assert_eq!(edge.provenance[0].source_episode_id, episode);
+        assert_eq!(edge.provenance[0].mention_count, 1);
+        assert_eq!(
+            edge.provenance[0].confidence,
+            Some(0.9),
+            "confidence should be seeded from entity_confidence"
+        );
+    }
+
+    #[test]
+    fn test_provenance_strengthen_accumulates_sources() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let a = make_entity(&graph, "ProvAccA");
+        let b = make_entity(&graph, "ProvAccB");
+        let episode_a = Uuid::new_v4();
+        let episode_b = Uuid::new_v4();
+
+        // First attestation from episode A creates the edge.
+        let edge_id = graph
+            .add_relationship(provenance_edge(a, b, episode_a))
+            .unwrap();
+
+        // Second attestation from episode B must strengthen the SAME edge and
+        // ADD a provenance record — the bug was that this episode was discarded.
+        let edge_id_2 = graph
+            .add_relationship(provenance_edge(a, b, episode_b))
+            .unwrap();
+        assert_eq!(edge_id, edge_id_2, "same entity pair + type = same edge");
+
+        let edge = graph.get_relationship(&edge_id).unwrap().unwrap();
+        assert_eq!(
+            edge.provenance.len(),
+            2,
+            "strengthen must accumulate the second source episode (bug fix)"
+        );
+
+        // Re-attest from episode A: no new record, A's mention_count bumps to 2.
+        graph
+            .add_relationship(provenance_edge(a, b, episode_a))
+            .unwrap();
+        let edge = graph.get_relationship(&edge_id).unwrap().unwrap();
+        assert_eq!(
+            edge.provenance.len(),
+            2,
+            "re-attesting an existing episode must not add a record"
+        );
+        let rec_a = edge
+            .provenance
+            .iter()
+            .find(|p| p.source_episode_id == episode_a)
+            .expect("episode A record present");
+        assert_eq!(
+            rec_a.mention_count, 2,
+            "re-attested episode A must have mention_count == 2"
+        );
+    }
+
+    #[test]
+    fn test_provenance_cap_enforced() {
+        // Pin the cap low and deterministically so the test is hermetic.
+        std::env::set_var("SHODH_PROVENANCE_MAX_SOURCES", "3");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let a = make_entity(&graph, "ProvCapA");
+        let b = make_entity(&graph, "ProvCapB");
+
+        // Attest from 5 distinct episodes; the trail must be capped at 3.
+        let mut episodes = Vec::new();
+        let mut edge_id = None;
+        for _ in 0..5 {
+            let ep = Uuid::new_v4();
+            episodes.push(ep);
+            edge_id = Some(graph.add_relationship(provenance_edge(a, b, ep)).unwrap());
+        }
+        let edge_id = edge_id.unwrap();
+
+        let edge = graph.get_relationship(&edge_id).unwrap().unwrap();
+        assert_eq!(
+            edge.provenance.len(),
+            3,
+            "provenance must be capped at SHODH_PROVENANCE_MAX_SOURCES"
+        );
+        // The most recently added episode must survive the cap.
+        let last_episode = *episodes.last().unwrap();
+        assert!(
+            edge.provenance
+                .iter()
+                .any(|p| p.source_episode_id == last_episode),
+            "the just-added episode must never be dropped by the cap"
+        );
+
+        std::env::remove_var("SHODH_PROVENANCE_MAX_SOURCES");
+    }
+
+    #[test]
+    fn test_provenance_serde_backward_compat() {
+        // Simulate a LEGACY edge serialized before the `provenance` field
+        // existed: a struct identical to RelationshipEdge minus that trailing
+        // field. Encoding it and decoding as the current RelationshipEdge must
+        // succeed and yield an EMPTY provenance trail (the #[serde(default)]).
+        #[derive(Serialize)]
+        struct LegacyEdge {
+            uuid: Uuid,
+            from_entity: Uuid,
+            to_entity: Uuid,
+            relation_type: RelationType,
+            strength: f32,
+            created_at: DateTime<Utc>,
+            valid_at: DateTime<Utc>,
+            invalidated_at: Option<DateTime<Utc>>,
+            source_episode_id: Option<Uuid>,
+            context: String,
+            last_activated: DateTime<Utc>,
+            activation_count: u32,
+            ltp_status: LtpStatus,
+            tier: EdgeTier,
+            activation_timestamps: Option<VecDeque<DateTime<Utc>>>,
+            entity_confidence: Option<f32>,
+            endpoint_selectivity: Option<f32>,
+            forman_curvature: Option<f32>,
+        }
+
+        let legacy = LegacyEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: Uuid::new_v4(),
+            to_entity: Uuid::new_v4(),
+            relation_type: RelationType::WorksWith,
+            strength: 0.42,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: Some(Uuid::new_v4()),
+            context: "legacy".to_string(),
+            last_activated: Utc::now(),
+            activation_count: 7,
+            ltp_status: LtpStatus::None,
+            tier: EdgeTier::L2Episodic,
+            activation_timestamps: None,
+            entity_confidence: Some(0.5),
+            endpoint_selectivity: None,
+            forman_curvature: None,
+        };
+
+        let bytes = crate::serialization::encode(&legacy).unwrap();
+
+        // Postcard is NOT self-describing: a record missing the trailing
+        // `provenance` field cannot be decoded by the plain `decode` path (it
+        // runs off the end of the buffer), so `#[serde(default)]` alone does not
+        // grant backward-compat. The edge read path goes through
+        // `decode_relationship_edge`, which supplies the field's postcard default
+        // on EOF — that is the path production uses, so that is what we assert.
+        assert!(
+            crate::serialization::decode::<RelationshipEdge>(&bytes).is_err(),
+            "plain postcard decode of a pre-provenance edge must fail on EOF"
+        );
+
+        let (decoded, needs_migration) = decode_relationship_edge(&bytes).unwrap();
+        assert!(
+            needs_migration,
+            "a pre-provenance edge should be flagged for rewrite"
+        );
+        assert_eq!(decoded.strength, 0.42);
+        assert_eq!(decoded.activation_count, 7);
+        assert_eq!(decoded.context, "legacy");
+        assert_eq!(decoded.entity_confidence, Some(0.5));
+        assert!(
+            decoded.provenance.is_empty(),
+            "legacy edge without provenance must decode to an empty trail"
+        );
+
+        // Forward round-trip: a current edge WITH provenance survives both the
+        // plain decode and the compat decode unchanged (no migration needed).
+        let mut edge = provenance_edge(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        edge.provenance = vec![ProvenanceRecord {
+            source_episode_id: Uuid::new_v4(),
+            mention_count: 3,
+            first_observed: Utc::now(),
+            last_observed: Utc::now(),
+            confidence: Some(0.8),
+            evidence_span: Some((0, 42)),
+            typed_by: Some(TypingMethod::Cue),
+        }];
+        let bytes = crate::serialization::encode(&edge).unwrap();
+        let decoded: RelationshipEdge = crate::serialization::decode(&bytes).unwrap();
+        assert_eq!(decoded.provenance.len(), 1);
+        assert_eq!(decoded.provenance[0].mention_count, 3);
+        assert_eq!(decoded.provenance[0].evidence_span, Some((0, 42)));
+        assert_eq!(decoded.provenance[0].typed_by, Some(TypingMethod::Cue));
+
+        let (decoded, needs_migration) = decode_relationship_edge(&bytes).unwrap();
+        assert!(
+            !needs_migration,
+            "a current-schema edge must not be flagged for migration"
+        );
+        assert_eq!(decoded.provenance.len(), 1);
     }
 }

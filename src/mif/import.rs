@@ -338,6 +338,7 @@ pub fn import_graph_relationships(
             entity_confidence: rel.confidence,
             forman_curvature: None,
             endpoint_selectivity: None,
+            provenance: Vec::new(),
         };
 
         match graph.add_relationship(edge) {

@@ -7675,6 +7675,7 @@ impl MemorySystem {
                             entity_confidence: Some(fact.confidence),
                             forman_curvature: None,
                             endpoint_selectivity: None,
+                            provenance: Vec::new(),
                         };
                         if graph_guard.add_relationship(edge).is_ok() {
                             edges_added += 1;
@@ -8039,6 +8040,7 @@ impl MemorySystem {
                             entity_confidence,
                             forman_curvature: None,
                             endpoint_selectivity: None,
+                            provenance: Vec::new(),
                         };
 
                         if let Err(e) = graph_guard.add_relationship(edge) {
