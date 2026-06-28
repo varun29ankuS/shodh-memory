@@ -907,6 +907,106 @@ pub fn detect_temporal_intent(query: &str) -> TemporalIntent {
     TemporalIntent::None
 }
 
+// ============================================================================
+// MULTI-HOP QUERY DETECTION
+// ============================================================================
+// Detect when a query bridges two entities through an intermediate relation
+// (e.g. "who does the colleague that X works with manage?"). Such queries have
+// multiple gold turns spread across episodes; the answer turn is reachable only
+// by following a relation from an anchor the query does NOT name directly.
+//
+// Prior finding (companion-coverage thread): a single-conversation / single-
+// session signal is a BAD multi-hop proxy. This classifier instead keys on the
+// query's own structure — two or more grounded entities AND a relational bridge
+// (a connective relation OR a bridge verb OR a "who/how does X … Y" frame) — so
+// it does not rely on corpus partitioning.
+
+/// Bridge verbs that signal a relation linking two entities through an
+/// intermediate party (the hop). Lower-cased, matched as whole-ish tokens.
+const MULTIHOP_BRIDGE_VERBS: &[&str] = &[
+    "work",
+    "works",
+    "worked",
+    "working",
+    "manage",
+    "manages",
+    "managed",
+    "managing",
+    "collaborate",
+    "collaborates",
+    "collaborated",
+    "report",
+    "reports",
+    "reported",
+    "reporting",
+    "depend",
+    "depends",
+    "depended",
+    "lead",
+    "leads",
+    "led",
+    "leading",
+    "supervise",
+    "supervises",
+    "oversee",
+    "oversees",
+    "partner",
+    "partners",
+    "partnered",
+];
+
+/// Connective phrases that chain one relation into another (the linguistic
+/// signature of a 2-hop question).
+const MULTIHOP_CONNECTIVES: &[&str] = &[
+    "that ",
+    " who ",
+    " whom ",
+    " which ",
+    "the colleague",
+    "the person who",
+    "the one who",
+    "together with",
+    "along with",
+    " and also ",
+];
+
+/// Detect whether a query is asking a multi-hop (bridge) question.
+///
+/// Returns `true` when there are at least two grounded entities AND the query
+/// carries a relational bridge: a connective phrase, a bridge verb, or a
+/// "who/how does … " frame. `entity_count` is the number of entities the query
+/// NER resolved; `relations` are any relation cues already parsed from the
+/// query (e.g. ontological relation surface forms). Either source of relational
+/// signal qualifies, so the classifier degrades gracefully when NER under-counts
+/// entities but the surface structure is unambiguous.
+pub fn detect_multihop_intent(query: &str, entity_count: usize, relations: &[String]) -> bool {
+    let q = query.to_lowercase();
+
+    // A relational bridge present in the parsed relations is the strongest
+    // signal and does not require the entity-count floor (the parser already
+    // grounded the relation).
+    let has_parsed_relation = !relations.is_empty();
+
+    let has_connective = MULTIHOP_CONNECTIVES.iter().any(|c| q.contains(c));
+
+    // Bridge verb: split on non-alphanumeric so "works." / "works," match.
+    let tokens: Vec<&str> = q
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let has_bridge_verb = tokens.iter().any(|t| MULTIHOP_BRIDGE_VERBS.contains(t));
+
+    // "who/how does X … Y" interrogative frame.
+    let has_bridge_frame = (q.starts_with("who ") || q.starts_with("how "))
+        && (q.contains(" does ") || q.contains(" do ") || q.contains(" did "));
+
+    let bridge = has_connective || has_bridge_verb || has_bridge_frame;
+
+    // Two grounded entities + a bridge, OR an already-parsed relation with at
+    // least one grounded entity, is a multi-hop question.
+    (entity_count >= 2 && bridge) || (has_parsed_relation && entity_count >= 1 && bridge)
+}
+
 /// Check if a query requires temporal filtering for accurate retrieval
 ///
 /// Returns true if the query has a temporal component that should be used
@@ -4470,6 +4570,68 @@ mod polar_negation_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multihop_intent_fires_on_bridge_question_with_two_entities() {
+        // The canonical planted 2-hop query: two grounded entities + connective
+        // "that" + bridge verbs "works"/"manage".
+        assert!(detect_multihop_intent(
+            "Who does the colleague that Vorland works closely with manage?",
+            2,
+            &[],
+        ));
+    }
+
+    #[test]
+    fn multihop_intent_fires_on_parsed_relation_with_single_entity() {
+        // A parsed relation grounds the bridge even when NER counted one entity.
+        assert!(detect_multihop_intent(
+            "who manages the team Vorland leads?",
+            1,
+            &["WorksWith".to_string()],
+        ));
+    }
+
+    #[test]
+    fn multihop_intent_false_on_simple_lookup() {
+        // Single entity, no bridge structure — a 1-hop lookup, not multi-hop.
+        assert!(!detect_multihop_intent("What is Vorland's email?", 1, &[]));
+        // Two entities but no relational bridge.
+        assert!(!detect_multihop_intent("Vorland and Meslin", 2, &[]));
+    }
+
+    #[test]
+    fn multihop_intent_false_without_entity_floor() {
+        // Bridge verb present but no grounded entities and no parsed relation:
+        // not enough to assert a multi-hop question.
+        assert!(!detect_multihop_intent("who works here", 0, &[]));
+    }
+
+    #[test]
+    fn multihop_intent_fires_on_planted_harness_query() {
+        // The exact 2-hop query generated by the multi-hop harness. Verifies the
+        // gate fires end-to-end (analyze_query → ontological intent → gate) so the
+        // companion A/B actually exercises the feature on the planted corpus.
+        let q = "Who does the colleague that Vorland works closely with manage?";
+        let analysis = analyze_query(q);
+        let onto = infer_ontological_intent(q, &analysis);
+        let relations: Vec<String> = onto.relation_types.iter().map(|r| format!("{r:?}")).collect();
+        let entity_count = analysis.focal_entities.len();
+        assert!(
+            detect_multihop_intent(q, entity_count, &relations),
+            "planted 2-hop query must classify as multi-hop (focal_entities={entity_count}, relations={relations:?})"
+        );
+    }
+
+    #[test]
+    fn multihop_intent_handles_punctuated_bridge_verbs() {
+        // Bridge verb adjacent to punctuation must still tokenize/match.
+        assert!(detect_multihop_intent(
+            "Who is the person who Vorland works, then Meslin manages?",
+            2,
+            &[],
+        ));
+    }
 
     #[test]
     fn extract_relative_dates_does_not_overflow_on_absurd_values() {

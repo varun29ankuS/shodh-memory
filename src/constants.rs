@@ -2842,6 +2842,44 @@ pub const LINEAGE_EXPANSION_MAX: usize = 3;
 pub const LINEAGE_EXPANSION_MIN_CONFIDENCE: f32 = 0.7;
 
 // =============================================================================
+// PROVENANCE-DRIVEN MULTI-HOP COMPANION INJECTION (Increment 2)
+// =============================================================================
+//
+// multi_hop questions have MULTIPLE gold turns; recall reliably surfaces the
+// best anchor, but companion evidence ranks 11-50 and falls outside the top-k.
+// An edge's `provenance` trail (Increment 1) lists every source episode that
+// attested it. When recall touches such an edge — via the entities of the
+// memories it already returned — those source episodes are exactly the
+// companion turns. Injecting them (gated, sub-source, accumulate-not-displace)
+// gives the missing gold a path into the result set.
+//
+// Gated behind `SHODH_COMPANION_MULTIHOP_GATE=1` AND a positive multi-hop
+// intent classification. Default OFF → zero overhead and byte-identical recall.
+
+/// Minimum confidence for a provenance record to seed a companion candidate.
+///
+/// Provenance confidence is optional (legacy/co-occurrence edges record `None`);
+/// when absent we fall back to the edge's `effective_strength()`. This bar
+/// (0.5, matching `LINEAGE_RETRIEVAL_MIN_CONFIDENCE`) filters weakly-attested
+/// edges so a single noisy co-occurrence cannot drag in an unrelated episode.
+pub const COMPANION_INJECTION_MIN_CONFIDENCE: f32 = 0.5;
+
+/// Maximum number of provenance companions injected into a single recall.
+///
+/// Caps the blast radius so a hub entity with many attesting episodes cannot
+/// flood the result tail. Five is enough to cover the companion turns of a
+/// typical multi-hop chain without overwhelming genuine top-k results.
+pub const COMPANION_INJECTION_MAX: usize = 5;
+
+/// Score factor applied to an injected companion (sub-source).
+///
+/// A companion's score = source_score × confidence-weight × this factor. At
+/// 0.5 a perfectly-attested companion of the top result scores at most half of
+/// it, so it sorts strictly below its source and only enters the kept window
+/// when a slot is open — it never displaces a genuinely higher-scored result.
+pub const COMPANION_SCORE_FACTOR: f32 = 0.5;
+
+// =============================================================================
 // CONSTANTS USAGE DOCUMENTATION
 // =============================================================================
 //

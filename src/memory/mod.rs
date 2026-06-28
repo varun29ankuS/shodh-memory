@@ -67,6 +67,16 @@ pub(crate) fn scoring_now() -> chrono::DateTime<chrono::Utc> {
         .unwrap_or_else(chrono::Utc::now)
 }
 
+/// `SHODH_COMPANION_MULTIHOP_GATE=1` — enable provenance-driven multi-hop
+/// companion injection (Increment 2). Default OFF → recall is byte-identical and
+/// no extra graph reads are performed. The flag only ARMS the feature; injection
+/// still fires solely on `Full`-layer recalls classified as multi-hop intent.
+fn companion_gate_enabled() -> bool {
+    std::env::var("SHODH_COMPANION_MULTIHOP_GATE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 use crate::constants::{
     DEFAULT_COMPRESSION_AGE_DAYS, DEFAULT_IMPORTANCE_THRESHOLD, DEFAULT_MAX_HEAP_PER_USER_MB,
     DEFAULT_SESSION_MEMORY_SIZE_MB, DEFAULT_WORKING_MEMORY_SIZE, EDGE_SEMANTIC_WEIGHT_FLOOR,
@@ -1367,6 +1377,106 @@ impl MemorySystem {
         std::env::var("SHODH_RECALL_READONLY")
             .map(|v| v == "1")
             .unwrap_or(false)
+    }
+
+    /// Harvest provenance companions for the already-ranked `memories`.
+    ///
+    /// Increment 2 — provenance-driven multi-hop recall. For each ranked memory
+    /// we look up the knowledge-graph entities it exposes, walk each entity's
+    /// relationship edges, and read the `provenance` trail Increment 1 attached
+    /// to every edge. Each `ProvenanceRecord.source_episode_id` is a companion
+    /// episode that attested an edge the recalled memory is incident to — exactly
+    /// the multi-hop companion turn that fell outside the top-k. We:
+    ///
+    /// - confidence-filter each record (record confidence, or the edge's
+    ///   `effective_strength()` when the record carries none — co-occurrence and
+    ///   legacy edges record `None`),
+    /// - skip any episode already in the result set or already harvested (dedup),
+    /// - derive a SUB-source score = `source_score × conf-weight ×
+    ///   COMPANION_SCORE_FACTOR`, so a companion sorts strictly below the memory
+    ///   that reached it and can only occupy an OPEN top-k slot — it never
+    ///   displaces a higher-scored genuine result (accumulate-not-displace),
+    /// - cap the total at `COMPANION_INJECTION_MAX`.
+    ///
+    /// Returns `(Memory, derived_score)` pairs; the caller sets the score and
+    /// appends them before the final sort+truncate. A no-op (empty Vec) when no
+    /// edge carries qualifying provenance.
+    fn harvest_provenance_companions(
+        &self,
+        graph: &crate::graph_memory::GraphMemory,
+        memories: &[SharedMemory],
+    ) -> Vec<(Memory, f32)> {
+        use crate::constants::{
+            COMPANION_INJECTION_MAX, COMPANION_INJECTION_MIN_CONFIDENCE, COMPANION_SCORE_FACTOR,
+        };
+
+        let existing_ids: HashSet<uuid::Uuid> = memories.iter().map(|m| m.id.0).collect();
+        let mut harvested: HashSet<uuid::Uuid> = HashSet::new();
+        let mut companions: Vec<(Memory, f32)> = Vec::new();
+
+        // Resolve each entity name to a graph node at most once across all ranked
+        // memories — a memory's entities frequently repeat (the bridge entity is
+        // shared by the seed and link turns of a chain).
+        let mut entity_uuid_cache: std::collections::HashMap<String, Option<uuid::Uuid>> =
+            std::collections::HashMap::new();
+
+        'outer: for mem in memories {
+            let source_score = mem.score.unwrap_or_else(|| mem.salience_score_with_access());
+            if source_score <= 0.0 {
+                continue;
+            }
+
+            for name in &mem.experience.entities {
+                let key = name.to_lowercase();
+                let entity_uuid = *entity_uuid_cache.entry(key).or_insert_with(|| {
+                    graph
+                        .find_entity_by_name_strict(name)
+                        .ok()
+                        .flatten()
+                        .map(|e| e.uuid)
+                });
+                let Some(entity_uuid) = entity_uuid else {
+                    continue;
+                };
+
+                let Ok(edges) = graph.get_entity_relationships(&entity_uuid) else {
+                    continue;
+                };
+
+                for edge in &edges {
+                    for record in &edge.provenance {
+                        // Confidence: record-level when present (provenance-aware
+                        // edges), else the edge's effective strength (co-occurrence
+                        // / legacy edges store None). Filter weak attestations.
+                        let conf = record.confidence.unwrap_or_else(|| edge.effective_strength());
+                        if conf < COMPANION_INJECTION_MIN_CONFIDENCE {
+                            continue;
+                        }
+
+                        let src = record.source_episode_id;
+                        if existing_ids.contains(&src) || !harvested.insert(src) {
+                            continue;
+                        }
+
+                        let Ok(companion) = self.get_memory(&MemoryId(src)) else {
+                            // get_memory failed (episode not a stored memory) —
+                            // drop from the harvested set so it can't block a
+                            // later, fetchable attestation of the same id.
+                            harvested.remove(&src);
+                            continue;
+                        };
+
+                        let derived_score = source_score * conf * COMPANION_SCORE_FACTOR;
+                        companions.push((companion, derived_score));
+                        if companions.len() >= COMPANION_INJECTION_MAX {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+
+        companions
     }
 
     pub fn recall(&self, query: &Query) -> Result<Vec<SharedMemory>> {
@@ -4908,6 +5018,45 @@ impl MemorySystem {
         if layer_full {
             let mut seen_ids: HashSet<MemoryId> = memories.iter().map(|m| m.id.clone()).collect();
             self.expand_with_hierarchy(&mut memories, &mut seen_ids);
+        }
+
+        // ===========================================================================
+        // PROVENANCE-DRIVEN MULTI-HOP COMPANION INJECTION (Increment 2)
+        // ===========================================================================
+        // multi_hop questions have MULTIPLE gold turns; the pipeline above surfaces
+        // the best anchor, but companion evidence often ranks 11-50 and misses the
+        // top-k. Each knowledge-graph edge carries a `provenance` trail (Increment 1)
+        // listing every source episode that attested it. By walking the edges of the
+        // entities the recalled memories already expose, we reach exactly those
+        // companion episodes and inject them with a SUB-source score so they
+        // accumulate into open top-k slots without ever displacing a higher-scored
+        // genuine result. Gated: `SHODH_COMPANION_MULTIHOP_GATE=1` AND a positive
+        // multi-hop intent classification AND `Full` layer (production path only).
+        // Default OFF → byte-identical recall and zero graph reads.
+        if layer_full && companion_gate_enabled() {
+            let q_entities: &[String] = query.ner_entities.as_deref().unwrap_or(&[]);
+            let relation_surfaces: Vec<String> = onto_intent
+                .relation_types
+                .iter()
+                .map(|r| format!("{r:?}"))
+                .collect();
+            // entity_count combines query-NER grounding with the focal entities the
+            // analyzer parsed, so an under-counting NER still clears the floor when
+            // the surface structure is unambiguous.
+            let entity_count = q_entities.len().max(query_analysis.focal_entities.len());
+            let multihop_intent =
+                query_parser::detect_multihop_intent(query_text, entity_count, &relation_surfaces);
+
+            if multihop_intent {
+                if let Some(graph) = self.graph_memory.as_ref() {
+                    let companions = self.harvest_provenance_companions(&graph.read(), &memories);
+                    for (mem, score) in companions {
+                        let mut cloned: Memory = mem;
+                        cloned.set_score(score);
+                        memories.push(Arc::new(cloned));
+                    }
+                }
+            }
         }
 
         // Re-sort by score and trim to max_results after expansion.
@@ -9813,5 +9962,270 @@ impl Drop for MemorySystem {
         if let Err(e) = self.long_term_memory.flush() {
             tracing::error!("Failed to flush storage on shutdown: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod companion_injection_tests {
+    use super::*;
+    use crate::graph_memory::{
+        EntityLabel, EntityNode, GraphMemory, ProvenanceRecord, RelationType, RelationshipEdge,
+    };
+    use crate::memory::types::Experience;
+    use std::collections::HashMap as StdHashMap;
+
+    fn setup() -> (MemorySystem, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 1,
+            importance_threshold: 0.0,
+        };
+        let mut system = MemorySystem::new(config, None).expect("memory system");
+        let graph = GraphMemory::new(&temp_dir.path().join("graph"), None).expect("graph");
+        system.set_graph_memory(Arc::new(parking_lot::RwLock::new(graph)));
+        (system, temp_dir)
+    }
+
+    fn remember_with_entities(
+        system: &MemorySystem,
+        content: &str,
+        entities: &[&str],
+    ) -> MemoryId {
+        let experience = Experience {
+            content: content.to_string(),
+            entities: entities.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        system.remember(experience, None).expect("remember")
+    }
+
+    fn add_entity(graph: &GraphMemory, name: &str) -> uuid::Uuid {
+        let node = EntityNode {
+            uuid: uuid::Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Person],
+            created_at: chrono::Utc::now(),
+            last_seen_at: chrono::Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: StdHashMap::new(),
+            name_embedding: None,
+            salience: 1.0,
+            is_proper_noun: true,
+            selectivity: None,
+        };
+        graph.add_entity(node).expect("add entity")
+    }
+
+    fn add_edge_with_provenance(
+        graph: &GraphMemory,
+        from: uuid::Uuid,
+        to: uuid::Uuid,
+        source_episode: uuid::Uuid,
+        confidence: Option<f32>,
+    ) {
+        let now = chrono::Utc::now();
+        let edge = RelationshipEdge {
+            uuid: uuid::Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type: RelationType::CoOccurs,
+            strength: 1.0,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: Some(source_episode),
+            context: String::new(),
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: crate::graph_memory::LtpStatus::None,
+            tier: crate::graph_memory::EdgeTier::L1Working,
+            activation_timestamps: None,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: vec![ProvenanceRecord {
+                source_episode_id: source_episode,
+                mention_count: 1,
+                first_observed: now,
+                last_observed: now,
+                confidence,
+                evidence_span: None,
+                typed_by: None,
+            }],
+        };
+        graph.add_relationship(edge).expect("add edge");
+    }
+
+    /// Add an edge carrying NO provenance and no source episode — the harvester
+    /// must treat it as a no-op.
+    fn add_edge_no_provenance(graph: &GraphMemory, from: uuid::Uuid, to: uuid::Uuid) {
+        let now = chrono::Utc::now();
+        let edge = RelationshipEdge {
+            uuid: uuid::Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type: RelationType::CoOccurs,
+            strength: 1.0,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: crate::graph_memory::LtpStatus::None,
+            tier: crate::graph_memory::EdgeTier::L1Working,
+            activation_timestamps: None,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: Vec::new(),
+        };
+        graph.add_relationship(edge).expect("add edge");
+    }
+
+    /// A high-confidence provenance edge incident to a ranked memory's entity
+    /// surfaces the attesting companion episode, scored strictly below its source.
+    #[test]
+    fn companion_is_harvested_and_scored_sub_source() {
+        let (system, _t) = setup();
+        // Companion is a separate stored memory; anchor exposes entity "A".
+        let companion_id = remember_with_entities(&system, "Companion turn about B and C.", &["B"]);
+        let anchor_id = remember_with_entities(&system, "Anchor turn mentions A and B.", &["A", "B"]);
+        let mut anchor = system.get_memory(&anchor_id).unwrap();
+        anchor.set_score(1.0);
+
+        {
+            let graph = system.graph_memory().unwrap().write();
+            let a = add_entity(&graph, "A");
+            let b = add_entity(&graph, "B");
+            // Edge A->B attested by the COMPANION episode (provenance points to it).
+            add_edge_with_provenance(&graph, a, b, companion_id.0, Some(0.9));
+        }
+
+        let ranked: Vec<SharedMemory> = vec![Arc::new(anchor)];
+        let companions =
+            system.harvest_provenance_companions(&system.graph_memory().unwrap().read(), &ranked);
+
+        assert_eq!(companions.len(), 1, "the single attesting companion is harvested");
+        let (mem, score) = &companions[0];
+        assert_eq!(mem.id, companion_id, "harvested the attesting episode");
+        // Sub-source: 1.0 (source) * 0.9 (conf) * 0.5 (factor) = 0.45 < 1.0.
+        assert!(*score < 1.0, "companion scores strictly below its source");
+        assert!((*score - 0.45).abs() < 1e-4, "score = source*conf*factor");
+    }
+
+    /// Companions already present in the ranked set are not re-injected (dedup),
+    /// and a single source episode attesting many edges is harvested once.
+    #[test]
+    fn dedup_against_ranked_and_across_edges() {
+        let (system, _t) = setup();
+        let anchor_id = remember_with_entities(&system, "Anchor with A and B.", &["A", "B"]);
+        let companion_id = remember_with_entities(&system, "Companion with C.", &["C"]);
+        let mut anchor = system.get_memory(&anchor_id).unwrap();
+        anchor.set_score(1.0);
+
+        {
+            let graph = system.graph_memory().unwrap().write();
+            let a = add_entity(&graph, "A");
+            let b = add_entity(&graph, "B");
+            // Two edges off A, BOTH attested by the same companion episode → one companion.
+            add_edge_with_provenance(&graph, a, b, companion_id.0, Some(0.9));
+            let c = add_entity(&graph, "Cnode");
+            add_edge_with_provenance(&graph, a, c, companion_id.0, Some(0.9));
+            // An edge attested by the ANCHOR itself must be skipped (already ranked).
+            add_edge_with_provenance(&graph, b, a, anchor_id.0, Some(0.9));
+        }
+
+        let ranked: Vec<SharedMemory> = vec![Arc::new(anchor)];
+        let companions =
+            system.harvest_provenance_companions(&system.graph_memory().unwrap().read(), &ranked);
+        assert_eq!(
+            companions.len(),
+            1,
+            "one unique companion (dedup across edges + skip already-ranked source)"
+        );
+        assert_eq!(companions[0].0.id, companion_id);
+    }
+
+    /// The cap bounds the number of injected companions.
+    #[test]
+    fn respects_injection_cap() {
+        let (system, _t) = setup();
+        let anchor_id = remember_with_entities(&system, "Anchor with A.", &["A"]);
+        let mut anchor = system.get_memory(&anchor_id).unwrap();
+        anchor.set_score(1.0);
+
+        let cap = crate::constants::COMPANION_INJECTION_MAX;
+        {
+            let graph = system.graph_memory().unwrap().write();
+            let a = add_entity(&graph, "A");
+            // cap + 3 distinct companion episodes, each attesting its own edge off A.
+            for i in 0..(cap + 3) {
+                let companion = remember_with_entities(
+                    &system,
+                    &format!("Companion episode number {i}."),
+                    &[],
+                );
+                let other = add_entity(&graph, &format!("Other{i}"));
+                add_edge_with_provenance(&graph, a, other, companion.0, Some(0.9));
+            }
+        }
+
+        let ranked: Vec<SharedMemory> = vec![Arc::new(anchor)];
+        let companions =
+            system.harvest_provenance_companions(&system.graph_memory().unwrap().read(), &ranked);
+        assert_eq!(companions.len(), cap, "injection is bounded by COMPANION_INJECTION_MAX");
+    }
+
+    /// No provenance on the incident edges → nothing to harvest (no-op).
+    #[test]
+    fn no_op_when_provenance_empty() {
+        let (system, _t) = setup();
+        let anchor_id = remember_with_entities(&system, "Anchor with A.", &["A"]);
+        let mut anchor = system.get_memory(&anchor_id).unwrap();
+        anchor.set_score(1.0);
+
+        {
+            let graph = system.graph_memory().unwrap().write();
+            let a = add_entity(&graph, "A");
+            let b = add_entity(&graph, "B");
+            // Edge with no source episode and an empty provenance trail.
+            add_edge_no_provenance(&graph, a, b);
+        }
+
+        let ranked: Vec<SharedMemory> = vec![Arc::new(anchor)];
+        let companions =
+            system.harvest_provenance_companions(&system.graph_memory().unwrap().read(), &ranked);
+        assert!(companions.is_empty(), "no provenance → no companions");
+    }
+
+    /// Low-confidence provenance is filtered out.
+    #[test]
+    fn filters_low_confidence_attestation() {
+        let (system, _t) = setup();
+        let anchor_id = remember_with_entities(&system, "Anchor with A.", &["A"]);
+        let companion_id = remember_with_entities(&system, "Companion with C.", &["C"]);
+        let mut anchor = system.get_memory(&anchor_id).unwrap();
+        anchor.set_score(1.0);
+
+        {
+            let graph = system.graph_memory().unwrap().write();
+            let a = add_entity(&graph, "A");
+            let b = add_entity(&graph, "B");
+            // confidence below COMPANION_INJECTION_MIN_CONFIDENCE (0.5).
+            add_edge_with_provenance(&graph, a, b, companion_id.0, Some(0.1));
+        }
+
+        let ranked: Vec<SharedMemory> = vec![Arc::new(anchor)];
+        let companions =
+            system.harvest_provenance_companions(&system.graph_memory().unwrap().read(), &ranked);
+        assert!(companions.is_empty(), "weak attestations are filtered");
     }
 }
