@@ -156,16 +156,35 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
 .gtop .activ.on{opacity:1;}
 .gtop .activ .x{cursor:pointer;color:var(--mut);font-weight:700;}
 .gtop .activ .x:hover{color:#fff;}
-#graph{width:100%;height:100%;display:block;cursor:grab;}
+#graph{width:100%;height:100%;display:block;cursor:grab;touch-action:none;}
 #graph:active{cursor:grabbing;}
 .glegend{position:absolute;bottom:12px;left:14px;z-index:5;display:flex;gap:14px;font-size:9.5px;color:var(--mut);
   background:rgba(11,14,20,.7);border:1px solid var(--line);border-radius:8px;padding:7px 11px;backdrop-filter:blur(4px);}
 .glegend .it{display:flex;align-items:center;gap:5px;}
 .glegend .sw{width:14px;height:3px;border-radius:2px;}
 .glegend .swn{width:9px;height:9px;border-radius:50%;}
-.node-l{font-size:9px;fill:var(--txt2);pointer-events:none;}
-.edge-l{font-size:7.5px;fill:#8c97a6;pointer-events:none;}
-.gloading{position:absolute;inset:0;display:grid;place-items:center;color:var(--mut);font-size:12px;}
+.gloading{position:absolute;inset:0;display:grid;place-items:center;color:var(--mut);font-size:12px;z-index:6;}
+
+/* ── Graph: cluster breadcrumb + drill-down controls ──── */
+.gnav{position:absolute;top:34px;left:14px;z-index:5;display:flex;align-items:center;gap:8px;
+  font-size:11px;color:var(--txt2);pointer-events:auto;}
+.gnav .crumb{display:flex;align-items:center;gap:6px;background:rgba(11,14,20,.72);border:1px solid var(--line);
+  border-radius:8px;padding:5px 10px;backdrop-filter:blur(4px);}
+.gnav .crumb .seg{cursor:pointer;color:var(--turmeric);font-weight:600;}
+.gnav .crumb .seg:hover{color:#fff;}
+.gnav .crumb .seg.cur{color:var(--txt);cursor:default;font-weight:700;}
+.gnav .crumb .seg.cur:hover{color:var(--txt);}
+.gnav .crumb .sep{color:var(--mut);}
+.gnav .mode{color:var(--mut);font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;}
+/* floating tooltip over the canvas */
+#gtip{position:absolute;z-index:7;pointer-events:none;display:none;max-width:240px;
+  background:rgba(14,19,28,.96);border:1px solid var(--line2);border-radius:8px;padding:8px 10px;
+  font-size:11px;color:var(--txt);box-shadow:0 8px 28px rgba(0,0,0,.5);}
+#gtip .tname{font-weight:700;color:var(--gold);margin-bottom:3px;word-break:break-word;}
+#gtip .tmeta{font-size:10px;color:var(--mut);line-height:1.5;}
+#gtip .tmeta b{color:var(--txt2);font-weight:600;}
+.ghint{position:absolute;bottom:12px;right:14px;z-index:5;font-size:9.5px;color:var(--mut);
+  background:rgba(11,14,20,.7);border:1px solid var(--line);border-radius:8px;padding:6px 10px;backdrop-filter:blur(4px);}
 
 /* ── Right column panels ──────────────────────────────── */
 .col.right{overflow-y:auto;}
@@ -245,12 +264,18 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
       <div class="lbl">KNOWLEDGE GRAPH · <b id="g-user">…</b> · <span id="g-meta">…</span></div>
       <div class="activ" id="activ"><span id="activ-t"></span><span class="x" id="activ-x">✕</span></div>
     </div>
+    <div class="gnav" id="gnav" style="display:none">
+      <div class="crumb" id="gcrumb"></div>
+      <span class="mode" id="gmode"></span>
+    </div>
     <div class="gloading" id="gloading">building graph…</div>
-    <svg id="graph"></svg>
+    <canvas id="graph"></canvas>
+    <div id="gtip"></div>
+    <div class="ghint">scroll to zoom · drag to pan · click a cluster to drill in</div>
     <div class="glegend">
+      <div class="it"><span class="swn" style="background:#d2a8ff"></span>technology</div>
       <div class="it"><span class="swn" style="background:#82a0dc"></span>org</div>
       <div class="it"><span class="swn" style="background:#96e6aa"></span>location</div>
-      <div class="it"><span class="swn" style="background:#d2a8ff"></span>artifact</div>
       <div class="it"><span class="swn" style="background:#ffc896"></span>person</div>
       <span style="color:#2c3647">│</span>
       <div class="it"><span class="sw" style="background:#78c878"></span>strong</div>
@@ -312,195 +337,507 @@ function ago(ts){ const s=(Date.now()-new Date(ts).getTime())/1000; if(s<60)retu
 // ════════════════════════════════════════════════════════════════════════════
 //  GRAPH — the spreading-activation map. Lights up on recall.
 // ════════════════════════════════════════════════════════════════════════════
-let G = {nodes:[],links:[],byId:new Map(),byName:new Map(),sim:null,refs:null,activeSet:null,activeCore:null};
-const svg = d3.select("#graph");
-let gZoom, gRoot;
+// ──────────────────────────────────────────────────────────────────────────
+//  The graph is CLUSTER-FIRST. A 2k-node / 87k-edge corpus is unreadable as a
+//  hairball, so we (1) load the universe once, (2) run Louvain community
+//  detection in-browser over the full edge set, (3) render ~20-40 CLUSTER
+//  super-nodes on a CANVAS by default, and (4) DRILL DOWN into a cluster on
+//  click to reveal its members. A recall lights up the cluster(s) that hold the
+//  surfaced entities — the spreading-activation demo survives clustering.
+// ──────────────────────────────────────────────────────────────────────────
+const cv = $("graph");                       // <canvas>
+const ctx = cv.getContext("2d");
+let DPR = Math.max(1, window.devicePixelRatio||1);
 
-function graphInit(){
-  svg.selectAll("*").remove();
-  gRoot = svg.append("g");
-  gZoom = d3.zoom().scaleExtent([0.2,4]).on("zoom", e => gRoot.attr("transform", e.transform));
-  svg.call(gZoom);
-  svg.append("defs").append("marker").attr("id","arrow").attr("viewBox","0 -5 10 10")
-    .attr("refX",18).attr("refY",0).attr("markerWidth",6).attr("markerHeight",6).attr("orient","auto")
-    .append("path").attr("d","M0,-4L8,0L0,4").attr("fill","#3a4150");
-}
+// RAW = the whole universe + community structure (built once per user).
+let RAW = null;
+// VIEW = what is on screen right now: super-node graph or a drilled cluster.
+let VIEW = {level:"clusters", clusterId:null, nodes:[], links:[], byId:new Map(), sim:null};
+let activeClusters = null;     // Set<clusterId> lit by the current recall
+let activeMembers  = null;     // Set<entityId> surfaced members (the lit core)
+let hoverNode = null;
+// the canvas pan/zoom transform (we drive d3.zoom but paint manually)
+let GT = d3.zoomIdentity;
+const gzoom = d3.zoom().scaleExtent([0.15, 6]).on("zoom", e=>{ GT = e.transform; draw(); });
 
+// the cluster colour wheel — clusters get distinct hues so they read apart even
+// when most member entity_types collapse to one colour (e.g. "Technology").
+const CLUSTER_HUES = ["#82a0dc","#96e6aa","#d2a8ff","#ffc896","#ffd682","#8fd3d0",
+  "#e69ac0","#a0c878","#dcb482","#84b6ff","#b4e6b4","#ff9ea0","#c8a0ff","#9adcc0",
+  "#e6c864","#7ec8e6","#d0a8a0","#aab4ff","#8ce0b4","#ffb0d0","#c0d878","#e0a8e0",
+  "#9cc0e6","#d8e082","#ff9c78","#88d0a0","#b8a0e0","#e6b48c","#90c8d8","#cce0a0"];
+
+// ── load universe + cluster it (once per user) ──────────────────────────────
 async function loadGraph(){
   $("gloading").style.display="grid"; $("gloading").textContent="building graph…";
   $("g-user").textContent = user();
+  activeClusters=null; activeMembers=null; hoverNode=null;
+  if(VIEW.sim){ VIEW.sim.stop(); VIEW.sim=null; }
   try{
     const u = await api("/api/graph/"+encodeURIComponent(user())+"/universe", {headers:H});
-    let stars = u.stars||[], conns = u.connections||[];
-    // bound dense graphs (e.g. defence-live ~2k nodes) — keep top by degree, then salience
-    const deg = new Map();
-    conns.forEach(c=>{deg.set(c.from_id,(deg.get(c.from_id)||0)+1);deg.set(c.to_id,(deg.get(c.to_id)||0)+1);});
-    const totalStars = stars.length;
-    const NODE_CAP = 180;
-    if(stars.length>NODE_CAP){
-      stars = stars.map(s=>({...s,_d:deg.get(s.id)||0}))
-        .sort((a,b)=>(b._d-a._d)||(b.salience-a.salience)).slice(0,NODE_CAP);
-    }
-    const keep = new Set(stars.map(s=>s.id));
-    conns = conns.filter(c=>keep.has(c.from_id)&&keep.has(c.to_id));
-
-    G.nodes = stars.map(s=>({id:s.id,name:s.name,type:s.entity_type,sal:s.salience,
-      ment:s.mention_count,deg:deg.get(s.id)||0}));
-    G.links = conns.map(c=>({source:c.from_id,target:c.to_id,rel:relName(c.relation_type),str:c.strength}));
-    G.byId = new Map(G.nodes.map(n=>[n.id,n]));
-    G.byName = new Map(G.nodes.map(n=>[n.name.toLowerCase(),n]));
-    $("g-meta").textContent = G.nodes.length+" entities · "+G.links.length+" edges"+(G.nodes.length<totalStars?" (top "+G.nodes.length+" of "+totalStars+")":"");
-    render();
+    RAW = buildRaw(u.stars||[], u.connections||[]);
+    if(!RAW.N){ $("gloading").textContent="no graph yet for this user"; clearCanvas(); $("g-meta").textContent="0 entities"; $("gnav").style.display="none"; return; }
+    clusterRaw(RAW);
+    $("g-meta").textContent = RAW.N+" entities · "+fmt(RAW.E)+" edges · "+RAW.clusters.length+" clusters";
+    showClusters();
   }catch(e){
     $("gloading").style.display="grid"; $("gloading").textContent = "graph load failed: "+e.message;
-    G.nodes=[];G.links=[];G.refs=null;
+    RAW=null; clearCanvas();
   }
 }
 
-function render(){
-  graphInit();
-  $("gloading").style.display = G.nodes.length ? "none":"grid";
-  if(!G.nodes.length) return;
-  const W = svg.node().clientWidth, Hh = svg.node().clientHeight;
-  const maxDeg = d3.max(G.nodes, d=>d.deg) || 1;
-  const r = d => 5 + 9*Math.sqrt((d.deg)/maxDeg);
-
-  const link = gRoot.append("g").attr("stroke-opacity",.55).selectAll("line")
-    .data(G.links).join("line")
-    .attr("stroke", d=>ec(Math.min(1,d.str/3))).attr("stroke-width", d=>0.7+Math.min(2.2,d.str/2))
-    .attr("marker-end","url(#arrow)").attr("class","gl");
-
-  const elabel = gRoot.append("g").selectAll("text").data(G.links).join("text")
-    .attr("class","edge-l").text(d=>d.rel).attr("opacity",0);
-
-  const node = gRoot.append("g").selectAll("circle").data(G.nodes).join("circle")
-    .attr("class","gn").attr("r",r).attr("fill",d=>tc(d.type))
-    .attr("stroke","#0b0e14").attr("stroke-width",1.4).style("cursor","pointer")
-    .call(drag()).on("click",(e,d)=>{e.stopPropagation();selectNode(d);})
-    .on("mouseover",function(e,d){if(!G.activeSet)highlightNeighbors(d,true);})
-    .on("mouseout",function(){if(!G.activeSet)highlightNeighbors(null,false);});
-
-  const label = gRoot.append("g").selectAll("text").data(G.nodes).join("text")
-    .attr("class","node-l").text(d=>d.name.length>22?d.name.slice(0,21)+"…":d.name)
-    .attr("dx",d=>r(d)+3).attr("dy",3);
-
-  G.refs = {link,elabel,node,label,r};
-
-  G.sim = d3.forceSimulation(G.nodes)
-    .force("link", d3.forceLink(G.links).id(d=>d.id).distance(d=>60+40/(1+d.str)).strength(.18))
-    .force("charge", d3.forceManyBody().strength(-160))
-    .force("center", d3.forceCenter(W/2,Hh/2))
-    .force("collide", d3.forceCollide().radius(d=>r(d)+10))
-    .on("tick", ()=>{
-      link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y).attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);
-      elabel.attr("x",d=>(d.source.x+d.target.x)/2).attr("y",d=>(d.source.y+d.target.y)/2);
-      node.attr("cx",d=>d.x).attr("cy",d=>d.y);
-      label.attr("x",d=>d.x).attr("y",d=>d.y);
-    });
-  svg.on("click",()=>{ if(G.activeSet) return; clearHighlight(); });
-  if(G.activeSet) applyActivation();   // re-apply if a recall is selected
+// build the deduped, undirected, weighted adjacency from the raw universe.
+function buildRaw(stars, conns){
+  const idx = new Map(); stars.forEach((s,i)=>idx.set(s.id,i));
+  const N = stars.length;
+  const nodes = stars.map(s=>({id:s.id, name:s.name||"(unnamed)", type:s.entity_type||"entity",
+    sal:s.salience||0, ment:s.mention_count||0, proper:!!s.is_proper_noun, deg:0, wdeg:0, comm:-1}));
+  // adjacency: per node a Map<neighborIdx, maxStrength>; also keep relation labels
+  const adj = Array.from({length:N}, ()=>new Map());
+  const relOf = new Map();         // "a|b" (a<b) -> relation label of strongest edge
+  for(const c of conns){
+    const a = idx.get(c.from_id), b = idx.get(c.to_id);
+    if(a==null||b==null||a===b) continue;
+    const w = typeof c.strength==="number"?c.strength:0.5;
+    if((adj[a].get(b)||0) < w){ adj[a].set(b,w); adj[b].set(a,w);
+      const key = a<b ? a+"|"+b : b+"|"+a; relOf.set(key, relName(c.relation_type)); }
+  }
+  let E=0;
+  for(let i=0;i<N;i++){ nodes[i].deg=adj[i].size; for(const [,w] of adj[i]) nodes[i].wdeg+=w; if(i<N) E+=adj[i].size; }
+  E = Math.round(E/2);
+  return {stars, idx, N, E, nodes, adj, relOf, clusters:[], m:0};
 }
 
-function drag(){
-  return d3.drag()
-    .on("start",(e,d)=>{if(!e.active)G.sim.alphaTarget(.3).restart();d.fx=d.x;d.fy=d.y;})
-    .on("drag",(e,d)=>{d.fx=e.x;d.fy=e.y;})
-    .on("end",(e,d)=>{if(!e.active)G.sim.alphaTarget(0);d.fx=null;d.fy=null;});
-}
-
-function highlightNeighbors(d, on){
-  if(!G.refs) return;
-  if(!on || !d){ G.refs.node.attr("opacity",1); G.refs.link.attr("stroke-opacity",.55); G.refs.label.attr("opacity",1); G.refs.elabel.attr("opacity",0); return; }
-  const nb = new Set([d.id]);
-  G.links.forEach(l=>{ if(l.source.id===d.id)nb.add(l.target.id); if(l.target.id===d.id)nb.add(l.source.id); });
-  G.refs.node.attr("opacity",n=>nb.has(n.id)?1:.12);
-  G.refs.label.attr("opacity",n=>nb.has(n.id)?1:.08);
-  G.refs.link.attr("stroke-opacity",l=>(l.source.id===d.id||l.target.id===d.id)?.95:.04);
-  G.refs.elabel.attr("opacity",l=>(l.source.id===d.id||l.target.id===d.id)?.9:0);
-}
-function clearHighlight(){ highlightNeighbors(null,false); }
-
-function selectNode(d){
-  $("detail").innerHTML = '<div class="rel"><b>'+esc(d.name)+'</b></div>'+
-    '<div class="line"><span>type</span> '+esc(d.type)+'</div>'+
-    '<div class="line"><span>degree</span> '+d.deg+' connections</div>'+
-    '<div class="line"><span>salience</span> '+(d.sal||0).toFixed(2)+'</div>'+
-    '<div class="line"><span>mentions</span> '+(d.ment||0)+'</div>';
-  if(!G.activeSet) highlightNeighbors(d,true);
-}
-
-// ── SPREADING ACTIVATION: light up the subgraph a recall surfaced ──
-function activateFromCascade(res){
-  if(!G.refs){ return; }
-  // Match surfaced-memory text to graph entities, then keep the most DISTINCTIVE
-  // matches as the lit core — so dense corpora don't light the whole graph.
-  const text = (res.memories||[]).map(m=>m.content||"").join(" ").toLowerCase();
-  const scored = [];
-  G.nodes.forEach(n=>{
-    const nm = n.name.toLowerCase();
-    if(nm.length<4) return;                       // skip 1-3 char names (too generic)
-    if(!text.includes(nm)) return;
-    // specificity: proper-noun / multi-word / higher-salience entities score higher
-    const spec = (n.name.includes(" ")?1.4:1) * (nm.length>=8?1.3:1) * (0.5+(n.sal||0));
-    scored.push({id:n.id, w:spec*(1+Math.log1p(n.deg||0))});
+// ── Louvain community detection (one level of local moving). On 87k edges this
+//    runs in well under 100ms; it yields 20-30 communities at resolution 1.6. ──
+function clusterRaw(R){
+  const {N, adj, nodes} = R;
+  const k = new Float64Array(N); let m=0;
+  for(let i=0;i<N;i++){ let s=0; for(const [j,w] of adj[i]){ s+=w; if(i<j) m+=w; } k[i]=s; }
+  R.m = m || 1;
+  const RES = 1.6;                              // resolution: higher = more, smaller clusters
+  const comm = new Int32Array(N); for(let i=0;i<N;i++)comm[i]=i;
+  const sigmaTot = new Float64Array(N); for(let i=0;i<N;i++)sigmaTot[i]=k[i];
+  const order = Array.from({length:N},(_,i)=>i);
+  const twoM = 2*R.m;
+  let improved=true, passes=0;
+  while(improved && passes<30){
+    improved=false; passes++;
+    for(const i of order){
+      const ci=comm[i]; sigmaTot[ci]-=k[i];
+      const wc=new Map(); wc.set(ci,0);
+      for(const [nb,w] of adj[i]){ const cn=comm[nb]; wc.set(cn,(wc.get(cn)||0)+w); }
+      let best=ci, bestGain=-Infinity;
+      for(const [c,wic] of wc){ const gain = wic - RES*sigmaTot[c]*k[i]/twoM; if(gain>bestGain){ bestGain=gain; best=c; } }
+      sigmaTot[best]+=k[i]; comm[i]=best;
+      if(best!==ci) improved=true;
+    }
+  }
+  // Absorb micro-clusters: communities of <=MIN_CLUSTER members add visual noise
+  // (lone satellites) without conveying structure, so fold each such node into the
+  // neighbouring community it is most strongly tied to. Keeps the overview to a
+  // readable ~15-25 meaningful clusters.
+  const MIN_CLUSTER = 3;
+  const csize=new Map(); for(let i=0;i<N;i++)csize.set(comm[i],(csize.get(comm[i])||0)+1);
+  for(let pass=0; pass<2; pass++){
+    let moved=false;
+    for(let i=0;i<N;i++){
+      if((csize.get(comm[i])||0) > MIN_CLUSTER) continue;
+      const wc=new Map();
+      for(const [nb,w] of adj[i]){ const cn=comm[nb]; if(cn===comm[i]) continue; wc.set(cn,(wc.get(cn)||0)+w); }
+      let best=null,bw=-Infinity;
+      for(const [c,w] of wc){ if((csize.get(c)||0)>MIN_CLUSTER && w>bw){ bw=w; best=c; } }
+      if(best!=null && best!==comm[i]){ csize.set(comm[i],csize.get(comm[i])-1); csize.set(best,(csize.get(best)||0)+1); comm[i]=best; moved=true; }
+    }
+    if(!moved) break;
+  }
+  // compact community ids, build cluster metadata
+  const remap=new Map(), members=[];
+  for(let i=0;i<N;i++){ let cid=comm[i]; if(!remap.has(cid)){ remap.set(cid, members.length); members.push([]); }
+    const m2=remap.get(cid); nodes[i].comm=m2; members[m2].push(i); }
+  // a label per cluster: prefer a salient, proper-noun, non-document entity with
+  // high degree; document filenames (".txt") are poor labels so they rank last.
+  const clusters = members.map((mem, cid)=>{
+    let best=mem[0], bestScore=-Infinity; const typeCount=new Map();
+    for(const i of mem){
+      const n=nodes[i]; typeCount.set(n.type,(typeCount.get(n.type)||0)+1);
+      const isDoc = /\.(txt|md|pdf|json|csv)$/i.test(n.name);
+      const score = (n.deg) * (isDoc?0.15:1) * (n.proper?1.3:1) * (1+(n.sal||0));
+      if(score>bestScore){ bestScore=score; best=i; }
+    }
+    let domType="entity", domN=-1;
+    for(const [t,c] of typeCount) if(c>domN){ domN=c; domType=t; }
+    return {id:cid, members:mem, size:mem.length, label:nodes[best].name, labelId:nodes[best].id,
+      domType, color:CLUSTER_HUES[cid % CLUSTER_HUES.length], x:0, y:0};
   });
-  scored.sort((a,b)=>b.w-a.w);
-  // cap the lit core so it reads as a focused subgraph, not a flood
-  const cap = Math.max(8, Math.min(24, Math.round(scored.length*0.55)));
-  const hits = new Set(scored.slice(0, scored.length<=10?scored.length:cap).map(x=>x.id));
-  // Halo = one hop along the edges that connect the lit core. In a sparse graph this
-  // shows the spreading wave; in a dense co-occurrence mesh a full hop would flood, so
-  // only admit a neighbour if it bridges TWO core entities (a genuine cascade hub).
-  const avgDeg = G.nodes.length ? (2*G.links.length)/G.nodes.length : 0;
-  const dense = avgDeg > 8;
-  const halo = new Set(hits);
-  // In a sparse, curated graph one hop reveals the spreading wave. In a dense
-  // co-occurrence mesh every node is a neighbour of the core, so a hop floods the
-  // whole graph and tells you nothing — there we light only the surfaced core.
-  if(hits.size && !dense){
-    G.links.forEach(l=>{ const s=l.source.id||l.source,t=l.target.id||l.target;
-      if(hits.has(s))halo.add(t); if(hits.has(t))halo.add(s); });
+  // aggregate inter-cluster edge weights for the overview
+  const inter=new Map();           // "a|b" (a<b) -> {w, n}
+  for(let i=0;i<N;i++){ const ca=nodes[i].comm;
+    for(const [j,w] of adj[i]){ if(i>=j) continue; const cb=nodes[j].comm; if(ca===cb) continue;
+      const key = ca<cb ? ca+"|"+cb : cb+"|"+ca; const e=inter.get(key); if(e){ e.w+=w; e.n++; } else inter.set(key,{w,n:1}); } }
+  R.clusterLinks = [...inter.entries()].map(([key,v])=>{ const [a,b]=key.split("|").map(Number);
+    return {source:a, target:b, w:v.w, n:v.n}; });
+  R.clusters = clusters;
+}
+
+// ── canvas sizing (HiDPI) ───────────────────────────────────────────────────
+function sizeCanvas(){
+  const rect = cv.getBoundingClientRect();
+  DPR = Math.max(1, window.devicePixelRatio||1);
+  cv.width = Math.round(rect.width*DPR); cv.height = Math.round(rect.height*DPR);
+  return {w:rect.width, h:rect.height};
+}
+function clearCanvas(){ const {w,h}=sizeCanvas(); ctx.setTransform(DPR,0,0,DPR,0,0); ctx.clearRect(0,0,w,h); }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CLUSTER OVERVIEW  — the default, readable view
+// ════════════════════════════════════════════════════════════════════════════
+function showClusters(){
+  VIEW.level="clusters"; VIEW.clusterId=null;
+  const {w,h}=sizeCanvas();
+  const maxSize = d3.max(RAW.clusters, c=>c.size)||1;
+  // super-node radius scales with member count (sqrt = area-proportional)
+  const rad = c => 18 + 48*Math.sqrt(c.size/maxSize);
+  const nodes = RAW.clusters.map(c=>({kind:"cluster", id:c.id, label:c.label, size:c.size,
+    color:c.color, domType:c.domType, r:rad(c), x:w/2+(Math.random()-.5)*w*0.6, y:h/2+(Math.random()-.5)*h*0.5}));
+  const byId = new Map(nodes.map(n=>[n.id,n]));
+  const maxW = d3.max(RAW.clusterLinks, l=>l.w)||1;
+  const links = RAW.clusterLinks.map(l=>({source:l.source, target:l.target, w:l.w, n:l.n,
+    sw:0.5+3.5*Math.sqrt(l.w/maxW)}));
+  VIEW.nodes=nodes; VIEW.links=links; VIEW.byId=byId;
+
+  // Strong repulsion + size-aware link distance keeps the dense defence core from
+  // collapsing into a clump; weak link strength lets clusters breathe apart.
+  if(VIEW.sim) VIEW.sim.stop();
+  VIEW.sim = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d=>d.id)
+      .distance(d=>d.source.r+d.target.r+70).strength(d=>Math.min(.3,0.06+0.7*d.w/maxW)))
+    .force("charge", d3.forceManyBody().strength(d=>-180 - 18*d.r).distanceMax(900))
+    .force("center", d3.forceCenter(w/2,h/2))
+    .force("x", d3.forceX(w/2).strength(.08))
+    .force("y", d3.forceY(h/2).strength(.08))
+    .force("collide", d3.forceCollide().radius(d=>d.r+16).strength(1).iterations(2))
+    .on("tick", draw);
+  VIEW.sim.alpha(1).restart();
+  for(let i=0;i<220;i++) VIEW.sim.tick();   // pre-warm so first paint is settled (fast)
+  fitView(nodes, 70, false);
+  $("gloading").style.display="none";
+  updateNav();
+  draw();
+  if(activeClusters) applyActivation();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  DRILL-DOWN  — one cluster's members + their intra-cluster edges
+// ════════════════════════════════════════════════════════════════════════════
+function showCluster(cid){
+  const cl = RAW.clusters[cid]; if(!cl) return;
+  VIEW.level="cluster"; VIEW.clusterId=cid;
+  const {w,h}=sizeCanvas();
+  const memSet = new Set(cl.members);
+  // cap members rendered to the most-connected — never dump thousands of nodes.
+  const MEMBER_CAP = 220;
+  let mem = cl.members.slice();
+  if(mem.length>MEMBER_CAP) mem = mem.slice().sort((a,b)=>RAW.nodes[b].deg-RAW.nodes[a].deg).slice(0,MEMBER_CAP);
+  const shown = new Set(mem);
+  const maxDeg = d3.max(mem, i=>RAW.nodes[i].deg)||1;
+  const rad = i => 4 + 11*Math.sqrt(RAW.nodes[i].deg/maxDeg);
+  const nodes = mem.map(i=>{ const n=RAW.nodes[i];
+    return {kind:"entity", id:n.id, idx:i, label:n.name, type:n.type, sal:n.sal, ment:n.ment, deg:n.deg,
+      color:tc(n.type), r:rad(i), x:w/2+(Math.random()-.5)*w*0.6, y:h/2+(Math.random()-.5)*h*0.5}; });
+  const byId = new Map(nodes.map(n=>[n.id,n]));
+  // rank members by degree so the label budget can show the most-connected first
+  nodes.slice().sort((a,b)=>b.deg-a.deg).forEach((n,i)=>{ n._lr=i; });
+  // intra-cluster edges among shown members; cap to the strongest to stay crisp
+  const links=[];
+  for(const i of mem){ for(const [j,wt] of RAW.adj[i]){ if(i<j && shown.has(j) && memSet.has(j)){
+    const key = i<j ? i+"|"+j : j+"|"+i;
+    links.push({source:RAW.nodes[i].id, target:RAW.nodes[j].id, str:wt, rel:RAW.relOf.get(key)||""}); } } }
+  links.sort((a,b)=>b.str-a.str);
+  const EDGE_CAP = 600;
+  const vlinks = links.slice(0, EDGE_CAP);
+  VIEW.nodes=nodes; VIEW.links=vlinks; VIEW.byId=byId; VIEW.memberTotal=cl.members.length;
+
+  // A cluster is internally dense, so strong repulsion + low link strength is what
+  // makes the members fan out into a readable constellation instead of a clump.
+  if(VIEW.sim) VIEW.sim.stop();
+  const chargeStr = -(80 + 9000/Math.max(20, nodes.length));   // smaller clusters spread wider
+  VIEW.sim = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(vlinks).id(d=>d.id).distance(d=>40+24/(1+d.str)).strength(d=>0.04+0.12*d.str))
+    .force("charge", d3.forceManyBody().strength(chargeStr).distanceMax(600))
+    .force("center", d3.forceCenter(w/2,h/2))
+    .force("x", d3.forceX(w/2).strength(.05))
+    .force("y", d3.forceY(h/2).strength(.05))
+    .force("collide", d3.forceCollide().radius(d=>d.r+7).strength(.9).iterations(2))
+    .on("tick", draw);
+  VIEW.sim.alpha(1).restart();
+  for(let i=0;i<300;i++) VIEW.sim.tick();
+  fitView(nodes, 60, false);
+  $("gloading").style.display="none";
+  updateNav();
+  draw();
+  if(activeMembers) applyActivation();
+}
+
+// ── pan/zoom the transform to frame a set of nodes ──────────────────────────
+function fitView(nodes, pad, animate){
+  const {w,h}=sizeCanvas();
+  const pts = nodes.filter(n=>n.x!=null);
+  if(!pts.length) return;
+  let minx=Infinity,maxx=-Infinity,miny=Infinity,maxy=-Infinity;
+  for(const p of pts){ const r=p.r||8; minx=Math.min(minx,p.x-r);maxx=Math.max(maxx,p.x+r);miny=Math.min(miny,p.y-r);maxy=Math.max(maxy,p.y+r); }
+  pad=pad||40;
+  const bw=Math.max(40,maxx-minx), bh=Math.max(40,maxy-miny);
+  const k=Math.max(.15,Math.min(3,Math.min((w-2*pad)/bw,(h-2*pad)/bh)));
+  const cx=(minx+maxx)/2, cy=(miny+maxy)/2;
+  const t = d3.zoomIdentity.translate(w/2,h/2).scale(k).translate(-cx,-cy);
+  if(animate){ d3.select(cv).transition().duration(650).call(gzoom.transform, t); }
+  else { GT=t; d3.select(cv).call(gzoom.transform, t); }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CANVAS PAINT  — one routine for both views, driven by VIEW.level
+// ════════════════════════════════════════════════════════════════════════════
+function draw(){
+  if(!RAW) return;
+  const {w,h}=sizeCanvas();
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.clearRect(0,0,w,h);
+  ctx.save();
+  ctx.translate(GT.x, GT.y); ctx.scale(GT.k, GT.k);
+
+  const lit = VIEW.level==="clusters" ? activeClusters : activeMembers;
+  const dimmed = !!lit;
+
+  // edges first
+  ctx.lineCap="round";
+  for(const l of VIEW.links){
+    const s=l.source, t=l.target; if(!s||!t||s.x==null||t.x==null) continue;
+    let on=true;
+    if(dimmed){
+      on = VIEW.level==="clusters" ? (lit.has(s.id)&&lit.has(t.id))
+                                   : (lit.has(s.id)&&lit.has(t.id));
+    }
+    if(VIEW.level==="clusters"){
+      ctx.strokeStyle = on ? "rgba(120,200,255,.5)" : "rgba(120,140,170,.05)";
+      ctx.lineWidth = (l.sw||1)/GT.k * (on?1.4:1);
+    } else {
+      ctx.strokeStyle = on ? hexA(ec(l.str), dimmed?.95:.5) : "rgba(120,140,170,.04)";
+      ctx.lineWidth = (0.6+Math.min(2,l.str*1.6))/GT.k * (on?1.3:1);
+    }
+    ctx.beginPath(); ctx.moveTo(s.x,s.y); ctx.lineTo(t.x,t.y); ctx.stroke();
   }
-  G.activeSet = halo.size ? halo : null;
-  G.activeCore = hits;
-  applyActivation();
-  centerOn(halo);
-  const a=$("activ");
-  if(G.activeSet){ a.classList.add("on");
-    const extra=halo.size-hits.size;
-    $("activ-t").textContent="⚡ "+hits.size+" entities activated"+(extra>0?" · "+extra+" in spreading halo":""); }
-  else { a.classList.remove("on"); $("activ-t").textContent=""; }
+
+  // nodes
+  for(const n of VIEW.nodes){
+    if(n.x==null) continue;
+    const isLit = !dimmed || lit.has(n.id);
+    const isCore = (VIEW.level==="clusters" ? (activeClusters&&activeClusters.has(n.id))
+                                            : (activeMembers&&activeMembers.has(n.id)));
+    ctx.globalAlpha = dimmed ? (isLit?1:0.08) : 1;
+    ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,2*Math.PI);
+    ctx.fillStyle = n.color; ctx.fill();
+    ctx.lineWidth = (isCore?2.6:1.4)/GT.k;
+    ctx.strokeStyle = isCore ? "#ffc896" : (n===hoverNode ? "#ffffff" : "#0b0e14");
+    ctx.stroke();
+  }
+  ctx.globalAlpha=1;
+
+  // labels — clusters always labelled; entities labelled when sparse/zoomed/lit
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  if(VIEW.level==="clusters"){
+    for(const n of VIEW.nodes){
+      if(n.x==null) continue;
+      const isLit = !dimmed || lit.has(n.id);
+      ctx.globalAlpha = isLit?1:0.12;
+      // draw at screen scale so the cluster label stays legible at any zoom; a dark
+      // halo (stroke) keeps the name readable even where it overflows the disc.
+      ctx.save(); ctx.translate(n.x,n.y); ctx.scale(1/GT.k,1/GT.k);
+      ctx.lineJoin="round"; ctx.miterLimit=2;
+      // light halo so dark label text stays readable both on the (light) disc and
+      // where it overflows onto the dark canvas background.
+      ctx.font = "700 12px Inter, sans-serif";
+      ctx.strokeStyle="rgba(245,248,252,.9)"; ctx.lineWidth=3.5; ctx.strokeText(trim(n.label,22),0,0);
+      ctx.fillStyle = "#0a121e"; ctx.fillText(trim(n.label, 22), 0, 0);
+      ctx.font = "600 9px Inter, sans-serif";
+      ctx.strokeStyle="rgba(245,248,252,.8)"; ctx.lineWidth=3; ctx.strokeText(n.size+" entities",0,13);
+      ctx.fillStyle = "rgba(20,30,44,.9)"; ctx.fillText(n.size+" entities", 0, 13);
+      ctx.restore();
+    }
+  } else {
+    // Label the most-connected members (and any lit core / hovered node). Zooming
+    // in reveals more; this keeps a dense cluster from drowning in overlapping text.
+    const labelCut = VIEW.labelCut!=null ? VIEW.labelCut : 0;
+    const budget = GT.k>1.6 ? 1e9 : (GT.k>1.0 ? 60 : 28);
+    for(const n of VIEW.nodes){
+      if(n.x==null) continue;
+      const isLit = !dimmed || lit.has(n.id);
+      const isCore = activeMembers&&activeMembers.has(n.id);
+      const show = isCore || n===hoverNode || (isLit && n.deg>=labelCut && n._lr<budget);
+      if(!show) continue;
+      ctx.globalAlpha = isLit?1:0.1;
+      ctx.save(); ctx.translate(n.x, n.y+n.r+2); ctx.scale(1/GT.k,1/GT.k);
+      ctx.lineJoin="round"; ctx.font = (isCore?"700 ":"500 ")+"10px Inter, sans-serif";
+      ctx.strokeStyle="rgba(8,12,20,.85)"; ctx.lineWidth=3; ctx.strokeText(trim(n.label,24),0,6);
+      ctx.fillStyle = isCore ? "#ffd6a0" : "#cdd6e0";
+      ctx.fillText(trim(n.label,24), 0, 6);
+      ctx.restore();
+    }
+  }
+  ctx.globalAlpha=1;
+  ctx.restore();
 }
-// pan/zoom the viewport to frame the activated subgraph
-function centerOn(set){
-  if(!G.refs||!set||!set.size||!gZoom) return;
-  const pts=G.nodes.filter(n=>set.has(n.id)&&n.x!=null);
-  if(pts.length<2) return;
-  const xs=pts.map(p=>p.x), ys=pts.map(p=>p.y);
-  const minx=Math.min(...xs),maxx=Math.max(...xs),miny=Math.min(...ys),maxy=Math.max(...ys);
-  const W=svg.node().clientWidth,Hh=svg.node().clientHeight;
-  const bw=Math.max(60,maxx-minx),bh=Math.max(60,maxy-miny);
-  const k=Math.max(.35,Math.min(1.8,.82*Math.min(W/bw,Hh/bh)));
-  const cx=(minx+maxx)/2,cy=(miny+maxy)/2;
-  svg.transition().duration(700).call(gZoom.transform,
-    d3.zoomIdentity.translate(W/2,Hh/2).scale(k).translate(-cx,-cy));
+function trim(s,n){ s=s||""; return s.length>n ? s.slice(0,n-1)+"…" : s; }
+function hexA(hex,a){ const m=/^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex||""); if(!m) return "rgba(150,200,150,"+a+")";
+  return "rgba("+parseInt(m[1],16)+","+parseInt(m[2],16)+","+parseInt(m[3],16)+","+a+")"; }
+
+// ── hit-testing in graph coordinates ────────────────────────────────────────
+function nodeAt(sx, sy){
+  const gx=(sx-GT.x)/GT.k, gy=(sy-GT.y)/GT.k;
+  let hit=null, hd=Infinity;
+  for(const n of VIEW.nodes){ if(n.x==null) continue;
+    const dx=n.x-gx, dy=n.y-gy, d=dx*dx+dy*dy; const rr=(n.r+3)*(n.r+3);
+    if(d<=rr && d<hd){ hd=d; hit=n; } }
+  return hit;
 }
-function applyActivation(){
-  if(!G.refs || !G.activeSet) return;
-  const core=G.activeCore, set=G.activeSet;
-  G.refs.node.attr("opacity",n=>set.has(n.id)?1:.07)
-    .attr("stroke",n=>core.has(n.id)?"#ffc896":"#0b0e14")
-    .attr("stroke-width",n=>core.has(n.id)?2.6:1.4);
-  G.refs.label.attr("opacity",n=>set.has(n.id)?1:.05).attr("fill",n=>core.has(n.id)?"#ffd6a0":"#aab4c2");
-  G.refs.link.attr("stroke-opacity",l=>{const s=l.source.id,t=l.target.id;return (set.has(s)&&set.has(t))?.95:.03;})
-    .attr("stroke-width",l=>{const s=l.source.id,t=l.target.id;return (core.has(s)||core.has(t))?2.2:0.7;});
-  G.refs.elabel.attr("opacity",l=>{const s=l.source.id,t=l.target.id;return (set.has(s)&&set.has(t))?.85:0;});
-  // gently re-energise the layout for a "bloom"
-  if(G.sim){ G.sim.alphaTarget(.05).restart(); setTimeout(()=>{if(G.sim)G.sim.alphaTarget(0);},600); }
+
+// ── canvas interaction: zoom via d3.zoom, click to drill / inspect, hover tip ─
+d3.select(cv).call(gzoom);
+let downXY=null;
+cv.addEventListener("pointerdown", e=>{ downXY=[e.offsetX,e.offsetY]; });
+cv.addEventListener("click", e=>{
+  if(!RAW) return;
+  if(downXY && (Math.abs(e.offsetX-downXY[0])>4 || Math.abs(e.offsetY-downXY[1])>4)) return; // was a drag
+  const n = nodeAt(e.offsetX, e.offsetY);
+  if(!n){ return; }
+  if(n.kind==="cluster"){ showCluster(n.id); selectClusterDetail(n.id); }
+  else { selectEntityDetail(n); }
+});
+cv.addEventListener("pointermove", e=>{
+  if(!RAW){ return; }
+  const n = nodeAt(e.offsetX, e.offsetY);
+  cv.style.cursor = n ? "pointer" : "grab";
+  if(n!==hoverNode){ hoverNode=n; draw(); }
+  const tip=$("gtip");
+  if(n){
+    if(n.kind==="cluster"){
+      tip.innerHTML = '<div class="tname">'+esc(n.label)+'</div>'+
+        '<div class="tmeta"><b>'+n.size+'</b> entities · dominant type <b>'+esc(n.domType)+'</b><br>click to drill into this cluster</div>';
+    } else {
+      tip.innerHTML = '<div class="tname">'+esc(n.label)+'</div>'+
+        '<div class="tmeta">type <b>'+esc(n.type)+'</b> · <b>'+n.deg+'</b> connections · salience <b>'+(n.sal||0).toFixed(2)+'</b></div>';
+    }
+    tip.style.display="block";
+    const r=cv.getBoundingClientRect(); let x=e.offsetX+14, y=e.offsetY+14;
+    if(x>r.width-250) x=e.offsetX-250; if(y>r.height-70) y=e.offsetY-70;
+    tip.style.left=x+"px"; tip.style.top=y+"px";
+  } else tip.style.display="none";
+});
+cv.addEventListener("pointerleave", ()=>{ $("gtip").style.display="none"; hoverNode=null; draw(); });
+
+// ── breadcrumb / mode indicator ─────────────────────────────────────────────
+function updateNav(){
+  const nav=$("gnav"), cr=$("gcrumb"), md=$("gmode");
+  if(!RAW){ nav.style.display="none"; return; }
+  nav.style.display="flex";
+  if(VIEW.level==="clusters"){
+    cr.innerHTML = '<span class="seg cur">All clusters</span>';
+    md.textContent = RAW.clusters.length+" clusters";
+  } else {
+    const cl=RAW.clusters[VIEW.clusterId];
+    cr.innerHTML = '<span class="seg" id="crumb-all">All clusters</span><span class="sep">›</span>'+
+      '<span class="seg cur">'+esc(trim(cl.label,28))+'</span>';
+    md.textContent = (VIEW.nodes.length<VIEW.memberTotal? VIEW.nodes.length+" of "+VIEW.memberTotal : cl.size)+" members";
+    const a=$("crumb-all"); if(a) a.onclick=()=>{ showClusters(); $("detail").innerHTML='<div class="miss">Click a cluster to drill in, or fire a recall to light up the relevant clusters.</div>'; };
+  }
 }
-function deactivate(){ G.activeSet=null;G.activeCore=null;$("activ").classList.remove("on");$("activ-t").textContent="";clearHighlight();
-  document.querySelectorAll(".cascade.sel").forEach(e=>e.classList.remove("sel")); }
+
+function selectClusterDetail(cid){
+  const cl=RAW.clusters[cid]; if(!cl) return;
+  // top members by degree for the provenance panel
+  const top = cl.members.slice().sort((a,b)=>RAW.nodes[b].deg-RAW.nodes[a].deg).slice(0,6)
+    .map(i=>RAW.nodes[i]);
+  $("detail").innerHTML = '<div class="rel">cluster <b>'+esc(cl.label)+'</b></div>'+
+    '<div class="line"><span>members</span> '+cl.size+' entities</div>'+
+    '<div class="line"><span>dominant type</span> '+esc(cl.domType)+'</div>'+
+    '<div class="line"><span>top entities</span></div>'+
+    top.map(n=>'<div class="line" style="border-top:none;padding:2px 0 2px 8px">• '+esc(trim(n.name,30))+' <span style="color:var(--mut)">('+n.deg+')</span></div>').join("");
+}
+function selectEntityDetail(n){
+  $("detail").innerHTML = '<div class="rel"><b>'+esc(n.label)+'</b></div>'+
+    '<div class="line"><span>type</span> '+esc(n.type)+'</div>'+
+    '<div class="line"><span>degree</span> '+n.deg+' connections</div>'+
+    '<div class="line"><span>salience</span> '+(n.sal||0).toFixed(2)+'</div>'+
+    '<div class="line"><span>mentions</span> '+(n.ment||0)+'</div>';
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SPREADING ACTIVATION — a recall lights up the cluster(s) it surfaced, then
+//  (if focused enough) auto-drills into the dominant cluster and lights the
+//  surfaced member entities within. The cue→cascade→subgraph-lights-up demo.
+// ════════════════════════════════════════════════════════════════════════════
+function activateFromCascade(res){
+  if(!RAW) return;
+  // 1) map surfaced memory text → graph entities (distinctive matches only)
+  const text = (res.memories||[]).map(m=>m.content||"").join(" ").toLowerCase();
+  const scored=[];
+  for(const n of RAW.nodes){
+    const nm=n.name.toLowerCase();
+    if(nm.length<4) continue;
+    if(/\.(txt|md|pdf|json|csv)$/i.test(n.name)) continue;     // documents aren't entities to light
+    if(!text.includes(nm)) continue;
+    const spec = (n.name.includes(" ")?1.4:1) * (nm.length>=8?1.3:1) * (0.5+(n.sal||0));
+    scored.push({n, w:spec*(1+Math.log1p(n.deg||0))});
+  }
+  scored.sort((a,b)=>b.w-a.w);
+  if(!scored.length){ deactivate(); return; }
+  // keep the distinctive core (cap so dense corpora don't flood)
+  const cap=Math.max(6, Math.min(28, Math.round(scored.length*0.6)));
+  const core = scored.slice(0, scored.length<=10?scored.length:cap).map(x=>x.n);
+  activeMembers = new Set(core.map(n=>n.id));
+  // 2) which clusters do they fall in? weight clusters by core membership
+  const cw=new Map();
+  for(const n of core){ cw.set(n.comm,(cw.get(n.comm)||0)+1); }
+  const litClusters = [...cw.entries()].sort((a,b)=>b[1]-a[1]);
+  activeClusters = new Set(litClusters.map(e=>e[0]));
+
+  const a=$("activ"); a.classList.add("on");
+  const topName = RAW.clusters[litClusters[0][0]].label;
+
+  // 3) focus: if one cluster dominates the surfaced set, drill into it so the
+  //    member nodes light up; otherwise stay in the overview and glow clusters.
+  const dominant = litClusters[0][1] >= Math.max(2, 0.5*core.length) && litClusters[0][1] >= (litClusters[1]?litClusters[1][1]:0);
+  if(dominant){
+    showCluster(litClusters[0][0]);
+    const litNodes = VIEW.nodes.filter(nd=>activeMembers.has(nd.id));
+    const inView = litNodes.length;
+    $("activ-t").textContent = "⚡ "+inView+" entities lit in cluster “"+trim(topName,20)+"”";
+    // frame the lit members + a little surrounding context
+    if(litNodes.length>=2) fitView(litNodes, 110, true);
+    else fitView(VIEW.nodes, 60, true);
+  } else {
+    if(VIEW.level!=="clusters") showClusters();
+    $("activ-t").textContent = "⚡ "+core.length+" entities across "+activeClusters.size+" clusters — top: "+trim(topName,20);
+    const litNodes = VIEW.nodes.filter(nd=>activeClusters.has(nd.id));
+    applyActivation();
+    if(litNodes.length>=2) fitView(litNodes, 90, true); else draw();
+  }
+}
+function applyActivation(){ draw(); }
+function deactivate(){
+  activeClusters=null; activeMembers=null;
+  $("activ").classList.remove("on"); $("activ-t").textContent="";
+  document.querySelectorAll(".cascade.sel").forEach(e=>e.classList.remove("sel"));
+  draw();
+}
 $("activ-x").onclick = deactivate;
+
+// keep the canvas crisp on container resize; re-fit the current view
+let _rezT;
+function onGraphResize(){ if(!RAW) { clearCanvas(); return; }
+  clearTimeout(_rezT); _rezT=setTimeout(()=>{ sizeCanvas();
+    if(VIEW.sim){ VIEW.sim.force("center", d3.forceCenter(cv.getBoundingClientRect().width/2, cv.getBoundingClientRect().height/2)); VIEW.sim.alpha(.2).restart(); }
+    draw(); }, 120); }
 
 // ════════════════════════════════════════════════════════════════════════════
 //  RIVER — render a recall as an associative cascade
@@ -706,7 +1043,7 @@ async function fireRecall(){
 $("recall").onclick = fireRecall;
 $("cue").addEventListener("keydown",e=>{if(e.key==="Enter")fireRecall();});
 $("user").addEventListener("change",()=>{ $("river").innerHTML='<div class="empty">switched user — cue a recall to see the cascade.</div>'; riverCount=0; $("river-cnt").textContent=''; deactivate(); loadGraph(); loadStats(); loadSessions(); loadTodos(); connectStream(); });
-window.addEventListener("resize",()=>{ if(G.nodes.length) render(); });
+window.addEventListener("resize", onGraphResize);
 drawSpark();
 loadGraph(); loadStats(); loadSessions(); loadTodos(); connectStream();
 setInterval(()=>{ loadStats(); loadSessions(); loadTodos(); }, 15000);
