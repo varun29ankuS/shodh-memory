@@ -51,8 +51,16 @@ pub use circuit_breaker::{
 
 /// Trait for embedding generation
 pub trait Embedder: Send + Sync {
-    /// Generate embedding for text
+    /// Generate embedding for text (treated as a DOCUMENT/passage)
     fn encode(&self, text: &str) -> Result<Vec<f32>>;
+
+    /// Generate embedding for a QUERY. Asymmetric retrieval models
+    /// (e5/bge/Nomic) apply a query-side instruction prefix here so the query
+    /// and document manifolds align. Default: identical to `encode` (symmetric
+    /// models like MiniLM).
+    fn encode_query(&self, text: &str) -> Result<Vec<f32>> {
+        self.encode(text)
+    }
 
     /// Get embedding dimension
     fn dimension(&self) -> usize;

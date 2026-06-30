@@ -1,0 +1,145 @@
+name: ㉕ BATCHED — typed-walk A/B · learned-pairs retest · FLAT_ADAPTIVE ontology arm · lineage confirm
+
+# ONE run per authorization (zero-budget regime). Iteration 2 — the first
+# iteration (run 27348362950) delivered: real-NER bias ≈ +0.001 (history
+# stands), SEMREL DEFAULT FLIPPED (9f632af, new canonical 0.7157), learned-
+# pairs v1 REJECTED (per-application over-generalization, open_domain -0.067),
+# lineage cross-platform 0.983.
+#
+# ① TYPED-WALK A/B (9f2c1e4, the headline): the lineage walk generalized to
+#    intent-gated typed relations (located→LocatedIn, creator→CreatedBy).
+#    Pre-registered: multi_hop/single_hop recall@10 movement vs base 0.7157;
+#    p@1 partially gated on the fusion frontier; open_domain must hold.
+# ② LEARNED-PAIRS RETEST (tightened gates): prior rejection = CreatedBy 3→344
+#    mass-application. Expect bounded learned counts and open_domain HELD;
+#    another -0.05 class regression ⇒ reject the approach, not just the gates.
+# ③ FLAT_ADAPTIVE=0 ONTOLOGY ARM (task 9): attribute the type-P@1 0.15→0.05
+#    tail (the 0.65→0.15 head is BM25 fusion itself, census-localized).
+# ④ LINEAGE DEFAULTS CONFIRM: ≥0.95 expected at pure defaults.
+#
+# The NER hard gate (in-workflow prefetch + in-binary NER_BACKEND bail) is
+# permanent — measurements on the fallback NER are no longer possible.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/batched-guard.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  batched:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache models (MiniLM + NER)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-ner-v1
+      - name: Pre-fetch models — MiniLM AND the pinned NER (hard gate)
+        run: |
+          set -o pipefail
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+          ND="$HOME/.cache/shodh-memory/models/bert-tiny-ner"; mkdir -p "$ND"
+          NB="https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7"
+          [ -s "$ND/model_quantized.onnx" ] || dl "$ND/model_quantized.onnx" "$NB/onnx/model_quantized.onnx"
+          [ -s "$ND/tokenizer.json" ]       || dl "$ND/tokenizer.json" "$NB/tokenizer.json"
+          # HARD GATE (#23): refuse to measure on the fallback NER ever again.
+          test -s "$ND/model_quantized.onnx" || { echo "::error::NER model missing — refusing to eval on fallback NER"; exit 1; }
+          test -s "$ND/tokenizer.json" || { echo "::error::NER tokenizer missing"; exit 1; }
+          ls -la "$ND"
+
+      - name: A recall — base (defaults now include semrel)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>a.err | tail -3
+      - name: B recall — +typed-walk (the lineage walk as a leg primitive)
+        run: set -o pipefail; SHODH_TYPED_WALK=1 SHODH_TYPED_WALK_DEBUG=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>b.err | tail -3
+      - name: C recall — +learned-pairs retest (tightened gates)
+        run: set -o pipefail; SHODH_LEARNED_PAIRS=1 RUST_LOG=info ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>c.err | tail -3
+      - name: Ontology — FLAT_ADAPTIVE=0 arm (the 0.15→0.05 tail attribution)
+        run: |
+          set -o pipefail
+          SHODH_FLAT_ADAPTIVE=0 ./target/release/recall-eval --suite locomo --output o-main.json --ontology ontology-noadaptive.json --storage ./s-o 2>o.err | tail -3
+      - name: Lineage — defaults confirm
+        run: |
+          set -o pipefail
+          SHODH_CAUSAL_ORIGIN_DEBUG=1 \
+            ./target/release/recall-eval --suite locomo --output l-main.json --lineage lineage-confirm.json --storage ./s-l 2>l.err | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Compare
+        if: always()
+        run: |
+          {
+            echo "### censuses and counters"
+            echo "A census:";  grep -E "EDGE_TYPE_DISTRIBUTION" a.err | head -1 || true
+            echo "B typed-walk funnel:"; grep -E "TYPED_WALK" b.err | sort | uniq -c | sort -rn | head -8 || true
+            echo "C census:";  grep -E "EDGE_TYPE_DISTRIBUTION" c.err | head -1 || true
+            echo "C learned counts (provenance):"; grep -oE "learned=[0-9]+" c.err | sort | uniq -c | sort -rn | head -5 || true
+            echo "lineage funnel:"; grep -E "CAUSAL_FUNNEL" l.err | sort | uniq -c | sort -rn | head -8 || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'A base':load('a.json'),'B +typed-walk':load('b.json'),'C +learned':load('c.json')}
+          names=list(arms.keys())
+          def m(d,cat,k='recall@10'):
+              if not d: return float('nan')
+              src = d['layers']['full'] if cat=='ALL' else d['by_category'][cat]
+              return src.get(k,float('nan'))
+          print("## ㉕ batched guard it.2 — recall@10 (canonical base 0.7157)\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          for cat in ('ALL','single_hop','multi_hop','temporal','open_domain'):
+              print(f"| {cat} | "+" | ".join(f"{m(arms[n],cat):.4f}" for n in names)+" |")
+          def p1(d):
+              if not d: return float('nan')
+              return d['layers']['full'].get('p@1',float('nan'))
+          print("| p@1 | "+" | ".join(f"{p1(arms[n]):.4f}" for n in names)+" |")
+          def lin(f):
+              d=load(f)
+              if not d: return "n/a"
+              full=[r for r in d['rows'] if r['layer']=='full']
+              return f"r@10 {full[0]['multihop_recall_at_10']:.3f}, P@1 {full[0]['multihop_p_at_1']:.3f}" if full else "n/a"
+          print(f"\n**lineage (full, defaults):** prior = 0.983 | now → {lin('lineage-confirm.json')}")
+          o=load('ontology-noadaptive.json')
+          if o:
+              full=[r for r in o['rows'] if r['layer']=='full']
+              if full: print(f"**ontology type-P@1 (FLAT_ADAPTIVE=0):** with-adaptive history=0.067 → {full[0]['multihop_p_at_1']:.3f}")
+          print("\n**Pre-registered decisions:**")
+          print("- ① B vs A: multi_hop/single_hop up with open_domain held ⇒ typed-walk default candidate; "
+                "open_domain down >0.01 ⇒ intent cues misfire on open queries → tighten cues. "
+                "TYPED_WALK funnel shows how many queries took an intent path.")
+          print("- ② C vs A: open_domain within 0.003 AND bounded learned counts ⇒ tightened gates work → "
+                "another sweep arm; open_domain down ≥0.02 again ⇒ reject the approach.")
+          print("- ③ ontology arm: type-P@1 rises with FLAT_ADAPTIVE=0 ⇒ the 0.15→0.05 tail is the fitted "
+                "gate's BM25 trust on type-confusable queries; flat ⇒ the whole loss is fusion itself (roadmap ②).")
+          print("- ④ lineage < 0.95 at defaults ⇒ regression — read l.err funnel first.")
+          PY
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: batched-guard-results
+          path: |
+            *.json
+            *.err
+          retention-days: 3
+          if-no-files-found: warn

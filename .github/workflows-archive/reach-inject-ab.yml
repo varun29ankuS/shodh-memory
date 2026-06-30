@@ -1,0 +1,100 @@
+name: ② reachable-inject A/B — surface the 98%-reachable gold the leg drops
+
+# EFFECT audit (run 27209627316) proved gold is 98-100% reachable ≤2hop on the exact graph
+# whose GRAPH leg surfaces only ~51% (recall A/B funnel). So the 51% is a SURFACING failure —
+# the leg's spreading/threshold/pruning drops reachable gold before fusion — NOT missing
+# edges or entity-resolution. reachable_inject (SHODH_GRAPH_REACH_INJECT) re-derives a
+# complete best-path activation for every entity within REACH_HOPS of a seed with NO
+# threshold and merges by max, so the reachable gold enters the candidate pool.
+#   Arm A = baseline (inject OFF).  Arm B = SHODH_GRAPH_REACH_INJECT=1.
+# KEY: funnel GRAPH present% — does B rise from ~51 toward ~98? And top10% — does the
+# surfaced gold also RANK (→ multi_hop recall up), or does it enter but stay buried at
+# rank ~29 (→ the next lever is fusion/ranking survival, not surfacing)?
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/reach-inject-ab.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  reachinject:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — inject OFF (baseline)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — inject ON
+        run: set -o pipefail; SHODH_GRAPH_REACH_INJECT=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: A funnel — inject OFF
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
+      - name: B funnel — inject ON
+        run: set -o pipefail; SHODH_GRAPH_REACH_INJECT=1 ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          a=load("a.json"); b=load("b.json"); fa=load("fa.json"); fb=load("fb.json")
+          def rec(d,c):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if c=='ALL' else d['by_category'][c]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          print("## ② reachable-inject A/B — surface the reachable gold\n")
+          print("### recall@10\n| cat | OFF | ON | Δ |")
+          print("| --- | --- | --- | --- |")
+          for c in cats:
+              print(f"| {c} | {rec(a,c):.4f} | {rec(b,c):.4f} | {rec(b,c)-rec(a,c):+.4f} |")
+          def g(fn,stage,k):
+              if not fn: return float('nan')
+              for r in fn.get('overall',[]):
+                  if r['stage']==stage: return r.get(k,float('nan'))
+              return float('nan')
+          print("\n### funnel GRAPH stage (THE surfacing metric)\n| metric | OFF | ON |")
+          print("| --- | --- | --- |")
+          for k in ('present_pct','top10_pct','mean_rank_when_present'):
+              print(f"| graph {k} | {g(fa,'graph',k):.2f} | {g(fb,'graph',k):.2f} |")
+          print("\n### funnel FUSION stage (did it survive fusion?)\n| metric | OFF | ON |")
+          print("| --- | --- | --- |")
+          for k in ('present_pct','top10_pct','mean_rank_when_present'):
+              print(f"| fusion {k} | {g(fa,'fusion',k):.2f} | {g(fb,'fusion',k):.2f} |")
+          print("\n**Decision:** graph present% ON rises 51→toward 98 ⇒ reachable_inject SURFACES the reachable gold (the diagnosed lever, CONFIRMED). THEN: top10% up + multi_hop recall up ⇒ surfacing alone wins → build it out. present% up but top10% flat / mean_rank still ~29 + recall flat ⇒ gold enters but FUSION/RANKING buries it ⇒ next lever is magnitude fusion (G3/ACT-R), not surfacing. present% flat ⇒ inject didn't engage (check SHODH_GRAPH_REACH_INJECT wired into the leg output) — instrument before concluding. AUDIT: watch any category REGRESS (inject adds noise candidates that displace correct hits).")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reach-inject-json
+          path: "*.json"
+          if-no-files-found: warn

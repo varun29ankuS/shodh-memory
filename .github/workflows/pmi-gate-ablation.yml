@@ -1,0 +1,149 @@
+# PMI² edge-gate ablation — does pruning incidental co-occurrence shrink the graph
+# WITHOUT hurting recall? (Stanford OpenIE precision filter, SHODH_GRAPH_PMI_GATE.)
+#
+# Two arms on the SAME suite, ingesting through the harness's real graph path
+# (process_experience_into_graph), capturing the per-memory "edge typing provenance"
+# log so we can sum edges-by-type and how many the gate pruned:
+#   A = control      (no flag)             — full co-occurrence graph
+#   B = SHODH_GRAPH_PMI_GATE=1             — incidental co-occurrence dropped at birth
+# Reports recall@10 (overall + per-category) AND total edges A vs B. The win we're
+# testing: edges collapse, recall holds (incidental co-occurrence carries no signal).
+name: PMI Edge-Gate Ablation
+on:
+  push:
+    branches: ['exp/pmi-edge-gate']
+    paths: ['src/handlers/state.rs', '.github/workflows/pmi-gate-ablation.yml']
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'recall suite: locomo (held-out) or smoke (fast)'
+        required: false
+        default: 'locomo'
+      gate_min:
+        description: 'SHODH_GRAPH_PMI_GATE_MIN (PMI floor; 0.0 = PPMI). Higher prunes more.'
+        required: false
+        default: '0.0'
+      max_cases:
+        description: 'SHODH_MAX_CASES cap (blank = all)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pmi-gate-ablation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ablation:
+    name: PMI gate A/B
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Arm A — control (full co-occurrence graph)
+        env:
+          SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
+          RUST_LOG: shodh_memory::handlers::state=info
+        run: |
+          ./target/release/recall-eval \
+            --suite "${{ github.event.inputs.suite || 'locomo' }}" \
+            --output a-recall.json \
+            --storage ./a-storage 2>a.log | tee a-stdout.log
+
+      - name: Arm B — SHODH_GRAPH_PMI_GATE=1 (prune incidental co-occurrence)
+        env:
+          SHODH_GRAPH_PMI_GATE: '1'
+          SHODH_GRAPH_PMI_GATE_MIN: ${{ github.event.inputs.gate_min || '0.0' }}
+          SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
+          RUST_LOG: shodh_memory::handlers::state=info
+        run: |
+          ./target/release/recall-eval \
+            --suite "${{ github.event.inputs.suite || 'locomo' }}" \
+            --output b-recall.json \
+            --storage ./b-storage 2>b.log | tee b-stdout.log
+
+      - name: Compare — recall delta + edge-count drop
+        run: |
+          echo "## PMI² edge-gate ablation (gate_min=${{ github.event.inputs.gate_min || '0.0' }})" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, re, sys
+          def load(f):
+              d = json.load(open(f))
+              full = d['layers'].get('full') or next(iter(d['layers'].values()))
+              return d, full
+          def edges(logfile):
+              # sum the "edge typing provenance" per-memory counters across the run
+              tot = dict(semantic=0, cue=0, pair_table=0, learned=0, generic=0, fragment_blocked=0, pmi_gated=0)
+              pat = re.compile(r'(\w+)=(\d+)')
+              for line in open(logfile, errors='ignore'):
+                  if 'edge typing provenance' not in line: continue
+                  for k, v in pat.findall(line):
+                      if k in tot: tot[k] += int(v)
+              tot['stored_total'] = tot['semantic']+tot['cue']+tot['pair_table']+tot['learned']+tot['generic']+tot['fragment_blocked']
+              return tot
+          da, fa = load('a-recall.json'); db, fb = load('b-recall.json')
+          ea, eb = edges('a.log'), edges('b.log')
+          print(f"- cases: {da['case_count']}\n")
+          print("### Recall (does pruning hurt?)")
+          print("| metric | A control | B gated | Δ |")
+          print("| --- | --- | --- | --- |")
+          for m in ('recall@10','ndcg@10','mrr'):
+              print(f"| {m} | {fa[m]:.4f} | {fb[m]:.4f} | {fb[m]-fa[m]:+.4f} |")
+          print("\n### Graph size (did edges collapse?)")
+          print("| edges | A control | B gated | Δ |")
+          print("| --- | --- | --- | --- |")
+          print(f"| stored total | {ea['stored_total']} | {eb['stored_total']} | {eb['stored_total']-ea['stored_total']} |")
+          print(f"| generic (co-occ) | {ea['generic']} | {eb['generic']} | {eb['generic']-ea['generic']} |")
+          print(f"| typed (cue+sem+pair+learned) | {ea['semantic']+ea['cue']+ea['pair_table']+ea['learned']} | {eb['semantic']+eb['cue']+eb['pair_table']+eb['learned']} | — |")
+          print(f"| **pmi_gated (pruned)** | {ea['pmi_gated']} | **{eb['pmi_gated']}** | — |")
+          if ea['stored_total']:
+              drop = 100.0*(ea['stored_total']-eb['stored_total'])/ea['stored_total']
+              print(f"\n**Graph shrank {drop:.1f}%** ; recall@10 Δ = {fb['recall@10']-fa['recall@10']:+.4f}.")
+          print("\nPer-category recall@10:")
+          print("| category | A | B | Δ |")
+          print("| --- | --- | --- | --- |")
+          for cat in sorted(da['by_category']):
+              a = da['by_category'][cat]['recall@10']; b = db['by_category'].get(cat,{}).get('recall@10',0)
+              print(f"| {cat} | {a:.3f} | {b:.3f} | {b-a:+.3f} |")
+          PY
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pmi-gate-ablation
+          path: |
+            a-recall.json
+            b-recall.json
+            a.log
+            b.log

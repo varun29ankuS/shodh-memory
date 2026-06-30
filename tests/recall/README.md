@@ -21,11 +21,26 @@ new numbers. Routine refactors should leave it untouched — that is the whole p
 ```bash
 cargo run --release --bin recall-eval -- \
     --suite smoke \
+    --storage "$LOCALAPPDATA/shodh-eval/baseline" \
     --output tests/recall/baseline.json
 ```
 
 The binary records the current git SHA, embedder identifier, and timestamp into
 the report header so the baseline is self-describing.
+
+**`--storage` MUST point outside directories watched by a search indexer,
+antivirus, or sync daemon** — in practice: avoid the user-profile Documents
+tree, use `%LOCALAPPDATA%` (excluded from Windows Search indexing by default).
+Watcher processes intermittently lock freshly written tantivy segment files,
+which silently drops BM25 commit batches and makes rankings depend on ambient
+machine state (root-caused 2026-06-12: 432/432 smoke comparisons diverged with
+storage under the Documents tree; 0–1 under `%LOCALAPPDATA%`). The harness now
+hard-fails ingest when a commit batch is lost after retries, so a watched path
+errors out rather than producing garbage numbers.
+
+The eval scoring clock is frozen (`SHODH_EVAL_NOW`, pinned to a fixed anchor in
+`pin_harness_threads`) so recency components cannot drift between repeat
+passes or rot the baseline as the static corpus ages against wall-clock time.
 
 After regenerating, sanity-check the diff:
 

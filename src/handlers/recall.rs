@@ -497,6 +497,7 @@ pub async fn recall(
     let user_id_for_recall = req.user_id.clone();
     let query_for_recall = req.query.clone();
     let debug_mode = req.debug;
+    let neural_ner_for_recall = state.get_neural_ner();
 
     let (mut memories, triggered_reminders, _prospective_signals, retrieval_stats) =
         tokio::task::spawn_blocking(move || {
@@ -566,7 +567,7 @@ pub async fn recall(
             };
 
             // 4. Execute recall with prospective signals + robotics filters
-            let query = MemoryQuery {
+            let mut query = MemoryQuery {
                 user_id: Some(user_id_for_recall),
                 query_text: Some(query_for_recall),
                 max_results: limit,
@@ -586,6 +587,7 @@ pub async fn recall(
                 layers: layer_mode_for_recall,
                 ..Default::default()
             };
+            super::state::annotate_query_ner_with(&neural_ner_for_recall, &mut query);
 
             let (memories, retrieval_stats) = if debug_mode {
                 let result = memory_guard
@@ -1989,6 +1991,7 @@ pub async fn proactive_context(
     let habituation_tracker = state.habituation_tracker.clone();
     let user_id_for_habituation = req.user_id.clone();
     let graph_for_habituation = state.get_user_graph(&req.user_id).ok();
+    let neural_ner_for_proactive = state.get_neural_ner();
     let memory_type_filter: Vec<ExperienceType> = req
         .memory_types
         .iter()
@@ -2015,7 +2018,7 @@ pub async fn proactive_context(
                 .filter(|w| w.len() >= 3)
                 .collect();
 
-            let query = MemoryQuery {
+            let mut query = MemoryQuery {
                 user_id: Some(user_id_for_query),
                 query_text: Some(context_clone),
                 query_embedding: if embedding_valid {
@@ -2033,6 +2036,7 @@ pub async fn proactive_context(
                 },
                 ..Default::default()
             };
+            super::state::annotate_query_ner_with(&neural_ner_for_proactive, &mut query);
             let results = memory_guard
                 .recall(&query)
                 .map_err(|e| anyhow::anyhow!("Recall failed: {e}"))?;
@@ -3076,18 +3080,20 @@ pub async fn recall_tracked(
     let limit = req.limit;
     let user_id = req.user_id.clone();
     let retrieval_mode = parse_retrieval_mode(&req.mode);
+    let neural_ner_for_tracked = state.get_neural_ner();
 
     let memories = {
         let memory = memory.clone();
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
-            let query = MemoryQuery {
+            let mut query = MemoryQuery {
                 user_id: Some(user_id),
                 query_text: Some(query_text),
                 max_results: limit,
                 retrieval_mode,
                 ..Default::default()
             };
+            super::state::annotate_query_ner_with(&neural_ner_for_tracked, &mut query);
             memory_guard
                 .recall(&query)
                 .map_err(|e| anyhow::anyhow!("Recall failed: {e}"))

@@ -26,6 +26,22 @@ on:
         description: 'Layer attribution: full or all (per-stage)'
         required: false
         default: 'full'
+      diag_k:
+        description: 'Diagnostic cutoff: fetch this many results so per-case recall@50/@100 are meaningful (blank/10 = normal). Use 100 to split ranking vs retrieval-reach.'
+        required: false
+        default: ''
+      mode:
+        description: 'What to run: recall (default) | reachability | funnel | linking | learning_curve | multi_hop | ablation | temporal | ontology | lineage | forgetting | selective_forgetting'
+        required: false
+        default: 'recall'
+      suite:
+        description: 'Suite for recall/ablation: locomo (default) or smoke'
+        required: false
+        default: 'locomo'
+      extra_env:
+        description: 'Extra SHODH_* flags, space-separated KEY=VAL (e.g. "SHODH_GRAPH_EXPAND_K=5 SHODH_FEEDBACK_MOMENTUM_SCALE=0.6 SHODH_MAX_CASES=600"). Exported into the run.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -38,11 +54,23 @@ jobs:
   locomo-recall:
     name: LoCoMo Recall
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
     steps:
+      # Fetch the full history of the dispatched branch, then check out the
+      # requested commit by hand. `actions/checkout`'s `ref` input is resolved
+      # as a branch/tag name pattern (`+refs/heads/<ref>*`), so a raw commit
+      # SHA — short or full — fails the fetch. Checking out manually after a
+      # full-depth fetch makes the documented "dispatch twice with the commit
+      # before and after" A/B flow actually work for SHAs.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 0
+
+      - name: Check out requested commit
+        if: ${{ github.event.inputs.ref != '' }}
+        run: |
+          git checkout "${{ github.event.inputs.ref }}"
+          echo "Checked out $(git rev-parse --short HEAD)"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -55,11 +83,242 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y llvm-dev libclang-dev clang
 
+      - name: Set up e5-small-v2 embedder
+        if: ${{ github.event.inputs.embedder == 'e5' }}
+        run: |
+          E5_DIR="$HOME/models/e5-small-v2"
+          mkdir -p "$E5_DIR"
+          echo "Downloading e5-small-v2 ONNX + tokenizer (Xenova/e5-small-v2)…"
+          curl -fL --retry 3 -o "$E5_DIR/model.onnx" \
+            https://huggingface.co/Xenova/e5-small-v2/resolve/main/onnx/model.onnx
+          curl -fL --retry 3 -o "$E5_DIR/tokenizer.json" \
+            https://huggingface.co/Xenova/e5-small-v2/resolve/main/tokenizer.json
+          ls -la "$E5_DIR"
+          # Route the embedder at this model + enable e5 query/passage prefixes.
+          echo "SHODH_EMBEDDER=e5" >> "$GITHUB_ENV"
+          echo "SHODH_MODEL_PATH=$E5_DIR" >> "$GITHUB_ENV"
+          echo "SHODH_USE_QUANTIZED_MODEL=0" >> "$GITHUB_ENV"
+
       - name: Build recall-eval
         run: cargo build --release --bin recall-eval
 
-      - name: Run LoCoMo recall@k
+      - name: Cache embedder model (download from HF once, reuse across runs)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+
+      - name: Pre-fetch MiniLM embedder model (robust — avoids HF auto-download flakes)
         run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          # Skip the HF hit entirely on a cache hit. Only download (with hard 429 backoff)
+          # when the cache missed — so we contact HuggingFace at most once per cache key,
+          # not once per run (which earned us a 429 rate-limit after this session's runs).
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+          ls -la "$MODEL_DIR"
+
+      - name: Graph reachability diagnostic
+        if: ${{ github.event.inputs.mode == 'reachability' }}
+        env:
+          SHODH_GRAPH_IDF_EDGES: ${{ github.event.inputs.graph_idf }}
+          SHODH_HUB_DEGREE_MAX: ${{ github.event.inputs.hub_max }}
+          SHODH_CONCEPT_ENTITIES: ${{ github.event.inputs.concepts }}
+          SHODH_CONCEPT_SEED_DF_MAX: ${{ github.event.inputs.concept_seed_df_max }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval \
+            --suite locomo \
+            --graph-reachability locomo-reachability.json \
+            --output locomo-recall.json \
+            --storage ./locomo-storage 2>&1 | tee locomo-reachability.log
+          echo "## LoCoMo graph reachability + degree distribution" >> "$GITHUB_STEP_SUMMARY"
+          echo "Graph tuning — IDF edges: \`${SHODH_GRAPH_IDF_EDGES:-off}\`  hub_max: \`${SHODH_HUB_DEGREE_MAX:-300}\`" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          d = json.load(open('locomo-reachability.json'))
+          def pct(n,dn): return 0.0 if dn==0 else 100.0*n/dn
+          gs = d.get('graph', {})
+          print(f"### Graph structure (anti-hub scoreboard)")
+          print(f"- entities: {gs.get('total_entities',0)}  edges(est): {gs.get('total_edges',0)}  mean degree: {gs.get('mean_degree',0):.1f}")
+          print(f"- **max degree: {gs.get('max_degree',0)}**  hubs (degree>{gs.get('hub_threshold',50)}): **{gs.get('hub_count',0)}**  top degrees: {gs.get('top_degrees',[])}")
+          print(f"  (max degree + hub count should FALL with IDF edges / lower hub_max)\n")
+          print(f"- max_hops: {d['max_hops']}  (≤2hop% = canonical double-hop signal)")
+          print("\n| category | cases | gold | ≤1hop% | ≤2hop% | unreach% | no-seed% | cases≥2seed% | gold≥2seed% |")
+          print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+          rows = sorted(d['by_category'].items()) + [('ALL', d['overall'])]
+          for name,c in rows:
+              g=c['gold_total']
+              print(f"| {name} | {c['cases']} | {g} | {pct(c['reachable_within_1'],g):.1f} | {pct(c['reachable_within_2'],g):.1f} | {pct(c['unreachable'],g):.1f} | {pct(c['cases_no_seed'],c['cases']):.1f} | {pct(c.get('cases_multi_seed',0),c['cases']):.1f} | {pct(c.get('gold_multi_seed',0),g):.1f} |")
+          print("\ngold≥2seed% = the G5 multi-seed discrimination signal. If ~0, queries resolve to too few graph cues; the lever is richer query→graph cue extraction, not episode scoring.")
+          PY
+
+      - name: Entity-linking accuracy (is NER/linking the bottleneck?)
+        if: ${{ github.event.inputs.mode == 'linking' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval \
+            --suite locomo \
+            --linking locomo-linking.json \
+            --output unused-recall.json \
+            --storage ./linking-storage 2>&1 | tee linking.log
+          echo "## Query→graph entity-linking accuracy" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/## Query→graph entity-linking accuracy/,$p' linking.log >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Per-stage gold funnel (locates where reachable gold is lost)
+        if: ${{ github.event.inputs.mode == 'funnel' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval \
+            --suite locomo \
+            --funnel locomo-funnel.json \
+            --output unused-recall.json \
+            --storage ./funnel-storage 2>&1 | tee funnel.log
+          echo "## Per-stage gold-rank funnel" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/## Per-stage gold-rank funnel/,$p' funnel.log >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Learning-curve diagnostic (reward gradient)
+        if: ${{ github.event.inputs.mode == 'learning_curve' }}
+        env:
+          SHODH_REWARD_LR_MULT: ${{ github.event.inputs.reward_lr_mult }}
+          SHODH_GRAPH_IDF_EDGES: ${{ github.event.inputs.graph_idf }}
+          SHODH_HUB_DEGREE_MAX: ${{ github.event.inputs.hub_max }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval \
+            --suite smoke \
+            --learning-curve learning-curve.json \
+            --lc-cycles 8 \
+            --output unused-recall.json \
+            --storage ./lc-storage 2>&1 | tee learning-curve.log
+          echo "## Learning curve — reward-modulated plasticity (in-memory RL)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Reward LR mult: \`${SHODH_REWARD_LR_MULT:-1.0 (default)}\`" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          d = json.load(open('learning-curve.json'))
+          print(f"\ncycles: {d['cycles']}. A real reward gradient: Helpful rank DOWN, Misleading rank UP, Neutral flat.\n")
+          print("| outcome | tracked | rank cold→final (Δ) | score cold→final (Δ) | imp/wor/unc |")
+          print("| --- | --- | --- | --- | --- |")
+          for a in d['arms']:
+              r=a['mean_rank_by_cycle']; s=a['mean_score_by_cycle']
+              print(f"| **{a['outcome']}** | {a['tracked_cases']} | {r[0]:.2f}→{r[-1]:.2f} ({a['mean_rank_delta']:+.3f}) | {s[0]:.4f}→{s[-1]:.4f} ({a['mean_score_delta']:+.4f}) | {a['improved']}/{a['worsened']}/{a['unchanged']} |")
+          h=next((a for a in d['arms'] if a['outcome']=='Helpful'),None)
+          m=next((a for a in d['arms'] if a['outcome']=='Misleading'),None)
+          if h and m:
+              spread = m['mean_rank_delta'] - h['mean_rank_delta']
+              print(f"\nGradient spread (Misleading − Helpful rank Δ): **{spread:+.3f}** — bigger = reward steers recall more strongly.")
+          PY
+
+      - name: Ablation matrix (see+update studies)
+        if: ${{ github.event.inputs.mode == 'ablation' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval             --suite "${{ github.event.inputs.suite }}"             --ablation ablation.json             --output unused-recall.json             --storage ./abl-storage 2>&1 | tee ablation.log
+          echo "## Ablation matrix" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/## Ablation matrix/,$p' ablation.log >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Multi-hop diagnostic (E3 — planted 2-hop chains)
+        if: ${{ github.event.inputs.mode == 'multi_hop' }}
+        env:
+          SHODH_GRAPH_IDF_EDGES: ${{ github.event.inputs.graph_idf }}
+          SHODH_HUB_DEGREE_MAX: ${{ github.event.inputs.hub_max }}
+          SHODH_GRAPH_RESERVE_K: ${{ github.event.inputs.graph_reserve_k }}
+          SHODH_GRAPH_ACT_ADD: ${{ github.event.inputs.graph_act_add }}
+          SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
+          SHODH_SPREAD_FIX: ${{ github.event.inputs.spread_fix }}
+          SHODH_ACTR_NORM: ${{ github.event.inputs.actr_norm }}
+          SHODH_GRAPH_RESERVE_FINAL: ${{ github.event.inputs.graph_reserve_final }}
+          SHODH_GRAPH_EXPAND_K: ${{ github.event.inputs.graph_expand_k }}
+          SHODH_GRAPH_EXPAND_MIN_STRENGTH: ${{ github.event.inputs.graph_expand_min_strength }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          CHAINS_ARG=""
+          if [ -n "${{ github.event.inputs.mh_chains }}" ]; then CHAINS_ARG="--mh-chains ${{ github.event.inputs.mh_chains }}"; fi
+          ./target/release/recall-eval \
+            --suite locomo \
+            --multi-hop multihop.json \
+            $CHAINS_ARG \
+            --output unused-recall.json \
+            --storage ./mh-storage 2>&1 | tee multihop.log
+          echo "## E3 controlled multi-hop (planted 2-hop chains)" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          d = json.load(open('multihop.json'))
+          print(f"- chains: {d['chains']}  2-hop cases: {d['multihop_cases']}  1-hop control: {d['onehop_cases']}")
+          print("\n| stage | 2hop recall@10 | Δ vs prev | 1hop recall@10 | 2hop mrr |")
+          print("| --- | --- | --- | --- | --- |")
+          prev = None
+          for r in d['rows']:
+              delta = '' if prev is None else f"{r['multihop_recall_at_10']-prev:+.4f}"
+              print(f"| {r['layer']} | {r['multihop_recall_at_10']:.4f} | {delta} | {r['onehop_recall_at_10']:.4f} | {r['multihop_mrr']:.4f} |")
+              prev = r['multihop_recall_at_10']
+          print("\n2-hop gold is reachable ONLY via graph traversal. +spreading's 2hop Δ = the graph leg's isolated multi-hop recall. If +bm25 lifts 1hop but not 2hop, the contrast confirms the graph carries multi-hop. This is the metric LoCoMo recall@k cannot provide; relation-quality work is measured HERE.")
+          PY
+
+      - name: Ontology controlled diagnostic (E5)
+        if: ${{ github.event.inputs.mode == 'ontology' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval             --suite locomo             --ontology ontology.json             --output unused-recall.json             --storage ./ontology-storage 2>&1 | tee ontology.log
+          echo "## Ontology controlled diagnostic (E5)" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/^## /,$p' ontology.log | tail -n +1 >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Causal-lineage diagnostic (E4)
+        if: ${{ github.event.inputs.mode == 'lineage' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval             --suite locomo             --lineage lineage.json             --output unused-recall.json             --storage ./lineage-storage 2>&1 | tee lineage.log
+          echo "## Causal-lineage diagnostic (E4)" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/^## /,$p' lineage.log | tail -n +1 >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Decay/forgetting stability (E6)
+        if: ${{ github.event.inputs.mode == 'forgetting' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval             --suite locomo             --forgetting forgetting.json             --output unused-recall.json             --storage ./forgetting-storage 2>&1 | tee forgetting.log
+          echo "## Decay/forgetting stability (E6)" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/^## /,$p' forgetting.log | tail -n +1 >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Selective forgetting (E6b)
+        if: ${{ github.event.inputs.mode == 'selective_forgetting' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval             --suite locomo             --selective-forgetting selective.json             --output unused-recall.json             --storage ./selective-storage 2>&1 | tee selective.log
+          echo "## Selective forgetting (E6b)" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/## Selective forgetting/,$p' selective.log >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Temporal controlled diagnostic
+        if: ${{ github.event.inputs.mode == 'temporal' }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval             --suite locomo             --temporal temporal.json             --output unused-recall.json             --storage ./temporal-storage 2>&1 | tee temporal.log
+          echo "## Temporal controlled (planted time-varying facts)" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/## Temporal controlled/,$p' temporal.log >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Run LoCoMo recall@k
+        if: ${{ github.event.inputs.mode == 'recall' || github.event.inputs.mode == '' }}
+        env:
+          RECALL_DIAG_K: ${{ github.event.inputs.diag_k }}
+          SHODH_GRAPH_FUSION_WEIGHT: ${{ github.event.inputs.graph_w }}
+          SHODH_CONCEPT_ENTITIES: ${{ github.event.inputs.concepts }}
+          SHODH_CONCEPT_SEED_DF_MAX: ${{ github.event.inputs.concept_seed_df_max }}
+          SHODH_GRAPH_IDF_EDGES: ${{ github.event.inputs.graph_idf }}
+          SHODH_HUB_DEGREE_MAX: ${{ github.event.inputs.hub_max }}
+          SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
+          SHODH_GRAPH_RESERVE_K: ${{ github.event.inputs.graph_reserve_k }}
+          SHODH_GRAPH_ACT_ADD: ${{ github.event.inputs.graph_act_add }}
+          SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
+          SHODH_SPREAD_FIX: ${{ github.event.inputs.spread_fix }}
+          SHODH_ACTR_NORM: ${{ github.event.inputs.actr_norm }}
+          SHODH_GRAPH_RESERVE_FINAL: ${{ github.event.inputs.graph_reserve_final }}
+          SHODH_GRAPH_EXPAND_K: ${{ github.event.inputs.graph_expand_k }}
+          SHODH_GRAPH_EXPAND_MIN_STRENGTH: ${{ github.event.inputs.graph_expand_min_strength }}
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
           ./target/release/recall-eval \
             --suite locomo \
             --layer "${{ github.event.inputs.layer }}" \
@@ -70,14 +329,50 @@ jobs:
           echo "## LoCoMo held-out recall@k" >> "$GITHUB_STEP_SUMMARY"
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json
+          from collections import defaultdict
           d = json.load(open('locomo-recall.json'))
           full = d['layers'].get('full') or next(iter(d['layers'].values()))
           print(f"- cases: {d['case_count']}  (held-out, gold-evidence)")
           print(f"- **recall@10: {full['recall@10']:.4f}**  ndcg@10: {full['ndcg@10']:.4f}  mrr: {full['mrr']:.4f}")
+          # Per-layer ablation ladder (--layer all). Cumulative: each row adds one
+          # stage, so the recall@10 delta from the row above IS that stage's
+          # marginal contribution. vamana_only=vector, +spreading=graph leg,
+          # +bm25=lexical, etc. A ~0 delta means the stage adds nothing here.
+          order = ['vamana_only','+spreading','+bm25','+rerank','+facts','full']
+          present = [k for k in order if k in d['layers']]
+          if len(present) > 1:
+              print("\n### Per-layer ablation ladder (marginal contribution)")
+              print("| stage | recall@10 | Δ vs prev | ndcg@10 | mrr |")
+              print("| --- | --- | --- | --- | --- |")
+              prev = None
+              for k in present:
+                  L = d['layers'][k]
+                  delta = '' if prev is None else f"{L['recall@10']-prev:+.4f}"
+                  print(f"| {k} | {L['recall@10']:.4f} | {delta} | {L['ndcg@10']:.4f} | {L['mrr']:.4f} |")
+                  prev = L['recall@10']
+              print("\n+spreading delta = the GRAPH leg's marginal recall. +bm25 delta = lexical. This is the BM25-vs-graph attribution.")
           print("\n| category | recall@10 | ndcg@10 |")
           print("| --- | --- | --- |")
           for cat, r in sorted(d['by_category'].items()):
               print(f"| {cat} | {r['recall@10']:.3f} | {r['ndcg@10']:.3f} |")
+          # Ranking-vs-retrieval split from per-case recall@{10,50,100}. The gap
+          # recall@100 - recall@10 is the headroom a perfect top-100 reranker
+          # could recover; a small gap means the gold is not in the pool at all
+          # (a retrieval-reach problem the reranker cannot fix).
+          try:
+              pc = json.load(open('locomo-per-case.json'))['full']
+              agg = defaultdict(lambda: {'n':0,'r10':0.0,'r50':0.0,'r100':0.0})
+              for c in pc:
+                  a = agg[c['category']]; a['n']+=1
+                  a['r10']+=c['recall_at_k']; a['r50']+=c.get('recall_at_50',c['recall_at_k']); a['r100']+=c.get('recall_at_100',c['recall_at_k'])
+              if any(a['r100']>a['r10'] for a in agg.values()):
+                  print("\n### Ranking vs retrieval (recall@k over the SAME wide pool)")
+                  print("| category | recall@10 | recall@50 | recall@100 | rerank headroom |")
+                  print("| --- | --- | --- | --- | --- |")
+                  for cat,a in sorted(agg.items()):
+                      n=a['n']; print(f"| {cat} | {a['r10']/n:.3f} | {a['r50']/n:.3f} | {a['r100']/n:.3f} | {(a['r100']-a['r10'])/n:+.3f} |")
+          except Exception as e:
+              print(f"\n(diagnostic recall@k split unavailable: {e})")
           PY
 
       - name: Upload results
@@ -89,3 +384,7 @@ jobs:
             locomo-recall.json
             locomo-per-case.json
             locomo-recall.log
+            locomo-reachability.json
+            locomo-reachability.log
+            learning-curve.json
+            learning-curve.log

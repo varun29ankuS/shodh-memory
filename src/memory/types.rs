@@ -2028,6 +2028,15 @@ pub struct Query {
     /// This enables "future informs present" - pending reminders influence recall
     pub prospective_signals: Option<Vec<String>>,
 
+    // === Query-side NER (SHODH_QUERY_NER) ===
+    /// Entity names extracted from the query text by the NEURAL NER model,
+    /// annotated by the caller that owns the model (recall handler / eval
+    /// runner). When present, these AUGMENT the heuristic focal entities as
+    /// graph-leg seeds — the POS-heuristic extractor measurably tags verbs and
+    /// months as entities while missing real ones (audit 2026-06-10), and the
+    /// 17MB NER model that fixes this at ingest never saw queries until now.
+    pub ner_entities: Option<Vec<String>>,
+
     // === Episode Context (SHO-temporal) ===
     /// Episode ID for context-aware retrieval
     /// When set, memories from the same episode get a coherence boost
@@ -2118,6 +2127,7 @@ impl Default for Query {
             user_id: None,
             query_text: None,
             query_embedding: None,
+            ner_entities: None,
             time_range: None,
             experience_types: None,
             importance_threshold: None,

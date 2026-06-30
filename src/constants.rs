@@ -244,6 +244,15 @@ pub const ENTITY_EMBEDDING_CACHE_MAX: usize = 10_000;
 /// Reference: Lund & Burgess (1996) "Producing high-dimensional semantic spaces"
 pub const EDGE_SEMANTIC_WEIGHT_FLOOR: f32 = 0.2;
 
+/// Minimum PMI-derived edge-weight multiplier. PMI (pointwise mutual information)
+/// weights an edge by how much MORE two entities co-occur than chance:
+/// `PMI = log2(co·N / (df_x·df_y))`, normalized by `log2(N)` into a [floor, 1] factor on
+/// the base edge strength. A ≤-chance pair has PPMI=0; this floor keeps a weak edge for any
+/// observed co-occurrence rather than deleting the association outright (a single
+/// co-occurrence is still weak evidence, not zero). Replaces the selectivity-IDF proxy as
+/// the principled, frequency-aware edge weighting (KG-RAG edge statistics).
+pub const GRAPH_PMI_WEIGHT_FLOOR: f32 = 0.1;
+
 /// Whether to apply degree normalization during spreading activation.
 ///
 /// When true, outgoing activation per edge is divided by sqrt(1 + degree).
@@ -1239,6 +1248,20 @@ pub const PROSPECTIVE_BOOST_MAX: f32 = 0.75;
 ///   Hebbian scores are already in a small range)
 pub const HEBBIAN_ASSOCIATION_WEIGHT: f32 = 0.1;
 
+/// Multi-seed coverage bonus for spreading-activation episode scoring (G5).
+///
+/// The multi_hop discriminator. 96% of multi_hop gold is 1-hop reachable — but
+/// so are hundreds of HUB episodes wired to the same ubiquitous speaker entity,
+/// so raw summed activation cannot separate them (the reachability hub artifact).
+/// The real signal: GOLD is connected to MULTIPLE distinct query entities
+/// (speaker AND topic), a hub-distractor to only one. An episode's activation is
+/// scaled by `1 + SEED_COVERAGE_BONUS × (distinct_query_seeds_covered − 1)`, so a
+/// 2-seed episode gets ×(1+bonus) over a 1-seed hub. Single-seed queries are
+/// unaffected (coverage is always 1), so this cannot regress single_hop/temporal.
+/// The graph leg ranks by this, feeding fusion by rank — the brain-native
+/// spreading-activation discriminator, not a Layer-5 rescore.
+pub const SEED_COVERAGE_BONUS: f32 = 1.0;
+
 /// Importance scoring factor — how much importance modulates the retrieval score
 ///
 /// Formula: importance_factor = SCORING_IMPORTANCE_FLOOR + importance × SCORING_IMPORTANCE_RANGE
@@ -1250,10 +1273,15 @@ pub const SCORING_IMPORTANCE_RANGE: f32 = 0.3;
 
 /// Feedback momentum range — symmetric ±15% multiplicative adjustment
 ///
-/// Positive momentum (helpful) boosts up to 15%, negative (misleading) suppresses up to 15%.
+/// Positive momentum (helpful) boosts up to ±50%, negative (misleading) suppresses
+/// up to 50%. Raised 0.15→0.50: at 0.15 accumulated momentum was imperceptible
+/// (Helpful gold-rank moved −0.11 over 8 cycles); at 0.50 learning is load-bearing
+/// (−0.78, 4/9 cases improve) while staying gradual (EMA inertia) and safe for cold
+/// recall (no feedback → momentum 0 → no effect on baseline ranking). Tunable at
+/// runtime via SHODH_FEEDBACK_MOMENTUM_SCALE.
 ///
 /// Reference: Reinforcement learning in memory retrieval (Anderson & Bjork 1994)
-pub const FEEDBACK_MOMENTUM_SCALE: f32 = 0.15;
+pub const FEEDBACK_MOMENTUM_SCALE: f32 = 0.50;
 
 /// Recency decay rate — exponential time constant for recency scoring
 ///

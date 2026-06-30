@@ -575,6 +575,44 @@ impl MultiUserMemoryManagerRotationHelper {
 }
 
 /// Multi-user memory manager - central state for the server
+/// SHODH_QUERY_NER — annotate a recall query with neural-NER entities so the
+/// graph leg seeds from the real recognizer instead of the POS heuristic (which
+/// measurably tags verbs/months as entities — query analysis audit 2026-06-10).
+///
+/// DEFAULT ON (run 27272612202: +0.005 recall@10 ALL, p@1 0.5167, no category
+/// regresses — the Pareto arm). SHODH_QUERY_NER=0 disables. No-op when the
+/// query has no text or NER finds nothing (fallback NER returns an error that
+/// is swallowed here, so a missing model degrades to the POS heuristic).
+/// Confidence-filtered (≥0.5), capped at 8 names to bound the seed budget.
+///
+/// Free function (not a method) so spawn_blocking closures can capture just the
+/// `Arc<NeuralNer>` instead of the whole manager.
+pub fn annotate_query_ner_with(ner: &NeuralNer, query: &mut crate::memory::types::Query) {
+    let enabled = std::env::var("SHODH_QUERY_NER")
+        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+        .unwrap_or(true);
+    if !enabled {
+        return;
+    }
+    let Some(text) = query.query_text.as_deref() else {
+        return;
+    };
+    match ner.extract(text) {
+        Ok(entities) => {
+            let names: Vec<String> = entities
+                .into_iter()
+                .filter(|e| e.confidence >= 0.5 && e.text.trim().len() >= 2)
+                .map(|e| e.text)
+                .take(8)
+                .collect();
+            if !names.is_empty() {
+                query.ner_entities = Some(names);
+            }
+        }
+        Err(e) => tracing::debug!("query NER annotation failed: {e}"),
+    }
+}
+
 pub struct MultiUserMemoryManager {
     /// Per-user memory systems with LRU eviction
     pub user_memories: moka::sync::Cache<String, Arc<parking_lot::RwLock<MemorySystem>>>,
@@ -1275,13 +1313,17 @@ impl MultiUserMemoryManager {
             let mut created = None;
             for attempt in 0..4u32 {
                 match MemorySystem::new(config.clone(), Some(&self.shared_rocksdb_cache)) {
-                    Ok(ms) => {
+                    Ok(mut ms) => {
                         if attempt > 0 {
                             info!(
                                 "Memory system for user '{}' created after {} retries (lock contention resolved)",
                                 user_id, attempt
                             );
                         }
+                        // Record the owner so per-user stores (temporal facts)
+                        // work on every ingest path and recall() can default the
+                        // query user_id to this user.
+                        ms.set_default_user_id(user_id);
                         created = Some(ms);
                         break;
                     }
@@ -1760,6 +1802,14 @@ impl MultiUserMemoryManager {
     /// Get neural NER for entity extraction
     pub fn get_neural_ner(&self) -> Arc<NeuralNer> {
         self.neural_ner.clone()
+    }
+
+    /// Annotate a recall query with neural-NER entities so the graph leg seeds
+    /// from the real recognizer instead of the POS heuristic (which measurably
+    /// tags verbs/months as entities — query analysis audit 2026-06-10).
+    /// Delegates to [`annotate_query_ner_with`]; see it for flag semantics.
+    pub fn annotate_query_ner(&self, query: &mut crate::memory::types::Query) {
+        annotate_query_ner_with(&self.neural_ner, query)
     }
 
     /// Get keyword extractor for statistical term extraction
@@ -3026,17 +3076,166 @@ impl MultiUserMemoryManager {
             })
             .collect();
 
-        // Combine all entity groups for insertion, capped at 10 to prevent
-        // O(n²) edge explosion (10 entities → max 45 edges)
+        // Concept entities (L1 substrate test): YAKE keyphrases as graph nodes so
+        // the graph captures TOPICS — the discriminative anchors — not just person
+        // names. Edge-legal: YAKE is statistical, no model. Gated by
+        // SHODH_CONCEPT_ENTITIES. The production upgrade is GLiNER2 entity+relation
+        // extraction; this tests whether concept nodes move total_entities and
+        // gold≥2seed% off the floor before that integration.
+        let concepts_on = std::env::var("SHODH_CONCEPT_ENTITIES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let concept_entities: Vec<(String, EntityNode)> = if concepts_on {
+            crate::embeddings::keywords::KeywordExtractor::new()
+                .extract(&experience.content)
+                .into_iter()
+                .take(8)
+                .filter_map(|kw| {
+                    let name = kw.text.trim().to_string();
+                    if name.len() < 3 || known_names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                        return None;
+                    }
+                    known_names.push(name.clone());
+                    let emb = entity_name_embeddings.and_then(|m| m.get(&name)).cloned();
+                    let concept_label = EntityLabel::Other("Concept".to_string());
+                    Some((
+                        name.clone(),
+                        EntityNode {
+                            uuid: uuid::Uuid::new_v4(),
+                            name,
+                            labels: vec![concept_label.clone()],
+                            created_at: now,
+                            last_seen_at: now,
+                            mention_count: 1,
+                            summary: String::new(),
+                            attributes: HashMap::new(),
+                            name_embedding: emb,
+                            salience: crate::graph_memory::EntityExtractor::calculate_base_salience(
+                                &concept_label,
+                                false,
+                            ),
+                            is_proper_noun: false,
+                            selectivity: None,
+                        },
+                    ))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Combine all entity groups for insertion, capped to prevent O(n²) edge
+        // explosion. Widen the cap when concept entities are on so topic nodes
+        // aren't crowded out by person names.
         let mut all_entities: Vec<(String, EntityNode)> = ner_entities
             .into_iter()
             .chain(tag_entities)
             .chain(allcaps_entities)
             .chain(issue_entities)
+            .chain(concept_entities)
             .collect();
-        all_entities.sort_by(|a, b| b.1.salience.total_cmp(&a.1.salience));
-        let entity_cap = self.server_config.max_entities_per_memory;
+        // Salience ties MUST break on a total order (name): some entity groups
+        // are collected from HashMap iteration, whose order randomizes per
+        // instance. Without the tiebreak, the stable sort preserves that
+        // random order, so the cap truncation and the Phase-1.9 pair budget
+        // select a different entity/pair subset on every ingest of the same
+        // content — repeat-nondeterministic graphs (smoke-094).
+        all_entities.sort_by(|a, b| {
+            b.1.salience
+                .total_cmp(&a.1.salience)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        let entity_cap = if concepts_on {
+            self.server_config.max_entities_per_memory.max(16)
+        } else {
+            self.server_config.max_entities_per_memory
+        };
         all_entities.truncate(entity_cap);
+
+        // =====================================================================
+        // PHASE 1.9: SEMANTIC RELATION TYPING (SHODH_SEMANTIC_RELATIONS)
+        // Substrate increment 1 (#65): type entity-pair relations by embedding
+        // the template-normalized pair sentence against cached relation-label
+        // exemplars (relation_typer.rs). Embedding happens HERE, before the
+        // graph lock — Phase 2's pair loop only does map lookups. try_read on
+        // the user system: if a writer holds it we SKIP typing for this memory
+        // (graceful degradation) instead of risking the historical re-entrant
+        // deadlock class. Keyed by (name_i, name_j); the pair loop looks up in
+        // its own (i < j) order.
+        //
+        // DEFAULT ON (batched guard run 27348362950, real-NER arms): ALL
+        // 0.7124→0.7157, temporal +0.0141, no category down, lineage 0.983 —
+        // the two former blockers are fixed and regression-guarded: the
+        // origin-walk flood (fragment-bridge ingest mask + scored top-k,
+        // 9a977c9) and the cue/semantic precedence + fragment budget
+        // starvation (2f90434). SHODH_SEMANTIC_RELATIONS=0 disables.
+        // =====================================================================
+        let semantic_relations_on = std::env::var("SHODH_SEMANTIC_RELATIONS")
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
+        let mut semantic_pairs: HashMap<
+            (String, String),
+            (crate::graph_memory::RelationType, bool, f32),
+        > = HashMap::new();
+        if semantic_relations_on && all_entities.len() >= 2 {
+            if let Ok(system) = self.get_user_memory(user_id) {
+                if let Some(sys) = system.try_read() {
+                    let embedder = sys.get_embedder();
+                    // Fragment mask over the SAME names Phase 2 will see. The
+                    // pair loop blocks fragments from typing, so embedding
+                    // fragment pairs here only burns the budget — measured
+                    // (lineage fixture, 2026-06-11): with NER fragments present
+                    // the 20-pair budget was exhausted before any real pair,
+                    // silently disabling semrel (Triggers=120/Causes=0 with
+                    // NER vs Triggers=66/Causes=54 without).
+                    let is_fragment: Vec<bool> = (0..all_entities.len())
+                        .map(|k| {
+                            let name_k = all_entities[k].0.to_lowercase();
+                            all_entities.iter().enumerate().any(|(m, other)| {
+                                m != k && {
+                                    let name_m = other.0.to_lowercase();
+                                    name_m.len() > name_k.len() && name_m.contains(name_k.as_str())
+                                }
+                            })
+                        })
+                        .collect();
+                    // Mirror the Phase-2 pair cap (20) so we never embed pairs
+                    // the loop won't create edges for.
+                    const MAX_SEMANTIC_PAIRS: usize = 20;
+                    let mut budget = MAX_SEMANTIC_PAIRS;
+                    'outer: for i in 0..all_entities.len() {
+                        for j in (i + 1)..all_entities.len() {
+                            if is_fragment[i] || is_fragment[j] {
+                                continue;
+                            }
+                            if budget == 0 {
+                                break 'outer;
+                            }
+                            budget -= 1;
+                            if let Some(hit) = crate::relation_typer::RELATION_TYPER.type_relation(
+                                embedder,
+                                &experience.content,
+                                &all_entities[i].0,
+                                &all_entities[j].0,
+                            ) {
+                                semantic_pairs.insert(
+                                    (all_entities[i].0.clone(), all_entities[j].0.clone()),
+                                    hit,
+                                );
+                            }
+                        }
+                    }
+                    if !semantic_pairs.is_empty() {
+                        tracing::debug!(
+                            "semantic relation typing: {} pairs typed",
+                            semantic_pairs.len()
+                        );
+                    }
+                } else {
+                    tracing::debug!("semantic relation typing skipped: user system busy");
+                }
+            }
+        }
 
         // =====================================================================
         // PHASE 2: GRAPH INSERTION (WITH LOCK)
@@ -3137,6 +3336,106 @@ impl MultiUserMemoryManager {
         // memories from dominating graph traversal. Stacks with reward modulation above.
         let edge_strength = edge_strength * experience.experience_type.edge_weight_multiplier();
 
+        // Graph fine-tuning knobs (anti-hub), read once outside the O(n^2) loop:
+        // - SHODH_HUB_DEGREE_MAX: degree above which an entity stops accreting
+        //   new edges (default 300 — historically far too late; lower it to stop
+        //   speaker hubs at the source).
+        // - SHODH_GRAPH_IDF_EDGES: when on, scale each edge's birth strength by
+        //   the less-selective endpoint, so a ubiquitous speaker (low curvature
+        //   selectivity) forms near-zero-weight edges while topic↔topic edges
+        //   stay strong. IDF-at-birth instead of a hard degree cliff.
+        let hub_max: usize = std::env::var("SHODH_HUB_DEGREE_MAX")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        let idf_edges: bool = std::env::var("SHODH_GRAPH_IDF_EDGES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        // PMI edge weighting: weight each co-occurrence edge by pointwise mutual
+        // information so specific associations stay strong while incidental co-occurrence
+        // with a ubiquitous entity is born weak. Principled, frequency-aware replacement for
+        // the selectivity-IDF proxy; supersedes `idf_edges` when both set. Default OFF —
+        // measured neutral-to-slightly-negative (E3 multi-hop 0.4667→0.4500; LoCoMo flat
+        // across all categories). Kept behind SHODH_GRAPH_PMI_EDGES=1 for denser graphs /
+        // scale where hub suppression should pay off; not shipped as a default until it earns it.
+        let pmi_edges: bool = std::env::var("SHODH_GRAPH_PMI_EDGES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        // PMI² EDGE GATE (Stanford OpenIE precision filter). Where SHODH_GRAPH_PMI_EDGES
+        // only DOWN-WEIGHTS a kept edge, this PRUNES a GENERIC co-occurrence edge whose
+        // pointwise mutual information is below SHODH_GRAPH_PMI_GATE_MIN — i.e. incidental
+        // co-occurrence (two entities sharing a passage by chance, dominated by a ubiquitous
+        // endpoint) is never stored at all. Typed edges (cue/semantic/learned/label) and
+        // fragment bridges always survive — they carry grounding the PMI lacks. The point:
+        // a co-occurrence graph is >80% incidental edges; dropping them shrinks the graph
+        // AND removes noise. Default OFF — A/B for graph SIZE + edge precision, not just recall@10.
+        let pmi_gate: bool = std::env::var("SHODH_GRAPH_PMI_GATE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        // PPMI floor by default: prune generic edges whose PMI < 0.0 (they co-occur no more
+        // than chance). Raise it to prune more aggressively; lower (negative) to keep more.
+        let pmi_gate_min: f32 = std::env::var("SHODH_GRAPH_PMI_GATE_MIN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        // N (total episodes) and its log (the PMI normalizer), read once outside the
+        // O(n^2) pair loop. mention_count is the per-entity document-frequency proxy.
+        let total_episodes = graph_guard.total_episode_count().max(1) as f32;
+        let pmi_norm = total_episodes.max(2.0).log2();
+
+        // Lever-1: recover a typed, DIRECTED predicate from the episode text so an
+        // edge encodes the relation AND its direction ("X set Y in motion" →
+        // X --Triggers--> Y) instead of the label-pair default (CoOccurs for two
+        // same-type entities) with NER-order direction. Computed per pair below;
+        // only overrides GENERIC inferences so it never fights a confident label.
+        // Default ON: measured +0.033 multi-hop recall@10 vs raw co-occurrence. Opt out =0.
+        let extract_predicates: bool = std::env::var("SHODH_GRAPH_EXTRACTED_PREDICATES")
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
+
+        // Edge-typing provenance counters (the substrate's own scoreboard):
+        // how many edges each stage of the typing chain produced. Logged per
+        // memory at info so CI runs (RUST_LOG) can measure the typed fraction —
+        // the generic share is the substrate progress metric (audit: >80%
+        // CoOccurs). grep "edge typing provenance" in eval logs.
+        let mut typed_semantic = 0usize;
+        let mut typed_cue = 0usize;
+        let mut typed_pair = 0usize;
+        let mut typed_learned = 0usize;
+        let mut untyped_generic = 0usize;
+        let mut typed_blocked_fragment = 0usize;
+        let mut pmi_gated = 0usize;
+
+        // SHODH_LEARNED_PAIRS: the learned label-pair table (Stanford-1, PMI²
+        // relation mapping) — every cue hit records (label-pair, relation,
+        // direction) evidence; cue-less pairs whose label-pair has EARNED a
+        // gated mapping get it instead of the static table / generic CoOccurs.
+        // A/B lever, default off until the batched CI guard run.
+        let learned_pairs: bool = std::env::var("SHODH_LEARNED_PAIRS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        // MAXIMAL-MENTION mask: an entity whose name is a substring of a
+        // CO-MENTIONED entity's name is a recognizer fragment of that mention
+        // ("Mor" inside "the Morwen incident"), not an independent participant.
+        // Typed/causal edges to fragments make them CROSS-DOCUMENT CAUSAL BRIDGES:
+        // the 60-chain lineage sweep (2026-06-11) measured 34 such bridge
+        // fragments fusing 57/60 causal chains (backward-cone p50 = 48 when the
+        // true cone is 1). Fragments keep plain CoOccurs edges (spread-visible,
+        // walk-invisible); they are simply never causal/typed endpoints.
+        let fragment_of_comention: Vec<bool> = (0..entity_uuids.len())
+            .map(|k| {
+                let name_k = entity_uuids[k].0.to_lowercase();
+                entity_uuids.iter().enumerate().any(|(m, other)| {
+                    m != k && {
+                        let name_m = other.0.to_lowercase();
+                        name_m.len() > name_k.len() && name_m.contains(name_k.as_str())
+                    }
+                })
+            })
+            .collect();
+
         for i in 0..entity_uuids.len() {
             for j in (i + 1)..entity_uuids.len() {
                 // Edge quality gate using graph reputation
@@ -3158,8 +3457,8 @@ impl MultiUserMemoryManager {
                 }
 
                 // Skip: either endpoint is a saturated hub
-                if rep_i.as_ref().is_some_and(|r| r.degree > 300)
-                    || rep_j.as_ref().is_some_and(|r| r.degree > 300)
+                if rep_i.as_ref().is_some_and(|r| r.degree > hub_max)
+                    || rep_j.as_ref().is_some_and(|r| r.degree > hub_max)
                 {
                     tracing::debug!(
                         "Skipping edge '{}'-'{}': hub saturated (degrees: {:?}, {:?})",
@@ -3171,15 +3470,177 @@ impl MultiUserMemoryManager {
                     continue;
                 }
 
+                // Edge informativeness weighting. PMI (preferred) replaces raw
+                // co-occurrence strength with pointwise mutual information: a pair that
+                // co-occurs MORE than chance (a specific association) keeps full strength,
+                // while a pair dominated by a ubiquitous endpoint (incidental co-occurrence)
+                // is born weak. PMI = log2(co·N / (df_i·df_j)); at birth co=1, so this is
+                // log2(N / (df_i·df_j)). PPMI (negative→0) normalized by log2(N) → [floor,1]
+                // multiplier on the base strength. Repeat co-occurrences still reinforce the
+                // edge through add_relationship's Hebbian path. Falls back to the
+                // selectivity-IDF proxy, then to raw strength.
+                let pair_strength = if pmi_edges {
+                    let df_i = rep_i.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
+                    let df_j = rep_j.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
+                    let pmi = (total_episodes / (df_i * df_j)).log2();
+                    let factor = (pmi.max(0.0) / pmi_norm)
+                        .clamp(crate::constants::GRAPH_PMI_WEIGHT_FLOOR, 1.0);
+                    edge_strength * factor
+                } else if idf_edges {
+                    // IDF-at-birth: born-weak hubs. Scale by the LESS-selective endpoint so
+                    // a speaker (low selectivity) can't form strong edges to everything.
+                    let sel_i = rep_i.as_ref().map(|r| r.selectivity).unwrap_or(1.0);
+                    let sel_j = rep_j.as_ref().map(|r| r.selectivity).unwrap_or(1.0);
+                    edge_strength * sel_i.min(sel_j).clamp(0.05, 1.0)
+                } else {
+                    edge_strength
+                };
+
+                // Prefer a text-extracted predicate over the label-pair default,
+                // but only when the label heuristic was generic (CoOccurs/RelatedTo)
+                // — a confident typed inference (Person+Org → WorksAt) is kept.
+                // The directed extractor also sets the cause→effect arrow by surface
+                // order, overriding the NER (i,j) array order.
+                let label_relation = crate::graph_memory::infer_relation_type_for_pair(
+                    &entity_uuids[i].2,
+                    &entity_uuids[j].2,
+                );
+                let mut from_entity = entity_uuids[i].1;
+                let mut to_entity = entity_uuids[j].1;
+                // Typing chain: cue extractor (exact lexical evidence — "x set y
+                // in motion" literally in the sentence) → semantic typer (embeds
+                // the pair sentence vs exemplars — a distributional GUESS) →
+                // label-pair table. The semantic typer originally outranked the
+                // cue extractor; that made edge TYPES platform-dependent — the
+                // quantized CI embedder put the lineage fixture's causal
+                // templates nearest "x created y" (CreatedBy, not causal) while
+                // the local embedder chose "x caused y" (causal), flipping the
+                // backward walk's reachability per platform (CI lineage 0.200 vs
+                // local 1.000 at the same commit, run 27342411453). Among
+                // sentence-level evidence, an exact cue match beats an
+                // embedding-argmax near the threshold; the semantic typer's job
+                // is COVERAGE beyond the cue list, not overriding it.
+                let semantic_hit = semantic_pairs
+                    .get(&(entity_uuids[i].0.clone(), entity_uuids[j].0.clone()))
+                    .cloned();
+                let cue_hit = if extract_predicates {
+                    crate::graph_memory::extract_directed_predicate(
+                        &experience.content,
+                        &entity_uuids[i].0,
+                        &entity_uuids[j].0,
+                    )
+                } else {
+                    None
+                };
+                let relation_type = if fragment_of_comention[i] || fragment_of_comention[j] {
+                    // Fragment endpoint: never typed, never causal (see mask above).
+                    typed_blocked_fragment += 1;
+                    crate::graph_memory::RelationType::CoOccurs
+                } else if let Some((rt, a_is_source)) = cue_hit {
+                    // LINEAGE-ZERO FIX (repro: lineage_walk_survives_harness_scale):
+                    // the cue extractor was once gated behind the label-pair
+                    // table, so a confident-LOOKING pair guess suppressed
+                    // explicit causal text and the origin walk starved. It now
+                    // outranks both guess layers — and acts as the DISTANT
+                    // SUPERVISOR for the learned pair table: each hit teaches
+                    // the per-user (label-pair → relation, direction) stats.
+                    if learned_pairs {
+                        let (src_label, dst_label) = if a_is_source {
+                            (&entity_uuids[i].2, &entity_uuids[j].2)
+                        } else {
+                            (&entity_uuids[j].2, &entity_uuids[i].2)
+                        };
+                        if let Err(e) =
+                            graph_guard.record_relation_evidence(src_label, dst_label, &rt)
+                        {
+                            tracing::debug!("relation evidence record failed: {e}");
+                        }
+                    }
+                    if !a_is_source {
+                        std::mem::swap(&mut from_entity, &mut to_entity);
+                    }
+                    typed_cue += 1;
+                    rt
+                } else if let Some((rt, a_is_source, _sim)) = semantic_hit {
+                    if !a_is_source {
+                        std::mem::swap(&mut from_entity, &mut to_entity);
+                    }
+                    typed_semantic += 1;
+                    rt
+                } else if let Some((rt, a_is_source, support)) = (learned_pairs
+                    // Per-APPLICATION cap: a learned mapping may type at most 2
+                    // edges per memory. The v1 rejection (run 27348362950) was
+                    // one mapping mass-applying to every cue-less co-mention in
+                    // sight; per-pair purity cannot see per-application volume.
+                    && typed_learned < 2)
+                    .then(|| {
+                        graph_guard
+                            .lookup_learned_pair_relation(&entity_uuids[i].2, &entity_uuids[j].2)
+                            .ok()
+                            .flatten()
+                    })
+                    .flatten()
+                {
+                    // The learned pair table: this user's own cue evidence has
+                    // earned a typed default for this label-pair (support ≥ 3,
+                    // purity ≥ 0.6, PMI² > 0, never causal, settled direction).
+                    // Outranks the static hand-written table — per-user data
+                    // beats global defaults (seed+adapt).
+                    if !a_is_source {
+                        std::mem::swap(&mut from_entity, &mut to_entity);
+                    }
+                    tracing::debug!(
+                        "learned pair: ({:?},{:?}) → {} (support {})",
+                        entity_uuids[i].2,
+                        entity_uuids[j].2,
+                        rt.as_str(),
+                        support
+                    );
+                    typed_learned += 1;
+                    rt
+                } else {
+                    if matches!(
+                        label_relation,
+                        crate::graph_memory::RelationType::CoOccurs
+                            | crate::graph_memory::RelationType::RelatedTo
+                    ) {
+                        untyped_generic += 1;
+                    } else {
+                        typed_pair += 1;
+                    }
+                    label_relation
+                };
+
+                // PMI² gate (Stanford OpenIE precision filter): drop an INCIDENTAL
+                // generic co-occurrence edge at birth. Only fires on generic
+                // (CoOccurs/RelatedTo), NON-fragment edges — typed edges and fragment
+                // bridges are never pruned. PMI = log2(N / (df_i·df_j)) at birth (co=1);
+                // below the floor means the pair co-occurs no more than chance → noise.
+                if pmi_gate
+                    && !(fragment_of_comention[i] || fragment_of_comention[j])
+                    && matches!(
+                        relation_type,
+                        crate::graph_memory::RelationType::CoOccurs
+                            | crate::graph_memory::RelationType::RelatedTo
+                    )
+                {
+                    let df_i = rep_i.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
+                    let df_j = rep_j.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
+                    let pmi = (total_episodes / (df_i * df_j)).log2();
+                    if pmi < pmi_gate_min {
+                        pmi_gated += 1;
+                        // it was tallied as generic above; move the tally to pmi_gated
+                        untyped_generic = untyped_generic.saturating_sub(1);
+                        continue;
+                    }
+                }
+
                 let edge = RelationshipEdge {
                     uuid: uuid::Uuid::new_v4(),
-                    from_entity: entity_uuids[i].1,
-                    to_entity: entity_uuids[j].1,
-                    relation_type: crate::graph_memory::infer_relation_type_for_pair(
-                        &entity_uuids[i].2,
-                        &entity_uuids[j].2,
-                    ),
-                    strength: edge_strength,
+                    from_entity,
+                    to_entity,
+                    relation_type,
+                    strength: pair_strength,
                     created_at: now,
                     valid_at: now,
                     invalidated_at: None,
@@ -3201,6 +3662,27 @@ impl MultiUserMemoryManager {
             }
         }
         // Lock released here
+
+        if typed_semantic
+            + typed_cue
+            + typed_pair
+            + typed_learned
+            + untyped_generic
+            + typed_blocked_fragment
+            + pmi_gated
+            > 0
+        {
+            tracing::info!(
+                semantic = typed_semantic,
+                cue = typed_cue,
+                pair_table = typed_pair,
+                learned = typed_learned,
+                generic = untyped_generic,
+                fragment_blocked = typed_blocked_fragment,
+                pmi_gated = pmi_gated,
+                "edge typing provenance"
+            );
+        }
 
         Ok(())
     }

@@ -1,0 +1,97 @@
+name: D1 graph-reach A/B — spread-fix → +fusion (graph present% + recall + funnel)
+
+# The funnel located the recall ceiling: the graph leg OUTPUTS only 51% of gold
+# (at rank 2.56) vs 98% reachable ≤2hop — the 2-hop activation collapse. SHODH_SPREAD_FIX
+# replaces the compounding importance-decay (which double-uses edge strength → distal
+# targets collapse below threshold → pruned) with fixed per-hop decay + additive priors
+# so 2-hop gold survives. This A/Bs, in the user-chosen D1→fusion sequence:
+#   A baseline · B SHODH_SPREAD_FIX (D1) · C SHODH_SPREAD_FIX + SHODH_ACTR_FUSION
+# reading recall@10 AND the per-stage funnel — KEY metric = the GRAPH stage present%
+# (does D1 lift it past 51%, putting more gold under the graph's rank-2.5 precision).
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/graph-d1-ab.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  d1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 200
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — baseline
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — spread-fix (D1)
+        run: set -o pipefail; SHODH_SPREAD_FIX=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — spread-fix + ACT-R fusion
+        run: set -o pipefail; SHODH_SPREAD_FIX=1 SHODH_ACTR_FUSION=1 ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+      - name: A funnel — baseline
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
+      - name: B funnel — spread-fix (D1)
+        run: set -o pipefail; SHODH_SPREAD_FIX=1 ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb 2>&1 | tail -3
+      - name: C funnel — spread-fix + ACT-R fusion
+        run: set -o pipefail; SHODH_SPREAD_FIX=1 SHODH_ACTR_FUSION=1 ./target/release/recall-eval --suite locomo --output oc.json --funnel fc.json --storage ./s-fc 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms=[("baseline","a.json","fa.json"),("D1 spread-fix","b.json","fb.json"),("D1+fusion","c.json","fc.json")]
+          data=[(n,load(r),load(fn)) for n,r,fn in arms]
+          base=data[0][1]
+          def rec(d,c):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if c=='ALL' else d['by_category'][c]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          print("## D1 graph-reach A/B — recall@10 (capped MAX_CASES=300 MAX_CORPUS=1500; read Δ)\n")
+          print("| category | "+" | ".join(n for n,_,_ in data)+" | Δ(D1) | Δ(D1+fus) |")
+          print("| --- | "+" | ".join("---" for _ in data)+" | --- | --- |")
+          for c in cats:
+              vals=[rec(d,c) for _,d,_ in data]
+              b=rec(base,c)
+              print(f"| {c} | "+" | ".join(f"{v:.4f}" for v in vals)+f" | {vals[1]-b:+.4f} | {vals[2]-b:+.4f} |")
+          def frow(fn,stage):
+              if not fn: return None
+              for r in fn.get('overall',[]):
+                  if r['stage']==stage: return r
+              return None
+          print("\n### Funnel — GRAPH stage (present% = D1 metric) & FUSION stage (mean_rank)\n")
+          print("| arm | graph present% | graph mean_rank | fusion top10% | fusion mean_rank | final present% |")
+          print("| --- | --- | --- | --- | --- | --- |")
+          for n,_,fn in data:
+              g=frow(fn,'graph') or {}; fu=frow(fn,'fusion') or {}; fi=frow(fn,'final') or {}
+              def gv(x,k): return f"{x.get(k,float('nan')):.2f}" if x else "—"
+              print(f"| {n} | {gv(g,'present_pct')} | {gv(g,'mean_rank_when_present')} | {gv(fu,'top10_pct')} | {gv(fu,'mean_rank_when_present')} | {gv(fi,'present_pct')} |")
+          print("\n**Read:** D1 wins iff graph present% rises above 51% (more reachable gold surfaced at the graph's rank-2.5 precision). Then D1+fusion should convert that reach into top-10 recall (fusion mean_rank ↓, recall Δ ↑). If graph present% stays ~51%, SHODH_SPREAD_FIX isn't enough and the graph-leg reach needs a deeper fix. baseline recall MUST = 0.6221 (regression guard).")
+          PY

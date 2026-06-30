@@ -1,0 +1,118 @@
+name: ⑩ boost-stack stage 2 — which L5 family reorders gold DOWN?
+
+# Stage 1 (run 27249880829): Layer 5 runs post-truncation → invisible to recall@10, but
+# it REORDERS the kept window. Removing it: single_hop p@1 +9.2pp (0.411→0.503) but
+# temporal p@1 -8.5pp (0.535→0.451) — a category tradeoff hidden inside the overlay.
+# Eval-inert families (uniform in eval): recency, arousal, credibility, feedback,
+# tag_penalty. The effect lives in the 6 eval-ACTIVE families. This stage: leave-one-out
+# per family, judged on per-category MRR / p@1 with a recall@10-unchanged guard.
+# Suspects: quality (content-length verbosity bias — crashed ontology 0.88→0.083 once)
+# and importance for the single_hop harm; temporal_match for the temporal good.
+# Goal: a default disable-list that takes the single_hop ordering win WITHOUT the
+# temporal loss — recall@10 must stay 0.6853 in every arm (L5 can't move it; a change
+# means the kill-switch leaked into pre-truncation logic → abort).
+#   A=on  B=l5-off(ref)  C=-hebbian  D=-temporal_match  E=-importance  F=-quality
+#   G=-linguistic  H=-competition
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/boost-ablation-l5.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  l5-bisect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+      L5PACK: "hebbian,recency,arousal,credibility,temporal_match,feedback,importance,tag_penalty,quality,linguistic,competition"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — all boosts on (baseline)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — full L5 pack off (reference)
+        run: set -o pipefail; SHODH_DISABLE_BOOSTS="$L5PACK" ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — minus hebbian
+        run: set -o pipefail; SHODH_DISABLE_BOOSTS=hebbian ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+      - name: D recall — minus temporal_match
+        run: set -o pipefail; SHODH_DISABLE_BOOSTS=temporal_match ./target/release/recall-eval --suite locomo --repeats 1 --output d.json --storage ./s-d 2>&1 | tail -3
+      - name: E recall — minus importance
+        run: set -o pipefail; SHODH_DISABLE_BOOSTS=importance ./target/release/recall-eval --suite locomo --repeats 1 --output e.json --storage ./s-e 2>&1 | tail -3
+      - name: F recall — minus quality
+        run: set -o pipefail; SHODH_DISABLE_BOOSTS=quality ./target/release/recall-eval --suite locomo --repeats 1 --output f.json --storage ./s-f 2>&1 | tail -3
+      - name: G recall — minus linguistic
+        run: set -o pipefail; SHODH_DISABLE_BOOSTS=linguistic ./target/release/recall-eval --suite locomo --repeats 1 --output g.json --storage ./s-g 2>&1 | tail -3
+      - name: H recall — minus competition
+        run: set -o pipefail; SHODH_DISABLE_BOOSTS=competition ./target/release/recall-eval --suite locomo --repeats 1 --output h.json --storage ./s-h 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'on':load('a.json'),'l5-off':load('b.json'),'-hebbian':load('c.json'),
+                '-temporal_match':load('d.json'),'-importance':load('e.json'),
+                '-quality':load('f.json'),'-linguistic':load('g.json'),'-competition':load('h.json')}
+          names=list(arms.keys())
+          def m(d,cat,k):
+              if not d: return float('nan')
+              src = d['layers']['full'] if cat=='ALL' else d['by_category'][cat]
+              return src.get(k,float('nan'))
+          print("## ⑩ L5 bisect — which family reorders gold down? (per-category ordering)\n")
+          for k in ('p@1','mrr'):
+              print(f"### {k}\n")
+              print("| cat | "+" | ".join(names)+" |")
+              print("| --- "*(len(names)+1)+"|")
+              for cat in ('ALL','single_hop','multi_hop','temporal','open_domain'):
+                  print(f"| {cat} | "+" | ".join(f"{m(arms[n],cat,k):.4f}" for n in names)+" |")
+              print()
+          print("### recall@10 guard (every arm MUST equal `on` — L5 is post-truncation)\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          for cat in ('ALL','single_hop','multi_hop','temporal','open_domain'):
+              print(f"| {cat} | "+" | ".join(f"{m(arms[n],cat,'recall@10'):.4f}" for n in names)+" |")
+          print("\n**Reading:** the family whose LOO arm recovers most of l5-off's single_hop p@1 gain "
+                "(0.4110→0.5031) is the single_hop saboteur; the family whose LOO arm loses temporal p@1 "
+                "(0.5352→?) is the temporal carrier — expect temporal_match. "
+                "**Decision:** default-disable the saboteur(s) ONLY (PR), keep the temporal carrier → "
+                "single_hop ordering win without the temporal loss, recall@10 unchanged at 0.6853. "
+                "If effects don't decompose (no single family recovers ≥ half the gain), interactions "
+                "dominate → test the pair {quality,importance} next. "
+                "AUDIT: recall@10 guard must be IDENTICAL across arms; any drift = kill-switch leaked "
+                "pre-truncation = invalid run.")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boost-ablation-l5-json
+          path: "*.json"
+          if-no-files-found: warn

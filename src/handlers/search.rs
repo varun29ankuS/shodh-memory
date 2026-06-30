@@ -163,12 +163,13 @@ pub async fn multimodal_search(
         });
     }
 
-    let query = MemoryQuery {
+    let mut query = MemoryQuery {
         query_text: Some(req.query_text.clone()),
         max_results: req.limit.unwrap_or(10),
         retrieval_mode,
         ..Default::default()
     };
+    state.annotate_query_ner(&mut query);
 
     let shared_memories = memory_guard.recall(&query).map_err(AppError::Internal)?;
     let raw_memories: Vec<Memory> = shared_memories.iter().map(|m| (**m).clone()).collect();
@@ -275,7 +276,7 @@ pub async fn robotics_search(
         });
     }
 
-    let query = MemoryQuery {
+    let mut query = MemoryQuery {
         query_text: req.query_text,
         robot_id: req.robot_id.clone(),
         mission_id: req.mission_id.clone(),
@@ -286,6 +287,7 @@ pub async fn robotics_search(
         retrieval_mode,
         ..Default::default()
     };
+    state.annotate_query_ner(&mut query);
 
     let shared_memories = memory_guard.recall(&query).map_err(AppError::Internal)?;
     let raw_memories: Vec<Memory> = shared_memories.iter().map(|m| (**m).clone()).collect();

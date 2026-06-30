@@ -1,0 +1,112 @@
+name: ⑨ boost-stack ablation — does the post-fusion stack earn its keep on FLAT?
+
+# The calibrated FLAT fusion (0.6853) is followed by ~18 multiplicative boost families
+# (layers 4.45-5.7) that were tuned in the RRF era and never ablated against the FLAT
+# baseline. Per-layer ablation already showed rerank/facts ≈ 0. Audit 2026-06-10 found
+# uncapped compounding (attribute ×2.5, temporal_fact ×2.0, combined_boost up to ~2.35).
+# SHODH_DISABLE_BOOSTS=<family,...> kills families at recall time. Stage 1 BISECTS:
+#   A = baseline (all boosts on, 0.6853 ref)
+#   B = all off (pure calibrated fusion)
+#   C = layer-4 pack off (attribute, temporal_prefilter, temporal_fact, interference,
+#       prospective, fact_source, ontological)
+#   D = layer-5 pack off (hebbian, recency, arousal, credibility, temporal_match,
+#       feedback, importance, tag_penalty, quality, linguistic, competition)
+#   E = the two giant multipliers off (attribute ×2.5, temporal_fact ×2.0)
+# Decision: B≈A ⇒ stack inert → delete-stack PR. B>A ⇒ stack net-harmful → prune hard.
+# B<A ⇒ C vs D locates the load-bearing pack → stage 2 bisects inside it.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/boost-ablation.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  boost-ablation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+      L4PACK: "attribute,temporal_prefilter,temporal_fact,interference,prospective,fact_source,ontological"
+      L5PACK: "hebbian,recency,arousal,credibility,temporal_match,feedback,importance,tag_penalty,quality,linguistic,competition"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — baseline (all boosts on)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — ALL boosts off (pure calibrated fusion)
+        run: set -o pipefail; SHODH_DISABLE_BOOSTS=all ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — layer-4 pack off
+        run: set -o pipefail; SHODH_DISABLE_BOOSTS="$L4PACK" ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+      - name: D recall — layer-5 pack off
+        run: set -o pipefail; SHODH_DISABLE_BOOSTS="$L5PACK" ./target/release/recall-eval --suite locomo --repeats 1 --output d.json --storage ./s-d 2>&1 | tail -3
+      - name: E recall — attribute + temporal_fact off (the ×2.5 / ×2.0 multipliers)
+        run: set -o pipefail; SHODH_DISABLE_BOOSTS="attribute,temporal_fact" ./target/release/recall-eval --suite locomo --repeats 1 --output e.json --storage ./s-e 2>&1 | tail -3
+      - name: A funnel — baseline
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --output oa.json --funnel fa.json --storage ./s-fa 2>&1 | tail -3
+      - name: B funnel — all off
+        run: set -o pipefail; SHODH_DISABLE_BOOSTS=all ./target/release/recall-eval --suite locomo --output ob.json --funnel fb.json --storage ./s-fb 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'on':load('a.json'),'all-off':load('b.json'),'l4-off':load('c.json'),'l5-off':load('d.json'),'big2-off':load('e.json')}
+          def rec(d,cat):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if cat=='ALL' else d['by_category'][cat]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          names=list(arms.keys())
+          print("## ⑨ boost-stack ablation — recall@10 (FLAT baseline ref 0.6853)\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          for cat in cats:
+              print(f"| {cat} | "+" | ".join(f"{rec(arms[n],cat):.4f}" for n in names)+" |")
+          for cat in ('ALL','single_hop','multi_hop','temporal'):
+              print(f"\n**Δ {cat} vs on:** "+", ".join(f"{n} {rec(arms[n],cat)-rec(arms['on'],cat):+.4f}" for n in names if n!='on'))
+          def g(fn,stage,k):
+              if not fn: return float('nan')
+              for r in fn.get('overall',[]):
+                  if r['stage']==stage: return r.get(k,float('nan'))
+              return float('nan')
+          fa=load('fa.json'); fb=load('fb.json')
+          print("\n### funnel FUSION — boosts on vs all-off\n| metric | on | all-off |")
+          print("| --- | --- | --- |")
+          for k in ('present_pct','top10_pct','mean_rank_when_present'):
+              print(f"| fusion {k} | {g(fa,'fusion',k):.2f} | {g(fb,'fusion',k):.2f} |")
+          print("\n**Decision (stage 1 bisect):** all-off ≈ on (|Δ ALL| ≤ ~0.005) ⇒ the whole stack is INERT → delete-stack simplification PR. all-off > on ⇒ stack is net-HARMFUL → prune hard, keep only families that C/D/big2 show carrying signal. all-off < on ⇒ the stack carries real signal: l4-off vs l5-off locates the pack; stage 2 bisects INSIDE the losing pack (leave-one-out per family). Watch per-category: temporal families likely carry `temporal`; importance/quality may carry `single_hop`. AUDIT: any pruning decision must HOLD single_hop ≥ 0.7515 and temporal must not crater — a +ALL win that trades a category is the RRF-era mistake again.")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boost-ablation-json
+          path: "*.json"
+          if-no-files-found: warn

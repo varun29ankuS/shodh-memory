@@ -1,0 +1,98 @@
+name: ⑭ learned per-query trust (C, stage 1b) — vector↔BM25 AGREEMENT feature
+
+# Stage 1 (bm25 peakedness, run 27244857747) FAILED: helps multi/temporal, craters
+# single_hop — one leg's shape doesn't separate the query types. Stage 1b feature =
+# vector↔BM25 top-K AGREEMENT (SHODH_ADAPT_FEATURE=agreement): overlap of the legs'
+# top-K candidate sets. High overlap ⇒ lexical anchor exists ⇒ single_hop shape ⇒
+# trust BM25 (vec_trust→1). Low overlap ⇒ vector sees what BM25 can't ⇒ multi_hop
+# shape ⇒ trust vector (→max). Measures the RELATION between legs, not one leg alone.
+# GOAL (the whole point of approach C): multi_hop UP with single_hop HELD — break the
+# tradeoff, don't re-trade it.
+#   A=off (base)  B=agreement default (k10 lo.1 hi.5 max1.6)  C=max1.4  D=hi.7  E=k5
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/fusion-agreement-sweep.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  agreement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — adaptive off (base)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — agreement default (k10 lo.1 hi.5 max1.6)
+        run: set -o pipefail; SHODH_FLAT_ADAPTIVE=1 SHODH_ADAPT_FEATURE=agreement ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — agreement gentle (max1.4)
+        run: set -o pipefail; SHODH_FLAT_ADAPTIVE=1 SHODH_ADAPT_FEATURE=agreement SHODH_ADAPT_TRUST_MAX=1.4 ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+      - name: D recall — agreement wide (hi.7)
+        run: set -o pipefail; SHODH_FLAT_ADAPTIVE=1 SHODH_ADAPT_FEATURE=agreement SHODH_ADAPT_AGREE_HI=0.7 ./target/release/recall-eval --suite locomo --repeats 1 --output d.json --storage ./s-d 2>&1 | tail -3
+      - name: E recall — agreement sharp (k5)
+        run: set -o pipefail; SHODH_FLAT_ADAPTIVE=1 SHODH_ADAPT_FEATURE=agreement SHODH_ADAPT_AGREE_K=5 ./target/release/recall-eval --suite locomo --repeats 1 --output e.json --storage ./s-e 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'off':load('a.json'),'agree':load('b.json'),'max1.4':load('c.json'),'hi.7':load('d.json'),'k5':load('e.json')}
+          names=list(arms.keys())
+          def m(d,cat,k='recall@10'):
+              if not d: return float('nan')
+              src = d['layers']['full'] if cat=='ALL' else d['by_category'][cat]
+              return src.get(k,float('nan'))
+          print("## ⑭ agreement feature (approach C stage 1b) — recall@10\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          for cat in ('ALL','single_hop','multi_hop','temporal','open_domain'):
+              print(f"| {cat} | "+" | ".join(f"{m(arms[n],cat):.4f}" for n in names)+" |")
+          for cat in ('ALL','single_hop','multi_hop','temporal'):
+              print(f"\n**Δ {cat} vs off:** "+", ".join(f"{n} {m(arms[n],cat)-m(arms['off'],cat):+.4f}" for n in names if n!='off'))
+          print("\n**Decision (stage-1b proof of approach C):** an arm lifts ALL with multi_hop UP and "
+                "single_hop NOT regressing (within ~0.003 run noise of off) ⇒ the agreement feature "
+                "BREAKS the structural tradeoff → fold params into a confirm + default PR, then stage 2 "
+                "(multi-feature fit: agreement + peakedness + graph strength), stage 3 (online from "
+                "feedback — the E2 moat). All arms re-trade single_hop like peakedness did ⇒ single "
+                "features are exhausted → instrument per-query feature/recall export and FIT offline. "
+                "AUDIT: multi_hop AND single_hop must BOTH move the right way; a +ALL from temporal "
+                "alone is not the lever this tests.")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fusion-agreement-json
+          path: "*.json"
+          if-no-files-found: warn

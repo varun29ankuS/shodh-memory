@@ -1,0 +1,155 @@
+name: ㉓ PPR quality + lineage funnel — node specificity / predicate weights / origin localization
+
+# Two evidence-backed PPR-quality levers (from the HippoRAG read, 2026-06-11) plus the
+# pre-registered lineage funnel diagnostic. ALL arms hold the canonical base constant
+# (SHODH_QUERY_NER=1; base recall ~0.7124 ALL / multi 0.4896 / p@1 0.5167).
+#
+#   A = base recall (guard)
+#   B = +SHODH_PPR_SPECIFICITY        node-specificity restart weighting (s_i = 1/mention_count)
+#   C = +SHODH_GRAPH_PREDICATE_WEIGHTS retest, NOW that typed edges exist (SEMANTIC_RELATIONS=1)
+#   D = B+C                            interaction check
+#   + lineage funnel: SHODH_CAUSAL_ORIGIN_DEBUG=1 aggregates CAUSAL_FUNNEL (qents/strict/cue/origins)
+#     to LOCALIZE the lineage P@1=0 — origins-not-found (resolution/cue/walk) vs found-but-buried
+#     (injection survival). Injection already exists (mod.rs:2510); this says whether it FIRES.
+#   + lineage +specificity: does down-weighting hub seeds lift the true root's rank?
+#
+# Why specificity: PPR restart mass is currently raw salience-weighted activation
+# (graph_retrieval.rs:597) — a hub query entity dominates the stationary distribution.
+# HippoRAG's ablation measured ~2.7 R@2 from inverse-frequency seed weighting. Local IDF
+# (reads only the seed's own mention_count), so it stays within the edge-RAM budget.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/ppr-specificity-ab.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  ppr-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — base (guard)
+        run: set -o pipefail; SHODH_QUERY_NER=1 ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — +node specificity
+        run: set -o pipefail; SHODH_QUERY_NER=1 SHODH_PPR_SPECIFICITY=1 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — +predicate weights (typed edges live)
+        run: set -o pipefail; SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_GRAPH_PREDICATE_WEIGHTS=1 ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+      - name: D recall — +specificity +predicate weights
+        run: set -o pipefail; SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_GRAPH_PREDICATE_WEIGHTS=1 SHODH_PPR_SPECIFICITY=1 ./target/release/recall-eval --suite locomo --repeats 1 --output d.json --storage ./s-d 2>&1 | tail -3
+
+      - name: Lineage funnel — localize P@1=0 (CAUSAL_ORIGIN_DEBUG)
+        run: |
+          set -o pipefail
+          SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_CAUSAL_ORIGIN_DEBUG=1 \
+            ./target/release/recall-eval --suite locomo --output l-funnel-main.json --lineage lineage-funnel.json --storage ./s-lf 2>funnel.err | tail -3
+          echo "### lineage funnel (CAUSAL_ORIGIN_DEBUG)" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import re
+          rows=[]
+          for line in open('funnel.err', errors='ignore'):
+              m=re.search(r'CAUSAL_FUNNEL qents=(\d+) strict=(\d+) cue=(\w+) origins=(\d+)', line)
+              if m: rows.append((int(m.group(1)),int(m.group(2)),m.group(3)=='true',int(m.group(4))))
+          n=len(rows)
+          if not n:
+              print("\n**No CAUSAL_FUNNEL lines** — the lineage harness did not reach the causal-origin block. "
+                    "The walk path is not exercised in the harness recall path (different entrypoint).")
+          else:
+              cue=sum(1 for r in rows if r[2])
+              strict_ok=sum(1 for r in rows if r[1]>0)
+              found=sum(1 for r in rows if r[3]>0)
+              print(f"\n- funnel lines: **{n}**")
+              print(f"- cue matched: **{cue}/{n}**")
+              print(f"- strict seeds resolved (>0): **{strict_ok}/{n}**")
+              print(f"- origins found (>0): **{found}/{n}**")
+              if found==0:
+                  print("\n**Localized: origins NOT FOUND.** Bug is upstream of injection — entity resolution "
+                        "(strict_walk_seeds), cue match, or the backward walk. Fix that, not ranking.")
+              else:
+                  print(f"\n**Localized: origins FOUND in {found}/{n} cases but P@1 still 0** ⇒ found-but-buried. "
+                        "Injection at mod.rs:2510 fires but loses at RRF fusion (rank-based buries the rank-1 "
+                        "graph candidate). Next = post-fusion injection or magnitude-fusion survival.")
+          PY
+
+      - name: Lineage — +specificity (does hub down-weighting lift the root?)
+        run: |
+          set -o pipefail
+          SHODH_QUERY_NER=1 SHODH_SEMANTIC_RELATIONS=1 SHODH_PPR_SPECIFICITY=1 \
+            ./target/release/recall-eval --suite locomo --output l-spec-main.json --lineage lineage-spec.json --storage ./s-ls | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'base':load('a.json'),'+spec':load('b.json'),'+predw':load('c.json'),'+both':load('d.json')}
+          names=list(arms.keys())
+          def m(d,cat,k='recall@10'):
+              if not d: return float('nan')
+              src = d['layers']['full'] if cat=='ALL' else d['by_category'][cat]
+              return src.get(k,float('nan'))
+          print("## ㉓ PPR quality — recall@10 (base = in-run reference)\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          for cat in ('ALL','single_hop','multi_hop','temporal','open_domain'):
+              print(f"| {cat} | "+" | ".join(f"{m(arms[n],cat):.4f}" for n in names)+" |")
+          def p1(d,cat='ALL'):
+              if not d: return float('nan')
+              src=d['layers']['full'] if cat=='ALL' else d['by_category'][cat]
+              return src.get('p@1',float('nan'))
+          print("\n| p@1 | "+" | ".join(f"{p1(arms[n]):.4f}" for n in names)+" |")
+          def lin(f):
+              d=load(f)
+              if not d: return "n/a"
+              full=[r for r in d['rows'] if r['layer']=='full']
+              return f"P@1 {full[0]['multihop_p_at_1']:.2f}, r@10 {full[0]['multihop_recall_at_10']:.2f}" if full else "n/a"
+          print(f"\n**lineage (full layer):** base=P@1 0.00/r@10 0.05 | +spec → {lin('lineage-spec.json')}")
+          print("\n**Pre-registered decisions:**")
+          print("- **+spec (B):** ALL up or flat (≥ base-0.003) AND multi_hop not down >0.005 ⇒ Pareto/neutral, "
+                "default-PR candidate. ALL ≥ +0.005 ⇒ strong win. multi_hop/open_domain down >0.01 ⇒ hub "
+                "down-weighting hurt path-finding; gate or reject.")
+          print("- **+predw (C):** up ⇒ typed edges (increment 1) now carry spreading signal — flip default with "
+                "semantic relations. flat ⇒ still inert ⇒ typed fraction too low, next = typed-fraction "
+                "instrumentation at ingest. down ⇒ noisy types mislead spreading → raise SHODH_SEMREL_MIN.")
+          print("- **+both (D):** beats max(B,C) ⇒ levers compose, ship together. Below either ⇒ they interfere, "
+                "ship the stronger single arm.")
+          print("- **lineage +spec:** P@1 > 0 ⇒ down-weighting hub distractors let the true root surface; "
+                "combine with the funnel localization above to choose the next lineage fix.")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppr-specificity-json
+          path: "*.json"
+          if-no-files-found: warn

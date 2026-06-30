@@ -1,0 +1,85 @@
+name: nomic int8 confirmation — full corpus (MiniLM vs nomic@384)
+
+# Re-runs nomic@384 at int8 (model_quantized.onnx) on the FULL corpus (no caps),
+# for two reasons:
+#   1. nomic is the only arm running NEW code (768->384 Matryoshka truncation +
+#      parameter-free LayerNorm + conditional token_type_ids). An independent
+#      full-scale run confirms the implementation reproduces and isn't a fluke.
+#   2. int8 is ~3x faster than the 86-min fp32 directional run AND is the only
+#      deployable precision on edge.
+# MiniLM int8 is the same-precision baseline (true full-scale ~0.54). If nomic@384
+# does not clearly beat MiniLM at full scale, the 768-truncated-to-384 idea is dead
+# for us — a native-384 model (gte/bge) is simpler and at least as good.
+
+on:
+  workflow_dispatch:
+  # One-shot registration trigger: a never-run, dispatch-only workflow on a
+  # non-default branch is not yet dispatchable via the API. This push trigger
+  # registers AND launches it on the experiment branch. Strip after it runs.
+  push:
+    paths: ['.github/workflows/nomic-confirm-int8.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Fetch MiniLM + nomic (int8)
+        run: |
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+          # nomic int8 quantized (uint8, ~137MB) — still 768-dim native, truncated in-engine
+          ND="$HOME/models/nomic"; mkdir -p "$ND"
+          NB="https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main"
+          dl "$ND/model_quantized.onnx" "$NB/onnx/model_quantized.onnx"
+          dl "$ND/tokenizer.json"       "$NB/tokenizer.json"
+          ls -la "$ND"
+
+      - name: MiniLM-L6 int8 (baseline, full corpus)
+        run: ./target/release/recall-eval --suite locomo --output mini.json --storage ./s-mini 2>&1 | tail -3
+      - name: nomic Matryoshka@384 int8 (full corpus)
+        run: SHODH_EMBEDDER=nomic SHODH_MATRYOSHKA=1 SHODH_MODEL_PATH=/home/runner/models/nomic SHODH_USE_QUANTIZED_MODEL=1 ./target/release/recall-eval --suite locomo --output nomic.json --storage ./s-nomic 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms=[("MiniLM-L6 int8","mini.json"),("nomic@384 int8","nomic.json")]
+          data=[(n,load(f)) for n,f in arms]
+          def rec(d,c):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if c=='ALL' else d['by_category'][c]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          base=rec(data[0][1],'ALL')
+          print("## nomic@384 int8 confirmation — FULL corpus, full-pipeline recall@10\n")
+          print("_No caps: true full-scale recall (MiniLM baseline ~0.54). nomic = 768-dim int8, truncated to 384 + renormalized. Independent check that the Matryoshka path reproduces._\n")
+          print("| category | MiniLM-L6 int8 | nomic@384 int8 | Δ |")
+          print("| --- | --- | --- | --- |")
+          for c in cats:
+              m=rec(data[0][1],c); n=rec(data[1][1],c)
+              print(f"| {c} | {m:.4f} | {n:.4f} | {n-m:+.4f} |")
+          print(f"\n**Δ vs MiniLM (ALL):** nomic@384 int8 {rec(data[1][1],'ALL')-base:+.4f}")
+          print("\nIf nomic does not clearly beat MiniLM here (and especially if open_domain still regresses on its 89 full-scale cases), 768-truncated-to-384 is not worth its weight vs a native-384 model.")
+          PY

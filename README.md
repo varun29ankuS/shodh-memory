@@ -4,7 +4,7 @@
 
 <h1 align="center">Shodh-Memory</h1>
 
-<p align="center"><b>Persistent cognitive memory for AI agents and robots. Remembers what matters, forgets what doesn't, gets smarter with use.</b></p>
+<p align="center"><b>Persistent cognitive memory for AI agents and robots — with no LLM in the loop. Remembers what matters, forgets what doesn't, gets smarter with use.</b></p>
 
 <p align="center">
   <a href="https://github.com/varun29ankuS/shodh-memory/actions"><img src="https://github.com/varun29ankuS/shodh-memory/workflows/CI/badge.svg" alt="build"></a>
@@ -27,7 +27,7 @@
 
 AI agents forget everything between sessions. Robots lose context between missions. They repeat mistakes, miss patterns, and treat every interaction like the first one.
 
-Shodh-Memory fixes this. It's persistent memory that actually learns — memories you use often become easier to find, old irrelevant context fades automatically, and recalling one thing brings back related things. Works for chat agents (MCP/HTTP), robots (Zenoh/ROS2), and edge devices. No API keys. No cloud. No external databases. One binary.
+Shodh-Memory fixes this. It's persistent memory that actually learns — memories you use often become easier to find, old irrelevant context fades automatically, and recalling one thing brings back related things. Works for chat agents (MCP/HTTP), robots (Zenoh/ROS2), and edge devices. No API keys. No cloud. No external databases. **No LLM in the loop.** One binary.
 
 ## Why Not Just Use mem0 / Cognee / Zep?
 
@@ -42,7 +42,19 @@ Shodh-Memory fixes this. It's persistent memory that actually learns — memorie
 | Robotics / ROS2 native | **Yes** (Zenoh) | No | No | No |
 | Binary size | **~17MB** | pip install + API keys | pip install + API keys + Neo4j | Cloud only |
 
-Every other memory system delegates intelligence to LLM API calls — that's why they're slow, expensive, and can't work offline. Shodh uses algorithmic intelligence: local embeddings, mathematical decay, learned associations. No LLM in the loop.
+Every other memory system delegates intelligence to LLM API calls — that's why they're slow, expensive, and can't work offline.
+
+## No LLM in the Loop
+
+Storing a memory makes **zero LLM calls**. Recalling makes **zero LLM calls**. Entity extraction, relation typing, knowledge-graph construction, causal tracing, ranking, decay, consolidation — all of it runs locally as algorithms, not API round-trips:
+
+- **Local embeddings** — MiniLM (22MB, INT8) via ONNX Runtime, on-device semantic search
+- **Local NER** — TinyBERT (14MB, INT8) extracts people, places, organizations from every memory
+- **Typed relation extraction without an LLM** — directed lexical cues + exemplar-matched semantic typing build a typed knowledge graph (`LocatedIn`, `WorksAt`, `Causes`…) from plain text
+- **Causal lineage** — "what was the root cause of X?" is answered by walking typed causal edges backward through the graph, not by asking a model
+- **Mathematical memory dynamics** — Hebbian strengthening, exponential→power-law decay, spreading activation, long-term potentiation
+
+What that buys you: **fully offline** operation, **millisecond** latency instead of multi-second API calls, **zero inference cost** at any scale, **deterministic, testable** behavior, and **data that never leaves the machine**. Your agent's LLM does the reasoning — its memory doesn't need one.
 
 ## Get Started
 
@@ -413,3 +425,5 @@ Apache 2.0
 <p align="center">
   <a href="https://registry.modelcontextprotocol.io/v0/servers?search=shodh">MCP Registry</a> · <a href="https://hub.docker.com/r/varunshodh/shodh-memory">Docker Hub</a> · <a href="https://pypi.org/project/shodh-memory/">PyPI</a> · <a href="https://www.npmjs.com/package/@shodh/memory-mcp">npm</a> · <a href="https://crates.io/crates/shodh-memory">crates.io</a> · <a href="https://www.shodh-memory.com">Docs</a>
 </p>
+
+<sub><i>Keywords: LLM-free memory · no LLM in the loop · local-first AI memory · offline agent memory · persistent memory for AI agents · long-term memory for LLM agents · MCP memory server · Claude Code memory · knowledge graph memory · hybrid vector + graph search · causal lineage · Hebbian learning · memory decay · edge AI memory · robotics memory · ROS2 / Zenoh robot memory · air-gapped RAG alternative</i></sub>

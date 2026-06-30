@@ -410,10 +410,17 @@ impl InterferenceDetector {
     ///
     /// When multiple similar memories are retrieved, they compete
     /// for activation. Stronger memories suppress weaker ones.
+    /// `record_state`: when false, competition COMPUTES winners/suppression
+    /// exactly as always (per-query ranking semantics unchanged) but records
+    /// NO interference into the detector. Eval determinism requires it: the
+    /// accumulated records feed Layer 4.6's survivor/loser boosts on FUTURE
+    /// queries, so repeat 0 of a harness run was teaching the detector and
+    /// shifting repeats 1+ (L1 smoke cross-repeat divergence, smoke-094).
     pub fn apply_retrieval_competition(
         &mut self,
         candidates: &[(String, f32, f32)], // (memory_id, relevance_score, similarity_to_query)
         query_preview: &str,
+        record_state: bool,
     ) -> CompetitionResult {
         if candidates.len() <= 1 {
             return CompetitionResult {
@@ -464,23 +471,27 @@ impl InterferenceDetector {
                         if new_score > COMPETITION_SURVIVAL_FLOOR {
                             winners.push((id.clone(), new_score));
                             // Mild interference record for close survivors ("battle-tested")
-                            self.record_interference(
-                                id,
-                                winner_id,
-                                score_ratio,
-                                InterferenceType::RetrievalCompetition,
-                                suppression * COMPETITION_SURVIVOR_DAMAGE_RATIO,
-                            );
+                            if record_state {
+                                self.record_interference(
+                                    id,
+                                    winner_id,
+                                    score_ratio,
+                                    InterferenceType::RetrievalCompetition,
+                                    suppression * COMPETITION_SURVIVOR_DAMAGE_RATIO,
+                                );
+                            }
                         } else {
                             suppressed.push(id.clone());
                             // Strong interference record for fully suppressed memories
-                            self.record_interference(
-                                id,
-                                winner_id,
-                                score_ratio,
-                                InterferenceType::RetrievalCompetition,
-                                suppression,
-                            );
+                            if record_state {
+                                self.record_interference(
+                                    id,
+                                    winner_id,
+                                    score_ratio,
+                                    InterferenceType::RetrievalCompetition,
+                                    suppression,
+                                );
+                            }
                         }
                     } else {
                         winners.push((id.clone(), *score));
@@ -880,7 +891,7 @@ mod tests {
             ("mem-3".to_string(), 0.5, 0.70),  // Lower, should survive
         ];
 
-        let result = detector.apply_retrieval_competition(&candidates, "test query");
+        let result = detector.apply_retrieval_competition(&candidates, "test query", true);
 
         // Winner should be first
         assert_eq!(result.winners[0].0, "mem-1");

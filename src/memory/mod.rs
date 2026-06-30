@@ -11,6 +11,8 @@ pub mod context;
 pub mod facts;
 pub mod feedback;
 pub mod files;
+pub mod fusion_features;
+pub mod gold_funnel;
 pub mod graph_retrieval;
 pub mod hybrid_search;
 pub mod injection;
@@ -45,6 +47,25 @@ use crate::metrics::{
     EMBEDDING_CACHE_CONTENT, EMBEDDING_CACHE_CONTENT_SIZE, EMBEDDING_CACHE_QUERY,
     EMBEDDING_CACHE_QUERY_SIZE,
 };
+
+/// Query-time scoring clock. `SHODH_EVAL_NOW` (RFC3339) freezes it for the
+/// recall harness: repeat passes minutes apart see different `Utc::now() -
+/// created_at` recency components, which is enough to flip near-tie ranks
+/// (smoke-094). The env value is parsed once per process; when unset
+/// (production), every call returns the live clock.
+pub(crate) fn scoring_now() -> chrono::DateTime<chrono::Utc> {
+    static PINNED: std::sync::OnceLock<Option<chrono::DateTime<chrono::Utc>>> =
+        std::sync::OnceLock::new();
+    PINNED
+        .get_or_init(|| {
+            std::env::var("SHODH_EVAL_NOW").ok().and_then(|raw| {
+                chrono::DateTime::parse_from_rfc3339(&raw)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+            })
+        })
+        .unwrap_or_else(chrono::Utc::now)
+}
 
 use crate::constants::{
     DEFAULT_COMPRESSION_AGE_DAYS, DEFAULT_IMPORTANCE_THRESHOLD, DEFAULT_MAX_HEAP_PER_USER_MB,
@@ -234,6 +255,16 @@ pub struct MemorySystem {
     /// Extracts and indexes facts like "Melanie is planning camping next month"
     /// Resolves relative dates ("next month" → June 2023) for accurate retrieval
     temporal_fact_store: Arc<temporal_facts::TemporalFactStore>,
+
+    /// The user this MemorySystem belongs to. The manager creates one
+    /// MemorySystem per user but the id lived only in the manager's map key, so
+    /// `remember()` could not namespace per-user stores (e.g. temporal facts are
+    /// keyed `temporal_facts:{user_id}:…`). That is why temporal-fact storage was
+    /// previously handler-only — every non-HTTP path (Python bindings, batch,
+    /// MCP-direct, eval) silently dropped them. With the owner known here,
+    /// `remember()` persists facts and `recall()` can default the query's
+    /// `user_id` to this owner. `None` preserves the prior behaviour.
+    default_user_id: Option<String>,
 
     /// Flag: new memories stored since last fact extraction cycle.
     /// When false, fact extraction is skipped entirely (no RocksDB scan, no clones).
@@ -646,6 +677,9 @@ impl MemorySystem {
             learning_history,
             // Temporal fact store for multi-hop temporal reasoning
             temporal_fact_store,
+            // Owner unknown at construction; the manager sets it via
+            // set_default_user_id() so per-user stores work outside the handler.
+            default_user_id: None,
             // Dirty flag for fact extraction: run on first cycle, then only when new memories stored
             fact_extraction_needed: std::sync::atomic::AtomicBool::new(true),
             // Watermark for incremental fact extraction — initialized to 0 (sentinel).
@@ -721,6 +755,13 @@ impl MemorySystem {
     /// This provides consistent feedback integration across all retrieval paths.
     pub fn set_feedback_store(&mut self, feedback: Arc<parking_lot::RwLock<FeedbackStore>>) {
         self.feedback_store = Some(feedback);
+    }
+
+    /// Record which user owns this MemorySystem. Set by the manager right after
+    /// construction so per-user stores (temporal facts) work on every ingest
+    /// path, and so `recall()` can default the query's `user_id` to this owner.
+    pub fn set_default_user_id(&mut self, user_id: impl Into<String>) {
+        self.default_user_id = Some(user_id.into());
     }
 
     /// Get reference to the optional feedback store
@@ -1004,14 +1045,34 @@ impl MemorySystem {
                 &memory.experience.entities,
             );
             if !facts.is_empty() {
-                // Note: We don't have user_id in remember(), will need to pass it
-                // For now, extract facts but don't store - storage happens at handler level
-                // or we can use a placeholder user_id
-                tracing::debug!(
-                    "Extracted {} temporal facts from memory {}",
-                    facts.len(),
-                    memory.id.0
-                );
+                // Persist the facts under this system's owner. Previously these
+                // were extracted then dropped here ("storage happens at handler
+                // level"), so every non-HTTP ingest path (Python bindings, batch,
+                // MCP-direct, eval harness) silently lost temporal facts and
+                // Layer 0.6 had nothing to find. With the owner known, store them
+                // on the core path so all callers get temporal reasoning.
+                if let Some(user_id) = self.default_user_id.as_deref() {
+                    match self.temporal_fact_store.store_batch(user_id, &facts) {
+                        Ok(stored) => tracing::debug!(
+                            "Stored {}/{} temporal facts from memory {} (user={})",
+                            stored,
+                            facts.len(),
+                            memory.id.0,
+                            user_id
+                        ),
+                        Err(e) => tracing::warn!(
+                            "Failed to store temporal facts for memory {}: {e}",
+                            memory.id.0
+                        ),
+                    }
+                } else {
+                    tracing::debug!(
+                        "Extracted {} temporal facts from memory {} but no owner set; \
+                         not stored (call set_default_user_id)",
+                        facts.len(),
+                        memory.id.0
+                    );
+                }
             }
         }
 
@@ -1296,6 +1357,18 @@ impl MemorySystem {
     /// - Semantic search: Uses embeddings + vector similarity across ALL tiers
     /// - Non-semantic search: Uses importance * temporal decay
     /// - Zero shortcuts, no TODOs, enterprise-grade
+    /// SHODH_RECALL_READONLY=1 — recall performs no usage writes (access-count
+    /// persistence, co-retrieval edge creation). Set by the eval harness:
+    /// eval repeats measure variance, not learning curves, and FLAT fusion
+    /// made graph magnitude load-bearing, so first-repeat usage writes were
+    /// shifting later repeats' rankings (L1 smoke non-determinism,
+    /// PR #325 checks). Production default: writes on.
+    fn recall_readonly() -> bool {
+        std::env::var("SHODH_RECALL_READONLY")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    }
+
     pub fn recall(&self, query: &Query) -> Result<Vec<SharedMemory>> {
         Ok(self.recall_inner(query, false)?.memories)
     }
@@ -1364,7 +1437,7 @@ impl MemorySystem {
         self.expand_with_hierarchy(&mut memories, &mut seen_ids);
 
         // Rank by importance * temporal relevance
-        let now = chrono::Utc::now();
+        let now = scoring_now();
         memories.sort_by(|a, b| {
             let age_days_a = (now - a.created_at).num_days();
             let temporal_a = Self::calculate_temporal_relevance(age_days_a);
@@ -1391,23 +1464,26 @@ impl MemorySystem {
         // Update access counts (in-memory) + record consolidation events, then
         // persist all candidates' access bumps in ONE batched write instead of a
         // full re-index per candidate (the dominant old read-path cost).
-        let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
-        for memory in &memories {
-            let before =
-                self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
-            access_refs.push((memory.as_ref(), before));
-        }
-        if let Err(e) = self.long_term_memory.persist_access_updates(&access_refs) {
-            tracing::warn!("Failed to persist access updates: {e}");
-        }
+        if !Self::recall_readonly() {
+            let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
+            for memory in &memories {
+                let before =
+                    self.update_access_count_instrumented(memory, StrengtheningReason::Recalled);
+                access_refs.push((memory.as_ref(), before));
+            }
+            if let Err(e) = self.long_term_memory.persist_access_updates(&access_refs) {
+                tracing::warn!("Failed to persist access updates: {e}");
+            }
 
-        // Hebbian learning: co-activation strengthens associations between memories
-        // When memories are retrieved together, they form/strengthen edges in the memory graph
-        if memories.len() >= 2 {
-            if let Some(graph) = &self.graph_memory {
-                let memory_uuids: Vec<uuid::Uuid> = memories.iter().map(|m| m.id.0).collect();
-                if let Err(e) = graph.read().record_memory_coactivation(&memory_uuids) {
-                    tracing::trace!("Coactivation recording failed (non-critical): {e}");
+            // Hebbian learning: co-activation strengthens associations between
+            // memories. When memories are retrieved together, they
+            // form/strengthen edges in the memory graph.
+            if memories.len() >= 2 {
+                if let Some(graph) = &self.graph_memory {
+                    let memory_uuids: Vec<uuid::Uuid> = memories.iter().map(|m| m.id.0).collect();
+                    if let Err(e) = graph.read().record_memory_coactivation(&memory_uuids) {
+                        tracing::trace!("Coactivation recording failed (non-critical): {e}");
+                    }
                 }
             }
         }
@@ -1805,7 +1881,18 @@ impl MemorySystem {
         // Temporal fact lookup - boost source memories of matching facts in Layer 4.5
         // RH-8 gate: Layer 0.6 only runs in `Full` mode.
         let temporal_fact_boost_ids: HashSet<MemoryId> = if layer_full && has_temporal_query {
-            if let Some(user_id) = &query.user_id {
+            // Ablation hook: SHODH_DISABLE_FACT_LAYERS turns the temporal/fact
+            // layers off at query time so their recall contribution can be
+            // measured against the same ingested corpus.
+            let fact_user = if std::env::var("SHODH_DISABLE_FACT_LAYERS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
+                None
+            } else {
+                query.user_id.as_ref().or(self.default_user_id.as_ref())
+            };
+            if let Some(user_id) = fact_user {
                 // Get entity name (first focal entity)
                 let entity = query_analysis
                     .focal_entities
@@ -1905,7 +1992,18 @@ impl MemorySystem {
                 std::collections::HashMap::new();
 
             if layer_facts {
-                if let Some(user_id) = &query.user_id {
+                // Ablation hook: SHODH_DISABLE_FACT_LAYERS turns the temporal/fact
+                // layers off at query time so their recall contribution can be
+                // measured against the same ingested corpus.
+                let fact_user = if std::env::var("SHODH_DISABLE_FACT_LAYERS")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+                {
+                    None
+                } else {
+                    query.user_id.as_ref().or(self.default_user_id.as_ref())
+                };
+                if let Some(user_id) = fact_user {
                     let entity_names: Vec<String> = query_analysis
                         .focal_entities
                         .iter()
@@ -2001,7 +2099,7 @@ impl MemorySystem {
                     let embedding = self
                         .embedder
                         .as_ref()
-                        .encode(&embedding_query_text)
+                        .encode_query(&embedding_query_text)
                         .context("Failed to generate query embedding")?;
 
                     self.query_cache.insert(query_hash, embedding.clone());
@@ -2032,7 +2130,7 @@ impl MemorySystem {
                     Some(cached.clone())
                 } else {
                     EMBEDDING_CACHE_QUERY.with_label_values(&["miss"]).inc();
-                    match self.embedder.as_ref().encode(&neg_text) {
+                    match self.embedder.as_ref().encode_query(&neg_text) {
                         Ok(emb) => {
                             self.query_cache.insert(neg_hash, emb.clone());
                             EMBEDDING_CACHE_QUERY_SIZE.set(self.query_cache.entry_count() as i64);
@@ -2112,6 +2210,41 @@ impl MemorySystem {
                 query.retrieval_mode,
                 RetrievalMode::Hybrid | RetrievalMode::Associative | RetrievalMode::Causal
             );
+
+        // Graph-driven query expansion (SHODH_GRAPH_EXPAND_K). The graph's role
+        // for multi-hop is NOT to win the fusion scoring fight (distal activation
+        // is low-magnitude and gets diluted) but to EXPAND THE CUE SET — spreading
+        // activation cognitively surfaces related concepts, which become part of
+        // what you retrieve. We take the top-K strongest 1-hop graph neighbours of
+        // the query's entities (the "bridges") and append them to the BM25 query,
+        // so a multi-hop answer mentioning a bridge entity surfaces on the lexical
+        // leg's own terms instead of being buried as a low-RRF graph candidate.
+        // E3 ceiling ≈ 1.0 (the 1-hop control proves: bridge-in-query → BM25 finds
+        // the answer). Default 0 → off.
+        let graph_expand_k: usize = std::env::var("SHODH_GRAPH_EXPAND_K")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        // Margin gate: only expand on edges at/above this effective strength, so
+        // weak/noisy neighbours don't add lexical noise (recovers the small
+        // LoCoMo per-category cost on open_domain/temporal). 0 = no gate.
+        let graph_expand_min_strength: f32 = std::env::var("SHODH_GRAPH_EXPAND_MIN_STRENGTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        let mut graph_bridges: Vec<String> = Vec::new();
+        // Causal-origin entities (SHODH_CAUSAL_ORIGIN): top-k roots traced backward
+        // from the query's effect entities with their backward-path scores, whose
+        // episodes are injected as top graph candidates below (the funnel showed the
+        // trace finds the root but the lone BM25 bridge token loses to the direct
+        // cause's match on the effect term).
+        let mut causal_origin_entities: Vec<(uuid::Uuid, f32)> = Vec::new();
+        // Episode ids of the traced causal roots (populated by the Layer-2 origin
+        // injection), so the post-fusion answer placement (Layer 4.95) can lift the
+        // root ABOVE the global fused max — a structurally-certain answer, not a
+        // similarity candidate to be diluted by RRF.
+        let mut causal_origin_episode_ids: Vec<MemoryId> = Vec::new();
+
         #[allow(clippy::type_complexity)]
         let (
             graph_results,
@@ -2150,6 +2283,18 @@ impl MemorySystem {
 
                 // First, collect all query entity UUIDs
                 // Include nouns, adjectives, AND verbs for multi-hop reasoning
+                //
+                // IDF gate on concept seeds: a concept term (EntityLabel::Other,
+                // e.g. a YAKE keyphrase node) mentioned across many memories has
+                // ~no discriminative signal — it floods the spreading-activation
+                // frontier with non-gold and inflates traversal cost. When
+                // SHODH_CONCEPT_SEED_DF_MAX is set, skip concept-labeled seeds
+                // whose corpus mention_count (document-frequency proxy) exceeds
+                // it. Person/Org/Location/etc. seeds are never DF-filtered — a
+                // frequently-named person is still a valid anchor.
+                let concept_seed_df_max: Option<usize> = std::env::var("SHODH_CONCEPT_SEED_DF_MAX")
+                    .ok()
+                    .and_then(|s| s.parse().ok());
                 let mut query_entities: Vec<uuid::Uuid> = Vec::new();
                 for e in query_analysis
                     .focal_entities
@@ -2175,7 +2320,272 @@ impl MemorySystem {
                     )
                 {
                     if let Ok(Some(ent)) = g.find_entity_by_name(e) {
+                        if let Some(df_max) = concept_seed_df_max {
+                            let is_concept = matches!(
+                                ent.labels.first(),
+                                Some(crate::graph_memory::EntityLabel::Other(_))
+                            );
+                            if is_concept && ent.mention_count > df_max {
+                                continue;
+                            }
+                        }
                         query_entities.push(ent.uuid);
+                    }
+                }
+
+                // PRECISION seed set for the causal-origin walk: strict
+                // resolution only (exact / case-insensitive / stemmed — no
+                // substring or word-level fuzzing). Lineage diagnosis
+                // (2026-06-10): the fuzzy tiers bound a fragmented query token
+                // ("incident") to an arbitrary hub node, so the backward walk
+                // injected OTHER chains' roots and crowded the true root out of
+                // the top-10 (root-cause P@1 pinned at 0.0). Query-NER names
+                // (multiword, model-extracted) are included — they are exactly
+                // the phrases strict resolution needs.
+                let mut strict_walk_seeds: Vec<uuid::Uuid> = Vec::new();
+                {
+                    // Collect candidates WITH names so the maximal-match filter
+                    // below can compare mentions.
+                    let mut candidates: Vec<(uuid::Uuid, String)> = Vec::new();
+                    let mut seen: std::collections::HashSet<uuid::Uuid> =
+                        std::collections::HashSet::new();
+                    // Phrase-level: entities whose FULL name occurs verbatim in
+                    // the query. Token-level strict lookup is insufficient — the
+                    // POS tagger fragments multiword names ("the selvic
+                    // incident" → "selvic", "incident"), and fragments either
+                    // miss (strict) or bind to arbitrary hubs (fuzzy).
+                    let qt_lower = query_text.to_lowercase();
+                    if let Ok(contained) = g.find_entities_contained_in_text(&qt_lower, 5, 8) {
+                        for ent in contained {
+                            if seen.insert(ent.uuid) {
+                                candidates.push((ent.uuid, ent.name.to_lowercase()));
+                            }
+                        }
+                    }
+                    // NER names (model-extracted, multiword-capable) via strict
+                    // lookup as a complement.
+                    let ner_names = query.ner_entities.as_deref().unwrap_or(&[]);
+                    for e in ner_names.iter().map(|s| s.as_str()) {
+                        if let Ok(Some(ent)) = g.find_entity_by_name_strict(e) {
+                            if seen.insert(ent.uuid) {
+                                candidates.push((ent.uuid, ent.name.to_lowercase()));
+                            }
+                        }
+                    }
+                    // MAXIMAL-MATCH only: drop any seed whose name is a substring
+                    // of another seed's name. NER fragment entities ("Tavmor4",
+                    // "v1.2") pass the verbatim-containment test alongside the
+                    // full mention ("the Tavmor4 incident", "the v1.2 rollback"),
+                    // and a fragment is a cross-document hub — walking back from
+                    // it unions the backward cones of every chain that touches it
+                    // (funnel 2026-06-11: strict=2–4 seeds → 52–60 origins when 1
+                    // is correct). The longest mention is the intended referent.
+                    for (uuid, name) in &candidates {
+                        let subsumed = candidates.iter().any(|(other_uuid, other_name)| {
+                            other_uuid != uuid
+                                && other_name.len() > name.len()
+                                && other_name.contains(name.as_str())
+                        });
+                        if !subsumed {
+                            strict_walk_seeds.push(*uuid);
+                        }
+                    }
+                }
+
+                // Graph-driven cue expansion: collect the top-K strongest 1-hop
+                // neighbours of the resolved query entities as "bridges" to append
+                // to the BM25 query (see SHODH_GRAPH_EXPAND_K above).
+                if graph_expand_k > 0 && !query_entities.is_empty() {
+                    let original: std::collections::HashSet<String> = query_analysis
+                        .focal_entities
+                        .iter()
+                        .map(|e| e.text.to_lowercase())
+                        .collect();
+                    let mut seen: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    let mut scored: Vec<(String, f32)> = Vec::new();
+                    for qe in &query_entities {
+                        if let Ok(edges) = g.get_entity_relationships_limited(qe, Some(32)) {
+                            for edge in edges {
+                                let strength = edge.effective_strength();
+                                if strength < graph_expand_min_strength {
+                                    continue;
+                                }
+                                if let Ok(Some(nb)) = g.get_entity(&edge.to_entity) {
+                                    let name_lc = nb.name.to_lowercase();
+                                    if nb.name.trim().len() < 2 || original.contains(&name_lc) {
+                                        continue;
+                                    }
+                                    if seen.insert(name_lc) {
+                                        scored.push((nb.name.clone(), strength));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    graph_bridges = scored
+                        .into_iter()
+                        .take(graph_expand_k)
+                        .map(|(n, _)| n)
+                        .collect();
+                }
+
+                // Causal-origin retrieval (SHODH_CAUSAL_ORIGIN). "What was the
+                // origin of C?" cannot be answered by spreading activation: it
+                // favours the proximal cause and only flows cause→effect. For
+                // origin-intent queries, walk causal edges BACKWARD from the query
+                // entities to the source(s) and append the source entity names as
+                // bridges — the root episode shares no lexical token with the
+                // effect-query, so this is what lets it surface on the BM25 leg.
+                // Requires causally-typed edges (SHODH_GRAPH_EXTRACTED_PREDICATES).
+                //
+                // DEFAULT ON (lineage diagnosis 2026-06-10): this flag was
+                // default-OFF, so the walk the lineage harness exists to measure
+                // never executed — root-cause P@1 was pinned at 0.0 through every
+                // upstream fix ("machinery exists but never runs" #6). It is
+                // cue-gated (origin-intent queries only) and now PRECISION-seeded
+                // (phrase-level entity containment, not fuzzy fragments).
+                // SHODH_CAUSAL_ORIGIN=0 disables.
+                let causal_origin = std::env::var("SHODH_CAUSAL_ORIGIN")
+                    .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+                    .unwrap_or(true);
+                if causal_origin {
+                    const ORIGIN_CUES: &[&str] = &[
+                        "root cause",
+                        "root of",
+                        "origin",
+                        "underlying",
+                        "earliest",
+                        "what led to",
+                        "what caused",
+                        "stem from",
+                        "stemmed from",
+                        "reason behind",
+                        "originate",
+                    ];
+                    let qt = query_text.to_lowercase();
+                    let cue_matched = ORIGIN_CUES.iter().any(|c| qt.contains(c));
+                    let mut origins_found = 0usize;
+                    // PRECISION over recall for the walk: seed ONLY from
+                    // strictly-resolved entities. Fuzzy-resolved fragments
+                    // ("incident" → an arbitrary hub) made the walk inject
+                    // other chains' roots, burying the true root (the measured
+                    // lineage-zero ranking failure).
+                    if cue_matched && !strict_walk_seeds.is_empty() {
+                        if let Ok(origins) = g.trace_causal_origins(&strict_walk_seeds, 8) {
+                            origins_found = origins.len();
+                            // TOP-K only. The walk returns every terminal source in
+                            // the backward cone, scored by path strength; on a graph
+                            // with cross-chain causal bleed that was 21–57 origins
+                            // when 1 was correct, and injecting all of them FLOODED
+                            // the leg (the measured r@10 0.05 / P@1 0.0 is the
+                            // arithmetic of 1-true-in-50-injected). Bounded ranked
+                            // set, never everything reachable — the reach_inject
+                            // lesson, causal edition. SHODH_CAUSAL_ORIGIN_TOPK
+                            // overrides (default 3).
+                            let top_k = std::env::var("SHODH_CAUSAL_ORIGIN_TOPK")
+                                .ok()
+                                .and_then(|v| v.parse::<usize>().ok())
+                                .filter(|k| *k > 0)
+                                .unwrap_or(3);
+                            for (oid, score) in origins.into_iter().take(top_k) {
+                                causal_origin_entities.push((oid, score));
+                                if let Ok(Some(ent)) = g.get_entity(&oid) {
+                                    if ent.name.trim().len() >= 2 {
+                                        graph_bridges.push(ent.name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Funnel diagnostic (gated): localise WHERE causal-origin breaks —
+                    // entity resolution vs cue match vs trace. Greppable in CI logs.
+                    if std::env::var("SHODH_CAUSAL_ORIGIN_DEBUG").is_ok() {
+                        eprintln!(
+                            "CAUSAL_FUNNEL qents={} strict={} cue={} origins={}",
+                            query_entities.len(),
+                            strict_walk_seeds.len(),
+                            cue_matched,
+                            origins_found
+                        );
+                    }
+                }
+
+                // Typed-walk retrieval (SHODH_TYPED_WALK, #67): the causal-origin
+                // walk's machinery generalized to other relation intents. A
+                // typed-relation question ("Where does Caroline live?") is a
+                // triple with one unbound slot — (Caroline, LocatedIn, ?x) — and
+                // the typed substrate answers it by EDGE LOOKUP where BM25 and
+                // embeddings need lexical/semantic luck ("Caroline moved to
+                // Denver" shares nothing with "live"). V1 intents are the two
+                // relations the LoCoMo census shows the substrate actually
+                // carries (LocatedIn=166, CreatedBy well-typed); grow with
+                // typed_pct. Same discipline as the origin walk: strict maximal
+                // seeds, bounded top-k, scored injection — never a flood.
+                let typed_walk = std::env::var("SHODH_TYPED_WALK")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                if typed_walk && !strict_walk_seeds.is_empty() {
+                    use crate::graph_memory::RelationType;
+                    // (intent name, query cues, relations, incoming) — incoming
+                    // follows neighbor --R--> seed (the seed is the OBJECT slot).
+                    let intents: &[(&str, &[&str], &[RelationType], bool)] = &[
+                        (
+                            "located",
+                            &[
+                                "where does",
+                                "where do",
+                                "where did",
+                                "where is",
+                                "where was",
+                                "where are",
+                                "live now",
+                                "lives now",
+                                "living now",
+                            ],
+                            &[RelationType::LocatedIn],
+                            false,
+                        ),
+                        (
+                            "creator",
+                            &[
+                                "who made",
+                                "who created",
+                                "who built",
+                                "who wrote",
+                                "who painted",
+                                "who designed",
+                                "who composed",
+                            ],
+                            &[RelationType::CreatedBy],
+                            true,
+                        ),
+                    ];
+                    let qt = query_text.to_lowercase();
+                    const TYPED_WALK_TOPK: usize = 3;
+                    for (intent, cues, relations, incoming) in intents {
+                        if !cues.iter().any(|c| qt.contains(c)) {
+                            continue;
+                        }
+                        let answers = g
+                            .typed_neighbors(&strict_walk_seeds, relations, *incoming, 64)
+                            .unwrap_or_default();
+                        let found = answers.len();
+                        for (aid, score) in answers.into_iter().take(TYPED_WALK_TOPK) {
+                            causal_origin_entities.push((aid, score));
+                            if let Ok(Some(ent)) = g.get_entity(&aid) {
+                                if ent.name.trim().len() >= 2 {
+                                    graph_bridges.push(ent.name);
+                                }
+                            }
+                        }
+                        if std::env::var("SHODH_TYPED_WALK_DEBUG").is_ok() {
+                            eprintln!(
+                                "TYPED_WALK intent={intent} seeds={} answers={found}",
+                                strict_walk_seeds.len()
+                            );
+                        }
                     }
                 }
 
@@ -2242,6 +2652,40 @@ impl MemorySystem {
                         )
                     })
                     .collect();
+
+                // Causal-origin injection: the backward walk found the root cause,
+                // but as a lone BM25 bridge token it loses to the direct cause's
+                // match on the effect term (funnel: origins=1, yet P@1=0). The found
+                // roots ARE the answer for an origin query, so inject their episodes
+                // as TOP graph candidates — scaled by each origin's backward-path
+                // score relative to the strongest, so the best-supported root
+                // outranks the weaker top-k companions instead of all entering at a
+                // flat 2× ceiling.
+                if !causal_origin_entities.is_empty() {
+                    let max_score = r.iter().map(|x| x.1).fold(0.0f32, f32::max).max(1.0);
+                    let best_origin = causal_origin_entities
+                        .iter()
+                        .map(|(_, s)| *s)
+                        .fold(0.0f32, f32::max)
+                        .max(1e-9);
+                    let mut seen: std::collections::HashSet<MemoryId> =
+                        r.iter().map(|x| x.0.clone()).collect();
+                    for (oid, origin_score) in &causal_origin_entities {
+                        let inject_score = max_score * 2.0 * (origin_score / best_origin);
+                        if let Ok(eps) = g.get_episodes_by_entity(oid) {
+                            for ep in eps {
+                                let mid = MemoryId(ep.uuid);
+                                let in_scope =
+                                    episode_candidates.as_ref().is_none_or(|c| c.contains(&mid));
+                                if in_scope && seen.insert(mid.clone()) {
+                                    causal_origin_episode_ids.push(mid.clone());
+                                    r.push((mid, inject_score, inject_score));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Score desc; tie-break by MemoryId asc for deterministic graph candidate order.
                 r.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 r.truncate(200);
@@ -2274,6 +2718,8 @@ impl MemorySystem {
             }
         };
 
+        crate::memory::gold_funnel::record("graph", graph_results.iter().map(|(id, _, _)| id));
+
         let t_graph = recall_start.elapsed();
         tracing::info!(
             graph_ms = format!("{:.2}", (t_graph - t_embedding).as_secs_f64() * 1000.0),
@@ -2295,6 +2741,7 @@ impl MemorySystem {
             user_id: query.user_id.clone(),
             query_text: None, // Don't re-generate embedding
             query_embedding: Some(query_embedding),
+            ner_entities: None, // vector leg doesn't seed from entities
             time_range: query.time_range,
             experience_types: query.experience_types.clone(),
             importance_threshold: query.importance_threshold,
@@ -2373,6 +2820,7 @@ impl MemorySystem {
         } else {
             vr
         };
+        crate::memory::gold_funnel::record("vector", vector_results.iter().map(|(id, _)| id));
         let t_vector = recall_start.elapsed();
         tracing::info!(
             vector_ms = format!("{:.2}", (t_vector - t_graph).as_secs_f64() * 1000.0),
@@ -2390,6 +2838,96 @@ impl MemorySystem {
         // ===========================================================================
         // LAYER 4: BM25 + RRF FUSION
         // ===========================================================================
+        // E3 fusion-fix (rank-based, post-Layer-5): reserve a FINAL slot for the
+        // graph's top-K-by-RANK candidates that BM25 missed (graph-exclusive).
+        // The magnitude additives could not cleanly fix multi-hop because the
+        // distal answer's signal is in its graph RANK, not its (low) activation
+        // magnitude. This keys on rank, and — unlike approach A, which injected
+        // before Layer-5 and was re-dropped — it is applied after Layer-5 scoring,
+        // gated to graph-exclusive so it never displaces a BM25-ranked correct
+        // hit. Default 0 → off.
+        let graph_reserve_final: usize = std::env::var("SHODH_GRAPH_RESERVE_FINAL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let mut graph_exclusive_reserve: Vec<MemoryId> = Vec::new();
+
+        // SHODH_DISABLE_BOOSTS=<family,...> — ablation kill-switch for the post-fusion
+        // boost stack. Each token disables one boost family at recall time so its
+        // marginal contribution can be measured against the calibrated FLAT baseline
+        // (the stack predates calibrated fusion and was never ablated against it).
+        // Layer 4.45-4.9 families: attribute, temporal_prefilter, temporal_fact,
+        // interference, prospective, fact_source, ontological. Layer 5-5.7 families:
+        // hebbian, recency, arousal, credibility, temporal_match, feedback, importance,
+        // tag_penalty, quality, linguistic, competition. "all" disables every family.
+        // Default unset → all boosts active (shipped behavior unchanged).
+        const BOOST_FAMILIES: [&str; 18] = [
+            "attribute",
+            "temporal_prefilter",
+            "temporal_fact",
+            "interference",
+            "prospective",
+            "fact_source",
+            "ontological",
+            "hebbian",
+            "recency",
+            "arousal",
+            "credibility",
+            "temporal_match",
+            "feedback",
+            "importance",
+            "tag_penalty",
+            "quality",
+            "linguistic",
+            "competition",
+        ];
+        // DEFAULT: the Layer-5 hebbian RANK BOOST is disabled. The L5 bisect (run
+        // 27251798933) measured it as a strict ordering saboteur: disabling only
+        // hebbian lifted p@1 ALL 0.4100→0.4767 (+6.7pp), single_hop +11pp,
+        // open_domain 2x, multi_hop up, temporal HELD, MRR +0.042 — with recall@10
+        // bit-identical (L5 is post-truncation). Mechanism: heb scores come from
+        // graph co-activation and edges strengthen on EVERY retrieval (not on
+        // outcome), so frequently co-retrieved hub memories climb within the
+        // top-10 and displace gold at rank 1 — retrieval-gated rich-get-richer.
+        // Hebbian LEARNING (edge strengthening, spreading activation) is untouched;
+        // only the L5 score multiplier is off. Setting SHODH_DISABLE_BOOSTS
+        // explicitly (even to "") replaces this default — the escape hatch.
+        let disabled_boosts: std::collections::HashSet<String> =
+            std::env::var("SHODH_DISABLE_BOOSTS")
+                .map(|v| {
+                    v.split(',')
+                        .map(|t| t.trim().to_ascii_lowercase())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                })
+                .unwrap_or_else(|_| std::iter::once("hebbian".to_string()).collect());
+        for tok in &disabled_boosts {
+            if tok != "all" && !BOOST_FAMILIES.contains(&tok.as_str()) {
+                tracing::warn!("SHODH_DISABLE_BOOSTS: unknown boost family '{tok}' (ignored)");
+            }
+        }
+        let boost_on = |family: &str| -> bool {
+            !(disabled_boosts.contains("all") || disabled_boosts.contains(family))
+        };
+        let boost_attribute = boost_on("attribute");
+        let boost_temporal_prefilter = boost_on("temporal_prefilter");
+        let boost_temporal_fact = boost_on("temporal_fact");
+        let boost_interference = boost_on("interference");
+        let boost_prospective = boost_on("prospective");
+        let boost_fact_source = boost_on("fact_source");
+        let boost_ontological = boost_on("ontological");
+        let boost_hebbian = boost_on("hebbian");
+        let boost_recency = boost_on("recency");
+        let boost_arousal = boost_on("arousal");
+        let boost_credibility = boost_on("credibility");
+        let boost_temporal_match = boost_on("temporal_match");
+        let boost_feedback = boost_on("feedback");
+        let boost_importance = boost_on("importance");
+        let boost_tag_penalty = boost_on("tag_penalty");
+        let boost_quality = boost_on("quality");
+        let boost_linguistic = boost_on("linguistic");
+        let boost_competition = boost_on("competition");
+
         let (memory_ids, hebbian_scores): (
             Vec<(MemoryId, f32)>,
             std::collections::HashMap<MemoryId, f32>,
@@ -2410,6 +2948,26 @@ impl MemorySystem {
                             .get(id)
                             .ok()
                             .map(|m| m.experience.content.clone())
+                    })
+            };
+            // Mirror of get_content for entity sets — used by the specificity/
+            // concentration fusion term (SHODH_SPEC_FUSION).
+            let get_entities = |id: &MemoryId| -> Option<Vec<String>> {
+                self.working_memory
+                    .read()
+                    .get(id)
+                    .map(|m| m.experience.entities.clone())
+                    .or_else(|| {
+                        self.session_memory
+                            .read()
+                            .get(id)
+                            .map(|m| m.experience.entities.clone())
+                    })
+                    .or_else(|| {
+                        self.long_term_memory
+                            .get(id)
+                            .ok()
+                            .map(|m| m.experience.entities.clone())
                     })
             };
             // Use IC-weighted BM25 search with phrase matching
@@ -2443,12 +3001,19 @@ impl MemorySystem {
             // `constants::POLAR_QUERY_BM25_POOL_MULTIPLIER`.
             let polarity_sensitive = query_analysis.polarity_sensitive();
             let bm25_query_owned: String;
-            let bm25_query_text: &str = if polarity_sensitive {
-                bm25_query_owned = format!(
-                    "{} {}",
-                    query_text,
-                    crate::constants::POLAR_BM25_NEGATION_CUES.join(" ")
-                );
+            let bm25_query_text: &str = if polarity_sensitive || !graph_bridges.is_empty() {
+                let mut q = query_text.to_string();
+                if polarity_sensitive {
+                    q.push(' ');
+                    q.push_str(&crate::constants::POLAR_BM25_NEGATION_CUES.join(" "));
+                }
+                // Graph-driven cue expansion: append the discovered bridge entities
+                // so a multi-hop answer surfaces on the BM25 leg's own terms.
+                if !graph_bridges.is_empty() {
+                    q.push(' ');
+                    q.push_str(&graph_bridges.join(" "));
+                }
+                bm25_query_owned = q;
                 &bm25_query_owned
             } else {
                 query_text
@@ -2465,26 +3030,49 @@ impl MemorySystem {
             // RH-8 gate: BM25 hybrid fusion only runs in `PlusBm25` and above.
             // Lower modes pass the vector candidate set straight through, which makes the
             // RRF fusion below a one- or two-leg fusion (vector ± graph) instead of three-leg.
+            // Flatten-the-double-RRF prep: retain each result's BM25 and vector COMPONENT
+            // scores (HybridSearchResult already carries them) so the main fusion can treat
+            // vector and BM25 as independent calibrated legs instead of pre-RRF'ing them into
+            // one hybrid score that buries the vector-strong gold (funnel: multi_hop gold
+            // vector rank 7.4 → hybrid rank 28.4). id → (bm25_score, vector_score).
+            let mut hybrid_components: std::collections::HashMap<MemoryId, (f32, f32)> =
+                std::collections::HashMap::new();
             let hybrid_ids = if layer_bm25 {
-                self.hybrid_search
-                    .search_with_dynamic_weights_pool(
-                        bm25_query_text,
-                        vector_results.clone(),
-                        get_content,
-                        term_weights,
-                        phrases,
-                        disc_opt,
-                        bm25_pool_override,
-                    )
-                    .map(|r| {
+                match self.hybrid_search.search_with_dynamic_weights_pool(
+                    bm25_query_text,
+                    vector_results.clone(),
+                    get_content,
+                    term_weights,
+                    phrases,
+                    disc_opt,
+                    bm25_pool_override,
+                ) {
+                    Ok(r) => {
+                        for x in &r {
+                            hybrid_components.insert(
+                                x.memory_id.clone(),
+                                (x.bm25_score.unwrap_or(0.0), x.vector_score.unwrap_or(0.0)),
+                            );
+                        }
                         r.into_iter()
                             .map(|x| (x.memory_id, x.score))
                             .collect::<Vec<_>>()
-                    })
-                    .unwrap_or(vector_results)
+                    }
+                    Err(_) => {
+                        for (id, s) in &vector_results {
+                            hybrid_components.insert(id.clone(), (0.0, *s));
+                        }
+                        vector_results
+                    }
+                }
             } else {
+                for (id, s) in &vector_results {
+                    hybrid_components.insert(id.clone(), (0.0, *s));
+                }
                 vector_results
             };
+
+            crate::memory::gold_funnel::record("hybrid", hybrid_ids.iter().map(|(id, _)| id));
 
             // ===========================================================================
             // LAYER 4: RRF FUSION WITH DENSITY-BASED WEIGHTS (PIPE-11)
@@ -2508,9 +3096,46 @@ impl MemorySystem {
             // Density-based weights (already tuned in calculate_density_weights)
             // Sparse (≤0.5): graph_w=0.5, semantic_w=0.4, linguistic_w=0.1
             // Dense (≥2.0):  graph_w=0.1, semantic_w=0.7, linguistic_w=0.2
-            let (semantic_w, graph_w, linguistic_w) = graph_density
+            let (mut semantic_w, mut graph_w, linguistic_w) = graph_density
                 .map(calculate_density_weights)
                 .unwrap_or((0.6, 0.3, 0.1));
+
+            // Experiment knob: override the graph leg's fusion weight (eval only).
+            // SHODH_GRAPH_FUSION_WEIGHT=0 → graph-OFF (the graph leg contributes
+            // nothing to fusion AND its multiplicative activation bonus, which is
+            // gated on graph_w, becomes a no-op). Lets us measure whether the
+            // net-negative graph leg should be down-weighted/removed without a
+            // recompile. Unset in production → unchanged density behavior.
+            if let Ok(v) = std::env::var("SHODH_GRAPH_FUSION_WEIGHT") {
+                if let Ok(w) = v.parse::<f32>() {
+                    graph_w = w.clamp(0.0, 1.0);
+                }
+            }
+
+            // E3 fusion-fix C — graph-weight floor (SHODH_GRAPH_W_FLOOR).
+            // The density logic caps graph_w at 0.5 even for the sparsest graph,
+            // which on multi-hop queries leaves the graph's correct (but
+            // deep-ranked) answer too weak to survive BM25's lexical crowd. This
+            // raises graph_w to a floor and renormalises hybrid down, to test
+            // whether simply trusting the graph more recovers multi-hop. Default
+            // unset → unchanged.
+            if let Ok(v) = std::env::var("SHODH_GRAPH_W_FLOOR") {
+                if let Ok(f) = v.parse::<f32>() {
+                    if f > graph_w {
+                        // Cap the floor so renormalisation can never silently zero the
+                        // semantic/BM25 leg: keep at least 0.05 of semantic weight.
+                        let max_floor = (1.0 - linguistic_w - 0.05).max(0.0);
+                        let requested = f.clamp(0.0, 0.95);
+                        graph_w = requested.min(max_floor);
+                        if requested > max_floor {
+                            tracing::warn!(
+                                "SHODH_GRAPH_W_FLOOR={requested} capped to {graph_w:.2} to keep the semantic leg alive"
+                            );
+                        }
+                        semantic_w = (1.0 - graph_w - linguistic_w).max(0.0);
+                    }
+                }
+            }
 
             // Hybrid weight = semantic + linguistic (BM25 + vector combined)
             let hybrid_w = semantic_w + linguistic_w;
@@ -2530,21 +3155,545 @@ impl MemorySystem {
                 s.linguistic_weight = linguistic_w;
             }
 
-            // Graph results: pure RRF with density weight
+            // E3 fusion-fix A — reserved graph quota. Capture the graph leg's
+            // ranked ids so the top-N can be guaranteed a slot in the final
+            // top-k regardless of RRF dilution by BM25's lexical crowd (see the
+            // SHODH_GRAPH_RESERVE_K injection before truncation below).
+            let graph_topn: Vec<MemoryId> =
+                graph_results.iter().map(|(id, _, _)| id.clone()).collect();
+
+            // E3 fusion-fix B (gated) — activation-proportional additive term
+            // (SHODH_GRAPH_ACT_ADD=<scale>). The graph RRF (~w/(k+rank)) is tiny
+            // and gets diluted by BM25's many weak lexical matches; this adds a
+            // non-dilutable term proportional to spreading activation so a
+            // confident graph hit competes on the fused scale. Default unset → 0.
+            //
+            // CRITICAL gate: apply the boost ONLY to graph candidates that BM25/
+            // vector did NOT already rank in their top window (`hybrid_top`). A
+            // global boost is catastrophic on lexical corpora (LoCoMo recall@10
+            // −0.187 at scale 0.5) because it floods the top-k with graph-
+            // activated memories that are WRONG when BM25 is right. Restricting
+            // it to graph-EXCLUSIVE finds (the answer BM25 buried) repairs the
+            // multi-hop dilution without disturbing the BM25 backbone: if BM25
+            // already ranks a memory highly, trust it; only lift what the graph
+            // found and lexical retrieval missed.
+            let graph_act_add: f32 = std::env::var("SHODH_GRAPH_ACT_ADD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
+            // G3 prototype (SHODH_ACTR_NORM): self-calibrate the additive by
+            // normalising activation to its own max in this query's spread. The
+            // graph's BEST candidate then always gets the full term (fixes E3,
+            // where link_i has a clear activation peak) while diffuse/tangential
+            // activation stays small (spares LoCoMo, where the graph is noisy).
+            // This is the calibration a raw scalar additive lacked — no scale
+            // threaded E3-fix vs LoCoMo-safe because raw activation magnitude
+            // varies by corpus; the ratio activation/max does not.
+            let actr_norm = std::env::var("SHODH_ACTR_NORM")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let max_activation = graph_results
+                .iter()
+                .map(|(_, a, _)| *a)
+                .fold(0.0_f32, f32::max)
+                .max(1e-6);
+            // FUSION_V2 (SHODH_FUSION_V2): weighted-Borda consensus backbone + a
+            // calibrated graph-exclusive rescue. Borda gives a leg's rank-1 ~FULL
+            // leg weight (w·(N-rank)/N) instead of the RRF crumb w/(k+rank); the
+            // rescue lets a CONFIDENT graph-only hit (high activation, absent from
+            // the hybrid top window) exceed the consensus crowd — the single-witness
+            // case RRF structurally buries. Grounded in the dataflow map (the
+            // double-RRF crumb burial at this exact fusion) + the RRF scale-
+            // invariance lesson. Default off; RRF unchanged when unset.
+            let v2_fusion = std::env::var("SHODH_FUSION_V2")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let hybrid_top: std::collections::HashSet<MemoryId> =
+                if graph_act_add > 0.0 || graph_reserve_final > 0 || v2_fusion {
+                    hybrid_ids
+                        .iter()
+                        .take(query.max_results.max(1))
+                        .map(|(id, _)| id.clone())
+                        .collect()
+                } else {
+                    std::collections::HashSet::new()
+                };
+
+            // Capture the graph-exclusive top-K-by-rank for the post-Layer-5
+            // reserve (the answer the graph ranks highly but BM25 missed).
+            if graph_reserve_final > 0 {
+                graph_exclusive_reserve = graph_topn
+                    .iter()
+                    .filter(|id| !hybrid_top.contains(*id))
+                    .take(graph_reserve_final)
+                    .cloned()
+                    .collect();
+            }
+
+            // G3 (SHODH_ACTR_FUSION): replace the rank-reciprocal RRF base
+            // (graph_w/(k+rank) — a sub-0.01 crumb BM25's ranked crowd buries) with a
+            // calibrated MAGNITUDE additive: each leg's score normalised to its own
+            // max in this query and entered at full leg-weight, so the graph's
+            // confident hit competes on the fused scale instead of as a rank crumb
+            // (the triple-confirmed lock: ontology 0.65→0.083, multi-hop 0.43→0,
+            // lineage buried). Density weights remain the LoCoMo guard (dense/noisy
+            // graph → low graph_w → small contribution). The multiplicative
+            // activation bonus + gated additive below are RRF patches the magnitude
+            // makes redundant, so they collapse to no-ops under ACT-R.
+            let actr_fusion = std::env::var("SHODH_ACTR_FUSION")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let max_hybrid = hybrid_ids
+                .iter()
+                .map(|(_, s)| *s)
+                .fold(0.0_f32, f32::max)
+                .max(1e-6);
+            // Leg sizes for Borda normalisation (legs are already rank-sorted here).
+            let n_graph = graph_results.len().max(1) as f32;
+            let n_hybrid = hybrid_ids.len().max(1) as f32;
+
+            // Flatten the double-RRF (SHODH_FUSION_FLAT): vector and BM25 enter the fusion as
+            // SEPARATE calibrated-magnitude legs, so a vector-strong gold keeps its rank
+            // instead of being RRF-buried by BM25's lexical crowd in the hybrid pre-fusion
+            // (funnel-located: the entire multi_hop loss is vector 7.4 → hybrid 28.4). Implies
+            // the calibrated graph leg. hybrid_w is split; vector trusted more by default.
+            let explicit_flat = std::env::var("SHODH_FUSION_FLAT")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            // Consensus weight for the MIN leg in the max-fusion (a candidate present in BOTH
+            // vector and BM25 gets a small bonus over one strong in a single leg). The MAX leg
+            // is what preserves a single-leg-strong gold from crowd dilution.
+            // SHODH_LEG=bm25|vector|graph — isolate ONE retrieval leg to measure its
+            // STANDALONE recall (diagnostic, default unset = all legs). vector keeps
+            // only vector-retrieved candidates ranked by vector score; bm25 likewise;
+            // graph drops the hybrid pool entirely (graph candidates only). The graph
+            // loop below is skipped for bm25/vector.
+            let isolate_leg = std::env::var("SHODH_LEG").ok();
+            match isolate_leg.as_deref() {
+                Some("vector") => {
+                    hybrid_components.retain(|_, (_, v)| *v > 0.0);
+                    hybrid_components.values_mut().for_each(|c| c.0 = 0.0);
+                }
+                Some("bm25") => {
+                    hybrid_components.retain(|_, (b, _)| *b > 0.0);
+                    hybrid_components.values_mut().for_each(|c| c.1 = 0.0);
+                }
+                Some("graph") => hybrid_components.clear(),
+                _ => {}
+            }
+            let graph_leg_on = !matches!(isolate_leg.as_deref(), Some("bm25") | Some("vector"));
+
+            let flat_consensus = std::env::var("SHODH_FLAT_CONSENSUS")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(0.3)
+                .clamp(0.0, 1.0);
+            // SHODH_FLAT_VEC_TRUST (global vector multiplier) and SHODH_FLAT_VEC_ABS /
+            // SHODH_FLAT_VEC_FLOOR (absolute cosine calibration) were REMOVED: both
+            // measured NEGATIVE (runs 27221406266, 27223054766 — each trades
+            // multi_hop↔single_hop through a global scalar; the structural fix is the
+            // per-query SHODH_FLAT_ADAPTIVE path below). Deleted rather than left
+            // default-off so a stale sweep config can't silently re-enable a known
+            // regression. Recoverable from git history if a per-query variant of
+            // absolute calibration is ever wanted as an adaptive FEATURE.
+            let max_vec = hybrid_components
+                .values()
+                .map(|(_, v)| *v)
+                .fold(0.0_f32, f32::max)
+                .max(1e-6);
+            let max_bm = hybrid_components
+                .values()
+                .map(|(b, _)| *b)
+                .fold(0.0_f32, f32::max)
+                .max(1e-6);
+
+            // SHODH_FUSION_SUM: calibrated weighted-SUM fusion. Each leg's raw score is
+            // min-max normalised to [0,1] then linearly combined with sweepable weights
+            // (SHODH_FW_VEC / _BM25 / _GRAPH). Unlike flat-MAX (which keeps the best single
+            // leg per candidate), vector AND BM25 both contribute additively, and the sweep
+            // finds the mix that ranks the present-but-buried gold (96% present at fusion,
+            // mean-rank 14.3) into top-10. Default off → fusion unchanged.
+            let sum_fusion = std::env::var("SHODH_FUSION_SUM")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let env_w = |key: &str, default: f32| -> f32 {
+                std::env::var(key)
+                    .ok()
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .unwrap_or(default)
+            };
+            let fw_graph = env_w("SHODH_FW_GRAPH", 0.3);
+            let fw_vec = env_w("SHODH_FW_VEC", 0.6);
+            let fw_bm25 = env_w("SHODH_FW_BM25", 0.4);
+
+            // SHODH_FUSION_FLAT (calibrated-max) is now the DEFAULT fusion: measured
+            // +0.0665 recall@10 ALL (RRF 0.6188 → 0.6853), funnel fusion mean-rank 14.3→8.25,
+            // top10 68.7→76.0 (runs 27216648530 + 27218456694, reproduced identically). The
+            // per-candidate MAX of the calibrated vector/BM25 legs (+ small consensus on the
+            // min) and the calibrated graph leg keep a single-leg-strong gold from being
+            // RRF-buried by the lexical crowd. It is on UNLESS another explicit fusion mode
+            // (V2 / ACT-R / SUM) is requested, or SHODH_FUSION_RRF selects the legacy
+            // rank-reciprocal fusion (escape hatch). Explicit SHODH_FUSION_FLAT still forces it.
+            let rrf_escape = std::env::var("SHODH_FUSION_RRF")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let flat_fusion =
+                explicit_flat || (!rrf_escape && !v2_fusion && !actr_fusion && !sum_fusion);
+
+            // SHODH_FLAT_ADAPTIVE: LEARNED per-query leg trust (approach C, stage 1). A GLOBAL
+            // vector-trust trades multi_hop↔single_hop (run 27221406266) — single_hop wants
+            // BM25/lexical, multi_hop wants vector/semantic, and no global scalar serves both.
+            // A PER-QUERY weight conditioned on a query feature breaks it. Feature = BM25
+            // peakedness (max/mean BM25 over the candidate pool): a SHARP peak ⇒ one memory
+            // lexically dominates ⇒ exact-match/single_hop ⇒ trust BM25 (vec_trust→1); a FLAT
+            // BM25 ⇒ no lexical anchor ⇒ semantic/multi_hop ⇒ trust vector (vec_trust→max).
+            // DEFAULT ON since runs 27268510462 + 27269567367 (confirm): the FITTED
+            // SYMMETRIC gate (feature=fitted, symmetric, trust_max 2.0) BROKE the
+            // structural single↔multi tradeoff — recall@10 ALL 0.6976→~0.705
+            // (reproduced), multi_hop 0.4318→0.4896 (exact across runs, the largest
+            // multi_hop gain in project history), single_hop HELD at 0.7730 exactly,
+            // p@1 +2.3pp. CAVEAT: the fitted coefficients were trained on the LoCoMo
+            // eval distribution (70% of its cases, run 27267533447, holdout AUC
+            // 0.756) — stage 3 (online refit from recall feedback, per user) replaces
+            // them; this fit is the cold-start seed. SHODH_FLAT_ADAPTIVE=0 restores
+            // plain FLAT (escape hatch).
+            let flat_adaptive = std::env::var("SHODH_FLAT_ADAPTIVE")
+                .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+                .unwrap_or(true);
+            let effective_vec_trust = if flat_adaptive {
+                let adapt_trust_max = env_w("SHODH_ADAPT_TRUST_MAX", 2.0);
+                // SHODH_ADAPT_FEATURE selects the per-query discriminating feature:
+                //   peak      — BM25 peakedness (stage 1; run 27244857747: helps
+                //               multi/temporal but craters single_hop — the feature
+                //               doesn't separate the query types cleanly)
+                //   agreement — vector↔BM25 top-K overlap (stage 1b): when the two
+                //               legs AGREE on the top candidates there is a lexical
+                //               anchor (single_hop shape → trust BM25, vec_trust→1);
+                //               when vector's top is invisible to BM25 the answer is
+                //               semantic-only (multi_hop shape → trust vector →max).
+                //               Unlike peakedness this measures the RELATION between
+                //               the legs, not one leg's shape alone.
+                //   fitted    — stage 2b: offline-fitted logistic gate over ELEVEN
+                //               pool features (run 27267533447: holdout AUC 0.756 on
+                //               a 70/30 case split; no single feature exceeded AUC
+                //               0.554 — both stage-1 features were individually among
+                //               the weakest, which is WHY stage 1 kept re-trading).
+                //               t = P(vector ranks this query's gold better than
+                //               BM25). CAVEAT: coefficients fitted on the LoCoMo
+                //               eval distribution (caps 300/1500); an A/B on the
+                //               same suite partially trains-on-eval — the gate is
+                //               single_hop holding, and stage 3 is the online refit
+                //               from feedback.
+                let adapt_feature = std::env::var("SHODH_ADAPT_FEATURE")
+                    .unwrap_or_else(|_| "fitted".to_string())
+                    .to_ascii_lowercase();
+                let t = if adapt_feature == "fitted" {
+                    // (mu, sd, weight) per standardized feature, then bias — from
+                    // the run-27267533447 fit. Order must match `feats` below.
+                    const FIT: [(f32, f32, f32); 11] = [
+                        (2.77242, 1.87083, -0.301375),    // bm_peak
+                        (1.3841, 0.180661, -0.0212517),   // vec_peak
+                        (0.307389, 0.170755, -0.243719),  // agreement_top10
+                        (93.4129, 43.8602, -0.556471),    // max_bm
+                        (0.597371, 0.0823258, 0.236463),  // max_vec
+                        (106.897, 36.4931, 0.597537),     // n_bm_pos
+                        (31.4138, 7.54534, -0.881755),    // n_vec_pos
+                        (116.222, 38.3149, 0.582615),     // n_hybrid
+                        (9.90148, 0.987682, 0.304049),    // n_graph
+                        (0.358194, 0.0710801, 0.0264384), // graph_max_activation
+                        (54.1034, 16.0475, -0.571797),    // query_len
+                    ];
+                    const FIT_BIAS: f32 = -0.985886;
+                    let mut by_vec: Vec<(&MemoryId, f32)> = hybrid_components
+                        .iter()
+                        .filter(|(_, (_, v))| *v > 0.0)
+                        .map(|(id, (_, v))| (id, *v))
+                        .collect();
+                    let mut by_bm: Vec<(&MemoryId, f32)> = hybrid_components
+                        .iter()
+                        .filter(|(_, (b, _))| *b > 0.0)
+                        .map(|(id, (b, _))| (id, *b))
+                        .collect();
+                    by_vec.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                    by_bm.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                    let peak = |xs: &[(&MemoryId, f32)]| -> f32 {
+                        if xs.is_empty() {
+                            return 1.0;
+                        }
+                        let max = xs[0].1;
+                        let mean = xs.iter().map(|x| x.1).sum::<f32>() / xs.len() as f32;
+                        if mean > 1e-6 {
+                            max / mean
+                        } else {
+                            1.0
+                        }
+                    };
+                    let agreement = if by_vec.is_empty() || by_bm.is_empty() {
+                        0.0
+                    } else {
+                        let k10 = 10usize.min(by_vec.len()).min(by_bm.len()).max(1);
+                        let top_v: std::collections::HashSet<&MemoryId> =
+                            by_vec.iter().take(k10).map(|(id, _)| *id).collect();
+                        by_bm
+                            .iter()
+                            .take(k10)
+                            .filter(|(id, _)| top_v.contains(id))
+                            .count() as f32
+                            / k10 as f32
+                    };
+                    let graph_max_act = graph_results
+                        .iter()
+                        .map(|(_, a, _)| *a)
+                        .fold(0.0_f32, f32::max);
+                    let feats: [f32; 11] = [
+                        peak(&by_bm),
+                        peak(&by_vec),
+                        agreement,
+                        max_bm,
+                        max_vec,
+                        by_bm.len() as f32,
+                        by_vec.len() as f32,
+                        hybrid_components.len() as f32,
+                        graph_results.len() as f32,
+                        graph_max_act,
+                        query_text.len() as f32,
+                    ];
+                    let mut s = FIT_BIAS;
+                    for ((mu, sd, w), x) in FIT.iter().zip(feats) {
+                        s += w * (x - mu) / sd;
+                    }
+                    1.0 / (1.0 + (-s.clamp(-30.0, 30.0)).exp())
+                } else if adapt_feature == "agreement" {
+                    let agree_k = env_w("SHODH_ADAPT_AGREE_K", 10.0).max(1.0) as usize;
+                    let agree_lo = env_w("SHODH_ADAPT_AGREE_LO", 0.1);
+                    let agree_hi = env_w("SHODH_ADAPT_AGREE_HI", 0.5);
+                    let mut by_vec: Vec<(&MemoryId, f32)> = hybrid_components
+                        .iter()
+                        .filter(|(_, (_, v))| *v > 0.0)
+                        .map(|(id, (_, v))| (id, *v))
+                        .collect();
+                    let mut by_bm: Vec<(&MemoryId, f32)> = hybrid_components
+                        .iter()
+                        .filter(|(_, (b, _))| *b > 0.0)
+                        .map(|(id, (b, _))| (id, *b))
+                        .collect();
+                    if by_bm.is_empty() {
+                        // No lexical signal at all — the strongest "no anchor" case.
+                        1.0
+                    } else if by_vec.is_empty() {
+                        0.0
+                    } else {
+                        // Deterministic top-K per leg (score desc, id tie-break).
+                        by_vec.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                        by_bm.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                        let k = agree_k.min(by_vec.len()).min(by_bm.len()).max(1);
+                        let top_v: std::collections::HashSet<&MemoryId> =
+                            by_vec.iter().take(k).map(|(id, _)| *id).collect();
+                        let overlap = by_bm
+                            .iter()
+                            .take(k)
+                            .filter(|(id, _)| top_v.contains(id))
+                            .count() as f32
+                            / k as f32;
+                        // overlap ≥ hi → t=0 (legs agree, trust BM25);
+                        // overlap ≤ lo → t=1 (vector sees what BM25 can't).
+                        let span = (agree_hi - agree_lo).max(1e-6);
+                        ((agree_hi - overlap) / span).clamp(0.0, 1.0)
+                    }
+                } else {
+                    let adapt_peak_lo = env_w("SHODH_ADAPT_PEAK_LO", 2.0);
+                    let adapt_peak_hi = env_w("SHODH_ADAPT_PEAK_HI", 6.0);
+                    let bm_vals: Vec<f32> = hybrid_components
+                        .values()
+                        .map(|(b, _)| *b)
+                        .filter(|b| *b > 0.0)
+                        .collect();
+                    let mean_bm = if bm_vals.is_empty() {
+                        0.0
+                    } else {
+                        bm_vals.iter().sum::<f32>() / bm_vals.len() as f32
+                    };
+                    let bm_peak = if mean_bm > 1e-6 {
+                        max_bm / mean_bm
+                    } else {
+                        1.0
+                    };
+                    // t = 1 when BM25 is flat (peak ≤ lo) → full vector trust; t = 0 when
+                    // sharply peaked (peak ≥ hi) → no extra trust (BM25-strong gold protected).
+                    let span = (adapt_peak_hi - adapt_peak_lo).max(1e-6);
+                    ((adapt_peak_hi - bm_peak) / span).clamp(0.0, 1.0)
+                };
+                // SHODH_ADAPT_SYMMETRIC (default ON): map t through [down-weight,
+                // up-weight] instead of boost-only — with a CALIBRATED probability
+                // (fitted), t < 0.5 is evidence the query is BM25-favored and the
+                // vector leg can justifiably be weakened below 1.0 (floored at 0.2
+                // so vector never vanishes). MEASURED: boost-only FAILS even with
+                // fitted features (0.6879 vs base 0.6976) — the down-weighting is
+                // what protects single_hop while multi_hop gets freed. =0 restores
+                // the stage-1 boost-only form.
+                let symmetric = std::env::var("SHODH_ADAPT_SYMMETRIC")
+                    .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+                    .unwrap_or(true);
+                if symmetric {
+                    (1.0 + (adapt_trust_max - 1.0) * (2.0 * t - 1.0)).max(0.2)
+                } else {
+                    1.0 + (adapt_trust_max - 1.0) * t
+                }
+            } else {
+                // No global vector-trust knob: 1.0 unless the per-query adaptive
+                // path is enabled (global scalars measured as a category tradeoff).
+                1.0
+            };
+
+            // Approach C stage 2: per-query feature export for the offline trust fit.
+            // Armed by the recall harness (SHODH_FUSION_FEATURE_EXPORT) — a no-op in
+            // production. Computed here because this is the only point that sees all
+            // three calibrated legs plus the raw per-candidate scores, and the armed
+            // gold set lets us record per-leg gold ranks (the supervision label:
+            // which leg WOULD have ranked this query's gold best).
+            if crate::memory::fusion_features::is_armed() {
+                crate::memory::fusion_features::record_with(|gold| {
+                    use crate::memory::fusion_features::FusionFeatures;
+                    let mut by_vec: Vec<(&MemoryId, f32)> = hybrid_components
+                        .iter()
+                        .filter(|(_, (_, v))| *v > 0.0)
+                        .map(|(id, (_, v))| (id, *v))
+                        .collect();
+                    let mut by_bm: Vec<(&MemoryId, f32)> = hybrid_components
+                        .iter()
+                        .filter(|(_, (b, _))| *b > 0.0)
+                        .map(|(id, (b, _))| (id, *b))
+                        .collect();
+                    by_vec.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                    by_bm.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                    let peak = |xs: &[(&MemoryId, f32)]| -> f32 {
+                        if xs.is_empty() {
+                            return 1.0;
+                        }
+                        let max = xs[0].1;
+                        let mean = xs.iter().map(|x| x.1).sum::<f32>() / xs.len() as f32;
+                        if mean > 1e-6 {
+                            max / mean
+                        } else {
+                            1.0
+                        }
+                    };
+                    let agreement_top10 = if by_vec.is_empty() || by_bm.is_empty() {
+                        0.0
+                    } else {
+                        let k10 = 10usize.min(by_vec.len()).min(by_bm.len()).max(1);
+                        let top_v: std::collections::HashSet<&MemoryId> =
+                            by_vec.iter().take(k10).map(|(id, _)| *id).collect();
+                        by_bm
+                            .iter()
+                            .take(k10)
+                            .filter(|(id, _)| top_v.contains(id))
+                            .count() as f32
+                            / k10 as f32
+                    };
+                    let rank_of_gold = |xs: &[(&MemoryId, f32)]| -> Option<usize> {
+                        xs.iter().position(|(id, _)| gold.contains(*id))
+                    };
+                    let mut by_graph: Vec<(&MemoryId, f32)> =
+                        graph_results.iter().map(|(id, a, _)| (id, *a)).collect();
+                    by_graph.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                    // Candidate-level training rows (roadmap ②): the union of
+                    // the three legs' pools with query-relative scores — the
+                    // exact calibrated inputs the FLAT fusion ranks with.
+                    let mut union: std::collections::HashMap<&MemoryId, (f32, f32, f32)> =
+                        std::collections::HashMap::new();
+                    for (id, (b, v)) in hybrid_components.iter() {
+                        let e = union.entry(id).or_insert((0.0, 0.0, 0.0));
+                        e.0 = (*v / max_vec).clamp(0.0, 1.0);
+                        e.1 = (*b / max_bm).clamp(0.0, 1.0);
+                    }
+                    let max_act = by_graph.first().map(|x| x.1).unwrap_or(0.0).max(1e-6);
+                    for (id, a) in by_graph.iter() {
+                        union.entry(id).or_insert((0.0, 0.0, 0.0)).2 =
+                            (*a / max_act).clamp(0.0, 1.0);
+                    }
+                    let candidates: Vec<crate::memory::fusion_features::CandidateRow> = union
+                        .into_iter()
+                        .map(|(id, (vec, bm25, graph))| {
+                            crate::memory::fusion_features::CandidateRow {
+                                vec,
+                                bm25,
+                                graph,
+                                is_gold: gold.contains(id),
+                            }
+                        })
+                        .collect();
+                    FusionFeatures {
+                        n_hybrid: hybrid_components.len(),
+                        n_bm_pos: by_bm.len(),
+                        n_vec_pos: by_vec.len(),
+                        bm_peak: peak(&by_bm),
+                        vec_peak: peak(&by_vec),
+                        agreement_top10,
+                        max_bm,
+                        max_vec,
+                        n_graph: by_graph.len(),
+                        graph_max_activation: by_graph.first().map(|x| x.1).unwrap_or(0.0),
+                        gold_vec_rank: rank_of_gold(&by_vec),
+                        gold_bm_rank: rank_of_gold(&by_bm),
+                        gold_graph_rank: rank_of_gold(&by_graph),
+                        candidates,
+                    }
+                });
+            }
+
+            // Graph leg.
             for (r, (id, activation, h)) in graph_results.iter().enumerate() {
-                // Standard RRF: weight / (k + rank), rank is 1-indexed
-                let rrf_score = graph_w / (k + (r + 1) as f32);
+                if !graph_leg_on {
+                    break; // SHODH_LEG=bm25|vector isolates the hybrid leg
+                }
+                let rrf_score = if sum_fusion {
+                    // Calibrated weighted-SUM: graph leg enters at fw_graph·(activation/max).
+                    fw_graph * (activation / max_activation).clamp(0.0, 1.0)
+                } else if v2_fusion {
+                    // Borda (rank-1 ≈ full graph_w) + CONFIDENCE rescue: every graph
+                    // candidate gets graph_w·(activation/max) added, so a strongly
+                    // activated hit reaches up to 2·graph_w and can beat a lexical
+                    // distractor even when it is PRESENT-but-buried in the hybrid
+                    // pool. (The old `!hybrid_top` gate only rescued answers wholly
+                    // absent from hybrid — local observation showed it never fired
+                    // for the common burial case.)
+                    let borda = graph_w * ((n_graph - r as f32) / n_graph);
+                    let rescue = graph_w * (activation / max_activation).clamp(0.0, 1.0);
+                    borda + rescue
+                } else if actr_fusion || flat_fusion {
+                    // Calibrated magnitude: the graph's best hit enters at graph_w,
+                    // not a graph_w/(k+rank) crumb.
+                    graph_w * (activation / max_activation).clamp(0.0, 1.0)
+                } else {
+                    // Standard RRF: weight / (k + rank), rank is 1-indexed.
+                    graph_w / (k + (r + 1) as f32)
+                };
                 *fused.entry(id.clone()).or_insert(0.0) += rrf_score;
                 heb.insert(id.clone(), *h);
 
-                // Multiplicative activation bonus (ACT-R style spreading activation)
-                // Scaled by graph_w: trust activation more when graph is sparse/mature
-                let activation_factor = 1.0
-                    + graph_w
+                // Multiplicative activation bonus (RRF-only; no-op under ACT-R / V2 / SUM).
+                let activation_factor = if actr_fusion || v2_fusion || sum_fusion {
+                    1.0
+                } else {
+                    1.0 + graph_w
                         * crate::constants::ACTIVATION_BONUS_SCALE
-                        * activation.clamp(0.0, 1.0);
+                        * activation.clamp(0.0, 1.0)
+                };
                 if let Some(score) = fused.get_mut(id) {
                     *score *= activation_factor;
+                    // Gated additive: only lift graph-exclusive finds (absent from
+                    // BM25/vector's top window), never memories BM25 already ranks.
+                    // With SHODH_ACTR_NORM the magnitude is self-normalised
+                    // (activation/max) so it is calibrated across corpora.
+                    if graph_act_add > 0.0 && !hybrid_top.contains(id) {
+                        let mag = if actr_norm {
+                            (activation / max_activation).clamp(0.0, 1.0)
+                        } else {
+                            activation.clamp(0.0, 1.0)
+                        };
+                        *score += graph_w * graph_act_add * mag;
+                    }
                 }
 
                 // Track per-memory graph RRF contribution
@@ -2571,9 +3720,38 @@ impl MemorySystem {
                 }
             }
 
-            // Hybrid (BM25+vector) results: pure RRF with density weight
-            for (r, (id, _)) in hybrid_ids.iter().enumerate() {
-                let hybrid_rrf = hybrid_w / (k + (r + 1) as f32);
+            // Hybrid (BM25+vector) leg.
+            for (r, (id, hybrid_raw)) in hybrid_ids.iter().enumerate() {
+                let hybrid_rrf = if sum_fusion {
+                    // Calibrated weighted-SUM: vector and BM25 each min-max normalised and
+                    // added with sweepable weights. The sweep (SHODH_FW_VEC/_BM25) tunes the
+                    // mix; additive (not max) so a candidate strong in BOTH legs outranks one
+                    // strong in a single leg — the consensus signal max-fusion discards.
+                    let (bm25, vec) = hybrid_components.get(id).copied().unwrap_or((0.0, 0.0));
+                    fw_vec * (vec / max_vec).clamp(0.0, 1.0)
+                        + fw_bm25 * (bm25 / max_bm).clamp(0.0, 1.0)
+                } else if flat_fusion {
+                    // The flatten, max-fusion form: per-candidate MAX of the calibrated
+                    // vector/BM25 legs (+ a small consensus bonus on the MIN). A candidate
+                    // strong in EITHER leg keeps a high score — so BM25's lexical crowd can't
+                    // dilute a vector-strong gold (multi_hop) and vector noise can't dilute a
+                    // BM25-exact gold (single_hop). A global weighted SUM can't serve both
+                    // (measured: monotonic multi_hop↔single_hop tradeoff); max preserves the
+                    // best signal per candidate.
+                    let (bm25, vec) = hybrid_components.get(id).copied().unwrap_or((0.0, 0.0));
+                    let vn = (vec / max_vec).clamp(0.0, 1.0) * effective_vec_trust;
+                    let bn = (bm25 / max_bm).clamp(0.0, 1.0);
+                    let (hi, lo) = if vn >= bn { (vn, bn) } else { (bn, vn) };
+                    hybrid_w * (hi + flat_consensus * lo)
+                } else if v2_fusion {
+                    // Borda: rank-1 ≈ full hybrid_w (scale-invariant, no crumb).
+                    hybrid_w * ((n_hybrid - r as f32) / n_hybrid)
+                } else if actr_fusion {
+                    // Calibrated magnitude, parallel to the graph leg.
+                    hybrid_w * (hybrid_raw / max_hybrid).clamp(0.0, 1.0)
+                } else {
+                    hybrid_w / (k + (r + 1) as f32)
+                };
                 *fused.entry(id.clone()).or_insert(0.0) += hybrid_rrf;
 
                 // Track per-memory hybrid RRF contribution
@@ -2607,7 +3785,7 @@ impl MemorySystem {
             // For attribute queries, heavily boost memories that contain BOTH the entity
             // AND an attribute synonym value. This ensures "Caroline is single" ranks
             // high for "What is Caroline's relationship status?".
-            if !attribute_boost_ids.is_empty() {
+            if boost_attribute && !attribute_boost_ids.is_empty() {
                 let mut boosted_count = 0;
                 let boost_factor = 1.0 + crate::constants::ATTRIBUTE_QUERY_BOOST;
                 for id in &attribute_boost_ids {
@@ -2635,7 +3813,11 @@ impl MemorySystem {
             // Memories that fell within the query's parsed date range (Layer 0.4)
             // get a multiplicative boost. This ensures date-relevant memories rise
             // above semantically similar but temporally wrong results.
-            if !temporal_prefilter_ids.is_empty() {
+            // MEASURED (boost ablation, run 27249880829): despite the name, this boost's
+            // recall@10 contribution lands in single_hop; temporal-category recall is
+            // invariant with it on or off. Temporal ORDERING is carried by the Layer-5
+            // linguistic family instead.
+            if boost_temporal_prefilter && !temporal_prefilter_ids.is_empty() {
                 let mut boosted_count = 0;
                 let boost_factor = 1.0 + crate::constants::TEMPORAL_PREFILTER_BOOST;
                 for id in &temporal_prefilter_ids {
@@ -2663,7 +3845,10 @@ impl MemorySystem {
             // Source memories of matching temporal facts get a moderate boost.
             // This ensures "When did Melanie paint a sunrise?" boosts the memory that
             // recorded the event, not just memories with temporal_refs.
-            if !temporal_fact_boost_ids.is_empty() {
+            // MEASURED (boost ablation, run 27249880829): contributes to single_hop
+            // recall, NOT to temporal-category recall (invariant on/off) — the name
+            // describes the trigger, not the measured effect.
+            if boost_temporal_fact && !temporal_fact_boost_ids.is_empty() {
                 let mut boosted_count = 0;
                 let boost_factor = 1.0 + crate::constants::TEMPORAL_FACT_BOOST;
                 for id in &temporal_fact_boost_ids {
@@ -2700,7 +3885,7 @@ impl MemorySystem {
             // - High interference + low activation = "chronic loser" → suppress (0.5-1.0x)
             // - No interference history → neutral (1.0x)
             // RH-8 gate: interference adjustments only run in `Full` mode.
-            if layer_full {
+            if layer_full && boost_interference {
                 let detector = self.interference_detector.read();
 
                 // Compute max score once for normalization
@@ -2756,7 +3941,59 @@ impl MemorySystem {
             // Signals come from ProspectiveTasks that matched the current query
             // via keyword or semantic similarity (built in recall handler C5).
             // RH-8 gate: prospective signal boost only runs in `Full` mode.
-            if layer_full {
+            // SPECIFICITY / CONCENTRATION FUSION TERM (SHODH_SPEC_FUSION=<scale>, default OFF).
+            // Competitor-convergent anti-pollution lever (veld concentration ratio, Zep
+            // node-distance, Cognee ontology_valid trust-flag): down-weight DILUTED memories
+            // (the query matches only a small fraction of the memory's entities → broad/
+            // off-topic) and up-weight FOCUSED ones, query-conditional at rank time. This is
+            // the principled fix for "more entities pollute the graph" — it makes richer NER
+            // net-neutral instead of harmful. Multiplicative + clamped (veld-proven form);
+            // the additive G3 version is the refinement once this shows signal.
+            if let Some(scale) = std::env::var("SHODH_SPEC_FUSION")
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|s| *s != 0.0)
+            {
+                const SPEC_CENTER: f32 = 0.33;
+                let q_terms: std::collections::HashSet<String> =
+                    tokenize_words(&query_text.to_lowercase())
+                        .into_iter()
+                        .filter(|w| w.len() > 2)
+                        .map(|w| w.to_string())
+                        .collect();
+                if q_terms.len() >= 2 {
+                    let ids: Vec<MemoryId> = fused.keys().cloned().collect();
+                    let mut adjusted = 0usize;
+                    for id in &ids {
+                        if let Some(ents) = get_entities(id) {
+                            if ents.len() >= 2 {
+                                // Concentration = fraction of the memory's entities the query mentions.
+                                let matched = ents
+                                    .iter()
+                                    .filter(|e| {
+                                        let el = e.to_lowercase();
+                                        q_terms.iter().any(|qt| el.contains(qt.as_str()))
+                                    })
+                                    .count();
+                                let concentration = matched as f32 / ents.len() as f32;
+                                let factor =
+                                    (1.0 + scale * (concentration - SPEC_CENTER)).clamp(0.70, 1.30);
+                                if let Some(score) = fused.get_mut(id) {
+                                    *score *= factor;
+                                    adjusted += 1;
+                                }
+                            }
+                        }
+                    }
+                    tracing::debug!(
+                        "SHODH_SPEC_FUSION: concentration term (scale={}) applied to {} candidates",
+                        scale,
+                        adjusted
+                    );
+                }
+            }
+
+            if layer_full && boost_prospective {
                 if let Some(ref signals) = query.prospective_signals {
                     if !signals.is_empty() {
                         use crate::constants::{
@@ -2828,7 +4065,7 @@ impl MemorySystem {
             //
             // Conservative: only boosts memories already in fused set (does NOT inject
             // new candidates). Facts validate existing retrieval signals, not override.
-            if !fact_source_boosts.is_empty() {
+            if boost_fact_source && !fact_source_boosts.is_empty() {
                 let mut boosted_count = 0;
                 for (id, boost) in &fact_source_boosts {
                     if let Some(score) = fused.get_mut(id) {
@@ -2860,6 +4097,36 @@ impl MemorySystem {
             // Pre-sort and limit candidates before expensive re-ranking.
             // Only look up graph entities for the top 2x max_results candidates,
             // not all fused results (avoids 100s of RocksDB reads).
+            // ===========================================================================
+            // LAYER 4.95: CAUSAL-ORIGIN ANSWER PLACEMENT (SHODH_CAUSAL_ORIGIN_BOOST)
+            // ===========================================================================
+            // For an origin-intent query, the backward causal walk DETERMINISTICALLY
+            // traced THE root cause. That root IS the answer — but it shares no lexical
+            // token with the effect-named query, so it carries no vector/BM25 mass, and
+            // the pre-fusion graph-leg injection (2x graph max) loses to the direct-cause
+            // distractor under any fusion mode (RRF and ACT-R both measured P@1=0). A
+            // structurally-certain answer must not compete on the soft-similarity scale:
+            // place the traced root(s) ABOVE the global fused max here, post-fusion. Only
+            // fires for origin queries (ids non-empty); a strict no-op otherwise, so no
+            // other category can regress (LongMemEval bit-identical, run 27840532226).
+            // SHODH_CAUSAL_ORIGIN_BOOST=0 disables for A/B. Lineage root-cause P@1
+            // 0.000 -> 0.867 (run 27825097128), control P@1 unchanged.
+            let origin_answer_boost = std::env::var("SHODH_CAUSAL_ORIGIN_BOOST")
+                .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+                .unwrap_or(true);
+            if origin_answer_boost && !causal_origin_episode_ids.is_empty() {
+                let global_max = fused.values().copied().fold(0.0f32, f32::max).max(0.01);
+                for (i, mid) in causal_origin_episode_ids.iter().enumerate() {
+                    // Best-supported root highest; later roots a hair lower for a
+                    // deterministic order. All sit above any similarity candidate.
+                    let target = global_max * (2.0 - (i as f32) * 0.01).max(1.5);
+                    let slot = fused.entry(mid.clone()).or_insert(0.0);
+                    if *slot < target {
+                        *slot = target;
+                    }
+                }
+            }
+
             let mut res: Vec<_> = fused.into_iter().collect();
             // Score desc; tie-break by MemoryId for stable rerank-budget cutoff.
             // The cutoff at `rerank_budget` makes order at the boundary semantically
@@ -2873,7 +4140,11 @@ impl MemorySystem {
             // expectation of a cross-encoder. This codebase has no cross-encoder; the only
             // rerank present is the ontological label-match boost below. The mode label is
             // preserved for spec fidelity. See plan/PR for details.
-            if layer_rerank && use_ontology_rerank && !onto_intent.expected_labels.is_empty() {
+            if layer_rerank
+                && boost_ontological
+                && use_ontology_rerank
+                && !onto_intent.expected_labels.is_empty()
+            {
                 if let Some(graph) = self.graph_memory.as_ref() {
                     let g = graph.read();
                     let mut boosted_count = 0usize;
@@ -2937,6 +4208,39 @@ impl MemorySystem {
                 }
             }
 
+            // E3 fusion-fix A — reserved graph quota (SHODH_GRAPH_RESERVE_K=N).
+            // `res` is sorted by fused score; truncation to max_results drops the
+            // graph's correct-but-deep-ranked multi-hop answer once BM25's lexical
+            // crowd dilutes it. Guarantee the top-N graph-leg candidates a slot
+            // within the kept window: any reserved id ranked beyond max_results is
+            // promoted to the tail of the window (displacing the lowest-scored
+            // non-reserved kept item). Default unset → no change.
+            if let Some(reserve_k) = std::env::var("SHODH_GRAPH_RESERVE_K")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+            {
+                let mr = query.max_results.max(1);
+                if res.len() > mr {
+                    let reserved: Vec<MemoryId> =
+                        graph_topn.iter().take(reserve_k).cloned().collect();
+                    for mid in reserved {
+                        // Already inside the kept window? nothing to do.
+                        if res.iter().take(mr).any(|(id, _)| id == &mid) {
+                            continue;
+                        }
+                        // Present further down? promote it to the window tail.
+                        if let Some(cur) = res.iter().position(|(id, _)| id == &mid) {
+                            if cur >= mr {
+                                let item = res.remove(cur);
+                                res.insert(mr - 1, item);
+                            }
+                        }
+                    }
+                }
+            }
+
+            crate::memory::gold_funnel::record("fusion", res.iter().map(|(id, _)| id));
             res.truncate(query.max_results);
             tracing::debug!("Layer 4: {} fused results", res.len());
 
@@ -2976,17 +4280,30 @@ impl MemorySystem {
         // Layer 5: Unified scoring with hebbian + recency + emotional + feedback signals
         // All signals are multiplicative on the base score to preserve RRF ranking.
         // Formula: base × importance × (1 + recency + arousal + credibility + temporal) × feedback
-        let now = chrono::Utc::now();
+        let now = scoring_now();
 
         // PIPE-9: Get feedback store guard for momentum-based scoring
         // Acquire once outside the loop to avoid repeated locking
         let feedback_guard = self.feedback_store.as_ref().map(|fs| fs.read());
 
+        // Momentum is the learning signal: an EMA of feedback that ACCUMULATES
+        // over repeated use (low per-event alpha + inertia → gradual, robust to a
+        // single bad signal). FEEDBACK_MOMENTUM_SCALE caps how much BUILT-UP
+        // momentum can move the score. At the 0.15 default it's imperceptible, so
+        // accumulated learning never becomes load-bearing. Make the cap tunable
+        // (SHODH_FEEDBACK_MOMENTUM_SCALE) so momentum that has built up over many
+        // interactions can re-rank — without touching alpha, so one feedback still
+        // only nudges (momentum, not forcing). Default unchanged.
+        let momentum_scale: f32 = std::env::var("SHODH_FEEDBACK_MOMENTUM_SCALE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(crate::constants::FEEDBACK_MOMENTUM_SCALE);
+
         for (memory_id, score) in memory_ids {
             // Hebbian boost from learned graph weights (multiplicative)
             // RH-8 gate: Hebbian association boost only applies in `Full` mode.
             let hebbian_boost = hebbian_scores.get(&memory_id).copied().unwrap_or(0.0);
-            let base_score = if layer_full {
+            let base_score = if layer_full && boost_hebbian {
                 score * (1.0 + hebbian_boost * crate::constants::HEBBIAN_ASSOCIATION_WEIGHT)
             } else {
                 score
@@ -3007,24 +4324,34 @@ impl MemorySystem {
                 // Recency: exponential decay, multiplicative factor
                 let hours_old = (now - mem.created_at).num_hours().max(0) as f32;
                 let recency_scale = recency_scale_override.unwrap_or(RECENCY_BOOST_SCALE);
-                let recency_factor = (-RECENCY_DECAY_RATE * hours_old).exp() * recency_scale;
+                let recency_factor = if boost_recency {
+                    (-RECENCY_DECAY_RATE * hours_old).exp() * recency_scale
+                } else {
+                    0.0
+                };
 
                 // Emotional arousal: high arousal = more salient
                 // Reference: LaBar & Cabeza (2006) — emotionally arousing events better remembered
-                let arousal_factor = mem
-                    .experience
-                    .context
-                    .as_ref()
-                    .map(|c| c.emotional.arousal * AROUSAL_BOOST_SCALE)
-                    .unwrap_or(0.0);
+                let arousal_factor = if boost_arousal {
+                    mem.experience
+                        .context
+                        .as_ref()
+                        .map(|c| c.emotional.arousal * AROUSAL_BOOST_SCALE)
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
 
                 // Source credibility: credible sources weighted higher
-                let credibility_factor = mem
-                    .experience
-                    .context
-                    .as_ref()
-                    .map(|c| (c.source.credibility - 0.5).max(0.0) * CREDIBILITY_BOOST_SCALE)
-                    .unwrap_or(0.0);
+                let credibility_factor = if boost_credibility {
+                    mem.experience
+                        .context
+                        .as_ref()
+                        .map(|c| (c.source.credibility - 0.5).max(0.0) * CREDIBILITY_BOOST_SCALE)
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
 
                 // TEMPORAL MATCH (TEMPR approach for multi-hop temporal retrieval)
                 //
@@ -3032,7 +4359,10 @@ impl MemorySystem {
                 // 1. If memory has explicit temporal_refs → match against query refs (highest signal)
                 // 2. If query is filtering BY date → use created_at proximity as fallback
                 // 3. If query is seeking FOR a date (WhenQuestion) → skip boost entirely
-                let temporal_factor = if has_temporal_query && !temporal_ctx.is_seeking_query {
+                let temporal_factor = if boost_temporal_match
+                    && has_temporal_query
+                    && !temporal_ctx.is_seeking_query
+                {
                     let mut best_match = 0.0_f32;
 
                     // Tier 1: Explicit temporal_refs on the memory
@@ -3070,7 +4400,7 @@ impl MemorySystem {
                     // distinct content signal and still applies to them above.
                     if best_match == 0.0
                         && temporal_ctx.is_filtering_query
-                        && !temporal_prefilter_ids.contains(&mem.id)
+                        && !(boost_temporal_prefilter && temporal_prefilter_ids.contains(&mem.id))
                     {
                         if let Some((range_start, range_end)) = temporal_ctx.date_range {
                             let created_date = mem.created_at.date_naive();
@@ -3103,13 +4433,15 @@ impl MemorySystem {
 
                 // FEEDBACK MOMENTUM (PIPE-9)
                 // Symmetric ±15% multiplicative adjustment
-                let feedback_multiplier = if let Some(ref guard) = feedback_guard {
+                let feedback_multiplier = if !boost_feedback {
+                    1.0
+                } else if let Some(ref guard) = feedback_guard {
                     if let Some(fm) = guard.get_momentum(&mem.id) {
                         let momentum = fm.ema_with_decay();
                         if momentum < 0.0 {
-                            1.0 + (momentum * FEEDBACK_MOMENTUM_SCALE).max(-FEEDBACK_MOMENTUM_SCALE)
+                            1.0 + (momentum * momentum_scale).max(-momentum_scale)
                         } else {
-                            1.0 + (momentum * FEEDBACK_MOMENTUM_SCALE).min(FEEDBACK_MOMENTUM_SCALE)
+                            1.0 + (momentum * momentum_scale).min(momentum_scale)
                         }
                     } else {
                         1.0
@@ -3119,21 +4451,32 @@ impl MemorySystem {
                 };
 
                 // Importance: scale base score by learned importance (7 factors)
-                let importance_factor =
-                    SCORING_IMPORTANCE_FLOOR + mem.importance() * SCORING_IMPORTANCE_RANGE;
+                let importance_factor = if boost_importance {
+                    SCORING_IMPORTANCE_FLOOR + mem.importance() * SCORING_IMPORTANCE_RANGE
+                } else {
+                    1.0
+                };
 
                 // Unified multiplicative scoring:
                 // base × importance × (1 + recency + arousal + credibility + temporal) × feedback
                 // All boost factors are additive within the parenthetical, then multiplicative
                 // on the base. This preserves RRF ranking while allowing signals to modulate.
+                // Clamp: under default constants the additive parts max out at ~1.25
+                // (0.5 recency + 0.15 arousal + 0.1 credibility + 0.5 temporal), so 2.5
+                // never bites — but query.recency_weight is CALLER-supplied and unbounded,
+                // and an extreme override must not be able to multiply one memory's score
+                // arbitrarily past the rest of the window.
                 let combined_boost =
-                    1.0 + recency_factor + arousal_factor + credibility_factor + temporal_factor;
+                    (1.0 + recency_factor + arousal_factor + credibility_factor + temporal_factor)
+                        .min(2.5);
 
                 // AUTO-CAPTURED TAG PENALTY (PIPE-8)
                 // Hook-ingested memories carry "auto-captured" tag; assistant responses
                 // carry "assistant-response". Apply multiplicative penalty so they don't
                 // outrank intentional memories when volume gives them a ranking edge.
-                let tag_penalty = {
+                let tag_penalty = if !boost_tag_penalty {
+                    1.0
+                } else {
                     let mut penalty = 1.0_f32;
                     for tag in &mem.experience.tags {
                         match tag.as_str() {
@@ -3169,26 +4512,40 @@ impl MemorySystem {
                         use crate::constants::*;
                         let hours_old = (now - mem.created_at).num_hours().max(0) as f32;
                         let recency_scale = recency_scale_override.unwrap_or(RECENCY_BOOST_SCALE);
-                        attr.recency_factor =
-                            (-RECENCY_DECAY_RATE * hours_old).exp() * recency_scale;
-                        attr.arousal_factor = mem
-                            .experience
-                            .context
-                            .as_ref()
-                            .map(|c| c.emotional.arousal * AROUSAL_BOOST_SCALE)
-                            .unwrap_or(0.0);
-                        attr.credibility_factor = mem
-                            .experience
-                            .context
-                            .as_ref()
-                            .map(|c| {
-                                (c.source.credibility - 0.5).max(0.0) * CREDIBILITY_BOOST_SCALE
-                            })
-                            .unwrap_or(0.0);
-                        attr.importance_factor =
-                            SCORING_IMPORTANCE_FLOOR + mem.importance() * SCORING_IMPORTANCE_RANGE;
+                        attr.recency_factor = if boost_recency {
+                            (-RECENCY_DECAY_RATE * hours_old).exp() * recency_scale
+                        } else {
+                            0.0
+                        };
+                        attr.arousal_factor = if boost_arousal {
+                            mem.experience
+                                .context
+                                .as_ref()
+                                .map(|c| c.emotional.arousal * AROUSAL_BOOST_SCALE)
+                                .unwrap_or(0.0)
+                        } else {
+                            0.0
+                        };
+                        attr.credibility_factor = if boost_credibility {
+                            mem.experience
+                                .context
+                                .as_ref()
+                                .map(|c| {
+                                    (c.source.credibility - 0.5).max(0.0) * CREDIBILITY_BOOST_SCALE
+                                })
+                                .unwrap_or(0.0)
+                        } else {
+                            0.0
+                        };
+                        attr.importance_factor = if boost_importance {
+                            SCORING_IMPORTANCE_FLOOR + mem.importance() * SCORING_IMPORTANCE_RANGE
+                        } else {
+                            1.0
+                        };
                         // Feedback multiplier
-                        attr.feedback_multiplier = if let Some(ref guard) = feedback_guard {
+                        attr.feedback_multiplier = if !boost_feedback {
+                            1.0
+                        } else if let Some(ref guard) = feedback_guard {
                             if let Some(fm) = guard.get_momentum(&mem.id) {
                                 let momentum = fm.ema_with_decay();
                                 if momentum < 0.0 {
@@ -3312,15 +4669,26 @@ impl MemorySystem {
         // Same formula as proactive_context (Berntsen elaboration quality).
         // RH-8 gate: quality multiplier only applies in `Full` mode — lower modes
         // expose the raw fused score so per-layer attribution isn't masked.
-        if layer_full {
+        if layer_full && boost_quality {
+            let v2_no_verbosity = std::env::var("SHODH_FUSION_V2")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
             for mem in &mut memories {
-                let content_len = mem.experience.content.len() as f32;
                 let has_entities = !mem.experience.entities.is_empty();
                 let has_context = mem.experience.context.is_some();
-                let quality = (content_len / 200.0).min(1.0)
-                    * (1.0
-                        + if has_entities { 0.1 } else { 0.0 }
-                        + if has_context { 0.1 } else { 0.0 });
+                let elaboration = 1.0
+                    + if has_entities { 0.1 } else { 0.0 }
+                    + if has_context { 0.1 } else { 0.0 };
+                let quality = if v2_no_verbosity {
+                    // Conscious restructure: drop the raw content-length factor — a
+                    // verbosity bias that multiplied short correct answers (a person
+                    // name) down below longer ones (org names), crashing ontology
+                    // 0.88→0.083 at `full`. Keep only the structural elaboration.
+                    elaboration
+                } else {
+                    let content_len = mem.experience.content.len() as f32;
+                    (content_len / 200.0).min(1.0) * elaboration
+                };
                 let quality_factor = quality.max(crate::constants::ELABORATION_QUALITY_MIN);
                 if let Some(score) = mem.score {
                     let mut cloned: Memory = mem.as_ref().clone();
@@ -3340,27 +4708,44 @@ impl MemorySystem {
 
         // Linguistic analysis: additive boost (5% of IC weight), not a full re-sort
         // RH-8 gate: linguistic re-sort only runs in `Full` mode.
-        if layer_full && !query_analysis.focal_entities.is_empty() {
-            // Precompute the boosted score once per memory. Computing
-            // linguistic_boost inside the comparator re-scanned each memory's
-            // content O(n log n) times (twice per comparison); now it is O(n).
-            let boosted: std::collections::HashMap<MemoryId, f32> = memories
-                .iter()
-                .map(|m| {
-                    let key = m.score.unwrap_or(0.0)
-                        + Self::linguistic_boost(&m.experience.content, &query_analysis) * 0.05;
-                    (m.id.clone(), key)
-                })
-                .collect();
-            memories.sort_by(|a, b| {
-                let score_a = boosted.get(&a.id).copied().unwrap_or(0.0);
-                let score_b = boosted.get(&b.id).copied().unwrap_or(0.0);
-                // Score desc → recency desc → MemoryId asc for stable rank order.
-                score_b
-                    .total_cmp(&score_a)
-                    .then_with(|| b.created_at.cmp(&a.created_at))
-                    .then_with(|| a.id.cmp(&b.id))
-            });
+        if layer_full && boost_linguistic && !query_analysis.focal_entities.is_empty() {
+            let v2_single = std::env::var("SHODH_FUSION_V2")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if v2_single {
+                // Conscious restructure: FOLD the linguistic signal into the single
+                // .score (additive) instead of a separate sort-only re-rank that the
+                // final sort silently discards when len>max. One score, one sort.
+                for m in memories.iter_mut() {
+                    if let Some(s) = m.score {
+                        let add =
+                            Self::linguistic_boost(&m.experience.content, &query_analysis) * 0.05;
+                        let mut cloned: Memory = m.as_ref().clone();
+                        cloned.set_score(s + add);
+                        *m = Arc::new(cloned);
+                    }
+                }
+            } else {
+                // Legacy: sort-only re-rank by (score + linguistic). Precompute the
+                // key once per memory (computing it in the comparator re-scanned
+                // content O(n log n) times).
+                let boosted: std::collections::HashMap<MemoryId, f32> = memories
+                    .iter()
+                    .map(|m| {
+                        let key = m.score.unwrap_or(0.0)
+                            + Self::linguistic_boost(&m.experience.content, &query_analysis) * 0.05;
+                        (m.id.clone(), key)
+                    })
+                    .collect();
+                memories.sort_by(|a, b| {
+                    let score_a = boosted.get(&a.id).copied().unwrap_or(0.0);
+                    let score_b = boosted.get(&b.id).copied().unwrap_or(0.0);
+                    score_b
+                        .total_cmp(&score_a)
+                        .then_with(|| b.created_at.cmp(&a.created_at))
+                        .then_with(|| a.id.cmp(&b.id))
+                });
+            }
         }
 
         self.logger
@@ -3374,7 +4759,7 @@ impl MemorySystem {
         // Suppressed memories should not be coactivated (Hebbian "losers don't learn").
         // RH-8 gate: retrieval competition mutates interference state — only run in `Full` mode
         // so per-layer attribution runs in `--layer all` don't pollute state across modes.
-        if layer_full && memories.len() >= 2 {
+        if layer_full && boost_competition && memories.len() >= 2 {
             // Use actual pipeline scores for competition, not position-based proxies.
             // Previously used 1.0 - (i/n)*0.3 which compressed all scores to [0.7, 1.0],
             // making suppression (ratio > 0.9) almost impossible.
@@ -3386,14 +4771,22 @@ impl MemorySystem {
                 })
                 .collect();
 
+            // Suppression COMPUTES in all modes (per-query ranking semantics);
+            // interference ACCUMULATION is a usage write — read-only recall
+            // (eval repeats) must not teach the detector (the records feed
+            // Layer 4.6's boosts on future queries; the third write class
+            // behind the L1 smoke cross-repeat divergence).
+            let record_state = !Self::recall_readonly();
             let competition_result = self
                 .interference_detector
                 .write()
-                .apply_retrieval_competition(&candidates, query_text);
+                .apply_retrieval_competition(&candidates, query_text, record_state);
 
             // Record competition event if any memories were suppressed
-            if let Some(ref event) = competition_result.event {
-                self.record_consolidation_event(event.clone());
+            if record_state {
+                if let Some(ref event) = competition_result.event {
+                    self.record_consolidation_event(event.clone());
+                }
             }
 
             // DEMOTE suppressed memories — never remove them. Deleting suppressed
@@ -3453,7 +4846,7 @@ impl MemorySystem {
         // RH-8 gate: access count mutates persistent state — only in `Full` mode.
         // Bump in-memory + record events, then persist all candidates' access
         // updates in ONE batched write rather than a full re-index per candidate.
-        if layer_full {
+        if layer_full && !Self::recall_readonly() {
             let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
             for memory in &memories {
                 let before =
@@ -3471,7 +4864,7 @@ impl MemorySystem {
         // participate in coactivation (biological: "neurons that fire together
         // wire together" but suppressed neurons don't fire).
         // RH-8 gate: Hebbian coactivation mutates graph state — only in `Full` mode.
-        if layer_full && memories.len() >= 2 {
+        if layer_full && !Self::recall_readonly() && memories.len() >= 2 {
             if let Some(graph) = &self.graph_memory {
                 let memory_uuids: Vec<uuid::Uuid> = memories.iter().map(|m| m.id.0).collect();
                 match graph.read().record_memory_coactivation(&memory_uuids) {
@@ -3518,18 +4911,57 @@ impl MemorySystem {
         }
 
         // Re-sort by score and trim to max_results after expansion.
-        // Expanded memories must compete on score, not get a free pass.
-        if memories.len() > query.max_results {
+        // Conscious restructure (SHODH_FUSION_V2): this is the SINGLE arbiter — the
+        // linguistic signal is already folded into .score above — so sort by .score
+        // UNCONDITIONALLY, not only when len>max. That branch is what let result-set
+        // SIZE decide whether the lexical re-sort or .score won the final order.
+        let v2_single_sort = std::env::var("SHODH_FUSION_V2")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if v2_single_sort || memories.len() > query.max_results {
             // Score desc → recency desc → MemoryId asc — deterministic competition cutoff.
+            // Quantize the score to 1e-6 before comparing: fused scores are accumulated
+            // by `+=` over a HashMap in non-deterministic iteration order, so f32
+            // non-associativity wobbles the last ULPs (~1e-9) and `total_cmp` would order
+            // otherwise-equal candidates differently run-to-run — flipping adjacent ranks
+            // before the created_at/id tie-breaks can fire (the harness's repeat-determinism
+            // gate caught exactly this). Rounding to 1e-6 (far above the ULP noise, far
+            // below the ~1e-5 score granularity) collapses the wobble into exact ties broken
+            // deterministically by recency then id. Metric-neutral: only sub-1e-6
+            // (effectively tied) candidates are reordered, never the top-k membership.
+            let q = |s: f32| (s * 1.0e6).round();
             memories.sort_by(|a, b| {
-                b.score
-                    .unwrap_or(0.0)
-                    .total_cmp(&a.score.unwrap_or(0.0))
+                q(b.score.unwrap_or(0.0))
+                    .total_cmp(&q(a.score.unwrap_or(0.0)))
                     .then_with(|| b.created_at.cmp(&a.created_at))
                     .then_with(|| a.id.cmp(&b.id))
             });
+
+            // Post-Layer-5 graph-exclusive rank reserve: ensure each reserved
+            // candidate present in `memories` lands within the kept window by
+            // promoting it to the window tail (displacing the lowest-scored
+            // non-reserved kept item). Applied after the final sort, before the
+            // cutoff — the only place a distal multi-hop answer can be guaranteed
+            // survival without inflating its score upstream.
+            if graph_reserve_final > 0 && !graph_exclusive_reserve.is_empty() {
+                let mr = query.max_results.max(1);
+                for rid in &graph_exclusive_reserve {
+                    if memories.iter().take(mr).any(|m| m.id == *rid) {
+                        continue;
+                    }
+                    if let Some(cur) = memories.iter().position(|m| m.id == *rid) {
+                        if cur >= mr {
+                            let item = memories.remove(cur);
+                            memories.insert(mr - 1, item);
+                        }
+                    }
+                }
+            }
+
             memories.truncate(query.max_results);
         }
+
+        crate::memory::gold_funnel::record("final", memories.iter().map(|m| &m.id));
 
         let t_total = recall_start.elapsed();
         tracing::info!(
@@ -5654,12 +7086,29 @@ impl MemorySystem {
         self.hybrid_search.bm25_segment_count()
     }
 
+    /// BM25 commit batches lost after retries. Nonzero means the searchable
+    /// index is silently missing documents (read-your-writes broken) — the
+    /// recall harness treats that as an infrastructure failure.
+    pub fn bm25_commit_failure_count(&self) -> u64 {
+        self.hybrid_search.bm25_commit_failure_count()
+    }
+
     /// Get vector index health information
     ///
     /// Returns metrics about the Vamana index including total vectors,
     /// incremental inserts since last build, and whether rebuild is recommended.
     pub fn index_health(&self) -> retrieval::IndexHealth {
         self.retriever.index_health()
+    }
+
+    /// Bulk-rebuild the Vamana graph with full alpha-RNG construction
+    /// (robust_prune), replacing the greedy incremental-insert graph. Vector
+    /// composition and the id mapping are preserved exactly — only graph
+    /// topology changes. Used by the eval harness at the ingest→query boundary
+    /// (SHODH_VAMANA_QUALITY_REBUILD=1); production wiring belongs in the
+    /// maintenance cycle.
+    pub fn force_vector_quality_rebuild(&self) -> Result<()> {
+        self.retriever.force_quality_rebuild()
     }
 
     /// Auto-rebuild vector index if degradation threshold is exceeded
@@ -5773,6 +7222,20 @@ impl MemorySystem {
     ///
     /// # Returns
     /// Statistics about what was reinforced
+    /// Reward learning-rate multiplier for reward-modulated Hebbian plasticity
+    /// (the in-memory RL). Scales the importance/edge update applied on
+    /// Helpful/Misleading feedback. Default 1.0 (the calibrated constants);
+    /// `SHODH_REWARD_LR_MULT` lets us amplify the reward loop and measure when
+    /// it moves rank, not just score. The default-1.0 path is byte-identical to
+    /// the prior behavior.
+    fn reward_lr_mult(&self) -> f32 {
+        std::env::var("SHODH_REWARD_LR_MULT")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|m| *m > 0.0)
+            .unwrap_or(1.0)
+    }
+
     pub fn reinforce_recall(
         &self,
         memory_ids: &[MemoryId],
@@ -5919,11 +7382,15 @@ impl MemorySystem {
                 memory.record_access();
                 match &outcome {
                     RetrievalOutcome::Helpful => {
-                        memory.boost_importance(HEBBIAN_BOOST_HELPFUL * error_multiplier);
+                        memory.boost_importance(
+                            HEBBIAN_BOOST_HELPFUL * error_multiplier * self.reward_lr_mult(),
+                        );
                         stats.importance_boosts += 1;
                     }
                     RetrievalOutcome::Misleading => {
-                        memory.decay_importance(HEBBIAN_DECAY_MISLEADING * error_multiplier);
+                        memory.decay_importance(
+                            HEBBIAN_DECAY_MISLEADING * error_multiplier * self.reward_lr_mult(),
+                        );
                         stats.importance_decays += 1;
                     }
                     RetrievalOutcome::Neutral => {
@@ -5947,12 +7414,19 @@ impl MemorySystem {
                         memory.record_access();
                         match &outcome {
                             RetrievalOutcome::Helpful => {
-                                memory.boost_importance(HEBBIAN_BOOST_HELPFUL * error_multiplier);
+                                memory.boost_importance(
+                                    HEBBIAN_BOOST_HELPFUL
+                                        * error_multiplier
+                                        * self.reward_lr_mult(),
+                                );
                                 stats.importance_boosts += 1;
                             }
                             RetrievalOutcome::Misleading => {
-                                memory
-                                    .decay_importance(HEBBIAN_DECAY_MISLEADING * error_multiplier);
+                                memory.decay_importance(
+                                    HEBBIAN_DECAY_MISLEADING
+                                        * error_multiplier
+                                        * self.reward_lr_mult(),
+                                );
                                 stats.importance_decays += 1;
                             }
                             RetrievalOutcome::Neutral => {
@@ -5976,6 +7450,48 @@ impl MemorySystem {
                             "Memory not found during reinforcement - may have been deleted"
                         );
                     }
+                }
+            }
+        }
+
+        // Connect feedback to MOMENTUM — the load-bearing learning signal.
+        // Previously reinforce_recall only bumped importance + graph edges; it
+        // never touched the feedback-momentum EMA, so the momentum store and the
+        // reinforcement path were disconnected. That is why raising
+        // FEEDBACK_MOMENTUM_SCALE did nothing on the learning curve (the harness
+        // drives reinforce_recall, not the momentum store). Push a +1 (Helpful) /
+        // −1 (Misleading) signal per reinforced memory into the EMA. The EMA
+        // accumulates it gradually (inertia-damped, robust to a single bad
+        // signal), so repeated use BUILDS momentum that becomes load-bearing in
+        // recall (Layer 5 feedback_multiplier) — momentum, not forcing.
+        if let Some(fs) = &self.feedback_store {
+            let value: f32 = match outcome {
+                RetrievalOutcome::Helpful => 1.0,
+                RetrievalOutcome::Misleading => -1.0,
+                RetrievalOutcome::Neutral => 0.0,
+            };
+            if value != 0.0 {
+                let now = chrono::Utc::now();
+                let mut guard = fs.write();
+                for id in memory_ids {
+                    let mtype = self
+                        .long_term_memory
+                        .get(id)
+                        .map(|m| m.experience.experience_type)
+                        .unwrap_or(ExperienceType::Observation);
+                    {
+                        let momentum = guard.get_or_create_momentum(id.clone(), mtype);
+                        momentum.update(SignalRecord {
+                            timestamp: now,
+                            value,
+                            confidence: 1.0,
+                            trigger: SignalTrigger::TemporalCredit {
+                                turns_aggregated: 1,
+                                raw_total: value,
+                            },
+                        });
+                    }
+                    guard.mark_dirty(id);
                 }
             }
         }

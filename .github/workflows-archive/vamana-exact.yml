@@ -1,0 +1,65 @@
+name: vamana vs exact (index recall vs task recall)
+
+# Proves whether the Vamana ANN index is losing recall vs exact brute-force NN.
+# arm1 = Vamana (ANN), arm2 = SHODH_VECTOR_EXACT (true nearest neighbours).
+# If task recall@10 is ~equal, the index is faithful (Vamana ≈ LanceDB ≈ exact at
+# this scale) and the embeddings are the ceiling — swapping the index won't help.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  idx:
+    runs-on: ubuntu-latest
+    timeout-minutes: 250
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Vamana (ANN)
+        run: ./target/release/recall-eval --suite locomo --output vamana.json --storage ./s-ann 2>&1 | tail -3
+      - name: Exact (brute-force NN)
+        env: { SHODH_VECTOR_EXACT: "1" }
+        run: ./target/release/recall-eval --suite locomo --output exact.json --storage ./s-exact 2>&1 | tail -3
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          a=load("vamana.json"); b=load("exact.json")
+          def rec(d,c):
+              if not d: return float('nan')
+              return d['layers']['full']['recall@10'] if c=='ALL' else d['by_category'][c]['recall@10']
+          cats=['ALL','single_hop','multi_hop','temporal','open_domain']
+          print("## Vamana (ANN) vs Exact (brute-force) — full-pipeline recall@10\n")
+          print("| category | Vamana (ANN) | Exact | Δ |")
+          print("| --- | --- | --- | --- |")
+          for c in cats:
+              va,ex=rec(a,c),rec(b,c)
+              print(f"| {c} | {va:.4f} | {ex:.4f} | {ex-va:+.4f} |")
+          print("\nΔ≈0 ⇒ the ANN index is faithful (no recall lost vs exact); the embeddings are the ceiling, not the index. A better index (LanceDB/IVF/HNSW) cannot beat exact.")
+          PY

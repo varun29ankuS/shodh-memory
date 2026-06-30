@@ -29,6 +29,7 @@ const CF_ENTITY_EPISODES: &str = "entity_episodes";
 const CF_NAME_INDEX: &str = "name_index";
 const CF_LOWERCASE_INDEX: &str = "lowercase_index";
 const CF_STEMMED_INDEX: &str = "stemmed_index";
+const CF_RELATION_STATS: &str = "relation_stats";
 
 const GRAPH_CF_NAMES: &[&str] = &[
     CF_ENTITIES,
@@ -40,7 +41,59 @@ const GRAPH_CF_NAMES: &[&str] = &[
     CF_NAME_INDEX,
     CF_LOWERCASE_INDEX,
     CF_STEMMED_INDEX,
+    CF_RELATION_STATS,
 ];
+
+/// Per-(label-pair, relation) evidence counter for the learned pair table
+/// (Stanford-1, PMI² relation mapping). `src_is_a` counts observations where
+/// the relation's SOURCE entity carried the canonically-first label.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PairRelationStat {
+    relation: RelationType,
+    count: u64,
+    src_is_a: u64,
+}
+
+impl PairRelationStat {
+    fn new(relation: RelationType) -> Self {
+        Self {
+            relation,
+            count: 0,
+            src_is_a: 0,
+        }
+    }
+}
+
+/// Stable key string for an entity label in relation-stats keys.
+fn label_key(label: &EntityLabel) -> String {
+    format!("{label:?}")
+}
+
+/// Labels too generic to carry a learned relation default. The first
+/// measurement (batched guard run 27348362950) showed one label-pair
+/// mass-applying CreatedBy to 344 cue-less co-mentions (open_domain -0.067):
+/// catch-all labels make every co-mention look like the same "pair", so the
+/// purity gate sees a clean signal that is actually label poverty. Learned
+/// mappings require both endpoints to carry a SPECIFIC label.
+fn label_is_generic(label: &EntityLabel) -> bool {
+    matches!(
+        label,
+        EntityLabel::Concept | EntityLabel::Keyword | EntityLabel::Other(_)
+    )
+}
+
+/// Canonicalize an unordered label pair for stats keys. Returns
+/// (first, second, input_src_is_first): the two label keys in lexicographic
+/// order plus whether the FIRST argument landed in the first slot.
+fn canonical_label_pair(a: &EntityLabel, b: &EntityLabel) -> (String, String, bool) {
+    let ka = label_key(a);
+    let kb = label_key(b);
+    if ka <= kb {
+        (ka, kb, true)
+    } else {
+        (kb, ka, false)
+    }
+}
 
 /// Entity node in the knowledge graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -504,8 +557,13 @@ impl LtpStatus {
         match self {
             Self::None => 1.0,
             Self::Burst { detected_at } => {
-                // Check if burst has expired
-                let hours_since = (Utc::now() - *detected_at).num_hours();
+                // Check if burst has expired. Uses the frozen scoring clock
+                // (SHODH_EVAL_NOW) because this feeds effective_strength() on
+                // the read path: a live clock makes the burst-protection factor
+                // flip between recall repeats minutes apart, wobbling edge
+                // strength and graph activation. Production leaves the env
+                // unset, so this is Utc::now() there.
+                let hours_since = (crate::memory::scoring_now() - *detected_at).num_hours();
                 if hours_since > LTP_BURST_DURATION_HOURS {
                     1.0 // Expired, normal decay
                 } else {
@@ -527,7 +585,8 @@ impl LtpStatus {
         use crate::constants::LTP_BURST_DURATION_HOURS;
         match self {
             Self::Burst { detected_at } => {
-                (Utc::now() - *detected_at).num_hours() > LTP_BURST_DURATION_HOURS
+                // Frozen scoring clock on the read path (see decay_factor).
+                (crate::memory::scoring_now() - *detected_at).num_hours() > LTP_BURST_DURATION_HOURS
             }
             _ => false,
         }
@@ -1207,7 +1266,13 @@ impl RelationshipEdge {
     pub fn effective_strength(&self) -> f32 {
         use crate::decay::tier_decay_factor;
 
-        let now = Utc::now();
+        // Use the frozen scoring clock (SHODH_EVAL_NOW) on the eval path: this
+        // read-only decay feeds spreading-activation strength, and a live clock
+        // makes edges decay measurably between recall repeats minutes apart
+        // (L1Working edges decay over hours), wobbling episode activations and
+        // flipping near-tie graph-leg ranks. Production leaves SHODH_EVAL_NOW
+        // unset, so this is `Utc::now()` there — identical behaviour.
+        let now = crate::memory::scoring_now();
         let elapsed = now.signed_duration_since(self.last_activated);
         let hours_elapsed = elapsed.num_seconds() as f64 / 3600.0;
 
@@ -1458,6 +1523,204 @@ impl RelationType {
             Self::Custom(s) => s.as_str(),
         }
     }
+
+    /// Intrinsic spreading-activation weight for this relation type — lever-1
+    /// prototype, gated at the call site by `SHODH_GRAPH_PREDICATE_WEIGHTS`.
+    ///
+    /// A co-occurrence edge is weak evidence of a real relationship: the two
+    /// entities were merely co-mentioned. A typed predicate (causal, employment,
+    /// structural) encodes an actual relation. Spreading activation should flow
+    /// preferentially along meaning rather than adjacency, otherwise traversal over
+    /// a co-occurrence graph just rediscovers lexical co-occurrence (which BM25
+    /// already has). Weights are centred near 1.0 so the flag RE-WEIGHTS the graph
+    /// instead of globally scaling it; the load-bearing contrast is the 2.6× gap
+    /// between `CoOccurs` (0.5) and the causal relations (1.3).
+    pub fn spreading_weight(&self) -> f32 {
+        use RelationType::*;
+        match self {
+            // Causal relations — the lineage / multi-hop backbone.
+            Causes | ResultsIn | Triggers | SupersededBy => 1.3,
+            // Strong typed relations between distinct entities.
+            WorksAt | EmployedBy | Manages | AssignedTo | Approves | OwnedBy | CreatedBy
+            | DevelopedBy | Teaches => 1.1,
+            // Structural / functional relations.
+            PartOf | Contains | LocatedIn | LocatedAt | DependsOn | Requires | Uses
+            | Implements | Configures | DeploysTo | Monitors | Documents | WorksWith | Knows
+            | Learned | Prefers | Recommends => 1.0,
+            AlternativeTo => 0.9,
+            // Generic associations — progressively weaker evidence of meaning.
+            AssociatedWith | CoRetrieved => 0.7,
+            RelatedTo => 0.6,
+            CoOccurs => 0.5,
+            Custom(_) => 1.0,
+        }
+    }
+
+    /// Whether this relation encodes forward causation (cause `from` → effect
+    /// `to`). Used by backward causal-origin tracing: to find the origin of an
+    /// effect, walk these edges from the effect (`to`) toward the cause (`from`).
+    pub fn is_causal(&self) -> bool {
+        matches!(
+            self,
+            RelationType::Causes | RelationType::Triggers | RelationType::ResultsIn
+        )
+    }
+}
+
+/// SHODH_PERSON_PERSON_KNOWS=1 — type Person↔Person co-mentions as `Knows`
+/// instead of `CoOccurs`. Cached: read once per process (eval sets env before
+/// start; production restarts to change it).
+fn person_person_knows() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("SHODH_PERSON_PERSON_KNOWS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// Match relational cue phrases in ALREADY-LOWERCASED text → a typed predicate.
+/// Shared by the whole-text and span-scoped extractors below.
+fn predicate_from_cues(t: &str) -> Option<RelationType> {
+    use RelationType::*;
+    let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
+
+    // Ordered by signal strength; first match wins. Cue fragments are chosen to
+    // survive an entity splitting the verb phrase ("X set Y in motion") — real text
+    // rarely keeps a relational verb contiguous, so matching only "set in motion"
+    // would miss the relation it is meant to capture.
+    if has(&[
+        "in motion",
+        "brought about",
+        "gave rise",
+        "triggered",
+        "led directly to",
+        "led to",
+        "resulted in",
+        "caused",
+        "because of",
+        "due to",
+    ]) {
+        return Some(Triggers);
+    }
+    if has(&[
+        "superseded",
+        "replaced by",
+        "deprecated",
+        "obsoleted",
+        "rolled back",
+    ]) {
+        return Some(SupersededBy);
+    }
+    if has(&[
+        "manages",
+        "manager of",
+        "oversees",
+        "supervises",
+        "in charge of",
+    ]) {
+        return Some(Manages);
+    }
+    if has(&[
+        "works at",
+        "works for",
+        "employed by",
+        "employee of",
+        "joined",
+    ]) {
+        return Some(WorksAt);
+    }
+    if has(&[
+        "created",
+        "developed",
+        "built",
+        "founded",
+        "designed",
+        "authored",
+    ]) {
+        return Some(CreatedBy);
+    }
+    if has(&["depends on", "relies on", "requires", "needs"]) {
+        return Some(DependsOn);
+    }
+    if has(&["located in", "based in", "headquartered", "situated in"]) {
+        return Some(LocatedIn);
+    }
+    if has(&["part of", "belongs to", "member of", "division of"]) {
+        return Some(PartOf);
+    }
+    if has(&["uses", "using", "powered by", "built on"]) {
+        return Some(Uses);
+    }
+    None
+}
+
+/// Whole-text predicate recovery (lever-1, gated at the call site by
+/// `SHODH_GRAPH_EXTRACTED_PREDICATES`). Undirected and clause-blind — kept for the
+/// simple single-relation path and unit tests. Prefer `extract_directed_predicate`
+/// at edge-creation time.
+pub fn extract_predicate_from_text(text: &str) -> Option<RelationType> {
+    predicate_from_cues(&text.to_ascii_lowercase())
+}
+
+/// Span-scoped, DIRECTION-aware predicate recovery. Locates both entity mentions,
+/// scans only the sentence containing BOTH for a cue, and decides direction by
+/// surface order (the earlier mention is the subject/cause → `from_entity`),
+/// FLIPPED for effect-first constructions (see below).
+/// Returns `(relation, a_is_source)`; `None` when the mentions don't co-occur in
+/// one sentence or no cue is present, so the caller keeps the label-pair inference.
+///
+/// This fixes the two bugs that left lineage at P@1=0: a multi-relation sentence no
+/// longer types every pair the same (sentence-scoped), and the causal arrow now
+/// points cause→effect by surface order instead of trusting NER's entity ordering
+/// (the likely cause of the failed first measurement — a reversed arrow makes the
+/// backward origin-walk dead-end).
+///
+/// DIRECTION FIX (substrate audit 2026-06-10): surface order is only correct for
+/// cause-first constructions ("B triggered A"). Effect-first constructions invert
+/// it — "A happened BECAUSE OF B" / "A DUE TO B" / passive "A WAS CAUSED BY B" all
+/// put the EFFECT first, so the earlier mention is NOT the cause. Three of the ten
+/// causal cues systematically wrote reversed arrows, dead-ending the backward
+/// origin-walk for exactly those sentences. When an effect-first cue is present in
+/// the sentence, the arrow flips.
+pub fn extract_directed_predicate(
+    text: &str,
+    name_a: &str,
+    name_b: &str,
+) -> Option<(RelationType, bool)> {
+    let lc = text.to_ascii_lowercase();
+    let a = name_a.to_ascii_lowercase();
+    let b = name_b.to_ascii_lowercase();
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    let pa = lc.find(&a)?;
+    let pb = lc.find(&b)?;
+    if pa == pb {
+        return None;
+    }
+    // Window spanning both mentions, then clamp to the enclosing sentence so a cue
+    // from a neighbouring clause cannot leak in.
+    let (lo, hi) = if pa < pb {
+        (pa, pb + b.len())
+    } else {
+        (pb, pa + a.len())
+    };
+    let sent_start = lc[..lo]
+        .rfind(['.', '!', '?', ';', '\n'])
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let sent_end = lc[hi..]
+        .find(['.', '!', '?', ';', '\n'])
+        .map(|i| hi + i)
+        .unwrap_or(lc.len());
+    let sentence = &lc[sent_start..sent_end];
+    let rt = predicate_from_cues(sentence)?;
+    // Effect-first constructions: the earlier mention is the EFFECT, not the cause.
+    const EFFECT_FIRST_CUES: [&str; 4] = ["because of", "due to", "caused by", "triggered by"];
+    let effect_first = EFFECT_FIRST_CUES.iter().any(|c| sentence.contains(c));
+    let a_first = pa < pb;
+    Some((rt, if effect_first { !a_first } else { a_first }))
 }
 
 /// Infer a typed relation between two entities based on their labels.
@@ -1473,6 +1736,15 @@ pub fn infer_relation_type_for_pair(from: &EntityLabel, to: &EntityLabel) -> Rel
     use RelationType::*;
 
     match (from, to) {
+        // Person↔Person — the dominant pair in conversational/personal memory —
+        // previously had NO rule and fell through to CoOccurs (the mechanical
+        // cause of the >80%-untyped graph on conversational corpora, substrate
+        // audit 2026-06-10). Typed as Knows behind SHODH_PERSON_PERSON_KNOWS
+        // because the change is NOT free: non-generic types become eligible for
+        // ontological relation penalties and predicate weighting, so it must be
+        // A/B'd, not assumed.
+        (Person, Person) if person_person_knows() => Knows,
+
         // Person relationships
         (Person, Organization) | (Person, Team) => WorksAt,
         (Person, Technology) | (Person, Service) | (Person, Database) => Uses,
@@ -1507,8 +1779,13 @@ pub fn infer_relation_type_for_pair(from: &EntityLabel, to: &EntityLabel) -> Rel
         | (Module, Project)
         | (Service, Project) => PartOf,
 
-        // Technology alternatives
-        (Technology, Technology) => AlternativeTo,
+        // Two technologies co-mentioned were previously typed AlternativeTo —
+        // fabricated semantics from labels alone (co-mention says nothing about
+        // substitutability), and as a "confident" type it suppressed the cue
+        // extractor, starving the causal walk (the lineage-zero root cause,
+        // 2026-06-10). Co-mention is co-occurrence; real relations come from
+        // sentence evidence (semantic typer / cues).
+        (Technology, Technology) => CoOccurs,
 
         // Location relationships (either direction)
         (_, Location) | (Location, _) => LocatedIn,
@@ -2360,6 +2637,78 @@ impl GraphMemory {
         Ok(true)
     }
 
+    /// PHRASE-LEVEL precision resolution: entities whose FULL (lowercased) name
+    /// occurs verbatim inside `text_lower`. The inverse of fuzzy lookup — instead
+    /// of asking "which entity does this fragment match?" (where "incident"
+    /// binds to an arbitrary hub), it asks "which entity names does the query
+    /// actually CONTAIN?" ("the selvic incident" ⊂ query ✓; "the selvic1
+    /// incident" ⊄ query ✗). Built for causal-walk seeding, where a wrong seed
+    /// injects a wrong chain's origins into the candidate pool. Names shorter
+    /// than `min_len` are skipped (stop-word-like entity names would match
+    /// everything); capped at `max` results, longest names first (most specific).
+    pub fn find_entities_contained_in_text(
+        &self,
+        text_lower: &str,
+        min_len: usize,
+        max: usize,
+    ) -> Result<Vec<EntityNode>> {
+        let mut hits: Vec<(usize, Uuid)> = {
+            let lowercase_index = self.entity_lowercase_index.read();
+            lowercase_index
+                .iter()
+                .filter(|(name, _)| name.len() >= min_len && text_lower.contains(name.as_str()))
+                .map(|(name, uuid)| (name.len(), *uuid))
+                .collect()
+        };
+        // Longest (most specific) first; deterministic tie-break by uuid.
+        hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut out = Vec::new();
+        for (_, uuid) in hits.into_iter().take(max) {
+            if let Some(ent) = self.get_entity(&uuid)? {
+                out.push(ent);
+            }
+        }
+        Ok(out)
+    }
+
+    /// STRICT entity resolution: tiers 1-3 only (exact / case-insensitive /
+    /// stemmed) — no substring or word-level fuzzing.
+    ///
+    /// Use this when the caller needs PRECISION over recall — e.g. seeds for
+    /// the causal-origin walk. The lineage diagnosis (2026-06-10) showed the
+    /// fuzzy tiers binding a fragmented query token ("incident") to an
+    /// arbitrary hub node, making the backward walk inject OTHER chains' roots
+    /// into the candidate pool and crowding the true root out of the top-10
+    /// (harness root-cause P@1 pinned at 0.0). Spreading-activation seeding
+    /// keeps the recall-oriented fuzzy resolver; precision consumers use this.
+    pub fn find_entity_by_name_strict(&self, name: &str) -> Result<Option<EntityNode>> {
+        let uuid = {
+            let index = self.entity_name_index.read();
+            index.get(name).copied()
+        };
+        if let Some(uuid) = uuid {
+            return self.get_entity(&uuid);
+        }
+        let name_lower = name.to_lowercase();
+        let uuid = {
+            let lowercase_index = self.entity_lowercase_index.read();
+            lowercase_index.get(&name_lower).copied()
+        };
+        if let Some(uuid) = uuid {
+            return self.get_entity(&uuid);
+        }
+        let stemmer = Stemmer::create(Algorithm::English);
+        let stemmed_name = Self::stem_entity_name(&stemmer, name);
+        let uuid = {
+            let stemmed_index = self.entity_stemmed_index.read();
+            stemmed_index.get(&stemmed_name).copied()
+        };
+        if let Some(uuid) = uuid {
+            return self.get_entity(&uuid);
+        }
+        Ok(None)
+    }
+
     /// Find entity by name (case-insensitive, O(1) lookup)
     ///
     /// Uses a multi-tier matching strategy:
@@ -2456,6 +2805,12 @@ impl GraphMemory {
         }
 
         Ok(None)
+    }
+
+    /// Total number of episodes stored in the graph (the `N` in PMI / IDF statistics).
+    /// O(1) — read from the maintained atomic counter.
+    pub fn total_episode_count(&self) -> usize {
+        self.episode_count.load(Ordering::Relaxed)
     }
 
     /// Lightweight quality metrics for an existing entity in the graph.
@@ -2853,6 +3208,332 @@ impl GraphMemory {
         }
 
         Ok(edges)
+    }
+
+    /// Trace the causal origin(s) of a set of effect entities — the "root cause".
+    ///
+    /// Spreading activation cannot answer "what was the origin of C?": it favours
+    /// the PROXIMAL cause (1 hop) over the distal root (2+ hops), and its per-edge
+    /// step hardcodes the `to_entity` as the target so it only flows forward
+    /// (cause → effect), never backward. This walks the OTHER way: from each effect
+    /// it follows incoming causal edges (where the current node is the `to_entity`
+    /// of a `Causes`/`Triggers`/`ResultsIn` edge) toward the `from_entity` cause,
+    /// repeatedly, and returns the terminal sources — the nodes with no further
+    /// causal antecedent. Those are the roots whose episodes answer the query.
+    ///
+    /// Requires causally-typed edges (see `extract_predicate_from_text` /
+    /// `SHODH_GRAPH_EXTRACTED_PREDICATES`); on a pure co-occurrence graph there are
+    /// no causal edges to walk and this correctly returns nothing.
+    ///
+    /// Returns origins SCORED by backward-path strength — the max over paths of the
+    /// product of edge `effective_strength` with per-hop decay — sorted strongest
+    /// first. The unscored version of this walk returned EVERY terminal source in
+    /// the backward cone; on a graph with cross-chain causal bleed that was 21–57
+    /// origins per query when exactly 1 was correct (the measured lineage flood),
+    /// and the downstream injection amplified all of them. Scores let the caller
+    /// take a bounded top-k — the reach_inject lesson (bounded ranked set, never
+    /// everything reachable), causal edition. Relaxation re-expands improved nodes
+    /// (exact best-path); products of factors < 1 cannot improve around a cycle, so
+    /// it terminates.
+    pub fn trace_causal_origins(
+        &self,
+        seeds: &[Uuid],
+        max_depth: usize,
+    ) -> Result<Vec<(Uuid, f32)>> {
+        use std::collections::HashSet;
+        const HOP_DECAY: f32 = 0.7;
+        const MAX_NODES: usize = 4000;
+
+        let seed_set: HashSet<Uuid> = seeds.iter().copied().collect();
+        // Best backward-path strength per node (max-product relaxation).
+        let mut best: HashMap<Uuid, f32> = seeds.iter().map(|s| (*s, 1.0_f32)).collect();
+        let mut origins: HashMap<Uuid, f32> = HashMap::new();
+        let mut frontier: Vec<Uuid> = seeds.to_vec();
+
+        for _ in 0..max_depth.max(1) {
+            if frontier.is_empty() || best.len() >= MAX_NODES {
+                break;
+            }
+            let mut next: Vec<Uuid> = Vec::new();
+            for node in std::mem::take(&mut frontier) {
+                let node_score = best.get(&node).copied().unwrap_or(0.0);
+                if node_score <= 0.0 {
+                    continue;
+                }
+                let edges = self.get_entity_relationships_limited(&node, Some(64))?;
+                // Incoming causal edges: this node is the EFFECT (to_entity); the
+                // cause is the from_entity. Self-loops are skipped.
+                let parents: Vec<(Uuid, f32)> = edges
+                    .iter()
+                    .filter(|e| {
+                        e.to_entity == node && e.from_entity != node && e.relation_type.is_causal()
+                    })
+                    .map(|e| (e.from_entity, e.effective_strength().clamp(0.0, 1.0)))
+                    .collect();
+                if parents.is_empty() {
+                    // No causal antecedent → this is a source. A seed with no causal
+                    // parent is the query subject itself, not an origin, so skip it.
+                    if !seed_set.contains(&node) {
+                        let entry = origins.entry(node).or_insert(0.0);
+                        if node_score > *entry {
+                            *entry = node_score;
+                        }
+                    }
+                } else {
+                    for (parent, strength) in parents {
+                        let candidate = node_score * strength * HOP_DECAY;
+                        let entry = best.entry(parent).or_insert(0.0);
+                        if candidate > *entry {
+                            *entry = candidate;
+                            next.push(parent);
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+
+        let mut out: Vec<(Uuid, f32)> = origins.into_iter().collect();
+        // Strongest first; uuid tiebreak for determinism.
+        out.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        Ok(out)
+    }
+
+    fn relation_stats_cf(&self) -> &ColumnFamily {
+        self.db
+            .cf_handle(CF_RELATION_STATS)
+            .expect("relation_stats CF must exist")
+    }
+
+    /// Record one piece of high-precision relation evidence — the cue extractor
+    /// acting as distant supervisor (Angeli 2015 §5, adapted): every explicit
+    /// lexical cue hit teaches the per-user (label-pair → relation, direction)
+    /// statistics that `lookup_learned_pair_relation` later applies to cue-less
+    /// pairs. `src_label`/`dst_label` are the labels of the relation's source
+    /// and target entities respectively.
+    pub fn record_relation_evidence(
+        &self,
+        src_label: &EntityLabel,
+        dst_label: &EntityLabel,
+        relation: &RelationType,
+    ) -> Result<()> {
+        // Generic labels never participate (see label_is_generic) — refusing
+        // at RECORD time keeps the stats CF small and the signal honest.
+        if label_is_generic(src_label) || label_is_generic(dst_label) {
+            return Ok(());
+        }
+        let (la, lb, src_is_a) = canonical_label_pair(src_label, dst_label);
+        let key = format!("lp:{la}:{lb}:{}", relation.as_str());
+        let mut stat: PairRelationStat = match self.db.get_cf(self.relation_stats_cf(), &key)? {
+            Some(bytes) => crate::serialization::try_decode(&bytes)
+                .map(|(s, _)| s)
+                .unwrap_or_else(|_| PairRelationStat::new(relation.clone())),
+            None => PairRelationStat::new(relation.clone()),
+        };
+        stat.count += 1;
+        if src_is_a {
+            stat.src_is_a += 1;
+        }
+        self.db.put_cf(
+            self.relation_stats_cf(),
+            &key,
+            crate::serialization::encode(&stat)?,
+        )?;
+        self.bump_stat_counter(&format!("lp_total:{la}:{lb}"))?;
+        self.bump_stat_counter(&format!("rel_total:{}", relation.as_str()))?;
+        self.bump_stat_counter("lp_grand_total")?;
+        Ok(())
+    }
+
+    fn bump_stat_counter(&self, key: &str) -> Result<()> {
+        let n: u64 = match self.db.get_cf(self.relation_stats_cf(), key)? {
+            Some(bytes) => crate::serialization::try_decode(&bytes)
+                .map(|(v, _)| v)
+                .unwrap_or(0),
+            None => 0,
+        };
+        self.db.put_cf(
+            self.relation_stats_cf(),
+            key,
+            crate::serialization::encode(&(n + 1))?,
+        )?;
+        Ok(())
+    }
+
+    fn read_stat_counter(&self, key: &str) -> Result<u64> {
+        Ok(match self.db.get_cf(self.relation_stats_cf(), key)? {
+            Some(bytes) => crate::serialization::try_decode(&bytes)
+                .map(|(v, _)| v)
+                .unwrap_or(0),
+            None => 0,
+        })
+    }
+
+    /// Learned label-pair relation for a cue-less pair: the typed default this
+    /// user's own cue evidence has EARNED, replacing the hardcoded label-pair
+    /// table. Returns (relation, label_a_entity_is_source, support) for the
+    /// caller's (label_a, label_b) mention order, or None.
+    ///
+    /// Gates (each against a measured failure mode; tightened after the first
+    /// measurement, batched guard run 27348362950, rejected v1 for
+    /// per-application over-generalization):
+    /// - NO generic labels (Concept/Keyword/Other) on either endpoint —
+    ///   catch-all labels made every co-mention one "pair" (CreatedBy 3→344);
+    /// - support ≥ 10 (was 3) — a mapping must be earned by real evidence mass;
+    /// - purity ≥ 0.6 — a near-tie between relations stays generic (the
+    ///   embedding-argmax platform-divergence lesson: never let a coin flip
+    ///   pick semantics);
+    /// - PMI² > 0 — the pair must co-occur with the relation MORE than chance
+    ///   (Angeli 2015 §5);
+    /// - NEVER causal — causal edges demand explicit sentence-level evidence;
+    ///   a statistically-defaulted causal edge is lineage poison (the fragment
+    ///   bridge class);
+    /// - direction by ≥ 0.7 majority for cross-label pairs, mention order
+    ///   otherwise.
+    /// The caller adds the per-APPLICATION cap (max learned edges per memory).
+    pub fn lookup_learned_pair_relation(
+        &self,
+        label_a: &EntityLabel,
+        label_b: &EntityLabel,
+    ) -> Result<Option<(RelationType, bool, u64)>> {
+        if label_is_generic(label_a) || label_is_generic(label_b) {
+            return Ok(None);
+        }
+        let (la, lb, a_is_canonical_a) = canonical_label_pair(label_a, label_b);
+        let pair_total = self.read_stat_counter(&format!("lp_total:{la}:{lb}"))?;
+        if pair_total < 10 {
+            return Ok(None);
+        }
+        let prefix = format!("lp:{la}:{lb}:");
+        let iter = self
+            .db
+            .prefix_iterator_cf(self.relation_stats_cf(), prefix.as_bytes());
+        let mut best: Option<PairRelationStat> = None;
+        for (key, value) in iter.flatten() {
+            let Ok(key_str) = std::str::from_utf8(&key) else {
+                break;
+            };
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+            if let Ok((stat, _)) = crate::serialization::try_decode::<PairRelationStat>(&value) {
+                if best.as_ref().map(|b| stat.count > b.count).unwrap_or(true) {
+                    best = Some(stat);
+                }
+            }
+        }
+        let Some(best) = best else {
+            return Ok(None);
+        };
+        if best.relation.is_causal() {
+            return Ok(None);
+        }
+        let purity = best.count as f64 / pair_total as f64;
+        if purity < 0.6 {
+            return Ok(None);
+        }
+        let grand = self.read_stat_counter("lp_grand_total")?.max(1);
+        let rel_total = self
+            .read_stat_counter(&format!("rel_total:{}", best.relation.as_str()))?
+            .max(1);
+        // PMI² = log2( c(pair,rel)² · N / (c(pair) · c(rel)) ).
+        let pmi2 = ((best.count as f64).powi(2) * grand as f64
+            / (pair_total as f64 * rel_total as f64))
+            .log2();
+        if pmi2 <= 0.0 {
+            return Ok(None);
+        }
+        // Direction: majority vote across the evidence, expressed for the
+        // canonical pair, then mapped back to the caller's mention order.
+        let a_is_source = if la == lb {
+            true // same-label pairs carry no label-level direction signal
+        } else {
+            let ratio = best.src_is_a as f64 / best.count as f64;
+            if ratio >= 0.7 {
+                a_is_canonical_a
+            } else if ratio <= 0.3 {
+                !a_is_canonical_a
+            } else {
+                return Ok(None); // direction unsettled → stay generic
+            }
+        };
+        Ok(Some((best.relation.clone(), a_is_source, best.count)))
+    }
+
+    /// Typed-relation neighbor lookup — the lineage walk's machinery as a
+    /// general retrieval primitive (typed-walk retrieval, #67). For each seed,
+    /// collect the entities connected by an edge whose relation type is in
+    /// `relations`, respecting direction: `incoming=false` follows
+    /// seed --R--> neighbor (e.g. Caroline --LocatedIn--> Denver for "where
+    /// does Caroline live"); `incoming=true` follows neighbor --R--> seed
+    /// (e.g. creator --CreatedBy--> artifact for "who made X"). Scored by
+    /// edge `effective_strength`, deduped by max, strongest first — the same
+    /// bounded-ranked-set discipline as the causal walk.
+    pub fn typed_neighbors(
+        &self,
+        seeds: &[Uuid],
+        relations: &[RelationType],
+        incoming: bool,
+        max_edges_per_seed: usize,
+    ) -> Result<Vec<(Uuid, f32)>> {
+        let mut best: HashMap<Uuid, f32> = HashMap::new();
+        for seed in seeds {
+            let edges = self.get_entity_relationships_limited(seed, Some(max_edges_per_seed))?;
+            for edge in &edges {
+                if !relations.contains(&edge.relation_type) {
+                    continue;
+                }
+                let neighbor = if incoming {
+                    if edge.to_entity != *seed || edge.from_entity == *seed {
+                        continue;
+                    }
+                    edge.from_entity
+                } else {
+                    if edge.from_entity != *seed || edge.to_entity == *seed {
+                        continue;
+                    }
+                    edge.to_entity
+                };
+                let score = edge.effective_strength().clamp(0.0, 1.0);
+                let entry = best.entry(neighbor).or_insert(0.0);
+                if score > *entry {
+                    *entry = score;
+                }
+            }
+        }
+        let mut out: Vec<(Uuid, f32)> = best.into_iter().collect();
+        out.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        Ok(out)
+    }
+
+    /// Count edges by relation type — the substrate's typed-fraction scoreboard
+    /// (audit 2026-06-10: >80% of the graph was CoOccurs; the typed fraction is
+    /// the progress metric for the relation substrate). Full scan; intended for
+    /// post-ingest diagnostics, not the query path. Index entries in the CF fail
+    /// the format-tag decode and are skipped.
+    pub fn relation_type_distribution(&self) -> Result<Vec<(String, usize)>> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let iter = self
+            .db
+            .iterator_cf(self.relationships_cf(), rocksdb::IteratorMode::Start);
+        for (_, value) in iter.flatten() {
+            if let Ok((edge, _)) = crate::serialization::try_decode::<RelationshipEdge>(&value) {
+                *counts
+                    .entry(edge.relation_type.as_str().to_string())
+                    .or_default() += 1;
+            }
+        }
+        let mut out: Vec<(String, usize)> = counts.into_iter().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(out)
     }
 
     /// Calculate edge density for a specific entity (SHO-D5)
@@ -6817,6 +7498,320 @@ impl Default for EntityExtractor {
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    #[test]
+    fn spreading_weight_prefers_predicates_over_cooccurrence() {
+        // The load-bearing contrast: a real causal predicate must out-weight bare
+        // co-occurrence so activation flows along meaning, not adjacency.
+        assert!(
+            RelationType::Causes.spreading_weight() > RelationType::CoOccurs.spreading_weight()
+        );
+        assert!(
+            RelationType::Triggers.spreading_weight() > RelationType::RelatedTo.spreading_weight()
+        );
+        assert!(
+            RelationType::WorksAt.spreading_weight() > RelationType::CoOccurs.spreading_weight()
+        );
+        // Co-occurrence is the weakest evidence of meaning.
+        assert_eq!(RelationType::CoOccurs.spreading_weight(), 0.5);
+        assert!((RelationType::Causes.spreading_weight() - 1.3).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn extract_predicate_recovers_causal_relations_from_text() {
+        // The lineage harness phrasing must recover a causal predicate that the
+        // (Event, Event) label heuristic would have flattened to CoOccurs.
+        assert_eq!(
+            extract_predicate_from_text("Vornak set Meslin in motion."),
+            Some(RelationType::Triggers)
+        );
+        assert_eq!(
+            extract_predicate_from_text("the outage caused the rollback"),
+            Some(RelationType::Triggers)
+        );
+        assert_eq!(
+            extract_predicate_from_text("Alice manages the platform team"),
+            Some(RelationType::Manages)
+        );
+        assert_eq!(
+            extract_predicate_from_text("Service A depends on Service B"),
+            Some(RelationType::DependsOn)
+        );
+        // No relational cue → None, so the caller keeps the label-pair inference.
+        assert_eq!(
+            extract_predicate_from_text("the sky is a colour today"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_directed_predicate_sets_cause_effect_arrow() {
+        // "A set B in motion": A is the cause (appears first) → a_is_source = true.
+        assert_eq!(
+            extract_directed_predicate("Vornak set Meslin in motion.", "Vornak", "Meslin"),
+            Some((RelationType::Triggers, true))
+        );
+        // Same fact, arguments swapped: B is queried first but A is still the cause,
+        // so a_is_source = false (the caller swaps from/to). This is the arrow-
+        // direction fix that the NER-order default got wrong.
+        assert_eq!(
+            extract_directed_predicate("Vornak set Meslin in motion.", "Meslin", "Vornak"),
+            Some((RelationType::Triggers, false))
+        );
+        // Sentence scoping: a cue in a NEIGHBOURING sentence must not be applied to
+        // a pair that merely co-occurs across the boundary.
+        assert_eq!(
+            extract_directed_predicate("Alpha and Beta met. Gamma caused Delta.", "Alpha", "Beta"),
+            None
+        );
+        // Both mentions in the cued sentence → recovered.
+        assert_eq!(
+            extract_directed_predicate("Gamma caused Delta.", "Gamma", "Delta"),
+            Some((RelationType::Triggers, true))
+        );
+        // Missing mention → None (caller keeps label-pair inference).
+        assert_eq!(
+            extract_directed_predicate("Gamma caused Delta.", "Gamma", "Epsilon"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_directed_predicate_flips_effect_first_constructions() {
+        // "A happened because of B": A appears FIRST but B is the CAUSE.
+        // Surface order alone would mark A the source — the audit's inversion bug.
+        assert_eq!(
+            extract_directed_predicate(
+                "The flood happened because of the dam failure.",
+                "dam failure",
+                "flood"
+            ),
+            Some((RelationType::Triggers, true)),
+            "because-of: the later-mentioned cause must be the source"
+        );
+        // Passive voice: "A was caused by B" — B is the cause despite appearing second.
+        assert_eq!(
+            extract_directed_predicate("The outage was caused by Redis.", "Redis", "outage"),
+            Some((RelationType::Triggers, true)),
+            "passive caused-by: the later-mentioned cause must be the source"
+        );
+        // "due to": same effect-first shape.
+        assert_eq!(
+            extract_directed_predicate("The delay was due to the storm.", "delay", "storm"),
+            Some((RelationType::Triggers, false)),
+            "due-to: the earlier-mentioned effect must NOT be the source"
+        );
+        // Control: cause-first active voice is unchanged by the fix.
+        assert_eq!(
+            extract_directed_predicate("Redis caused the outage.", "Redis", "outage"),
+            Some((RelationType::Triggers, true))
+        );
+    }
+
+    #[test]
+    fn trace_causal_origins_walks_back_to_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        let mk = |from: Uuid, to: Uuid, rt: RelationType| RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type: rt,
+            strength: 0.8,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: Utc::now(),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+        };
+        // Causal chain a → b → c (cause = from_entity).
+        graph
+            .add_relationship(mk(a, b, RelationType::Triggers))
+            .unwrap();
+        graph
+            .add_relationship(mk(b, c, RelationType::Triggers))
+            .unwrap();
+
+        // Origin of the effect c is the root a (walk c ← b ← a), NOT the proximal
+        // cause b. This is the exact failure mode spreading activation cannot solve.
+        let origins = graph.trace_causal_origins(&[c], 8).unwrap();
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].0, a);
+        // Two hops at strength 0.8 each with HOP_DECAY 0.7: the score is the path
+        // product, strictly positive and below a single-hop score.
+        assert!(
+            origins[0].1 > 0.0 && origins[0].1 < 0.7,
+            "two-hop origin score should be decayed: {}",
+            origins[0].1
+        );
+
+        // A non-causal edge into c must NOT be followed (co-occurrence is not cause).
+        let d = Uuid::new_v4();
+        graph
+            .add_relationship(mk(d, c, RelationType::CoOccurs))
+            .unwrap();
+        let origins = graph.trace_causal_origins(&[c], 8).unwrap();
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].0, a);
+    }
+
+    #[test]
+    fn typed_neighbors_respects_relation_and_direction() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let caroline = Uuid::new_v4();
+        let denver = Uuid::new_v4();
+        let painting = Uuid::new_v4();
+        let melanie = Uuid::new_v4();
+        let mk = |from: Uuid, to: Uuid, rt: RelationType, strength: f32| RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type: rt,
+            strength,
+            created_at: Utc::now(),
+            valid_at: Utc::now(),
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: Utc::now(),
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+        };
+        // Caroline --LocatedIn--> Denver; Melanie --CreatedBy--> painting;
+        // plus a CoOccurs distractor edge Caroline--painting.
+        graph
+            .add_relationship(mk(caroline, denver, RelationType::LocatedIn, 0.8))
+            .unwrap();
+        graph
+            .add_relationship(mk(melanie, painting, RelationType::CreatedBy, 0.9))
+            .unwrap();
+        graph
+            .add_relationship(mk(caroline, painting, RelationType::CoOccurs, 0.9))
+            .unwrap();
+
+        // Outgoing LocatedIn from Caroline → Denver only (CoOccurs filtered).
+        let out = graph
+            .typed_neighbors(&[caroline], &[RelationType::LocatedIn], false, 64)
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, denver);
+
+        // Incoming CreatedBy into the painting → Melanie (the creator).
+        let creators = graph
+            .typed_neighbors(&[painting], &[RelationType::CreatedBy], true, 64)
+            .unwrap();
+        assert_eq!(creators.len(), 1);
+        assert_eq!(creators[0].0, melanie);
+
+        // Wrong direction yields nothing: nobody is LocatedIn Caroline.
+        let incoming_loc = graph
+            .typed_neighbors(&[caroline], &[RelationType::LocatedIn], true, 64)
+            .unwrap();
+        assert!(incoming_loc.is_empty());
+    }
+
+    #[test]
+    fn learned_pair_relation_gates() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let person = EntityLabel::Person;
+        let org = EntityLabel::Organization;
+
+        // Below support: 9 observations → None (threshold 10 after the v1
+        // rejection, run 27348362950).
+        for _ in 0..9 {
+            graph
+                .record_relation_evidence(&person, &org, &RelationType::WorksAt)
+                .unwrap();
+        }
+        assert!(graph
+            .lookup_learned_pair_relation(&person, &org)
+            .unwrap()
+            .is_none());
+
+        // Tenth observation clears support: mapping earned, direction settled
+        // (source = Person in all evidence), and it maps to the caller's
+        // mention order in both argument orders.
+        graph
+            .record_relation_evidence(&person, &org, &RelationType::WorksAt)
+            .unwrap();
+        let (rt, a_is_source, support) = graph
+            .lookup_learned_pair_relation(&person, &org)
+            .unwrap()
+            .expect("mapping earned at support 10");
+        assert_eq!(rt, RelationType::WorksAt);
+        assert!(a_is_source, "Person mentioned first is the source");
+        assert_eq!(support, 10);
+        let (_, a_is_source, _) = graph
+            .lookup_learned_pair_relation(&org, &person)
+            .unwrap()
+            .expect("swapped order still maps");
+        assert!(!a_is_source, "Org mentioned first is the target");
+
+        // Purity gate: a near-tie between relations stays generic.
+        for _ in 0..10 {
+            graph
+                .record_relation_evidence(&person, &org, &RelationType::Manages)
+                .unwrap();
+        }
+        assert!(
+            graph
+                .lookup_learned_pair_relation(&person, &org)
+                .unwrap()
+                .is_none(),
+            "10 WorksAt vs 10 Manages = purity 0.5 → no mapping"
+        );
+
+        // Causal exclusion: statistics may NEVER assign causal relations —
+        // a defaulted causal edge is lineage poison (the fragment-bridge class).
+        let event = EntityLabel::Event;
+        let tech = EntityLabel::Technology;
+        for _ in 0..12 {
+            graph
+                .record_relation_evidence(&event, &tech, &RelationType::Triggers)
+                .unwrap();
+        }
+        assert!(
+            graph
+                .lookup_learned_pair_relation(&event, &tech)
+                .unwrap()
+                .is_none(),
+            "causal relations must never be statistically defaulted"
+        );
+
+        // Generic-label exclusion: catch-all labels (Concept/Keyword/Other)
+        // never record and never map — the v1 mass-application vector.
+        let concept = EntityLabel::Concept;
+        for _ in 0..12 {
+            graph
+                .record_relation_evidence(&concept, &org, &RelationType::WorksAt)
+                .unwrap();
+        }
+        assert!(
+            graph
+                .lookup_learned_pair_relation(&concept, &org)
+                .unwrap()
+                .is_none(),
+            "generic labels must never carry learned mappings"
+        );
+    }
 
     #[test]
     fn classify_tag_label_maps_known_categories() {

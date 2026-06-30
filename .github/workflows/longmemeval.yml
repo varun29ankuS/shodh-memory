@@ -1,0 +1,106 @@
+# LongMemEval-S — current SOTA long-term memory benchmark (ICLR 2025).
+#
+# Manual only, NOT gated. Measures TURN-LEVEL retrieval recall@10 against the
+# `has_answer` gold turns (no LLM judge) — the honest "does our memory surface
+# the evidence?" signal, NOT the end-to-end answer accuracy the headline SOTA
+# numbers report. Each question has its own ~48-session haystack, so the harness
+# loops per-question (fresh ingest each).
+#
+# Downloads longmemeval_s from HuggingFace, runs benchmarks/longmemeval_to_harness.py
+# (with --shuffle so a --limit prefix is a representative category mix), then
+# recall-eval --longmemeval.
+name: LongMemEval (SOTA)
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Number of questions (representative mix via --shuffle). Blank = all 479.'
+        required: false
+        default: '50'
+      extra_env:
+        description: 'Extra SHODH_* flags, space-separated KEY=VAL.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: longmemeval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  longmemeval:
+    name: LongMemEval-S
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+
+      - name: Install LLVM (ONNX runtime build dep)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+
+      - name: Pre-fetch MiniLM embedder model
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+          ls -la "$MODEL_DIR"
+
+      - name: Download LongMemEval-S + build fixtures
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          JSON=$(python3 - <<'PY'
+          from huggingface_hub import hf_hub_download
+          print(hf_hub_download(repo_id='xiaowu0162/longmemeval-cleaned',
+                                filename='longmemeval_s_cleaned.json',
+                                repo_type='dataset'))
+          PY
+          )
+          echo "dataset: $JSON"
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
+            ${{ github.event.inputs.limit != '' && format('--limit {0}', github.event.inputs.limit) || '' }}
+          wc -l tests/recall/longmemeval/manifest.jsonl
+
+      - name: Run LongMemEval
+        run: |
+          for kv in ${{ github.event.inputs.extra_env }}; do export "$kv"; done
+          ./target/release/recall-eval \
+            --longmemeval tests/recall/longmemeval \
+            --output unused.json \
+            --storage ./lme-storage 2>&1 | tee longmemeval.log
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## LongMemEval-S — turn-level retrieval recall@10 (no LLM judge)"
+            echo ""
+            echo '> NOT comparable to headline LongMemEval answer-accuracy SOTA (which reads retrieved context with a large LLM). This is the retrieval half: does our memory surface the gold evidence turns?'
+            echo ""
+            echo '```'
+            grep -E "NER_BACKEND|LongMemEval-S:|recall@" longmemeval.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

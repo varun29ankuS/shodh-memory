@@ -3460,7 +3460,9 @@ impl Modality {
     /// Get embedding dimension for this modality
     pub fn dimension(&self) -> usize {
         match self {
-            Modality::Text => 384, // MiniLM-L6-v2
+            // Single source of truth: 384 by default (MiniLM/bge/gte/mxbai and
+            // nomic-Matryoshka), 768 when SHODH_TEXT_DIM=768 (native nomic).
+            Modality::Text => crate::embeddings::minilm::configured_text_dim(),
             // ImageBind projects all modalities to 1024-dim shared space
             Modality::Image => 1024,
             Modality::Audio => 1024,
@@ -3536,7 +3538,7 @@ impl VectorMappingEntry {
             Modality::Text,
             ModalityVectors {
                 vector_ids,
-                dimension: 384,
+                dimension: Modality::Text.dimension(),
                 chunk_ranges: None,
             },
         );

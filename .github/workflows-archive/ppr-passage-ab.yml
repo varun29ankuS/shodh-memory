@@ -1,0 +1,118 @@
+name: ㉔ unified phrase+passage PPR — HippoRAG-2 spike (task 19)
+
+# HippoRAG 2 (ICML25, 2502.14802): put passages INTO the graph as nodes with
+# contains-edges and run ONE PPR — the stationary distribution over passage
+# nodes IS the episode ranking (mass-conserved, hub-safe), replacing the
+# unnormalized sum-of-entity-activations the spreading audit flagged.
+# Our deviation: passages get ZERO reset mass (the vector leg already covers
+# dense); balance lives in the flow via a per-entity contains budget
+# (SHODH_PPR_PASSAGE=<w> splits w across the entity's episodes).
+#
+#   A = base (current defaults: qner+specificity on)
+#   B = +passage 0.5      C = +passage 1.0 (dose-response of the flow budget)
+#   D = +passage 0.5 +semrel (typed-edge interaction)
+#   + lineage arm (+passage 0.5 +semrel): does mass-conserved ranking move the
+#     found-but-flooded picture?
+#
+# Pre-registered decisions:
+# - B vs A: multi_hop is the target (graph magnitude into the hybrid mix).
+#   ALL ≥ base-0.003 AND multi_hop up ⇒ promising → sweep w / consider default.
+#   multi_hop down ⇒ flow budget starves entity→entity spreading → lower w.
+# - C vs B: monotone better ⇒ raise w; worse ⇒ w=0.5 region is the optimum.
+# - D: passage ranking composes with typed edges or not.
+# - LATENCY GUARD: p50 > 2× base ⇒ episode-ref caching required before any
+#   default, regardless of recall outcome.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/ppr-passage-ab.yml']
+    branches: [exp/ner-gliner-ablation]
+
+jobs:
+  passage-ppr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      SHODH_MAX_CASES: "300"
+      SHODH_MAX_CORPUS: "1500"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache MiniLM
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM
+        run: |
+          set -o pipefail
+          MD="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$MD"
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MD/model_quantized.onnx" ] || dl "$MD/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$MD/tokenizer.json" ]       || dl "$MD/tokenizer.json" "$B/tokenizer.json"
+
+      - name: A recall — base (defaults)
+        run: set -o pipefail; ./target/release/recall-eval --suite locomo --repeats 1 --output a.json --storage ./s-a 2>&1 | tail -3
+      - name: B recall — +passage 0.5
+        run: set -o pipefail; SHODH_PPR_PASSAGE=0.5 ./target/release/recall-eval --suite locomo --repeats 1 --output b.json --storage ./s-b 2>&1 | tail -3
+      - name: C recall — +passage 1.0
+        run: set -o pipefail; SHODH_PPR_PASSAGE=1.0 ./target/release/recall-eval --suite locomo --repeats 1 --output c.json --storage ./s-c 2>&1 | tail -3
+      - name: D recall — +passage 0.5 +semrel
+        run: set -o pipefail; SHODH_PPR_PASSAGE=0.5 SHODH_SEMANTIC_RELATIONS=1 ./target/release/recall-eval --suite locomo --repeats 1 --output d.json --storage ./s-d 2>&1 | tail -3
+      - name: Lineage — +passage 0.5 +semrel
+        run: |
+          set -o pipefail
+          SHODH_PPR_PASSAGE=0.5 SHODH_SEMANTIC_RELATIONS=1 \
+            ./target/release/recall-eval --suite locomo --output l-main.json --lineage lineage-passage.json --storage ./s-l | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Compare
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception: return None
+          arms={'base':load('a.json'),'pass.5':load('b.json'),'pass1.0':load('c.json'),'pass.5+semrel':load('d.json')}
+          names=list(arms.keys())
+          def m(d,cat,k='recall@10'):
+              if not d: return float('nan')
+              src = d['layers']['full'] if cat=='ALL' else d['by_category'][cat]
+              return src.get(k,float('nan'))
+          print("## ㉔ unified phrase+passage PPR — recall@10\n")
+          print("| cat | "+" | ".join(names)+" |")
+          print("| --- "*(len(names)+1)+"|")
+          for cat in ('ALL','single_hop','multi_hop','temporal','open_domain'):
+              print(f"| {cat} | "+" | ".join(f"{m(arms[n],cat):.4f}" for n in names)+" |")
+          def p50(d):
+              if not d: return float('nan')
+              return d['layers']['full'].get('latency_p50_ms',float('nan'))
+          print("\n| p50 ms | "+" | ".join(f"{p50(arms[n]):.1f}" for n in names)+" |")
+          def lin(f):
+              d=load(f)
+              if not d: return "n/a"
+              full=[r for r in d['rows'] if r['layer']=='full']
+              return f"P@1 {full[0]['multihop_p_at_1']:.2f}, r@10 {full[0]['multihop_recall_at_10']:.2f}" if full else "n/a"
+          print(f"\n**lineage (full layer):** flood baseline=P@1 0.00/r@10 0.05 | +passage → {lin('lineage-passage.json')}")
+          print("\n**Pre-registered decisions:** B vs A multi_hop up & ALL ≥ base-0.003 ⇒ promising (sweep w / default "
+                "candidate). multi_hop down ⇒ contains budget starves entity spreading → lower w. C vs B = dose-response. "
+                "p50 > 2× base ⇒ episode-ref caching required first. Lineage moves ⇒ mass conservation interacts with "
+                "the flood — fold into the selective-walk fix (task 12).")
+          PY
+
+      - name: Upload JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppr-passage-json
+          path: "*.json"
+          if-no-files-found: warn
