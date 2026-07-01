@@ -3532,9 +3532,14 @@ impl MultiUserMemoryManager {
                 } else {
                     None
                 };
+                // Provenance: record WHICH stage of the typing chain decided the
+                // relation type for this attestation (Increment 1, robust edge
+                // provenance). Assigned by every branch of the chain below.
+                let typed_by: Option<crate::graph_memory::TypingMethod>;
                 let relation_type = if fragment_of_comention[i] || fragment_of_comention[j] {
                     // Fragment endpoint: never typed, never causal (see mask above).
                     typed_blocked_fragment += 1;
+                    typed_by = Some(crate::graph_memory::TypingMethod::CoOccurrence);
                     crate::graph_memory::RelationType::CoOccurs
                 } else if let Some((rt, a_is_source)) = cue_hit {
                     // LINEAGE-ZERO FIX (repro: lineage_walk_survives_harness_scale):
@@ -3560,12 +3565,14 @@ impl MultiUserMemoryManager {
                         std::mem::swap(&mut from_entity, &mut to_entity);
                     }
                     typed_cue += 1;
+                    typed_by = Some(crate::graph_memory::TypingMethod::Cue);
                     rt
                 } else if let Some((rt, a_is_source, _sim)) = semantic_hit {
                     if !a_is_source {
                         std::mem::swap(&mut from_entity, &mut to_entity);
                     }
                     typed_semantic += 1;
+                    typed_by = Some(crate::graph_memory::TypingMethod::Semantic);
                     rt
                 } else if let Some((rt, a_is_source, support)) = (learned_pairs
                     // Per-APPLICATION cap: a learned mapping may type at most 2
@@ -3597,6 +3604,7 @@ impl MultiUserMemoryManager {
                         support
                     );
                     typed_learned += 1;
+                    typed_by = Some(crate::graph_memory::TypingMethod::Learned);
                     rt
                 } else {
                     if matches!(
@@ -3605,8 +3613,10 @@ impl MultiUserMemoryManager {
                             | crate::graph_memory::RelationType::RelatedTo
                     ) {
                         untyped_generic += 1;
+                        typed_by = Some(crate::graph_memory::TypingMethod::CoOccurrence);
                     } else {
                         typed_pair += 1;
+                        typed_by = Some(crate::graph_memory::TypingMethod::LabelPair);
                     }
                     label_relation
                 };
@@ -3635,6 +3645,13 @@ impl MultiUserMemoryManager {
                     }
                 }
 
+                // Evidence span: `truncated_context` is the first 150 CHARS of the
+                // episode content, so it is a prefix anchored at char 0. Record a
+                // char-offset REFERENCE (not the text) into the source episode so a
+                // later increment can resurface the exact attesting passage without
+                // bloating the edge. Length is in chars to stay consistent with the
+                // char-based truncation above.
+                let evidence_span = Some((0u32, truncated_context.chars().count() as u32));
                 let edge = RelationshipEdge {
                     uuid: uuid::Uuid::new_v4(),
                     from_entity,
@@ -3654,6 +3671,15 @@ impl MultiUserMemoryManager {
                     entity_confidence: None,
                     forman_curvature: None,
                     endpoint_selectivity: None,
+                    provenance: vec![crate::graph_memory::ProvenanceRecord {
+                        source_episode_id: memory_id.0,
+                        mention_count: 1,
+                        first_observed: now,
+                        last_observed: now,
+                        confidence: None,
+                        evidence_span,
+                        typed_by,
+                    }],
                 };
 
                 if let Err(e) = graph_guard.add_relationship(edge) {

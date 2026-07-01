@@ -482,6 +482,7 @@ pub async fn add_relationship(
         entity_confidence,
         forman_curvature: None,
         endpoint_selectivity: None,
+        provenance: Vec::new(),
     };
 
     graph_guard

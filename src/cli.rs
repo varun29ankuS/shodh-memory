@@ -1018,7 +1018,8 @@ struct RememberRequest {
 #[derive(Deserialize)]
 struct RememberResponse {
     id: String,
-    message: String,
+    success: Option<bool>,
+    message: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1037,11 +1038,77 @@ struct RecallResponse {
 #[derive(Deserialize)]
 struct RecalledMemory {
     id: String,
+    experience: RecalledExperience,
+    importance: f32,
+    created_at: String,
+    score: f32,
+    tier: String,
+}
+
+#[derive(Deserialize)]
+struct RecalledExperience {
     content: String,
-    memory_type: String,
-    similarity: f32,
-    #[allow(dead_code)]
+    memory_type: Option<String>,
     tags: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct CompactRecallOutput {
+    count: usize,
+    memories: Vec<CompactRecalledMemory>,
+}
+
+#[derive(Serialize)]
+struct CompactRecalledMemory {
+    id: String,
+    score: f32,
+    tier: String,
+    memory_type: String,
+    tags: Vec<String>,
+    importance: f32,
+    created_at: String,
+    content_preview: String,
+}
+
+fn memory_type_label(memory: &RecalledMemory) -> String {
+    memory
+        .experience
+        .memory_type
+        .clone()
+        .unwrap_or_else(|| "Observation".to_string())
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let mut truncated = value.chars().take(max_chars).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn compact_recall_output(resp: RecallResponse, max_content_chars: usize) -> CompactRecallOutput {
+    CompactRecallOutput {
+        count: resp.memories.len(),
+        memories: resp
+            .memories
+            .into_iter()
+            .map(|memory| CompactRecalledMemory {
+                id: memory.id,
+                score: memory.score,
+                tier: memory.tier,
+                memory_type: memory
+                    .experience
+                    .memory_type
+                    .unwrap_or_else(|| "Observation".to_string()),
+                tags: memory.experience.tags,
+                importance: memory.importance,
+                created_at: memory.created_at,
+                content_preview: truncate_chars(&memory.experience.content, max_content_chars),
+            })
+            .collect(),
+    }
 }
 
 // =============================================================================
@@ -1206,10 +1273,12 @@ struct RememberParams {
     /// The content to remember
     content: String,
     /// Type of memory (Observation, Decision, Learning, etc.)
-    #[serde(rename = "type")]
+    #[serde(rename = "type", alias = "memory_type", alias = "experience_type")]
     memory_type: Option<String>,
     /// Optional tags for categorization
     tags: Option<Vec<String>>,
+    /// Read the memory back after storing it and report whether the new ID is recallable.
+    verify: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1220,6 +1289,10 @@ struct RecallParams {
     limit: Option<u32>,
     /// Retrieval mode: semantic, associative, or hybrid
     mode: Option<String>,
+    /// Return a bounded JSON summary instead of full memory text.
+    compact: Option<bool>,
+    /// Maximum characters per compact content preview (default: 240)
+    max_content_chars: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1381,24 +1454,75 @@ impl ShodhMcpServer {
         &self,
         Parameters(params): Parameters<RememberParams>,
     ) -> Result<CallToolResult, McpError> {
+        let RememberParams {
+            content,
+            memory_type,
+            tags,
+            verify,
+        } = params;
+        let verify_query = truncate_chars(&content, 240);
+        let verify_requested = verify.unwrap_or(false);
+
         let result: Result<RememberResponse> = self
             .client
             .post(
                 "/api/remember",
                 &RememberRequest {
                     user_id: self.client.user_id.clone(),
-                    content: params.content,
-                    memory_type: params.memory_type,
-                    tags: params.tags,
+                    content,
+                    memory_type,
+                    tags,
                 },
             )
             .await;
 
         match result {
-            Ok(resp) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Stored memory: {} ({})",
-                resp.id, resp.message
-            ))])),
+            Ok(resp) => {
+                let status = resp
+                    .message
+                    .or_else(|| {
+                        resp.success.map(|success| {
+                            if success { "success" } else { "not successful" }.to_string()
+                        })
+                    })
+                    .unwrap_or_else(|| "ok".to_string());
+                let mut output = format!("Stored memory: {} ({})", resp.id, status);
+
+                if verify_requested {
+                    let recall_result: Result<RecallResponse> = self
+                        .client
+                        .post(
+                            "/api/recall",
+                            &RecallRequest {
+                                user_id: self.client.user_id.clone(),
+                                query: verify_query,
+                                limit: Some(10),
+                                mode: Some("hybrid".to_string()),
+                            },
+                        )
+                        .await;
+
+                    match recall_result {
+                        Ok(recall_resp) => {
+                            let found = recall_resp.memories.iter().any(|mem| mem.id == resp.id);
+                            if found {
+                                output.push_str("\nVerified: memory was returned by recall.");
+                            } else {
+                                output.push_str(
+                                    "\nVerification warning: memory was stored but was not returned by immediate recall.",
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            output.push_str(&format!(
+                                "\nVerification warning: recall check failed: {e}"
+                            ));
+                        }
+                    }
+                }
+
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
             Err(e) => Err(McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(e.to_string()),
@@ -1414,6 +1538,9 @@ impl ShodhMcpServer {
         &self,
         Parameters(params): Parameters<RecallParams>,
     ) -> Result<CallToolResult, McpError> {
+        let compact = params.compact.unwrap_or(false);
+        let max_content_chars = params.max_content_chars.unwrap_or(240);
+
         let result: Result<RecallResponse> = self
             .client
             .post(
@@ -1429,14 +1556,25 @@ impl ShodhMcpServer {
 
         match result {
             Ok(resp) => {
+                if compact {
+                    let output = compact_recall_output(resp, max_content_chars);
+                    let json = serde_json::to_string_pretty(&output).map_err(|e| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(e.to_string()),
+                        data: None,
+                    })?;
+                    return Ok(CallToolResult::success(vec![Content::text(json)]));
+                }
+
                 let mut output = format!("Found {} memories:\n\n", resp.memories.len());
                 for mem in resp.memories {
+                    let memory_type = memory_type_label(&mem);
+                    let id_short = mem.id[..8.min(mem.id.len())].to_string();
+                    let score = mem.score * 100.0;
+                    let content = mem.experience.content;
                     output.push_str(&format!(
-                        "**[{}]** {} (similarity: {:.0}%)\n{}\n\n",
-                        mem.memory_type,
-                        &mem.id[..8.min(mem.id.len())],
-                        mem.similarity * 100.0,
-                        mem.content
+                        "**[{}]** {} (score: {:.0}%)\n{}\n\n",
+                        memory_type, id_short, score, content
                     ));
                 }
                 Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -1824,5 +1962,46 @@ async fn handle_claude_launch(port: u16, args: Vec<String>) -> Result<()> {
         cmd.args(&args);
         let status = cmd.status()?;
         std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_chars_bounds_long_text() {
+        assert_eq!(truncate_chars("abcdef", 3), "abc...");
+        assert_eq!(truncate_chars("abc", 3), "abc");
+    }
+
+    #[test]
+    fn compact_recall_output_keeps_agent_fields_and_bounds_content() {
+        let response = RecallResponse {
+            memories: vec![RecalledMemory {
+                id: "memory-1".to_string(),
+                experience: RecalledExperience {
+                    content: "abcdefghijklmnopqrstuvwxyz".to_string(),
+                    memory_type: Some("Decision".to_string()),
+                    tags: vec!["agent".to_string(), "compact".to_string()],
+                },
+                importance: 0.8,
+                created_at: "2026-06-26T00:00:00Z".to_string(),
+                score: 0.91,
+                tier: "Hot".to_string(),
+            }],
+        };
+
+        let compact = compact_recall_output(response, 10);
+
+        assert_eq!(compact.count, 1);
+        assert_eq!(compact.memories[0].id, "memory-1");
+        assert_eq!(compact.memories[0].memory_type, "Decision");
+        assert_eq!(
+            compact.memories[0].tags,
+            vec!["agent".to_string(), "compact".to_string()]
+        );
+        assert_eq!(compact.memories[0].content_preview, "abcdefghij...");
+        assert_eq!(compact.memories[0].score, 0.91);
     }
 }

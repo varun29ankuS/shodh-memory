@@ -1033,6 +1033,12 @@ pub struct LongMemEvalReport {
     pub by_category: BTreeMap<String, (f64, usize)>,
     pub k: usize,
     pub ner_backend: String,
+    /// Per-pipeline-layer recall@k attribution: `report_key` -> (mean recall,
+    /// scored). When only the production pass is requested (`--layer full`, the
+    /// default) this holds a single `full` entry; `--layer all` adds the cumulative
+    /// ladder (vamana_only -> +spreading -> +bm25 -> +rerank -> +facts -> full),
+    /// measured on the SAME haystacks as `recall_at_k` so the two reconcile.
+    pub layers: BTreeMap<String, (f64, usize)>,
 }
 
 /// Run the LongMemEval-S suite (ICLR 2025, the current SOTA long-term memory
@@ -1050,6 +1056,7 @@ pub fn run_longmemeval(
     storage_root: &Path,
     limit: Option<usize>,
     k: usize,
+    layer_modes: &[LayerMode],
 ) -> Result<LongMemEvalReport> {
     pin_harness_threads();
 
@@ -1069,6 +1076,25 @@ pub fn run_longmemeval(
     let mut scored = 0usize;
     let mut by_cat: HashMap<String, (f64, usize)> = HashMap::new();
     let mut ner_backend = String::from("unknown");
+
+    // Per-layer attribution: each question's haystack is ingested ONCE, then the
+    // recall runs once per requested LayerMode (a query-time setting), so the
+    // ladder is measured on the SAME corpus as the headline. `full` (the default)
+    // runs a single pass and is byte-identical to the pre-attribution path. The
+    // headline aggregates (recall_at_k, by_category) always track the production
+    // (primary) pass; the per-mode means populate `layers`.
+    let modes: Vec<LayerMode> = if layer_modes.is_empty() {
+        vec![LayerMode::Full]
+    } else {
+        layer_modes.to_vec()
+    };
+    let primary_mode = if modes.contains(&LayerMode::Full) {
+        LayerMode::Full
+    } else {
+        modes[0]
+    };
+    // report_key -> (sum recall, scored count) over every requested mode.
+    let mut mode_agg: BTreeMap<String, (f64, usize)> = BTreeMap::new();
 
     for (qi, case) in cases.iter().enumerate() {
         let corpus_path = base_dir.join(&case.corpus);
@@ -1108,17 +1134,8 @@ pub fn run_longmemeval(
         let id_map = ingest_corpus(&manager, &corpus)?;
         let system = manager.get_user_memory(EVAL_USER)?;
 
-        let mut query = Query {
-            query_text: Some(case.question.clone()),
-            max_results: k,
-            layers: LayerMode::Full,
-            ..Default::default()
-        };
-        manager.annotate_query_ner(&mut query);
-        let memories = system.read().recall(&query).unwrap_or_default();
-        let topk: HashSet<Uuid> = memories.iter().take(k).map(|m| m.id.0).collect();
-
-        // Turn-level recall@k: fraction of gold `has_answer` turns in the top-k.
+        // Turn-level gold (`has_answer` mapped through ingest) — mode-independent,
+        // resolved once before the per-layer recall loop.
         let gold_uuids: Vec<Uuid> = case
             .gold_ids
             .iter()
@@ -1129,22 +1146,49 @@ pub fn run_longmemeval(
             let _ = std::fs::remove_dir_all(&q_storage);
             continue;
         }
-        let hit = gold_uuids.iter().filter(|g| topk.contains(g)).count();
-        let recall = hit as f64 / gold_uuids.len() as f64;
-        sum_recall += recall;
-        // p@1: is the single top-ranked memory a gold turn? A finer signal than
-        // recall@10, which only moves when gold crosses the top-k boundary.
-        if memories
-            .first()
-            .map(|m| gold_uuids.contains(&m.id.0))
-            .unwrap_or(false)
-        {
-            sum_p1 += 1.0;
+        // NER annotation is mode-independent — annotate once, then vary only the
+        // LayerMode across the per-layer loop.
+        let mut query = Query {
+            query_text: Some(case.question.clone()),
+            max_results: k,
+            layers: primary_mode,
+            ..Default::default()
+        };
+        manager.annotate_query_ner(&mut query);
+
+        for &mode in &modes {
+            query.layers = mode;
+            let memories = system.read().recall(&query).unwrap_or_default();
+            let topk: HashSet<Uuid> = memories.iter().take(k).map(|m| m.id.0).collect();
+
+            // Turn-level recall@k: fraction of gold turns in the top-k.
+            let hit = gold_uuids.iter().filter(|g| topk.contains(g)).count();
+            let recall = hit as f64 / gold_uuids.len() as f64;
+
+            let me = mode_agg
+                .entry(mode.report_key().to_string())
+                .or_insert((0.0, 0));
+            me.0 += recall;
+            me.1 += 1;
+
+            // Headline aggregates track the production (primary) pass only.
+            if mode == primary_mode {
+                sum_recall += recall;
+                // p@1: is the single top-ranked memory a gold turn? A finer signal
+                // than recall@10, which only moves when gold crosses the top-k boundary.
+                if memories
+                    .first()
+                    .map(|m| gold_uuids.contains(&m.id.0))
+                    .unwrap_or(false)
+                {
+                    sum_p1 += 1.0;
+                }
+                scored += 1;
+                let entry = by_cat.entry(case.category.clone()).or_insert((0.0, 0));
+                entry.0 += recall;
+                entry.1 += 1;
+            }
         }
-        scored += 1;
-        let entry = by_cat.entry(case.category.clone()).or_insert((0.0, 0));
-        entry.0 += recall;
-        entry.1 += 1;
 
         if (qi + 1) % 25 == 0 {
             eprintln!(
@@ -1173,6 +1217,25 @@ pub fn run_longmemeval(
         crate::memory::graph_retrieval::edge_dir_flip_count()
     );
 
+    let layers: BTreeMap<String, (f64, usize)> = mode_agg
+        .into_iter()
+        .map(|(key, (s, n))| (key, (s / n.max(1) as f64, n)))
+        .collect();
+
+    // Per-layer ladder to the log when more than the production pass ran, in
+    // canonical pipeline order so the CI summary can grep it.
+    if layers.len() > 1 {
+        eprintln!("LONGMEMEVAL_LAYERS (recall@{k}, same haystacks, query-time attribution):");
+        for mode in LayerMode::ALL {
+            if let Some((r, n)) = layers.get(mode.report_key()) {
+                eprintln!(
+                    "  LONGMEMEVAL_LAYER {:14} n={n:<4} recall@{k} = {r:.4}",
+                    mode.report_key()
+                );
+            }
+        }
+    }
+
     Ok(LongMemEvalReport {
         questions: scored,
         recall_at_k: if scored > 0 {
@@ -1188,6 +1251,7 @@ pub fn run_longmemeval(
         by_category,
         k,
         ner_backend,
+        layers,
     })
 }
 
