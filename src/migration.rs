@@ -732,15 +732,23 @@ where
         return Ok(());
     }
 
-    // Decode with legacy bincode fallback
-    let (val, _needs_migration): (T, bool) =
-        serialization::try_decode(value).with_context(|| {
-            format!(
-                "decoding record (key len={}, value len={})",
+    // Decode with legacy bincode fallback. A record that can't be decoded — e.g. a
+    // pre-postcard bincode record missing fields added after the cutover, which
+    // bincode cannot default — is SKIPPED and reported, never fatal: one bad record
+    // must not abort the whole column-family migration. (Such records are already
+    // unreadable by the server's compat decoder, so skipping loses nothing new.)
+    let (val, _needs_migration): (T, bool) = match serialization::try_decode(value) {
+        Ok(decoded) => decoded,
+        Err(e) => {
+            eprintln!(
+                "  skip: undecodable record (key len={}, value len={}): {e}",
                 key.len(),
                 value.len()
-            )
-        })?;
+            );
+            *skipped += 1;
+            return Ok(());
+        }
+    };
 
     if !dry_run {
         let new_value = serialization::encode(&val)?;
