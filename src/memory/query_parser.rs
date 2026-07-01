@@ -4024,7 +4024,13 @@ fn verb_stem_to_relation_types(stem: &str) -> Vec<RelationType> {
         }
 
         // Causal relationships
-        "caus" | "result" | "lead" => vec![RelationType::Causes, RelationType::ResultsIn],
+        // Triggers is the type the cue extractor assigns to the most common causal
+        // phrasings ("caused", "led to", "because of", "due to") — it MUST be in the
+        // causal intent set or the ontology penalty (0.4x) suppresses exactly those
+        // edges on causal queries.
+        "caus" | "result" | "lead" => {
+            vec![RelationType::Causes, RelationType::ResultsIn, RelationType::Triggers]
+        }
 
         // Ownership / structural
         "own" | "belong" | "possess" => vec![RelationType::OwnedBy, RelationType::PartOf],
