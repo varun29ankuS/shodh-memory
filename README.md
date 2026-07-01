@@ -179,24 +179,6 @@ This is based on [Cowan's working memory model](https://doi.org/10.1177/09637214
 
 Single binary. No GPU required. Content-hash dedup ensures identical memories are never stored twice.
 
-## TUI Dashboard
-
-```bash
-shodh tui
-```
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/varun29ankuS/shodh-memory/main/assets/recall.png" width="700" alt="Shodh Recall">
-</p>
-
-<p align="center"><i>Semantic recall with hybrid search — relevance scores, memory tiers, and activity feed</i></p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/varun29ankuS/shodh-memory/main/assets/projects-todos.jpg" width="700" alt="Shodh Projects & Todos">
-</p>
-
-<p align="center"><i>GTD task management — projects, todos, comments, and causal lineage</i></p>
-
 ## 37 MCP Tools
 
 Full list of tools available to Claude, Cursor, and other MCP clients:
