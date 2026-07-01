@@ -31,7 +31,7 @@ pub struct RememberRequest {
     pub content: String,
     #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default, alias = "experience_type")]
+    #[serde(default, alias = "type", alias = "experience_type")]
     pub memory_type: Option<String>,
     #[serde(default)]
     pub external_id: Option<String>,
@@ -183,7 +183,7 @@ pub struct BatchMemoryItem {
     pub content: String,
     #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default, alias = "experience_type")]
+    #[serde(default, alias = "type", alias = "experience_type")]
     pub memory_type: Option<String>,
     #[serde(default)]
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -235,7 +235,7 @@ pub struct UpsertRequest {
     pub content: String,
     #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default, alias = "experience_type")]
+    #[serde(default, alias = "type", alias = "experience_type")]
     pub memory_type: Option<String>,
     #[serde(default = "default_change_type")]
     pub change_type: String,
