@@ -8,7 +8,7 @@ use rocksdb::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::types::*;
 
@@ -695,7 +695,7 @@ impl LegacyMemoryV2 {
 ///
 /// Returns (Memory, needs_migration) where needs_migration=true means the data
 /// was in a legacy format and should be re-written for future performance.
-fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
+fn deserialize_memory_inner(data: &[u8]) -> Result<(Memory, bool)> {
     use crate::serialization::{SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};
 
     // Check for versioned format: SHO + version byte + payload + 4-byte CRC32
@@ -727,12 +727,94 @@ fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
     }
 }
 
+// ============================================================================
+// RECORD-LEVEL ENCRYPTION (encryption-v2)
+// Centralized serialize-before-encrypt / decrypt-before-deserialize logic so
+// every storage path makes the full Memory record opaque at rest when a keystore
+// is configured (SHODH_MASTER_PASSPHRASE / SHODH_KMS_WRAP_KEY). See
+// `crate::keystore`; exact-match index terms are HMAC-blinded (see blind_term).
+// ============================================================================
+
+/// Process-global v2 storage crypto: record encryptor + index blinder, set once
+/// from the keystore in `MemoryStorage::new`. Unset = encryption disabled
+/// (plaintext, backward compatible). Process-global to match shodh's existing
+/// single-store architecture (the prior single-key encryptor was global too).
+struct StorageCrypto {
+    record: crate::keystore::RecordCryptors,
+    index: crate::keystore::IndexBlinder,
+    /// KEK fingerprint of the keystore this crypto came from, so a second store
+    /// opened with a *different* keystore fails loudly instead of silently reusing
+    /// the first store's keys (the process-global is single-keystore).
+    kek_fingerprint: String,
+}
+
+static V2_CRYPTO: OnceLock<StorageCrypto> = OnceLock::new();
+
+fn crypto() -> Option<&'static StorageCrypto> {
+    V2_CRYPTO.get()
+}
+
+/// Blind an exact-match index term when encryption is enabled, else pass through.
+/// Equal terms map to equal HMAC tokens so lookups still work.
+fn blind_term(term: &str) -> String {
+    match crypto() {
+        Some(sc) => sc.index.blind(term),
+        None => term.to_string(),
+    }
+}
+
+/// Serialize a memory to bytes, envelope-encrypting the whole record if enabled.
+pub(crate) fn encode_memory(memory: &Memory) -> Result<Vec<u8>> {
+    let encoded = crate::serialization::encode_sho(memory)?;
+    match crypto() {
+        Some(sc) => sc
+            .record
+            .active()
+            // Bind the record to its identity: AAD = the memory-id (== the
+            // primary-CF key, id.0.as_bytes()). A ciphertext lifted from one key
+            // and replanted at another fails to decrypt (anti-swap / anti-
+            // relocation), and tamper of the stored id is caught.
+            .encrypt_record(&encoded, memory.id.0.as_bytes())
+            .context("Failed to encrypt serialized memory record"),
+        None => Ok(encoded),
+    }
+}
+
+/// Deserialize a memory, decrypting the whole record first when needed.
+///
+/// `id` is the record's identity (its primary-CF key, id.0.as_bytes()), bound
+/// into the AEAD AAD by encode_memory. Pass the rocksdb key the value was read
+/// at; a mismatch fails decryption (anti-swap). Unused on the plaintext path.
+fn deserialize_memory(id: &[u8], data: &[u8]) -> Result<(Memory, bool)> {
+    if crate::keystore::is_encrypted_record(data) {
+        let sc = crypto().ok_or_else(|| {
+            anyhow!("Encrypted memory record encountered, but no keystore/passphrase is configured")
+        })?;
+        let epoch = crate::keystore::record_epoch(data).unwrap_or(0);
+        // Select the DEK for THIS record's epoch — records written before a key
+        // rotation decrypt under their original (retired) epoch key.
+        let cryptor = sc.record.for_epoch(epoch).ok_or_else(|| {
+            anyhow!(
+                "record epoch {epoch} has no DEK in the keystore (active epoch {}); \
+                 the keystore may have been replaced or the epoch's key pruned",
+                sc.record.active_epoch()
+            )
+        })?;
+        let decrypted = cryptor
+            .decrypt_record(data, id)
+            .context("Failed to decrypt memory record")?;
+        deserialize_memory_inner(&decrypted)
+    } else {
+        deserialize_memory_inner(data)
+    }
+}
+
 /// Public wrapper around the full legacy fallback chain, used by the migration module.
 ///
 /// Tries SHO v2 (postcard), SHO v1 (bincode 2.x), then the 17-path legacy
 /// fallback for raw bincode/msgpack data. Returns just the Memory on success.
-pub fn deserialize_memory_for_migration(data: &[u8]) -> Result<Memory> {
-    deserialize_memory(data).map(|(m, _)| m)
+pub fn deserialize_memory_for_migration(id: &[u8], data: &[u8]) -> Result<Memory> {
+    deserialize_memory(id, data).map(|(m, _)| m)
 }
 
 /// Legacy MemoryFlat for bincode 2.x data written BEFORE multimodal Experience fields
@@ -1078,6 +1160,8 @@ pub(crate) fn crc32_simple(data: &[u8]) -> u32 {
 
 /// Column family name for secondary indices (tags, types, timestamps, etc.)
 const CF_INDEX: &str = "memory_index";
+/// Sentinel (in CF_INDEX) holding the last-seen keystore generation; rollback guard.
+const KEYSTORE_GENERATION_KEY: &[u8] = b"meta:keystore_generation";
 
 /// Maximum number of failed writes to buffer for retry.
 /// Small enough to bound memory usage (~100 memories × ~2KB ≈ 200KB)
@@ -1109,6 +1193,119 @@ impl MemoryStorage {
         self.db
             .cf_handle(CF_INDEX)
             .expect("memory_index CF must exist")
+    }
+
+    /// Load — or first-run create — the keystore, unseal it, verify integrity +
+    /// rollback generation, and install the process-global v2 storage crypto.
+    /// No keystore + no passphrase = plaintext (backward compatible).
+    fn init_storage_crypto(db: &DB, storage_path: &Path) -> Result<()> {
+        use crate::keystore::{IndexBlinder, KdfParams, Keystore, LocalAeadKms, RecordCryptors};
+
+        let keystore_path = storage_path.join("keystore.json");
+        let passphrase = std::env::var("SHODH_MASTER_PASSPHRASE")
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        let (ks, kek) = match (keystore_path.exists(), passphrase) {
+            (true, Some(pass)) => {
+                let json = std::fs::read_to_string(&keystore_path)
+                    .context("Failed to read keystore.json")?;
+                let ks = Keystore::from_json(&json)?;
+                let kek = ks.unseal_with_passphrase(&pass)?;
+                tracing::info!("Record-level encryption: keystore unsealed (passphrase)");
+                (ks, kek)
+            }
+            (true, None) => {
+                let json = std::fs::read_to_string(&keystore_path)
+                    .context("Failed to read keystore.json")?;
+                let ks = Keystore::from_json(&json)?;
+                let kms = LocalAeadKms::from_env()?.ok_or_else(|| {
+                    anyhow!(
+                        "keystore.json is present but neither SHODH_MASTER_PASSPHRASE nor \
+                         SHODH_KMS_WRAP_KEY is set; refusing to start (encrypted records would be \
+                         served as ciphertext)"
+                    )
+                })?;
+                let kek = ks.unseal_with_kms(&kms)?;
+                tracing::info!("Record-level encryption: keystore unsealed (KMS)");
+                (ks, kek)
+            }
+            (false, Some(pass)) => {
+                let ks = Keystore::create(&pass, KdfParams::production())?;
+                ks.save_to_path(&keystore_path)
+                    .context("Failed to write keystore.json")?;
+                let kek = ks.unseal_with_passphrase(&pass)?;
+                tracing::info!("Created new encryption keystore at {keystore_path:?}");
+                (ks, kek)
+            }
+            (false, None) => return Ok(()), // encryption disabled (plaintext)
+        };
+
+        ks.verify_integrity(&kek)
+            .context("keystore integrity verification failed")?;
+        Self::check_keystore_generation(db, ks.generation)?;
+
+        let sc = StorageCrypto {
+            record: RecordCryptors::from_keystore(&ks, &kek)?,
+            index: IndexBlinder::derive_from_kek(&kek),
+            kek_fingerprint: ks.kek_fingerprint.clone(),
+        };
+        // Process-global = single keystore per process. First store wins; a second
+        // store with a DIFFERENT keystore must fail loudly, not silently reuse the
+        // first store's keys (cross-keystore data confusion).
+        if let Err(rejected) = V2_CRYPTO.set(sc) {
+            let existing = V2_CRYPTO.get().expect("V2_CRYPTO just observed as set");
+            if existing.kek_fingerprint != rejected.kek_fingerprint {
+                return Err(anyhow!(
+                    "a different encryption keystore is already active in this process; \
+                     shodh's process-global encryption supports a single keystore per process"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Rollback guard: refuse a keystore whose generation is older than last seen.
+    fn check_keystore_generation(db: &DB, generation: u64) -> Result<()> {
+        let cf = db
+            .cf_handle(CF_INDEX)
+            .ok_or_else(|| anyhow!("memory_index CF missing for keystore generation sentinel"))?;
+        let stored = db
+            .get_cf(cf, KEYSTORE_GENERATION_KEY)
+            .context("read keystore generation sentinel")?
+            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or(0);
+        if generation < stored {
+            let allow_rollback = std::env::var("SHODH_ALLOW_KEYSTORE_ROLLBACK")
+                .map(|v| {
+                    let v = v.trim().to_ascii_lowercase();
+                    v == "true" || v == "1"
+                })
+                .unwrap_or(false);
+            if !allow_rollback {
+                return Err(anyhow!(
+                    "keystore rollback detected: file generation {generation} < last-seen {stored}. \
+                     If you intentionally restored an older keystore (e.g. keystore.json.bak), set \
+                     SHODH_ALLOW_KEYSTORE_ROLLBACK=true once to accept it and reset the sentinel."
+                ));
+            }
+            tracing::warn!(
+                file_generation = generation,
+                last_seen = stored,
+                "SHODH_ALLOW_KEYSTORE_ROLLBACK set: accepting an older keystore generation (restored \
+                 keystore?) and resetting the rollback sentinel to it. Rollback protection is \
+                 bypassed for this start — unset the variable afterward."
+            );
+            db.put_cf(cf, KEYSTORE_GENERATION_KEY, generation.to_le_bytes())
+                .context("reset keystore generation sentinel")?;
+            return Ok(());
+        }
+        if generation > stored {
+            db.put_cf(cf, KEYSTORE_GENERATION_KEY, generation.to_le_bytes())
+                .context("write keystore generation sentinel")?;
+        }
+        Ok(())
     }
 
     /// Create a new memory storage.
@@ -1187,6 +1384,8 @@ impl MemoryStorage {
 
         // Migrate from old separate-DB layout if needed
         Self::migrate_from_separate_dbs(path, &db)?;
+        // Initialise v2 encryption (keystore unseal + integrity + rollback guard).
+        Self::init_storage_crypto(&db, &storage_path)?;
 
         let write_mode = WriteMode::default();
         tracing::info!(
@@ -1422,8 +1621,8 @@ impl MemoryStorage {
         let key = memory.id.0.as_bytes();
 
         // Serialize memory (postcard + SHO v2 envelope)
-        let value = crate::serialization::encode_sho(memory)
-            .context(format!("Failed to serialize memory {}", memory.id.0))?;
+        let value =
+            encode_memory(memory).context(format!("Failed to serialize memory {}", memory.id.0))?;
 
         // Use write mode based on configuration
         let mut write_opts = WriteOptions::default();
@@ -1545,14 +1744,14 @@ impl MemoryStorage {
         // Index by entities (case-insensitive for tag search compatibility)
         for entity in &memory.experience.entities {
             let normalized_entity = entity.to_lowercase();
-            let entity_key = format!("entity:{}:{}", normalized_entity, memory.id.0);
+            let entity_key = format!("entity:{}:{}", blind_term(&normalized_entity), memory.id.0);
             batch.put_cf(idx, entity_key.as_bytes(), b"1");
         }
 
         // Index by tags (separate from entities for explicit tag queries)
         for tag in &memory.experience.tags {
             let normalized_tag = tag.to_lowercase();
-            let tag_key = format!("tag:{}:{}", normalized_tag, memory.id.0);
+            let tag_key = format!("tag:{}:{}", blind_term(&normalized_tag), memory.id.0);
             batch.put_cf(idx, tag_key.as_bytes(), b"1");
         }
 
@@ -1560,14 +1759,23 @@ impl MemoryStorage {
         // Episode is the primary temporal grouping - memories in same episode are highly related
         if let Some(ctx) = &memory.experience.context {
             if let Some(episode_id) = &ctx.episode.episode_id {
-                let episode_key = format!("episode:{}:{}", episode_id, memory.id.0);
+                let episode_key = format!(
+                    "episode:{}:{}",
+                    blind_term(&episode_id.to_string()),
+                    memory.id.0
+                );
                 batch.put_cf(idx, episode_key.as_bytes(), b"1");
 
                 // Also index by sequence within episode for temporal ordering
                 if let Some(seq) = ctx.episode.sequence_number {
                     // Zero-pad sequence number for correct lexicographic ordering in RocksDB
                     // Without padding: 1, 10, 100, 2, 20... With {:010}: 0000000001, 0000000002...
-                    let seq_key = format!("episode_seq:{}:{:010}:{}", episode_id, seq, memory.id.0);
+                    let seq_key = format!(
+                        "episode_seq:{}:{:010}:{}",
+                        blind_term(&episode_id.to_string()),
+                        seq,
+                        memory.id.0
+                    );
                     batch.put_cf(idx, seq_key.as_bytes(), b"1");
                 }
             }
@@ -1577,19 +1785,34 @@ impl MemoryStorage {
 
         // Index by robot_id (for multi-robot systems)
         if let Some(ref robot_id) = memory.experience.robot_id {
-            let robot_key = format!("robot:{}:{}", robot_id, memory.id.0);
+            let robot_key = format!(
+                "robot:{}:{}",
+                blind_term(&robot_id.to_string()),
+                memory.id.0
+            );
             batch.put_cf(idx, robot_key.as_bytes(), b"1");
         }
 
         // Index by mission_id (for mission context retrieval)
         if let Some(ref mission_id) = memory.experience.mission_id {
-            let mission_key = format!("mission:{}:{}", mission_id, memory.id.0);
+            let mission_key = format!(
+                "mission:{}:{}",
+                blind_term(&mission_id.to_string()),
+                memory.id.0
+            );
             batch.put_cf(idx, mission_key.as_bytes(), b"1");
         }
 
         // Index by geo_location (for spatial queries) using geohash
         // Key format: geo:GEOHASH:memory_id (geohash at precision 10 = ~1.2m x 60cm)
-        // Geohash enables efficient prefix-based spatial queries
+        // Geohash enables efficient prefix-based spatial queries.
+        //
+        // SECURITY (residual): the geohash is stored UNBLINDED, unlike the
+        // exact-match index terms. Spatial search scans by geohash *prefix*
+        // (proximity), so HMAC-blinding would destroy the prefix structure and
+        // break nearby-queries. Precise location (~1.2m) is therefore visible in
+        // the index CF to anyone who can read it — same class as the date/type/
+        // importance range keys. See SECURITY.md.
         if let Some(geo) = memory.experience.geo_location {
             let lat = geo[0];
             let lon = geo[1];
@@ -1601,7 +1824,11 @@ impl MemoryStorage {
 
         // Index by action_type (for action-based retrieval)
         if let Some(ref action_type) = memory.experience.action_type {
-            let action_key = format!("action:{}:{}", action_type, memory.id.0);
+            let action_key = format!(
+                "action:{}:{}",
+                blind_term(&action_type.to_string()),
+                memory.id.0
+            );
             batch.put_cf(idx, action_key.as_bytes(), b"1");
         }
 
@@ -1620,7 +1847,7 @@ impl MemoryStorage {
         // Enables O(1) duplicate detection on remember()
         {
             let content_hash = Self::sha256_content_hash(&memory.experience.content);
-            let hash_key = format!("content_hash:{}", content_hash);
+            let hash_key = format!("content_hash:{}", blind_term(&content_hash.to_string()));
             batch.put_cf(idx, hash_key.as_bytes(), memory.id.0.as_bytes());
         }
 
@@ -1629,7 +1856,11 @@ impl MemoryStorage {
         // Key format: external:{source}:{id}:{memory_id} -> memory_id
         // Enables O(1) lookup when syncing from external systems
         if let Some(ref external_id) = memory.external_id {
-            let external_key = format!("external:{}:{}", external_id, memory.id.0);
+            let external_key = format!(
+                "external:{}:{}",
+                blind_term(&external_id.to_string()),
+                memory.id.0
+            );
             // Store memory_id as value for direct lookup
             batch.put_cf(idx, external_key.as_bytes(), memory.id.0.as_bytes());
         }
@@ -1639,7 +1870,11 @@ impl MemoryStorage {
         // Key format: parent:{parent_id}:{child_id} -> 1
         // Enables O(1) lookup of all children for a parent
         if let Some(ref parent_id) = memory.parent_id {
-            let parent_key = format!("parent:{}:{}", parent_id.0, memory.id.0);
+            let parent_key = format!(
+                "parent:{}:{}",
+                blind_term(&parent_id.0.to_string()),
+                memory.id.0
+            );
             batch.put_cf(idx, parent_key.as_bytes(), b"1");
         }
 
@@ -1662,7 +1897,7 @@ impl MemoryStorage {
     /// Returns the MemoryId if identical content was already stored.
     pub fn get_by_content_hash(&self, content: &str) -> Option<MemoryId> {
         let content_hash = Self::sha256_content_hash(content);
-        let hash_key = format!("content_hash:{}", content_hash);
+        let hash_key = format!("content_hash:{}", blind_term(&content_hash.to_string()));
         let idx = self.index_cf();
         match self.db.get_cf(idx, hash_key.as_bytes()) {
             Ok(Some(value)) if value.len() == 16 => {
@@ -1690,13 +1925,14 @@ impl MemoryStorage {
         let key = id.0.as_bytes();
         match self.db.get(key)? {
             Some(value) => {
-                let (memory, needs_migration) = deserialize_memory(&value).with_context(|| {
-                    format!(
-                        "Failed to deserialize memory {} ({} bytes)",
-                        id.0,
-                        value.len()
-                    )
-                })?;
+                let (memory, needs_migration) =
+                    deserialize_memory(key, &value).with_context(|| {
+                        format!(
+                            "Failed to deserialize memory {} ({} bytes)",
+                            id.0,
+                            value.len()
+                        )
+                    })?;
 
                 // Lazy migration: re-write legacy formats in current format
                 if needs_migration {
@@ -1715,8 +1951,7 @@ impl MemoryStorage {
     /// Re-write a memory in current format (lazy migration helper)
     fn migrate_memory_format(&self, memory: &Memory) -> Result<()> {
         let key = memory.id.0.as_bytes();
-        let value = crate::serialization::encode_sho(memory)
-            .context("Failed to serialize for migration")?;
+        let value = encode_memory(memory).context("Failed to serialize for migration")?;
 
         let mut write_opts = WriteOptions::default();
         write_opts.set_sync(false); // Async is fine for migration
@@ -1732,7 +1967,7 @@ impl MemoryStorage {
     /// Used for upsert operations when syncing from external sources.
     pub fn find_by_external_id(&self, external_id: &str) -> Result<Option<Memory>> {
         // Index key format: external:{external_id}:{memory_id}
-        let prefix = format!("external:{external_id}:");
+        let prefix = format!("external:{}:", blind_term(external_id));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
@@ -1869,25 +2104,31 @@ impl MemoryStorage {
         // Entity indices (must match the to_lowercase() normalization in update_indices)
         for entity in &memory.experience.entities {
             let normalized_entity = entity.to_lowercase();
-            let entity_key = format!("entity:{}:{}", normalized_entity, id.0);
+            let entity_key = format!("entity:{}:{}", blind_term(&normalized_entity), id.0);
             batch.delete_cf(idx, entity_key.as_bytes());
         }
 
         // Tag indices
         for tag in &memory.experience.tags {
             let normalized_tag = tag.to_lowercase();
-            let tag_key = format!("tag:{}:{}", normalized_tag, id.0);
+            let tag_key = format!("tag:{}:{}", blind_term(&normalized_tag), id.0);
             batch.delete_cf(idx, tag_key.as_bytes());
         }
 
         // Episode indices
         if let Some(ctx) = &memory.experience.context {
             if let Some(episode_id) = &ctx.episode.episode_id {
-                let episode_key = format!("episode:{}:{}", episode_id, id.0);
+                let episode_key =
+                    format!("episode:{}:{}", blind_term(&episode_id.to_string()), id.0);
                 batch.delete_cf(idx, episode_key.as_bytes());
 
                 if let Some(seq) = ctx.episode.sequence_number {
-                    let seq_key = format!("episode_seq:{}:{:010}:{}", episode_id, seq, id.0);
+                    let seq_key = format!(
+                        "episode_seq:{}:{:010}:{}",
+                        blind_term(&episode_id.to_string()),
+                        seq,
+                        id.0
+                    );
                     batch.delete_cf(idx, seq_key.as_bytes());
                 }
             }
@@ -1895,13 +2136,13 @@ impl MemoryStorage {
 
         // Robot index
         if let Some(ref robot_id) = memory.experience.robot_id {
-            let robot_key = format!("robot:{}:{}", robot_id, id.0);
+            let robot_key = format!("robot:{}:{}", blind_term(&robot_id.to_string()), id.0);
             batch.delete_cf(idx, robot_key.as_bytes());
         }
 
         // Mission index
         if let Some(ref mission_id) = memory.experience.mission_id {
-            let mission_key = format!("mission:{}:{}", mission_id, id.0);
+            let mission_key = format!("mission:{}:{}", blind_term(&mission_id.to_string()), id.0);
             batch.delete_cf(idx, mission_key.as_bytes());
         }
 
@@ -1914,7 +2155,7 @@ impl MemoryStorage {
 
         // Action index
         if let Some(ref action_type) = memory.experience.action_type {
-            let action_key = format!("action:{}:{}", action_type, id.0);
+            let action_key = format!("action:{}:{}", blind_term(&action_type.to_string()), id.0);
             batch.delete_cf(idx, action_key.as_bytes());
         }
 
@@ -1929,19 +2170,20 @@ impl MemoryStorage {
         // Content hash index (idempotency dedup)
         {
             let content_hash = Self::sha256_content_hash(&memory.experience.content);
-            let hash_key = format!("content_hash:{}", content_hash);
+            let hash_key = format!("content_hash:{}", blind_term(&content_hash.to_string()));
             batch.delete_cf(idx, hash_key.as_bytes());
         }
 
         // External linking index
         if let Some(ref external_id) = memory.external_id {
-            let external_key = format!("external:{}:{}", external_id, id.0);
+            let external_key =
+                format!("external:{}:{}", blind_term(&external_id.to_string()), id.0);
             batch.delete_cf(idx, external_key.as_bytes());
         }
 
         // Parent index (hierarchy)
         if let Some(ref parent_id) = memory.parent_id {
-            let parent_key = format!("parent:{}:{}", parent_id.0, id.0);
+            let parent_key = format!("parent:{}:{}", blind_term(&parent_id.0.to_string()), id.0);
             batch.delete_cf(idx, parent_key.as_bytes());
         }
 
@@ -2146,7 +2388,7 @@ impl MemoryStorage {
         let mut ids = Vec::new();
         // Normalize to lowercase for case-insensitive matching
         let normalized_entity = entity.to_lowercase();
-        let prefix = format!("entity:{normalized_entity}:");
+        let prefix = format!("entity:{}:", blind_term(&normalized_entity));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
@@ -2178,7 +2420,7 @@ impl MemoryStorage {
         for tag in tags {
             // Normalize to lowercase for case-insensitive matching
             let normalized_tag = tag.to_lowercase();
-            let prefix = format!("tag:{normalized_tag}:");
+            let prefix = format!("tag:{}:", blind_term(&normalized_tag));
             let iter = self.db.iterator_cf(
                 self.index_cf(),
                 IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward),
@@ -2203,7 +2445,7 @@ impl MemoryStorage {
     /// Returns all memories in the specified episode
     fn search_by_episode(&self, episode_id: &str) -> Result<Vec<MemoryId>> {
         let mut ids = Vec::new();
-        let prefix = format!("episode:{episode_id}:");
+        let prefix = format!("episode:{}:", blind_term(episode_id));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
@@ -2234,8 +2476,11 @@ impl MemoryStorage {
     ) -> Result<Vec<MemoryId>> {
         let mut results: Vec<(u32, MemoryId)> = Vec::new();
 
-        // Scan the episode_seq index which has format: episode_seq:{episode_id}:{seq}:{memory_id}
-        let prefix = format!("episode_seq:{episode_id}:");
+        // Scan the episode_seq index which has format:
+        //   episode_seq:{blinded episode_id}:{seq}:{memory_id}
+        // The episode_id is blinded (HMAC) to match update_indices; seq stays
+        // plaintext as the zero-padded in-episode ordering key.
+        let prefix = format!("episode_seq:{}:", blind_term(episode_id));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
@@ -2280,7 +2525,7 @@ impl MemoryStorage {
     /// Search memories by robot/drone identifier
     fn search_by_robot(&self, robot_id: &str) -> Result<Vec<MemoryId>> {
         let mut ids = Vec::new();
-        let prefix = format!("robot:{robot_id}:");
+        let prefix = format!("robot:{}:", blind_term(robot_id));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
@@ -2304,7 +2549,7 @@ impl MemoryStorage {
     /// Search memories by mission identifier
     fn search_by_mission(&self, mission_id: &str) -> Result<Vec<MemoryId>> {
         let mut ids = Vec::new();
-        let prefix = format!("mission:{mission_id}:");
+        let prefix = format!("mission:{}:", blind_term(mission_id));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
@@ -2385,7 +2630,7 @@ impl MemoryStorage {
     /// Search memories by action type
     fn search_by_action_type(&self, action_type: &str) -> Result<Vec<MemoryId>> {
         let mut ids = Vec::new();
-        let prefix = format!("action:{action_type}:");
+        let prefix = format!("action:{}:", blind_term(action_type));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
@@ -2447,7 +2692,7 @@ impl MemoryStorage {
     /// Get all children of a parent memory
     fn search_by_parent(&self, parent_id: &MemoryId) -> Result<Vec<MemoryId>> {
         let mut ids = Vec::new();
-        let prefix = format!("parent:{}:", parent_id.0);
+        let prefix = format!("parent:{}:", blind_term(&parent_id.0.to_string()));
 
         let iter = self.db.iterator_cf(
             self.index_cf(),
@@ -2480,7 +2725,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory(&key, &value) {
                 if memory.parent_id.is_none() {
                     roots.push(memory.id);
                 }
@@ -2593,7 +2838,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory(&key, &value) {
                 if !memory.is_forgotten() {
                     memories.push(memory);
                 }
@@ -2618,7 +2863,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory(&key, &value) {
                 if !memory.is_forgotten() {
                     f(memory)?;
                 }
@@ -2636,7 +2881,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory(&key, &value) {
                 if !memory.compressed && !memory.is_forgotten() && memory.created_at < cutoff {
                     memories.push(memory);
                 }
@@ -2659,23 +2904,31 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((mut memory, _)) = deserialize_memory(&value) {
-                if memory.is_forgotten() {
-                    continue;
-                }
-                if memory.created_at < cutoff {
-                    flagged_ids.push(memory.id.clone());
-                    memory
-                        .experience
-                        .metadata
-                        .insert("forgotten".to_string(), "true".to_string());
-                    memory
-                        .experience
-                        .metadata
-                        .insert("forgotten_at".to_string(), now.clone());
+            match deserialize_memory(&key, &value) {
+                Ok((mut memory, _)) => {
+                    if memory.is_forgotten() {
+                        continue;
+                    }
+                    if memory.created_at < cutoff {
+                        flagged_ids.push(memory.id.clone());
+                        memory
+                            .experience
+                            .metadata
+                            .insert("forgotten".to_string(), "true".to_string());
+                        memory
+                            .experience
+                            .metadata
+                            .insert("forgotten_at".to_string(), now.clone());
 
-                    let updated_value = crate::serialization::encode_sho(&memory)?;
-                    batch.put(&key, updated_value);
+                        let updated_value = encode_memory(&memory)?;
+                        batch.put(&key, updated_value);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "skipping a record that failed to decrypt/deserialize during forget-by-age (corruption, wrong key, or unsupported epoch)"
+                    );
                 }
             }
         }
@@ -2702,23 +2955,31 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((mut memory, _)) = deserialize_memory(&value) {
-                if memory.is_forgotten() {
-                    continue;
-                }
-                if memory.importance() < threshold {
-                    flagged_ids.push(memory.id.clone());
-                    memory
-                        .experience
-                        .metadata
-                        .insert("forgotten".to_string(), "true".to_string());
-                    memory
-                        .experience
-                        .metadata
-                        .insert("forgotten_at".to_string(), now.clone());
+            match deserialize_memory(&key, &value) {
+                Ok((mut memory, _)) => {
+                    if memory.is_forgotten() {
+                        continue;
+                    }
+                    if memory.importance() < threshold {
+                        flagged_ids.push(memory.id.clone());
+                        memory
+                            .experience
+                            .metadata
+                            .insert("forgotten".to_string(), "true".to_string());
+                        memory
+                            .experience
+                            .metadata
+                            .insert("forgotten_at".to_string(), now.clone());
 
-                    let updated_value = crate::serialization::encode_sho(&memory)?;
-                    batch.put(&key, updated_value);
+                        let updated_value = encode_memory(&memory)?;
+                        batch.put(&key, updated_value);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "skipping a record that failed to decrypt/deserialize during forget-by-importance (corruption, wrong key, or unsupported epoch)"
+                    );
                 }
             }
         }
@@ -2742,7 +3003,7 @@ impl MemoryStorage {
             if key.len() != 16 {
                 continue;
             }
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory(&key, &value) {
                 if regex.is_match(&memory.experience.content) {
                     to_delete.push(memory.id);
                     count += 1;
@@ -2798,7 +3059,7 @@ impl MemoryStorage {
                         continue;
                     }
 
-                    match deserialize_memory(&value) {
+                    match deserialize_memory(&key, &value) {
                         Ok((memory, _)) => {
                             if memory.is_forgotten() {
                                 continue;
@@ -2920,7 +3181,7 @@ impl MemoryStorage {
                     key.len()
                 );
                 to_delete.push(key.to_vec());
-            } else if deserialize_memory(&value).is_err() {
+            } else if deserialize_memory(&key, &value).is_err() {
                 tracing::debug!(
                     "Marking for deletion: valid key but corrupted value ({} bytes)",
                     value.len()
@@ -2999,7 +3260,7 @@ impl MemoryStorage {
             // decode via the full fallback chain and queue it for re-encode to
             // postcard. A decode failure is counted as `failed`, never silently
             // skipped.
-            match deserialize_memory(&value) {
+            match deserialize_memory(&key, &value) {
                 Ok((memory, _)) => {
                     to_migrate.push((key.to_vec(), memory));
                 }
@@ -3020,7 +3281,7 @@ impl MemoryStorage {
             write_opts.set_sync(self.write_mode == WriteMode::Sync);
 
             for (key, memory) in to_migrate {
-                match crate::serialization::encode_sho(&memory) {
+                match encode_memory(&memory) {
                     Ok(serialized) => {
                         if let Err(e) = self.db.put_opt(&key, &serialized, &write_opts) {
                             tracing::warn!("Failed to migrate memory: {e}");
@@ -3367,8 +3628,8 @@ impl MemoryStorage {
 
         // 1. Serialize memory
         let memory_key = memory.id.0.as_bytes();
-        let memory_value = crate::serialization::encode_sho(memory)
-            .context(format!("Failed to serialize memory {}", memory.id.0))?;
+        let memory_value =
+            encode_memory(memory).context(format!("Failed to serialize memory {}", memory.id.0))?;
         batch.put(memory_key, &memory_value);
 
         // 2. Serialize vector mapping with modality support
@@ -3549,7 +3810,7 @@ impl MemoryStorage {
                 continue;
             }
 
-            if let Ok((memory, _)) = deserialize_memory(&value) {
+            if let Ok((memory, _)) = deserialize_memory(&key, &value) {
                 let has_mapping = match self.get_vector_mapping(&memory.id) {
                     Ok(Some(entry)) => entry.text_vectors().is_some_and(|v| !v.is_empty()),
                     _ => false,

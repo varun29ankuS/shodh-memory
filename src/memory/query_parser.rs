@@ -2735,9 +2735,7 @@ pub fn is_polar_question(query_text: &str) -> bool {
     if first_word.is_empty() {
         return false;
     }
-    crate::constants::POLAR_QUESTION_LEADERS
-        .iter()
-        .any(|leader| *leader == first_word.as_str())
+    crate::constants::POLAR_QUESTION_LEADERS.contains(&first_word.as_str())
 }
 
 /// Template-based decontextualization of a polar question into its negated
@@ -2747,7 +2745,7 @@ pub fn is_polar_question(query_text: &str) -> bool {
 ///   - "Are we using HNSW?" → "we are not using HNSW"
 ///   - "Do we call OpenAI's embedding API?" → "we do not call OpenAI's embedding API"
 ///   - "Did learning history records also move to postcard?"
-///        → "learning history records did not also move to postcard"
+///     → "learning history records did not also move to postcard"
 ///   - "Is GitHub auto-merge enabled?" → "GitHub auto-merge is not enabled"
 ///
 /// Returns `None` when:
@@ -2767,10 +2765,7 @@ pub fn polar_to_negated_form(query_text: &str) -> Option<String> {
         return None;
     }
     let leader_lc = words[0].to_lowercase();
-    if !crate::constants::POLAR_QUESTION_LEADERS
-        .iter()
-        .any(|l| *l == leader_lc.as_str())
-    {
+    if !crate::constants::POLAR_QUESTION_LEADERS.contains(&leader_lc.as_str()) {
         return None;
     }
     // Skip if the original already contains an overt negation token — the
