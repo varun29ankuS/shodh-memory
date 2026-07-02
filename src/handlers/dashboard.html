@@ -264,6 +264,9 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
 .anomfeed .anom{font-size:12.5px;padding:9px 0;}
 .anomfeed .anom .why{font-size:11px;}
 .workwrap{max-width:900px;margin:0 auto;}
+#anomdetail .ghl{margin-top:10px;background:none;border:1px solid var(--turmeric);color:var(--turmeric);
+  border-radius:5px;padding:5px 12px;font:600 10.5px Inter,sans-serif;cursor:pointer;letter-spacing:.6px;}
+#anomdetail .ghl:hover{background:rgba(230,160,60,.12);}
 
 /* anomaly feed — deviation from the user's own statistical baseline */
 .anom{padding:6px 0;border-top:1px solid var(--line);font-size:11px;line-height:1.45;}
@@ -666,11 +669,15 @@ function clearCanvas(){ const {w,h}=sizeCanvas(); ctx.setTransform(DPR,0,0,DPR,0
 // ════════════════════════════════════════════════════════════════════════════
 //  CLUSTER OVERVIEW  — the default, readable view
 // ════════════════════════════════════════════════════════════════════════════
+// Below this many entities the whole-graph entity view replaces cluster
+// bubbles (shared by showClusters and the activation/highlight logic).
+const SMALL_GRAPH_MAX = 40;
+
 function showClusters(){
   // SMALL-GRAPH MODE: cluster bubbles only earn their keep at scale. A demo
   // or young corpus (≤40 entities) reads far better as the actual entity
   // constellation — show it directly instead of 2-3 opaque super-nodes.
-  if(RAW.nodes.length>0 && RAW.nodes.length<=40){ return showWholeGraph(); }
+  if(RAW.nodes.length>0 && RAW.nodes.length<=SMALL_GRAPH_MAX){ return showWholeGraph(); }
   VIEW.level="clusters"; VIEW.clusterId=null;
   const {w,h}=sizeCanvas();
   const maxSize = d3.max(RAW.clusters, c=>c.size)||1;
@@ -823,7 +830,10 @@ function draw(){
   ctx.save();
   ctx.translate(GT.x, GT.y); ctx.scale(GT.k, GT.k);
 
-  const lit = VIEW.level==="clusters" ? activeClusters : activeMembers;
+  // Lit-set choice follows node KIND, not nav level: the whole-graph
+  // small-corpus view shows ENTITY nodes at the "clusters" level, and those
+  // light by member id — testing them against cluster ids lights nothing.
+  const lit = (VIEW.nodes.length && VIEW.nodes[0].kind==="cluster") ? activeClusters : activeMembers;
   const dimmed = !!lit;
 
   // edges first
@@ -1025,34 +1035,69 @@ function activateFromCascade(res){
   // keep the distinctive core (cap so dense corpora don't flood)
   const cap=Math.max(6, Math.min(28, Math.round(scored.length*0.6)));
   const core = scored.slice(0, scored.length<=10?scored.length:cap).map(x=>x.n);
+  lightUpMembers(core, null);
+}
+
+// Shared lighting mechanism: given graph entity nodes (RAW.nodes items),
+// light them exactly the way a recall cascade does — set the active sets,
+// pick the right view (dominant-cluster drill at scale, whole-graph when
+// small), set the ribbon, and frame the lit nodes. Both entry points
+// (recall cascade, anomaly cross-highlight) go through here so the visual
+// language stays one language.
+function lightUpMembers(core, ribbonText){
+  if(!core.length){ deactivate(); return; }
   activeMembers = new Set(core.map(n=>n.id));
-  // 2) which clusters do they fall in? weight clusters by core membership
+  // which clusters do they fall in? weight clusters by core membership
   const cw=new Map();
   for(const n of core){ cw.set(n.comm,(cw.get(n.comm)||0)+1); }
   const litClusters = [...cw.entries()].sort((a,b)=>b[1]-a[1]);
   activeClusters = new Set(litClusters.map(e=>e[0]));
 
-  const a=$("activ"); a.classList.add("on");
-  const topName = RAW.clusters[litClusters[0][0]].label;
+  $("activ").classList.add("on");
+  const topName = RAW.clusters[litClusters[0][0]] ? RAW.clusters[litClusters[0][0]].label : "";
+  const small = RAW.nodes.length<=SMALL_GRAPH_MAX;
 
-  // 3) focus: if one cluster dominates the surfaced set, drill into it so the
-  //    member nodes light up; otherwise stay in the overview and glow clusters.
-  const dominant = litClusters[0][1] >= Math.max(2, 0.5*core.length) && litClusters[0][1] >= (litClusters[1]?litClusters[1][1]:0);
+  // focus: if one cluster dominates, drill into it so members light up;
+  // in small-graph mode never drill — every entity is already on screen.
+  const dominant = !small && litClusters[0][1] >= Math.max(2, 0.5*core.length) && litClusters[0][1] >= (litClusters[1]?litClusters[1][1]:0);
   if(dominant){
     showCluster(litClusters[0][0]);
     const litNodes = VIEW.nodes.filter(nd=>activeMembers.has(nd.id));
-    const inView = litNodes.length;
-    $("activ-t").textContent = "⚡ "+inView+" entities lit in cluster “"+trim(topName,20)+"”";
+    $("activ-t").textContent = ribbonText || ("⚡ "+litNodes.length+" entities lit in cluster “"+trim(topName,20)+"”");
     // frame the lit members + a little surrounding context
     if(litNodes.length>=2) fitView(litNodes, 110, true);
     else fitView(VIEW.nodes, 60, true);
   } else {
     if(VIEW.level!=="clusters") showClusters();
-    $("activ-t").textContent = "⚡ "+core.length+" entities across "+activeClusters.size+" clusters — top: "+trim(topName,20);
-    const litNodes = VIEW.nodes.filter(nd=>activeClusters.has(nd.id));
+    const litNodes = small
+      ? VIEW.nodes.filter(nd=>activeMembers.has(nd.id))
+      : VIEW.nodes.filter(nd=>activeClusters.has(nd.id));
+    $("activ-t").textContent = ribbonText ||
+      (small ? "⚡ "+core.length+" entities lit"
+             : "⚡ "+core.length+" entities across "+activeClusters.size+" clusters — top: "+trim(topName,20));
     applyActivation();
     if(litNodes.length>=2) fitView(litNodes, 90, true); else draw();
   }
+}
+
+// Cross-highlight: project an anomaly onto the knowledge graph. Matches the
+// episode's entities to graph nodes by uuid (single-user view: star.id IS the
+// entity uuid) with a name-key fallback (group view re-keys merged nodes).
+function anomHighlight(i){
+  const row = ANOM_ROWS[i]; if(!row || !RAW) return;
+  const ents = row.a.entities || [];
+  const wantIds = new Set(), wantNames = new Set();
+  for(const e of ents){ if(e.id) wantIds.add(e.id); if(e.name) wantNames.add(nameKey(e.name)); }
+  const core = RAW.nodes.filter(n => wantIds.has(n.id) || wantNames.has(nameKey(n.name)));
+  showScreen('live');
+  sizeCanvas();   // showScreen's resize is debounced; fit needs real dims NOW
+  if(!core.length){
+    $("activ").classList.add("on");
+    $("activ-t").textContent = "⚠ this anomaly's entities are not in the current graph view";
+    draw();
+    return;
+  }
+  lightUpMembers(core, "⚡ anomaly "+row.a.max_abs_z.toFixed(1)+"σ — "+core.length+" entities lit");
 }
 function applyActivation(){ draw(); }
 function deactivate(){
@@ -1355,6 +1400,10 @@ function anomDetail(i){
       '<span>('+d.value.toFixed(3)+' vs baseline '+d.baseline_mean.toFixed(3)+' ± '+d.baseline_std.toFixed(3)+')</span></div>';
   });
   h += '<div class="line"><span>sample</span> '+a.components.pairs_scored+' pairs · '+a.components.entities_total+' entities · '+new Date(a.created_at).toLocaleString()+'</div>';
+  if((a.entities||[]).length){
+    h += '<div class="line"><span>involves</span> '+a.entities.map(e=>esc(e.name)).join(" · ")+'</div>';
+    h += '<button class="ghl" onclick="anomHighlight('+i+')">⚡ show in graph</button>';
+  }
   $("anomdetail").innerHTML = h;
 }
 

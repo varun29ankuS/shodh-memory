@@ -55,6 +55,15 @@ pub struct ComponentDeviation {
     pub z: f32,
 }
 
+/// An entity involved in an anomalous episode — the graph cross-highlight
+/// handle. `id` is the entity UUID (universe stars use the same id, so the
+/// dashboard matches by id in single-user mode and by name in group mode).
+#[derive(Debug, Clone, Serialize)]
+pub struct AnomalyEntity {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AnomalyEntry {
     pub memory_id: String,
@@ -68,6 +77,9 @@ pub struct AnomalyEntry {
     /// Human-readable, deterministic explanation built from the top deviating
     /// components — the auditable "why was this flagged".
     pub explanation: String,
+    /// The episode's entities (resolved names), so a flag can be projected
+    /// onto the knowledge-graph view. Resolved only for returned entries.
+    pub entities: Vec<AnomalyEntity>,
 }
 
 #[derive(Serialize)]
@@ -103,124 +115,154 @@ pub async fn list_anomalies(
         .get_user_graph(&req.user_id)
         .map_err(AppError::Internal)?;
 
-    // Collect the scored episodes (those carrying surprise components) off
-    // the async executor — episode iteration is a full CF scan.
-    let mut scored: Vec<(
-        uuid::Uuid,
-        chrono::DateTime<chrono::Utc>,
-        String,
-        SurpriseComponents,
-    )> = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<_>> {
-        let graph_guard = graph.read();
-        let episodes = graph_guard.get_all_episodes()?;
-        Ok(episodes
-            .into_iter()
-            .filter_map(|ep| {
-                let json = ep.metadata.get(SURPRISE_METADATA_KEY)?;
-                let components: SurpriseComponents = serde_json::from_str(json).ok()?;
-                let preview: String = ep.content.chars().take(160).collect();
-                Some((ep.uuid, ep.created_at, preview, components))
-            })
-            .collect())
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("Task join error: {}", e)))?
-    .map_err(AppError::Internal)?;
-
-    // Most recent first; the baseline is the rolling window of recent shape.
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
-    scored.truncate(window);
-
-    if scored.len() < MIN_BASELINE_EPISODES {
-        return Ok(Json(AnomalyListResponse {
-            anomalies: Vec::new(),
-            episodes_scored: scored.len(),
-            baseline_window: window,
-            min_sigma,
-        }));
-    }
-
-    // Per-axis baseline over the window (population mean/std).
-    let n = scored.len() as f32;
-    let baselines: Vec<(f32, f32)> = AXES
-        .iter()
-        .map(|(_, extract)| {
-            let mean = scored.iter().map(|(_, _, _, s)| extract(s)).sum::<f32>() / n;
-            let var = scored
-                .iter()
-                .map(|(_, _, _, s)| {
-                    let d = extract(s) - mean;
-                    d * d
-                })
-                .sum::<f32>()
-                / n;
-            (mean, var.sqrt())
-        })
-        .collect();
-
-    let mut entries: Vec<AnomalyEntry> = scored
-        .into_iter()
-        .map(|(uuid, created_at, preview, components)| {
-            let deviations: Vec<ComponentDeviation> = AXES
-                .iter()
-                .zip(baselines.iter())
-                .map(|((name, extract), (mean, std))| {
-                    let value = extract(&components);
-                    // A degenerate axis (zero variance in the window) carries
-                    // no deviation signal: z = 0, never a false flag.
-                    let z = if *std > f32::EPSILON {
-                        (value - mean) / std
-                    } else {
-                        0.0
-                    };
-                    ComponentDeviation {
-                        component: name.to_string(),
-                        value,
-                        baseline_mean: *mean,
-                        baseline_std: *std,
-                        z,
-                    }
+    // ALL CPU work — the full episode scan, baselines, z-scores, ranking, and
+    // entity resolution — runs in ONE blocking section off the async executor,
+    // taking the read guard once. Entity names are resolved only for the
+    // RETURNED entries (top `limit`), not the whole baseline window: at the
+    // defaults that is 12 episodes' refs instead of 200's.
+    let (entries, episodes_scored) =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<AnomalyEntry>, usize)> {
+            let graph_guard = graph.read();
+            let episodes = graph_guard.get_all_episodes()?;
+            let mut scored: Vec<(
+                uuid::Uuid,
+                chrono::DateTime<chrono::Utc>,
+                String,
+                SurpriseComponents,
+                Vec<uuid::Uuid>,
+            )> = episodes
+                .into_iter()
+                .filter_map(|ep| {
+                    let json = ep.metadata.get(SURPRISE_METADATA_KEY)?;
+                    let components: SurpriseComponents = serde_json::from_str(json).ok()?;
+                    let preview: String = ep.content.chars().take(160).collect();
+                    Some((ep.uuid, ep.created_at, preview, components, ep.entity_refs))
                 })
                 .collect();
-            let max_abs_z = deviations.iter().map(|d| d.z.abs()).fold(0.0, f32::max);
-            let flagged = max_abs_z >= min_sigma;
 
-            // Deterministic explanation from the top-2 deviating axes.
-            let mut ranked: Vec<&ComponentDeviation> = deviations.iter().collect();
-            ranked.sort_by(|a, b| b.z.abs().total_cmp(&a.z.abs()));
-            let explanation = ranked
+            // Most recent first; the baseline is the rolling window of recent shape.
+            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            scored.truncate(window);
+
+            if scored.len() < MIN_BASELINE_EPISODES {
+                return Ok((Vec::new(), scored.len()));
+            }
+
+            // Per-axis baseline over the window (population mean/std).
+            let n = scored.len() as f32;
+            let baselines: Vec<(f32, f32)> = AXES
                 .iter()
-                .take(2)
-                .filter(|d| d.z.abs() > f32::EPSILON)
-                .map(|d| {
-                    format!(
-                        "{} {:.1}σ {} baseline ({:.3} vs {:.3})",
-                        d.component,
-                        d.z.abs(),
-                        if d.z >= 0.0 { "above" } else { "below" },
-                        d.value,
-                        d.baseline_mean
+                .map(|(_, extract)| {
+                    let mean = scored.iter().map(|(_, _, _, s, _)| extract(s)).sum::<f32>() / n;
+                    let var = scored
+                        .iter()
+                        .map(|(_, _, _, s, _)| {
+                            let d = extract(s) - mean;
+                            d * d
+                        })
+                        .sum::<f32>()
+                        / n;
+                    (mean, var.sqrt())
+                })
+                .collect();
+
+            let episodes_scored = scored.len();
+            // Entries carry their entity refs alongside until ranking settles
+            // which ones are returned; only those get names resolved.
+            let mut ranked: Vec<(AnomalyEntry, Vec<uuid::Uuid>)> = scored
+                .into_iter()
+                .map(|(uuid, created_at, preview, components, entity_refs)| {
+                    let deviations: Vec<ComponentDeviation> = AXES
+                        .iter()
+                        .zip(baselines.iter())
+                        .map(|((name, extract), (mean, std))| {
+                            let value = extract(&components);
+                            // A degenerate axis (zero variance in the window) carries
+                            // no deviation signal: z = 0, never a false flag.
+                            let z = if *std > f32::EPSILON {
+                                (value - mean) / std
+                            } else {
+                                0.0
+                            };
+                            ComponentDeviation {
+                                component: name.to_string(),
+                                value,
+                                baseline_mean: *mean,
+                                baseline_std: *std,
+                                z,
+                            }
+                        })
+                        .collect();
+                    let max_abs_z = deviations.iter().map(|d| d.z.abs()).fold(0.0, f32::max);
+                    let flagged = max_abs_z >= min_sigma;
+
+                    // Deterministic explanation from the top-2 deviating axes.
+                    let mut by_z: Vec<&ComponentDeviation> = deviations.iter().collect();
+                    by_z.sort_by(|a, b| b.z.abs().total_cmp(&a.z.abs()));
+                    let explanation = by_z
+                        .iter()
+                        .take(2)
+                        .filter(|d| d.z.abs() > f32::EPSILON)
+                        .map(|d| {
+                            format!(
+                                "{} {:.1}σ {} baseline ({:.3} vs {:.3})",
+                                d.component,
+                                d.z.abs(),
+                                if d.z >= 0.0 { "above" } else { "below" },
+                                d.value,
+                                d.baseline_mean
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+
+                    (
+                        AnomalyEntry {
+                            memory_id: uuid.to_string(),
+                            created_at,
+                            content_preview: preview,
+                            components,
+                            deviations,
+                            max_abs_z,
+                            flagged,
+                            explanation,
+                            entities: Vec::new(),
+                        },
+                        entity_refs,
                     )
                 })
-                .collect::<Vec<_>>()
-                .join("; ");
+                .collect();
 
-            AnomalyEntry {
-                memory_id: uuid.to_string(),
-                created_at,
-                content_preview: preview,
-                components,
-                deviations,
-                max_abs_z,
-                flagged,
-                explanation,
-            }
+            ranked.sort_by(|a, b| b.0.max_abs_z.total_cmp(&a.0.max_abs_z));
+            ranked.truncate(limit);
+
+            let entries: Vec<AnomalyEntry> =
+                ranked
+                    .into_iter()
+                    .map(|(mut entry, refs)| {
+                        entry.entities =
+                            refs.iter()
+                                .filter_map(|u| {
+                                    // Unresolvable refs (entity since deleted) are skipped:
+                                    // they exist in neither the graph nor the universe view,
+                                    // so there is nothing to highlight.
+                                    graph_guard.get_entity(u).ok().flatten().map(|e| {
+                                        AnomalyEntity {
+                                            id: u.to_string(),
+                                            name: e.name,
+                                        }
+                                    })
+                                })
+                                .collect();
+                        entry
+                    })
+                    .collect();
+
+            Ok((entries, episodes_scored))
         })
-        .collect();
-
-    entries.sort_by(|a, b| b.max_abs_z.total_cmp(&a.max_abs_z));
-    let episodes_scored = entries.len();
-    entries.truncate(limit);
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Task join error: {}", e)))?
+        .map_err(AppError::Internal)?;
 
     Ok(Json(AnomalyListResponse {
         anomalies: entries,
