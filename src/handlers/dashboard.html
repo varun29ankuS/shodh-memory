@@ -222,6 +222,8 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
 .col.right{overflow-y:auto;}
 .panel{border-bottom:1px solid var(--line);padding:12px 14px;}
 .panel h3{margin:0 0 10px;font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:var(--turmeric);font-weight:700;}
+/* one-line "what question does this panel answer" — plain-language wayfinding */
+.panel .psub{margin:-8px 0 9px;font-size:9.5px;color:var(--mut);line-height:1.4;}
 .kv{display:flex;align-items:center;gap:8px;margin-bottom:7px;font-size:11.5px;}
 .kv .label{color:var(--txt2);width:78px;flex-shrink:0;}
 .kv .meter{flex:1;height:7px;border-radius:4px;background:#161d29;overflow:hidden;}
@@ -344,27 +346,33 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
   <div class="col right">
     <div class="panel">
       <h3>Memory Tiers</h3>
+      <div class="psub">how much is held: working → session → long-term</div>
       <div id="tiers"></div>
     </div>
     <div class="panel">
       <h3>Graph</h3>
+      <div class="psub">entities &amp; typed relations learned from text — no LLM</div>
       <div class="gridkv" id="graphstats"></div>
     </div>
     <div class="panel">
       <h3>Anomalies</h3>
+      <div class="psub">what deviates from this user's own baseline — click a row for the full why</div>
       <div id="anomalies"><div class="none">baseline forming…</div></div>
     </div>
     <div class="panel">
       <h3>Connected LLMs</h3>
+      <div class="psub">sessions writing to this memory right now</div>
       <div id="sessions"><div class="none">no active sessions</div></div>
     </div>
     <div class="panel">
       <h3>Todos</h3>
+      <div class="psub">open work the agent is tracking</div>
       <div id="todos"><div class="none">none</div></div>
     </div>
     <div class="panel" style="border-bottom:none">
       <h3>Detail / Provenance</h3>
-      <div id="detail"><div class="miss">Click a graph node, an edge, a surfaced memory, or a causal chain.</div></div>
+      <div class="psub">every belief traces to its source episodes</div>
+      <div id="detail"><div class="miss">Click a graph node, an edge, a surfaced memory, an anomaly, or a causal chain.</div></div>
     </div>
   </div>
 </main>
@@ -1224,13 +1232,29 @@ function renderAnomalies(group){
   LIVE_TEMPORAL.slice(0,4).forEach(t=>{
     h += '<div class="anom temporal"><span class="sig">↻</span><span class="prev">'+esc(t)+'</span></div>';
   });
-  ANOM_ROWS.forEach(({uid,a})=>{
+  ANOM_ROWS.forEach(({uid,a},i)=>{
     const who = group?'<span class="who">@'+esc(uid)+'</span>':'';
-    h += '<div class="anom'+(a.flagged?' flag':'')+'"><span class="sig">'+a.max_abs_z.toFixed(1)+'σ</span>'+
+    h += '<div class="anom'+(a.flagged?' flag':'')+'" style="cursor:pointer" onclick="anomDetail('+i+')">'+
+      '<span class="sig">'+a.max_abs_z.toFixed(1)+'σ</span>'+
       '<span class="prev">'+esc((a.content_preview||"").slice(0,60))+'</span>'+who+
       (a.explanation?'<span class="why">'+esc(a.explanation)+'</span>':'')+'</div>';
   });
   $("anomalies").innerHTML = h || '<div class="none">baseline forming… (needs ≥10 scored episodes)</div>';
+}
+// Click-through: the full audit trail of WHY an episode is unusual — every
+// component, its value, the user's baseline, and the signed deviation.
+function anomDetail(i){
+  const row = ANOM_ROWS[i]; if(!row) return;
+  const a = row.a;
+  let h = '<div class="rel"><b>'+a.max_abs_z.toFixed(1)+'σ deviation</b> — '+esc((a.content_preview||"").slice(0,120))+'</div>';
+  (a.deviations||[]).slice().sort((p,q)=>Math.abs(q.z)-Math.abs(p.z)).forEach(d=>{
+    const col = Math.abs(d.z)>=2 ? "#ff9c9c" : Math.abs(d.z)>=1 ? "#e6c864" : "var(--mut)";
+    h += '<div class="line"><span>'+esc(d.component)+'</span> '+
+      '<b style="color:'+col+'">'+(d.z>=0?"+":"")+d.z.toFixed(2)+'σ</b> '+
+      '<span>('+d.value.toFixed(3)+' vs baseline '+d.baseline_mean.toFixed(3)+' ± '+d.baseline_std.toFixed(3)+')</span></div>';
+  });
+  h += '<div class="line"><span>sample</span> '+a.components.pairs_scored+' pairs · '+a.components.entities_total+' entities · '+new Date(a.created_at).toLocaleString()+'</div>';
+  $("detail").innerHTML = h;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
