@@ -3766,6 +3766,45 @@ impl MultiUserMemoryManager {
             }
             Some(surprise)
         };
+
+        // Temporal anomalies (B4): drain what the strengthen path surfaced
+        // during this (or any prior) graph write, resolve entity names while
+        // the guard is held, and emit each on the SSE stream.
+        for ev in graph_guard.drain_temporal_anomalies() {
+            let name_of = |u: &uuid::Uuid| {
+                graph_guard
+                    .get_entity(u)
+                    .ok()
+                    .flatten()
+                    .map(|e| e.name)
+                    .unwrap_or_else(|| u.to_string())
+            };
+            let from_name = name_of(&ev.from_entity);
+            let to_name = name_of(&ev.to_entity);
+            tracing::info!(
+                kind = ?ev.kind,
+                from = %from_name,
+                to = %to_name,
+                relation = ?ev.relation_type,
+                gap_days = ev.gap_days,
+                "temporal anomaly"
+            );
+            self.emit_event(MemoryEvent {
+                event_type: "temporal_anomaly".to_string(),
+                timestamp: ev.detected_at,
+                user_id: user_id.to_string(),
+                memory_id: Some(memory_id.0.to_string()),
+                content_preview: Some(format!(
+                    "{} —{:?}→ {} reactivated after {:.1} days dormant",
+                    from_name, ev.relation_type, to_name, ev.gap_days
+                )),
+                memory_type: None,
+                importance: None,
+                count: None,
+                entities: Some(vec![from_name, to_name]),
+                results: serde_json::to_value(&ev).ok(),
+            });
+        }
         // Lock released here
 
         if typed_semantic

@@ -2048,6 +2048,38 @@ pub enum EpisodeSource {
     Observation,
 }
 
+/// Minimum dormancy (days since last activation) for an edge re-attestation
+/// to count as a [`TemporalAnomalyKind::DormantReactivation`] event.
+const DORMANT_REACTIVATION_MIN_DAYS: f32 = 7.0;
+
+/// Backstop cap on the pending temporal-anomaly queue (drained by the ingest
+/// path; the cap only matters if nothing drains it).
+const TEMPORAL_EVENT_QUEUE_CAP: usize = 1024;
+
+/// What kind of temporal anomaly the LTP/strengthen machinery surfaced.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum TemporalAnomalyKind {
+    /// An edge dormant for at least [`DORMANT_REACTIVATION_MIN_DAYS`] was
+    /// re-attested — a stale pattern suddenly became live again.
+    DormantReactivation,
+}
+
+/// A temporal anomaly detected at edge-strengthen time — SURFACED from the
+/// dynamics the Hebbian/decay machinery already runs, not re-detected.
+/// Queued on the graph (mirroring `pending_prune`) and drained by the ingest
+/// path, which resolves entity names and emits the event on SSE.
+#[derive(Debug, Clone, Serialize)]
+pub struct TemporalAnomalyEvent {
+    pub kind: TemporalAnomalyKind,
+    pub edge_uuid: Uuid,
+    pub from_entity: Uuid,
+    pub to_entity: Uuid,
+    pub relation_type: RelationType,
+    /// Days the edge sat dormant before this reactivation.
+    pub gap_days: f32,
+    pub detected_at: DateTime<Utc>,
+}
+
 /// Graph memory storage and operations
 ///
 /// Uses a single RocksDB instance with 9 column families for all graph data.
@@ -2091,6 +2123,10 @@ pub struct GraphMemory {
     /// Edges found below prune threshold during lazy-decay reads.
     /// Flushed as batch deletes on each maintenance cycle (no full scan needed).
     pending_prune: parking_lot::Mutex<Vec<Uuid>>,
+
+    /// Temporal anomalies surfaced at strengthen time (dormant reactivation),
+    /// drained by the ingest path and emitted on SSE. Capped backstop.
+    pending_temporal_anomalies: parking_lot::Mutex<Vec<TemporalAnomalyEvent>>,
 
     /// Entities that may have become orphaned from pruned edges.
     /// Checked during flush_pending_maintenance().
@@ -2244,6 +2280,7 @@ impl GraphMemory {
             synapse_update_lock: Arc::new(parking_lot::Mutex::new(())),
             entity_embedding_cache: Arc::new(parking_lot::RwLock::new(entity_embedding_cache)),
             pending_prune: parking_lot::Mutex::new(Vec::new()),
+            pending_temporal_anomalies: parking_lot::Mutex::new(Vec::new()),
             pending_orphan_checks: parking_lot::Mutex::new(Vec::new()),
         };
 
@@ -3213,9 +3250,31 @@ impl GraphMemory {
                     existing.to_entity
                 );
             }
+            // Temporal anomaly (B4): a long-dormant edge being re-attested is a
+            // pattern reactivation. Measured BEFORE strengthen()/last_activated
+            // overwrite the gap; queued for the ingest path to drain + emit.
+            let now = Utc::now();
+            let gap_days = now
+                .signed_duration_since(existing.last_activated)
+                .num_seconds() as f32
+                / 86_400.0;
+            if gap_days >= DORMANT_REACTIVATION_MIN_DAYS {
+                let mut queue = self.pending_temporal_anomalies.lock();
+                if queue.len() < TEMPORAL_EVENT_QUEUE_CAP {
+                    queue.push(TemporalAnomalyEvent {
+                        kind: TemporalAnomalyKind::DormantReactivation,
+                        edge_uuid: existing.uuid,
+                        from_entity: existing.from_entity,
+                        to_entity: existing.to_entity,
+                        relation_type: existing.relation_type.clone(),
+                        gap_days,
+                        detected_at: now,
+                    });
+                }
+            }
+
             // Strengthen existing edge instead of creating duplicate
             let _ = existing.strengthen();
-            let now = Utc::now();
             existing.last_activated = now;
 
             // Update context if new context is more informative
@@ -3322,6 +3381,13 @@ impl GraphMemory {
     }
 
     /// Index an edge for an entity
+    /// Drain the temporal anomalies queued by the strengthen path (dormant
+    /// reactivations). Called by the ingest path after each graph write; the
+    /// caller resolves entity names and emits SSE events.
+    pub fn drain_temporal_anomalies(&self) -> Vec<TemporalAnomalyEvent> {
+        std::mem::take(&mut *self.pending_temporal_anomalies.lock())
+    }
+
     fn index_entity_edge(&self, entity_uuid: &Uuid, edge_uuid: &Uuid) -> Result<()> {
         let key = format!("{entity_uuid}:{edge_uuid}");
         self.db
@@ -4138,6 +4204,7 @@ impl GraphMemory {
         // Drain pending maintenance queues — they reference now-deleted entities/edges
         let _ = std::mem::take(&mut *self.pending_prune.lock());
         let _ = std::mem::take(&mut *self.pending_orphan_checks.lock());
+        let _ = std::mem::take(&mut *self.pending_temporal_anomalies.lock());
 
         tracing::info!(
             "Graph data cleared (GDPR erasure): {} entities, {} relationships, {} episodes",
@@ -8381,6 +8448,74 @@ mod tests {
             graph.get_relationship(&edge_uuid).unwrap().is_none(),
             "an edge with no remaining attesting episode must be deleted"
         );
+    }
+
+    #[test]
+    fn dormant_reactivation_is_queued_and_drained() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let now = Utc::now();
+
+        let make_edge = || RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: a,
+            to_entity: b,
+            relation_type: RelationType::CoOccurs,
+            strength: 0.5,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            tier: EdgeTier::L2Episodic,
+            activation_timestamps: None,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: Vec::new(),
+        };
+
+        let edge_uuid = graph.add_relationship(make_edge()).unwrap();
+
+        // Fresh re-attestation (gap ~0): strengthen fires, but no event.
+        graph.add_relationship(make_edge()).unwrap();
+        assert!(
+            graph.drain_temporal_anomalies().is_empty(),
+            "a fresh re-attestation must not be a dormant reactivation"
+        );
+
+        // Backdate the stored edge 8 days, then re-attest: event queued.
+        let mut stored = graph.get_relationship(&edge_uuid).unwrap().unwrap();
+        stored.last_activated = now - Duration::days(8);
+        let encoded = crate::serialization::encode(&stored).unwrap();
+        graph
+            .db
+            .put_cf(graph.relationships_cf(), stored.uuid.as_bytes(), encoded)
+            .unwrap();
+
+        graph.add_relationship(make_edge()).unwrap();
+        let events = graph.drain_temporal_anomalies();
+        assert_eq!(
+            events.len(),
+            1,
+            "8-day dormancy must queue exactly one event"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.kind, TemporalAnomalyKind::DormantReactivation);
+        assert_eq!(ev.edge_uuid, edge_uuid);
+        assert!(
+            ev.gap_days >= 7.9 && ev.gap_days <= 8.1,
+            "gap_days should be ~8, got {}",
+            ev.gap_days
+        );
+
+        // Drained means drained.
+        assert!(graph.drain_temporal_anomalies().is_empty());
     }
 
     /// Create a test relationship edge with specified strength and last_activated (L1 tier)
