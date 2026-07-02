@@ -3095,6 +3095,30 @@ impl GraphMemory {
             &edge.to_entity,
             &edge.relation_type,
         )? {
+            // #8 DIAGNOSTIC (default-safe, log-only): the typed pair key is
+            // order-independent (pair_key sorts min/max UUID), so an incoming
+            // CAUSAL attestation whose direction is the REVERSE of the stored
+            // edge collapses into it silently — the stored cause→effect arrow
+            // is never flipped. Count how often that actually happens for causal
+            // relations: if it's frequent, the order-independent key is losing
+            // real direction and a direction-sensitive key + reindex is justified;
+            // if near-zero (expected, given the effect-first extractor already
+            // fixes most mis-direction), the migration isn't worth its cost.
+            // grep eval logs for "directed reverse-collapse".
+            if edge.relation_type.is_causal()
+                && existing.from_entity == edge.to_entity
+                && existing.to_entity == edge.from_entity
+            {
+                tracing::info!(
+                    target: "shodh::provenance",
+                    relation = ?edge.relation_type,
+                    "directed reverse-collapse: incoming {}->{} merged into stored {}->{}",
+                    edge.from_entity,
+                    edge.to_entity,
+                    existing.from_entity,
+                    existing.to_entity
+                );
+            }
             // Strengthen existing edge instead of creating duplicate
             let _ = existing.strengthen();
             let now = Utc::now();
