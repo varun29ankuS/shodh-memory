@@ -2054,10 +2054,15 @@ pub async fn proactive_context(
                     if alpha_count < 10 {
                         return false;
                     }
-                    // Anti-echo: skip memories that are just our own context echoed back
-                    // (auto-ingest stores context, which then gets retrieved for itself)
+                    // Anti-echo: skip auto-ingested memories that are just our own context
+                    // echoed back. Explicit memories can legitimately overlap the current
+                    // context and must still surface through proactive_context.
                     // Uses inline comparison to avoid allocating a HashSet<String> per candidate
-                    if !query_words.is_empty() {
+                    let is_auto_echo_candidate = m.experience.tags.iter().any(|tag| {
+                        tag.eq_ignore_ascii_case("auto-captured")
+                            || tag.eq_ignore_ascii_case("assistant-response")
+                    });
+                    if is_auto_echo_candidate && !query_words.is_empty() {
                         let mut mem_word_count = 0usize;
                         let mut overlap = 0usize;
                         for w in content.split_whitespace() {

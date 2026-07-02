@@ -1476,6 +1476,56 @@ mod proactive_integration_tests {
     }
 
     #[tokio::test]
+    async fn proactive_context_keeps_explicit_memory_that_overlaps_context() {
+        let h = Harness::new();
+        let content = "Workflow preference: when running automated validation, use the existing local runner path and avoid duplicate remote automation runs. Do not create temporary branches or extra remote jobs unless explicitly requested.";
+        let memory_id = store_memory_full(
+            &h,
+            "test-user",
+            content,
+            "Decision",
+            vec!["workflow", "validation"],
+        )
+        .await;
+        wait_for_indexing().await;
+
+        let query =
+            "run automated validation using the local runner without duplicate remote automation";
+        let (status, recall_body) = recall(&h, "test-user", query).await;
+        assert_eq!(status, StatusCode::OK);
+        let recall_memories = recall_body["memories"].as_array().unwrap();
+        assert!(
+            recall_memories
+                .iter()
+                .any(|m| m["id"].as_str() == Some(memory_id.as_str())),
+            "explicit recall should find the stored memory: {recall_body}"
+        );
+
+        let (status, proactive_body) = json_of(
+            h.app(),
+            authed_post(
+                "/api/proactive_context",
+                json!({
+                    "user_id": "test-user",
+                    "context": query,
+                    "max_results": 10,
+                    "semantic_threshold": 0.1,
+                    "auto_ingest": false,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let proactive_memories = proactive_body["memories"].as_array().unwrap();
+        assert!(
+            proactive_memories
+                .iter()
+                .any(|m| m["id"].as_str() == Some(memory_id.as_str())),
+            "proactive_context should not drop explicit memories as context echoes: {proactive_body}"
+        );
+    }
+
+    #[tokio::test]
     async fn proactive_context_respects_max_results() {
         let h = Harness::new();
         for i in 0..5 {
