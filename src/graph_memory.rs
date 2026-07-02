@@ -3432,8 +3432,7 @@ impl GraphMemory {
         // This replaces the eager full-scan apply_decay() with lazy on-read pruning.
         let mut has_prunable = false;
         for edge in &edges {
-            if edge.effective_strength() < edge.tier.prune_threshold()
-                && !edge.is_prune_protected()
+            if edge.effective_strength() < edge.tier.prune_threshold() && !edge.is_prune_protected()
             {
                 has_prunable = true;
                 break;
