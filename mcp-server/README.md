@@ -83,7 +83,7 @@ env = { SHODH_API_KEY = "your-api-key-here" }
 | `SHODH_STREAM` | Enable/disable streaming ingestion | `true` |
 | `SHODH_PROACTIVE` | Enable/disable proactive memory surfacing | `true` |
 
-## MCP Tools (47 total)
+## MCP Tools (51 total)
 
 <details>
 <summary><b>Memory</b> — Store, search, and manage memories</summary>

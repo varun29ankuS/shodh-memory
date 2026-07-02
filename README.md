@@ -179,14 +179,26 @@ This is based on [Cowan's working memory model](https://doi.org/10.1177/09637214
 
 Single binary. No GPU required. Content-hash dedup ensures identical memories are never stored twice.
 
-## 37 MCP Tools
+## 51 MCP Tools
 
 Full list of tools available to Claude, Cursor, and other MCP clients:
 
 <details>
 <summary>Memory</summary>
 
-`remember` · `recall` · `proactive_context` · `context_summary` · `list_memories` · `read_memory` · `forget`
+`remember` · `recall` · `recall_by_tags` · `proactive_context` · `context_summary` · `list_memories` · `read_memory` · `forget`
+</details>
+
+<details>
+<summary>Search & Insight</summary>
+
+`quick_recall` · `query` · `topic` · `what_i_know` · `recent_memories` · `pending_work` · `count` · `memory_health` · `session_summary`
+</details>
+
+<details>
+<summary>Sessions & Facts</summary>
+
+`session_digest` · `session_history` · `fact_narratives` · `purge_facts`
 </details>
 
 <details>
