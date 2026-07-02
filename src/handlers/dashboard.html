@@ -248,6 +248,18 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
 #detail .line span{color:var(--mut);}
 .miss{font-size:10px;color:var(--mut);line-height:1.6;}
 .miss b{color:var(--txt2);}
+
+/* anomaly feed — deviation from the user's own statistical baseline */
+.anom{padding:6px 0;border-top:1px solid var(--line);font-size:11px;line-height:1.45;}
+.anom:first-child{border-top:none;}
+.anom .sig{display:inline-block;min-width:34px;text-align:center;border-radius:3px;
+  padding:0 4px;font-weight:700;font-size:10px;margin-right:6px;
+  background:#2c3647;color:var(--txt2);}
+.anom.flag .sig{background:#5c2b2b;color:#ff9c9c;}
+.anom.temporal .sig{background:#4a3a1e;color:#ffd682;}
+.anom .prev{color:var(--txt2);}
+.anom .why{display:block;margin-top:2px;font-size:10px;color:var(--mut);}
+.anom .who{color:var(--mut);font-size:9.5px;margin-left:6px;}
 </style>
 </head>
 <body>
@@ -337,6 +349,10 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
     <div class="panel">
       <h3>Graph</h3>
       <div class="gridkv" id="graphstats"></div>
+    </div>
+    <div class="panel">
+      <h3>Anomalies</h3>
+      <div id="anomalies"><div class="none">baseline forming…</div></div>
     </div>
     <div class="panel">
       <h3>Connected LLMs</h3>
@@ -1064,8 +1080,16 @@ function connectStream(){
       if(d.event_type==="RETRIEVE"||d.event_type==="PROACTIVE_CONTEXT"){
         if(d.results && (d.results.memories||d.results.lineage)){ d.src_user=uid; buildCascade(d, true); }
       }
+      // Anomaly feed: a dormant pattern reactivating is shown live; each
+      // episode's surprise components debounce-refresh the deviation ranking.
+      if(d.event_type==="temporal_anomaly"){
+        LIVE_TEMPORAL.unshift(d.content_preview||"pattern reactivated");
+        LIVE_TEMPORAL = LIVE_TEMPORAL.slice(0,4);
+        renderAnomalies(users().length>1);
+      }
+      if(d.event_type==="surprise"){ scheduleAnomalies(); }
     };
-    ["RETRIEVE","PROACTIVE_CONTEXT","CREATE","UPDATE","DELETE","message"].forEach(t=>es.addEventListener(t,onEv));
+    ["RETRIEVE","PROACTIVE_CONTEXT","CREATE","UPDATE","DELETE","surprise","temporal_anomaly","message"].forEach(t=>es.addEventListener(t,onEv));
     es.onopen = ()=>{ anyOpen=true; setPulse(true); };
     es.onerror = ()=>{ if(!esList.some(x=>x.readyState===1)) setPulse(false); };
     esList.push(es);
@@ -1173,6 +1197,43 @@ async function loadTodos(){
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+//  ANOMALIES — deviation from each user's OWN statistical baseline.
+//  POST /api/anomalies returns per-component z-scores over the ingest-time
+//  surprise components with a deterministic explanation (LLM-free, auditable).
+//  SSE: "surprise" (per-episode shape) debounce-refreshes the feed;
+//       "temporal_anomaly" (dormant pattern reactivated) prepends a live row.
+// ════════════════════════════════════════════════════════════════════════════
+let LIVE_TEMPORAL = [];   // recent dormant-reactivations (live, cap 4)
+let ANOM_ROWS = [];       // fetched deviation entries (ranked by max |z|)
+let anomTimer = null;
+function scheduleAnomalies(){ clearTimeout(anomTimer); anomTimer=setTimeout(loadAnomalies, 1200); }
+async function loadAnomalies(){
+  try{
+    const sel = users();
+    const all = await perUser(uid=>api("/api/anomalies",{method:"POST",headers:POST_H,
+      body:JSON.stringify({user_id:uid,limit:6})}).then(r=>({uid,r})));
+    const rows=[];
+    for(const x of all){ if(!x||!x.r) continue; for(const a of (x.r.anomalies||[])) rows.push({uid:x.uid,a}); }
+    rows.sort((p,q)=>q.a.max_abs_z-p.a.max_abs_z);
+    ANOM_ROWS = rows.slice(0,6);
+    renderAnomalies(sel.length>1);
+  }catch(e){ $("anomalies").innerHTML='<div class="none">unavailable</div>'; }
+}
+function renderAnomalies(group){
+  let h="";
+  LIVE_TEMPORAL.slice(0,4).forEach(t=>{
+    h += '<div class="anom temporal"><span class="sig">↻</span><span class="prev">'+esc(t)+'</span></div>';
+  });
+  ANOM_ROWS.forEach(({uid,a})=>{
+    const who = group?'<span class="who">@'+esc(uid)+'</span>':'';
+    h += '<div class="anom'+(a.flagged?' flag':'')+'"><span class="sig">'+a.max_abs_z.toFixed(1)+'σ</span>'+
+      '<span class="prev">'+esc((a.content_preview||"").slice(0,60))+'</span>'+who+
+      (a.explanation?'<span class="why">'+esc(a.explanation)+'</span>':'')+'</div>';
+  });
+  $("anomalies").innerHTML = h || '<div class="none">baseline forming… (needs ≥10 scored episodes)</div>';
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 //  Manual recall (fires the cue → the server emits a RETRIEVE event we also catch)
 // ════════════════════════════════════════════════════════════════════════════
 async function fireRecall(){
@@ -1237,7 +1298,7 @@ function onIdentityChange(){
     ? 'group view — '+users().length+' users overlapped. Cue a recall to pool their memories.'
     : 'identity: '+esc(users()[0])+' — cue a recall to see the cascade.')+'</div>';
   riverCount=0; $("river-cnt").textContent='';
-  deactivate(); loadGraph(); loadStats(); loadSessions(); loadTodos(); connectStream();
+  deactivate(); loadGraph(); loadStats(); loadSessions(); loadTodos(); loadAnomalies(); connectStream();
 }
 function toggleIdMenu(open){ const m=$("idmenu"); const o = open!=null?open : !m.classList.contains("open");
   m.classList.toggle("open",o); if(o) renderIdMenu(); }
@@ -1273,8 +1334,8 @@ window.addEventListener("resize", onGraphResize);
 renderIdButton(); renderIdMenu();
 drawSpark();
 loadUserList();
-loadGraph(); loadStats(); loadSessions(); loadTodos(); connectStream();
-setInterval(()=>{ loadStats(); loadSessions(); loadTodos(); }, 15000);
+loadGraph(); loadStats(); loadSessions(); loadTodos(); loadAnomalies(); connectStream();
+setInterval(()=>{ loadStats(); loadSessions(); loadTodos(); loadAnomalies(); }, 15000);
 </script>
 </body>
 </html>
