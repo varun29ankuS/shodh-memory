@@ -3893,17 +3893,65 @@ impl GraphMemory {
             }
         }
 
-        // Delete edges sourced from this episode
-        // Scan all relationships for matching source_episode_id
+        // Scrub this episode from every edge's attestation trail (multi-source aware).
+        //
+        // An edge survives iff at least one attesting episode remains after scrubbing.
+        // The deleted episode is removed from the provenance trail; if it was the
+        // edge's primary `source_episode_id` but other sources still attest the edge,
+        // primacy is promoted to a surviving source. Only edges left with NO remaining
+        // attestation are deleted. This avoids both over-deletion (nuking a
+        // well-corroborated edge because its first source was removed) and dangling
+        // trails (provenance still pointing at a now-deleted episode).
+        //
+        // Edges never sourced from this episode (source_episode_id is a different
+        // episode or None, and the episode is absent from the trail) are untouched —
+        // including memory↔memory co-retrieval edges, which carry no episode
+        // attestation by design.
         let iter = self
             .db
             .iterator_cf(self.relationships_cf(), rocksdb::IteratorMode::Start);
         let mut edges_to_delete = Vec::new();
+        let mut edges_to_update: Vec<RelationshipEdge> = Vec::new();
         for (_, value) in iter.flatten() {
-            if let Ok((edge, _)) = decode_relationship_edge(&value) {
-                if edge.source_episode_id == Some(*episode_uuid) {
-                    edges_to_delete.push(edge.uuid);
+            let mut edge = match decode_relationship_edge(&value) {
+                Ok((edge, _)) => edge,
+                Err(_) => continue,
+            };
+            let was_primary_source = edge.source_episode_id == Some(*episode_uuid);
+            let in_trail = edge
+                .provenance
+                .iter()
+                .any(|p| p.source_episode_id == *episode_uuid);
+            if !was_primary_source && !in_trail {
+                continue;
+            }
+            edge.provenance
+                .retain(|p| p.source_episode_id != *episode_uuid);
+            if was_primary_source {
+                // Promote a surviving attesting episode to primary source, if any.
+                edge.source_episode_id = edge.provenance.first().map(|p| p.source_episode_id);
+            }
+            let still_attested = edge.source_episode_id.is_some() || !edge.provenance.is_empty();
+            if still_attested {
+                edges_to_update.push(edge);
+            } else {
+                edges_to_delete.push(edge.uuid);
+            }
+        }
+
+        // Persist scrubbed survivors. Endpoints and relation_type are unchanged, so
+        // no edge index (pair-key / entity-edge) needs updating — only the payload.
+        for edge in &edges_to_update {
+            match crate::serialization::encode(edge) {
+                Ok(encoded) => {
+                    if let Err(e) =
+                        self.db
+                            .put_cf(self.relationships_cf(), edge.uuid.as_bytes(), encoded)
+                    {
+                        tracing::debug!("Failed to persist scrubbed edge {}: {}", edge.uuid, e);
+                    }
                 }
+                Err(e) => tracing::debug!("Failed to encode scrubbed edge {}: {}", edge.uuid, e),
             }
         }
 
@@ -3914,9 +3962,10 @@ impl GraphMemory {
         }
 
         tracing::debug!(
-            "Deleted episode {} with {} entity_refs and {} sourced edges",
+            "Deleted episode {} with {} entity_refs; {} edges scrubbed, {} orphan edges removed",
             &episode_uuid.to_string()[..8],
             episode.entity_refs.len(),
+            edges_to_update.len(),
             edges_to_delete.len()
         );
 
@@ -8037,6 +8086,89 @@ mod tests {
         assert_eq!(classify_misc_entity("PostgreSQL"), EntityLabel::Product);
         // Plain lowercase noun with no signal → Concept (still type-hierarchy visible)
         assert_eq!(classify_misc_entity("widget"), EntityLabel::Concept);
+    }
+
+    #[test]
+    fn delete_episode_is_multi_source_aware() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let e1 = Uuid::new_v4();
+        let e2 = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let now = Utc::now();
+
+        let make_episode = |uuid: Uuid| EpisodicNode {
+            uuid,
+            name: "ep".to_string(),
+            content: "content".to_string(),
+            valid_at: now,
+            created_at: now,
+            entity_refs: vec![a, b],
+            source: EpisodeSource::Message,
+            metadata: HashMap::new(),
+        };
+        graph.add_episode(make_episode(e1)).unwrap();
+        graph.add_episode(make_episode(e2)).unwrap();
+
+        // Edge A—B attested by BOTH episodes; e1 is the primary source.
+        let make_record = |episode: Uuid| ProvenanceRecord {
+            source_episode_id: episode,
+            mention_count: 1,
+            first_observed: now,
+            last_observed: now,
+            confidence: None,
+            evidence_span: None,
+            typed_by: None,
+        };
+        let edge = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: a,
+            to_entity: b,
+            relation_type: RelationType::CoOccurs,
+            strength: 0.5,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: Some(e1),
+            context: String::new(),
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            tier: EdgeTier::L1Working,
+            activation_timestamps: None,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: vec![make_record(e1), make_record(e2)],
+        };
+        let edge_uuid = graph.add_relationship(edge).unwrap();
+
+        // Deleting the primary source must NOT delete a corroborated edge: the
+        // trail is scrubbed of e1 and primacy is promoted to the survivor e2.
+        assert!(graph.delete_episode(&e1).unwrap());
+        let survived = graph
+            .get_relationship(&edge_uuid)
+            .unwrap()
+            .expect("edge corroborated by e2 must survive deletion of its primary source e1");
+        assert_eq!(survived.provenance.len(), 1, "e1 must be scrubbed from the trail");
+        assert_eq!(
+            survived.provenance[0].source_episode_id, e2,
+            "only e2's attestation should remain"
+        );
+        assert_eq!(
+            survived.source_episode_id,
+            Some(e2),
+            "primary source must be promoted to the surviving attester"
+        );
+
+        // Deleting the last attesting episode leaves no attestation → edge removed.
+        assert!(graph.delete_episode(&e2).unwrap());
+        assert!(
+            graph.get_relationship(&edge_uuid).unwrap().is_none(),
+            "an edge with no remaining attesting episode must be deleted"
+        );
     }
 
     /// Create a test relationship edge with specified strength and last_activated (L1 tier)
