@@ -773,14 +773,33 @@ pub async fn remember(
                 }
             };
 
-            // Task 1: Build episodic graph (entities + episode + relationships)
-            if let Err(e) = state.process_experience_into_graph(
+            // Task 1: Build episodic graph (entities + episode + relationships).
+            // On success the episode's surprise components come back — emit them
+            // on the SSE stream so live consumers (dashboard anomaly feed) see
+            // each episode's statistical shape as it lands. Read-time deviation
+            // scoring stays in /api/anomalies; this event carries the raw facts.
+            match state.process_experience_into_graph(
                 &user_id,
                 &experience,
                 &memory_id,
                 entity_embeddings.as_ref(),
             ) {
-                tracing::debug!("Graph processing failed (non-fatal): {}", e);
+                Ok(Some(surprise)) => {
+                    state.emit_event(MemoryEvent {
+                        event_type: "surprise".to_string(),
+                        timestamp: chrono::Utc::now(),
+                        user_id: user_id.clone(),
+                        memory_id: Some(memory_id.0.to_string()),
+                        content_preview: Some(experience.content.chars().take(100).collect()),
+                        memory_type: None,
+                        importance: None,
+                        count: None,
+                        entities: None,
+                        results: serde_json::to_value(&surprise).ok(),
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => tracing::debug!("Graph processing failed (non-fatal): {}", e),
             }
 
             // Task 2: Set parent_id for hierarchical organization

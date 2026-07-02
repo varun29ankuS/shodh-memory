@@ -621,6 +621,42 @@ pub struct NerEntityRecord {
     pub end_char: Option<usize>,
 }
 
+/// Raw per-episode surprise components, computed at ingest from graph
+/// statistics already in hand in the entity-pair loop (PMI document
+/// frequencies, typing-chain counters, entity reputations). These are the
+/// FACTS of the episode's statistical shape — deliberately NOT a single
+/// weighted "anomaly score". Deviation scoring (z-scores against the user's
+/// rolling baseline) happens at READ time so thresholds stay tunable without
+/// re-ingesting, and every flag stays explainable component-by-component
+/// ("mean PMI 3σ below corpus norm; 60% never-seen entities").
+///
+/// Persisted as JSON under [`SURPRISE_METADATA_KEY`] in the graph episode's
+/// metadata map — additive, no storage schema change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SurpriseComponents {
+    /// Mean birth-PMI across scored pairs: log2(N / (df_i·df_j)) at co=1.
+    /// LOW mean = the episode's pairs co-occur no more than chance given how
+    /// common the entities are — an unusual combination of familiar things.
+    pub mean_pmi: f32,
+    /// Fraction of this episode's entities never seen before (lexically new
+    /// to the name index; embedding-merge in add_entity may still dedup some).
+    pub novel_entity_ratio: f32,
+    /// Fraction of pairs the typing chain could NOT type (generic CoOccurs):
+    /// unrecognized structure. High = novel relational shape.
+    pub untyped_ratio: f32,
+    /// Fraction of pairs dropped by the PMI gate as chance-level co-occurrence.
+    pub pmi_gated_ratio: f32,
+    /// Fraction of pairs whose weaker endpoint has hub-like (low) selectivity.
+    pub low_selectivity_share: f32,
+    /// Number of entity pairs the components were computed over.
+    pub pairs_scored: u32,
+    /// Number of entities in the episode.
+    pub entities_total: u32,
+}
+
+/// Episode-metadata key under which [`SurpriseComponents`] is stored as JSON.
+pub const SURPRISE_METADATA_KEY: &str = "shodh.surprise";
+
 /// Raw experience data to be stored (ENHANCED with smart defaults)
 ///
 /// Only `content` is required. All other fields have intelligent defaults:
@@ -4456,6 +4492,30 @@ pub struct GraphDecayResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surprise_components_json_roundtrip() {
+        // The components are persisted as JSON in episode metadata under
+        // SURPRISE_METADATA_KEY; the anomaly read path depends on this
+        // roundtrip staying stable.
+        let s = SurpriseComponents {
+            mean_pmi: -1.25,
+            novel_entity_ratio: 0.6,
+            untyped_ratio: 0.4,
+            pmi_gated_ratio: 0.1,
+            low_selectivity_share: 0.2,
+            pairs_scored: 10,
+            entities_total: 5,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SurpriseComponents = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pairs_scored, 10);
+        assert_eq!(back.entities_total, 5);
+        assert!((back.mean_pmi - (-1.25)).abs() < f32::EPSILON);
+        assert!((back.novel_entity_ratio - 0.6).abs() < f32::EPSILON);
+        // Key is namespaced so it can't collide with user metadata.
+        assert!(SURPRISE_METADATA_KEY.starts_with("shodh."));
+    }
 
     #[test]
     fn test_geo_filter_haversine_distance() {
