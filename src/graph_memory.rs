@@ -814,6 +814,21 @@ fn corroboration_meets(provenance_len: usize, min: Option<usize>) -> bool {
     matches!(min, Some(m) if provenance_len >= m)
 }
 
+/// #8 measurement: total CAUSAL edges that collapsed into an existing edge in the
+/// REVERSE direction (incoming from/to is the swap of the stored edge) since
+/// process start. The order-independent typed pair key merges these silently,
+/// keeping the first-observed arrow. A high count means direction is being lost
+/// and a direction-sensitive key is justified; near-zero means it is not worth
+/// the index migration. Printed by the recall harness (grep
+/// "DIRECTED_REVERSE_COLLAPSE=").
+static DIRECTED_REVERSE_COLLAPSE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Count of causal reverse-direction collapses since process start (see above).
+pub fn directed_reverse_collapse_count() -> u64 {
+    DIRECTED_REVERSE_COLLAPSE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Merge a single observation into a provenance trail, deduplicating by episode.
 ///
 /// - If `record.source_episode_id` is already present, its `mention_count` is
@@ -3203,6 +3218,7 @@ impl GraphMemory {
                 && existing.from_entity == edge.to_entity
                 && existing.to_entity == edge.from_entity
             {
+                DIRECTED_REVERSE_COLLAPSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!(
                     target: "shodh::provenance",
                     relation = ?edge.relation_type,

@@ -1217,6 +1217,14 @@ pub fn run_longmemeval(
         crate::memory::graph_retrieval::edge_dir_flip_count()
     );
 
+    // #8 measurement: how many CAUSAL attestations collapsed into an existing
+    // edge in the REVERSE direction during ingest. Gates whether a
+    // direction-sensitive pair key (+ index migration) is worth building.
+    eprintln!(
+        "DIRECTED_REVERSE_COLLAPSE={}",
+        crate::graph_memory::directed_reverse_collapse_count()
+    );
+
     let layers: BTreeMap<String, (f64, usize)> = mode_agg
         .into_iter()
         .map(|(key, (s, n))| (key, (s / n.max(1) as f64, n)))

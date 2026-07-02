@@ -1,0 +1,119 @@
+name: "#8 measure — causal reverse-collapse count (LongMemEval-S ingest)"
+
+# GATE for #8 (direction-sensitive pair key). typed_pair_key is order-independent
+# (pair_key sorts min/max UUID), so a CAUSAL attestation whose direction is the
+# reverse of an existing edge collapses into it silently, keeping the first-observed
+# arrow. add_relationship counts these (DIRECTED_REVERSE_COLLAPSE, printed by the
+# harness). This job ingests LongMemEval-S and reports the count + baseline recall.
+#   near-zero  -> opposite-direction causal claims are rare; the migration (a persisted
+#                 entity_pair_index key-format change + reindex) is NOT worth it.
+#   tens+      -> real direction is being lost; build SHODH_DIRECTED_PAIR_KEY + A/B.
+# The effect-first extractor already fixes most mis-direction at typing time, so the
+# expectation is low — this run confirms or refutes that before any migration work.
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'LongMemEval questions (via --shuffle). Blank = all 479.'
+        required: false
+        default: '100'
+  push:
+    paths:
+      - '.github/workflows/directed-collapse-measure.yml'
+      - 'src/graph_memory.rs'
+      - 'src/recall_harness/runner.rs'
+    branches: [measure/directed-collapse-counter]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: directed-collapse-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM embedder model
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Download LongMemEval-S + build fixtures
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          JSON=$(python3 - <<'PY'
+          from huggingface_hub import hf_hub_download
+          print(hf_hub_download(repo_id='xiaowu0162/longmemeval-cleaned',
+                                filename='longmemeval_s_cleaned.json',
+                                repo_type='dataset'))
+          PY
+          )
+          echo "dataset: $JSON"
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
+            ${{ github.event.inputs.limit != '' && format('--limit {0}', github.event.inputs.limit) || '--limit 100' }}
+          wc -l tests/recall/longmemeval/manifest.jsonl
+
+      - name: Ingest + query (control) — capture reverse-collapse counter
+        run: |
+          set -o pipefail
+          RUST_LOG="shodh::provenance=info" ./target/release/recall-eval \
+            --longmemeval tests/recall/longmemeval --output /dev/null --storage ./lme 2>&1 | tee run.log
+
+      - name: Report
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import os, re
+          text = open('run.log').read() if os.path.exists('run.log') else ''
+          collapse = None; overall = float('nan'); ner = '?'; cats = {}
+          for line in text.splitlines():
+              m = re.search(r'DIRECTED_REVERSE_COLLAPSE=(\d+)', line)
+              if m: collapse = int(m.group(1))
+              mo = re.search(r'LongMemEval-S:\s*\d+\s*questions\s*\(NER=(\w+)\).*recall@\d+\s*=\s*([0-9.]+)', line)
+              if mo: ner = mo.group(1); overall = float(mo.group(2))
+              mc = re.match(r'\s+(\w+)\s+n=(\d+)\s+recall@\d+\s*=\s*([0-9.]+)', line)
+              if mc: cats[mc.group(1)] = float(mc.group(3))
+          log_hits = text.count('directed reverse-collapse:')
+          def f(x): return f"{x:.4f}" if isinstance(x, float) and x == x else str(x)
+          print("## #8 GATE — causal reverse-collapse on LongMemEval-S ingest\n")
+          print(f"- **DIRECTED_REVERSE_COLLAPSE = {collapse}**  (counter; independent of RUST_LOG)")
+          print(f"- tracing cross-check (log occurrences): {log_hits}")
+          print(f"- baseline recall@10 ALL = {f(overall)} (NER={ner})")
+          print(f"- baseline multi_hop recall@10 = {f(cats.get('multi_hop', float('nan')))}\n")
+          print("**Decision rule:** counter near-zero (0-few) ⇒ opposite-direction causal "
+                "claims are rare; the order-independent pair key is NOT losing meaningful "
+                "direction ⇒ SKIP the #8 migration. Counter in the tens+ ⇒ direction is "
+                "being lost ⇒ build `SHODH_DIRECTED_PAIR_KEY` (direction-sensitive key for "
+                "directed relations + entity_pair_index reindex) and A/B it on LongMemEval-S.")
+          PY
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: directed-collapse-log
+          path: run.log
+          if-no-files-found: warn
