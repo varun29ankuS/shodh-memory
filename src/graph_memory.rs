@@ -5737,8 +5737,7 @@ impl GraphMemory {
         for (entity_id, selectivity) in &entity_selectivity {
             let key = entity_id.as_bytes();
             if let Ok(Some(value)) = self.db.get_cf(self.entities_cf(), key) {
-                if let Ok((mut entity, _)) = decode_entity_node(&value)
-                {
+                if let Ok((mut entity, _)) = decode_entity_node(&value) {
                     entity.selectivity = Some(*selectivity);
                     if let Ok(encoded) = crate::serialization::encode(&entity) {
                         entity_batch.put_cf(self.entities_cf(), key, encoded);
@@ -5919,8 +5918,7 @@ impl GraphMemory {
 
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
-                if let Ok((mut entity, _)) = decode_entity_node(&value)
-                {
+                if let Ok((mut entity, _)) = decode_entity_node(&value) {
                     let old_salience = entity.salience;
                     entity.salience = (entity.salience + boost).clamp(0.05, 1.0);
 
