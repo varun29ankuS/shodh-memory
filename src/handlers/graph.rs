@@ -111,22 +111,27 @@ pub async fn traverse_graph(
         .map_err(AppError::Internal)?;
 
     let entity_name = req.entity_name.clone();
+    let missing_entity_name = req.entity_name;
     let max_depth = req.max_depth.unwrap_or(2);
     let traversal = tokio::task::spawn_blocking(move || {
         let graph_guard = graph.read();
 
-        let entity = graph_guard
+        let Some(entity) = graph_guard
             .find_entity_by_name(&entity_name)
             .map_err(|e| anyhow::anyhow!(e))?
-            .ok_or_else(|| anyhow::anyhow!("Entity not found: {}", entity_name))?;
+        else {
+            return Ok(None);
+        };
 
-        graph_guard
+        let traversal = graph_guard
             .traverse_from_entity(&entity.uuid, max_depth)
-            .map_err(|e| anyhow::anyhow!(e))
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(Some(traversal))
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Task join error: {e}")))?
-    .map_err(AppError::Internal)?;
+    .map_err(AppError::Internal)?
+    .ok_or_else(|| AppError::EntityNotFound(missing_entity_name))?;
 
     Ok(Json(traversal))
 }
