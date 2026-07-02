@@ -264,6 +264,51 @@ pub static MEMORY_HEAP_BYTES_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
     .expect("MEMORY_HEAP_BYTES_TOTAL metric must be valid at compile time")
 });
 
+/// Resident set size for the server process, when available.
+pub static PROCESS_RSS_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_process_rss_bytes",
+        "Resident set size for the server process",
+    )
+    .expect("PROCESS_RSS_BYTES metric must be valid at compile time")
+});
+
+/// Peak resident set size for the server process, when available.
+pub static PROCESS_PEAK_RSS_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_process_peak_rss_bytes",
+        "Peak resident set size for the server process",
+    )
+    .expect("PROCESS_PEAK_RSS_BYTES metric must be valid at compile time")
+});
+
+/// Virtual memory size for the server process, when available.
+pub static PROCESS_VIRTUAL_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_process_virtual_bytes",
+        "Virtual memory size for the server process",
+    )
+    .expect("PROCESS_VIRTUAL_BYTES metric must be valid at compile time")
+});
+
+/// Current cgroup memory usage for the server, when available.
+pub static CGROUP_MEMORY_CURRENT_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_cgroup_memory_current_bytes",
+        "Current cgroup memory usage for the server process",
+    )
+    .expect("CGROUP_MEMORY_CURRENT_BYTES metric must be valid at compile time")
+});
+
+/// Peak cgroup memory usage for the server, when available.
+pub static CGROUP_MEMORY_PEAK_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_cgroup_memory_peak_bytes",
+        "Peak cgroup memory usage for the server process",
+    )
+    .expect("CGROUP_MEMORY_PEAK_BYTES metric must be valid at compile time")
+});
+
 // ============================================================================
 // Vector Index Metrics (aggregate)
 // ============================================================================
@@ -512,6 +557,27 @@ pub static EMBEDDING_CACHE_CONTENT_SIZE: LazyLock<IntGauge> = LazyLock::new(|| {
     .expect("EMBEDDING_CACHE_CONTENT_SIZE metric must be valid at compile time")
 });
 
+fn set_optional_gauge(gauge: &IntGauge, value: Option<u64>) {
+    if let Some(value) = value {
+        gauge.set(value.min(i64::MAX as u64) as i64);
+    }
+}
+
+/// Update best-effort process/cgroup memory gauges.
+pub fn update_system_memory_metrics(diagnostics: &crate::system_memory::SystemMemoryDiagnostics) {
+    set_optional_gauge(&PROCESS_RSS_BYTES, diagnostics.process_rss_bytes);
+    set_optional_gauge(&PROCESS_PEAK_RSS_BYTES, diagnostics.process_peak_rss_bytes);
+    set_optional_gauge(&PROCESS_VIRTUAL_BYTES, diagnostics.process_virtual_bytes);
+    set_optional_gauge(
+        &CGROUP_MEMORY_CURRENT_BYTES,
+        diagnostics.cgroup_memory_current_bytes,
+    );
+    set_optional_gauge(
+        &CGROUP_MEMORY_PEAK_BYTES,
+        diagnostics.cgroup_memory_peak_bytes,
+    );
+}
+
 /// Register all metrics with the global registry
 ///
 /// # Returns
@@ -581,6 +647,11 @@ fn do_register_metrics() -> Result<(), MetricsError> {
     register!(ACTIVE_USERS, "ACTIVE_USERS");
     register!(MEMORIES_BY_TIER, "MEMORIES_BY_TIER");
     register!(MEMORY_HEAP_BYTES_TOTAL, "MEMORY_HEAP_BYTES_TOTAL");
+    register!(PROCESS_RSS_BYTES, "PROCESS_RSS_BYTES");
+    register!(PROCESS_PEAK_RSS_BYTES, "PROCESS_PEAK_RSS_BYTES");
+    register!(PROCESS_VIRTUAL_BYTES, "PROCESS_VIRTUAL_BYTES");
+    register!(CGROUP_MEMORY_CURRENT_BYTES, "CGROUP_MEMORY_CURRENT_BYTES");
+    register!(CGROUP_MEMORY_PEAK_BYTES, "CGROUP_MEMORY_PEAK_BYTES");
 
     // Vector index metrics (aggregate)
     register!(VECTOR_INDEX_SIZE_TOTAL, "VECTOR_INDEX_SIZE_TOTAL");

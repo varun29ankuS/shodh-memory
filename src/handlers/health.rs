@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use super::state::MultiUserMemoryManager;
 use super::types::{ContextStatus, MemoryEvent};
 use crate::metrics;
+use crate::system_memory::SystemMemoryDiagnostics;
 
 /// Application state type alias
 pub type AppState = std::sync::Arc<MultiUserMemoryManager>;
@@ -28,6 +29,7 @@ pub struct HealthResponse {
     pub max_cache_size: usize,
     pub write_failures: u64,
     pub pending_retries: usize,
+    pub system_memory: SystemMemoryDiagnostics,
 }
 
 /// Main health check endpoint
@@ -37,6 +39,8 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 
     // Aggregate write failure metrics across all cached users
     let (write_failures, pending_retries) = state.write_failure_metrics();
+    let system_memory = crate::system_memory::read_system_memory_diagnostics();
+    metrics::update_system_memory_metrics(&system_memory);
 
     Json(HealthResponse {
         status: "healthy".to_string(),
@@ -47,6 +51,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         max_cache_size: state.server_config().max_users_in_memory,
         write_failures,
         pending_retries,
+        system_memory,
     })
 }
 
@@ -195,6 +200,8 @@ pub async fn metrics_endpoint(State(state): State<AppState>) -> Result<String, S
         .set(total_longterm);
     metrics::MEMORY_HEAP_BYTES_TOTAL.set(total_heap);
     metrics::VECTOR_INDEX_SIZE_TOTAL.set(total_vectors);
+    let system_memory = crate::system_memory::read_system_memory_diagnostics();
+    metrics::update_system_memory_metrics(&system_memory);
 
     // Gather and encode metrics
     let encoder = prometheus::TextEncoder::new();
