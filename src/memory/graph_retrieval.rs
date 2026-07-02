@@ -537,6 +537,10 @@ fn edge_dir_fix_enabled() -> bool {
 /// factor and column-normalisation subsume them.
 fn ppr_edge_weight(
     edge: &crate::graph_memory::RelationshipEdge,
+    // The TRUE traversal neighbour (the `edge_neighbor` result), NOT `edge.to_entity`.
+    // The entity-type penalty must key on the endpoint activation actually flows to,
+    // or it penalises the wrong node once SHODH_GRAPH_EDGE_DIR routes to `from_entity`.
+    neighbor: Uuid,
     intent: Option<&OntologicalIntent>,
     predicate_weights: bool,
     graph: &GraphMemory,
@@ -569,13 +573,9 @@ fn ppr_edge_weight(
             w *= ONTOLOGICAL_RELATION_PENALTY;
         }
         if !intent.expected_labels.is_empty() {
-            let labels = label_cache.entry(edge.to_entity).or_insert_with(|| {
-                graph
-                    .get_entity(&edge.to_entity)
-                    .ok()
-                    .flatten()
-                    .map(|e| e.labels)
-            });
+            let labels = label_cache
+                .entry(neighbor)
+                .or_insert_with(|| graph.get_entity(&neighbor).ok().flatten().map(|e| e.labels));
             if let Some(labels) = labels {
                 let type_match = labels.iter().any(|l| {
                     intent
@@ -654,11 +654,18 @@ fn personalized_pagerank(
             let ui = ppr_intern(u, &mut nodes, &mut node_idx, &mut adj);
             let edges = graph.get_entity_relationships_limited(&u, Some(MAX_EDGES_PER_NODE))?;
             for edge in edges {
-                let w = ppr_edge_weight(&edge, intent, predicate_weights, graph, &mut label_cache);
+                let nb = edge_neighbor(&edge, &u, dir_fix);
+                let w = ppr_edge_weight(
+                    &edge,
+                    nb,
+                    intent,
+                    predicate_weights,
+                    graph,
+                    &mut label_cache,
+                );
                 if w <= 0.0 {
                     continue;
                 }
-                let nb = edge_neighbor(&edge, &u, dir_fix);
                 let ti = ppr_intern(nb, &mut nodes, &mut node_idx, &mut adj);
                 adj[ui].push((ti, w));
                 traversed.push(edge.uuid);
@@ -874,11 +881,18 @@ fn reachable_inject(
             }
             let edges = graph.get_entity_relationships_limited(&u, Some(MAX_EDGES_PER_NODE))?;
             for edge in edges {
-                let w = ppr_edge_weight(&edge, intent, predicate_weights, graph, &mut label_cache);
+                let nb = edge_neighbor(&edge, &u, dir_fix);
+                let w = ppr_edge_weight(
+                    &edge,
+                    nb,
+                    intent,
+                    predicate_weights,
+                    graph,
+                    &mut label_cache,
+                );
                 if w <= 0.0 {
                     continue;
                 }
-                let nb = edge_neighbor(&edge, &u, dir_fix);
                 let new_act = au * w * HOP_DECAY;
                 if new_act > best.get(&nb).copied().unwrap_or(0.0) {
                     best.insert(nb, new_act);
@@ -952,7 +966,14 @@ fn traverse_beam(
                 if p.visited.contains(&nb) {
                     continue;
                 }
-                let w = ppr_edge_weight(&edge, intent, predicate_weights, graph, &mut label_cache);
+                let w = ppr_edge_weight(
+                    &edge,
+                    nb,
+                    intent,
+                    predicate_weights,
+                    graph,
+                    &mut label_cache,
+                );
                 if w <= 0.0 {
                     continue;
                 }
