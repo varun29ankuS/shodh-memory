@@ -244,12 +244,26 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
 .none{color:var(--mut);font-size:11px;font-style:italic;}
 
 /* detail (selected node/edge/memory) */
-#detail .rel{font-size:13px;margin:2px 0 8px;line-height:1.5;}
-#detail .rel b{color:var(--retrieve);}
-#detail .line{font-size:11px;color:var(--txt2);padding:4px 0;border-top:1px solid var(--line);}
-#detail .line span{color:var(--mut);}
+#detail .rel,#anomdetail .rel{font-size:13px;margin:2px 0 8px;line-height:1.5;}
+#detail .rel b,#anomdetail .rel b{color:var(--retrieve);}
+#detail .line,#anomdetail .line{font-size:11px;color:var(--txt2);padding:4px 0;border-top:1px solid var(--line);}
+#detail .line span,#anomdetail .line span{color:var(--mut);}
 .miss{font-size:10px;color:var(--mut);line-height:1.6;}
 .miss b{color:var(--txt2);}
+
+/* screens — TUI-style views (1 LIVE · 2 ANOMALIES · 3 WORK), keys 1/2/3 */
+#tabbar{display:flex;gap:6px;padding:6px 14px 0;border-bottom:1px solid var(--line);}
+#tabbar .tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--mut);
+  font:600 10.5px Inter,sans-serif;letter-spacing:1.4px;padding:6px 12px 8px;cursor:pointer;text-transform:uppercase;}
+#tabbar .tab.on{color:var(--turmeric);border-bottom-color:var(--turmeric);}
+#tabbar .tab:hover{color:var(--txt2);}
+#tabbar .tab .badge{background:#5c2b2b;color:#ff9c9c;border-radius:8px;padding:0 6px;font-size:9.5px;margin-left:4px;}
+.screen{padding:16px;}
+.screen .panel{border:1px solid var(--line);border-radius:8px;padding:14px 16px;background:rgba(255,255,255,.015);}
+.anomcols{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:14px;max-width:1440px;margin:0 auto;align-items:start;}
+.anomfeed .anom{font-size:12.5px;padding:9px 0;}
+.anomfeed .anom .why{font-size:11px;}
+.workwrap{max-width:900px;margin:0 auto;}
 
 /* anomaly feed — deviation from the user's own statistical baseline */
 .anom{padding:6px 0;border-top:1px solid var(--line);font-size:11px;line-height:1.45;}
@@ -299,6 +313,13 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
     <span class="tag">ON-DEVICE</span>
   </div>
 </header>
+
+<!-- TUI-style screens: 1 LIVE (river+graph) · 2 ANOMALIES (analyst) · 3 WORK (GTD) -->
+<nav id="tabbar">
+  <button class="tab on" id="tab-live" onclick="showScreen('live')">1 · Live</button>
+  <button class="tab" id="tab-anom" onclick="showScreen('anom')">2 · Anomalies <span class="badge" id="anom-badge" style="display:none">0</span></button>
+  <button class="tab" id="tab-work" onclick="showScreen('work')">3 · Work</button>
+</nav>
 
 <main>
   <!-- LEFT: the recall river (cascade feed) -->
@@ -355,27 +376,42 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
       <div class="gridkv" id="graphstats"></div>
     </div>
     <div class="panel">
-      <h3>Anomalies</h3>
-      <div class="psub">what deviates from this user's own baseline — click a row for the full why</div>
-      <div id="anomalies"><div class="none">baseline forming…</div></div>
-    </div>
-    <div class="panel">
       <h3>Connected LLMs</h3>
       <div class="psub">sessions writing to this memory right now</div>
       <div id="sessions"><div class="none">no active sessions</div></div>
     </div>
-    <div class="panel">
-      <h3>Todos</h3>
-      <div class="psub">open work the agent is tracking</div>
-      <div id="todos"><div class="none">none</div></div>
-    </div>
     <div class="panel" style="border-bottom:none">
       <h3>Detail / Provenance</h3>
       <div class="psub">every belief traces to its source episodes</div>
-      <div id="detail"><div class="miss">Click a graph node, an edge, a surfaced memory, an anomaly, or a causal chain.</div></div>
+      <div id="detail"><div class="miss">Click a graph node, an edge, a surfaced memory, or a causal chain.</div></div>
     </div>
   </div>
 </main>
+
+<!-- SCREEN 2: ANOMALIES — the analyst view -->
+<section class="screen" id="scr-anom" style="display:none">
+  <div class="anomcols">
+    <div class="anomfeed panel">
+      <h3>Anomalies</h3>
+      <div class="psub">episodes that deviate from this user's own statistical baseline — deterministic, LLM-free. Click a row for the full audit trail.</div>
+      <div id="anomalies"><div class="none">baseline forming…</div></div>
+    </div>
+    <div class="anomside panel">
+      <h3>Audit Trail</h3>
+      <div class="psub">every component: value vs baseline, signed σ — the exact arithmetic behind the flag</div>
+      <div id="anomdetail"><div class="miss">Click an anomaly to see exactly why it was flagged.</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- SCREEN 3: WORK — GTD, in its own room -->
+<section class="screen" id="scr-work" style="display:none">
+  <div class="workwrap panel">
+    <h3>Todos</h3>
+    <div class="psub">open work the agent is tracking</div>
+    <div id="todos"><div class="none">none</div></div>
+  </div>
+</section>
 
 <script>
 "use strict";
@@ -1255,6 +1291,23 @@ async function loadTodos(){
 //  SSE: "surprise" (per-episode shape) debounce-refreshes the feed;
 //       "temporal_anomaly" (dormant pattern reactivated) prepends a live row.
 // ════════════════════════════════════════════════════════════════════════════
+// ── screens (TUI-style: keys 1/2/3, mirrors the terminal UI's ViewMode) ──────
+let SCREEN = "live";
+function showScreen(s){
+  SCREEN = s;
+  document.querySelector("main").style.display = s==="live" ? "" : "none";
+  $("scr-anom").style.display = s==="anom" ? "" : "none";
+  $("scr-work").style.display = s==="work" ? "" : "none";
+  ["live","anom","work"].forEach(k=>$("tab-"+k).classList.toggle("on", k===s));
+  if(s==="live"){ onGraphResize(); }   // canvas had zero dims while hidden
+}
+document.addEventListener("keydown", e=>{
+  if(e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  if(e.key==="1") showScreen("live");
+  else if(e.key==="2") showScreen("anom");
+  else if(e.key==="3") showScreen("work");
+});
+
 let LIVE_TEMPORAL = [];   // recent dormant-reactivations (live, cap 4)
 let ANOM_ROWS = [];       // fetched deviation entries (ranked by max |z|)
 let anomTimer = null;
@@ -1263,11 +1316,15 @@ async function loadAnomalies(){
   try{
     const sel = users();
     const all = await perUser(uid=>api("/api/anomalies",{method:"POST",headers:POST_H,
-      body:JSON.stringify({user_id:uid,limit:6})}).then(r=>({uid,r})));
+      body:JSON.stringify({user_id:uid,limit:12})}).then(r=>({uid,r})));
     const rows=[];
     for(const x of all){ if(!x||!x.r) continue; for(const a of (x.r.anomalies||[])) rows.push({uid:x.uid,a}); }
     rows.sort((p,q)=>q.a.max_abs_z-p.a.max_abs_z);
-    ANOM_ROWS = rows.slice(0,6);
+    ANOM_ROWS = rows.slice(0,12);
+    // tab badge: pull attention only when something is actually flagged
+    const flagged = ANOM_ROWS.filter(x=>x.a.flagged).length;
+    const badge = $("anom-badge");
+    if(flagged>0){ badge.textContent = flagged; badge.style.display=""; } else { badge.style.display="none"; }
     renderAnomalies(sel.length>1);
   }catch(e){ $("anomalies").innerHTML='<div class="none">unavailable</div>'; }
 }
@@ -1298,7 +1355,7 @@ function anomDetail(i){
       '<span>('+d.value.toFixed(3)+' vs baseline '+d.baseline_mean.toFixed(3)+' ± '+d.baseline_std.toFixed(3)+')</span></div>';
   });
   h += '<div class="line"><span>sample</span> '+a.components.pairs_scored+' pairs · '+a.components.entities_total+' entities · '+new Date(a.created_at).toLocaleString()+'</div>';
-  $("detail").innerHTML = h;
+  $("anomdetail").innerHTML = h;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
