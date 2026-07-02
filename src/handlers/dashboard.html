@@ -631,6 +631,10 @@ function clearCanvas(){ const {w,h}=sizeCanvas(); ctx.setTransform(DPR,0,0,DPR,0
 //  CLUSTER OVERVIEW  — the default, readable view
 // ════════════════════════════════════════════════════════════════════════════
 function showClusters(){
+  // SMALL-GRAPH MODE: cluster bubbles only earn their keep at scale. A demo
+  // or young corpus (≤40 entities) reads far better as the actual entity
+  // constellation — show it directly instead of 2-3 opaque super-nodes.
+  if(RAW.nodes.length>0 && RAW.nodes.length<=40){ return showWholeGraph(); }
   VIEW.level="clusters"; VIEW.clusterId=null;
   const {w,h}=sizeCanvas();
   const maxSize = d3.max(RAW.clusters, c=>c.size)||1;
@@ -668,6 +672,44 @@ function showClusters(){
 // ════════════════════════════════════════════════════════════════════════════
 //  DRILL-DOWN  — one cluster's members + their intra-cluster edges
 // ════════════════════════════════════════════════════════════════════════════
+// Whole-graph entity view for small corpora: same constellation renderer as
+// the cluster drill-down, over EVERY node. Stays at nav level "clusters" so
+// breadcrumbs/clicks behave as the root view (entity clicks → detail).
+function showWholeGraph(){
+  VIEW.level="clusters"; VIEW.clusterId=null;
+  const {w,h}=sizeCanvas();
+  const mem = RAW.nodes.map((_,i)=>i);
+  const maxDeg = d3.max(mem, i=>RAW.nodes[i].deg)||1;
+  const rad = i => 6 + 14*Math.sqrt(RAW.nodes[i].deg/maxDeg);
+  const nodes = mem.map(i=>{ const n=RAW.nodes[i];
+    return {kind:"entity", id:n.id, idx:i, label:n.name, type:n.type, sal:n.sal, ment:n.ment, deg:n.deg,
+      users:n.users, ucount:n.ucount||1, bridge:(n.ucount||1)>1,
+      color:tc(n.type), r:rad(i), x:w/2+(Math.random()-.5)*w*0.6, y:h/2+(Math.random()-.5)*h*0.5}; });
+  const byId = new Map(nodes.map(n=>[n.id,n]));
+  nodes.slice().sort((a,b)=>b.deg-a.deg).forEach((n,i)=>{ n._lr=i; });
+  const links=[];
+  for(const i of mem){ for(const [j,wt] of RAW.adj[i]){ if(i<j){
+    const key = i+"|"+j;
+    links.push({source:RAW.nodes[i].id, target:RAW.nodes[j].id, str:wt, rel:RAW.relOf.get(key)||""}); } } }
+  VIEW.nodes=nodes; VIEW.links=links; VIEW.byId=byId; VIEW.memberTotal=nodes.length;
+
+  if(VIEW.sim) VIEW.sim.stop();
+  const chargeStr = -(120 + 9000/Math.max(12, nodes.length));
+  VIEW.sim = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d=>d.id).distance(d=>60+30/(1+d.str)).strength(d=>0.05+0.15*d.str))
+    .force("charge", d3.forceManyBody().strength(chargeStr).distanceMax(700))
+    .force("center", d3.forceCenter(w/2,h/2))
+    .force("x", d3.forceX(w/2).strength(.06))
+    .force("y", d3.forceY(h/2).strength(.06))
+    .force("collide", d3.forceCollide().radius(d=>d.r+10).strength(.9).iterations(2))
+    .on("tick", draw);
+  VIEW.sim.alpha(1).restart();
+  for(let i=0;i<300;i++) VIEW.sim.tick();
+  fitView(nodes, 60, false);
+  $("gloading").style.display="none";
+  updateNav();
+}
+
 function showCluster(cid){
   const cl = RAW.clusters[cid]; if(!cl) return;
   VIEW.level="cluster"; VIEW.clusterId=cid;
@@ -788,9 +830,11 @@ function draw(){
   }
   ctx.globalAlpha=1;
 
-  // labels — clusters always labelled; entities labelled when sparse/zoomed/lit
+  // labels — clusters always labelled; entities labelled when sparse/zoomed/lit.
+  // Branch on node KIND (not view level): the whole-graph small-corpus view
+  // shows entity nodes at the "clusters" nav level.
   ctx.textAlign="center"; ctx.textBaseline="middle";
-  if(VIEW.level==="clusters"){
+  if(VIEW.nodes.length && VIEW.nodes[0].kind==="cluster"){
     for(const n of VIEW.nodes){
       if(n.x==null) continue;
       const isLit = !dimmed || lit.has(n.id);
@@ -1236,7 +1280,7 @@ function renderAnomalies(group){
     const who = group?'<span class="who">@'+esc(uid)+'</span>':'';
     h += '<div class="anom'+(a.flagged?' flag':'')+'" style="cursor:pointer" onclick="anomDetail('+i+')">'+
       '<span class="sig">'+a.max_abs_z.toFixed(1)+'σ</span>'+
-      '<span class="prev">'+esc((a.content_preview||"").slice(0,60))+'</span>'+who+
+      '<span class="prev">'+esc((a.content_preview||"").length>72?(a.content_preview||"").slice(0,72)+"…":(a.content_preview||""))+'</span>'+who+
       (a.explanation?'<span class="why">'+esc(a.explanation)+'</span>':'')+'</div>';
   });
   $("anomalies").innerHTML = h || '<div class="none">baseline forming… (needs ≥10 scored episodes)</div>';
