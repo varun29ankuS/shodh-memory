@@ -2773,6 +2773,35 @@ impl GraphMemory {
             self.db.delete_cf(self.entity_pair_index_cf(), key)?;
         }
 
+        // 6b. Remove entity_episodes inverted-index entries (entity_uuid:episode_uuid).
+        // These are otherwise only cleaned per-episode (delete_episode), so deleting
+        // an entity while episodes still reference it in entity_refs leaves stale
+        // entries that accumulate over orphan-cleanup churn. (entity_edges entries
+        // need no handling here: delete_relationship already removes both endpoints
+        // when each edge dies, and this entity is edgeless by the time it is deleted.)
+        let ep_prefix = format!("{}:", uuid);
+        let mut episode_keys_to_delete = Vec::new();
+        let iter = self
+            .db
+            .prefix_iterator_cf(self.entity_episodes_cf(), ep_prefix.as_bytes());
+        for item in iter {
+            match item {
+                Ok((key, _)) => {
+                    if key.starts_with(ep_prefix.as_bytes()) {
+                        episode_keys_to_delete.push(key.to_vec());
+                    } else {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        for key in &episode_keys_to_delete {
+            if let Err(e) = self.db.delete_cf(self.entity_episodes_cf(), key) {
+                tracing::warn!(entity = %uuid, error = %e, "Failed to delete from entity_episodes index");
+            }
+        }
+
         // 7. Decrement counter
         self.entity_count.fetch_sub(1, Ordering::Relaxed);
 
@@ -8037,6 +8066,59 @@ mod tests {
         assert_eq!(classify_misc_entity("PostgreSQL"), EntityLabel::Product);
         // Plain lowercase noun with no signal → Concept (still type-hierarchy visible)
         assert_eq!(classify_misc_entity("widget"), EntityLabel::Concept);
+    }
+
+    #[test]
+    fn delete_entity_scrubs_episode_index() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let now = Utc::now();
+
+        let entity = EntityNode {
+            uuid: Uuid::new_v4(),
+            name: "Zephyrine".to_string(),
+            labels: vec![EntityLabel::Concept],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: false,
+            selectivity: None,
+        };
+        let entity_uuid = graph.add_entity(entity).unwrap();
+
+        let episode = EpisodicNode {
+            uuid: Uuid::new_v4(),
+            name: "ep".to_string(),
+            content: "content".to_string(),
+            valid_at: now,
+            created_at: now,
+            entity_refs: vec![entity_uuid],
+            source: EpisodeSource::Message,
+            metadata: HashMap::new(),
+        };
+        graph.add_episode(episode).unwrap();
+
+        assert!(
+            !graph
+                .get_episodes_by_entity(&entity_uuid)
+                .unwrap()
+                .is_empty(),
+            "episode should be indexed under the entity before deletion"
+        );
+
+        assert!(graph.delete_entity(&entity_uuid).unwrap());
+
+        assert!(
+            graph
+                .get_episodes_by_entity(&entity_uuid)
+                .unwrap()
+                .is_empty(),
+            "entity_episodes index entries must be scrubbed when the entity is deleted"
+        );
     }
 
     /// Create a test relationship edge with specified strength and last_activated (L1 tier)
