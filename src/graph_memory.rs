@@ -5152,7 +5152,18 @@ impl GraphMemory {
                     entity_confidence: Some(confidence),
                     forman_curvature: None,
                     endpoint_selectivity: None,
-                    provenance: Vec::new(),
+                    // Lineage bridge edge: the source episode is known and the
+                    // bridge confidence is meaningful, so seed the attestation
+                    // trail here (typed_by left None — no dedicated lineage method).
+                    provenance: vec![ProvenanceRecord {
+                        source_episode_id: *from_memory_uuid,
+                        mention_count: 1,
+                        first_observed: now,
+                        last_observed: now,
+                        confidence: Some(confidence),
+                        evidence_span: None,
+                        typed_by: None,
+                    }],
                 };
                 if self.add_relationship(edge).is_ok() {
                     created += 1;

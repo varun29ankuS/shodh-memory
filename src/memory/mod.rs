@@ -7644,6 +7644,25 @@ impl MemorySystem {
                             _ => 1.0,
                         };
 
+                        // Provenance: record EVERY source memory that attests this
+                        // fact, not just the first. A SemanticFact is the one place
+                        // the system holds an explicit multi-episode attestation set
+                        // (fact.source_memories), so capture all of them — the richest
+                        // companion signal for provenance-driven multi-hop recall (Inc2).
+                        // add_relationship caps + dedups the trail.
+                        let provenance: Vec<crate::graph_memory::ProvenanceRecord> = fact
+                            .source_memories
+                            .iter()
+                            .map(|mid| crate::graph_memory::ProvenanceRecord {
+                                source_episode_id: mid.0,
+                                mention_count: 1,
+                                first_observed: now,
+                                last_observed: now,
+                                confidence: Some(fact.confidence),
+                                evidence_span: None,
+                                typed_by: Some(crate::graph_memory::TypingMethod::LabelPair),
+                            })
+                            .collect();
                         let edge = crate::graph_memory::RelationshipEdge {
                             uuid: Uuid::new_v4(),
                             from_entity: e1.uuid,
@@ -7675,7 +7694,7 @@ impl MemorySystem {
                             entity_confidence: Some(fact.confidence),
                             forman_curvature: None,
                             endpoint_selectivity: None,
-                            provenance: Vec::new(),
+                            provenance,
                         };
                         if graph_guard.add_relationship(edge).is_ok() {
                             edges_added += 1;
@@ -8021,6 +8040,19 @@ impl MemorySystem {
                             _ => 1.0,
                         };
 
+                        // Provenance: the single source episode that produced this
+                        // co-occurrence edge. This is the primary ingest path (the
+                        // majority of edges), so populating it here gives most of the
+                        // graph a real attestation trail + confidence at edge birth.
+                        let provenance = vec![crate::graph_memory::ProvenanceRecord {
+                            source_episode_id: memory.id.0,
+                            mention_count: 1,
+                            first_observed: now,
+                            last_observed: now,
+                            confidence: entity_confidence,
+                            evidence_span: None,
+                            typed_by: Some(crate::graph_memory::TypingMethod::CoOccurrence),
+                        }];
                         let edge = crate::graph_memory::RelationshipEdge {
                             uuid: Uuid::new_v4(),
                             from_entity: e1.uuid,
@@ -8040,7 +8072,7 @@ impl MemorySystem {
                             entity_confidence,
                             forman_curvature: None,
                             endpoint_selectivity: None,
-                            provenance: Vec::new(),
+                            provenance,
                         };
 
                         if let Err(e) = graph_guard.add_relationship(edge) {
