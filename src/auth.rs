@@ -227,18 +227,19 @@ pub async fn auth_middleware(request: Request, next: Next) -> Response {
                 .map(|s| s.to_string())
         })
         .or_else(|| {
-            // WebSocket fallback: check query parameter for api_key
-            // Browser WebSocket API doesn't support custom headers, so
-            // clients can pass ?api_key=... in the URL instead.
-            // ONLY allow this for WebSocket upgrades to prevent API key
-            // leakage via URLs in server logs, browser history, and referrer headers.
+            // Query-parameter fallback: browsers cannot attach custom headers to
+            // WebSocket (`new WebSocket`) or Server-Sent Events (`new EventSource`)
+            // connections, so those clients pass ?api_key=... in the URL instead.
+            // Restricted to those two channels to limit API-key leakage via URLs in
+            // server logs, browser history, and referrer headers.
             let is_websocket = request
                 .headers()
                 .get("upgrade")
                 .and_then(|v| v.to_str().ok())
                 .map(|v| v.eq_ignore_ascii_case("websocket"))
                 .unwrap_or(false);
-            if !is_websocket {
+            let is_event_stream = path == "/api/events" || path == "/api/events/sse";
+            if !is_websocket && !is_event_stream {
                 return None;
             }
             request.uri().query().and_then(|q| {
@@ -588,6 +589,38 @@ mod tests {
             resp.status(),
             StatusCode::OK,
             "Should accept API key from query parameter on WebSocket upgrade"
+        );
+
+        clear_auth_env();
+    }
+
+    #[tokio::test]
+    async fn auth_middleware_accepts_query_param_for_event_stream() {
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::middleware::from_fn;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_auth_env();
+        env::set_var("SHODH_API_KEYS", "test-sse-key");
+
+        let app = Router::new()
+            .route("/api/events", get(|| async { "ok" }))
+            .layer(from_fn(auth_middleware));
+
+        // SSE EventSource cannot set headers, so the key arrives as a query parameter.
+        let req = HttpRequest::builder()
+            .uri("/api/events?user_id=u&api_key=test-sse-key")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should accept API key from query parameter on the SSE event stream"
         );
 
         clear_auth_env();

@@ -191,6 +191,9 @@ pub fn relationship_to_edge(edge: &crate::graph_memory::RelationshipEdge) -> Exp
         "created_at": edge.created_at,
         "valid_at": edge.valid_at,
         "entity_confidence": edge.entity_confidence,
+        // Provenance: which episode this relationship was extracted from (drives the
+        // dashboard's "click edge -> source document" — the auditable claim).
+        "source_episode_id": edge.source_episode_id.map(|u| u.to_string()),
     });
 
     ExportEdge {
