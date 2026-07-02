@@ -569,13 +569,9 @@ fn ppr_edge_weight(
             w *= ONTOLOGICAL_RELATION_PENALTY;
         }
         if !intent.expected_labels.is_empty() {
-            let labels = label_cache.entry(neighbor).or_insert_with(|| {
-                graph
-                    .get_entity(&neighbor)
-                    .ok()
-                    .flatten()
-                    .map(|e| e.labels)
-            });
+            let labels = label_cache
+                .entry(neighbor)
+                .or_insert_with(|| graph.get_entity(&neighbor).ok().flatten().map(|e| e.labels));
             if let Some(labels) = labels {
                 let type_match = labels.iter().any(|l| {
                     intent
@@ -655,7 +651,14 @@ fn personalized_pagerank(
             let edges = graph.get_entity_relationships_limited(&u, Some(MAX_EDGES_PER_NODE))?;
             for edge in edges {
                 let nb = edge_neighbor(&edge, &u, dir_fix);
-                let w = ppr_edge_weight(&edge, nb, intent, predicate_weights, graph, &mut label_cache);
+                let w = ppr_edge_weight(
+                    &edge,
+                    nb,
+                    intent,
+                    predicate_weights,
+                    graph,
+                    &mut label_cache,
+                );
                 if w <= 0.0 {
                     continue;
                 }
@@ -875,7 +878,14 @@ fn reachable_inject(
             let edges = graph.get_entity_relationships_limited(&u, Some(MAX_EDGES_PER_NODE))?;
             for edge in edges {
                 let nb = edge_neighbor(&edge, &u, dir_fix);
-                let w = ppr_edge_weight(&edge, nb, intent, predicate_weights, graph, &mut label_cache);
+                let w = ppr_edge_weight(
+                    &edge,
+                    nb,
+                    intent,
+                    predicate_weights,
+                    graph,
+                    &mut label_cache,
+                );
                 if w <= 0.0 {
                     continue;
                 }
@@ -952,7 +962,14 @@ fn traverse_beam(
                 if p.visited.contains(&nb) {
                     continue;
                 }
-                let w = ppr_edge_weight(&edge, nb, intent, predicate_weights, graph, &mut label_cache);
+                let w = ppr_edge_weight(
+                    &edge,
+                    nb,
+                    intent,
+                    predicate_weights,
+                    graph,
+                    &mut label_cache,
+                );
                 if w <= 0.0 {
                     continue;
                 }
