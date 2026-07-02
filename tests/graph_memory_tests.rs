@@ -113,6 +113,7 @@ fn create_relationship(
         entity_confidence: None,
         endpoint_selectivity: None,
         forman_curvature: None,
+        provenance: Vec::new(),
     }
 }
 
@@ -149,6 +150,7 @@ fn create_relationship_with_plasticity(
         entity_confidence: None,
         endpoint_selectivity: None,
         forman_curvature: None,
+        provenance: Vec::new(),
     }
 }
 
