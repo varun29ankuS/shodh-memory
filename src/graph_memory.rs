@@ -773,6 +773,47 @@ fn provenance_max_sources() -> usize {
         .unwrap_or(PROVENANCE_MAX_SOURCES_DEFAULT)
 }
 
+/// Default minimum number of distinct attesting episodes for corroboration to
+/// shield an edge from strength-based pruning (used when `SHODH_PROVENANCE_AWARE_PRUNE=1`).
+const PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT: usize = 3;
+
+/// Resolve the provenance-aware-pruning corroboration threshold from the env.
+///
+/// `SHODH_PROVENANCE_AWARE_PRUNE` gates the whole feature and is cached (read
+/// once per process; eval/production set it before start):
+/// - unset / `0` / `false` / empty → `None` (feature OFF — only LTP protects,
+///   exactly the pre-existing behavior),
+/// - `1` / `true` → `Some(PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT)`,
+/// - an explicit integer `N ≥ 1` → `Some(N)` (lets an A/B sweep the threshold).
+///
+/// When `Some(min)`, an edge attested by at least `min` distinct episodes is
+/// protected from STRENGTH-based pruning only — age-based reaping still applies,
+/// so there are no immortal edges.
+fn provenance_prune_min() -> Option<usize> {
+    static FLAG: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| match std::env::var("SHODH_PROVENANCE_AWARE_PRUNE") {
+        Ok(v) => {
+            let v = v.trim();
+            if v.is_empty() || v == "0" || v.eq_ignore_ascii_case("false") {
+                None
+            } else if v == "1" || v.eq_ignore_ascii_case("true") {
+                Some(PROVENANCE_PRUNE_CORROBORATION_MIN_DEFAULT)
+            } else {
+                v.parse::<usize>().ok().filter(|&n| n > 0)
+            }
+        }
+        Err(_) => None,
+    })
+}
+
+/// Pure corroboration decision, separated from the cached env read so it is
+/// deterministically unit-testable: an edge with `provenance_len` distinct
+/// attesting episodes is protected iff the feature is enabled (`Some(min)`) and
+/// the count meets `min`.
+fn corroboration_meets(provenance_len: usize, min: Option<usize>) -> bool {
+    matches!(min, Some(m) if provenance_len >= m)
+}
+
 /// Merge a single observation into a provenance trail, deduplicating by episode.
 ///
 /// - If `record.source_episode_id` is already present, its `mention_count` is
@@ -1248,6 +1289,21 @@ impl RelationshipEdge {
     /// repeated calls.
     ///
     /// Returns true if synapse should be pruned (below tier's threshold)
+    /// True when multi-source corroboration should shield this edge from
+    /// STRENGTH-based pruning. Off by default; enabled via
+    /// `SHODH_PROVENANCE_AWARE_PRUNE`. Age-based reaping is unaffected, so a
+    /// corroborated edge is never immortal.
+    fn corroboration_protected(&self) -> bool {
+        corroboration_meets(self.provenance.len(), provenance_prune_min())
+    }
+
+    /// True when this edge is shielded from strength-based pruning by either LTP
+    /// potentiation or (when enabled) multi-source corroboration. Used by the
+    /// strength-only prune-queue paths, which carry no age dimension.
+    pub fn is_prune_protected(&self) -> bool {
+        self.ltp_status.is_potentiated() || self.corroboration_protected()
+    }
+
     pub fn decay(&mut self) -> bool {
         self.decay_at(Utc::now())
     }
@@ -1354,12 +1410,21 @@ impl RelationshipEdge {
             self.ltp_status = LtpStatus::None;
         }
 
-        // Return whether this synapse should be pruned
-        // Prune if: exceeded max age OR below prune threshold (unless any LTP protection)
+        // Return whether this synapse should be pruned.
+        // - LTP potentiation protects from everything (age AND strength).
+        // - Age forces a prune next (no immortal edges).
+        // - Multi-source corroboration (opt-in) protects from strength-only decay:
+        //   a relationship independently attested by several episodes survives the
+        //   decay of its activation strength, but not old age.
+        // - Otherwise, prune once strength falls to the tier threshold.
         if self.ltp_status.is_potentiated() {
             false
+        } else if exceeded_max_age {
+            true
+        } else if self.corroboration_protected() {
+            false
         } else {
-            exceeded_max_age || self.strength <= prune_threshold
+            self.strength <= prune_threshold
         }
     }
 
@@ -3368,7 +3433,7 @@ impl GraphMemory {
         let mut has_prunable = false;
         for edge in &edges {
             if edge.effective_strength() < edge.tier.prune_threshold()
-                && !edge.ltp_status.is_potentiated()
+                && !edge.is_prune_protected()
             {
                 has_prunable = true;
                 break;
@@ -3391,7 +3456,7 @@ impl GraphMemory {
             }
             edges.retain(|edge| {
                 if edge.effective_strength() < edge.tier.prune_threshold()
-                    && !edge.ltp_status.is_potentiated()
+                    && !edge.is_prune_protected()
                 {
                     prune_queue.push(edge.uuid);
                     orphan_queue.push(edge.from_entity);
@@ -4600,8 +4665,12 @@ impl GraphMemory {
                     }
                     edge.strength *= 1.0 - clamped_decay;
                     edge.strength = edge.strength.max(crate::constants::LTP_MIN_STRENGTH);
-                    // Queue for pruning if below tier threshold
-                    if edge.strength < edge.tier.prune_threshold() {
+                    // Queue for pruning if below tier threshold. When enabled,
+                    // multi-source corroboration shields the edge from this
+                    // strength-only decay path (LTP::Full was already skipped above).
+                    if edge.strength < edge.tier.prune_threshold()
+                        && !edge.corroboration_protected()
+                    {
                         self.pending_prune.lock().push(edge.uuid);
                     }
                     match crate::serialization::encode(&edge) {
@@ -8037,6 +8106,19 @@ mod tests {
         assert_eq!(classify_misc_entity("PostgreSQL"), EntityLabel::Product);
         // Plain lowercase noun with no signal → Concept (still type-hierarchy visible)
         assert_eq!(classify_misc_entity("widget"), EntityLabel::Concept);
+    }
+
+    #[test]
+    fn corroboration_meets_gates_on_threshold() {
+        // Feature disabled (None) → never protected, regardless of attestation count.
+        assert!(!corroboration_meets(0, None));
+        assert!(!corroboration_meets(100, None));
+        // Enabled → protected iff distinct attesting episodes >= min.
+        assert!(!corroboration_meets(2, Some(3)));
+        assert!(corroboration_meets(3, Some(3)));
+        assert!(corroboration_meets(8, Some(3)));
+        assert!(!corroboration_meets(0, Some(1)));
+        assert!(corroboration_meets(1, Some(1)));
     }
 
     /// Create a test relationship edge with specified strength and last_activated (L1 tier)
