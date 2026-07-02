@@ -92,7 +92,13 @@ components:
           description: Optional tags for categorization
           example: ["preferences", "ui"]
         memory_type:
-          $ref: '#/components/schemas/MemoryType'
+          allOf:
+            - $ref: '#/components/schemas/MemoryType'
+          description: Memory classification. The API also accepts `type` and `experience_type` as aliases.
+        type:
+          allOf:
+            - $ref: '#/components/schemas/MemoryType'
+          description: Alias for `memory_type`, useful for MCP/tool callers that already use `type`.
         external_id:
           type: string
           description: External system ID for linking (e.g., "linear:SHO-39")

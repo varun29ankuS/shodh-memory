@@ -7644,6 +7644,25 @@ impl MemorySystem {
                             _ => 1.0,
                         };
 
+                        // Provenance: record EVERY source memory that attests this
+                        // fact, not just the first. A SemanticFact is the one place
+                        // the system holds an explicit multi-episode attestation set
+                        // (fact.source_memories), so capture all of them — the richest
+                        // companion signal for provenance-driven multi-hop recall (Inc2).
+                        // add_relationship caps + dedups the trail.
+                        let provenance: Vec<crate::graph_memory::ProvenanceRecord> = fact
+                            .source_memories
+                            .iter()
+                            .map(|mid| crate::graph_memory::ProvenanceRecord {
+                                source_episode_id: mid.0,
+                                mention_count: 1,
+                                first_observed: now,
+                                last_observed: now,
+                                confidence: Some(fact.confidence),
+                                evidence_span: None,
+                                typed_by: Some(crate::graph_memory::TypingMethod::LabelPair),
+                            })
+                            .collect();
                         let edge = crate::graph_memory::RelationshipEdge {
                             uuid: Uuid::new_v4(),
                             from_entity: e1.uuid,
@@ -7675,6 +7694,7 @@ impl MemorySystem {
                             entity_confidence: Some(fact.confidence),
                             forman_curvature: None,
                             endpoint_selectivity: None,
+                            provenance,
                         };
                         if graph_guard.add_relationship(edge).is_ok() {
                             edges_added += 1;
@@ -8020,6 +8040,19 @@ impl MemorySystem {
                             _ => 1.0,
                         };
 
+                        // Provenance: the single source episode that produced this
+                        // co-occurrence edge. This is the primary ingest path (the
+                        // majority of edges), so populating it here gives most of the
+                        // graph a real attestation trail + confidence at edge birth.
+                        let provenance = vec![crate::graph_memory::ProvenanceRecord {
+                            source_episode_id: memory.id.0,
+                            mention_count: 1,
+                            first_observed: now,
+                            last_observed: now,
+                            confidence: entity_confidence,
+                            evidence_span: None,
+                            typed_by: Some(crate::graph_memory::TypingMethod::CoOccurrence),
+                        }];
                         let edge = crate::graph_memory::RelationshipEdge {
                             uuid: Uuid::new_v4(),
                             from_entity: e1.uuid,
@@ -8039,6 +8072,7 @@ impl MemorySystem {
                             entity_confidence,
                             forman_curvature: None,
                             endpoint_selectivity: None,
+                            provenance,
                         };
 
                         if let Err(e) = graph_guard.add_relationship(edge) {
@@ -9062,11 +9096,24 @@ impl MemorySystem {
                     },
                 );
             }
+
+            // Connect newly extracted facts to the knowledge graph — the
+            // timer-driven run_maintenance() path does this, but the on-demand
+            // distillation path used to leave facts orphaned (never wired into
+            // EntityNodes/edges), so graph-augmented recall couldn't reach them.
+            self.connect_facts_to_graph(&deduplicated_facts);
         }
 
-        // Advance watermark after successful extraction
+        // Advance watermark to the LAST memory's created_at, NOT now(): using now()
+        // would skip memories created during the (potentially slow) extraction cycle
+        // — they'd have created_at < now() and never be processed for facts. Mirrors
+        // run_maintenance().
         if !memories.is_empty() {
-            let new_watermark = chrono::Utc::now().timestamp_millis();
+            let new_watermark = memories
+                .iter()
+                .map(|m| m.created_at.timestamp_millis())
+                .max()
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
             self.fact_extraction_watermark
                 .store(new_watermark, std::sync::atomic::Ordering::Relaxed);
             self.long_term_memory

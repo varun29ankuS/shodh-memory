@@ -1059,6 +1059,32 @@ impl Embedder for MiniLMEmbedder {
             return Ok(vec![empty_embedding; texts.len()]);
         }
 
+        // Apply the document/passage instruction prefix to every non-empty text
+        // before any encode path — this mirrors the single-text encode() →
+        // encode_prefixed(text, &self.doc_prefix) contract. For symmetric models
+        // (MiniLM/bge/mxbai) doc_prefix is empty, so we keep the original slice and
+        // this is a byte-identical no-op. For asymmetric models (e5/nomic) it places
+        // documents on the same manifold as prefixed queries; without it, batch
+        // ingest embedded documents on the wrong manifold. Empty inputs stay empty.
+        let prefixed: Vec<String>;
+        let prefixed_refs: Vec<&str>;
+        let texts: &[&str] = if self.doc_prefix.is_empty() {
+            texts
+        } else {
+            prefixed = texts
+                .iter()
+                .map(|t| {
+                    if t.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{}{}", self.doc_prefix, t)
+                    }
+                })
+                .collect();
+            prefixed_refs = prefixed.iter().map(|s| s.as_str()).collect();
+            &prefixed_refs
+        };
+
         // Use simplified mode if in that mode
         if self.simplified_mode {
             let start = std::time::Instant::now();

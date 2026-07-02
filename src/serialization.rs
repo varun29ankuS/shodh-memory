@@ -133,6 +133,69 @@ pub fn try_decode<T: DeserializeOwned>(data: &[u8]) -> Result<(T, bool)> {
     Ok((val, true))
 }
 
+/// Decode a tagged-postcard / legacy-bincode record, tolerating older records
+/// that were serialized with FEWER trailing fields than `T` currently has.
+///
+/// Postcard is not self-describing and carries no per-field presence or struct
+/// length: [`deserialize_struct`](postcard::Deserializer) reads exactly the
+/// number of fields `T` declares today. Consequently `#[serde(default)]` on a
+/// NEW trailing field does NOT make older payloads decode — postcard runs off
+/// the end of the buffer ("Hit the end of buffer, expected more data"). This is
+/// the canonical postcard schema-evolution gap.
+///
+/// `default_suffix` is the postcard encoding of the default values for the
+/// field(s) added since the older records were written, in declaration order.
+/// For a single new trailing `Vec<_>` field that means `&[0x00]` (an empty Vec
+/// is the varint length `0`). On an EOF decode error we append `default_suffix`
+/// to the postcard payload and retry, yielding the new schema with defaulted
+/// trailing fields. Non-EOF errors (genuine corruption) are returned as-is.
+///
+/// Returns `(value, needs_migration)` with the same `needs_migration` semantics
+/// as [`try_decode`] (true = the record was legacy bincode and should be
+/// rewritten in postcard form).
+pub fn try_decode_compat<T: DeserializeOwned>(
+    data: &[u8],
+    default_suffix: &[u8],
+) -> Result<(T, bool)> {
+    if has_format_tag(data) {
+        let payload = &data[FORMAT_TAG_LEN..];
+        match postcard::from_bytes::<T>(payload) {
+            Ok(val) => return Ok((val, false)),
+            Err(postcard::Error::DeserializeUnexpectedEnd) if !default_suffix.is_empty() => {
+                // Older record missing one or more trailing fields. A record can be
+                // short by SEVERAL fields (each schema revision adds one), so supply
+                // the field defaults ONE AT A TIME and retry until it decodes or the
+                // defaults run out — appending all of them at once would trip
+                // postcard's trailing-bytes check for a record missing only some.
+                // needs_migration = true so the caller rewrites it in current schema.
+                let mut extended = Vec::with_capacity(payload.len() + default_suffix.len());
+                extended.extend_from_slice(payload);
+                for &b in default_suffix {
+                    extended.push(b);
+                    match postcard::from_bytes::<T>(&extended) {
+                        Ok(val) => return Ok((val, true)),
+                        Err(postcard::Error::DeserializeUnexpectedEnd) => continue,
+                        Err(e) => {
+                            return Err(anyhow::anyhow!("postcard decode (compat retry): {e}"))
+                        }
+                    }
+                }
+                return Err(anyhow::anyhow!(
+                    "postcard decode (compat): record still truncated after appending \
+                     {} default field(s)",
+                    default_suffix.len()
+                ));
+            }
+            Err(e) => return Err(anyhow::anyhow!("postcard decode (tagged): {e}")),
+        }
+    }
+
+    // Legacy: bincode 2.x with safe allocation limit.
+    let (val, _): (T, _) = bincode::serde::decode_from_slice(data, crate::bincode_safe_config())
+        .map_err(|e| anyhow::anyhow!("bincode decode (legacy): {e}"))?;
+    Ok((val, true))
+}
+
 /// Check if data starts with the postcard format tag.
 #[inline]
 fn has_format_tag(data: &[u8]) -> bool {

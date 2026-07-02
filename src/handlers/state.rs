@@ -2564,13 +2564,16 @@ impl MultiUserMemoryManager {
     /// - All-caps terms (API, TUI, NER, etc.)
     /// - Issue IDs (SHO-XX pattern)
     /// - Semantic similarity edges between memories
+    /// Returns the episode's raw [`SurpriseComponents`] when the graph pass ran
+    /// (also persisted on the episode's metadata); `None` when skipped
+    /// (idempotent replay or an entity-less episode).
     pub fn process_experience_into_graph(
         &self,
         user_id: &str,
         experience: &Experience,
         memory_id: &MemoryId,
         entity_name_embeddings: Option<&HashMap<String, Vec<f32>>>,
-    ) -> Result<()> {
+    ) -> Result<Option<crate::memory::types::SurpriseComponents>> {
         let graph = self.get_user_graph(user_id)?;
 
         // =====================================================================
@@ -3252,10 +3255,16 @@ impl MultiUserMemoryManager {
                 "Episode {} already processed, skipping graph rebuild",
                 &memory_id.0.to_string()[..8]
             );
-            return Ok(());
+            return Ok(None);
         }
 
         let mut entity_uuids: Vec<(String, uuid::Uuid, EntityLabel)> = Vec::new();
+
+        // Surprise component: entities lexically new to this user's graph.
+        // Pre-checked against the O(1) name index before add_entity runs its
+        // dedup (tier-4 embedding merge may still fold some in — this counts
+        // "never seen this name", which is the explainable novelty signal).
+        let mut novel_entities: u32 = 0;
 
         // Insert all pre-built entities
         for (name, entity) in all_entities {
@@ -3264,6 +3273,9 @@ impl MultiUserMemoryManager {
                 .first()
                 .cloned()
                 .unwrap_or(EntityLabel::Concept);
+            if matches!(graph_guard.find_entity_by_name(&name), Ok(None)) {
+                novel_entities += 1;
+            }
             match graph_guard.add_entity(entity) {
                 Ok(uuid) => entity_uuids.push((name, uuid, primary_label)),
                 Err(e) => tracing::debug!("Failed to add entity {}: {}", name, e),
@@ -3281,7 +3293,11 @@ impl MultiUserMemoryManager {
                 .collect::<Vec<_>>()
         );
 
-        let episode = EpisodicNode {
+        // `mut` + clone-at-add: after the pair loop the computed surprise
+        // components are inserted into this episode's metadata and the episode
+        // is re-put (add_episode overwrite is idempotent — `already_existed`
+        // guards the counter and the index puts are same-key).
+        let mut episode = EpisodicNode {
             uuid: memory_id.0,
             name: format!("Memory {}", &memory_id.0.to_string()[..8]),
             content: experience.content.clone(),
@@ -3292,7 +3308,7 @@ impl MultiUserMemoryManager {
             metadata: experience.metadata.clone(),
         };
 
-        match graph_guard.add_episode(episode) {
+        match graph_guard.add_episode(episode.clone()) {
             Ok(uuid) => {
                 tracing::debug!(
                     "Episode {} added with {} entity refs",
@@ -3436,11 +3452,36 @@ impl MultiUserMemoryManager {
             })
             .collect();
 
+        // Surprise-component accumulators (see `SurpriseComponents`): counted
+        // over ALL candidate pairs, before any quality-gate `continue`, so the
+        // ratios share one stable denominator.
+        let mut pairs_scored: u32 = 0;
+        let mut pmi_sum: f32 = 0.0;
+        let mut low_selectivity_pairs: u32 = 0;
+
         for i in 0..entity_uuids.len() {
             for j in (i + 1)..entity_uuids.len() {
                 // Edge quality gate using graph reputation
                 let rep_i = graph_guard.get_entity_reputation(&entity_uuids[i].0);
                 let rep_j = graph_guard.get_entity_reputation(&entity_uuids[j].0);
+
+                // Birth-PMI for this pair — log2(N / (df_i·df_j)) at co=1.
+                // Computed once here; reused by the strength weighting, the
+                // PMI gate, and the surprise components below.
+                let df_i = rep_i.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
+                let df_j = rep_j.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
+                let birth_pmi = (total_episodes / (df_i * df_j)).log2();
+
+                pairs_scored += 1;
+                pmi_sum += birth_pmi;
+                let min_sel = rep_i
+                    .as_ref()
+                    .map(|r| r.selectivity)
+                    .unwrap_or(1.0)
+                    .min(rep_j.as_ref().map(|r| r.selectivity).unwrap_or(1.0));
+                if min_sel < 0.2 {
+                    low_selectivity_pairs += 1;
+                }
 
                 // Skip: both endpoints are low-selectivity (co-occurrence is meaningless)
                 if let (Some(ri), Some(rj)) = (&rep_i, &rep_j) {
@@ -3480,10 +3521,7 @@ impl MultiUserMemoryManager {
                 // edge through add_relationship's Hebbian path. Falls back to the
                 // selectivity-IDF proxy, then to raw strength.
                 let pair_strength = if pmi_edges {
-                    let df_i = rep_i.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
-                    let df_j = rep_j.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
-                    let pmi = (total_episodes / (df_i * df_j)).log2();
-                    let factor = (pmi.max(0.0) / pmi_norm)
+                    let factor = (birth_pmi.max(0.0) / pmi_norm)
                         .clamp(crate::constants::GRAPH_PMI_WEIGHT_FLOOR, 1.0);
                     edge_strength * factor
                 } else if idf_edges {
@@ -3532,9 +3570,14 @@ impl MultiUserMemoryManager {
                 } else {
                     None
                 };
+                // Provenance: record WHICH stage of the typing chain decided the
+                // relation type for this attestation (Increment 1, robust edge
+                // provenance). Assigned by every branch of the chain below.
+                let typed_by: Option<crate::graph_memory::TypingMethod>;
                 let relation_type = if fragment_of_comention[i] || fragment_of_comention[j] {
                     // Fragment endpoint: never typed, never causal (see mask above).
                     typed_blocked_fragment += 1;
+                    typed_by = Some(crate::graph_memory::TypingMethod::CoOccurrence);
                     crate::graph_memory::RelationType::CoOccurs
                 } else if let Some((rt, a_is_source)) = cue_hit {
                     // LINEAGE-ZERO FIX (repro: lineage_walk_survives_harness_scale):
@@ -3560,12 +3603,14 @@ impl MultiUserMemoryManager {
                         std::mem::swap(&mut from_entity, &mut to_entity);
                     }
                     typed_cue += 1;
+                    typed_by = Some(crate::graph_memory::TypingMethod::Cue);
                     rt
                 } else if let Some((rt, a_is_source, _sim)) = semantic_hit {
                     if !a_is_source {
                         std::mem::swap(&mut from_entity, &mut to_entity);
                     }
                     typed_semantic += 1;
+                    typed_by = Some(crate::graph_memory::TypingMethod::Semantic);
                     rt
                 } else if let Some((rt, a_is_source, support)) = (learned_pairs
                     // Per-APPLICATION cap: a learned mapping may type at most 2
@@ -3597,6 +3642,7 @@ impl MultiUserMemoryManager {
                         support
                     );
                     typed_learned += 1;
+                    typed_by = Some(crate::graph_memory::TypingMethod::Learned);
                     rt
                 } else {
                     if matches!(
@@ -3605,8 +3651,10 @@ impl MultiUserMemoryManager {
                             | crate::graph_memory::RelationType::RelatedTo
                     ) {
                         untyped_generic += 1;
+                        typed_by = Some(crate::graph_memory::TypingMethod::CoOccurrence);
                     } else {
                         typed_pair += 1;
+                        typed_by = Some(crate::graph_memory::TypingMethod::LabelPair);
                     }
                     label_relation
                 };
@@ -3623,18 +3671,21 @@ impl MultiUserMemoryManager {
                         crate::graph_memory::RelationType::CoOccurs
                             | crate::graph_memory::RelationType::RelatedTo
                     )
+                    && birth_pmi < pmi_gate_min
                 {
-                    let df_i = rep_i.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
-                    let df_j = rep_j.as_ref().map(|r| r.mention_count).unwrap_or(1).max(1) as f32;
-                    let pmi = (total_episodes / (df_i * df_j)).log2();
-                    if pmi < pmi_gate_min {
-                        pmi_gated += 1;
-                        // it was tallied as generic above; move the tally to pmi_gated
-                        untyped_generic = untyped_generic.saturating_sub(1);
-                        continue;
-                    }
+                    pmi_gated += 1;
+                    // it was tallied as generic above; move the tally to pmi_gated
+                    untyped_generic = untyped_generic.saturating_sub(1);
+                    continue;
                 }
 
+                // Evidence span: `truncated_context` is the first 150 CHARS of the
+                // episode content, so it is a prefix anchored at char 0. Record a
+                // char-offset REFERENCE (not the text) into the source episode so a
+                // later increment can resurface the exact attesting passage without
+                // bloating the edge. Length is in chars to stay consistent with the
+                // char-based truncation above.
+                let evidence_span = Some((0u32, truncated_context.chars().count() as u32));
                 let edge = RelationshipEdge {
                     uuid: uuid::Uuid::new_v4(),
                     from_entity,
@@ -3654,12 +3705,105 @@ impl MultiUserMemoryManager {
                     entity_confidence: None,
                     forman_curvature: None,
                     endpoint_selectivity: None,
+                    provenance: vec![crate::graph_memory::ProvenanceRecord {
+                        source_episode_id: memory_id.0,
+                        mention_count: 1,
+                        first_observed: now,
+                        last_observed: now,
+                        confidence: None,
+                        evidence_span,
+                        typed_by,
+                    }],
                 };
 
                 if let Err(e) = graph_guard.add_relationship(edge) {
                     tracing::debug!("Failed to add relationship: {}", e);
                 }
             }
+        }
+
+        // Aggregate the episode's surprise components (raw facts only —
+        // deviation/z-scoring happens at read time against the user's rolling
+        // baseline) and persist them on the episode via an idempotent re-put.
+        let surprise = if entity_uuids.is_empty() {
+            None
+        } else {
+            let pairs_f = pairs_scored.max(1) as f32;
+            let surprise = crate::memory::types::SurpriseComponents {
+                mean_pmi: if pairs_scored > 0 {
+                    pmi_sum / pairs_f
+                } else {
+                    0.0
+                },
+                novel_entity_ratio: novel_entities as f32 / entity_uuids.len() as f32,
+                untyped_ratio: untyped_generic as f32 / pairs_f,
+                pmi_gated_ratio: pmi_gated as f32 / pairs_f,
+                low_selectivity_share: low_selectivity_pairs as f32 / pairs_f,
+                pairs_scored,
+                entities_total: entity_uuids.len() as u32,
+            };
+            tracing::info!(
+                mean_pmi = surprise.mean_pmi,
+                novel_entity_ratio = surprise.novel_entity_ratio,
+                untyped_ratio = surprise.untyped_ratio,
+                pmi_gated_ratio = surprise.pmi_gated_ratio,
+                low_selectivity_share = surprise.low_selectivity_share,
+                pairs = surprise.pairs_scored,
+                entities = surprise.entities_total,
+                "episode surprise components"
+            );
+            match serde_json::to_string(&surprise) {
+                Ok(json) => {
+                    episode.metadata.insert(
+                        crate::memory::types::SURPRISE_METADATA_KEY.to_string(),
+                        json,
+                    );
+                    if let Err(e) = graph_guard.add_episode(episode) {
+                        tracing::debug!("Failed to persist surprise components: {}", e);
+                    }
+                }
+                Err(e) => tracing::debug!("Failed to serialize surprise components: {}", e),
+            }
+            Some(surprise)
+        };
+
+        // Temporal anomalies (B4): drain what the strengthen path surfaced
+        // during this (or any prior) graph write, resolve entity names while
+        // the guard is held, and emit each on the SSE stream.
+        for ev in graph_guard.drain_temporal_anomalies() {
+            let name_of = |u: &uuid::Uuid| {
+                graph_guard
+                    .get_entity(u)
+                    .ok()
+                    .flatten()
+                    .map(|e| e.name)
+                    .unwrap_or_else(|| u.to_string())
+            };
+            let from_name = name_of(&ev.from_entity);
+            let to_name = name_of(&ev.to_entity);
+            tracing::info!(
+                kind = ?ev.kind,
+                from = %from_name,
+                to = %to_name,
+                relation = ?ev.relation_type,
+                gap_days = ev.gap_days,
+                "temporal anomaly"
+            );
+            self.emit_event(MemoryEvent {
+                event_type: "temporal_anomaly".to_string(),
+                timestamp: ev.detected_at,
+                user_id: user_id.to_string(),
+                memory_id: Some(memory_id.0.to_string()),
+                content_preview: Some(format!(
+                    "{} —{:?}→ {} reactivated after {:.1} days dormant",
+                    from_name, ev.relation_type, to_name, ev.gap_days
+                )),
+                memory_type: None,
+                importance: None,
+                count: None,
+                entities: Some(vec![from_name, to_name]),
+                results: serde_json::to_value(&ev).ok(),
+            });
         }
         // Lock released here
 
@@ -3684,7 +3828,7 @@ impl MultiUserMemoryManager {
             );
         }
 
-        Ok(())
+        Ok(surprise)
     }
 }
 

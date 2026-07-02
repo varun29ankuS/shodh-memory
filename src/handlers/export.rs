@@ -734,6 +734,7 @@ mod tests {
             activation_timestamps: Some(VecDeque::new()),
             entity_confidence: Some(0.9),
             endpoint_selectivity: None,
+            provenance: Vec::new(),
             forman_curvature: None,
         }
     }

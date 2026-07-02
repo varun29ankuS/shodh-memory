@@ -183,6 +183,7 @@ fn spread_single_direction(
     let spread_fix = std::env::var("SHODH_SPREAD_FIX")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let dir_fix = edge_dir_fix_enabled();
     const SPREAD_FIX_HOP_DECAY: f32 = 0.6;
     const SPREAD_FIX_PRIOR_FLOOR: f32 = 0.5;
 
@@ -222,7 +223,7 @@ fn spread_single_direction(
             };
 
             for edge in edges {
-                let target_uuid = edge.to_entity;
+                let target_uuid = edge_neighbor(&edge, &entity_uuid, dir_fix);
 
                 // Edge-tier trust weight
                 let tier_trust = if edge.is_potentiated() {
@@ -275,6 +276,7 @@ fn spread_single_direction(
                             RelationType::CoOccurs
                                 | RelationType::RelatedTo
                                 | RelationType::CoRetrieved
+                                | RelationType::AssociatedWith
                         )
                         && !intent.relation_types.contains(&edge.relation_type)
                     {
@@ -479,6 +481,55 @@ fn ppr_intern(
     i
 }
 
+/// Resolve the spreading-activation *neighbour* of `current` across `edge`.
+///
+/// Edges are indexed under BOTH endpoints (`GraphMemory::index_entity_edge` is
+/// called for `from_entity` and `to_entity`), so `get_entity_relationships_limited`
+/// returns incoming edges too. The legacy traversal blindly used `edge.to_entity`
+/// as the neighbour, which means every edge where `current` is already the `to`
+/// endpoint resolved to `current` itself — a self-loop that silently dropped all
+/// incoming connectivity (and pumped activation back into the source node instead
+/// of the real neighbour). With `dir_fix` on, the neighbour is the OTHER endpoint:
+/// `current` is always one endpoint (the edge came from its index), so when it is
+/// the `to`, the neighbour is `from`. With `dir_fix` off, the exact legacy
+/// behaviour is preserved so it can serve as the A/B control.
+/// Diagnostic counter: how many times the direction fix actually changed the
+/// traversal target (the current node was the `to` endpoint, so the true
+/// neighbour is `from`). Zero overhead when the fix is off, because the
+/// increment is gated behind the same `dir_fix` branch. Lets an eval prove the
+/// fix executed and altered traversal even when a coarse metric like recall@10
+/// does not move.
+static EDGE_DIR_FLIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Total edge-direction flips since process start (see [`edge_neighbor`]).
+pub fn edge_dir_flip_count() -> u64 {
+    EDGE_DIR_FLIPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[inline]
+fn edge_neighbor(
+    edge: &crate::graph_memory::RelationshipEdge,
+    current: &Uuid,
+    dir_fix: bool,
+) -> Uuid {
+    if dir_fix && edge.from_entity != *current {
+        EDGE_DIR_FLIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        edge.from_entity
+    } else {
+        edge.to_entity
+    }
+}
+
+/// Read the `SHODH_GRAPH_EDGE_DIR` A/B flag: when set, spreading/PPR/beam traversal
+/// follows edges to their true non-source endpoint instead of the legacy
+/// `to_entity`-only behaviour. Default off until the multi_hop comparison confirms
+/// it before flipping the production default.
+fn edge_dir_fix_enabled() -> bool {
+    std::env::var("SHODH_GRAPH_EDGE_DIR")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Intrinsic (decay-free, degree-free) transition weight of an edge for PPR: the
 /// `effective_strength × tier_trust` an edge contributes, optionally scaled by the
 /// relation-type spreading weight and the ontological penalty. The per-hop decay and
@@ -486,6 +537,10 @@ fn ppr_intern(
 /// factor and column-normalisation subsume them.
 fn ppr_edge_weight(
     edge: &crate::graph_memory::RelationshipEdge,
+    // The TRUE traversal neighbour (the `edge_neighbor` result), NOT `edge.to_entity`.
+    // The entity-type penalty must key on the endpoint activation actually flows to,
+    // or it penalises the wrong node once SHODH_GRAPH_EDGE_DIR routes to `from_entity`.
+    neighbor: Uuid,
     intent: Option<&OntologicalIntent>,
     predicate_weights: bool,
     graph: &GraphMemory,
@@ -508,20 +563,19 @@ fn ppr_edge_weight(
         if !intent.relation_types.is_empty()
             && !matches!(
                 edge.relation_type,
-                RelationType::CoOccurs | RelationType::RelatedTo | RelationType::CoRetrieved
+                RelationType::CoOccurs
+                    | RelationType::RelatedTo
+                    | RelationType::CoRetrieved
+                    | RelationType::AssociatedWith
             )
             && !intent.relation_types.contains(&edge.relation_type)
         {
             w *= ONTOLOGICAL_RELATION_PENALTY;
         }
         if !intent.expected_labels.is_empty() {
-            let labels = label_cache.entry(edge.to_entity).or_insert_with(|| {
-                graph
-                    .get_entity(&edge.to_entity)
-                    .ok()
-                    .flatten()
-                    .map(|e| e.labels)
-            });
+            let labels = label_cache
+                .entry(neighbor)
+                .or_insert_with(|| graph.get_entity(&neighbor).ok().flatten().map(|e| e.labels));
             if let Some(labels) = labels {
                 let type_match = labels.iter().any(|l| {
                     intent
@@ -595,19 +649,28 @@ fn personalized_pagerank(
             break;
         }
         let mut next: Vec<Uuid> = Vec::new();
+        let dir_fix = edge_dir_fix_enabled();
         for &u in &frontier {
             let ui = ppr_intern(u, &mut nodes, &mut node_idx, &mut adj);
             let edges = graph.get_entity_relationships_limited(&u, Some(MAX_EDGES_PER_NODE))?;
             for edge in edges {
-                let w = ppr_edge_weight(&edge, intent, predicate_weights, graph, &mut label_cache);
+                let nb = edge_neighbor(&edge, &u, dir_fix);
+                let w = ppr_edge_weight(
+                    &edge,
+                    nb,
+                    intent,
+                    predicate_weights,
+                    graph,
+                    &mut label_cache,
+                );
                 if w <= 0.0 {
                     continue;
                 }
-                let ti = ppr_intern(edge.to_entity, &mut nodes, &mut node_idx, &mut adj);
+                let ti = ppr_intern(nb, &mut nodes, &mut node_idx, &mut adj);
                 adj[ui].push((ti, w));
                 traversed.push(edge.uuid);
-                if visited.insert(edge.to_entity) {
-                    next.push(edge.to_entity);
+                if visited.insert(nb) {
+                    next.push(nb);
                 }
             }
             if nodes.len() >= MAX_NODES {
@@ -810,6 +873,7 @@ fn reachable_inject(
             break;
         }
         let mut next: Vec<Uuid> = Vec::new();
+        let dir_fix = edge_dir_fix_enabled();
         for &u in &frontier {
             let au = best.get(&u).copied().unwrap_or(0.0);
             if au <= 0.0 {
@@ -817,11 +881,18 @@ fn reachable_inject(
             }
             let edges = graph.get_entity_relationships_limited(&u, Some(MAX_EDGES_PER_NODE))?;
             for edge in edges {
-                let w = ppr_edge_weight(&edge, intent, predicate_weights, graph, &mut label_cache);
+                let nb = edge_neighbor(&edge, &u, dir_fix);
+                let w = ppr_edge_weight(
+                    &edge,
+                    nb,
+                    intent,
+                    predicate_weights,
+                    graph,
+                    &mut label_cache,
+                );
                 if w <= 0.0 {
                     continue;
                 }
-                let nb = edge.to_entity;
                 let new_act = au * w * HOP_DECAY;
                 if new_act > best.get(&nb).copied().unwrap_or(0.0) {
                     best.insert(nb, new_act);
@@ -885,22 +956,31 @@ fn traverse_beam(
     let mut reached: HashMap<Uuid, f32> = HashMap::new();
     let mut label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
 
+    let dir_fix = edge_dir_fix_enabled();
     for _ in 0..HOPS {
         let mut next: Vec<BeamPath> = Vec::new();
         for p in &beam {
             let edges = graph.get_entity_relationships_limited(&p.endpoint, Some(MAX_EDGES))?;
             for edge in edges {
-                if p.visited.contains(&edge.to_entity) {
+                let nb = edge_neighbor(&edge, &p.endpoint, dir_fix);
+                if p.visited.contains(&nb) {
                     continue;
                 }
-                let w = ppr_edge_weight(&edge, intent, predicate_weights, graph, &mut label_cache);
+                let w = ppr_edge_weight(
+                    &edge,
+                    nb,
+                    intent,
+                    predicate_weights,
+                    graph,
+                    &mut label_cache,
+                );
                 if w <= 0.0 {
                     continue;
                 }
                 let mut visited = p.visited.clone();
-                visited.insert(edge.to_entity);
+                visited.insert(nb);
                 next.push(BeamPath {
-                    endpoint: edge.to_entity,
+                    endpoint: nb,
                     score: p.score * w,
                     visited,
                 });
@@ -1282,6 +1362,7 @@ pub fn spreading_activation_retrieve_with_stats(
         let predicate_weights = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+        let dir_fix = edge_dir_fix_enabled();
 
         for hop in 1..=SPREADING_MAX_HOPS {
             stats.graph_hops = hop;
@@ -1324,7 +1405,7 @@ pub fn spreading_activation_retrieve_with_stats(
 
                 for edge in edges {
                     // Spread activation to connected entity
-                    let target_uuid = edge.to_entity;
+                    let target_uuid = edge_neighbor(&edge, &entity_uuid, dir_fix);
 
                     // Edge-tier trust weight (SHO-D1, PIPE-4)
                     let tier_trust = if edge.is_potentiated() {
@@ -1479,7 +1560,13 @@ pub fn spreading_activation_retrieve_with_stats(
     // activation for every entity within REACH_HOPS of a seed (NO threshold) and merge by
     // max, so fusion can rank the reachable gold instead of never seeing it.
     if reach_inject {
-        match reachable_inject(graph, &seed_activations, intent_ref, false) {
+        // Honor SHODH_GRAPH_PREDICATE_WEIGHTS here too — the other graph passes (PPR,
+        // spreading, traversal) all weight edges by predicate type when it's set;
+        // reachable injection used to hardcode `false`, silently dropping that signal.
+        let pred_w = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        match reachable_inject(graph, &seed_activations, intent_ref, pred_w) {
             Ok(reach) => {
                 let before = activation_map.len();
                 for (u, a) in reach {
@@ -1921,6 +2008,7 @@ mod tests {
             entity_confidence: None,
             forman_curvature: None,
             endpoint_selectivity: None,
+            provenance: Vec::new(),
         };
         graph.add_relationship(mk_edge(hub, target_h)).unwrap();
         graph.add_relationship(mk_edge(rare, target_r)).unwrap();
@@ -2005,6 +2093,7 @@ mod tests {
                 entity_confidence: None,
                 forman_curvature: None,
                 endpoint_selectivity: None,
+                provenance: Vec::new(),
             })
             .unwrap();
 
