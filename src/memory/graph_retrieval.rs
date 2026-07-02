@@ -276,6 +276,7 @@ fn spread_single_direction(
                             RelationType::CoOccurs
                                 | RelationType::RelatedTo
                                 | RelationType::CoRetrieved
+                                | RelationType::AssociatedWith
                         )
                         && !intent.relation_types.contains(&edge.relation_type)
                     {
@@ -562,7 +563,10 @@ fn ppr_edge_weight(
         if !intent.relation_types.is_empty()
             && !matches!(
                 edge.relation_type,
-                RelationType::CoOccurs | RelationType::RelatedTo | RelationType::CoRetrieved
+                RelationType::CoOccurs
+                    | RelationType::RelatedTo
+                    | RelationType::CoRetrieved
+                    | RelationType::AssociatedWith
             )
             && !intent.relation_types.contains(&edge.relation_type)
         {
