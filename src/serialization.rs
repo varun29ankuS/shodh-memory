@@ -162,15 +162,29 @@ pub fn try_decode_compat<T: DeserializeOwned>(
         match postcard::from_bytes::<T>(payload) {
             Ok(val) => return Ok((val, false)),
             Err(postcard::Error::DeserializeUnexpectedEnd) if !default_suffix.is_empty() => {
-                // Older record missing trailing field(s): supply their postcard
-                // defaults and retry. needs_migration = true so the caller can
-                // rewrite it in the current schema.
+                // Older record missing one or more trailing fields. A record can be
+                // short by SEVERAL fields (each schema revision adds one), so supply
+                // the field defaults ONE AT A TIME and retry until it decodes or the
+                // defaults run out — appending all of them at once would trip
+                // postcard's trailing-bytes check for a record missing only some.
+                // needs_migration = true so the caller rewrites it in current schema.
                 let mut extended = Vec::with_capacity(payload.len() + default_suffix.len());
                 extended.extend_from_slice(payload);
-                extended.extend_from_slice(default_suffix);
-                let val = postcard::from_bytes::<T>(&extended)
-                    .map_err(|e| anyhow::anyhow!("postcard decode (compat retry): {e}"))?;
-                return Ok((val, true));
+                for &b in default_suffix {
+                    extended.push(b);
+                    match postcard::from_bytes::<T>(&extended) {
+                        Ok(val) => return Ok((val, true)),
+                        Err(postcard::Error::DeserializeUnexpectedEnd) => continue,
+                        Err(e) => {
+                            return Err(anyhow::anyhow!("postcard decode (compat retry): {e}"))
+                        }
+                    }
+                }
+                return Err(anyhow::anyhow!(
+                    "postcard decode (compat): record still truncated after appending \
+                     {} default field(s)",
+                    default_suffix.len()
+                ));
             }
             Err(e) => return Err(anyhow::anyhow!("postcard decode (tagged): {e}")),
         }

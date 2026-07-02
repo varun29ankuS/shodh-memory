@@ -828,12 +828,13 @@ fn merge_provenance(trail: &mut Vec<ProvenanceRecord>, record: ProvenanceRecord)
     }
 }
 
-/// Postcard encoding of the default value(s) for `RelationshipEdge` fields added
-/// AFTER the `provenance` field was introduced — currently just the single
-/// trailing `provenance: Vec<ProvenanceRecord>` (an empty Vec is the varint
-/// length `0`). Used to decode pre-provenance edges that were serialized before
-/// this field existed (postcard has no `#[serde(default)]` EOF tolerance).
-const EDGE_PROVENANCE_DEFAULT_SUFFIX: &[u8] = &[0x00];
+/// Postcard defaults for every trailing `RelationshipEdge` field added after the
+/// postcard cutover (#192), in field order: `endpoint_selectivity: Option` (None
+/// = `0x00`), `forman_curvature: Option` (None = `0x00`), `provenance: Vec` (empty
+/// = varint `0x00`). `try_decode_compat` appends these one at a time, so a record
+/// missing any suffix of these fields decodes (postcard has no `#[serde(default)]`
+/// EOF tolerance). Keep in sync with any new trailing field.
+const EDGE_PROVENANCE_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00, 0x00];
 
 /// Decode a stored `RelationshipEdge`, tolerating legacy records written before
 /// the `provenance` field existed. See [`crate::serialization::try_decode_compat`].
@@ -845,6 +846,17 @@ fn decode_relationship_edge(data: &[u8]) -> Result<(RelationshipEdge, bool)> {
         data,
         EDGE_PROVENANCE_DEFAULT_SUFFIX,
     )
+}
+
+/// Postcard defaults for trailing `EntityNode` fields added after the postcard
+/// cutover (#192): `selectivity: Option` (None = `0x00`). Keep in sync with any
+/// new trailing field.
+const ENTITY_NODE_DEFAULT_SUFFIX: &[u8] = &[0x00];
+
+/// Decode a stored `EntityNode`, tolerating legacy records written before trailing
+/// fields (e.g. `selectivity`) existed. See [`crate::serialization::try_decode_compat`].
+fn decode_entity_node(data: &[u8]) -> Result<(EntityNode, bool)> {
+    crate::serialization::try_decode_compat::<EntityNode>(data, ENTITY_NODE_DEFAULT_SUFFIX)
 }
 
 fn default_last_activated() -> DateTime<Utc> {
@@ -2312,7 +2324,7 @@ impl GraphMemory {
             let entity_iter = db.iterator_cf(entities_cf, rocksdb::IteratorMode::Start);
             let mut migrated_count = 0;
             for (_, value) in entity_iter.flatten() {
-                if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value) {
+                if let Ok((entity, _)) = decode_entity_node(&value) {
                     // Store in name_index CF: name -> UUID bytes
                     db.put_cf(
                         name_index_cf,
@@ -2455,7 +2467,7 @@ impl GraphMemory {
         for uuid in name_index.values() {
             let key = uuid.as_bytes();
             if let Ok(Some(value)) = db.get_cf(entities_cf, key) {
-                if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value) {
+                if let Ok((entity, _)) = decode_entity_node(&value) {
                     if let Some(emb) = entity.name_embedding {
                         cache.push((*uuid, emb));
                         if cache.len() >= ENTITY_EMBEDDING_CACHE_MAX {
@@ -2674,7 +2686,7 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.entities_cf(), key)? {
             Some(value) => {
-                let (entity, _) = crate::serialization::try_decode::<EntityNode>(&value)?;
+                let (entity, _) = decode_entity_node(&value)?;
                 Ok(Some(entity))
             }
             None => Ok(None),
@@ -4435,7 +4447,7 @@ impl GraphMemory {
             }
 
             let (_, value) = result?;
-            let (entity, _) = crate::serialization::try_decode::<EntityNode>(&value)?;
+            let (entity, _) = decode_entity_node(&value)?;
 
             let entity_matches = self.match_pattern(&entity.uuid, pattern, min_strength)?;
             for m in entity_matches {
@@ -5201,7 +5213,18 @@ impl GraphMemory {
                     entity_confidence: Some(confidence),
                     forman_curvature: None,
                     endpoint_selectivity: None,
-                    provenance: Vec::new(),
+                    // Lineage bridge edge: the source episode is known and the
+                    // bridge confidence is meaningful, so seed the attestation
+                    // trail here (typed_by left None — no dedicated lineage method).
+                    provenance: vec![ProvenanceRecord {
+                        source_episode_id: *from_memory_uuid,
+                        mention_count: 1,
+                        first_observed: now,
+                        last_observed: now,
+                        confidence: Some(confidence),
+                        evidence_span: None,
+                        typed_by: None,
+                    }],
                 };
                 if self.add_relationship(edge).is_ok() {
                     created += 1;
@@ -5774,8 +5797,7 @@ impl GraphMemory {
         for (entity_id, selectivity) in &entity_selectivity {
             let key = entity_id.as_bytes();
             if let Ok(Some(value)) = self.db.get_cf(self.entities_cf(), key) {
-                if let Ok((mut entity, _)) = crate::serialization::try_decode::<EntityNode>(&value)
-                {
+                if let Ok((mut entity, _)) = decode_entity_node(&value) {
                     entity.selectivity = Some(*selectivity);
                     if let Ok(encoded) = crate::serialization::encode(&entity) {
                         entity_batch.put_cf(self.entities_cf(), key, encoded);
@@ -5956,8 +5978,7 @@ impl GraphMemory {
 
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
-                if let Ok((mut entity, _)) = crate::serialization::try_decode::<EntityNode>(&value)
-                {
+                if let Ok((mut entity, _)) = decode_entity_node(&value) {
                     let old_salience = entity.salience;
                     entity.salience = (entity.salience + boost).clamp(0.05, 1.0);
 
@@ -6005,7 +6026,7 @@ impl GraphMemory {
             self.db
                 .iterator_cf_opt(self.entities_cf(), read_opts, rocksdb::IteratorMode::Start);
         for (_, value) in iter.flatten() {
-            if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value) {
+            if let Ok((entity, _)) = decode_entity_node(&value) {
                 entities.push(entity);
             }
         }
