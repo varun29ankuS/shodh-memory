@@ -8152,7 +8152,11 @@ mod tests {
             .get_relationship(&edge_uuid)
             .unwrap()
             .expect("edge corroborated by e2 must survive deletion of its primary source e1");
-        assert_eq!(survived.provenance.len(), 1, "e1 must be scrubbed from the trail");
+        assert_eq!(
+            survived.provenance.len(),
+            1,
+            "e1 must be scrubbed from the trail"
+        );
         assert_eq!(
             survived.provenance[0].source_episode_id, e2,
             "only e2's attestation should remain"
