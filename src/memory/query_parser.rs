@@ -4029,7 +4029,11 @@ fn verb_stem_to_relation_types(stem: &str) -> Vec<RelationType> {
         // causal intent set or the ontology penalty (0.4x) suppresses exactly those
         // edges on causal queries.
         "caus" | "result" | "lead" => {
-            vec![RelationType::Causes, RelationType::ResultsIn, RelationType::Triggers]
+            vec![
+                RelationType::Causes,
+                RelationType::ResultsIn,
+                RelationType::Triggers,
+            ]
         }
 
         // Ownership / structural
