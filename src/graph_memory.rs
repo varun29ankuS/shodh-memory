@@ -828,12 +828,13 @@ fn merge_provenance(trail: &mut Vec<ProvenanceRecord>, record: ProvenanceRecord)
     }
 }
 
-/// Postcard encoding of the default value(s) for `RelationshipEdge` fields added
-/// AFTER the `provenance` field was introduced — currently just the single
-/// trailing `provenance: Vec<ProvenanceRecord>` (an empty Vec is the varint
-/// length `0`). Used to decode pre-provenance edges that were serialized before
-/// this field existed (postcard has no `#[serde(default)]` EOF tolerance).
-const EDGE_PROVENANCE_DEFAULT_SUFFIX: &[u8] = &[0x00];
+/// Postcard defaults for every trailing `RelationshipEdge` field added after the
+/// postcard cutover (#192), in field order: `endpoint_selectivity: Option` (None
+/// = `0x00`), `forman_curvature: Option` (None = `0x00`), `provenance: Vec` (empty
+/// = varint `0x00`). `try_decode_compat` appends these one at a time, so a record
+/// missing any suffix of these fields decodes (postcard has no `#[serde(default)]`
+/// EOF tolerance). Keep in sync with any new trailing field.
+const EDGE_PROVENANCE_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00, 0x00];
 
 /// Decode a stored `RelationshipEdge`, tolerating legacy records written before
 /// the `provenance` field existed. See [`crate::serialization::try_decode_compat`].
@@ -845,6 +846,17 @@ fn decode_relationship_edge(data: &[u8]) -> Result<(RelationshipEdge, bool)> {
         data,
         EDGE_PROVENANCE_DEFAULT_SUFFIX,
     )
+}
+
+/// Postcard defaults for trailing `EntityNode` fields added after the postcard
+/// cutover (#192): `selectivity: Option` (None = `0x00`). Keep in sync with any
+/// new trailing field.
+const ENTITY_NODE_DEFAULT_SUFFIX: &[u8] = &[0x00];
+
+/// Decode a stored `EntityNode`, tolerating legacy records written before trailing
+/// fields (e.g. `selectivity`) existed. See [`crate::serialization::try_decode_compat`].
+fn decode_entity_node(data: &[u8]) -> Result<(EntityNode, bool)> {
+    crate::serialization::try_decode_compat::<EntityNode>(data, ENTITY_NODE_DEFAULT_SUFFIX)
 }
 
 fn default_last_activated() -> DateTime<Utc> {
@@ -2312,7 +2324,7 @@ impl GraphMemory {
             let entity_iter = db.iterator_cf(entities_cf, rocksdb::IteratorMode::Start);
             let mut migrated_count = 0;
             for (_, value) in entity_iter.flatten() {
-                if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value) {
+                if let Ok((entity, _)) = decode_entity_node(&value) {
                     // Store in name_index CF: name -> UUID bytes
                     db.put_cf(
                         name_index_cf,
@@ -2455,7 +2467,7 @@ impl GraphMemory {
         for uuid in name_index.values() {
             let key = uuid.as_bytes();
             if let Ok(Some(value)) = db.get_cf(entities_cf, key) {
-                if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value) {
+                if let Ok((entity, _)) = decode_entity_node(&value) {
                     if let Some(emb) = entity.name_embedding {
                         cache.push((*uuid, emb));
                         if cache.len() >= ENTITY_EMBEDDING_CACHE_MAX {
@@ -2674,7 +2686,7 @@ impl GraphMemory {
         let key = uuid.as_bytes();
         match self.db.get_cf(self.entities_cf(), key)? {
             Some(value) => {
-                let (entity, _) = crate::serialization::try_decode::<EntityNode>(&value)?;
+                let (entity, _) = decode_entity_node(&value)?;
                 Ok(Some(entity))
             }
             None => Ok(None),
@@ -3112,6 +3124,30 @@ impl GraphMemory {
             &edge.to_entity,
             &edge.relation_type,
         )? {
+            // #8 DIAGNOSTIC (default-safe, log-only): the typed pair key is
+            // order-independent (pair_key sorts min/max UUID), so an incoming
+            // CAUSAL attestation whose direction is the REVERSE of the stored
+            // edge collapses into it silently — the stored cause→effect arrow
+            // is never flipped. Count how often that actually happens for causal
+            // relations: if it's frequent, the order-independent key is losing
+            // real direction and a direction-sensitive key + reindex is justified;
+            // if near-zero (expected, given the effect-first extractor already
+            // fixes most mis-direction), the migration isn't worth its cost.
+            // grep eval logs for "directed reverse-collapse".
+            if edge.relation_type.is_causal()
+                && existing.from_entity == edge.to_entity
+                && existing.to_entity == edge.from_entity
+            {
+                tracing::info!(
+                    target: "shodh::provenance",
+                    relation = ?edge.relation_type,
+                    "directed reverse-collapse: incoming {}->{} merged into stored {}->{}",
+                    edge.from_entity,
+                    edge.to_entity,
+                    existing.from_entity,
+                    existing.to_entity
+                );
+            }
             // Strengthen existing edge instead of creating duplicate
             let _ = existing.strengthen();
             let now = Utc::now();
@@ -3922,17 +3958,65 @@ impl GraphMemory {
             }
         }
 
-        // Delete edges sourced from this episode
-        // Scan all relationships for matching source_episode_id
+        // Scrub this episode from every edge's attestation trail (multi-source aware).
+        //
+        // An edge survives iff at least one attesting episode remains after scrubbing.
+        // The deleted episode is removed from the provenance trail; if it was the
+        // edge's primary `source_episode_id` but other sources still attest the edge,
+        // primacy is promoted to a surviving source. Only edges left with NO remaining
+        // attestation are deleted. This avoids both over-deletion (nuking a
+        // well-corroborated edge because its first source was removed) and dangling
+        // trails (provenance still pointing at a now-deleted episode).
+        //
+        // Edges never sourced from this episode (source_episode_id is a different
+        // episode or None, and the episode is absent from the trail) are untouched —
+        // including memory↔memory co-retrieval edges, which carry no episode
+        // attestation by design.
         let iter = self
             .db
             .iterator_cf(self.relationships_cf(), rocksdb::IteratorMode::Start);
         let mut edges_to_delete = Vec::new();
+        let mut edges_to_update: Vec<RelationshipEdge> = Vec::new();
         for (_, value) in iter.flatten() {
-            if let Ok((edge, _)) = decode_relationship_edge(&value) {
-                if edge.source_episode_id == Some(*episode_uuid) {
-                    edges_to_delete.push(edge.uuid);
+            let mut edge = match decode_relationship_edge(&value) {
+                Ok((edge, _)) => edge,
+                Err(_) => continue,
+            };
+            let was_primary_source = edge.source_episode_id == Some(*episode_uuid);
+            let in_trail = edge
+                .provenance
+                .iter()
+                .any(|p| p.source_episode_id == *episode_uuid);
+            if !was_primary_source && !in_trail {
+                continue;
+            }
+            edge.provenance
+                .retain(|p| p.source_episode_id != *episode_uuid);
+            if was_primary_source {
+                // Promote a surviving attesting episode to primary source, if any.
+                edge.source_episode_id = edge.provenance.first().map(|p| p.source_episode_id);
+            }
+            let still_attested = edge.source_episode_id.is_some() || !edge.provenance.is_empty();
+            if still_attested {
+                edges_to_update.push(edge);
+            } else {
+                edges_to_delete.push(edge.uuid);
+            }
+        }
+
+        // Persist scrubbed survivors. Endpoints and relation_type are unchanged, so
+        // no edge index (pair-key / entity-edge) needs updating — only the payload.
+        for edge in &edges_to_update {
+            match crate::serialization::encode(edge) {
+                Ok(encoded) => {
+                    if let Err(e) =
+                        self.db
+                            .put_cf(self.relationships_cf(), edge.uuid.as_bytes(), encoded)
+                    {
+                        tracing::debug!("Failed to persist scrubbed edge {}: {}", edge.uuid, e);
+                    }
                 }
+                Err(e) => tracing::debug!("Failed to encode scrubbed edge {}: {}", edge.uuid, e),
             }
         }
 
@@ -3943,9 +4027,10 @@ impl GraphMemory {
         }
 
         tracing::debug!(
-            "Deleted episode {} with {} entity_refs and {} sourced edges",
+            "Deleted episode {} with {} entity_refs; {} edges scrubbed, {} orphan edges removed",
             &episode_uuid.to_string()[..8],
             episode.entity_refs.len(),
+            edges_to_update.len(),
             edges_to_delete.len()
         );
 
@@ -4415,7 +4500,7 @@ impl GraphMemory {
             }
 
             let (_, value) = result?;
-            let (entity, _) = crate::serialization::try_decode::<EntityNode>(&value)?;
+            let (entity, _) = decode_entity_node(&value)?;
 
             let entity_matches = self.match_pattern(&entity.uuid, pattern, min_strength)?;
             for m in entity_matches {
@@ -5181,7 +5266,18 @@ impl GraphMemory {
                     entity_confidence: Some(confidence),
                     forman_curvature: None,
                     endpoint_selectivity: None,
-                    provenance: Vec::new(),
+                    // Lineage bridge edge: the source episode is known and the
+                    // bridge confidence is meaningful, so seed the attestation
+                    // trail here (typed_by left None — no dedicated lineage method).
+                    provenance: vec![ProvenanceRecord {
+                        source_episode_id: *from_memory_uuid,
+                        mention_count: 1,
+                        first_observed: now,
+                        last_observed: now,
+                        confidence: Some(confidence),
+                        evidence_span: None,
+                        typed_by: None,
+                    }],
                 };
                 if self.add_relationship(edge).is_ok() {
                     created += 1;
@@ -5754,8 +5850,7 @@ impl GraphMemory {
         for (entity_id, selectivity) in &entity_selectivity {
             let key = entity_id.as_bytes();
             if let Ok(Some(value)) = self.db.get_cf(self.entities_cf(), key) {
-                if let Ok((mut entity, _)) = crate::serialization::try_decode::<EntityNode>(&value)
-                {
+                if let Ok((mut entity, _)) = decode_entity_node(&value) {
                     entity.selectivity = Some(*selectivity);
                     if let Ok(encoded) = crate::serialization::encode(&entity) {
                         entity_batch.put_cf(self.entities_cf(), key, encoded);
@@ -5936,8 +6031,7 @@ impl GraphMemory {
 
         for (i, result) in results.into_iter().enumerate() {
             if let Ok(Some(value)) = result {
-                if let Ok((mut entity, _)) = crate::serialization::try_decode::<EntityNode>(&value)
-                {
+                if let Ok((mut entity, _)) = decode_entity_node(&value) {
                     let old_salience = entity.salience;
                     entity.salience = (entity.salience + boost).clamp(0.05, 1.0);
 
@@ -5985,7 +6079,7 @@ impl GraphMemory {
             self.db
                 .iterator_cf_opt(self.entities_cf(), read_opts, rocksdb::IteratorMode::Start);
         for (_, value) in iter.flatten() {
-            if let Ok((entity, _)) = crate::serialization::try_decode::<EntityNode>(&value) {
+            if let Ok((entity, _)) = decode_entity_node(&value) {
                 entities.push(entity);
             }
         }
@@ -8118,6 +8212,93 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "entity_episodes index entries must be scrubbed when the entity is deleted"
+        );
+    }
+
+    #[test]
+    fn delete_episode_is_multi_source_aware() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let e1 = Uuid::new_v4();
+        let e2 = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let now = Utc::now();
+
+        let make_episode = |uuid: Uuid| EpisodicNode {
+            uuid,
+            name: "ep".to_string(),
+            content: "content".to_string(),
+            valid_at: now,
+            created_at: now,
+            entity_refs: vec![a, b],
+            source: EpisodeSource::Message,
+            metadata: HashMap::new(),
+        };
+        graph.add_episode(make_episode(e1)).unwrap();
+        graph.add_episode(make_episode(e2)).unwrap();
+
+        // Edge A—B attested by BOTH episodes; e1 is the primary source.
+        let make_record = |episode: Uuid| ProvenanceRecord {
+            source_episode_id: episode,
+            mention_count: 1,
+            first_observed: now,
+            last_observed: now,
+            confidence: None,
+            evidence_span: None,
+            typed_by: None,
+        };
+        let edge = RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: a,
+            to_entity: b,
+            relation_type: RelationType::CoOccurs,
+            strength: 0.5,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: Some(e1),
+            context: String::new(),
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            tier: EdgeTier::L1Working,
+            activation_timestamps: None,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: vec![make_record(e1), make_record(e2)],
+        };
+        let edge_uuid = graph.add_relationship(edge).unwrap();
+
+        // Deleting the primary source must NOT delete a corroborated edge: the
+        // trail is scrubbed of e1 and primacy is promoted to the survivor e2.
+        assert!(graph.delete_episode(&e1).unwrap());
+        let survived = graph
+            .get_relationship(&edge_uuid)
+            .unwrap()
+            .expect("edge corroborated by e2 must survive deletion of its primary source e1");
+        assert_eq!(
+            survived.provenance.len(),
+            1,
+            "e1 must be scrubbed from the trail"
+        );
+        assert_eq!(
+            survived.provenance[0].source_episode_id, e2,
+            "only e2's attestation should remain"
+        );
+        assert_eq!(
+            survived.source_episode_id,
+            Some(e2),
+            "primary source must be promoted to the surviving attester"
+        );
+
+        // Deleting the last attesting episode leaves no attestation → edge removed.
+        assert!(graph.delete_episode(&e2).unwrap());
+        assert!(
+            graph.get_relationship(&edge_uuid).unwrap().is_none(),
+            "an edge with no remaining attesting episode must be deleted"
         );
     }
 
