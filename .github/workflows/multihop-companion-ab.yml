@@ -1,0 +1,125 @@
+# Inc-2 authenticity check — provenance-driven multi-hop companion injection.
+#
+# The original claim (branch feat/multihop-companions, 2026-06-28, old base):
+# planted 2-hop harness multi_hop recall@10 0.50 -> 0.60 (+0.10), 1-hop no loss.
+# That number predates three weeks of main evolution (PMI gate default-on,
+# provenance-at-birth, prune/delete changes). This A/B re-measures it on the
+# CURRENT port (feat/multihop-companions-v2) before any PR exists:
+#   A = control                          (SHODH_COMPANION_MULTIHOP_GATE unset)
+#   B = SHODH_COMPANION_MULTIHOP_GATE=1  (companion injection on)
+# PASS = B two-hop recall@10 gains materially over A with one-hop held.
+name: multihop companion A/B (Inc-2 authenticity)
+on:
+  workflow_dispatch:
+    inputs:
+      chains:
+        description: 'planted 2-hop chains (--mh-chains)'
+        required: false
+        default: '60'
+  push:
+    branches: [feat/multihop-companions-v2]
+    paths: ['.github/workflows/multihop-companion-ab.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mh-companion-ab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Arm A — control (gate off)
+        run: |
+          set -o pipefail
+          ./target/release/recall-eval \
+            --multi-hop mh-a.json --mh-chains "${{ github.event.inputs.chains || '60' }}" \
+            --output unused-a.json --storage ./mh-a-storage 2>&1 | tee a.log
+
+      - name: Arm B — SHODH_COMPANION_MULTIHOP_GATE=1
+        env:
+          SHODH_COMPANION_MULTIHOP_GATE: '1'
+        run: |
+          set -o pipefail
+          ./target/release/recall-eval \
+            --multi-hop mh-b.json --mh-chains "${{ github.event.inputs.chains || '60' }}" \
+            --output unused-b.json --storage ./mh-b-storage 2>&1 | tee b.log
+
+      - name: Compare
+        if: always()
+        run: |
+          echo "## Inc-2 authenticity — companion injection A/B (planted 2-hop, chains=${{ github.event.inputs.chains || '60' }})" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          def load(f):
+              try: return json.load(open(f))
+              except Exception as e: return {"error": str(e)}
+          a, b = load('mh-a.json'), load('mh-b.json')
+          def dig(d, *keys):
+              for k in keys:
+                  if isinstance(d, dict) and k in d: d = d[k]
+                  else: return None
+              return d
+          # tolerate either flat or nested report shapes
+          def metric(d, name):
+              for path in ((name,), ('summary', name), ('metrics', name)):
+                  v = dig(d, *path)
+                  if isinstance(v, (int, float)): return v
+              return None
+          rows = [("two-hop recall@10", "multihop_recall_at_10"), ("one-hop recall@10", "onehop_recall_at_10")]
+          print("| metric | A control | B companions | Δ |")
+          print("| --- | --- | --- | --- |")
+          verdict_gain, verdict_hold = None, None
+          for label, key in rows:
+              va, vb = metric(a, key), metric(b, key)
+              if va is None or vb is None:
+                  print(f"| {label} | ? | ? | parse miss ({key}) |"); continue
+              print(f"| {label} | {va:.4f} | {vb:.4f} | {vb-va:+.4f} |")
+              if 'two' in label: verdict_gain = vb - va
+              else: verdict_hold = vb - va
+          print()
+          if verdict_gain is not None and verdict_hold is not None:
+              ok = verdict_gain >= 0.05 and verdict_hold >= -0.01
+              print(f"**Verdict: {'AUTHENTIC — gain reproduces on current main' if ok else 'NOT REPRODUCED as claimed'}** "
+                    f"(claimed +0.10 two-hop, no one-hop loss; measured {verdict_gain:+.4f} / {verdict_hold:+.4f})")
+          else:
+              print("**Verdict: could not parse — inspect artifacts (report shape drifted).**")
+          PY
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mh-companion-ab
+          path: |
+            mh-a.json
+            mh-b.json
+            a.log
+            b.log
