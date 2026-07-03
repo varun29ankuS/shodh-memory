@@ -244,6 +244,8 @@ pub fn extract_temporal_refs(text: &str) -> TemporalExtraction {
     let mut refs = Vec::new();
     let mut earliest: Option<NaiveDate> = None;
     let mut latest: Option<NaiveDate> = None;
+    let explicit_dates = extract_explicit_dates(text);
+    let has_explicit_dates = !explicit_dates.is_empty();
 
     // Helper to validate date is in reasonable range (1900-2100)
     let is_valid_date = |date: &NaiveDate| -> bool {
@@ -251,44 +253,49 @@ pub fn extract_temporal_refs(text: &str) -> TemporalExtraction {
         (1900..=2100).contains(&year)
     };
 
-    // Try dateparser on the full text (returns Result, never panics)
-    if let Ok(parsed) = dateparser::parse(text) {
-        let date = parsed.date_naive();
-        if is_valid_date(&date) {
-            refs.push(TemporalRef {
-                date,
-                original_text: text.to_string(),
-                confidence: 0.8,
-                position: 0,
-                ref_type: classify_temporal_ref(text, &date, &now),
-            });
-            update_bounds(&mut earliest, &mut latest, date);
+    // Try dateparser on the full text (returns Result, never panics). Exact
+    // regex dates win because dateparser may timezone-shift an embedded ISO
+    // date at local midnight into the previous UTC day.
+    if !has_explicit_dates {
+        if let Ok(parsed) = dateparser::parse(text) {
+            let date = parsed.date_naive();
+            if is_valid_date(&date) {
+                refs.push(TemporalRef {
+                    date,
+                    original_text: text.to_string(),
+                    confidence: 0.8,
+                    position: 0,
+                    ref_type: classify_temporal_ref(text, &date, &now),
+                });
+                update_bounds(&mut earliest, &mut latest, date);
+            }
         }
     }
 
     // Try parsing individual sentences/phrases
-    for (pos, sentence) in split_temporal_phrases(text).iter().enumerate() {
-        if let Ok(parsed) = dateparser::parse(sentence) {
-            let date = parsed.date_naive();
-            if !is_valid_date(&date) {
-                continue;
+    if !has_explicit_dates {
+        for (pos, sentence) in split_temporal_phrases(text).iter().enumerate() {
+            if let Ok(parsed) = dateparser::parse(sentence) {
+                let date = parsed.date_naive();
+                if !is_valid_date(&date) {
+                    continue;
+                }
+                if refs.iter().any(|r| r.date == date) {
+                    continue;
+                }
+                refs.push(TemporalRef {
+                    date,
+                    original_text: sentence.to_string(),
+                    confidence: 0.7,
+                    position: pos,
+                    ref_type: classify_temporal_ref(sentence, &date, &now),
+                });
+                update_bounds(&mut earliest, &mut latest, date);
             }
-            if refs.iter().any(|r| r.date == date) {
-                continue;
-            }
-            refs.push(TemporalRef {
-                date,
-                original_text: sentence.to_string(),
-                confidence: 0.7,
-                position: pos,
-                ref_type: classify_temporal_ref(sentence, &date, &now),
-            });
-            update_bounds(&mut earliest, &mut latest, date);
         }
     }
 
     // Also use regex-based extraction for explicit date patterns
-    let explicit_dates = extract_explicit_dates(text);
     for (date, original, pos) in explicit_dates {
         if !is_valid_date(&date) {
             continue;
