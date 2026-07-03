@@ -151,6 +151,41 @@ async fn store_memory_full(
         .to_string()
 }
 
+/// Store a memory with an explicit creation timestamp.
+async fn store_memory_full_at(
+    h: &Harness,
+    user_id: &str,
+    content: &str,
+    memory_type: &str,
+    tags: Vec<&str>,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({
+                "user_id": user_id,
+                "content": content,
+                "memory_type": memory_type,
+                "tags": tags,
+                "created_at": created_at.to_rfc3339(),
+                "importance": 0.9,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "store_memory_full_at failed: {body}"
+    );
+    body["id"]
+        .as_str()
+        .expect("missing id in response")
+        .to_string()
+}
+
 /// Recall memories for a user
 async fn recall(h: &Harness, user_id: &str, query: &str) -> (StatusCode, Value) {
     json_of(
@@ -1522,6 +1557,72 @@ mod proactive_integration_tests {
                 .iter()
                 .any(|m| m["id"].as_str() == Some(memory_id.as_str())),
             "proactive_context should not drop explicit memories as context echoes: {proactive_body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proactive_context_threshold_uses_normalized_score_scale() {
+        let h = Harness::new();
+        let content = "Workflow preference: proactive context threshold calibration should surface durable old validation memories when recall ranks them as the best candidate.";
+        let created_at = chrono::Utc::now() - chrono::Duration::days(30);
+        let memory_id = store_memory_full_at(
+            &h,
+            "test-user",
+            content,
+            "Decision",
+            vec!["workflow", "threshold", "validation"],
+            created_at,
+        )
+        .await;
+        wait_for_indexing().await;
+
+        let query = "proactive context threshold calibration validation memories";
+        let (status, zero_threshold_body) = json_of(
+            h.app(),
+            authed_post(
+                "/api/proactive_context",
+                json!({
+                    "user_id": "test-user",
+                    "context": query,
+                    "max_results": 10,
+                    "semantic_threshold": 0.0,
+                    "auto_ingest": false,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            zero_threshold_body["memories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"].as_str() == Some(memory_id.as_str())),
+            "sanity check: zero threshold should surface the stored memory: {zero_threshold_body}"
+        );
+
+        let (status, tiny_threshold_body) = json_of(
+            h.app(),
+            authed_post(
+                "/api/proactive_context",
+                json!({
+                    "user_id": "test-user",
+                    "context": query,
+                    "max_results": 10,
+                    "semantic_threshold": 0.0001,
+                    "auto_ingest": false,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            tiny_threshold_body["memories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"].as_str() == Some(memory_id.as_str())),
+            "tiny positive threshold should use normalized score scale: {tiny_threshold_body}"
         );
     }
 
