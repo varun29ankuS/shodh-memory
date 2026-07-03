@@ -1,6 +1,6 @@
 # Shodh-Memory Performance Benchmarks
 
-Comprehensive performance measurements for shodh-memory v0.1.5+.
+Comprehensive performance measurements for shodh-memory (last measured on v0.1.5; current release v0.2.0).
 
 **Test Environment:** Windows 11, Intel i7-1355U (10 cores, 12 threads), Rust 1.75, Release build with LTO
 
