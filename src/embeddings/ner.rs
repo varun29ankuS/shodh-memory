@@ -202,6 +202,19 @@ struct LazyNerModel {
 
 impl LazyNerModel {
     fn new(config: &NerConfig) -> Result<Self> {
+        // GUARD (upgrade-panic fix): every ort session creation must go through
+        // the shared ORT_DYLIB_PATH guard. Without it, an NER init racing ahead
+        // of the runtime download made ort fall back to bare-name loading —
+        // on Windows that finds C:\Windows\System32\onnxruntime.dll (an old
+        // 1.17.x), whose version handshake panics and poisons ort's global
+        // mutex, killing every embedder call for the process lifetime. The
+        // OnceLock guard is idempotent AND blocking, so a concurrent caller
+        // waits for the in-flight download instead of racing it.
+        let offline_mode = std::env::var("SHODH_OFFLINE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        super::minilm::pre_init_ort_runtime(offline_mode);
+
         // macOS ARM64: default to 1 thread to avoid Eigen thread pool
         // spin-to-block deadlock on heterogeneous P/E cores.
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
