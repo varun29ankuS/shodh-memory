@@ -3385,10 +3385,16 @@ impl MultiUserMemoryManager {
         // endpoint) is never stored at all. Typed edges (cue/semantic/learned/label) and
         // fragment bridges always survive — they carry grounding the PMI lacks. The point:
         // a co-occurrence graph is >80% incidental edges; dropping them shrinks the graph
-        // AND removes noise. Default OFF — A/B for graph SIZE + edge precision, not just recall@10.
+        // AND removes noise.
+        // Default ON (flipped 2026-07-03): our A/B measured −97.4% edges with recall
+        // UNCHANGED, and production data confirmed the cost of the dense default —
+        // issue #90 reported 240k edges from 3k memories (~79/memory) with RSS growth
+        // to match. Gating applies at edge BIRTH; existing dense graphs don't shrink
+        // retroactively. Opt out with SHODH_GRAPH_PMI_GATE=0 (the pmi-gate-* workflows
+        // pin their control arms to 0 explicitly).
         let pmi_gate: bool = std::env::var("SHODH_GRAPH_PMI_GATE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
         // PPMI floor by default: prune generic edges whose PMI < 0.0 (they co-occur no more
         // than chance). Raise it to prune more aggressively; lower (negative) to keep more.
         let pmi_gate_min: f32 = std::env::var("SHODH_GRAPH_PMI_GATE_MIN")
