@@ -1,0 +1,60 @@
+# ONNX Runtime memory attribution probe — Linux edition (#90).
+#
+# Runs tests/onnx_memory_probe.rs on ubuntu (the same environment class as the
+# field reports: Linux, jemalloc-linked rocksdb) and publishes the staged-RSS
+# table. Windows local measurement attributed ~179MB to ONNX with a flat
+# arena-reuse signature; this run tests whether that number transfers to Linux
+# before we claim closure on the #90 plateau decomposition.
+name: diag — ONNX memory probe (Linux)
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Cache models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+
+      - name: Pre-fetch models (MiniLM + TinyBERT NER)
+        run: |
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          M="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$M"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          [ -s "$M/model_quantized.onnx" ] || dl "$M/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$M/tokenizer.json" ]       || dl "$M/tokenizer.json" "$B/tokenizer.json"
+          N="$HOME/.cache/shodh-memory/models/bert-tiny-ner"; mkdir -p "$N"
+          NPIN=9b03777d9832105fbe419f258127fb2ec3eb09d7
+          NB="https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/$NPIN"
+          [ -s "$N/model.onnx" ]      || dl "$N/model.onnx" "$NB/onnx/model_quantized.onnx"
+          [ -s "$N/tokenizer.json" ]  || dl "$N/tokenizer.json" "$NB/tokenizer.json"
+
+      - name: Run probe
+        run: |
+          set -o pipefail
+          cargo test --test onnx_memory_probe -- --ignored --nocapture 2>&1 | tee probe.log
+
+      - name: Publish table
+        if: always()
+        run: |
+          echo "## ONNX RSS attribution — Linux (ubuntu runner)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/=== ONNX RSS attribution/,/TOTAL ONNX-attributable/p' probe.log >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "_Windows local reference: embedder init+1st = +137.3MB · reuse Δ = +0.1MB · NER = +32.5MB · total ≈ +179MB_" >> "$GITHUB_STEP_SUMMARY"
