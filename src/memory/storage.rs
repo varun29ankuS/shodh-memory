@@ -3051,6 +3051,33 @@ impl MemoryStorage {
     }
 
     /// Flush all column families to ensure data is persisted (critical for graceful shutdown)
+    /// RocksDB in-process memory for this storage DB: (memtable bytes,
+    /// table-reader bytes), summed over its column families. Block cache is
+    /// NOT included here — it is shared across all DBs and reported once at
+    /// the manager level (summing it per-CF would count the same pool many
+    /// times over).
+    pub fn rocksdb_memory_breakdown(&self) -> (u64, u64) {
+        let mut memtables = 0u64;
+        let mut readers = 0u64;
+        for cf_name in ["default", CF_INDEX] {
+            if let Some(cf) = self.db.cf_handle(cf_name) {
+                if let Ok(Some(v)) = self
+                    .db
+                    .property_int_value_cf(cf, "rocksdb.cur-size-all-mem-tables")
+                {
+                    memtables += v;
+                }
+                if let Ok(Some(v)) = self
+                    .db
+                    .property_int_value_cf(cf, "rocksdb.estimate-table-readers-mem")
+                {
+                    readers += v;
+                }
+            }
+        }
+        (memtables, readers)
+    }
+
     pub fn flush(&self) -> Result<()> {
         use rocksdb::FlushOptions;
 

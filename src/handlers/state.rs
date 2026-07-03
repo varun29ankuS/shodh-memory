@@ -1660,6 +1660,41 @@ impl MultiUserMemoryManager {
             .collect()
     }
 
+    /// RocksDB in-process memory, decomposed — the instrument for #90.
+    ///
+    /// - Shared block cache: read ONCE from the manager's own handle (it is a
+    ///   single LRU pool wired into every DB instance; summing the per-CF
+    ///   property would count the same pool once per column family).
+    /// - Memtables / table readers: per-CF, genuinely additive — summed across
+    ///   the DBs of currently CACHED users only. Cold users on disk are never
+    ///   opened by a diagnostic (the #362 lesson: observation must not create
+    ///   the pressure it observes).
+    pub fn rocksdb_memory_diagnostics(&self) -> crate::system_memory::RocksDbMemoryDiagnostics {
+        let mut memtables = 0u64;
+        let mut readers = 0u64;
+        let mut users_counted = 0usize;
+        for user_id in self.list_cached_users() {
+            if let Ok(memory) = self.get_user_memory(&user_id) {
+                // try_read: a diagnostic must never block a writer; a user
+                // mid-write is simply skipped this scrape.
+                if let Some(guard) = memory.try_read() {
+                    let (m, r) = guard.rocksdb_memory_breakdown();
+                    memtables += m;
+                    readers += r;
+                    users_counted += 1;
+                }
+            }
+        }
+        crate::system_memory::RocksDbMemoryDiagnostics {
+            shared_block_cache_usage_bytes: self.shared_rocksdb_cache.get_usage() as u64,
+            shared_block_cache_pinned_bytes: self.shared_rocksdb_cache.get_pinned_usage() as u64,
+            shared_block_cache_capacity_bytes: crate::constants::ROCKSDB_SHARED_CACHE_BYTES as u64,
+            user_memtables_bytes: memtables,
+            user_table_readers_bytes: readers,
+            users_counted,
+        }
+    }
+
     /// Get audit logs for a user
     pub fn get_audit_logs(&self, user_id: &str, limit: usize) -> Vec<AuditEvent> {
         let mut events: Vec<AuditEvent> = Vec::new();

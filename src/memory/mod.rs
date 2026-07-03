@@ -716,6 +716,19 @@ impl MemorySystem {
         self.graph_memory.as_ref()
     }
 
+    /// RocksDB in-process memory for this user's DBs (memory storage + graph):
+    /// (memtable bytes, table-reader bytes). Shared block cache excluded —
+    /// reported once at the manager level.
+    pub fn rocksdb_memory_breakdown(&self) -> (u64, u64) {
+        let (mut memtables, mut readers) = self.long_term_memory.rocksdb_memory_breakdown();
+        if let Some(graph) = self.graph_memory.as_ref() {
+            let (gm, gr) = graph.read().rocksdb_memory_breakdown();
+            memtables += gm;
+            readers += gr;
+        }
+        (memtables, readers)
+    }
+
     /// Age the knowledge-graph edges by `total_days` of simulated time, applying
     /// decay in `cadence_hours` steps (production runs the heavy maintenance
     /// cycle ~every 6h).

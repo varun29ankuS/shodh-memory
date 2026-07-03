@@ -3396,7 +3396,6 @@ impl GraphMemory {
         Ok(edge.uuid)
     }
 
-    /// Index an edge for an entity
     /// Drain the temporal anomalies queued by the strengthen path (dormant
     /// reactivations). Called by the ingest path after each graph write; the
     /// caller resolves entity names and emits SSE events.
@@ -3404,6 +3403,33 @@ impl GraphMemory {
         std::mem::take(&mut *self.pending_temporal_anomalies.lock())
     }
 
+    /// RocksDB in-process memory for this graph DB: (memtable bytes,
+    /// table-reader bytes), summed over all graph column families. The shared
+    /// block cache is deliberately excluded — it is one pool shared by every
+    /// DB instance and is reported once at the manager level.
+    pub fn rocksdb_memory_breakdown(&self) -> (u64, u64) {
+        let mut memtables = 0u64;
+        let mut readers = 0u64;
+        for cf_name in GRAPH_CF_NAMES {
+            if let Some(cf) = self.db.cf_handle(cf_name) {
+                if let Ok(Some(v)) = self
+                    .db
+                    .property_int_value_cf(cf, "rocksdb.cur-size-all-mem-tables")
+                {
+                    memtables += v;
+                }
+                if let Ok(Some(v)) = self
+                    .db
+                    .property_int_value_cf(cf, "rocksdb.estimate-table-readers-mem")
+                {
+                    readers += v;
+                }
+            }
+        }
+        (memtables, readers)
+    }
+
+    /// Index an edge for an entity
     fn index_entity_edge(&self, entity_uuid: &Uuid, edge_uuid: &Uuid) -> Result<()> {
         let key = format!("{entity_uuid}:{edge_uuid}");
         self.db
@@ -8532,6 +8558,35 @@ mod tests {
 
         // Drained means drained.
         assert!(graph.drain_temporal_anomalies().is_empty());
+    }
+
+    #[test]
+    fn rocksdb_memory_breakdown_reflects_writes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        // A fresh unflushed write lands in a memtable — the breakdown must see it.
+        let now = Utc::now();
+        graph
+            .add_entity(EntityNode {
+                uuid: Uuid::new_v4(),
+                name: "Breakdown Probe".to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: now,
+                last_seen_at: now,
+                mention_count: 1,
+                summary: String::new(),
+                attributes: HashMap::new(),
+                name_embedding: None,
+                salience: 0.5,
+                is_proper_noun: false,
+                selectivity: None,
+            })
+            .unwrap();
+        let (memtables, _readers) = graph.rocksdb_memory_breakdown();
+        assert!(
+            memtables > 0,
+            "memtable bytes must be visible after an unflushed write, got {memtables}"
+        );
     }
 
     /// Create a test relationship edge with specified strength and last_activated (L1 tier)

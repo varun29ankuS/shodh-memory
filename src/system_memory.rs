@@ -136,6 +136,40 @@ fn parse_u64_file_value(raw: &str) -> Option<u64> {
     }
 }
 
+/// RocksDB in-process memory, decomposed — the instrument for #90.
+///
+/// Process RSS growth (see [`SystemMemoryDiagnostics`]) tells you THAT memory
+/// grows; this tells you WHERE inside RocksDB it sits:
+/// - `shared_block_cache_*`: the single LRU pool shared by every DB instance
+///   (per-user memory DBs, per-user graph DBs, the global shared DB). Bounded
+///   by capacity — growth here plateaus by construction.
+/// - `user_memtables_bytes` / `user_table_readers_bytes`: per-column-family
+///   write buffers and index/filter readers, summed across CACHED users only
+///   (never loads cold users — the #362 lesson). These are the unbounded-ish
+///   suspects: they scale with open CFs per cached user.
+///
+/// The decisive read: if RSS climbs while all of these plateau, the growth is
+/// OUTSIDE RocksDB (allocator retention, our own caches); if memtables/readers
+/// climb with RSS, it's RocksDB tuning.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RocksDbMemoryDiagnostics {
+    /// Bytes currently used in the shared LRU block cache.
+    pub shared_block_cache_usage_bytes: u64,
+    /// Bytes pinned in the shared cache (in active use, can't be evicted).
+    pub shared_block_cache_pinned_bytes: u64,
+    /// Configured capacity of the shared cache (the hard ceiling).
+    pub shared_block_cache_capacity_bytes: u64,
+    /// Sum of active+immutable memtable bytes across all CFs of all CACHED
+    /// users' DBs (memory storage + graph).
+    pub user_memtables_bytes: u64,
+    /// Sum of estimated table-reader (index/filter) bytes outside the block
+    /// cache, same scope as `user_memtables_bytes`.
+    pub user_table_readers_bytes: u64,
+    /// How many cached users the per-user sums cover (cold users on disk are
+    /// deliberately not opened by this diagnostic).
+    pub users_counted: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

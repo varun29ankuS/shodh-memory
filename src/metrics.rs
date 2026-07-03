@@ -267,6 +267,42 @@ pub static MEMORY_HEAP_BYTES_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
     .expect("MEMORY_HEAP_BYTES_TOTAL metric must be valid at compile time")
 });
 
+/// Shared RocksDB block cache usage (single pool across all DB instances).
+pub static ROCKSDB_BLOCK_CACHE_USAGE_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_rocksdb_block_cache_usage_bytes",
+        "Bytes used in the shared RocksDB block cache (single pool across all DBs)",
+    )
+    .expect("ROCKSDB_BLOCK_CACHE_USAGE_BYTES metric must be valid at compile time")
+});
+
+/// Bytes pinned (unevictable) in the shared RocksDB block cache.
+pub static ROCKSDB_BLOCK_CACHE_PINNED_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_rocksdb_block_cache_pinned_bytes",
+        "Bytes pinned in the shared RocksDB block cache",
+    )
+    .expect("ROCKSDB_BLOCK_CACHE_PINNED_BYTES metric must be valid at compile time")
+});
+
+/// Sum of memtable bytes across all CFs of all cached users' DBs.
+pub static ROCKSDB_MEMTABLES_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_rocksdb_memtables_bytes",
+        "Active+immutable memtable bytes summed across cached users' DBs",
+    )
+    .expect("ROCKSDB_MEMTABLES_BYTES metric must be valid at compile time")
+});
+
+/// Sum of table-reader (index/filter) bytes outside the block cache.
+pub static ROCKSDB_TABLE_READERS_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_rocksdb_table_readers_bytes",
+        "Estimated table-reader bytes outside the block cache, cached users' DBs",
+    )
+    .expect("ROCKSDB_TABLE_READERS_BYTES metric must be valid at compile time")
+});
+
 /// Resident set size for the server process, when available.
 pub static PROCESS_RSS_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
     IntGauge::new(
@@ -581,6 +617,14 @@ pub fn update_system_memory_metrics(diagnostics: &crate::system_memory::SystemMe
     );
 }
 
+/// Update the RocksDB memory-decomposition gauges (the #90 instrument).
+pub fn update_rocksdb_memory_metrics(d: &crate::system_memory::RocksDbMemoryDiagnostics) {
+    ROCKSDB_BLOCK_CACHE_USAGE_BYTES.set(d.shared_block_cache_usage_bytes as i64);
+    ROCKSDB_BLOCK_CACHE_PINNED_BYTES.set(d.shared_block_cache_pinned_bytes as i64);
+    ROCKSDB_MEMTABLES_BYTES.set(d.user_memtables_bytes as i64);
+    ROCKSDB_TABLE_READERS_BYTES.set(d.user_table_readers_bytes as i64);
+}
+
 /// Register all metrics with the global registry
 ///
 /// # Returns
@@ -655,6 +699,16 @@ fn do_register_metrics() -> Result<(), MetricsError> {
     register!(PROCESS_VIRTUAL_BYTES, "PROCESS_VIRTUAL_BYTES");
     register!(CGROUP_MEMORY_CURRENT_BYTES, "CGROUP_MEMORY_CURRENT_BYTES");
     register!(CGROUP_MEMORY_PEAK_BYTES, "CGROUP_MEMORY_PEAK_BYTES");
+    register!(
+        ROCKSDB_BLOCK_CACHE_USAGE_BYTES,
+        "ROCKSDB_BLOCK_CACHE_USAGE_BYTES"
+    );
+    register!(
+        ROCKSDB_BLOCK_CACHE_PINNED_BYTES,
+        "ROCKSDB_BLOCK_CACHE_PINNED_BYTES"
+    );
+    register!(ROCKSDB_MEMTABLES_BYTES, "ROCKSDB_MEMTABLES_BYTES");
+    register!(ROCKSDB_TABLE_READERS_BYTES, "ROCKSDB_TABLE_READERS_BYTES");
 
     // Vector index metrics (aggregate)
     register!(VECTOR_INDEX_SIZE_TOTAL, "VECTOR_INDEX_SIZE_TOTAL");

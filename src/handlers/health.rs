@@ -30,6 +30,7 @@ pub struct HealthResponse {
     pub write_failures: u64,
     pub pending_retries: usize,
     pub system_memory: SystemMemoryDiagnostics,
+    pub rocksdb_memory: crate::system_memory::RocksDbMemoryDiagnostics,
 }
 
 /// Main health check endpoint
@@ -41,6 +42,10 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let (write_failures, pending_retries) = state.write_failure_metrics();
     let system_memory = crate::system_memory::read_system_memory_diagnostics();
     metrics::update_system_memory_metrics(&system_memory);
+    // RocksDB decomposition (#90): shared cache read once from the manager's
+    // handle; per-CF sums over CACHED users only (cold users stay cold).
+    let rocksdb_memory = state.rocksdb_memory_diagnostics();
+    metrics::update_rocksdb_memory_metrics(&rocksdb_memory);
 
     Json(HealthResponse {
         status: "healthy".to_string(),
@@ -52,6 +57,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         write_failures,
         pending_retries,
         system_memory,
+        rocksdb_memory,
     })
 }
 
@@ -204,6 +210,9 @@ pub async fn metrics_endpoint(State(state): State<AppState>) -> Result<String, S
     metrics::VECTOR_INDEX_SIZE_TOTAL.set(total_vectors);
     let system_memory = crate::system_memory::read_system_memory_diagnostics();
     metrics::update_system_memory_metrics(&system_memory);
+    // RocksDB decomposition (#90) — cached users only, shared cache read once.
+    let rocksdb_memory = state.rocksdb_memory_diagnostics();
+    metrics::update_rocksdb_memory_metrics(&rocksdb_memory);
 
     // Gather and encode metrics
     let encoder = prometheus::TextEncoder::new();
@@ -308,6 +317,36 @@ mod tests {
     use crate::handlers::state::MultiUserMemoryManager;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn rocksdb_diagnostics_do_not_load_cold_disk_users() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        std::fs::create_dir(temp_dir.path().join("cold-user"))
+            .expect("failed to create cold user dir");
+        let config = ServerConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            backup_enabled: false,
+            ..ServerConfig::default()
+        };
+        let state = Arc::new(
+            MultiUserMemoryManager::new(temp_dir.path().to_path_buf(), config)
+                .expect("failed to create test manager"),
+        );
+        assert_eq!(state.users_in_cache(), 0);
+
+        let d = state.rocksdb_memory_diagnostics();
+
+        assert_eq!(
+            state.users_in_cache(),
+            0,
+            "the diagnostic must not open cold user RocksDB instances"
+        );
+        assert_eq!(d.users_counted, 0, "no cached users → nothing counted");
+        assert!(
+            d.shared_block_cache_capacity_bytes > 0,
+            "shared cache capacity must report the configured ceiling"
+        );
+    }
 
     #[tokio::test]
     async fn metrics_endpoint_does_not_load_cold_disk_users() {
