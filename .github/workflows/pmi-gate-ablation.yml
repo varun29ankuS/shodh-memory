@@ -72,6 +72,9 @@ jobs:
 
       - name: Arm A — control (full co-occurrence graph)
         env:
+          # Pinned explicitly: the gate is default-ON since 2026-07-03, so the
+          # control arm must opt out rather than rely on the default.
+          SHODH_GRAPH_PMI_GATE: '0'
           SHODH_MAX_CASES: ${{ github.event.inputs.max_cases }}
           RUST_LOG: shodh_memory::handlers::state=info
         run: |

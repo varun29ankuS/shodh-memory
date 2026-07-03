@@ -72,15 +72,31 @@ impl ModelChecksums {
         Some("d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66");
 }
 
-/// ONNX Runtime download URLs by platform (v1.23.2 required by ort 2.0.0-rc.11)
-#[cfg(target_os = "windows")]
-const ONNX_RUNTIME_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip";
-#[cfg(target_os = "linux")]
-const ONNX_RUNTIME_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz";
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const ONNX_RUNTIME_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-arm64-1.23.2.tgz";
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const ONNX_RUNTIME_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-x86_64-1.23.2.tgz";
+/// Pinned ONNX Runtime version — the single source of truth. Must satisfy the
+/// `ort` crate's minimum (2.0.0-rc.11 requires >= 1.23.x); the download URL
+/// AND the cache directory are both derived from this, so bumping the pin
+/// automatically invalidates stale caches: an incompatible runtime cached by
+/// an older release lives in a different versioned directory and is never
+/// loaded (previously the unversioned shared path made upgrades load a stale
+/// dylib blindly — ort then panicked and poisoned its global mutex, turning
+/// every embedder call into a 500 while /health still reported healthy).
+pub const ONNX_RUNTIME_VERSION: &str = "1.23.2";
+
+/// ONNX Runtime download URL for this platform, derived from the pinned version.
+fn onnx_runtime_url() -> String {
+    #[cfg(target_os = "windows")]
+    let (platform, ext) = ("win-x64", "zip");
+    #[cfg(target_os = "linux")]
+    let (platform, ext) = ("linux-x64", "tgz");
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let (platform, ext) = ("osx-arm64", "tgz");
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    let (platform, ext) = ("osx-x86_64", "tgz");
+    format!(
+        "https://github.com/microsoft/onnxruntime/releases/download/v{v}/onnxruntime-{platform}-{v}.{ext}",
+        v = ONNX_RUNTIME_VERSION
+    )
+}
 
 /// Get the cache directory for shodh-memory
 pub fn get_cache_dir() -> PathBuf {
@@ -108,9 +124,17 @@ pub fn get_ner_models_dir() -> PathBuf {
     get_cache_dir().join("models").join("bert-tiny-ner")
 }
 
-/// Get the ONNX Runtime directory
+/// Get the ONNX Runtime directory — keyed by the pinned runtime version.
+///
+/// Version-keying makes cache correctness structural: every binary loads
+/// exactly the runtime it pinned, differently-pinned binaries coexist on one
+/// machine instead of fighting over a single dylib, and machines with a stale
+/// unversioned cache self-heal on the next start (the versioned directory
+/// doesn't exist yet, so a compatible runtime is downloaded).
 pub fn get_onnx_runtime_dir() -> PathBuf {
-    get_cache_dir().join("onnxruntime")
+    get_cache_dir()
+        .join("onnxruntime")
+        .join(format!("v{ONNX_RUNTIME_VERSION}"))
 }
 
 /// Check if embedding model files are downloaded and valid
@@ -608,7 +632,7 @@ pub fn download_onnx_runtime(progress: Option<ProgressCallback>) -> Result<PathB
     let archive_path = onnx_dir.join(archive_name);
 
     download_file(
-        ONNX_RUNTIME_URL,
+        &onnx_runtime_url(),
         &archive_path,
         progress.as_ref().map(|p| p.as_ref()),
     )?;
@@ -621,7 +645,39 @@ pub fn download_onnx_runtime(progress: Option<ProgressCallback>) -> Result<PathB
         tracing::warn!("Failed to clean up archive {:?}: {}", archive_path, e);
     }
 
+    // Best-effort: remove the LEGACY unversioned runtime files that pre-date
+    // version-keyed caching (they sat directly in <cache>/onnxruntime/). An
+    // incompatible one of these is exactly what used to poison upgrades.
+    // Other v*/ directories are deliberately kept — coexistence is the point.
+    if let Some(base) = onnx_dir.parent() {
+        cleanup_legacy_onnx_runtime(base);
+    }
+
     get_onnx_runtime_path().ok_or_else(|| anyhow::anyhow!("Failed to extract ONNX Runtime"))
+}
+
+/// Remove pre-versioning runtime files sitting directly in the base
+/// `onnxruntime/` directory (the old unversioned cache layout). Versioned
+/// `v*/` subdirectories are left untouched.
+fn cleanup_legacy_onnx_runtime(base: &Path) {
+    for name in [
+        "onnxruntime.dll",
+        "libonnxruntime.so",
+        "libonnxruntime.dylib",
+        "onnxruntime.zip",
+        "onnxruntime.tgz",
+    ] {
+        let legacy = base.join(name);
+        // symlink_metadata: also catch dangling symlinks exists() would miss.
+        if legacy.symlink_metadata().is_ok() {
+            match fs::remove_file(&legacy) {
+                Ok(()) => {
+                    tracing::info!("Removed legacy unversioned ONNX Runtime file {:?}", legacy)
+                }
+                Err(e) => tracing::warn!("Could not remove legacy file {:?}: {}", legacy, e),
+            }
+        }
+    }
 }
 
 /// Extract ONNX Runtime from archive
@@ -865,6 +921,65 @@ mod tests {
     fn test_models_dir() {
         let models_dir = get_models_dir();
         assert!(models_dir.to_string_lossy().contains("minilm-l6"));
+    }
+
+    /// Regression for the stale-cache upgrade panic: the runtime cache MUST be
+    /// keyed by the pinned version so an ort upgrade can never load a dylib
+    /// cached by an older release (which poisoned ort's mutex and 500'd every
+    /// embedder call while /health stayed green).
+    #[test]
+    fn onnx_runtime_dir_is_version_keyed() {
+        let dir = get_onnx_runtime_dir();
+        let s = dir.to_string_lossy().replace('\\', "/");
+        assert!(
+            s.ends_with(&format!("onnxruntime/v{ONNX_RUNTIME_VERSION}")),
+            "runtime cache dir must be version-keyed, got {s}"
+        );
+    }
+
+    /// The download URL and the cache key derive from ONE constant — they
+    /// cannot drift apart (drift was how 1.17.1 ended up under a path a
+    /// 1.23-requiring binary trusted).
+    #[test]
+    fn onnx_runtime_url_embeds_pinned_version() {
+        let url = onnx_runtime_url();
+        assert!(url.starts_with("https://github.com/microsoft/onnxruntime/releases/download/"));
+        assert_eq!(
+            url.matches(ONNX_RUNTIME_VERSION).count(),
+            2,
+            "version must appear in both the tag and the artifact name: {url}"
+        );
+    }
+
+    /// Legacy cleanup removes pre-versioning files from the base directory but
+    /// never touches versioned subdirectories (coexistence is the point).
+    #[test]
+    fn cleanup_legacy_keeps_versioned_dirs() {
+        let tmp = std::env::temp_dir().join("shodh-test-legacy-ort-cleanup");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        // legacy unversioned files in the base dir
+        fs::write(tmp.join("onnxruntime.dll"), b"stale").unwrap();
+        fs::write(tmp.join("libonnxruntime.so"), b"stale").unwrap();
+        fs::write(tmp.join("onnxruntime.tgz"), b"stale").unwrap();
+        // a versioned runtime that must survive
+        let versioned = tmp.join("v9.9.9");
+        fs::create_dir_all(&versioned).unwrap();
+        fs::write(versioned.join("onnxruntime.dll"), b"keep").unwrap();
+
+        cleanup_legacy_onnx_runtime(&tmp);
+
+        assert!(!tmp.join("onnxruntime.dll").exists(), "legacy dll must go");
+        assert!(!tmp.join("libonnxruntime.so").exists(), "legacy so must go");
+        assert!(
+            !tmp.join("onnxruntime.tgz").exists(),
+            "legacy archive must go"
+        );
+        assert!(
+            versioned.join("onnxruntime.dll").exists(),
+            "versioned runtime must be untouched"
+        );
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     /// Regression test for #250: a 14KB providers_shared stub masquerading as
