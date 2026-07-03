@@ -97,7 +97,6 @@ env = { SHODH_API_KEY = "your-api-key-here" }
 | `list_memories` | List all stored memories |
 | `read_memory` | Read full content of a specific memory by ID |
 | `forget` | Delete a specific memory by ID |
-| `reinforce` | Reinforce a memory (boost importance) |
 </details>
 
 <details>
