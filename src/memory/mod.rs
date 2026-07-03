@@ -1434,7 +1434,9 @@ impl MemorySystem {
             std::collections::HashMap::new();
 
         'outer: for mem in memories {
-            let source_score = mem.score.unwrap_or_else(|| mem.salience_score_with_access());
+            let source_score = mem
+                .score
+                .unwrap_or_else(|| mem.salience_score_with_access());
             if source_score <= 0.0 {
                 continue;
             }
@@ -1461,7 +1463,9 @@ impl MemorySystem {
                         // Confidence: record-level when present (provenance-aware
                         // edges), else the edge's effective strength (co-occurrence
                         // / legacy edges store None). Filter weak attestations.
-                        let conf = record.confidence.unwrap_or_else(|| edge.effective_strength());
+                        let conf = record
+                            .confidence
+                            .unwrap_or_else(|| edge.effective_strength());
                         if conf < COMPANION_INJECTION_MIN_CONFIDENCE {
                             continue;
                         }
@@ -10049,11 +10053,7 @@ mod companion_injection_tests {
         (system, temp_dir)
     }
 
-    fn remember_with_entities(
-        system: &MemorySystem,
-        content: &str,
-        entities: &[&str],
-    ) -> MemoryId {
+    fn remember_with_entities(system: &MemorySystem, content: &str, entities: &[&str]) -> MemoryId {
         let experience = Experience {
             content: content.to_string(),
             entities: entities.iter().map(|s| s.to_string()).collect(),
@@ -10155,7 +10155,8 @@ mod companion_injection_tests {
         let (system, _t) = setup();
         // Companion is a separate stored memory; anchor exposes entity "A".
         let companion_id = remember_with_entities(&system, "Companion turn about B and C.", &["B"]);
-        let anchor_id = remember_with_entities(&system, "Anchor turn mentions A and B.", &["A", "B"]);
+        let anchor_id =
+            remember_with_entities(&system, "Anchor turn mentions A and B.", &["A", "B"]);
         let mut anchor = system.get_memory(&anchor_id).unwrap();
         anchor.set_score(1.0);
 
@@ -10171,7 +10172,11 @@ mod companion_injection_tests {
         let companions =
             system.harvest_provenance_companions(&system.graph_memory().unwrap().read(), &ranked);
 
-        assert_eq!(companions.len(), 1, "the single attesting companion is harvested");
+        assert_eq!(
+            companions.len(),
+            1,
+            "the single attesting companion is harvested"
+        );
         let (mem, score) = &companions[0];
         assert_eq!(mem.id, companion_id, "harvested the attesting episode");
         // Sub-source: 1.0 (source) * 0.9 (conf) * 0.5 (factor) = 0.45 < 1.0.
@@ -10226,11 +10231,8 @@ mod companion_injection_tests {
             let a = add_entity(&graph, "A");
             // cap + 3 distinct companion episodes, each attesting its own edge off A.
             for i in 0..(cap + 3) {
-                let companion = remember_with_entities(
-                    &system,
-                    &format!("Companion episode number {i}."),
-                    &[],
-                );
+                let companion =
+                    remember_with_entities(&system, &format!("Companion episode number {i}."), &[]);
                 let other = add_entity(&graph, &format!("Other{i}"));
                 add_edge_with_provenance(&graph, a, other, companion.0, Some(0.9));
             }
@@ -10239,7 +10241,11 @@ mod companion_injection_tests {
         let ranked: Vec<SharedMemory> = vec![Arc::new(anchor)];
         let companions =
             system.harvest_provenance_companions(&system.graph_memory().unwrap().read(), &ranked);
-        assert_eq!(companions.len(), cap, "injection is bounded by COMPANION_INJECTION_MAX");
+        assert_eq!(
+            companions.len(),
+            cap,
+            "injection is bounded by COMPANION_INJECTION_MAX"
+        );
     }
 
     /// No provenance on the incident edges → nothing to harvest (no-op).

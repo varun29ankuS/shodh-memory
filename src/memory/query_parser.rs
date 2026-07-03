@@ -4632,7 +4632,11 @@ mod tests {
         let q = "Who does the colleague that Vorland works closely with manage?";
         let analysis = analyze_query(q);
         let onto = infer_ontological_intent(q, &analysis);
-        let relations: Vec<String> = onto.relation_types.iter().map(|r| format!("{r:?}")).collect();
+        let relations: Vec<String> = onto
+            .relation_types
+            .iter()
+            .map(|r| format!("{r:?}"))
+            .collect();
         let entity_count = analysis.focal_entities.len();
         assert!(
             detect_multihop_intent(q, entity_count, &relations),
