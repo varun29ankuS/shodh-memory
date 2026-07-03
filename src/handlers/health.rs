@@ -170,13 +170,15 @@ pub async fn metrics_endpoint(State(state): State<AppState>) -> Result<String, S
     let users_in_cache = state.users_in_cache();
     metrics::ACTIVE_USERS.set(users_in_cache as i64);
 
-    // Aggregate metrics across all users
+    // Aggregate metrics across currently cached users only.
+    // list_users() returns filesystem directories; get_user_memory() would open
+    // RocksDB for cold users and make a metrics scrape increase memory/FD usage.
     let (mut total_working, mut total_session, mut total_longterm, mut total_heap) =
         (0i64, 0i64, 0i64, 0i64);
     let mut total_vectors = 0i64;
 
-    for user_id in state.list_users().iter().take(100) {
-        if let Ok(memory_sys) = state.get_user_memory(user_id) {
+    for user_id in state.list_cached_users() {
+        if let Ok(memory_sys) = state.get_user_memory(&user_id) {
             if let Some(guard) = memory_sys.try_read() {
                 let stats = guard.stats();
                 total_working += stats.working_memory_count as i64;
@@ -297,4 +299,42 @@ pub async fn get_context_status(State(state): State<AppState>) -> Json<Vec<Conte
         .collect();
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Json(sessions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ServerConfig;
+    use crate::handlers::state::MultiUserMemoryManager;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn metrics_endpoint_does_not_load_cold_disk_users() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        std::fs::create_dir(temp_dir.path().join("cold-user"))
+            .expect("failed to create cold user dir");
+        let config = ServerConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            backup_enabled: false,
+            ..ServerConfig::default()
+        };
+        let state = Arc::new(
+            MultiUserMemoryManager::new(temp_dir.path().to_path_buf(), config)
+                .expect("failed to create test manager"),
+        );
+
+        assert_eq!(state.list_users(), vec!["cold-user".to_string()]);
+        assert_eq!(state.users_in_cache(), 0);
+
+        metrics_endpoint(State(state.clone()))
+            .await
+            .expect("metrics endpoint failed");
+
+        assert_eq!(
+            state.users_in_cache(),
+            0,
+            "metrics scrape must not open cold user RocksDB instances"
+        );
+    }
 }

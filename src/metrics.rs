@@ -249,7 +249,10 @@ pub static ACTIVE_USERS: LazyLock<IntGauge> = LazyLock::new(|| {
 /// Total memories stored by tier (aggregate across all users)
 pub static MEMORIES_BY_TIER: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     IntGaugeVec::new(
-        Opts::new("shodh_memories_by_tier", "Total memories by tier"),
+        Opts::new(
+            "shodh_memories_by_tier",
+            "Total memories by tier across currently cached users",
+        ),
         &["tier"], // tier: "working", "session", "longterm"
     )
     .expect("MEMORIES_BY_TIER metric must be valid at compile time")
@@ -259,7 +262,7 @@ pub static MEMORIES_BY_TIER: LazyLock<IntGaugeVec> = LazyLock::new(|| {
 pub static MEMORY_HEAP_BYTES_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
     IntGauge::new(
         "shodh_memory_heap_bytes_total",
-        "Total estimated heap usage across all users",
+        "Total estimated heap usage across currently cached users",
     )
     .expect("MEMORY_HEAP_BYTES_TOTAL metric must be valid at compile time")
 });
@@ -317,7 +320,7 @@ pub static CGROUP_MEMORY_PEAK_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
 pub static VECTOR_INDEX_SIZE_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
     IntGauge::new(
         "shodh_vector_index_size_total",
-        "Total number of vectors in all indices",
+        "Total number of vectors across currently cached user indices",
     )
     .expect("VECTOR_INDEX_SIZE_TOTAL metric must be valid at compile time")
 });

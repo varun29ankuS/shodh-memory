@@ -47,6 +47,12 @@ struct LazyModel {
 
 impl LazyModel {
     fn new(config: &EmbeddingConfig) -> Result<Self> {
+        // Defense in depth: session creation must never precede the runtime
+        // path guard (see LazyNerModel::new for the failure mode). Idempotent.
+        let offline_mode = std::env::var("SHODH_OFFLINE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        pre_init_ort_runtime(offline_mode);
         // macOS ARM64 (M1/M2/M3): default to 1 thread to avoid Eigen thread pool
         // spin-to-block deadlock on heterogeneous P/E cores.
         // See: https://github.com/microsoft/onnxruntime/issues/10270
