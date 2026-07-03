@@ -72,7 +72,8 @@ jobs:
           from huggingface_hub import hf_hub_download
           print(hf_hub_download(repo_id='xiaowu0162/longmemeval-cleaned',
                                 filename='longmemeval_s_cleaned.json',
-                                repo_type='dataset'))
+                                repo_type='dataset',
+                                revision='98d7416c24c778c2fee6e6f3006e7a073259d48f'))
           PY
           )
           python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
