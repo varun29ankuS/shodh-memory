@@ -21,7 +21,9 @@ use tower::ServiceExt;
 
 use shodh_memory::{
     config::ServerConfig,
-    handlers::{build_protected_routes, build_public_routes, MultiUserMemoryManager},
+    handlers::{
+        build_probe_routes, build_protected_routes, build_public_routes, MultiUserMemoryManager,
+    },
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -37,6 +39,7 @@ fn init_env() {
         unsafe {
             std::env::set_var("SHODH_API_KEYS", TEST_KEY);
         }
+        let _ = shodh_memory::metrics::register_metrics();
     });
 }
 
@@ -65,11 +68,12 @@ impl Harness {
 
     fn app(&self) -> Router {
         // Mirror main.rs: auth middleware only wraps protected routes.
+        let probe = build_probe_routes(self.mgr.clone());
         let public = build_public_routes(self.mgr.clone());
         let protected = build_protected_routes(self.mgr.clone()).layer(axum::middleware::from_fn(
             shodh_memory::auth::auth_middleware,
         ));
-        Router::new().merge(public).merge(protected)
+        Router::new().merge(probe).merge(public).merge(protected)
     }
 }
 
@@ -222,6 +226,21 @@ async fn health_endpoint() {
         body.get("status").is_some(),
         "health response needs 'status' field"
     );
+    let system_memory = body["system_memory"]
+        .as_object()
+        .expect("health response needs 'system_memory' object");
+    for field in [
+        "process_rss_bytes",
+        "process_peak_rss_bytes",
+        "process_virtual_bytes",
+        "cgroup_memory_current_bytes",
+        "cgroup_memory_peak_bytes",
+    ] {
+        assert!(
+            system_memory.contains_key(field),
+            "system_memory missing '{field}'"
+        );
+    }
 }
 
 #[tokio::test]
@@ -249,11 +268,20 @@ async fn health_index() {
 #[tokio::test]
 async fn metrics_endpoint() {
     let h = Harness::new();
-    let status = status_of(h.app(), authed_get("/metrics")).await;
+    let (status, body) = json_of(h.app(), authed_get("/metrics")).await;
     // metrics handler should always return 200 in test harness
     assert!(
         status == StatusCode::OK,
         "unexpected metrics status: {status}"
+    );
+    let metrics = body.as_str().expect("metrics response should be text");
+    assert!(
+        metrics.contains("shodh_process_rss_bytes"),
+        "metrics response should include process RSS gauge"
+    );
+    assert!(
+        metrics.contains("shodh_cgroup_memory_current_bytes"),
+        "metrics response should include cgroup memory gauge"
     );
 }
 

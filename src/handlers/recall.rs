@@ -2054,10 +2054,15 @@ pub async fn proactive_context(
                     if alpha_count < 10 {
                         return false;
                     }
-                    // Anti-echo: skip memories that are just our own context echoed back
-                    // (auto-ingest stores context, which then gets retrieved for itself)
+                    // Anti-echo: skip auto-ingested memories that are just our own context
+                    // echoed back. Explicit memories can legitimately overlap the current
+                    // context and must still surface through proactive_context.
                     // Uses inline comparison to avoid allocating a HashSet<String> per candidate
-                    if !query_words.is_empty() {
+                    let is_auto_echo_candidate = m.experience.tags.iter().any(|tag| {
+                        tag.eq_ignore_ascii_case("auto-captured")
+                            || tag.eq_ignore_ascii_case("assistant-response")
+                    });
+                    if is_auto_echo_candidate && !query_words.is_empty() {
                         let mut mem_word_count = 0usize;
                         let mut overlap = 0usize;
                         for w in content.split_whitespace() {
@@ -2286,20 +2291,23 @@ pub async fn proactive_context(
                 enriched.sort_by(|a, b| b.1.total_cmp(&a.1));
             }
 
-            // Drop results below minimum absolute score — don't pad with irrelevant filler
-            // Also drop results that are < 30% of the top score (too weak relative to best)
+            // Normalize scores before applying the public threshold. Raw pipeline scores are
+            // often tiny after proactive recency decay, while the API exposes scores on the
+            // same relative 0.0-0.95 scale as recall().
             let top_score = enriched.first().map(|(_, s, _)| *s).unwrap_or(0.0);
-            let abs_min = semantic_threshold;
-            let relative_min = top_score * 0.30;
-            let effective_min = abs_min.max(relative_min);
-            enriched.retain(|(_, s, _)| *s >= effective_min);
-
-            // Normalize scores for display: scale relative to top result
             if top_score > 0.0 {
                 for (_, score, _) in enriched.iter_mut() {
                     *score = (*score / top_score) * 0.95;
                 }
             }
+
+            // Drop results below minimum normalized score — don't pad with irrelevant filler.
+            // Also drop results that are < 30% of the top normalized score.
+            let top_normalized_score = if top_score > 0.0 { 0.95 } else { 0.0 };
+            let abs_min = semantic_threshold;
+            let relative_min = top_normalized_score * 0.30;
+            let effective_min = abs_min.max(relative_min);
+            enriched.retain(|(_, s, _)| *s >= effective_min);
 
             // (E) Update habituation state — record that these memories were surfaced.
             // Positive feedback resets count in Phase 0 of the next call.
