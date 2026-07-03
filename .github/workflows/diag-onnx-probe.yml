@@ -8,6 +8,9 @@
 name: diag — ONNX memory probe (Linux)
 on:
   workflow_dispatch:
+  push:
+    branches: [diag/onnx-memory-probe]
+    paths: ['.github/workflows/diag-onnx-probe.yml', 'tests/onnx_memory_probe.rs']
 
 permissions:
   contents: read
