@@ -82,23 +82,16 @@ jobs:
               try: return json.load(open(f))
               except Exception as e: return {"error": str(e)}
           a, b = load('mh-a.json'), load('mh-b.json')
-          def dig(d, *keys):
-              for k in keys:
-                  if isinstance(d, dict) and k in d: d = d[k]
-                  else: return None
-              return d
-          # tolerate either flat or nested report shapes
-          def metric(d, name):
-              for path in ((name,), ('summary', name), ('metrics', name)):
-                  v = dig(d, *path)
-                  if isinstance(v, (int, float)): return v
-              return None
-          rows = [("two-hop recall@10", "multihop_recall_at_10"), ("one-hop recall@10", "onehop_recall_at_10")]
-          print("| metric | A control | B companions | Δ |")
+          def full_row(d):
+              for r in d.get('rows', []):
+                  if r.get('layer') == 'full': return r
+              return {}
+          fa, fb = full_row(a), full_row(b)
+          print("| metric (full layer) | A control | B companions | delta |")
           print("| --- | --- | --- | --- |")
           verdict_gain, verdict_hold = None, None
-          for label, key in rows:
-              va, vb = metric(a, key), metric(b, key)
+          for label, key in (("two-hop recall@10", "multihop_recall_at_10"), ("one-hop recall@10", "onehop_recall_at_10")):
+              va, vb = fa.get(key), fb.get(key)
               if va is None or vb is None:
                   print(f"| {label} | ? | ? | parse miss ({key}) |"); continue
               print(f"| {label} | {va:.4f} | {vb:.4f} | {vb-va:+.4f} |")
