@@ -97,6 +97,14 @@ claude mcp add shodh-memory -- npx -y @shodh/memory-mcp
 </details>
 
 <details>
+<summary>Direct server mode (systemd / MCP / REST)</summary>
+
+For Linux users who want the Rust HTTP server supervised separately from MCP
+clients, see [Direct server mode with systemd](docs/direct-server-systemd.md).
+
+</details>
+
+<details>
 <summary>Cursor / Claude Desktop config</summary>
 
 ```json

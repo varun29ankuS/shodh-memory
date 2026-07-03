@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use super::state::MultiUserMemoryManager;
 use super::{
-    ab_testing, compression, consolidation, crud, export, facts, files, graph, health,
+    ab_testing, anomalies, compression, consolidation, crud, export, facts, files, graph, health,
     integrations, lineage, mif, recall, remember, search, sessions, todos, users, visualization,
     webhooks,
 };
@@ -75,7 +75,8 @@ pub fn build_public_routes(state: AppState) -> Router {
         // =================================================================
         // GRAPH VISUALIZATION (PUBLIC - HTML VIEWER ONLY)
         // =================================================================
-        .route("/graph/view", get(visualization::graph_view));
+        .route("/graph/view", get(visualization::graph_view))
+        .route("/dashboard", get(visualization::dashboard));
 
     // /metrics is an authenticated route by default; expose it here only when
     // the operator has explicitly opted in via SHODH_METRICS_PUBLIC.
@@ -191,6 +192,7 @@ pub fn build_protected_routes(state: AppState) -> Router {
             "/api/consolidation/events",
             get(consolidation::get_consolidation_events),
         )
+        .route("/api/anomalies", post(anomalies::list_anomalies))
         .route("/api/backup/create", post(consolidation::create_backup))
         .route("/api/backup/list", post(consolidation::list_backups))
         .route("/api/backups", post(consolidation::list_backups)) // MCP alias

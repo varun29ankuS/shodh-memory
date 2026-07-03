@@ -58,6 +58,7 @@ pub enum AppError {
 
     // Not Found Errors (404)
     MemoryNotFound(String),
+    EntityNotFound(String),
     UserNotFound(String),
     TodoNotFound(String),
     ProjectNotFound(String),
@@ -116,6 +117,7 @@ impl AppError {
             Self::AmbiguousMemoryId { .. } => "AMBIGUOUS_MEMORY_ID",
             Self::ResourceLimit { .. } => "RESOURCE_LIMIT",
             Self::MemoryNotFound(_) => "MEMORY_NOT_FOUND",
+            Self::EntityNotFound(_) => "ENTITY_NOT_FOUND",
             Self::UserNotFound(_) => "USER_NOT_FOUND",
             Self::TodoNotFound(_) => "TODO_NOT_FOUND",
             Self::ProjectNotFound(_) => "PROJECT_NOT_FOUND",
@@ -144,6 +146,7 @@ impl AppError {
             Self::ResourceLimit { .. } => StatusCode::TOO_MANY_REQUESTS,
 
             Self::MemoryNotFound(_)
+            | Self::EntityNotFound(_)
             | Self::UserNotFound(_)
             | Self::TodoNotFound(_)
             | Self::ProjectNotFound(_) => StatusCode::NOT_FOUND,
@@ -185,6 +188,7 @@ impl AppError {
                 format!("Resource limit exceeded for {resource}: current={current} MB, limit={limit} MB")
             }
             Self::MemoryNotFound(id) => format!("Memory not found: {id}"),
+            Self::EntityNotFound(name) => format!("Entity not found: {name}"),
             Self::UserNotFound(id) => format!("User not found: {id}"),
             Self::TodoNotFound(id) => format!("Todo not found: {id}"),
             Self::ProjectNotFound(id) => format!("Project not found: {id}"),
