@@ -15,8 +15,9 @@ Output (recall-harness JSONL):
   tests/recall/corpora/locomo.jsonl  — one CorpusItem per dialogue turn
   tests/recall/locomo_cases.jsonl    — one SmokeCase per QA pair (cat 1-4)
 
-Usage:
-  curl -sL https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json -o locomo10.json
+Usage (PINNED to a fixed upstream commit — regenerating from `main` would let
+upstream edits silently change our benchmark basis):
+  curl -sL https://raw.githubusercontent.com/snap-research/locomo/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/locomo10.json -o locomo10.json
   python benchmarks/locomo_to_harness.py --input locomo10.json
 """
 from __future__ import annotations
