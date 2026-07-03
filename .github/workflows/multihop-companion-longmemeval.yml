@@ -1,0 +1,138 @@
+# Inc-2 DECISIVE test — companion injection on the real corpus (LongMemEval-S).
+#
+# The planted-harness authenticity run reproduced +0.15 two-hop with zero
+# one-hop loss (run 28659034488). But the planted harness is synthetic; the
+# multi_hop wall lives here (0.56 on the canonical 50-q sample). This A/B is
+# the gate for any default-flip conversation:
+#   A = control                          (SHODH_COMPANION_MULTIHOP_GATE unset)
+#   B = SHODH_COMPANION_MULTIHOP_GATE=1
+# One shared fixture (built once), both arms on it. Read: multi_hop recall@10
+# must gain with single_hop/knowledge_update/temporal held. NOTE on power: at
+# limit=100 only ~28 multi_hop questions — directional, not definitive; a
+# clear positive earns a bigger confirm run.
+name: multihop companion — LongMemEval A/B
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'questions per arm (shared shuffled fixture). Default 100.'
+        required: false
+        default: '100'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mh-companion-lme
+  cancel-in-progress: true
+
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Download LongMemEval-S (pinned) + build ONE shared fixture
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          JSON=$(python3 - <<'PY'
+          from huggingface_hub import hf_hub_download
+          print(hf_hub_download(repo_id='xiaowu0162/longmemeval-cleaned',
+                                filename='longmemeval_s_cleaned.json',
+                                repo_type='dataset',
+                                revision='98d7416c24c778c2fee6e6f3006e7a073259d48f'))
+          PY
+          )
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
+            --limit "${{ github.event.inputs.limit || '100' }}"
+          wc -l tests/recall/longmemeval/manifest.jsonl
+
+      - name: Arm A — control (gate off)
+        run: |
+          set -o pipefail
+          ./target/release/recall-eval \
+            --longmemeval tests/recall/longmemeval \
+            --output unused-a.json --storage ./lme-a-storage 2>a.log | tee a-stdout.log
+
+      - name: Arm B — SHODH_COMPANION_MULTIHOP_GATE=1
+        env:
+          SHODH_COMPANION_MULTIHOP_GATE: '1'
+        run: |
+          set -o pipefail
+          ./target/release/recall-eval \
+            --longmemeval tests/recall/longmemeval \
+            --output unused-b.json --storage ./lme-b-storage 2>b.log | tee b-stdout.log
+
+      - name: Compare
+        if: always()
+        run: |
+          echo "## Inc-2 real-corpus A/B — LongMemEval (limit=${{ github.event.inputs.limit || '100' }})" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import re
+          def parse(fs):
+              overall=None; p1=None; cats={}
+              for f in fs:
+                  try: t=open(f, errors='ignore').read()
+                  except FileNotFoundError: continue
+                  m=re.search(r'LongMemEval-S:\s*\d+\s*questions.*?recall@10\s*=\s*([0-9.]+)', t)
+                  if m: overall=float(m.group(1))
+                  mp=re.search(r'p@1\s*=\s*([0-9.]+)', t)
+                  if mp: p1=float(mp.group(1))
+                  for cat,n,r in re.findall(r'^\s+(\w+)\s+n=(\d+)\s+recall@10\s*=\s*([0-9.]+)', t, re.M):
+                      cats[cat]=(int(n),float(r))
+              return overall,p1,cats
+          ao,ap,ac = parse(['a-stdout.log','a.log'])
+          bo,bp,bc = parse(['b-stdout.log','b.log'])
+          f=lambda x: f"{x:.4f}" if isinstance(x,float) else "?"
+          print("| metric | A control | B companions | delta |")
+          print("| --- | --- | --- | --- |")
+          if ao is not None and bo is not None:
+              print(f"| recall@10 ALL | {f(ao)} | {f(bo)} | {bo-ao:+.4f} |")
+          if ap is not None and bp is not None:
+              print(f"| p@1 ALL | {f(ap)} | {f(bp)} | {bp-ap:+.4f} |")
+          for cat in sorted(set(ac)|set(bc)):
+              na,ra = ac.get(cat,(0,None)); nb,rb = bc.get(cat,(0,None))
+              star=" **<-- the lever**" if cat=="multi_hop" else ""
+              if ra is not None and rb is not None:
+                  print(f"| {cat} (n={na}){star} | {f(ra)} | {f(rb)} | {rb-ra:+.4f} |")
+          if ac.get('multi_hop') and bc.get('multi_hop'):
+              d = bc['multi_hop'][1]-ac['multi_hop'][1]
+              others_ok = all(bc[c][1] >= ac[c][1]-0.02 for c in ac if c!='multi_hop' and c in bc)
+              print()
+              print(f"**Read: multi_hop {d:+.4f}; other categories {'held' if others_ok else 'REGRESSED — inspect'}.** "
+                    f"(n~{ac['multi_hop'][0]} — directional at limit=100; a clear positive earns a bigger confirm.)")
+          PY
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mh-companion-lme
+          path: |
+            a.log
+            b.log
+            a-stdout.log
+            b-stdout.log
