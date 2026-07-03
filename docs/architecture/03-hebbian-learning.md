@@ -218,6 +218,28 @@ This simulates sleep-dependent memory consolidation.
 
 ## Metrics & Observability
 
+### PMI Edge-Gate Diagnostics
+
+`SHODH_GRAPH_PMI_GATE` is an edge-birth filter for generic graph links. It drops
+only incidental `CoOccurs` / `RelatedTo` candidate edges whose birth PMI is below
+`SHODH_GRAPH_PMI_GATE_MIN`. Typed links, cue-derived links, learned relation
+links, and fragment-safe bridges are not pruned by this gate.
+
+This boundary matters when interpreting graph-size measurements:
+
+1. The gate affects new graph construction only; it does not shrink an existing
+   dense graph retroactively.
+2. The expected edge drop depends on corpus shape. Raw dialogue imports with a
+   large generic co-occurrence surface should show a larger effect than already
+   pre-processed or tag/entity-projected memory objects.
+3. A clean comparison needs an explicit control arm with `SHODH_GRAPH_PMI_GATE=0`
+   because the current default is gated.
+
+The `pmi-gate-*` GitHub workflows keep the default A/B path unchanged and expose
+an optional `gate_min_sweep` input for manual threshold sweeps across corpus
+shapes. Use it when a single `gate_min=0.0` run does not explain a local graph
+profile.
+
 ### Prometheus Metrics
 
 ```

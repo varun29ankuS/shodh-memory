@@ -23,6 +23,10 @@ on:
         description: 'SHODH_GRAPH_PMI_GATE_MIN (PMI floor).'
         required: false
         default: '0.0'
+      gate_min_sweep:
+        description: 'Optional comma-separated SHODH_GRAPH_PMI_GATE_MIN values for extra gated arms.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -145,6 +149,108 @@ jobs:
           print('```'); print(open('b-summary.txt', errors='ignore').read() if __import__('os').path.exists('b-summary.txt') else '(none)'); print('```')
           PY
 
+      - name: Optional gate-min sweep
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gate_min_sweep != '' }}
+        env:
+          SHODH_GATE_MIN_SWEEP: ${{ github.event.inputs.gate_min_sweep }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+          import subprocess
+
+          def parse_gates(raw):
+              gates = []
+              for token in raw.split(","):
+                  token = token.strip()
+                  if not token:
+                      continue
+                  float(token)
+                  gates.append(token)
+              if not gates:
+                  raise SystemExit("gate_min_sweep did not contain any numeric values")
+              return gates
+
+          def slug(value):
+              return re.sub(r"[^0-9A-Za-z_.-]", "_", value).replace("-", "neg")
+
+          def overall(path):
+              try:
+                  text = open(path, errors="ignore").read()
+              except FileNotFoundError:
+                  return None
+              match = re.search(r"LongMemEval-S:.*?recall@10\s*=\s*([0-9.]+)", text)
+              return float(match.group(1)) if match else None
+
+          def edge_counts(path):
+              totals = dict(generic=0, pmi_gated=0, cue=0, semantic=0, pair_table=0, learned=0)
+              try:
+                  lines = open(path, errors="ignore")
+              except FileNotFoundError:
+                  return totals
+              for line in lines:
+                  if "edge typing provenance" not in line:
+                      continue
+                  for key, value in re.findall(r"(\w+)=(\d+)", line):
+                      if key in totals:
+                          totals[key] += int(value)
+              totals["stored_total"] = (
+                  totals["generic"] + totals["cue"] + totals["semantic"]
+                  + totals["pair_table"] + totals["learned"]
+              )
+              return totals
+
+          rows = []
+          for gate in parse_gates(os.environ["SHODH_GATE_MIN_SWEEP"]):
+              safe = slug(gate)
+              stdout_log = f"sweep-{safe}.stdout.log"
+              stderr_log = f"sweep-{safe}.log"
+              summary_log = f"sweep-{safe}.summary.txt"
+              env = os.environ.copy()
+              env.update({
+                  "SHODH_GRAPH_PMI_GATE": "1",
+                  "SHODH_GRAPH_PMI_GATE_MIN": gate,
+                  "RUST_LOG": "shodh_memory::handlers::state=info",
+              })
+              cmd = [
+                  "./target/release/recall-eval",
+                  "--longmemeval", "tests/recall/longmemeval",
+                  "--output", f"sweep-{safe}.json",
+                  "--storage", f"./lme-sweep-{safe}-storage",
+              ]
+              with open(stdout_log, "w") as out, open(stderr_log, "w") as err:
+                  result = subprocess.run(cmd, stdout=out, stderr=err, env=env, text=True)
+              if result.returncode != 0:
+                  raise SystemExit(f"gate_min={gate} failed with exit code {result.returncode}")
+              text = ""
+              for path in (stdout_log, stderr_log):
+                  try:
+                      text += open(path, errors="ignore").read()
+                  except FileNotFoundError:
+                      pass
+              with open(summary_log, "w") as handle:
+                  for line in text.splitlines():
+                      if "LongMemEval-S:" in line or "recall@" in line:
+                          handle.write(line + "\n")
+              recall = overall(stdout_log)
+              if recall is None:
+                  recall = overall(stderr_log)
+              rows.append((gate, recall, edge_counts(stderr_log)))
+
+          summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a") as handle:
+              handle.write("\n### Optional PMI gate-min sweep\n")
+              handle.write("| gate_min | recall@10 | stored edges | generic | pmi_gated |\n")
+              handle.write("| --- | ---: | ---: | ---: | ---: |\n")
+              for gate, recall, edges in rows:
+                  recall_cell = f"{recall:.4f}" if recall is not None else "parse-failed"
+                  handle.write(
+                      f"| {gate} | {recall_cell} | {edges['stored_total']} | "
+                      f"{edges['generic']} | {edges['pmi_gated']} |\n"
+                  )
+          PY
+
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -155,3 +261,7 @@ jobs:
             b.log
             a-summary.txt
             b-summary.txt
+            sweep-*.json
+            sweep-*.log
+            sweep-*.stdout.log
+            sweep-*.summary.txt

@@ -23,6 +23,10 @@ on:
         description: 'SHODH_GRAPH_PMI_GATE_MIN (PMI floor; 0.0 = PPMI). Higher prunes more.'
         required: false
         default: '0.0'
+      gate_min_sweep:
+        description: 'Optional comma-separated SHODH_GRAPH_PMI_GATE_MIN values for extra gated arms.'
+        required: false
+        default: ''
       max_cases:
         description: 'SHODH_MAX_CASES cap (blank = all)'
         required: false
@@ -140,6 +144,98 @@ jobs:
               print(f"| {cat} | {a:.3f} | {b:.3f} | {b-a:+.3f} |")
           PY
 
+      - name: Optional gate-min sweep
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.gate_min_sweep != '' }}
+        env:
+          SHODH_GATE_MIN_SWEEP: ${{ github.event.inputs.gate_min_sweep }}
+          SHODH_SWEEP_SUITE: ${{ github.event.inputs.suite || 'locomo' }}
+          SHODH_SWEEP_MAX_CASES: ${{ github.event.inputs.max_cases }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+
+          def parse_gates(raw):
+              gates = []
+              for token in raw.split(","):
+                  token = token.strip()
+                  if not token:
+                      continue
+                  float(token)
+                  gates.append(token)
+              if not gates:
+                  raise SystemExit("gate_min_sweep did not contain any numeric values")
+              return gates
+
+          def slug(value):
+              return re.sub(r"[^0-9A-Za-z_.-]", "_", value).replace("-", "neg")
+
+          def load_recall(path):
+              data = json.load(open(path))
+              full = data["layers"].get("full") or next(iter(data["layers"].values()))
+              return data, full
+
+          def edge_counts(path):
+              totals = dict(semantic=0, cue=0, pair_table=0, learned=0, generic=0,
+                            fragment_blocked=0, pmi_gated=0)
+              pat = re.compile(r"(\w+)=(\d+)")
+              for line in open(path, errors="ignore"):
+                  if "edge typing provenance" not in line:
+                      continue
+                  for key, value in pat.findall(line):
+                      if key in totals:
+                          totals[key] += int(value)
+              totals["stored_total"] = (
+                  totals["semantic"] + totals["cue"] + totals["pair_table"]
+                  + totals["learned"] + totals["generic"] + totals["fragment_blocked"]
+              )
+              return totals
+
+          suite = os.environ.get("SHODH_SWEEP_SUITE") or "locomo"
+          max_cases = os.environ.get("SHODH_SWEEP_MAX_CASES", "")
+          rows = []
+          for gate in parse_gates(os.environ["SHODH_GATE_MIN_SWEEP"]):
+              safe = slug(gate)
+              output = f"sweep-{safe}.json"
+              stdout_log = f"sweep-{safe}.stdout.log"
+              stderr_log = f"sweep-{safe}.log"
+              env = os.environ.copy()
+              env.update({
+                  "SHODH_GRAPH_PMI_GATE": "1",
+                  "SHODH_GRAPH_PMI_GATE_MIN": gate,
+                  "SHODH_MAX_CASES": max_cases,
+                  "RUST_LOG": "shodh_memory::handlers::state=info",
+              })
+              cmd = [
+                  "./target/release/recall-eval",
+                  "--suite", suite,
+                  "--output", output,
+                  "--storage", f"./sweep-{safe}-storage",
+              ]
+              with open(stdout_log, "w") as out, open(stderr_log, "w") as err:
+                  result = subprocess.run(cmd, stdout=out, stderr=err, env=env, text=True)
+              if result.returncode != 0:
+                  raise SystemExit(f"gate_min={gate} failed with exit code {result.returncode}")
+              data, full = load_recall(output)
+              edges = edge_counts(stderr_log)
+              rows.append((gate, data["case_count"], full, edges))
+
+          summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a") as handle:
+              handle.write("\n### Optional PMI gate-min sweep\n")
+              handle.write("| gate_min | cases | recall@10 | ndcg@10 | mrr | stored edges | generic | pmi_gated |\n")
+              handle.write("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+              for gate, case_count, full, edges in rows:
+                  handle.write(
+                      f"| {gate} | {case_count} | {full['recall@10']:.4f} | "
+                      f"{full['ndcg@10']:.4f} | {full['mrr']:.4f} | "
+                      f"{edges['stored_total']} | {edges['generic']} | {edges['pmi_gated']} |\n"
+                  )
+          PY
+
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -150,3 +246,6 @@ jobs:
             b-recall.json
             a.log
             b.log
+            sweep-*.json
+            sweep-*.log
+            sweep-*.stdout.log
