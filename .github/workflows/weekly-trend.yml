@@ -1,0 +1,119 @@
+# Weekly recall trend — the progress METER (the PR gate is only a regression floor).
+#
+# Every Monday: LongMemEval-S, 100 questions (shuffled representative mix, PINNED
+# dataset revision) on current main. Results are appended as a comment to the
+# tracking issue (#367) — one comment per week, recall@10 overall + per-category.
+#
+# Reading it: multi_hop is the number we're trying to move (Inc-2 provenance
+# recall is the planned lever); single_hop/knowledge_update should hold. The
+# 100-question sample carries ±2-3pp run-to-run noise — read the trend across
+# weeks, not single deltas.
+name: weekly recall trend
+on:
+  schedule:
+    - cron: '0 2 * * 1' # Mondays 02:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: weekly-trend
+  cancel-in-progress: false
+
+env:
+  TREND_ISSUE: '367'
+
+jobs:
+  trend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Download LongMemEval-S (pinned revision) + build fixture
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          JSON=$(python3 - <<'PY'
+          from huggingface_hub import hf_hub_download
+          print(hf_hub_download(repo_id='xiaowu0162/longmemeval-cleaned',
+                                filename='longmemeval_s_cleaned.json',
+                                repo_type='dataset',
+                                revision='98d7416c24c778c2fee6e6f3006e7a073259d48f'))
+          PY
+          )
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle --limit 100
+          wc -l tests/recall/longmemeval/manifest.jsonl
+
+      - name: Run LongMemEval-100
+        run: |
+          set -o pipefail
+          ./target/release/recall-eval \
+            --longmemeval tests/recall/longmemeval \
+            --output unused.json \
+            --storage ./lme-storage 2>run.log | tee stdout.log
+
+      - name: Post trend comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY' > comment.md
+          import re, subprocess, datetime
+          def text(f):
+              try: return open(f, errors='ignore').read()
+              except FileNotFoundError: return ''
+          t = text('stdout.log') + text('run.log')
+          m = re.search(r'LongMemEval-S:\s*(\d+)\s*questions\s*\(NER=(\w+)\).*?recall@10\s*=\s*([0-9.]+)', t)
+          p1 = re.search(r'p@1\s*=\s*([0-9.]+)', t)
+          sha = subprocess.check_output(['git','rev-parse','--short','HEAD']).decode().strip()
+          today = datetime.date.today().isoformat()
+          print(f"### {today} — main @ {sha}")
+          if m:
+              print(f"- **recall@10 = {float(m.group(3)):.4f}** ({m.group(1)} questions, NER={m.group(2)})" + (f" · p@1 = {float(p1.group(1)):.4f}" if p1 else ""))
+          else:
+              print("- ⚠ could not parse overall recall — see workflow logs")
+          print("\n| category | recall@10 |\n| --- | --- |")
+          for cat, n, r in re.findall(r'^\s+(\w+)\s+n=(\d+)\s+recall@10\s*=\s*([0-9.]+)', t, re.M):
+              flag = ' ⭐' if cat == 'multi_hop' else ''
+              print(f"| {cat}{flag} | {float(r):.4f} (n={n}) |")
+          PY
+          cat comment.md
+          gh issue comment "$TREND_ISSUE" --repo "$GITHUB_REPOSITORY" --body-file comment.md
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-trend-logs
+          path: |
+            stdout.log
+            run.log
+          if-no-files-found: warn
