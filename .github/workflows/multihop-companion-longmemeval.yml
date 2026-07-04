@@ -4,12 +4,18 @@
 # one-hop loss (run 28659034488). But the planted harness is synthetic; the
 # multi_hop wall lives here (0.56 on the canonical 50-q sample). This A/B is
 # the gate for any default-flip conversation:
-#   A = control                          (SHODH_COMPANION_MULTIHOP_GATE unset)
+#   A = control                          (SHODH_COMPANION_MULTIHOP_GATE=0)
 #   B = SHODH_COMPANION_MULTIHOP_GATE=1
-# One shared fixture (built once), both arms on it. Read: multi_hop recall@10
-# must gain with single_hop/knowledge_update/temporal held. NOTE on power: at
-# limit=100 only ~28 multi_hop questions — directional, not definitive; a
-# clear positive earns a bigger confirm run.
+# Read: multi_hop recall@10 must gain with single_hop/knowledge_update/temporal
+# held. NOTE on power: at limit=100 only ~25 multi_hop questions — directional,
+# not definitive; a clear positive earns a bigger confirm run.
+#
+# Arms run as PARALLEL jobs: the first attempt (run 28661797560) ran them
+# sequentially and hit the job timeout at 350min with Arm B on question 75/100
+# — one arm alone needs ~2h55m, two don't fit under the 6h runner cap. The
+# fixture is deterministic (pinned dataset revision + stable md5-of-question-id
+# shuffle), so each arm rebuilds it identically; the compare job asserts the
+# fixture hashes match before trusting any delta.
 name: multihop companion — LongMemEval A/B
 on:
   workflow_dispatch:
@@ -27,9 +33,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ab:
+  arm:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arm: a
+            gate: '0'
+          - arm: b
+            gate: '1'
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -55,7 +69,7 @@ jobs:
           [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
           [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
 
-      - name: Download LongMemEval-S (pinned) + build ONE shared fixture
+      - name: Download LongMemEval-S (pinned) + build the deterministic fixture
         run: |
           python3 -m pip install --quiet huggingface_hub
           JSON=$(python3 - <<'PY'
@@ -69,27 +83,55 @@ jobs:
           python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
             --limit "${{ github.event.inputs.limit || '100' }}"
           wc -l tests/recall/longmemeval/manifest.jsonl
+          sha256sum tests/recall/longmemeval/manifest.jsonl | cut -d' ' -f1 \
+            > "${{ matrix.arm }}-fixture.sha"
 
-      - name: Arm A — control (gate off)
-        run: |
-          set -o pipefail
-          ./target/release/recall-eval \
-            --longmemeval tests/recall/longmemeval \
-            --output unused-a.json --storage ./lme-a-storage 2>a.log | tee a-stdout.log
-
-      - name: Arm B — SHODH_COMPANION_MULTIHOP_GATE=1
+      - name: Run arm ${{ matrix.arm }} (gate=${{ matrix.gate }})
         env:
-          SHODH_COMPANION_MULTIHOP_GATE: '1'
+          SHODH_COMPANION_MULTIHOP_GATE: ${{ matrix.gate }}
+          # Capture ONLY the injection fire-rate lines (mod.rs, target
+          # companion_injection) — distinguishes "gate never fired" from
+          # "fired but changed nothing" when the arms come out close.
+          RUST_LOG: 'error,companion_injection=info'
         run: |
           set -o pipefail
           ./target/release/recall-eval \
             --longmemeval tests/recall/longmemeval \
-            --output unused-b.json --storage ./lme-b-storage 2>b.log | tee b-stdout.log
+            --output unused-${{ matrix.arm }}.json \
+            --storage ./lme-${{ matrix.arm }}-storage \
+            2>${{ matrix.arm }}.log | tee ${{ matrix.arm }}-stdout.log
 
-      - name: Compare
+      - name: Upload arm logs
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mh-companion-lme-${{ matrix.arm }}
+          path: |
+            ${{ matrix.arm }}.log
+            ${{ matrix.arm }}-stdout.log
+            ${{ matrix.arm }}-fixture.sha
+
+  compare:
+    needs: arm
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download arm artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mh-companion-lme-*
+          merge-multiple: true
+      - name: Compare
         run: |
           echo "## Inc-2 real-corpus A/B — LongMemEval (limit=${{ github.event.inputs.limit || '100' }})" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f a-fixture.sha ] && [ -f b-fixture.sha ]; then
+            if cmp -s a-fixture.sha b-fixture.sha; then
+              echo "fixture hashes match: $(cat a-fixture.sha)" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              echo "**FIXTURE MISMATCH — arms ran different question sets, deltas are void.**" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
           python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import re
           def parse(fs):
@@ -118,6 +160,20 @@ jobs:
               star=" **<-- the lever**" if cat=="multi_hop" else ""
               if ra is not None and rb is not None:
                   print(f"| {cat} (n={na}){star} | {f(ra)} | {f(rb)} | {rb-ra:+.4f} |")
+          # Injection fire-rate (target companion_injection, Arm B stderr).
+          fired, injected = 0, 0
+          try:
+              for line in open('b.log', errors='ignore'):
+                  if 'companion injection fired' in line:
+                      fired += 1
+                      mi = re.search(r'injected[=:]\s*(\d+)', line)
+                      if mi: injected += int(mi.group(1))
+          except FileNotFoundError:
+              pass
+          print()
+          print(f"**Arm B injection fire-rate: intent gate opened on {fired} queries, "
+                f"{injected} companion episodes injected in total.** "
+                f"(0 fires = the intent detector never triggered on this corpus.)")
           if ac.get('multi_hop') and bc.get('multi_hop'):
               d = bc['multi_hop'][1]-ac['multi_hop'][1]
               others_ok = all(bc[c][1] >= ac[c][1]-0.02 for c in ac if c!='multi_hop' and c in bc)
@@ -125,14 +181,3 @@ jobs:
               print(f"**Read: multi_hop {d:+.4f}; other categories {'held' if others_ok else 'REGRESSED — inspect'}.** "
                     f"(n~{ac['multi_hop'][0]} — directional at limit=100; a clear positive earns a bigger confirm.)")
           PY
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: mh-companion-lme
-          path: |
-            a.log
-            b.log
-            a-stdout.log
-            b-stdout.log
