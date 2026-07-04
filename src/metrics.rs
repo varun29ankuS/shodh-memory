@@ -285,6 +285,15 @@ pub static ROCKSDB_BLOCK_CACHE_PINNED_BYTES: LazyLock<IntGauge> = LazyLock::new(
     .expect("ROCKSDB_BLOCK_CACHE_PINNED_BYTES metric must be valid at compile time")
 });
 
+/// Configured shared RocksDB block cache capacity.
+pub static ROCKSDB_BLOCK_CACHE_CAPACITY_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        "shodh_rocksdb_block_cache_capacity_bytes",
+        "Configured capacity of the shared RocksDB block cache",
+    )
+    .expect("ROCKSDB_BLOCK_CACHE_CAPACITY_BYTES metric must be valid at compile time")
+});
+
 /// Sum of memtable bytes across all CFs of all cached users' DBs.
 pub static ROCKSDB_MEMTABLES_BYTES: LazyLock<IntGauge> = LazyLock::new(|| {
     IntGauge::new(
@@ -598,8 +607,12 @@ pub static EMBEDDING_CACHE_CONTENT_SIZE: LazyLock<IntGauge> = LazyLock::new(|| {
 
 fn set_optional_gauge(gauge: &IntGauge, value: Option<u64>) {
     if let Some(value) = value {
-        gauge.set(value.min(i64::MAX as u64) as i64);
+        set_u64_gauge(gauge, value);
     }
+}
+
+fn set_u64_gauge(gauge: &IntGauge, value: u64) {
+    gauge.set(value.min(i64::MAX as u64) as i64);
 }
 
 /// Update best-effort process/cgroup memory gauges.
@@ -619,10 +632,20 @@ pub fn update_system_memory_metrics(diagnostics: &crate::system_memory::SystemMe
 
 /// Update the RocksDB memory-decomposition gauges (the #90 instrument).
 pub fn update_rocksdb_memory_metrics(d: &crate::system_memory::RocksDbMemoryDiagnostics) {
-    ROCKSDB_BLOCK_CACHE_USAGE_BYTES.set(d.shared_block_cache_usage_bytes as i64);
-    ROCKSDB_BLOCK_CACHE_PINNED_BYTES.set(d.shared_block_cache_pinned_bytes as i64);
-    ROCKSDB_MEMTABLES_BYTES.set(d.user_memtables_bytes as i64);
-    ROCKSDB_TABLE_READERS_BYTES.set(d.user_table_readers_bytes as i64);
+    set_u64_gauge(
+        &ROCKSDB_BLOCK_CACHE_USAGE_BYTES,
+        d.shared_block_cache_usage_bytes,
+    );
+    set_u64_gauge(
+        &ROCKSDB_BLOCK_CACHE_PINNED_BYTES,
+        d.shared_block_cache_pinned_bytes,
+    );
+    set_u64_gauge(
+        &ROCKSDB_BLOCK_CACHE_CAPACITY_BYTES,
+        d.shared_block_cache_capacity_bytes,
+    );
+    set_u64_gauge(&ROCKSDB_MEMTABLES_BYTES, d.user_memtables_bytes);
+    set_u64_gauge(&ROCKSDB_TABLE_READERS_BYTES, d.user_table_readers_bytes);
 }
 
 /// Register all metrics with the global registry
@@ -706,6 +729,10 @@ fn do_register_metrics() -> Result<(), MetricsError> {
     register!(
         ROCKSDB_BLOCK_CACHE_PINNED_BYTES,
         "ROCKSDB_BLOCK_CACHE_PINNED_BYTES"
+    );
+    register!(
+        ROCKSDB_BLOCK_CACHE_CAPACITY_BYTES,
+        "ROCKSDB_BLOCK_CACHE_CAPACITY_BYTES"
     );
     register!(ROCKSDB_MEMTABLES_BYTES, "ROCKSDB_MEMTABLES_BYTES");
     register!(ROCKSDB_TABLE_READERS_BYTES, "ROCKSDB_TABLE_READERS_BYTES");
