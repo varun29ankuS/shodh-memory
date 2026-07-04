@@ -236,6 +236,15 @@ This boundary matters when interpreting graph-size measurements:
 3. A clean comparison needs an explicit control arm with `SHODH_GRAPH_PMI_GATE=0`
    because the current default is gated.
 
+For clique-shaped corpora, `SHODH_GRAPH_GENERIC_PAIR_BUDGET` adds a separate
+per-memory throttle for generic `CoOccurs` / `RelatedTo` edge births. It runs
+after the PMI gate, preserves typed/cue/semantic/label links and fragment-safe
+bridges, and is disabled by default (`None`) to preserve existing behavior.
+Set it to `0` to suppress generic edge births, or to a positive integer to keep
+only that many generic edges from a single memory in deterministic salience/name
+order. Like the PMI gate, it affects new graph construction only and does not
+compact existing dense graphs retroactively.
+
 The `pmi-gate-*` GitHub workflows keep the default A/B path unchanged and expose
 an optional `gate_min_sweep` input for manual threshold sweeps across corpus
 shapes. In the LongMemEval workflow, that sweep is intentionally limited to one

@@ -359,6 +359,7 @@ SHODH_PORT=3030                   # Port (default: 3030)
 SHODH_MEMORY_PATH=/var/lib/shodh  # Data directory
 SHODH_REQUEST_TIMEOUT=60          # Request timeout in seconds
 SHODH_MAX_CONCURRENT=200          # Max concurrent requests
+SHODH_GRAPH_GENERIC_PAIR_BUDGET=20 # Optional cap for generic graph edges per memory
 SHODH_CORS_ORIGINS=https://app.example.com
 ```
 </details>

@@ -21,9 +21,15 @@ use tower::ServiceExt;
 
 use shodh_memory::{
     config::ServerConfig,
+    graph_memory::RelationType,
     handlers::{
         build_probe_routes, build_protected_routes, build_public_routes, MultiUserMemoryManager,
     },
+    memory::{
+        types::{Experience, ExperienceType, NerEntityRecord},
+        MemoryId,
+    },
+    uuid::Uuid,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -51,13 +57,18 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::new_with_config(|_| {})
+    }
+
+    fn new_with_config(configure: impl FnOnce(&mut ServerConfig)) -> Self {
         init_env();
         let dir = TempDir::new().expect("create temp dir");
-        let cfg = ServerConfig {
+        let mut cfg = ServerConfig {
             storage_path: dir.path().to_path_buf(),
             backup_enabled: false,
             ..ServerConfig::default()
         };
+        configure(&mut cfg);
         let mgr = MultiUserMemoryManager::new(dir.path().to_path_buf(), cfg)
             .expect("create MultiUserMemoryManager");
         Self {
@@ -834,6 +845,97 @@ async fn graph_data_authenticated() {
     assert!(
         status.is_success(),
         "graph data with auth returned {status}"
+    );
+}
+
+#[test]
+fn graph_generic_pair_budget_limits_generic_edges() {
+    let h = Harness::new_with_config(|cfg| {
+        cfg.max_entities_per_memory = 6;
+        cfg.max_generic_edges_per_memory = Some(2);
+    });
+    let experience = Experience {
+        experience_type: ExperienceType::Observation,
+        content: "AlphaOne BetaTwo GammaThree DeltaFour EpsilonFive ZetaSix".to_string(),
+        entities: vec![
+            "AlphaOne".to_string(),
+            "BetaTwo".to_string(),
+            "GammaThree".to_string(),
+            "DeltaFour".to_string(),
+            "EpsilonFive".to_string(),
+            "ZetaSix".to_string(),
+        ],
+        ..Default::default()
+    };
+
+    h.mgr
+        .process_experience_into_graph("budget-user", &experience, &MemoryId(Uuid::new_v4()), None)
+        .expect("graph ingest");
+
+    let graph = h.mgr.get_user_graph("budget-user").expect("graph");
+    let edges = graph.read().get_all_relationships().expect("edges");
+    let generic_edges = edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                edge.relation_type,
+                RelationType::CoOccurs | RelationType::RelatedTo
+            )
+        })
+        .count();
+
+    assert!(
+        generic_edges <= 2,
+        "generic pair budget should cap generic edges at 2, got {generic_edges}"
+    );
+}
+
+#[test]
+fn graph_generic_pair_budget_preserves_typed_edges() {
+    let h = Harness::new_with_config(|cfg| {
+        cfg.max_entities_per_memory = 2;
+        cfg.max_generic_edges_per_memory = Some(0);
+    });
+    let experience = Experience {
+        experience_type: ExperienceType::Observation,
+        content: "Alice works at Acme Corporation".to_string(),
+        ner_entities: vec![
+            NerEntityRecord {
+                text: "Alice".to_string(),
+                entity_type: "PER".to_string(),
+                confidence: 0.99,
+                start_char: Some(0),
+                end_char: Some(5),
+            },
+            NerEntityRecord {
+                text: "Acme Corporation".to_string(),
+                entity_type: "ORG".to_string(),
+                confidence: 0.99,
+                start_char: Some(15),
+                end_char: Some(31),
+            },
+        ],
+        ..Default::default()
+    };
+
+    h.mgr
+        .process_experience_into_graph(
+            "typed-budget-user",
+            &experience,
+            &MemoryId(Uuid::new_v4()),
+            None,
+        )
+        .expect("graph ingest");
+
+    let graph = h.mgr.get_user_graph("typed-budget-user").expect("graph");
+    let edges = graph.read().get_all_relationships().expect("edges");
+
+    assert!(
+        edges.iter().any(|edge| !matches!(
+            edge.relation_type,
+            RelationType::CoOccurs | RelationType::RelatedTo
+        )),
+        "typed edge should survive even when generic pair budget is zero"
     );
 }
 

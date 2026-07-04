@@ -310,6 +310,11 @@ pub struct ServerConfig {
     /// in the knowledge graph. 10 entities → max 45 co-occurrence edges.
     pub max_entities_per_memory: usize,
 
+    /// Optional cap for generic CoOccurs/RelatedTo edges created per memory.
+    /// Typed/cue/semantic/label and fragment bridge edges are not capped.
+    /// None preserves existing behavior; Some(0) disables generic edge births.
+    pub max_generic_edges_per_memory: Option<usize>,
+
     /// Whether opt-in telemetry heartbeat is enabled (default: false)
     /// Sends anonymous aggregate stats (version, OS, user count, memory count) once per day.
     /// No PII, no memory content, no queries. Set SHODH_TELEMETRY=true to opt in.
@@ -345,6 +350,7 @@ impl Default for ServerConfig {
             backup_max_count: 7,           // Keep 7 backups (1 week of daily backups)
             backup_enabled: false,         // Disabled by default, auto-enabled in production
             max_entities_per_memory: 10,   // Cap entities per memory (10 → max 45 edges)
+            max_generic_edges_per_memory: None,
             telemetry_enabled: false,
             telemetry_url: "https://shodh-memory.com/api/telemetry".to_string(),
             telemetry_interval_secs: 86400, // 24 hours
@@ -499,6 +505,23 @@ impl ServerConfig {
                     );
                 }
                 config.max_entities_per_memory = clamped;
+            }
+        }
+
+        // Generic graph edge budget (optional)
+        if let Ok(val) = env::var("SHODH_GRAPH_GENERIC_PAIR_BUDGET") {
+            if let Ok(n) = val.parse::<usize>() {
+                // SHODH_MAX_ENTITIES is clamped to 50, so 50 choose 2 is the
+                // largest single-memory pair set the graph writer can see.
+                let clamped = n.min(1225);
+                if clamped != n {
+                    tracing::warn!(
+                        "SHODH_GRAPH_GENERIC_PAIR_BUDGET={} clamped to {} (valid range: 0–1225)",
+                        n,
+                        clamped
+                    );
+                }
+                config.max_generic_edges_per_memory = Some(clamped);
             }
         }
 

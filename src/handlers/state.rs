@@ -3463,6 +3463,9 @@ impl MultiUserMemoryManager {
         let mut untyped_generic = 0usize;
         let mut typed_blocked_fragment = 0usize;
         let mut pmi_gated = 0usize;
+        let mut generic_budget_gated = 0usize;
+        let mut generic_budget_kept = 0usize;
+        let generic_pair_budget = self.server_config.max_generic_edges_per_memory;
 
         // SHODH_LEARNED_PAIRS: the learned label-pair table (Stanford-1, PMI²
         // relation mapping) — every cue hit records (label-pair, relation,
@@ -3615,7 +3618,8 @@ impl MultiUserMemoryManager {
                 // relation type for this attestation (Increment 1, robust edge
                 // provenance). Assigned by every branch of the chain below.
                 let typed_by: Option<crate::graph_memory::TypingMethod>;
-                let relation_type = if fragment_of_comention[i] || fragment_of_comention[j] {
+                let fragment_pair = fragment_of_comention[i] || fragment_of_comention[j];
+                let relation_type = if fragment_pair {
                     // Fragment endpoint: never typed, never causal (see mask above).
                     typed_blocked_fragment += 1;
                     typed_by = Some(crate::graph_memory::TypingMethod::CoOccurrence);
@@ -3705,17 +3709,30 @@ impl MultiUserMemoryManager {
                 // (CoOccurs/RelatedTo), NON-fragment edges — typed edges and fragment
                 // bridges are never pruned. PMI = log2(N / (df_i·df_j)) at birth (co=1);
                 // below the floor means the pair co-occurs no more than chance → noise.
-                if pmi_gate
-                    && !(fragment_of_comention[i] || fragment_of_comention[j])
-                    && matches!(
-                        relation_type,
-                        crate::graph_memory::RelationType::CoOccurs
-                            | crate::graph_memory::RelationType::RelatedTo
-                    )
-                    && birth_pmi < pmi_gate_min
-                {
+                let generic_relation = matches!(
+                    relation_type,
+                    crate::graph_memory::RelationType::CoOccurs
+                        | crate::graph_memory::RelationType::RelatedTo
+                );
+                if pmi_gate && !fragment_pair && generic_relation && birth_pmi < pmi_gate_min {
                     pmi_gated += 1;
                     // it was tallied as generic above; move the tally to pmi_gated
+                    untyped_generic = untyped_generic.saturating_sub(1);
+                    continue;
+                }
+
+                // Optional clique-density throttle (#90): PMI filters hub noise,
+                // but rare-per-memory cliques score as informative and can still
+                // birth many weak generic links. Keep typed/cue/semantic/label
+                // edges and fragment bridges intact; only cap the residual
+                // CoOccurs/RelatedTo births, in deterministic salience/name order.
+                if !consume_generic_pair_budget(
+                    fragment_pair,
+                    generic_relation,
+                    generic_pair_budget,
+                    &mut generic_budget_kept,
+                ) {
+                    generic_budget_gated += 1;
                     untyped_generic = untyped_generic.saturating_sub(1);
                     continue;
                 }
@@ -3855,6 +3872,7 @@ impl MultiUserMemoryManager {
             + untyped_generic
             + typed_blocked_fragment
             + pmi_gated
+            + generic_budget_gated
             > 0
         {
             tracing::info!(
@@ -3865,6 +3883,9 @@ impl MultiUserMemoryManager {
                 generic = untyped_generic,
                 fragment_blocked = typed_blocked_fragment,
                 pmi_gated = pmi_gated,
+                generic_budget_gated = generic_budget_gated,
+                generic_budget_kept = generic_budget_kept,
+                generic_pair_budget = ?generic_pair_budget,
                 "edge typing provenance"
             );
         }
@@ -3873,9 +3894,70 @@ impl MultiUserMemoryManager {
     }
 }
 
+fn consume_generic_pair_budget(
+    fragment_pair: bool,
+    generic_relation: bool,
+    generic_pair_budget: Option<usize>,
+    generic_budget_kept: &mut usize,
+) -> bool {
+    if fragment_pair || !generic_relation {
+        return true;
+    }
+
+    let Some(max_generic_edges) = generic_pair_budget else {
+        return true;
+    };
+
+    if *generic_budget_kept >= max_generic_edges {
+        return false;
+    }
+
+    *generic_budget_kept += 1;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generic_pair_budget_caps_generic_edges_only() {
+        let mut kept = 0;
+
+        assert!(consume_generic_pair_budget(false, true, Some(2), &mut kept));
+        assert!(consume_generic_pair_budget(false, true, Some(2), &mut kept));
+        assert!(!consume_generic_pair_budget(
+            false,
+            true,
+            Some(2),
+            &mut kept
+        ));
+        assert_eq!(kept, 2);
+    }
+
+    #[test]
+    fn generic_pair_budget_preserves_typed_and_fragment_edges() {
+        let mut kept = 0;
+
+        assert!(consume_generic_pair_budget(
+            false,
+            false,
+            Some(0),
+            &mut kept
+        ));
+        assert!(consume_generic_pair_budget(true, true, Some(0), &mut kept));
+        assert_eq!(kept, 0);
+    }
+
+    #[test]
+    fn generic_pair_budget_none_preserves_existing_behavior() {
+        let mut kept = 0;
+
+        for _ in 0..5 {
+            assert!(consume_generic_pair_budget(false, true, None, &mut kept));
+        }
+        assert_eq!(kept, 0);
+    }
 
     #[test]
     fn test_blocklist_contains_english_stop_words() {
