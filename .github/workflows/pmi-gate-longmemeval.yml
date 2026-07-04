@@ -24,7 +24,7 @@ on:
         required: false
         default: '0.0'
       gate_min_sweep:
-        description: 'Optional comma-separated SHODH_GRAPH_PMI_GATE_MIN values for extra gated arms.'
+        description: 'Optional SHODH_GRAPH_PMI_GATE_MIN value for one extra gated arm; run separate dispatches for more.'
         required: false
         default: ''
 
@@ -170,6 +170,12 @@ jobs:
                   gates.append(token)
               if not gates:
                   raise SystemExit("gate_min_sweep did not contain any numeric values")
+              if len(gates) > 1:
+                  raise SystemExit(
+                      "pmi-gate-longmemeval supports at most one extra gate_min_sweep value "
+                      "per dispatch; run separate dispatches for more values to stay under "
+                      "the 360-minute workflow timeout."
+                  )
               return gates
 
           def slug(value):
@@ -184,7 +190,8 @@ jobs:
               return float(match.group(1)) if match else None
 
           def edge_counts(path):
-              totals = dict(generic=0, pmi_gated=0, cue=0, semantic=0, pair_table=0, learned=0)
+              totals = dict(generic=0, pmi_gated=0, cue=0, semantic=0, pair_table=0,
+                            learned=0, fragment_blocked=0)
               try:
                   lines = open(path, errors="ignore")
               except FileNotFoundError:
@@ -197,7 +204,7 @@ jobs:
                           totals[key] += int(value)
               totals["stored_total"] = (
                   totals["generic"] + totals["cue"] + totals["semantic"]
-                  + totals["pair_table"] + totals["learned"]
+                  + totals["pair_table"] + totals["learned"] + totals["fragment_blocked"]
               )
               return totals
 

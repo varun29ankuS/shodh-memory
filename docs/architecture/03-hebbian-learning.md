@@ -229,16 +229,18 @@ This boundary matters when interpreting graph-size measurements:
 
 1. The gate affects new graph construction only; it does not shrink an existing
    dense graph retroactively.
-2. The expected edge drop depends on corpus shape. Raw dialogue imports with a
-   large generic co-occurrence surface should show a larger effect than already
-   pre-processed or tag/entity-projected memory objects.
+2. The expected edge drop depends on corpus shape. The gate is a hub-noise
+   filter: it prunes generic pairs when the endpoint document frequencies make
+   the pair no more informative than chance. Hub-shaped corpora can shrink
+   sharply; clique-shaped corpora with many rare pairs per memory may not.
 3. A clean comparison needs an explicit control arm with `SHODH_GRAPH_PMI_GATE=0`
    because the current default is gated.
 
 The `pmi-gate-*` GitHub workflows keep the default A/B path unchanged and expose
 an optional `gate_min_sweep` input for manual threshold sweeps across corpus
-shapes. Use it when a single `gate_min=0.0` run does not explain a local graph
-profile.
+shapes. In the LongMemEval workflow, that sweep is intentionally limited to one
+extra value per dispatch so the default `limit=50` run stays under the workflow
+timeout; use separate dispatches for more values.
 
 ### Prometheus Metrics
 
