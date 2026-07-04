@@ -1497,7 +1497,282 @@ impl MemorySystem {
     }
 
     pub fn recall(&self, query: &Query) -> Result<Vec<SharedMemory>> {
+        // Companion-coverage re-rank (SHODH_COMPANION_RERANK, default off), gated
+        // on multi-hop INTENT. The multi_hop wall is present-but-buried: gold
+        // companions sit at rank 11-50 of the pool (present 86% vs recall 56%),
+        // so the lever is re-ranking them up, not finding more candidates —
+        // provenance INJECTION measured NEGATIVE on real LongMemEval (run
+        // 28696042764: multi_hop −0.02) because added items only displace.
+        // Mechanism (measured 2026-06-17/18, exp/hop-gain-excitable-spread):
+        // retrieve a deeper pool (k×5), boost sub-anchor candidates connected to
+        // the top-3 anchors — surface shared-entity mode (+0.060 multi_hop) or
+        // graph 1-hop edge mode (SHODH_COMPANION_GRAPH; typed-only via
+        // SHODH_COMPANION_GRAPH_TYPED was the best multi_hop of the session,
+        // 0.6548, and HELD knowledge_update + temporal). Both traded single_hop
+        // when applied unconditionally, so the wrapper only fires on
+        // detect_multihop_intent — the intent detector the raw NER-count gate
+        // (SHODH_COMPANION_MIN_ENTS, measured inert: LongMemEval multi_hop
+        // questions rarely NAME two entities) could never be: it also accepts a
+        // parsed relation + one grounded entity, and fired 31/100 on the real
+        // corpus (Inc-2 instrumentation). Accumulate-not-displace (Baleen).
+        let rerank_enabled = std::env::var("SHODH_COMPANION_RERANK")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if rerank_enabled {
+            if let Some(query_text) = query.query_text.as_deref() {
+                // Same intent inputs as the Inc-2 injection site: NER entities
+                // OR parser focal entities (whichever counts more), plus parsed
+                // ontological relations. Pure functions over the query text.
+                let query_analysis = query_parser::analyze_query(query_text);
+                let onto_intent =
+                    query_parser::infer_ontological_intent(query_text, &query_analysis);
+                let relation_surfaces: Vec<String> = onto_intent
+                    .relation_types
+                    .iter()
+                    .map(|r| format!("{r:?}"))
+                    .collect();
+                let entity_count = query
+                    .ner_entities
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .len()
+                    .max(query_analysis.focal_entities.len());
+                if query_parser::detect_multihop_intent(
+                    query_text,
+                    entity_count,
+                    &relation_surfaces,
+                ) {
+                    const COMPANION_EXPAND: usize = 5;
+                    let k = query.max_results.max(1);
+                    let mut deep_q = query.clone();
+                    deep_q.max_results = k.saturating_mul(COMPANION_EXPAND).max(k);
+                    let deep = self.recall_inner(&deep_q, false)?.memories;
+                    let graph_mode = std::env::var("SHODH_COMPANION_GRAPH")
+                        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
+                    // Dedicated target so eval runs can capture the fire rate with
+                    // RUST_LOG=error,companion_rerank=info (same pattern as the
+                    // companion_injection target).
+                    tracing::info!(
+                        target: "companion_rerank",
+                        pool = deep.len(),
+                        graph_mode = graph_mode,
+                        "companion re-rank fired"
+                    );
+                    return Ok(if graph_mode {
+                        self.graph_companion_rerank(deep, k)
+                    } else {
+                        self.companion_rerank(deep, k)
+                    });
+                }
+            }
+        }
         Ok(self.recall_inner(query, false)?.memories)
+    }
+
+    /// Companion-coverage re-rank: given a deep ranked pool, boost candidates that
+    /// share an entity with a top-anchor result so the scattered companion evidence
+    /// of a multi-hop answer rises into top-k. Score = base position score (1/(rank+1))
+    /// + weight × (distinct anchor entities shared, capped). Anchors (top-ANCHORS) keep
+    /// their base score only, so a correct primary cannot be displaced out of the head.
+    /// Deterministic: original-rank tie-break. SHODH_COMPANION_WEIGHT tunes the lift.
+    fn companion_rerank(&self, deep: Vec<SharedMemory>, k: usize) -> Vec<SharedMemory> {
+        const ANCHORS: usize = 3;
+        const SHARED_CAP: usize = 3;
+        if deep.len() <= k {
+            return deep.into_iter().take(k).collect();
+        }
+        let weight: f32 = std::env::var("SHODH_COMPANION_WEIGHT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.10);
+
+        // Anchor entity set: the top results' entities (lowercased), skipping
+        // trivially short tokens.
+        let mut anchor_ents: HashSet<String> = HashSet::new();
+        for m in deep.iter().take(ANCHORS) {
+            for e in &m.experience.entities {
+                let el = e.to_lowercase();
+                if el.len() >= 3 {
+                    anchor_ents.insert(el);
+                }
+            }
+        }
+
+        let mut scored: Vec<(f32, usize, SharedMemory)> = deep
+            .into_iter()
+            .enumerate()
+            .map(|(rank, m)| {
+                let base = 1.0 / (rank as f32 + 1.0);
+                let shared = if rank < ANCHORS {
+                    0 // an anchor is not its own companion
+                } else {
+                    m.experience
+                        .entities
+                        .iter()
+                        .map(|e| e.to_lowercase())
+                        .filter(|el| el.len() >= 3 && anchor_ents.contains(el))
+                        .collect::<HashSet<_>>()
+                        .len()
+                        .min(SHARED_CAP)
+                };
+                let score = base + weight * shared as f32;
+                (score, rank, m)
+            })
+            .collect();
+        // Score desc; original-rank tie-break (deterministic, stable).
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        scored.into_iter().take(k).map(|(_, _, m)| m).collect()
+    }
+
+    /// Graph-seeded companion re-rank (SHODH_COMPANION_GRAPH) — a candidate is
+    /// boosted by how many DISTINCT anchor entities it connects to through a real
+    /// 1-hop relationship EDGE in the knowledge graph, the relational signal
+    /// surface co-occurrence lacks (at the token level a single-hop distractor and
+    /// a multi-hop co-gold turn are indistinguishable, which is why the surface
+    /// lift and its trade proved inseparable). SHODH_COMPANION_GRAPH_TYPED=1
+    /// restricts the walk to typed edges (excludes CoOccurs / CoRetrieved /
+    /// RelatedTo) — measured the best multi_hop of the June session (0.6548) while
+    /// holding knowledge_update and temporal at baseline. Accumulate-not-displace:
+    /// the top-ANCHORS keep base score. SHODH_COMPANION_WEIGHT tunes the lift;
+    /// SHODH_COMPANION_HOP_STRENGTH gates minimum edge strength;
+    /// SHODH_COMPANION_MIN_CONN sets minimum distinct-anchor multiplicity.
+    /// Deterministic (original-rank tie-break).
+    fn graph_companion_rerank(&self, deep: Vec<SharedMemory>, k: usize) -> Vec<SharedMemory> {
+        const ANCHORS: usize = 3;
+        const EDGE_LIMIT: usize = 32;
+        const CONN_CAP: usize = 3;
+        if deep.len() <= k {
+            return deep.into_iter().take(k).collect();
+        }
+        let Some(graph) = self.graph_memory.as_ref() else {
+            return deep.into_iter().take(k).collect();
+        };
+        let weight: f32 = std::env::var("SHODH_COMPANION_WEIGHT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.10);
+        let min_strength: f32 = std::env::var("SHODH_COMPANION_HOP_STRENGTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        let typed_only = std::env::var("SHODH_COMPANION_GRAPH_TYPED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        // Minimum distinct-anchor connection multiplicity for a candidate to be
+        // boosted. =1 boosts any graph-connected candidate; =2 requires bridging
+        // TWO anchor entities (measured WORSE on multi_hop: many co-gold turns
+        // bridge only one anchor).
+        let min_conn: usize = std::env::var("SHODH_COMPANION_MIN_CONN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(1);
+
+        let g = graph.read();
+
+        // Resolve the top anchors' entities to graph nodes.
+        let mut anchor_nodes: HashSet<uuid::Uuid> = HashSet::new();
+        for m in deep.iter().take(ANCHORS) {
+            for e in &m.experience.entities {
+                if e.trim().len() < 3 {
+                    continue;
+                }
+                if let Ok(Some(ent)) = g.find_entity_by_name(e.as_str()) {
+                    anchor_nodes.insert(ent.uuid);
+                }
+            }
+        }
+        if anchor_nodes.is_empty() {
+            return deep.into_iter().take(k).collect();
+        }
+
+        // 1-hop relationship neighbours of the anchor entities.
+        // neighbour node -> count of DISTINCT anchor entities it links to.
+        let mut companion_conn: std::collections::HashMap<uuid::Uuid, usize> =
+            std::collections::HashMap::new();
+        for an in &anchor_nodes {
+            let Ok(edges) = g.get_entity_relationships_limited(an, Some(EDGE_LIMIT)) else {
+                continue;
+            };
+            let mut reached: HashSet<uuid::Uuid> = HashSet::new();
+            for edge in edges {
+                if edge.effective_strength() < min_strength {
+                    continue;
+                }
+                if typed_only {
+                    let rt = edge.relation_type.as_str();
+                    if rt == "CoOccurs" || rt == "CoRetrieved" || rt == "RelatedTo" {
+                        continue;
+                    }
+                }
+                if reached.insert(edge.to_entity) {
+                    *companion_conn.entry(edge.to_entity).or_insert(0) += 1;
+                }
+            }
+        }
+        if companion_conn.is_empty() {
+            return deep.into_iter().take(k).collect();
+        }
+
+        // A candidate below the anchors is boosted by how many distinct anchor
+        // entities its OWN entities are graph-connected to (capped).
+        let mut scored: Vec<(f32, usize, SharedMemory)> = deep
+            .into_iter()
+            .enumerate()
+            .map(|(rank, m)| {
+                let base = 1.0 / (rank as f32 + 1.0);
+                let conn = if rank < ANCHORS {
+                    0
+                } else {
+                    let mut counted: HashSet<uuid::Uuid> = HashSet::new();
+                    let mut c = 0usize;
+                    for e in &m.experience.entities {
+                        if e.trim().len() < 3 {
+                            continue;
+                        }
+                        if let Ok(Some(ent)) = g.find_entity_by_name(e.as_str()) {
+                            if anchor_nodes.contains(&ent.uuid) {
+                                continue;
+                            }
+                            if let Some(n) = companion_conn.get(&ent.uuid) {
+                                if counted.insert(ent.uuid) {
+                                    c += *n;
+                                }
+                            }
+                        }
+                    }
+                    if c >= min_conn {
+                        c.min(CONN_CAP)
+                    } else {
+                        0
+                    }
+                };
+                (base + weight * conn as f32, rank, m)
+            })
+            .collect();
+        // Freeze the original top-ANCHORS in place — a correct single-hop primary
+        // in the head can never be displaced by a boosted companion — and re-rank
+        // only the tail for the remaining slots. SHODH_COMPANION_FREEZE=0 restores
+        // the unfrozen behaviour for an A/B.
+        let freeze_anchors = std::env::var("SHODH_COMPANION_FREEZE")
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
+        if freeze_anchors {
+            let (mut anchors, mut tail): (Vec<_>, Vec<_>) =
+                scored.into_iter().partition(|(_, rank, _)| *rank < ANCHORS);
+            anchors.sort_by_key(|(_, rank, _)| *rank);
+            tail.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            anchors
+                .into_iter()
+                .chain(tail)
+                .take(k)
+                .map(|(_, _, m)| m)
+                .collect()
+        } else {
+            scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            scored.into_iter().take(k).map(|(_, _, m)| m).collect()
+        }
     }
 
     /// Recall with full retrieval diagnostics (per-stage timing, per-memory score attribution).
@@ -10299,5 +10574,178 @@ mod companion_injection_tests {
         let companions =
             system.harvest_provenance_companions(&system.graph_memory().unwrap().read(), &ranked);
         assert!(companions.is_empty(), "weak attestations are filtered");
+    }
+}
+
+#[cfg(test)]
+mod companion_rerank_tests {
+    use super::*;
+    use crate::graph_memory::{
+        EntityLabel, EntityNode, GraphMemory, RelationType, RelationshipEdge,
+    };
+    use crate::memory::types::Experience;
+    use std::collections::HashMap as StdHashMap;
+
+    fn setup() -> (MemorySystem, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 1,
+            importance_threshold: 0.0,
+        };
+        let mut system = MemorySystem::new(config, None).expect("memory system");
+        let graph = GraphMemory::new(&temp_dir.path().join("graph"), None).expect("graph");
+        system.set_graph_memory(Arc::new(parking_lot::RwLock::new(graph)));
+        (system, temp_dir)
+    }
+
+    fn stored(system: &MemorySystem, content: &str, entities: &[&str]) -> SharedMemory {
+        let experience = Experience {
+            content: content.to_string(),
+            entities: entities.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let id = system.remember(experience, None).expect("remember");
+        Arc::new(system.get_memory(&id).expect("get"))
+    }
+
+    fn add_entity(graph: &GraphMemory, name: &str) -> uuid::Uuid {
+        let node = EntityNode {
+            uuid: uuid::Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Person],
+            created_at: chrono::Utc::now(),
+            last_seen_at: chrono::Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: StdHashMap::new(),
+            name_embedding: None,
+            salience: 1.0,
+            is_proper_noun: true,
+            selectivity: None,
+        };
+        graph.add_entity(node).expect("add entity")
+    }
+
+    fn add_edge(graph: &GraphMemory, from: uuid::Uuid, to: uuid::Uuid) {
+        let now = chrono::Utc::now();
+        let edge = RelationshipEdge {
+            uuid: uuid::Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type: RelationType::CoOccurs,
+            strength: 1.0,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: crate::graph_memory::LtpStatus::None,
+            tier: crate::graph_memory::EdgeTier::L1Working,
+            activation_timestamps: None,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: Vec::new(),
+        };
+        graph.add_relationship(edge).expect("add edge");
+    }
+
+    /// A pool no deeper than k passes through untouched (both modes).
+    #[test]
+    fn shallow_pool_is_untouched() {
+        let (system, _t) = setup();
+        let pool: Vec<SharedMemory> = (0..3)
+            .map(|i| stored(&system, &format!("Memory {i}."), &["Anchorite"]))
+            .collect();
+        let ids: Vec<MemoryId> = pool.iter().map(|m| m.id.clone()).collect();
+        let out = system.companion_rerank(pool.clone(), 5);
+        assert_eq!(out.iter().map(|m| m.id.clone()).collect::<Vec<_>>(), ids);
+        let out = system.graph_companion_rerank(pool, 5);
+        assert_eq!(out.iter().map(|m| m.id.clone()).collect::<Vec<_>>(), ids);
+    }
+
+    /// Surface mode: a deep candidate sharing an anchor entity rises above
+    /// non-sharing candidates ranked ahead of it.
+    #[test]
+    fn surface_rerank_boosts_shared_entity_candidate() {
+        let (system, _t) = setup();
+        let mut pool: Vec<SharedMemory> = Vec::new();
+        for i in 0..3 {
+            pool.push(stored(&system, &format!("Anchor {i}."), &["Kestrel"]));
+        }
+        pool.push(stored(&system, "Filler one.", &["Unrelated"]));
+        pool.push(stored(&system, "Filler two.", &["Alsounrelated"]));
+        let companion = stored(&system, "Companion shares Kestrel.", &["Kestrel"]);
+        pool.push(companion.clone());
+
+        // rank 5 base 1/6 + 0.10*1 = 0.2667 beats rank 3 (0.25) and rank 4 (0.20).
+        let out = system.companion_rerank(pool, 4);
+        assert_eq!(out.len(), 4);
+        assert_eq!(
+            out[3].id, companion.id,
+            "shared-entity companion takes the open slot past both fillers"
+        );
+    }
+
+    /// Graph mode: a deep candidate whose entity is 1-hop edge-connected to an
+    /// anchor entity rises; anchors stay frozen in the head (default).
+    #[test]
+    fn graph_rerank_boosts_edge_connected_candidate_and_freezes_anchors() {
+        let (system, _t) = setup();
+        {
+            let graph = system.graph_memory().unwrap().write();
+            let anchor_node = add_entity(&graph, "Meridian");
+            let companion_node = add_entity(&graph, "Solstice");
+            add_edge(&graph, anchor_node, companion_node);
+        }
+        let mut pool: Vec<SharedMemory> = Vec::new();
+        for i in 0..3 {
+            pool.push(stored(&system, &format!("Anchor {i}."), &["Meridian"]));
+        }
+        pool.push(stored(&system, "Filler one.", &["Unrelated"]));
+        pool.push(stored(&system, "Filler two.", &["Alsounrelated"]));
+        let companion = stored(&system, "Companion names Solstice.", &["Solstice"]);
+        pool.push(companion.clone());
+        let anchor_ids: Vec<MemoryId> = pool[..3].iter().map(|m| m.id.clone()).collect();
+
+        let out = system.graph_companion_rerank(pool, 4);
+        assert_eq!(out.len(), 4);
+        assert_eq!(
+            out[..3].iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+            anchor_ids,
+            "top anchors are frozen in place"
+        );
+        assert_eq!(
+            out[3].id, companion.id,
+            "edge-connected companion takes the open slot past both fillers"
+        );
+    }
+
+    /// Graph mode with no graph connectivity for any candidate leaves the
+    /// original order intact (boost never fires).
+    #[test]
+    fn graph_rerank_without_connectivity_preserves_order() {
+        let (system, _t) = setup();
+        {
+            let graph = system.graph_memory().unwrap().write();
+            add_entity(&graph, "Meridian");
+        }
+        let pool: Vec<SharedMemory> = (0..6)
+            .map(|i| stored(&system, &format!("Memory {i}."), &["Meridian"]))
+            .collect();
+        let head: Vec<MemoryId> = pool[..4].iter().map(|m| m.id.clone()).collect();
+        let out = system.graph_companion_rerank(pool, 4);
+        assert_eq!(
+            out.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+            head,
+            "no connectivity -> original ranking survives"
+        );
     }
 }
