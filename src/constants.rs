@@ -760,6 +760,40 @@ pub const FACT_NEGATION_MARKERS: &[&str] = &[
 /// Families of all DB's managed by the process."
 pub const ROCKSDB_SHARED_CACHE_BYTES: usize = 256 * 1024 * 1024;
 
+/// Environment variable for overriding the shared RocksDB block cache capacity.
+///
+/// Value is in MiB. Invalid, zero, or overflowing values fall back to
+/// `ROCKSDB_SHARED_CACHE_BYTES`.
+pub const ROCKSDB_SHARED_CACHE_MB_ENV: &str = "SHODH_ROCKSDB_BLOCK_CACHE_MB";
+
+/// Parse a MiB override for the shared RocksDB block cache.
+pub(crate) fn parse_rocksdb_shared_cache_capacity_bytes(raw: &str) -> Option<usize> {
+    let mib = raw.trim().parse::<usize>().ok()?;
+    if mib == 0 {
+        return None;
+    }
+    mib.checked_mul(1024 * 1024)
+}
+
+/// Shared RocksDB block cache capacity after applying the optional env override.
+pub fn rocksdb_shared_cache_capacity_bytes() -> usize {
+    let Ok(raw) = std::env::var(ROCKSDB_SHARED_CACHE_MB_ENV) else {
+        return ROCKSDB_SHARED_CACHE_BYTES;
+    };
+    match parse_rocksdb_shared_cache_capacity_bytes(&raw) {
+        Some(bytes) => bytes,
+        None => {
+            tracing::warn!(
+                "{}={} is invalid; using default {}MiB RocksDB block cache",
+                ROCKSDB_SHARED_CACHE_MB_ENV,
+                raw,
+                ROCKSDB_SHARED_CACHE_BYTES / (1024 * 1024)
+            );
+            ROCKSDB_SHARED_CACHE_BYTES
+        }
+    }
+}
+
 /// Per-DB write buffer size for MemoryStorage (bytes).
 ///
 /// Reduced from 32MB to 8MB because total memtable memory is now bounded
@@ -3147,3 +3181,31 @@ pub const SEMANTIC_CLUSTER_SAMPLE_SIZE: usize = 50;
 ///   to keep the similarity triple count manageable (≤500 pairs).
 /// - Matches typical HNSW ef_search defaults for recall-oriented searches.
 pub const SEMANTIC_CLUSTER_NEIGHBOR_K: usize = 10;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_rocksdb_shared_cache_capacity_mib() {
+        assert_eq!(
+            parse_rocksdb_shared_cache_capacity_bytes("64"),
+            Some(64 * 1024 * 1024)
+        );
+        assert_eq!(
+            parse_rocksdb_shared_cache_capacity_bytes(" 128 "),
+            Some(128 * 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_rocksdb_shared_cache_capacity() {
+        assert_eq!(parse_rocksdb_shared_cache_capacity_bytes("0"), None);
+        assert_eq!(parse_rocksdb_shared_cache_capacity_bytes(""), None);
+        assert_eq!(parse_rocksdb_shared_cache_capacity_bytes("64MB"), None);
+        assert_eq!(
+            parse_rocksdb_shared_cache_capacity_bytes(&usize::MAX.to_string()),
+            None
+        );
+    }
+}

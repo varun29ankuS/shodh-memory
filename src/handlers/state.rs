@@ -705,6 +705,7 @@ pub struct MultiUserMemoryManager {
     /// Without this, each user's MemoryStorage + GraphMemory allocates ~96MB in
     /// independent caches — 6 users = 576MB just in block caches alone.
     shared_rocksdb_cache: rocksdb::Cache,
+    shared_rocksdb_cache_capacity_bytes: usize,
 
     /// Per-user, per-memory habituation tracker for proactive_context.
     /// Tracks how many times a memory was surfaced without positive feedback,
@@ -902,13 +903,15 @@ impl MultiUserMemoryManager {
         // Single shared LRU block cache for ALL RocksDB instances (per-user memory DBs,
         // per-user graph DBs, and the global shared DB). Provides a hard memory ceiling
         // regardless of how many users are active. Without this, each user allocates
-        // ~96MB in independent caches — the shared cache collapses that to a single
-        // 256MB pool with LRU eviction of the coldest blocks across all users.
+        // ~96MB in independent caches — the shared cache collapses that to one
+        // configured pool (256MiB by default) with LRU eviction of the coldest blocks.
+        let shared_rocksdb_cache_capacity_bytes =
+            crate::constants::rocksdb_shared_cache_capacity_bytes();
         let shared_rocksdb_cache =
-            rocksdb::Cache::new_lru_cache(crate::constants::ROCKSDB_SHARED_CACHE_BYTES);
+            rocksdb::Cache::new_lru_cache(shared_rocksdb_cache_capacity_bytes);
         info!(
             "Shared RocksDB block cache initialized ({}MB)",
-            crate::constants::ROCKSDB_SHARED_CACHE_BYTES / (1024 * 1024)
+            shared_rocksdb_cache_capacity_bytes / (1024 * 1024)
         );
 
         // Open a single shared DB for all global stores (todos, reminders, files, feedback, audit).
@@ -1044,6 +1047,7 @@ impl MultiUserMemoryManager {
             user_memory_init_locks: DashMap::new(),
             user_graph_init_locks: DashMap::new(),
             shared_rocksdb_cache,
+            shared_rocksdb_cache_capacity_bytes,
             habituation_tracker,
             task_tracker: tokio_util::task::TaskTracker::new(),
             consolidation_locks: DashMap::new(),
@@ -1688,7 +1692,7 @@ impl MultiUserMemoryManager {
         crate::system_memory::RocksDbMemoryDiagnostics {
             shared_block_cache_usage_bytes: self.shared_rocksdb_cache.get_usage() as u64,
             shared_block_cache_pinned_bytes: self.shared_rocksdb_cache.get_pinned_usage() as u64,
-            shared_block_cache_capacity_bytes: crate::constants::ROCKSDB_SHARED_CACHE_BYTES as u64,
+            shared_block_cache_capacity_bytes: self.shared_rocksdb_cache_capacity_bytes as u64,
             user_memtables_bytes: memtables,
             user_table_readers_bytes: readers,
             users_counted,

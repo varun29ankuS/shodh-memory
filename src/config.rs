@@ -595,6 +595,7 @@ pub fn print_env_help() {
     println!("  SHODH_RATE_BURST       - Burst size (default: 8000)");
     println!("  SHODH_MAX_CONCURRENT   - Max concurrent requests (default: 200)");
     println!("  SHODH_REQUEST_TIMEOUT  - Request timeout in seconds (default: 60)");
+    println!("  SHODH_ROCKSDB_BLOCK_CACHE_MB - Shared RocksDB block cache in MiB (default: 256)");
     println!("  SHODH_AUDIT_MAX_ENTRIES    - Max audit entries per user (default: 10000)");
     println!("  SHODH_AUDIT_RETENTION_DAYS - Audit log retention days (default: 30)");
     println!();
