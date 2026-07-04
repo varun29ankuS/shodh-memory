@@ -102,11 +102,9 @@ pub async fn health_index(
             // open RocksDB for every user on disk, wasting FDs and memory.
             let users: Vec<(String, crate::memory::retrieval::IndexHealth)> = {
                 let mut results = Vec::new();
-                for user_id in state.list_cached_users() {
-                    if let Ok(memory) = state.get_user_memory(&user_id) {
-                        let guard = memory.read();
-                        results.push((user_id, guard.index_health()));
-                    }
+                for (user_id, memory) in state.cached_user_memories() {
+                    let guard = memory.read();
+                    results.push((user_id, guard.index_health()));
                 }
                 results
             };
@@ -183,16 +181,14 @@ pub async fn metrics_endpoint(State(state): State<AppState>) -> Result<String, S
         (0i64, 0i64, 0i64, 0i64);
     let mut total_vectors = 0i64;
 
-    for user_id in state.list_cached_users() {
-        if let Ok(memory_sys) = state.get_user_memory(&user_id) {
-            if let Some(guard) = memory_sys.try_read() {
-                let stats = guard.stats();
-                total_working += stats.working_memory_count as i64;
-                total_session += stats.session_memory_count as i64;
-                total_longterm += stats.long_term_memory_count as i64;
-                total_heap += (stats.total_memories * 250) as i64;
-                total_vectors += stats.total_memories as i64;
-            }
+    for (_user_id, memory_sys) in state.cached_user_memories() {
+        if let Some(guard) = memory_sys.try_read() {
+            let stats = guard.stats();
+            total_working += stats.working_memory_count as i64;
+            total_session += stats.session_memory_count as i64;
+            total_longterm += stats.long_term_memory_count as i64;
+            total_heap += (stats.total_memories * 250) as i64;
+            total_vectors += stats.total_memories as i64;
         }
     }
 
