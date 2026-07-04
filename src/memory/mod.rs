@@ -5067,6 +5067,14 @@ impl MemorySystem {
             if multihop_intent {
                 if let Some(graph) = self.graph_memory.as_ref() {
                     let companions = self.harvest_provenance_companions(&graph.read(), &memories);
+                    // Dedicated target so eval runs can capture the fire rate with
+                    // RUST_LOG=error,companion_injection=info and nothing else:
+                    // zero lines = the intent gate never opened (vs fired-but-inert).
+                    tracing::info!(
+                        target: "companion_injection",
+                        injected = companions.len(),
+                        "multihop companion injection fired"
+                    );
                     for (mem, score) in companions {
                         let mut cloned: Memory = mem;
                         cloned.set_score(score);
