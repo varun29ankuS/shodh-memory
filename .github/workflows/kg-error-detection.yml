@@ -1,0 +1,96 @@
+# KG error-detection benchmark (FB15k-237 + constrained noise injection).
+#
+# The standard error-detection protocol (CKRL / KGTtm / CAGED): corrupt a
+# fraction of a public KG's triples, rank all triples by trustworthiness,
+# measure AUC + error-precision@K. Every shodh signal here is DETERMINISTIC
+# and LLM-free (PPMI support, Adamic-Adar, slot priors, frozen-MiniLM name
+# cosine) — the reference numbers from the literature are trained KG-embedding
+# models, so read the comparison as "how far do memory-graph statistics get",
+# not as a leaderboard entry. Source data pinned (KG-BERT repo @ 62b76ed5);
+# injection seeded — the fixture is bit-reproducible.
+name: kg error detection benchmark
+on:
+  workflow_dispatch:
+    inputs:
+      ratios:
+        description: 'comma-separated corruption ratios'
+        required: false
+        default: '0.05,0.10,0.20'
+      limit:
+        description: 'clean-triple cap (blank = full 272k train split)'
+        required: false
+        default: ''
+  push:
+    branches: [feat/kg-error-detection-benchmark]
+    paths: ['.github/workflows/kg-error-detection.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kg-error-detection
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Cache FB15k-237 source
+        uses: actions/cache@v4
+        with:
+          path: .kg-error-cache
+          key: kg-bert-fb15k237-62b76ed5
+
+      - name: Run benchmark per ratio
+        run: |
+          set -o pipefail
+          echo "## KG error detection — FB15k-237, constrained noise" >> "$GITHUB_STEP_SUMMARY"
+          LIMIT="${{ github.event.inputs.limit || '' }}"
+          IFS=',' read -ra RATIOS <<< "${{ github.event.inputs.ratios || '0.05,0.10,0.20' }}"
+          for ratio in "${RATIOS[@]}"; do
+            ratio=$(echo "$ratio" | tr -d ' ')
+            FIX="kg-fix-$ratio"
+            python3 benchmarks/kg_error_inject.py --ratio "$ratio" --out "$FIX" \
+              ${LIMIT:+--limit "$LIMIT"}
+            ./target/release/recall-eval --kg-error "$FIX" \
+              --output "kg-error-$ratio.json" | tee "kg-error-$ratio.log"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### ratio=$ratio" >> "$GITHUB_STEP_SUMMARY"
+            cat "kg-error-$ratio.log" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "_Reference (trained models, 10% noise FB15k-class, from the literature: CKRL/KGTtm/CAGED report error-detection AUC ≈ 0.87–0.95). Our signals are untrained and deterministic._" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kg-error-detection
+          path: |
+            kg-error-*.json
+            kg-error-*.log

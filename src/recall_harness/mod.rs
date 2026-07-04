@@ -13,6 +13,7 @@
 pub mod decay_sim;
 pub mod fixtures;
 pub mod forgetting_harness;
+pub mod kg_error;
 pub mod lineage_harness;
 pub mod metrics;
 pub mod multihop;

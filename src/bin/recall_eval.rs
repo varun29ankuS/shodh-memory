@@ -272,6 +272,15 @@ struct Args {
     #[arg(long)]
     longmemeval_limit: Option<usize>,
 
+    /// KG error-detection benchmark (FB15k-237 + constrained noise): path to
+    /// the fixture dir built by benchmarks/kg_error_inject.py (triples.tsv +
+    /// entity_names.tsv). Ranks every triple by LLM-free trustworthiness
+    /// signals (PPMI support, Adamic-Adar, slot priors, MiniLM name cosine)
+    /// and reports per-signal AUC + error-precision@K against the injected
+    /// labels. Short-circuits the normal suite.
+    #[arg(long)]
+    kg_error: Option<PathBuf>,
+
     /// Simulated edge age in days, applied AFTER ingest and BEFORE queries
     /// (decay study). When `> 0`, the harness ages the knowledge-graph edges via
     /// `simulate_edge_aging` at the production ~6h cadence, so recall quality is
@@ -360,6 +369,24 @@ fn run(args: &Args) -> Result<i32> {
         layer_modes: args.layer.to_modes(),
         age_days: args.age_days,
     };
+
+    // KG error-detection benchmark short-circuits the normal suite: it scores
+    // a noised public KG fixture, no corpus ingest at all.
+    if let Some(kg_dir) = &args.kg_error {
+        let report =
+            shodh_memory::recall_harness::kg_error::run_kg_error(kg_dir).context("kg-error run")?;
+        println!(
+            "KG error detection: {} triples, {} injected ({} entities embedded)",
+            report.triples, report.injected, report.embedded_entities
+        );
+        println!("| signal | AUC | error-precision@K |");
+        println!("| --- | --- | --- |");
+        for (name, auc, p_at_k) in &report.signals {
+            println!("| {name} | {auc:.4} | {p_at_k:.4} |");
+        }
+        std::fs::write(&args.output, serde_json::to_string_pretty(&report)?)?;
+        return Ok(EXIT_PASS);
+    }
 
     // LongMemEval-S short-circuits the normal suite: each question has its own
     // haystack, so it loops per-question ingest+recall instead of one corpus.
