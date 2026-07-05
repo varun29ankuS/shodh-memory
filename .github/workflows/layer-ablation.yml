@@ -7,6 +7,9 @@ name: layer ablation (per-stage attribution)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ci/layer-ablation-repeats]
+    paths: ['.github/workflows/layer-ablation.yml']
 
 jobs:
   layers:
@@ -38,7 +41,7 @@ jobs:
           [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
 
       - name: Run --layer all (cumulative ladder)
-        run: ./target/release/recall-eval --suite locomo --layer all --output layers.json --storage ./s-layers 2>&1 | tail -8
+        run: ./target/release/recall-eval --suite locomo --layer all --repeats 1 --output layers.json --storage ./s-layers 2>&1 | tail -8
 
       - name: Per-layer ablation table
         if: always()
