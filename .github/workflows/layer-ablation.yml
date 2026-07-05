@@ -7,6 +7,9 @@ name: layer ablation (per-stage attribution)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ci/layer-ablation-repeats]
+    paths: ['.github/workflows/layer-ablation.yml']
 
 jobs:
   layers:
@@ -38,7 +41,7 @@ jobs:
           [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
 
       - name: Run --layer all (cumulative ladder)
-        run: ./target/release/recall-eval --suite locomo --layer all --output layers.json --storage ./s-layers 2>&1 | tail -8
+        run: ./target/release/recall-eval --suite locomo --layer all --repeats 1 --output layers.json --storage ./s-layers 2>&1 | tail -8
 
       - name: Per-layer ablation table
         if: always()
@@ -48,7 +51,7 @@ jobs:
           d = json.load(open('layers.json'))
           L = d.get('layers', {})
           # report_key() is snake_case; include any unexpected keys so we never miss again
-          order = ['vamana_only', 'plus_spreading', 'plus_bm25', 'plus_rerank', 'plus_facts', 'full']
+          order = ['vamana_only', '+spreading', '+bm25', '+rerank', '+facts', 'full']
           keys = [k for k in order if k in L] + [k for k in L if k not in order]
           def r(v):
               return v['recall@10'] if isinstance(v, dict) else v
