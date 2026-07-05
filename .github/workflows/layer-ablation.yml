@@ -51,7 +51,7 @@ jobs:
           d = json.load(open('layers.json'))
           L = d.get('layers', {})
           # report_key() is snake_case; include any unexpected keys so we never miss again
-          order = ['vamana_only', 'plus_spreading', 'plus_bm25', 'plus_rerank', 'plus_facts', 'full']
+          order = ['vamana_only', '+spreading', '+bm25', '+rerank', '+facts', 'full']
           keys = [k for k in order if k in L] + [k for k in L if k not in order]
           def r(v):
               return v['recall@10'] if isinstance(v, dict) else v
