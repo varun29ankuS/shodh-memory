@@ -865,8 +865,32 @@ pub const EVAL_USER: &str = "recall-eval";
 pub(crate) fn build_manager(storage_path: &Path) -> Result<MultiUserMemoryManager> {
     std::fs::create_dir_all(storage_path)
         .with_context(|| format!("creating storage dir {}", storage_path.display()))?;
-    MultiUserMemoryManager::new(storage_path.to_path_buf(), ServerConfig::default())
+    let config = ServerConfig {
+        max_generic_edges_per_memory: recall_generic_pair_budget_from_env(),
+        ..ServerConfig::default()
+    };
+    MultiUserMemoryManager::new(storage_path.to_path_buf(), config)
         .context("initialising MultiUserMemoryManager for recall harness")
+}
+
+fn recall_generic_pair_budget_from_env() -> Option<usize> {
+    std::env::var("SHODH_GRAPH_GENERIC_PAIR_BUDGET")
+        .ok()
+        .and_then(|val| {
+            val.parse::<usize>().ok().map(|n| {
+                // SHODH_MAX_ENTITIES is clamped to 50, so 50 choose 2 is the
+                // largest single-memory pair set the graph writer can see.
+                let clamped = n.min(1225);
+                if clamped != n {
+                    tracing::warn!(
+                        "SHODH_GRAPH_GENERIC_PAIR_BUDGET={} clamped to {} (valid range: 0-1225)",
+                        n,
+                        clamped
+                    );
+                }
+                clamped
+            })
+        })
 }
 
 /// Ingest the corpus through the production ingest path (NER → remember →
@@ -2226,6 +2250,23 @@ mod tests {
     fn unique_storage_dir(label: &str) -> PathBuf {
         let id = Uuid::new_v4().simple().to_string();
         std::env::temp_dir().join(format!("shodh-recall-{label}-{id}"))
+    }
+
+    #[test]
+    fn recall_generic_pair_budget_reads_env_for_ab_runs() {
+        std::env::remove_var("SHODH_GRAPH_GENERIC_PAIR_BUDGET");
+        assert_eq!(recall_generic_pair_budget_from_env(), None);
+
+        std::env::set_var("SHODH_GRAPH_GENERIC_PAIR_BUDGET", "7");
+        assert_eq!(recall_generic_pair_budget_from_env(), Some(7));
+
+        std::env::set_var("SHODH_GRAPH_GENERIC_PAIR_BUDGET", "9999");
+        assert_eq!(recall_generic_pair_budget_from_env(), Some(1225));
+
+        std::env::set_var("SHODH_GRAPH_GENERIC_PAIR_BUDGET", "not-a-number");
+        assert_eq!(recall_generic_pair_budget_from_env(), None);
+
+        std::env::remove_var("SHODH_GRAPH_GENERIC_PAIR_BUDGET");
     }
 
     /// Lineage repro (substrate diagnosis 2026-06-10): root-cause P@1 has been
