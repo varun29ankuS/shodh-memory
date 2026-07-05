@@ -360,6 +360,7 @@ SHODH_MEMORY_PATH=/var/lib/shodh  # Data directory
 SHODH_REQUEST_TIMEOUT=60          # Request timeout in seconds
 SHODH_MAX_CONCURRENT=200          # Max concurrent requests
 SHODH_GRAPH_GENERIC_PAIR_BUDGET=20 # Optional/off-by-default cap for generic graph edges per memory
+SHODH_ROCKSDB_BLOCK_CACHE_MB=256  # Shared RocksDB block cache (MiB)
 SHODH_CORS_ORIGINS=https://app.example.com
 ```
 </details>

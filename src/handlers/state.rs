@@ -705,6 +705,7 @@ pub struct MultiUserMemoryManager {
     /// Without this, each user's MemoryStorage + GraphMemory allocates ~96MB in
     /// independent caches — 6 users = 576MB just in block caches alone.
     shared_rocksdb_cache: rocksdb::Cache,
+    shared_rocksdb_cache_capacity_bytes: usize,
 
     /// Per-user, per-memory habituation tracker for proactive_context.
     /// Tracks how many times a memory was surfaced without positive feedback,
@@ -902,13 +903,15 @@ impl MultiUserMemoryManager {
         // Single shared LRU block cache for ALL RocksDB instances (per-user memory DBs,
         // per-user graph DBs, and the global shared DB). Provides a hard memory ceiling
         // regardless of how many users are active. Without this, each user allocates
-        // ~96MB in independent caches — the shared cache collapses that to a single
-        // 256MB pool with LRU eviction of the coldest blocks across all users.
+        // ~96MB in independent caches — the shared cache collapses that to one
+        // configured pool (256MiB by default) with LRU eviction of the coldest blocks.
+        let shared_rocksdb_cache_capacity_bytes =
+            crate::constants::rocksdb_shared_cache_capacity_bytes();
         let shared_rocksdb_cache =
-            rocksdb::Cache::new_lru_cache(crate::constants::ROCKSDB_SHARED_CACHE_BYTES);
+            rocksdb::Cache::new_lru_cache(shared_rocksdb_cache_capacity_bytes);
         info!(
             "Shared RocksDB block cache initialized ({}MB)",
-            crate::constants::ROCKSDB_SHARED_CACHE_BYTES / (1024 * 1024)
+            shared_rocksdb_cache_capacity_bytes / (1024 * 1024)
         );
 
         // Open a single shared DB for all global stores (todos, reminders, files, feedback, audit).
@@ -1044,6 +1047,7 @@ impl MultiUserMemoryManager {
             user_memory_init_locks: DashMap::new(),
             user_graph_init_locks: DashMap::new(),
             shared_rocksdb_cache,
+            shared_rocksdb_cache_capacity_bytes,
             habituation_tracker,
             task_tracker: tokio_util::task::TaskTracker::new(),
             consolidation_locks: DashMap::new(),
@@ -1660,6 +1664,18 @@ impl MultiUserMemoryManager {
             .collect()
     }
 
+    /// Snapshot cached user memories without creating/opening cold users.
+    ///
+    /// Observability paths must use this instead of `list_cached_users()` plus
+    /// `get_user_memory()`: if a user is evicted between those two calls,
+    /// `get_user_memory()` would reopen the RocksDB instance from disk.
+    pub fn cached_user_memories(&self) -> Vec<(String, Arc<parking_lot::RwLock<MemorySystem>>)> {
+        self.user_memories
+            .iter()
+            .map(|(id, memory)| (id.to_string(), memory.clone()))
+            .collect()
+    }
+
     /// RocksDB in-process memory, decomposed — the instrument for #90.
     ///
     /// - Shared block cache: read ONCE from the manager's own handle (it is a
@@ -1673,22 +1689,20 @@ impl MultiUserMemoryManager {
         let mut memtables = 0u64;
         let mut readers = 0u64;
         let mut users_counted = 0usize;
-        for user_id in self.list_cached_users() {
-            if let Ok(memory) = self.get_user_memory(&user_id) {
-                // try_read: a diagnostic must never block a writer; a user
-                // mid-write is simply skipped this scrape.
-                if let Some(guard) = memory.try_read() {
-                    let (m, r) = guard.rocksdb_memory_breakdown();
-                    memtables += m;
-                    readers += r;
-                    users_counted += 1;
-                }
+        for (_user_id, memory) in self.cached_user_memories() {
+            // try_read: a diagnostic must never block a writer; a user
+            // mid-write is simply skipped this scrape.
+            if let Some(guard) = memory.try_read() {
+                let (m, r) = guard.rocksdb_memory_breakdown();
+                memtables += m;
+                readers += r;
+                users_counted += 1;
             }
         }
         crate::system_memory::RocksDbMemoryDiagnostics {
             shared_block_cache_usage_bytes: self.shared_rocksdb_cache.get_usage() as u64,
             shared_block_cache_pinned_bytes: self.shared_rocksdb_cache.get_pinned_usage() as u64,
-            shared_block_cache_capacity_bytes: crate::constants::ROCKSDB_SHARED_CACHE_BYTES as u64,
+            shared_block_cache_capacity_bytes: self.shared_rocksdb_cache_capacity_bytes as u64,
             user_memtables_bytes: memtables,
             user_table_readers_bytes: readers,
             users_counted,
@@ -1726,14 +1740,8 @@ impl MultiUserMemoryManager {
             .map_err(|e| anyhow::anyhow!("Failed to flush shared database: {e}"))?;
         info!("  Shared database flushed (todos, prospective, files, feedback, audit)");
 
-        let user_entries: Vec<(String, Arc<parking_lot::RwLock<MemorySystem>>)> = self
-            .user_memories
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect();
-
         let mut flushed = 0;
-        for (user_id, memory_system) in user_entries {
+        for (user_id, memory_system) in self.cached_user_memories() {
             if let Some(guard) = memory_system.try_read() {
                 if let Err(e) = guard.flush_storage() {
                     tracing::warn!("  Failed to flush database for user {}: {}", user_id, e);
@@ -1757,14 +1765,8 @@ impl MultiUserMemoryManager {
     pub fn save_all_vector_indices(&self) -> Result<()> {
         info!("Saving vector indices to disk...");
 
-        let user_entries: Vec<(String, Arc<parking_lot::RwLock<MemorySystem>>)> = self
-            .user_memories
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect();
-
         let mut saved = 0;
-        for (user_id, memory_system) in user_entries {
+        for (user_id, memory_system) in self.cached_user_memories() {
             if let Some(guard) = memory_system.try_read() {
                 let index_path = self.base_path.join(&user_id).join("vector_index");
                 if let Err(e) = guard.save_vector_index(&index_path) {
@@ -2425,12 +2427,10 @@ impl MultiUserMemoryManager {
     pub fn write_failure_metrics(&self) -> (u64, usize) {
         let mut total_failures = 0u64;
         let mut total_pending = 0usize;
-        for (user_id, _) in self.user_memories.iter() {
-            if let Ok(memory_lock) = self.get_user_memory(user_id.as_ref()) {
-                let memory = memory_lock.read();
-                total_failures += memory.total_write_failures();
-                total_pending += memory.pending_write_retries();
-            }
+        for (_user_id, memory_lock) in self.cached_user_memories() {
+            let memory = memory_lock.read();
+            total_failures += memory.total_write_failures();
+            total_pending += memory.pending_write_retries();
         }
         (total_failures, total_pending)
     }
@@ -4160,5 +4160,37 @@ mod tests {
                 word
             );
         }
+    }
+
+    #[test]
+    fn cached_user_memories_snapshot_does_not_reopen_evicted_users() {
+        let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
+        let config = ServerConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            backup_enabled: false,
+            ..ServerConfig::default()
+        };
+        let manager = MultiUserMemoryManager::new(temp_dir.path().to_path_buf(), config)
+            .expect("failed to create manager");
+
+        manager
+            .get_user_memory("warm-user")
+            .expect("failed to create warm user memory");
+        let cached = manager.cached_user_memories();
+        assert_eq!(cached.len(), 1);
+
+        manager.evict_user("warm-user");
+        assert_eq!(manager.users_in_cache(), 0);
+
+        let (_user_id, memory) = cached.into_iter().next().expect("cached snapshot");
+        assert!(
+            memory.try_read().is_some(),
+            "snapshot should hold the cached memory handle directly"
+        );
+        assert_eq!(
+            manager.users_in_cache(),
+            0,
+            "reading the snapshot must not recreate the evicted cache entry"
+        );
     }
 }

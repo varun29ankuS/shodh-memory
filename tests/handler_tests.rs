@@ -294,6 +294,10 @@ async fn metrics_endpoint() {
         metrics.contains("shodh_cgroup_memory_current_bytes"),
         "metrics response should include cgroup memory gauge"
     );
+    assert!(
+        metrics.contains("shodh_rocksdb_block_cache_capacity_bytes"),
+        "metrics response should include RocksDB block cache capacity gauge"
+    );
 }
 
 #[tokio::test]

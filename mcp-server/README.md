@@ -5,7 +5,7 @@
 <h1 align="center">Shodh-Memory MCP Server</h1>
 
 <p align="center">
-  <strong>v0.1.90</strong> | Persistent cognitive memory for AI agents
+  Persistent cognitive memory for AI agents
 </p>
 
 <p align="center">
