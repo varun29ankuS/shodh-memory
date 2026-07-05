@@ -31,29 +31,12 @@ import { fileURLToPath } from "url";
 import { nextReconnectDelay, serializeAndValidateBody, shouldWarnInsecureApiUrl } from "./security-utils";
 import { stripSystemNoise, getContent as _getContent, getType as _getType, formatSurfacedMemories as _formatSurfacedMemories, formatToolCallContent } from "./string-utils";
 import { TokenTracker } from "./token-tracking";
+import { resolvePackageVersion } from "./version";
 
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
 
-// Resolve the package version from package.json so it cannot drift from the
-// published version. Tries the build layout (dist/index.js -> ../package.json)
-// then the dev layout (index.ts -> ./package.json); falls back to "unknown".
-function resolveVersion(): string {
-  const candidates = [
-    path.join(__dirname, "..", "package.json"),
-    path.join(__dirname, "package.json"),
-  ];
-  for (const candidate of candidates) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(candidate, "utf-8"));
-      if (typeof pkg.version === "string" && pkg.version) return pkg.version;
-    } catch {
-      // try next candidate
-    }
-  }
-  return "unknown";
-}
-const SERVER_VERSION = resolveVersion();
+const SERVER_VERSION = resolvePackageVersion(__dirname);
 
 // Configuration
 // Priority: SHODH_API_URL (full URL) > SHODH_HOST+SHODH_PORT (constructed) > localhost default
