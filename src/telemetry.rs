@@ -92,14 +92,9 @@ fn collect_heartbeat(
 
     // Count memories from cached users only (avoids loading every user from disk)
     let total_memories: u64 = manager
-        .list_cached_users()
+        .cached_user_memories()
         .iter()
-        .filter_map(|uid| {
-            manager
-                .get_user_memory(uid)
-                .ok()
-                .map(|ms| ms.read().stats().total_memories as u64)
-        })
+        .map(|(_, ms)| ms.read().stats().total_memories as u64)
         .sum();
 
     // Approximate storage size (walk top-level directory)
