@@ -8,6 +8,9 @@ name: layer ablation (per-stage attribution)
 on:
   workflow_dispatch:
   push:
+    branches: [feat/leave-one-out-ablation]
+    paths: ['.github/workflows/layer-ablation.yml']
+  push:
     branches: [ci/layer-ablation-repeats]
     paths: ['.github/workflows/layer-ablation.yml']
 
@@ -81,3 +84,63 @@ jobs:
           name: layer-ablation-json
           path: layers.json
           if-no-files-found: warn
+
+  leave_one_out:
+    # Marginal contribution of one leg at the FULL operating point (the
+    # cumulative ladder above is order-dependent; this is not).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arm: control
+            env_name: SHODH_ABLATE_NONE
+          - arm: no-spreading
+            env_name: SHODH_ABLATE_SPREADING
+          - arm: no-bm25
+            env_name: SHODH_ABLATE_BM25
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        run: cargo build --release --bin recall-eval
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+      - name: Run full pipeline, arm ${{ matrix.arm }}
+        run: |
+          export ${{ matrix.env_name }}=1
+          ./target/release/recall-eval --suite locomo --repeats 1             --output loo-${{ matrix.arm }}.json --storage ./s-loo 2>&1 | tail -4
+      - name: Report
+        if: always()
+        run: |
+          python3 - <<'PYEOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          d = json.load(open('loo-${{ matrix.arm }}.json'))
+          f = d['layers'].get('full', {})
+          print(f"leave-one-out arm ${{ matrix.arm }}: recall@10={f.get('recall@10'):.4f} "
+                f"ndcg@10={f.get('ndcg@10'):.4f} p@1={f.get('p@1'):.4f}")
+          PYEOF
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loo-${{ matrix.arm }}
+          path: loo-${{ matrix.arm }}.json
