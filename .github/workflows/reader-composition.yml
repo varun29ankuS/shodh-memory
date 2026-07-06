@@ -108,28 +108,33 @@ jobs:
           curl -fL --retry 10 -o llama.tar.gz \
             "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-bin-ubuntu-x64.tar.gz"
           mkdir -p llama && tar -xzf llama.tar.gz -C llama
-          LLAMA_CLI=$(find llama -name "llama-cli" -type f | head -1)
-          chmod +x "$LLAMA_CLI"
-          echo "LLAMA_CLI=$PWD/$LLAMA_CLI" >> "$GITHUB_ENV"
+          LLAMA_SERVER=$(find llama -name "llama-server" -type f | head -1)
+          chmod +x "$LLAMA_SERVER"
+          echo "LLAMA_SERVER=$PWD/$LLAMA_SERVER" >> "$GITHUB_ENV"
           QWEN_PIN=7dabda4d13d513e3e842b20f0d435c732f172cbe
           curl -fL --retry 10 -o qwen3b-q4.gguf \
             "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/${QWEN_PIN}/qwen2.5-3b-instruct-q4_k_m.gguf"
           ls -la qwen3b-q4.gguf
 
+      - name: Start llama-server (model loaded once)
+        run: |
+          export LD_LIBRARY_PATH="$(dirname "$LLAMA_SERVER"):$LD_LIBRARY_PATH"
+          nohup "$LLAMA_SERVER" -m qwen3b-q4.gguf -c 8192 --threads 4 \
+            --host 127.0.0.1 --port 8080 > llama-server.log 2>&1 &
+          echo $! > llama.pid
+
       - name: Reader answers (temp 0, seed 29)
         run: |
-          export LD_LIBRARY_PATH="$(dirname "$LLAMA_CLI"):$LD_LIBRARY_PATH"
           python3 benchmarks/reader_composition.py answer \
-            --dump contexts.jsonl --model qwen3b-q4.gguf \
-            --llama-cli "$LLAMA_CLI" --out answers.jsonl
+            --dump contexts.jsonl --server http://127.0.0.1:8080 \
+            --out answers.jsonl
           wc -l answers.jsonl
 
       - name: Score (substring-EM + local judge)
         run: |
-          export LD_LIBRARY_PATH="$(dirname "$LLAMA_CLI"):$LD_LIBRARY_PATH"
           python3 benchmarks/reader_composition.py score \
             --answers answers.jsonl --dataset "$LME_JSON" \
-            --model qwen3b-q4.gguf --llama-cli "$LLAMA_CLI" --out scores.json
+            --server http://127.0.0.1:8080 --out scores.json
           echo "## Reader composition — LongMemEval answer-half (local 3B reader)" >> "$GITHUB_STEP_SUMMARY"
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json
@@ -154,3 +159,4 @@ jobs:
             answers.jsonl
             scores.json
             retrieval-stdout.log
+            llama-server.log

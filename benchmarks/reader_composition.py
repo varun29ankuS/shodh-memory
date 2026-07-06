@@ -2,13 +2,15 @@
 """Reader-composition study: answer LongMemEval questions from shodh retrievals.
 
 The memory system is LLM-free; this study composes it with a SMALL LOCAL reader
-model (llama.cpp, CPU, temperature 0, fixed seed) to measure the answer-half on
-top of our published retrieval-half. Design constraints:
+model (llama.cpp SERVER, CPU, temperature 0, fixed seed) to measure the
+answer-half on top of our published retrieval-half. Design constraints:
 
 - The reader sees EXACTLY what the memory system retrieved (top-k turn texts
   from `recall-eval ... SHODH_DUMP_CONTEXT=...`), nothing else. Gold answers
   are never in the dump; they are joined here from the pinned upstream dataset
   by question id, only for scoring.
+- The model is served by llama-server and loaded ONCE (per-invocation reloads
+  of a 2GB model made per-question latency minutes, not seconds).
 - Scoring is reported two ways, both clearly labeled:
     * substring-EM: normalized gold answer contained in the model answer.
       Deterministic, conservative (paraphrases score 0).
@@ -17,18 +19,21 @@ top of our published retrieval-half. Design constraints:
       supplementary signal with that caveat attached.
 
 Usage:
-  reader_composition.py answer --dump ctx.jsonl --model model.gguf \
-      --llama-cli /path/llama-cli --out answers.jsonl
+  reader_composition.py answer --dump ctx.jsonl --server http://127.0.0.1:8080 \
+      --out answers.jsonl
   reader_composition.py score --answers answers.jsonl --dataset lme.json \
-      --model model.gguf --llama-cli /path/llama-cli --out scores.json
+      --server http://127.0.0.1:8080 --out scores.json
 """
 
 import argparse
 import json
 import pathlib
 import re
-import subprocess
 import sys
+import time
+import urllib.request
+
+TURN_CHAR_CAP = 800  # bound per-turn prompt contribution
 
 
 def normalize(text: str) -> str:
@@ -37,19 +42,46 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def run_llama(llama_cli: str, model: str, prompt: str, n_predict: int) -> str:
-    cmd = [
-        llama_cli, "-m", model, "--temp", "0", "--seed", "29",
-        "-n", str(n_predict), "--no-display-prompt", "-no-cnv",
-        "--threads", "4", "-p", prompt,
-    ]
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if out.returncode != 0:
-        raise RuntimeError(f"llama-cli failed: {out.stderr[-400:]}")
-    return out.stdout.strip()
+def ask(server: str, prompt: str, n_predict: int) -> str:
+    body = json.dumps({
+        "prompt": prompt,
+        "n_predict": n_predict,
+        "temperature": 0,
+        "seed": 29,
+        "cache_prompt": False,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        server.rstrip("/") + "/completion",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                return json.loads(resp.read())["content"].strip()
+        except Exception as e:  # transient server hiccup: brief retry
+            if attempt == 2:
+                raise
+            print(f"  retry after: {e}", file=sys.stderr)
+            time.sleep(5)
+    raise RuntimeError("unreachable")
+
+
+def wait_ready(server: str, timeout_s: int = 300) -> None:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(server.rstrip("/") + "/health", timeout=5) as r:
+                if r.status == 200:
+                    return
+        except Exception:
+            pass
+        time.sleep(3)
+    raise RuntimeError("llama-server never became healthy")
 
 
 def cmd_answer(args: argparse.Namespace) -> None:
+    wait_ready(args.server)
     out_path = pathlib.Path(args.out)
     done = set()
     if out_path.exists():  # resumable
@@ -61,7 +93,8 @@ def cmd_answer(args: argparse.Namespace) -> None:
             if rec["question_id"] in done:
                 continue
             context = "\n".join(
-                f"[{r['rank']}] {r['content']}" for r in rec["retrieved"]
+                f"[{r['rank']}] {r['content'][:TURN_CHAR_CAP]}"
+                for r in rec["retrieved"]
             )
             prompt = (
                 "You are answering a question about a user's conversation history. "
@@ -71,9 +104,10 @@ def cmd_answer(args: argparse.Namespace) -> None:
                 f"Question: {rec['question']}\n"
                 "Answer (one short sentence, no explanation):"
             )
-            answer = run_llama(args.llama_cli, args.model, prompt, 96)
+            answer = ask(args.server, prompt, 96)
             sink.write(json.dumps({
                 "question_id": rec["question_id"],
+                "question": rec["question"],
                 "category": rec["category"],
                 "gold_in_topk": rec["gold_in_topk"],
                 "answer": answer,
@@ -89,17 +123,19 @@ def cmd_score(args: argparse.Namespace) -> None:
         data = data.get("questions", list(data.values()))
     gold = {q["question_id"]: str(q.get("answer", "")) for q in data}
 
+    if args.server:
+        wait_ready(args.server)
     rows = [json.loads(l) for l in open(args.answers, encoding="utf-8")]
     em_hits, judge_hits, per_cat = 0, 0, {}
     for r in rows:
         g = gold.get(r["question_id"], "")
         em = bool(g) and normalize(g) in normalize(r["answer"])
         judge = None
-        if args.llama_cli and args.model:
-            verdict = run_llama(
-                args.llama_cli, args.model,
+        if args.server:
+            verdict = ask(
+                args.server,
                 "Judge whether the candidate answer conveys the same fact as the "
-                f"gold answer.\nQuestion: {r.get('question','')}\n"
+                f"gold answer.\nQuestion: {r.get('question', '')}\n"
                 f"Gold answer: {g}\nCandidate answer: {r['answer']}\n"
                 "Reply with exactly one word, yes or no:",
                 4,
@@ -135,15 +171,13 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("answer")
     a.add_argument("--dump", required=True)
-    a.add_argument("--model", required=True)
-    a.add_argument("--llama-cli", required=True)
+    a.add_argument("--server", required=True)
     a.add_argument("--out", required=True)
     a.set_defaults(fn=cmd_answer)
     s = sub.add_parser("score")
     s.add_argument("--answers", required=True)
     s.add_argument("--dataset", required=True)
-    s.add_argument("--model", default=None)
-    s.add_argument("--llama-cli", default=None)
+    s.add_argument("--server", default=None)
     s.add_argument("--out", required=True)
     s.set_defaults(fn=cmd_score)
     args = ap.parse_args()
