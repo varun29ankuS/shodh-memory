@@ -868,11 +868,13 @@ function draw(){
                                    : (lit.has(s.id)&&lit.has(t.id));
     }
     if(VIEW.level==="clusters"){
-      ctx.strokeStyle = on ? "rgba(120,200,255,.5)" : "rgba(120,140,170,.05)";
-      ctx.lineWidth = (l.sw||1)/GT.k * (on?1.4:1);
+      ctx.strokeStyle = dimmed ? (on ? "rgba(255,154,92,.6)" : "rgba(120,140,170,.05)")
+                               : "rgba(125,150,185,.26)";
+      ctx.lineWidth = (l.sw||1)/GT.k * (dimmed&&on?1.5:1);
     } else {
-      ctx.strokeStyle = on ? hexA(ec(l.str), dimmed?.95:.5) : "rgba(120,140,170,.04)";
-      ctx.lineWidth = (0.6+Math.min(2,l.str*1.6))/GT.k * (on?1.3:1);
+      ctx.strokeStyle = dimmed ? (on ? "rgba(255,154,92,.8)" : "rgba(120,140,170,.04)")
+                               : hexA(ec(l.str), .45);
+      ctx.lineWidth = (0.6+Math.min(2,l.str*1.6))/GT.k * (dimmed&&on?1.4:1);
     }
     ctx.beginPath(); ctx.moveTo(s.x,s.y); ctx.lineTo(t.x,t.y); ctx.stroke();
   }
@@ -890,10 +892,14 @@ function draw(){
       ctx.beginPath(); ctx.arc(n.x,n.y,n.r+3.2/GT.k,0,2*Math.PI);
       ctx.strokeStyle="rgba(255,200,150,.85)"; ctx.lineWidth=2.4/GT.k; ctx.stroke();
     }
+    const isClusterNode = n.kind==="cluster";
     ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,2*Math.PI);
-    ctx.fillStyle = n.color; ctx.fill();
-    ctx.lineWidth = (isCore?2.6:1.4)/GT.k;
-    ctx.strokeStyle = isCore ? "#ff9a5c" : (n.bridge ? "#ffb787" : (n===hoverNode ? "#e8eef5" : "#0b0e14"));
+    ctx.fillStyle = isClusterNode ? hexA(n.color,.28) : n.color; ctx.fill();
+    ctx.lineWidth = (isCore?2.6:(isClusterNode?1.7:1.4))/GT.k;
+    ctx.strokeStyle = isCore ? "#ff9a5c"
+      : (n.bridge ? "#ffb787"
+      : (n===hoverNode ? "#e8eef5"
+      : (isClusterNode ? hexA(n.color,.85) : "#0b0e14")));
     ctx.stroke();
   }
   ctx.globalAlpha=1;
@@ -914,11 +920,11 @@ function draw(){
       // light halo so dark label text stays readable both on the (light) disc and
       // where it overflows onto the dark canvas background.
       ctx.font = "700 12px Inter, sans-serif";
-      ctx.strokeStyle="rgba(245,248,252,.9)"; ctx.lineWidth=3.5; ctx.strokeText(trim(n.label,22),0,0);
-      ctx.fillStyle = "#0a121e"; ctx.fillText(trim(n.label, 22), 0, 0);
+      ctx.strokeStyle="rgba(8,12,20,.9)"; ctx.lineWidth=3.5; ctx.strokeText(trim(n.label,22),0,0);
+      ctx.fillStyle = "#e4ebf3"; ctx.fillText(trim(n.label, 22), 0, 0);
       ctx.font = "600 9px Inter, sans-serif";
-      ctx.strokeStyle="rgba(245,248,252,.8)"; ctx.lineWidth=3; ctx.strokeText(n.size+" entities",0,13);
-      ctx.fillStyle = "rgba(20,30,44,.9)"; ctx.fillText(n.size+" entities", 0, 13);
+      ctx.strokeStyle="rgba(8,12,20,.85)"; ctx.lineWidth=3; ctx.strokeText(n.size+" entities",0,13);
+      ctx.fillStyle = "rgba(196,208,222,.8)"; ctx.fillText(n.size+" entities", 0, 13);
       ctx.restore();
     }
   } else {
