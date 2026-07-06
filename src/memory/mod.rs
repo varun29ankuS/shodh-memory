@@ -2004,11 +2004,22 @@ impl MemorySystem {
         // stages. Cumulative ordering: VamanaOnly < PlusSpreading < PlusBm25 <
         // PlusRerank < PlusFacts < Full. See `LayerMode` in `types.rs`.
         let layer_mode = query.layers;
+        // Leave-one-out ablation overrides (default off -> byte-identical).
+        // The cumulative ladder attributes each stage CONDITIONAL on the ones
+        // before it (order-dependent); these switches remove exactly one leg
+        // from the FULL pipeline so its marginal contribution at the
+        // production operating point is measurable. Eval-only knobs.
+        let ablate = |name: &str| {
+            std::env::var(name)
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        };
         let layer_full = layer_mode >= types::LayerMode::Full;
         let layer_facts = layer_mode >= types::LayerMode::PlusFacts;
         let layer_rerank = layer_mode >= types::LayerMode::PlusRerank;
-        let layer_bm25 = layer_mode >= types::LayerMode::PlusBm25;
-        let layer_spreading = layer_mode >= types::LayerMode::PlusSpreading;
+        let layer_bm25 = layer_mode >= types::LayerMode::PlusBm25 && !ablate("SHODH_ABLATE_BM25");
+        let layer_spreading =
+            layer_mode >= types::LayerMode::PlusSpreading && !ablate("SHODH_ABLATE_SPREADING");
 
         // Diagnostic accumulators — only allocated when collect_diagnostics=true
         let mut stats = if collect_diagnostics {
