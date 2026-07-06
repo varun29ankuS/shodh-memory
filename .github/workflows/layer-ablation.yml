@@ -10,9 +10,6 @@ on:
   push:
     branches: [feat/leave-one-out-ablation]
     paths: ['.github/workflows/layer-ablation.yml']
-  push:
-    branches: [ci/layer-ablation-repeats]
-    paths: ['.github/workflows/layer-ablation.yml']
 
 jobs:
   layers:
