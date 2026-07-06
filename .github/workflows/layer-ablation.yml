@@ -7,9 +7,6 @@ name: layer ablation (per-stage attribution)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [feat/leave-one-out-ablation]
-    paths: ['.github/workflows/layer-ablation.yml']
 
 jobs:
   layers:
