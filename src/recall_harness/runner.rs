@@ -1173,6 +1173,44 @@ pub fn run_longmemeval(
 
             // Headline aggregates track the production (primary) pass only.
             if mode == primary_mode {
+                // SHODH_DUMP_CONTEXT=<path>: append one JSONL record per question
+                // with the retrieved top-k turn TEXTS (production pass only).
+                // Feeds the reader-composition study: an external reader model
+                // answers from exactly what the memory system surfaced, so
+                // answer accuracy can be attributed to retrieval vs reading.
+                // Gold answers are NOT exported -- the scorer joins them from
+                // the pinned upstream dataset by question id, so this dump can
+                // never leak gold into the reader's context by construction.
+                if let Ok(dump_path) = std::env::var("SHODH_DUMP_CONTEXT") {
+                    use std::io::Write as _;
+                    let retrieved: Vec<serde_json::Value> = memories
+                        .iter()
+                        .take(k)
+                        .enumerate()
+                        .map(|(rank, m)| {
+                            serde_json::json!({
+                                "rank": rank + 1,
+                                "content": m.experience.content,
+                                "is_gold": gold_uuids.contains(&m.id.0),
+                            })
+                        })
+                        .collect();
+                    let line = serde_json::json!({
+                        "question_id": case.id,
+                        "question": case.question,
+                        "category": case.category,
+                        "gold_in_topk": hit,
+                        "gold_total": gold_uuids.len(),
+                        "retrieved": retrieved,
+                    });
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&dump_path)
+                    {
+                        let _ = writeln!(f, "{line}");
+                    }
+                }
                 sum_recall += recall;
                 // p@1: is the single top-ranked memory a gold turn? A finer signal
                 // than recall@10, which only moves when gold crosses the top-k boundary.
