@@ -28,7 +28,8 @@
   --bg:#0b0e14; --bg2:#0e1117; --panel:#121722; --panel2:#161b26; --line:#222a38;
   --line2:#2c3647; --txt:#e6edf3; --txt2:#aab4c2; --mut:#6e7a8c; --accent:#58a6ff;
   --saffron:#ffb782; --gold:#ffd682; --turmeric:#ffc878; --maroon:#ff8c8c;
-  --deepblue:#82a0dc; --live:#96e6aa; --strong:#78c878; --medium:#e6c864; --weak:#787878;
+  --deepblue:#82a0dc; --live:#96e6aa; --strong:#5f9678; --medium:#8f8a62; --weak:#4a5260;
+  --act:#ff9a5c; --act-dim:#b96f42;
   --create:#b4e6b4; --retrieve:#ffc896; --proactive:#b4dcff; --update:#ffe082; --del:#ff8c8c;
 }
 *{box-sizing:border-box;}
@@ -64,7 +65,8 @@ header{
 @keyframes beat{0%,100%{box-shadow:0 0 0 0 rgba(150,230,170,.5);}50%{box-shadow:0 0 0 7px rgba(150,230,170,0);}}
 .stats-strip{display:flex;gap:18px;margin-left:6px;}
 .stat{display:flex;flex-direction:column;line-height:1.15;}
-.stat .v{font-size:14px;font-weight:700;font-variant-numeric:tabular-nums;}
+.stat .v{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums;
+  font-family:"JetBrains Mono","SF Mono",ui-monospace,Consolas,monospace;color:#dfe7f0;}
 .stat .k{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.7px;}
 .spark{margin-left:auto;display:flex;align-items:flex-end;gap:2px;height:26px;}
 .spark .bar{width:3px;background:linear-gradient(180deg,#58a6ff,#2f6fbf);border-radius:1px;min-height:2px;transition:height .25s;}
@@ -131,6 +133,10 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
 .river{flex:1;overflow-y:auto;padding:10px 12px;}
 .empty{color:var(--mut);font-size:12px;padding:18px 6px;line-height:1.6;}
 .empty b{color:var(--txt2);}
+.empty .empty-title{font-family:"JetBrains Mono",ui-monospace,monospace;color:var(--txt2);font-size:13px;margin-bottom:8px;letter-spacing:.4px;}
+.empty .demo-cue{display:block;margin-top:14px;background:none;border:1px solid var(--act-dim);color:var(--act);
+  border-radius:7px;padding:8px 14px;font:600 11.5px Inter,sans-serif;cursor:pointer;letter-spacing:.4px;}
+.empty .demo-cue:hover{background:rgba(255,154,92,.1);border-color:var(--act);}
 
 .cascade{border:1px solid var(--line2);border-radius:12px;margin-bottom:14px;background:linear-gradient(180deg,#131a26,#0f141d);
   overflow:hidden;animation:rise .45s cubic-bezier(.2,.8,.2,1);position:relative;}
@@ -230,7 +236,8 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
 .kv .meter i{display:block;height:100%;border-radius:4px;}
 .kv .num{color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums;min-width:40px;text-align:right;}
 .gridkv{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;}
-.gridkv .c .v{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums;}
+.gridkv .c .v{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;
+  font-family:"JetBrains Mono","SF Mono",ui-monospace,Consolas,monospace;}
 .gridkv .c .l{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.6px;}
 
 /* sessions / LLMs */
@@ -252,10 +259,14 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
 .miss b{color:var(--txt2);}
 
 /* screens — TUI-style views (1 LIVE · 2 ANOMALIES · 3 WORK), keys 1/2/3 */
-#tabbar{display:flex;gap:6px;padding:6px 14px 0;border-bottom:1px solid var(--line);}
+#tabbar{display:flex;gap:10px;padding:8px 14px 0;border-bottom:1px solid var(--line);}
 #tabbar .tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--mut);
-  font:600 10.5px Inter,sans-serif;letter-spacing:1.4px;padding:6px 12px 8px;cursor:pointer;text-transform:uppercase;}
-#tabbar .tab.on{color:var(--turmeric);border-bottom-color:var(--turmeric);}
+  font:700 12px Inter,sans-serif;letter-spacing:1.6px;padding:8px 14px 10px;cursor:pointer;text-transform:uppercase;
+  display:flex;align-items:center;gap:8px;}
+#tabbar .tab .key{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:10px;color:var(--mut);
+  border:1px solid var(--line2);border-radius:4px;padding:0 5px;line-height:1.5;}
+#tabbar .tab.on{color:var(--act);border-bottom-color:var(--act);}
+#tabbar .tab.on .key{color:var(--act);border-color:var(--act-dim);}
 #tabbar .tab:hover{color:var(--txt2);}
 #tabbar .tab .badge{background:#5c2b2b;color:#ff9c9c;border-radius:8px;padding:0 6px;font-size:9.5px;margin-left:4px;}
 .screen{padding:16px;}
@@ -319,9 +330,9 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
 
 <!-- TUI-style screens: 1 LIVE (river+graph) · 2 ANOMALIES (analyst) · 3 WORK (GTD) -->
 <nav id="tabbar">
-  <button class="tab on" id="tab-live" onclick="showScreen('live')">1 · Live</button>
-  <button class="tab" id="tab-anom" onclick="showScreen('anom')">2 · Anomalies <span class="badge" id="anom-badge" style="display:none">0</span></button>
-  <button class="tab" id="tab-work" onclick="showScreen('work')">3 · Work</button>
+  <button class="tab on" id="tab-live" onclick="showScreen('live')"><span class="key">1</span>Live</button>
+  <button class="tab" id="tab-anom" onclick="showScreen('anom')"><span class="key">2</span>Anomalies <span class="badge" id="anom-badge" style="display:none">0</span></button>
+  <button class="tab" id="tab-work" onclick="showScreen('work')"><span class="key">3</span>Work</button>
 </nav>
 
 <main>
@@ -336,7 +347,11 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
     </div>
     <div class="sechd"><b>RECALL RIVER</b> · associative cascade <span class="cnt" id="river-cnt"></span></div>
     <div class="river" id="river">
-      <div class="empty">Waiting for the first recall.<br><br>Type a cue above and press <b>Recall</b>, or trigger one from any connected agent — each recall blooms into the memories it surfaced and the <b>causal chains</b> that lit up with them.</div>
+      <div class="empty" id="river-empty">
+  <div class="empty-title">The river is still.</div>
+  Each recall blooms into the memories it surfaced and the <b>causal chains</b> that lit up with them — spreading activation, made visible.
+  <button class="demo-cue" id="demo-cue" onclick="demoCue()">cue a recall from this graph →</button>
+</div>
     </div>
   </div>
 
@@ -355,14 +370,16 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
     <div id="gtip"></div>
     <div class="ghint">scroll to zoom · drag to pan · click a cluster to drill in</div>
     <div class="glegend">
-      <div class="it"><span class="swn" style="background:#d2a8ff"></span>technology</div>
-      <div class="it"><span class="swn" style="background:#82a0dc"></span>org</div>
-      <div class="it"><span class="swn" style="background:#96e6aa"></span>location</div>
-      <div class="it"><span class="swn" style="background:#ffc896"></span>person</div>
+      <div class="it"><span class="swn" style="background:#a08cc8"></span>technology</div>
+      <div class="it"><span class="swn" style="background:#7f9cc4"></span>org</div>
+      <div class="it"><span class="swn" style="background:#6fae8f"></span>location</div>
+      <div class="it"><span class="swn" style="background:#c9b280"></span>person</div>
       <span style="color:#2c3647">│</span>
-      <div class="it"><span class="sw" style="background:#78c878"></span>strong</div>
-      <div class="it"><span class="sw" style="background:#e6c864"></span>medium</div>
-      <div class="it"><span class="sw" style="background:#787878"></span>weak</div>
+      <div class="it"><span class="sw" style="background:#5f9678"></span>strong</div>
+      <div class="it"><span class="sw" style="background:#8f8a62"></span>medium</div>
+      <div class="it"><span class="sw" style="background:#4a5260"></span>weak</div>
+      <span style="color:#2c3647">│</span>
+      <div class="it"><span class="swn" style="background:#ff9a5c"></span>active / anomaly</div>
     </div>
   </div>
 
@@ -424,12 +441,15 @@ const API_KEY  = window.__SHODH_API_KEY__  || "";
 const H = API_KEY ? {"X-API-Key":API_KEY} : {};
 const POST_H = Object.assign({"Content-Type":"application/json"}, H);
 
-const TYPEC = {org:"#82a0dc",organization:"#82a0dc",company:"#82a0dc",location:"#96e6aa",loc:"#96e6aa",
-  gpe:"#96e6aa",person:"#ffc896",per:"#ffc896",artifact:"#d2a8ff",technology:"#d2a8ff",tech:"#d2a8ff",
-  product:"#d2a8ff",entity:"#58a6ff",event:"#ffd682",_d:"#8a94a4"};
+// Node-type palette: desaturated, dark-tuned, and deliberately COOL —
+// the warm/orange band is reserved for ACTIVITY (recalls, anomalies,
+// active paths). A node may only turn warm by DOING something.
+const TYPEC = {org:"#7f9cc4",organization:"#7f9cc4",company:"#7f9cc4",location:"#6fae8f",loc:"#6fae8f",
+  gpe:"#6fae8f",person:"#c9b280",per:"#c9b280",artifact:"#a08cc8",technology:"#a08cc8",tech:"#a08cc8",
+  product:"#a08cc8",entity:"#6f93b8",event:"#b0a06f",_d:"#77828f"};
 const tc = t => TYPEC[(t||"").toLowerCase()] || TYPEC._d;
 // edge strength colour — matches TUI CONN_STRONG/MEDIUM/WEAK thresholds
-const ec = s => s>=0.7 ? "#78c878" : s>=0.4 ? "#e6c864" : "#787878";
+const ec = s => s>=0.7 ? "#5f9678" : s>=0.4 ? "#8f8a62" : "#4a5260";
 const EVCOL = {RETRIEVE:"#ffc896",PROACTIVE_CONTEXT:"#b4dcff",CREATE:"#b4e6b4",UPDATE:"#ffe082",DELETE:"#ff8c8c"};
 const EVICO = {RETRIEVE:"◎",PROACTIVE_CONTEXT:"◉",CREATE:"●",UPDATE:"◐",DELETE:"○"};
 
@@ -476,10 +496,12 @@ const gzoom = d3.zoom().scaleExtent([0.15, 6]).on("zoom", e=>{ GT = e.transform;
 
 // the cluster colour wheel — clusters get distinct hues so they read apart even
 // when most member entity_types collapse to one colour (e.g. "Technology").
-const CLUSTER_HUES = ["#82a0dc","#96e6aa","#d2a8ff","#ffc896","#ffd682","#8fd3d0",
-  "#e69ac0","#a0c878","#dcb482","#84b6ff","#b4e6b4","#ff9ea0","#c8a0ff","#9adcc0",
-  "#e6c864","#7ec8e6","#d0a8a0","#aab4ff","#8ce0b4","#ffb0d0","#c0d878","#e0a8e0",
-  "#9cc0e6","#d8e082","#ff9c78","#88d0a0","#b8a0e0","#e6b48c","#90c8d8","#cce0a0"];
+// Cluster hues: one restrained cool family with lightness variation —
+// clusters must read as TERRITORIES of one map, not competing candies,
+// and none may impersonate the activity orange.
+const CLUSTER_HUES = ["#7f9cc4","#6fae8f","#a08cc8","#c9b280","#6f93b8","#8fb3ae",
+  "#b08cb4","#8ba86f","#95a4c9","#79c0b4","#9d8fb8","#b8a86f",
+  "#6a8daa","#84b691","#af9cd4","#a3927a","#7ba6c4","#98b98a"];
 
 // normalize an entity name for cross-user identity. Same surface name across
 // users → one merged node (this is the cross-USER cross-referencing: a shared
@@ -871,7 +893,7 @@ function draw(){
     ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,2*Math.PI);
     ctx.fillStyle = n.color; ctx.fill();
     ctx.lineWidth = (isCore?2.6:1.4)/GT.k;
-    ctx.strokeStyle = isCore ? "#ffc896" : (n.bridge ? "#ffd6a0" : (n===hoverNode ? "#ffffff" : "#0b0e14"));
+    ctx.strokeStyle = isCore ? "#ff9a5c" : (n.bridge ? "#ffb787" : (n===hoverNode ? "#e8eef5" : "#0b0e14"));
     ctx.stroke();
   }
   ctx.globalAlpha=1;
@@ -914,7 +936,7 @@ function draw(){
       ctx.save(); ctx.translate(n.x, n.y+n.r+2); ctx.scale(1/GT.k,1/GT.k);
       ctx.lineJoin="round"; ctx.font = (isCore?"700 ":"500 ")+"10px Inter, sans-serif";
       ctx.strokeStyle="rgba(8,12,20,.85)"; ctx.lineWidth=3; ctx.strokeText(trim(n.label,24),0,6);
-      ctx.fillStyle = isCore ? "#ffd6a0" : "#cdd6e0";
+      ctx.fillStyle = isCore ? "#ffb787" : "#cdd6e0";
       ctx.fillText(trim(n.label,24), 0, 6);
       ctx.restore();
     }
@@ -1410,6 +1432,18 @@ function anomDetail(i){
 // ════════════════════════════════════════════════════════════════════════════
 //  Manual recall (fires the cue → the server emits a RETRIEVE event we also catch)
 // ════════════════════════════════════════════════════════════════════════════
+function demoCue(){
+  // The invitation action: cue the graph's own most salient entity, so the
+  // first recall a viewer sees is guaranteed to bloom into a cascade.
+  const pool = (typeof RAW!=="undefined" && RAW && RAW.nodes) ? RAW.nodes : [];
+  const cands = pool.filter(n=>n.proper && n.deg>2);
+  const pick = (cands.length?cands:pool).slice()
+    .sort((a,b)=>((b.sal||0)-(a.sal||0)) || ((b.deg||0)-(a.deg||0)))[0];
+  if(!pick){ $("cue").focus(); return; }
+  $("cue").value = pick.name;
+  fireRecall();
+}
+
 async function fireRecall(){
   const q = $("cue").value.trim(); if(!q) return;
   const sel = users();
