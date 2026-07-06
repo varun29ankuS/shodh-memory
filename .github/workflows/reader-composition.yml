@@ -24,10 +24,17 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: reader-composition
   cancel-in-progress: true
+
+env:
+  # Resume pointer: when set, reuse contexts.jsonl from that run's artifact
+  # instead of re-running the 3h retrieval pass. Pre-merge verification
+  # convenience; blank it (or remove) before merge.
+  CONTEXTS_RUN_ID: '28767286749'
 
 jobs:
   study:
@@ -42,6 +49,7 @@ jobs:
       - name: Install LLVM (ONNX runtime build dep)
         run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
       - name: Build recall-eval
+        if: ${{ env.CONTEXTS_RUN_ID == '' }}
         run: cargo build --release --bin recall-eval
       - name: Cache embedder model
         uses: actions/cache@v4
@@ -73,7 +81,18 @@ jobs:
           python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
             --limit "${{ github.event.inputs.limit || '100' }}"
 
+      - name: Reuse contexts from prior run
+        if: ${{ env.CONTEXTS_RUN_ID != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$CONTEXTS_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name reader-composition --dir prev
+          cp prev/contexts.jsonl contexts.jsonl
+          wc -l contexts.jsonl
+
       - name: Retrieval pass with context dump
+        if: ${{ env.CONTEXTS_RUN_ID == '' }}
         env:
           SHODH_DUMP_CONTEXT: contexts.jsonl
         run: |
@@ -86,9 +105,9 @@ jobs:
       - name: Fetch pinned llama.cpp + reader model
         run: |
           LLAMA_TAG=b9878
-          curl -fL --retry 10 -o llama.zip \
-            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-bin-ubuntu-x64.zip"
-          unzip -q llama.zip -d llama
+          curl -fL --retry 10 -o llama.tar.gz \
+            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-bin-ubuntu-x64.tar.gz"
+          mkdir -p llama && tar -xzf llama.tar.gz -C llama
           LLAMA_CLI=$(find llama -name "llama-cli" -type f | head -1)
           chmod +x "$LLAMA_CLI"
           echo "LLAMA_CLI=$PWD/$LLAMA_CLI" >> "$GITHUB_ENV"
