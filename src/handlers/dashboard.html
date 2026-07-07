@@ -572,11 +572,26 @@ async function loadGraph(){
       stars=merged.stars; conns=merged.connections;
       sharedNote = " · "+merged.shared+" shared entities bridge the group";
     }
+    // EDGE BUDGET (information density at scale): a real ingest produces
+    // hundreds of edges per memory; a 100GB corpus produces millions. The
+    // browser must never attempt to cluster them all — keep the STRONGEST
+    // edges up to a budget, say so on screen, and let drill-down fetch depth.
+    // Measured: 126k raw edges froze the client-side build for >75s; 40k
+    // builds in seconds and the strongest-edge subset preserves cluster
+    // structure (weak long-tail edges are exactly what the PMI gate and
+    // pair budget prune at birth on current servers).
+    const EDGE_BUDGET = 40000;
+    let edgeNote = "";
+    if(conns.length > EDGE_BUDGET){
+      const total = conns.length;
+      conns = conns.slice().sort((a,b)=>(b.strength||0)-(a.strength||0)).slice(0, EDGE_BUDGET);
+      edgeNote = " · strongest "+fmt(EDGE_BUDGET)+" of "+fmt(total)+" edges";
+    }
     RAW = buildRaw(stars, conns);
     RAW.group = sel.length>1; RAW.selUsers = sel;
     if(!RAW.N){ $("gloading").textContent="no graph yet for "+(sel.length>1?"this group":"this user"); clearCanvas(); $("g-meta").textContent="0 entities"; $("gnav").style.display="none"; return; }
     clusterRaw(RAW);
-    $("g-meta").textContent = RAW.N+" entities · "+fmt(RAW.E)+" edges · "+RAW.clusters.length+" clusters"+sharedNote;
+    $("g-meta").textContent = RAW.N+" entities · "+fmt(RAW.E)+" edges · "+RAW.clusters.length+" clusters"+edgeNote+sharedNote;
     showClusters();
   }catch(e){
     $("gloading").style.display="grid"; $("gloading").textContent = "graph load failed: "+e.message;
