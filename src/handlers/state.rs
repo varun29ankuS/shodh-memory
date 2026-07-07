@@ -2713,6 +2713,14 @@ impl MultiUserMemoryManager {
                 if !name.chars().any(|c| c.is_alphanumeric()) {
                     return false;
                 }
+                // 6b-d. Structural non-entities that leak from messy real-world
+                //     documents (news dumps, event feeds): URLs/domains/file paths,
+                //     timestamps/timezones, and hex-id fragments. Deterministic and
+                //     model-agnostic — the NER model never has to learn to avoid
+                //     them, and this holds whether the backbone is TinyBERT or GLiNER.
+                if is_structural_non_entity(name) {
+                    return false;
+                }
                 // 7. MISC type without uppercase needs higher confidence
                 if matches!(e.entity_type, NerEntityType::Misc)
                     && !name.chars().any(|c| c.is_uppercase())
@@ -3873,9 +3881,103 @@ impl MultiUserMemoryManager {
     }
 }
 
+/// Deterministic entity hygiene: reject structural tokens that NER backbones
+/// mislabel as named entities when fed messy real-world text (news dumps, event
+/// feeds, scraped documents) — URLs/domains/file paths, timestamps/timezones,
+/// and hex-id/code fragments. Model-agnostic: the ingest rejects these whether
+/// the extractor is TinyBERT or GLiNER, so entity quality does not depend on the
+/// input being pre-cleaned. Named entities always survive (every real name has a
+/// run of 3+ letters and none of the structural signatures below).
+pub(crate) fn is_structural_non_entity(name: &str) -> bool {
+    let lower = name.to_lowercase();
+
+    // URL / domain / file-path fragments (".com", "article.aspx", "metro.co.uk").
+    if lower.contains("://")
+        || lower.starts_with("www.")
+        || lower.starts_with("http")
+        || lower.contains(".co.uk")
+        || [
+            ".com", ".org", ".net", ".gov", ".edu", ".io", ".html", ".htm", ".aspx", ".php",
+        ]
+        .iter()
+        .any(|s| lower.ends_with(s))
+    {
+        return true;
+    }
+
+    // Timestamps / datetimes / timezone markers ("08:00 utc", "2024-03-26 08:00",
+    // "09:00", bare "gmt"). The memory's created_at already carries the real time.
+    let has_clock = {
+        let b = name.as_bytes();
+        (0..b.len().saturating_sub(2))
+            .any(|i| b[i].is_ascii_digit() && b[i + 1] == b':' && b[i + 2].is_ascii_digit())
+    };
+    if has_clock
+        || lower.ends_with(" utc")
+        || lower.ends_with(" gmt")
+        || matches!(
+            lower.as_str(),
+            "utc" | "gmt" | "est" | "edt" | "pst" | "pdt"
+        )
+    {
+        return true;
+    }
+
+    // No run of 3+ consecutive letters -> not a word/name. Kills hex-id and code
+    // fragments ("46ec 53a6", "1cdb0c73c b8") from URL slugs and article ids.
+    let mut run = 0usize;
+    let mut max_run = 0usize;
+    for c in name.chars() {
+        if c.is_alphabetic() {
+            run += 1;
+            max_run = max_run.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    max_run < 3
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structural_non_entities_are_rejected() {
+        for junk in &[
+            "metro.co.uk",
+            ".com",
+            "article.aspx",
+            "http://x.io/y",
+            "www.cnn.com",
+            "08:00 utc",
+            "09:00",
+            "2024-03-26 08:00",
+            "gmt",
+            "utc",
+            "46ec 53a6 8dea",
+            "1cdb0c73c b8",
+        ] {
+            assert!(is_structural_non_entity(junk), "should reject: {junk}");
+        }
+    }
+
+    #[test]
+    fn real_named_entities_survive() {
+        for name in &[
+            "Niki Fennoy",
+            "Brandon Scott",
+            "Francis Scott Key Bridge",
+            "Patapsco River",
+            "Maryland Transportation Authority",
+            "Baltimore",
+            "The Dali",
+            "DRDO",
+            "HAL Tejas",
+        ] {
+            assert!(!is_structural_non_entity(name), "should keep: {name}");
+        }
+    }
 
     #[test]
     fn test_blocklist_contains_english_stop_words() {
