@@ -444,10 +444,12 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
             }
 
             // Try to deserialize with the full legacy fallback chain
-            match crate::memory::storage::deserialize_memory_for_migration(&value) {
+            match crate::memory::storage::deserialize_memory_for_migration(&key, &value) {
                 Ok(memory) => {
                     if !dry_run {
-                        let new_value = serialization::encode_sho(&memory)?;
+                        // Route through encode_memory so re-encoded memories are
+                        // encrypted when a keystore is configured (SHODH_MASTER_PASSPHRASE).
+                        let new_value = crate::memory::storage::encode_memory(&memory)?;
                         batch.put(&*key, &new_value);
                         batch_count += 1;
                     }

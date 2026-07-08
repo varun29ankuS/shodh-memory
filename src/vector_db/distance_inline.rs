@@ -32,7 +32,7 @@ pub fn dot_product_inline(a: &[f32], b: &[f32]) -> f32 {
     {
         #[cfg(target_feature = "avx2")]
         unsafe {
-            return dot_product_avx2_inline(a, b);
+            dot_product_avx2_inline(a, b)
         }
 
         #[cfg(not(target_feature = "avx2"))]
@@ -45,7 +45,7 @@ pub fn dot_product_inline(a: &[f32], b: &[f32]) -> f32 {
     {
         #[cfg(target_feature = "neon")]
         unsafe {
-            return dot_product_neon_inline(a, b);
+            dot_product_neon_inline(a, b)
         }
 
         #[cfg(not(target_feature = "neon"))]
@@ -188,7 +188,7 @@ pub fn euclidean_squared_inline(a: &[f32], b: &[f32]) -> f32 {
     {
         #[cfg(target_feature = "avx2")]
         unsafe {
-            return euclidean_squared_avx2_inline(a, b);
+            euclidean_squared_avx2_inline(a, b)
         }
 
         #[cfg(not(target_feature = "avx2"))]
@@ -201,7 +201,7 @@ pub fn euclidean_squared_inline(a: &[f32], b: &[f32]) -> f32 {
     {
         #[cfg(target_feature = "neon")]
         unsafe {
-            return euclidean_squared_neon_inline(a, b);
+            euclidean_squared_neon_inline(a, b)
         }
 
         #[cfg(not(target_feature = "neon"))]
@@ -325,7 +325,7 @@ pub fn l2_norm_squared_inline(a: &[f32]) -> f32 {
     {
         #[cfg(target_feature = "avx2")]
         unsafe {
-            return l2_norm_squared_avx2_inline(a);
+            l2_norm_squared_avx2_inline(a)
         }
 
         #[cfg(not(target_feature = "avx2"))]
@@ -338,7 +338,7 @@ pub fn l2_norm_squared_inline(a: &[f32]) -> f32 {
     {
         #[cfg(target_feature = "neon")]
         unsafe {
-            return l2_norm_squared_neon_inline(a);
+            l2_norm_squared_neon_inline(a)
         }
 
         #[cfg(not(target_feature = "neon"))]
@@ -404,8 +404,8 @@ unsafe fn l2_norm_squared_neon_inline(a: &[f32]) -> f32 {
 
     let mut result = vaddvq_f32(sum);
 
-    for j in simd_len..len {
-        result += a[j] * a[j];
+    for val in &a[simd_len..] {
+        result += val * val;
     }
 
     result

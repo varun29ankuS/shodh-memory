@@ -1,0 +1,18 @@
+shodh-memory
+Copyright (c) shodh-memory contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+----------------------------------------------------------------------
+Third-party / cross-project attributions
+----------------------------------------------------------------------
+
+The following source files were contributed by Portll, the original author,
+under the Apache License 2.0. Portll also maintains parallel implementations of
+this code in its `veld` project (licensed BUSL-1.1) at commit
+dbc9036d5c29614eba9a6d43032038632d5612f9. As the copyright holder, Portll
+contributes these files to shodh-memory under Apache-2.0; no BUSL-1.1 terms
+attach to the copies in this repository.
+
+  - src/encryption.rs              (AES-256-GCM record-level encryption)
+  - src/embeddings/http_embedder.rs (OpenAI-compatible HTTP embedding client)

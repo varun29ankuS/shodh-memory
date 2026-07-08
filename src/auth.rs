@@ -115,31 +115,31 @@ impl IntoResponse for AuthError {
     }
 }
 
-/// Constant-time string comparison to prevent timing attacks
+/// Constant-time comparison of two key strings.
 ///
-/// Compares all bytes of both strings to prevent length-based timing leaks.
-/// The comparison time is constant regardless of where differences occur.
+/// For equal-length inputs the comparison is constant-time in the input
+/// *contents* via `subtle::ConstantTimeEq`, so it does not leak where two
+/// equal-length keys first differ.
+///
+/// Unequal-length inputs return `false` immediately. This is deliberate and
+/// safe: a key's length is not secret (API-key lengths are public), and an
+/// early reject avoids doing work proportional to the *caller-supplied* length.
+/// That work would otherwise be both a timing signal (cost varying with the
+/// attacker's input) and a DoS vector (a multi-megabyte "key" forcing a
+/// multi-megabyte compare on every request). Note `subtle`'s slice `ct_eq`
+/// already short-circuits on a length mismatch, so the explicit guard only
+/// makes that intent visible — it does not change the leakage profile.
 pub(crate) fn constant_time_compare(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
+
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
-    let a_len = a_bytes.len();
-    let b_len = b_bytes.len();
-    let max_len = std::cmp::max(a_len, b_len);
 
-    // Track whether lengths match (0 if equal, non-zero otherwise)
-    // Use u32 to avoid truncation: (usize as u8) wraps at 256, so lengths
-    // differing by a multiple of 256 would falsely compare as equal.
-    let mut result: u32 = (a_len ^ b_len) as u32;
-
-    // Compare all bytes up to max_len, using 0 for out-of-bounds indices
-    // This ensures constant time regardless of actual lengths
-    for i in 0..max_len {
-        let byte_a = if i < a_len { a_bytes[i] } else { 0 };
-        let byte_b = if i < b_len { b_bytes[i] } else { 0 };
-        result |= (byte_a ^ byte_b) as u32;
+    if a_bytes.len() != b_bytes.len() {
+        return false;
     }
 
-    result == 0
+    bool::from(a_bytes.ct_eq(b_bytes))
 }
 
 /// Validate API key against configured keys using constant-time comparison

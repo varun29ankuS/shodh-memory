@@ -95,6 +95,10 @@ path = "src/cli.rs"
 name = "recall-eval"
 path = "src/bin/recall_eval.rs"
 
+[[bin]]
+name = "shodh-keyctl"
+path = "src/bin/shodh_keyctl.rs"
+
 [dependencies]
 # MCP Protocol
 rmcp = { version = "0.12", features = ["server", "macros", "transport-io"] }
@@ -191,9 +195,17 @@ hex = "0.4"
 
 # MIF encryption (AES-256-GCM)
 aes-gcm = "0.10"
+# XChaCha20-Poly1305 for record encryption (192-bit nonce; no AES-GCM nonce ceiling)
+chacha20poly1305 = "0.10"
+# Zeroize key material on drop (field-level encryption)
+zeroize = { version = "1", features = ["derive"] }
+# Constant-time equality for API key comparison
+subtle = "2.6"
 
 # External integrations (SHO-40)
 hmac = "0.12"
+# Argon2id passphrase KDF for the encryption-v2 keystore
+argon2 = "0.5"
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 
 # Auto-download for models and ONNX runtime
@@ -290,6 +302,10 @@ python = ["pyo3", "numpy"]
 
 # Optional: LLM-based query parser (future: requires API key)
 llm-parser = []
+
+# Optional: HTTP-backed OpenAI-compatible embedder.
+# Disabled by default because it can send memory text to an external service.
+http-embedder = []
 
 # Optional: Zenoh transport for robotics/ROS2 (pure Rust, cross-platform)
 zenoh = ["dep:zenoh"]
