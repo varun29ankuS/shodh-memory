@@ -1,0 +1,26 @@
+[package]
+name = "shodh-front"
+version = "0.1.0"
+edition = "2021"
+description = "Local web frontend for Shodh Memory — embedded assets, zero network dependencies"
+authors = ["Shodh"]
+license = "MIT"
+
+[[bin]]
+name = "shodh-front"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+
+# Keep out of parent workspace (mirrors tui/)
+[workspace]

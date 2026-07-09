@@ -131,3 +131,10 @@ facts_out.json
 # Drafts / working scratch — local-only, never commit (plans, eval scratch, reports, venvs)
 drafts/
 tests/recall/longmemeval/
+demo-data/
+demos/
+
+# GLiNER/GLiREL model binaries (large, downloaded not committed)
+models/
+# shodh-front build artifacts
+web/target/

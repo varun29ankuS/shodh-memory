@@ -392,8 +392,10 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         return EntityLabel::Module;
     }
 
-    // Default: Technology (reasonable fallback for unknown tags)
-    EntityLabel::Technology
+    // Default: Concept. Technology was the old fallback, which silently typed
+    // every unknown tag — people, dates, themes — as Technology and drowned the
+    // graph's type signal. An unknown tag is a concept until proven otherwise.
+    EntityLabel::Concept
 }
 
 /// Classify a MISC NER entity (or an otherwise-untyped name) into a more
@@ -456,6 +458,41 @@ pub fn classify_misc_entity(name: &str) -> EntityLabel {
 
     // Default: Concept (participates in type hierarchy via Role→Concept parent)
     EntityLabel::Concept
+}
+
+/// Map a GLiNER zero-shot label to a graph EntityLabel, preserving diversity.
+/// First-class variants are used where they exist; everything else rides through
+/// `EntityLabel::Other(<Title Case>)` so vessels, facilities, weapons, aircraft,
+/// agencies, infrastructure, money, nationalities, etc. keep their identity in
+/// the graph and dashboard instead of collapsing to Technology.
+pub(crate) fn gliner_entity_label(raw: &str) -> EntityLabel {
+    match raw {
+        "person" => EntityLabel::Person,
+        "organization" | "company" | "government agency" | "military unit" => {
+            EntityLabel::Organization
+        }
+        "location" | "city" | "country" => EntityLabel::Location,
+        "event" | "disaster" => EntityLabel::Event,
+        "date" => EntityLabel::Date,
+        "product" => EntityLabel::Product,
+        "technology" => EntityLabel::Technology,
+        "job title" => EntityLabel::Role,
+        other => EntityLabel::Other(title_case_label(other)),
+    }
+}
+
+/// Title-case a possibly multi-word label ("government agency" → "Government Agency").
+fn title_case_label(s: &str) -> String {
+    s.split_whitespace()
+        .map(|w| {
+            let mut ch = w.chars();
+            match ch.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + ch.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Memory tier for edge consolidation
@@ -1831,6 +1868,23 @@ fn predicate_from_cues(t: &str) -> Option<RelationType> {
         "caused",
         "because of",
         "due to",
+        // Physical-impact / disaster causation verbs. Transitive — they connect
+        // two named entities causally in real reporting ("the Dali struck the
+        // bridge", "the ship rammed the span", "the collision brought down the
+        // deck"). Chosen for precision: each is almost always a cause→effect
+        // relation between its subject and object, not incidental co-mention.
+        "struck",
+        "rammed",
+        "crashed into",
+        "slammed into",
+        "collided with",
+        "smashed into",
+        "plowed into",
+        "brought down",
+        "knocked down",
+        "toppled",
+        "destroyed",
+        "demolished",
     ]) {
         return Some(Triggers);
     }

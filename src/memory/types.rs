@@ -619,6 +619,12 @@ pub struct NerEntityRecord {
     /// Character offset of entity end in source content
     #[serde(default)]
     pub end_char: Option<usize>,
+    /// Rich zero-shot type from GLiNER (e.g. "vessel", "government agency",
+    /// "weapon"). `None` for TinyBERT/rule-based records. Preserves entity-type
+    /// diversity across the storage boundary so graph rebuilds keep the specific
+    /// type instead of collapsing to the coarse PER/ORG/LOC/MISC bucket.
+    #[serde(default)]
+    pub raw_type: Option<String>,
 }
 
 /// Raw per-episode surprise components, computed at ingest from graph

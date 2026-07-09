@@ -230,6 +230,20 @@ pub struct ContextStatusRequest {
     pub tokens_budget: u64,
     pub current_dir: Option<String>,
     pub model: Option<String>,
+    /// Session that spawned this one. `None` = a root/main session; `Some` =
+    /// a subagent, letting the console draw the live agent topology (who
+    /// spawned whom) rather than a flat list.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+    /// What kind of session this is — "main", "subagent", or the agent type
+    /// name (e.g. "Explore", "code-reviewer"). Drives the agent-registry view.
+    #[serde(default)]
+    pub agent_kind: Option<String>,
+    /// Lifecycle signal from the hook: "active" (default) or "stopped". A stop
+    /// hook posts "stopped" so an agent popping off is observed, not inferred
+    /// only from staleness.
+    #[serde(default)]
+    pub agent_status: Option<String>,
 }
 
 /// Update context status from Claude Code status line script
@@ -251,6 +265,11 @@ pub async fn update_context_status(
         current_task: req.current_dir,
         model: req.model,
         updated_at: chrono::Utc::now(),
+        parent_session_id: req.parent_session_id,
+        agent_kind: req.agent_kind,
+        // Default the lifecycle to "active" so a hook that only reports usage
+        // still registers the agent as live; an explicit "stopped" wins.
+        agent_status: Some(req.agent_status.unwrap_or_else(|| "active".to_string())),
     };
 
     state

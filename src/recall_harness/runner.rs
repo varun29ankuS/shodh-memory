@@ -903,6 +903,7 @@ pub fn ingest_corpus(
                     confidence: e.confidence,
                     start_char: Some(e.start),
                     end_char: Some(e.end),
+                    raw_type: e.raw_type,
                 })
                 .collect(),
             Err(_) => Vec::new(),

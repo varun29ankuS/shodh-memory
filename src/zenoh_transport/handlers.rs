@@ -328,6 +328,7 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
                         confidence: e.confidence,
                         start_char: Some(e.start),
                         end_char: Some(e.end),
+                        raw_type: e.raw_type,
                     })
                     .collect::<Vec<_>>(),
                 Err(e) => {

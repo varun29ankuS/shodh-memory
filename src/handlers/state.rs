@@ -2643,6 +2643,7 @@ impl MultiUserMemoryManager {
                     confidence: record.confidence,
                     start: record.start_char.unwrap_or(0),
                     end: record.end_char.unwrap_or(record.text.len()),
+                    raw_type: record.raw_type.clone(),
                 })
                 .collect()
         } else if !experience.entities.is_empty() {
@@ -2659,6 +2660,7 @@ impl MultiUserMemoryManager {
                     confidence: 0.8,
                     start: 0,
                     end: name.len(),
+                    raw_type: None,
                 })
                 .collect()
         } else {
@@ -2939,11 +2941,17 @@ impl MultiUserMemoryManager {
         let ner_entities: Vec<(String, EntityNode)> = filtered_entities
             .into_iter()
             .map(|ner_entity| {
-                let label = match ner_entity.entity_type {
-                    NerEntityType::Person => EntityLabel::Person,
-                    NerEntityType::Organization => EntityLabel::Organization,
-                    NerEntityType::Location => EntityLabel::Location,
-                    NerEntityType::Misc => classify_misc_entity(&ner_entity.text),
+                let label = match ner_entity.raw_type.as_deref() {
+                    // GLiNER: preserve the rich zero-shot type (vessel, facility,
+                    // weapon, agency, event, …). This is the diversity lever —
+                    // never collapse it back to the coarse 4-way bucket.
+                    Some(raw) => crate::graph_memory::gliner_entity_label(raw),
+                    None => match ner_entity.entity_type {
+                        NerEntityType::Person => EntityLabel::Person,
+                        NerEntityType::Organization => EntityLabel::Organization,
+                        NerEntityType::Location => EntityLabel::Location,
+                        NerEntityType::Misc => classify_misc_entity(&ner_entity.text),
+                    },
                 };
                 let node = EntityNode {
                     uuid: uuid::Uuid::new_v4(),
@@ -2978,7 +2986,24 @@ impl MultiUserMemoryManager {
             })
             .collect();
 
-        // Build tag entity nodes
+        // Build tag entity nodes.
+        // Names the NER path already typed — a tag duplicating a NER entity must
+        // NOT build a second node here: add_entity's label-merge puts the incoming
+        // label first, so the tag path's guess (historically Technology) would
+        // displace the model's Person/Organization/vessel/… as the primary type.
+        let ner_typed_names: Vec<String> = ner_entities
+            .iter()
+            .map(|(name, _)| name.to_lowercase())
+            .collect();
+        // A tag that equals OR is contained in a NER-typed name is a fragment of
+        // it (YAKE bigrams like "francis scott" inside "Francis Scott Key
+        // Bridge") — building a node for it would shadow the real entity.
+        let covered_by_ner = |t: &str| {
+            let tl = t.to_lowercase();
+            ner_typed_names
+                .iter()
+                .any(|n| n == &tl || (tl.len() >= 5 && n.contains(tl.as_str())))
+        };
         let tag_entities: Vec<(String, EntityNode)> = experience
             .tags
             .iter()
@@ -2986,6 +3011,8 @@ impl MultiUserMemoryManager {
                 let tag_name = tag.trim();
                 if tag_name.len() >= 2
                     && !blocklist.contains(tag_name.to_lowercase().as_str())
+                    && !covered_by_ner(tag_name)
+                    && !is_structural_non_entity(tag_name)
                     && !tag_name.starts_with("tool:")
                     && !tag_name.starts_with("source:")
                     && !tag_name.starts_with("file:")

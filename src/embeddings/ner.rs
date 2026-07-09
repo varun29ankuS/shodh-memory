@@ -130,6 +130,12 @@ pub struct NerEntity {
     pub start: usize,
     /// End character offset in original text
     pub end: usize,
+    /// Rich zero-shot type from GLiNER (e.g. "vessel", "facility", "weapon",
+    /// "government agency"). `None` for the TinyBERT / rule-based paths, which
+    /// only produce the coarse PER/ORG/LOC/MISC `entity_type`. When present, the
+    /// graph builder types the node from this instead of the coarse bucket, so
+    /// GLiNER's diversity is preserved end-to-end.
+    pub raw_type: Option<String>,
 }
 
 /// Configuration for NER model
@@ -279,6 +285,87 @@ pub struct NeuralNer {
     /// LRU cache for extracted entities (keyed by text hash)
     /// Avoids re-processing identical texts
     entity_cache: moka::sync::Cache<u64, Vec<NerEntity>>,
+    /// GLiNER zero-shot backend. When `SHODH_GLINER_MODEL_PATH` is set and the
+    /// model loads, GLiNER REPLACES the TinyBERT path in extract()/extract_batch()
+    /// — schema-driven, word-level (no subword fragmentation), and rich-typed.
+    gliner: Option<Arc<crate::embeddings::gliner::GlinerNer>>,
+}
+
+/// Zero-shot entity schema for GLiNER — deliberately diverse and oriented to
+/// intelligence / open-source-news content, not the 4-way PER/ORG/LOC/MISC of
+/// TinyBERT. GLiNER scores every label per word in one pass, so a broad schema
+/// costs one forward pass regardless of length (kept ≤ the model's max_types=25).
+pub const GLINER_SCHEMA: &[&str] = &[
+    "person", "organization", "company", "government agency", "military unit",
+    "location", "city", "country", "facility", "infrastructure",
+    "vessel", "aircraft", "vehicle", "weapon", "event", "disaster",
+    "product", "technology", "money", "nationality", "law", "job title", "date",
+];
+
+/// Map a GLiNER label to the coarse PER/ORG/LOC/MISC bucket every downstream
+/// consumer already understands. The exact label is preserved separately in
+/// `NerEntity.raw_type`, so nothing is lost — this is only the fallback bucket.
+fn gliner_coarse_type(label: &str) -> NerEntityType {
+    match label {
+        "person" => NerEntityType::Person,
+        "organization" | "company" | "government agency" | "military unit" => {
+            NerEntityType::Organization
+        }
+        "location" | "city" | "country" | "facility" | "infrastructure" => {
+            NerEntityType::Location
+        }
+        _ => NerEntityType::Misc,
+    }
+}
+
+/// Trim edge punctuation and leading articles off a GLiNER span surface.
+/// Returns (cleaned text, chars trimmed from the left).
+fn trim_entity_surface(raw: &str) -> (String, usize) {
+    let chars: Vec<char> = raw.chars().collect();
+    let is_edge_junk = |c: char| matches!(c, ',' | '.' | ';' | ':' | '!' | '?' | '"' | '\'' | '“' | '”' | '‘' | '’' | '(' | ')' | '[' | ']');
+    let mut s = 0usize;
+    let mut e = chars.len();
+    while s < e && (chars[s].is_whitespace() || is_edge_junk(chars[s])) {
+        s += 1;
+    }
+    while e > s && (chars[e - 1].is_whitespace() || is_edge_junk(chars[e - 1])) {
+        e -= 1;
+    }
+    let mut cleaned: String = chars[s..e].iter().collect();
+    let mut ltrim = s;
+    for article in ["The ", "the ", "A ", "An "] {
+        if let Some(rest) = cleaned.strip_prefix(article) {
+            // Strip the article when the remainder is itself a proper name
+            // ("The Dali" -> "Dali", "The Pentagon" -> "Pentagon"). Costs us
+            // "The Hague"-style names, which cross-document entity resolution
+            // re-merges; unstripped articles fragment far more entities than
+            // article-bearing proper names save.
+            if rest.chars().next().is_some_and(|c| c.is_uppercase()) {
+                ltrim += article.chars().count();
+                cleaned = rest.to_string();
+            }
+            break;
+        }
+    }
+    (cleaned, ltrim)
+}
+
+/// Load the GLiNER backend from `SHODH_GLINER_MODEL_PATH`, if set. A missing or
+/// unloadable model is not an error — we simply keep the TinyBERT/fallback path.
+fn load_gliner() -> Option<Arc<crate::embeddings::gliner::GlinerNer>> {
+    if std::env::var("SHODH_GLINER_MODEL_PATH").is_err() {
+        return None;
+    }
+    match crate::embeddings::gliner::GlinerNer::from_env() {
+        Ok(g) => {
+            tracing::info!("GLiNER backend active — replacing TinyBERT for NER");
+            Some(Arc::new(g))
+        }
+        Err(e) => {
+            tracing::warn!("SHODH_GLINER_MODEL_PATH set but GLiNER failed to load: {e}. Falling back to TinyBERT.");
+            None
+        }
+    }
 }
 
 // ── NER replay hook (offline-entity ablation; env-gated, default OFF) ────────
@@ -328,6 +415,7 @@ fn ner_replay_map() -> Option<&'static std::collections::HashMap<String, Vec<Ner
                             confidence: e.conf,
                             start: e.start,
                             end: e.end,
+                            raw_type: None,
                         })
                         .collect();
                     (k, v)
@@ -368,6 +456,7 @@ impl NeuralNer {
                 use_fallback: true,
                 entity_extractor: OnceLock::new(),
                 entity_cache: cache,
+                gliner: load_gliner(),
             });
         }
 
@@ -377,6 +466,7 @@ impl NeuralNer {
             use_fallback: false,
             entity_extractor: OnceLock::new(),
             entity_cache: cache,
+            gliner: load_gliner(),
         })
     }
 
@@ -391,6 +481,7 @@ impl NeuralNer {
                 .max_capacity(NER_CACHE_SIZE)
                 .time_to_live(std::time::Duration::from_secs(3600))
                 .build(),
+            gliner: load_gliner(),
         }
     }
 
@@ -442,8 +533,16 @@ impl NeuralNer {
             return Ok(cached);
         }
 
-        // Extract entities
-        let entities = if self.use_fallback {
+        // Extract entities — GLiNER (when active) REPLACES TinyBERT.
+        let entities = if let Some(g) = &self.gliner {
+            match self.extract_gliner(g, text) {
+                Ok(entities) => entities,
+                Err(e) => {
+                    tracing::warn!("GLiNER failed: {}. Using rule-based fallback.", e);
+                    self.extract_fallback(text)?
+                }
+            }
+        } else if self.use_fallback {
             self.extract_fallback(text)?
         } else {
             match self.extract_neural(text) {
@@ -461,6 +560,44 @@ impl NeuralNer {
         Ok(entities)
     }
 
+    /// Run the GLiNER backend and map its rich, zero-shot-typed spans into
+    /// `NerEntity`. The coarse `entity_type` keeps every existing consumer happy;
+    /// the exact GLiNER label rides along in `raw_type` for the graph builder.
+    fn extract_gliner(
+        &self,
+        g: &crate::embeddings::gliner::GlinerNer,
+        text: &str,
+    ) -> Result<Vec<NerEntity>> {
+        let threshold = std::env::var("SHODH_GLINER_THRESHOLD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.5_f32);
+        let ents = g.extract(text, GLINER_SCHEMA, threshold)?;
+        Ok(ents
+            .into_iter()
+            .filter_map(|e| {
+                // The port tokenizes on whitespace (parity with the reference),
+                // so spans can carry edge punctuation ("Baltimore,") and leading
+                // articles ("The Dali"). Normalize at the mapping layer: trim
+                // punctuation/articles off the edges, keep offsets consistent.
+                let (clean, ltrim) = trim_entity_surface(&e.text);
+                if clean.len() < 2 {
+                    return None;
+                }
+                let start = e.start + ltrim;
+                let end = start + clean.chars().count();
+                Some(NerEntity {
+                    entity_type: gliner_coarse_type(&e.label),
+                    raw_type: Some(e.label),
+                    text: clean,
+                    confidence: e.score,
+                    start,
+                    end,
+                })
+            })
+            .collect())
+    }
+
     /// Extract entities from multiple texts in batch
     ///
     /// More efficient than calling extract() repeatedly because:
@@ -476,6 +613,12 @@ impl NeuralNer {
     pub fn extract_batch(&self, texts: &[&str]) -> Result<Vec<Vec<NerEntity>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // GLiNER path: the port is single-text; extract() already caches, so a
+        // per-text map is correct and avoids duplicating the batch machinery.
+        if self.gliner.is_some() {
+            return texts.iter().map(|t| self.extract(t)).collect();
         }
 
         let mut results = vec![Vec::new(); texts.len()];
@@ -904,6 +1047,7 @@ impl NeuralNer {
             confidence,
             start,
             end,
+            raw_type: None,
         })
     }
 
@@ -1013,6 +1157,7 @@ impl NeuralNer {
                     confidence,
                     start,
                     end,
+                    raw_type: None,
                 }
             })
             .collect();
@@ -1424,6 +1569,7 @@ mod tests {
             confidence: 0.95,
             start: 0,
             end: 9,
+            raw_type: None,
         };
 
         let cloned = entity.clone();

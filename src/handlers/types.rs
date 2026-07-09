@@ -60,6 +60,14 @@ pub struct ContextStatus {
     pub current_task: Option<String>,
     pub model: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// Agent topology + lifecycle (see ContextStatusRequest). Defaulted so
+    /// existing serialized status blobs and older hooks stay compatible.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+    #[serde(default)]
+    pub agent_kind: Option<String>,
+    #[serde(default)]
+    pub agent_status: Option<String>,
 }
 
 // =============================================================================
