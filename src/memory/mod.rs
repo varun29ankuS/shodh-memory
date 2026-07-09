@@ -495,7 +495,23 @@ impl MemorySystem {
         let indexed_count = retriever.len();
         let orphaned_count = storage_count.saturating_sub(indexed_count);
 
-        if orphaned_count > 0 {
+        // SHODH_SKIP_STARTUP_REPAIR=1 leaves orphans unindexed instead of
+        // re-adding them. Escape hatch for a store whose graph has grown large
+        // enough that the per-memory graph-add allocation is pathological
+        // (write-path O(N) blow-up, graph_memory.rs:5409) — repair would OOM the
+        // server on every boot, making the whole store unservable. Skipping loses
+        // only the orphaned handful; the indexed majority serves normally.
+        let skip_startup_repair = std::env::var("SHODH_SKIP_STARTUP_REPAIR")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if orphaned_count > 0 && skip_startup_repair {
+            tracing::warn!(
+                orphaned_count = orphaned_count,
+                "SHODH_SKIP_STARTUP_REPAIR set — leaving orphaned memories \
+                 unindexed (they will not surface in recall until reindexed)"
+            );
+        }
+        if orphaned_count > 0 && !skip_startup_repair {
             tracing::warn!(
                 storage_count = storage_count,
                 indexed_count = indexed_count,
