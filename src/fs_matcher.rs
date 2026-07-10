@@ -39,6 +39,11 @@ pub struct MatchRecord {
     pub head: String,
     pub entity_type: String,
     pub agent_roles: HashSet<String>,
+    /// Discriminative (rare / high-IDF) causal fingerprints the entity holds,
+    /// e.g. `"Struck>bridge"`. The caller pre-filters to rare relations (the
+    /// Bhattacharya-Getoor lever); the comparison just measures overlap, so two
+    /// mentions that share a rare cause/effect argue for being the same entity.
+    pub rare_causal_fps: HashSet<String>,
 }
 
 const NAME_THRESHOLDS: [f64; 3] = [0.92, 0.75, 0.5];
@@ -132,12 +137,14 @@ fn type_level(a: &MatchRecord, b: &MatchRecord) -> usize {
     usize::from(a.entity_type.is_empty() || a.entity_type != b.entity_type)
 }
 
-fn agent_role_level(a: &MatchRecord, b: &MatchRecord) -> usize {
-    if a.agent_roles.is_empty() || b.agent_roles.is_empty() {
-        return JACCARD_LEVELS - 1; // no evidence → lowest agreement bucket
+/// Bucket the Jaccard overlap of two string sets into 4 agreement levels.
+/// Empty on either side → the lowest bucket (no evidence, not disagreement).
+fn jaccard_level(a: &HashSet<String>, b: &HashSet<String>) -> usize {
+    if a.is_empty() || b.is_empty() {
+        return JACCARD_LEVELS - 1;
     }
-    let inter = a.agent_roles.intersection(&b.agent_roles).count() as f64;
-    let union = a.agent_roles.union(&b.agent_roles).count() as f64;
+    let inter = a.intersection(b).count() as f64;
+    let union = a.union(b).count() as f64;
     let j = if union > 0.0 { inter / union } else { 0.0 };
     if j >= 0.5 {
         0
@@ -148,6 +155,14 @@ fn agent_role_level(a: &MatchRecord, b: &MatchRecord) -> usize {
     } else {
         3
     }
+}
+
+fn agent_role_level(a: &MatchRecord, b: &MatchRecord) -> usize {
+    jaccard_level(&a.agent_roles, &b.agent_roles)
+}
+
+fn causal_level(a: &MatchRecord, b: &MatchRecord) -> usize {
+    jaccard_level(&a.rare_causal_fps, &b.rare_causal_fps)
 }
 
 /// A single comparison: how to bucket a pair, plus the learned m/u per level.
@@ -192,6 +207,7 @@ pub fn default_comparisons() -> Vec<Comparison> {
         Comparison::new("head", 2, head_level),
         Comparison::new("type", 2, type_level),
         Comparison::new("agent_role", JACCARD_LEVELS, agent_role_level),
+        Comparison::new("causal", JACCARD_LEVELS, causal_level),
     ]
 }
 
@@ -326,6 +342,17 @@ mod tests {
             head: head.to_string(),
             entity_type: ty.to_string(),
             agent_roles: roles.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn rec_causal(name: &str, head: &str, ty: &str, fps: &[&str]) -> MatchRecord {
+        MatchRecord {
+            name: name.to_string(),
+            head: head.to_string(),
+            entity_type: ty.to_string(),
+            rare_causal_fps: fps.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         }
     }
 
@@ -387,6 +414,37 @@ mod tests {
         assert!(
             agree > disagree,
             "agreement {agree} must exceed disagreement {disagree}"
+        );
+    }
+
+    #[test]
+    fn shared_rare_causal_fingerprint_is_evidence() {
+        // The Bhattacharya-Getoor lever: mentions that share a RARE cause/effect
+        // are likely the same entity. Three ship mentions all "Struck>bridge";
+        // the bridge and river carry unrelated causal fingerprints.
+        let records = vec![
+            rec_causal("container ship", "ship", "Vessel", &["Struck>bridge"]),
+            rec_causal("cargo ship", "ship", "Vessel", &["Struck>bridge"]),
+            rec_causal("the vessel", "vessel", "Vessel", &["Struck>bridge"]),
+            rec_causal(
+                "key bridge",
+                "bridge",
+                "Structure",
+                &["CollapsedInto>river"],
+            ),
+            rec_causal("patapsco", "river", "Location", &["Received>debris"]),
+        ];
+        let model = FellegiSunter::fit(&records, 25);
+        assert!(
+            model.top_bayes_factor("causal") > 1.0,
+            "a shared rare causal fingerprint should be positive evidence, got {}",
+            model.top_bayes_factor("causal")
+        );
+        let shares = model.match_probability(&records[0], &records[1]);
+        let differs = model.match_probability(&records[0], &records[3]);
+        assert!(
+            shares > differs,
+            "shared-cause pair {shares} should beat unrelated {differs}"
         );
     }
 
