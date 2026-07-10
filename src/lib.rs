@@ -23,6 +23,7 @@ pub mod constants;
 pub mod decay;
 pub mod dep_parser;
 pub mod embeddings;
+pub mod entity_resolution;
 pub mod errors;
 pub mod graph_memory;
 pub mod handlers;
