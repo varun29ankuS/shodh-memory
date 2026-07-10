@@ -18,6 +18,8 @@
 pub mod ab_testing;
 pub mod auth;
 pub mod backup;
+pub mod catena;
+pub mod causal_vocab;
 pub mod config;
 pub mod constants;
 pub mod decay;
@@ -34,6 +36,7 @@ pub mod metrics;
 pub mod middleware;
 pub mod mif;
 pub mod migration;
+pub mod openie;
 pub mod query_parsing;
 pub mod recall_harness;
 pub mod relation_typer;

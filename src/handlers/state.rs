@@ -3763,6 +3763,14 @@ impl MultiUserMemoryManager {
             }
         }
 
+        // === Causal spine (parser-based clause/event causal extraction) ===
+        // OpenIE mints entity→entity typed causal edges from clause grammar and
+        // CATENA mints event→event edges (the sparse narrative spine) — causation
+        // the entity-pair cue typer structurally cannot reach. Live whenever the
+        // dependency parser is deployed (SHODH_SPACY_MODEL_PATH); disable with
+        // SHODH_CAUSAL_SPINE=0. Precision-gated inside (causal families only).
+        graph_guard.mint_causal_spine_edges(&experience.content, &entity_uuids, memory_id.0, now);
+
         // Aggregate the episode's surprise components (raw facts only —
         // deviation/z-scoring happens at read time against the user's rolling
         // baseline) and persist them on the episode via an idempotent re-put.

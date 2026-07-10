@@ -745,6 +745,8 @@ pub enum TypingMethod {
     CoOccurrence,
     Glirel,
     OpenIe,
+    /// Event→event causal link from the CATENA event arm (signal + temporal order).
+    Catena,
 }
 
 /// One source episode that attested an edge — the unit of provenance/corroboration.
@@ -2547,6 +2549,204 @@ impl GraphMemory {
         let mut index = self.entity_alias_index.write();
         index.extend(staged);
         Ok(written)
+    }
+
+    /// Map a causal-spine canonical relation label to a `RelationType`, preferring
+    /// the named variants where they exist and falling back to `Custom`.
+    fn relation_type_from_label(label: &str) -> RelationType {
+        match label {
+            "Causes" => RelationType::Causes,
+            "Triggers" => RelationType::Triggers,
+            "ResultsIn" => RelationType::ResultsIn,
+            "RelatedTo" => RelationType::RelatedTo,
+            other => RelationType::Custom(other.to_string()),
+        }
+    }
+
+    /// Find or create an EVENT node for a CATENA event lemma. Exact-match reuse so
+    /// repeated events (collapse, blackout) are one node; new events are added
+    /// with `EntityLabel::Event`.
+    fn get_or_create_event(&self, lemma: &str, now: DateTime<Utc>) -> Option<Uuid> {
+        let name = lemma.trim();
+        if name.len() < 3 {
+            return None;
+        }
+        if let Ok(Some(existing)) = self.find_entity_by_name_strict(name) {
+            return Some(existing.uuid);
+        }
+        let node = EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Event],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: EntityExtractor::calculate_base_salience(&EntityLabel::Event, false),
+            is_proper_noun: false,
+            selectivity: None,
+        };
+        self.add_entity(node).ok()
+    }
+
+    /// Build a causal-spine `RelationshipEdge` with provenance from the given
+    /// typing method. Born strong (typed edges are the spine, not co-occurrence).
+    #[allow(clippy::too_many_arguments)]
+    fn build_spine_edge(
+        &self,
+        from_entity: Uuid,
+        to_entity: Uuid,
+        relation_type: RelationType,
+        source_episode: Uuid,
+        context: &str,
+        now: DateTime<Utc>,
+        typed_by: TypingMethod,
+    ) -> RelationshipEdge {
+        let ctx: String = context.chars().take(150).collect();
+        let span_len = ctx.chars().count() as u32;
+        RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity,
+            to_entity,
+            relation_type,
+            strength: 0.7,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: Some(source_episode),
+            context: ctx,
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            tier: EdgeTier::L1Working,
+            activation_timestamps: None,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: vec![ProvenanceRecord {
+                source_episode_id: source_episode,
+                mention_count: 1,
+                first_observed: now,
+                last_observed: now,
+                confidence: None,
+                evidence_span: Some((0, span_len)),
+                typed_by: Some(typed_by),
+            }],
+        }
+    }
+
+    /// Mint the causal-spine edges for an ingested passage: OpenIE clause-level
+    /// entity→entity causal edges + CATENA event→event edges (the sparse narrative
+    /// spine). Parser-based clause/event extraction reaches causation the
+    /// entity-pair cue typer structurally cannot. Runs only when the dependency
+    /// parser is available (`SHODH_SPACY_MODEL_PATH`) and not disabled via
+    /// `SHODH_CAUSAL_SPINE=0`. Precision-gated: causal families only, abstract-
+    /// social predicates (`supported`/`affected`) skipped. Returns edges minted.
+    pub fn mint_causal_spine_edges(
+        &self,
+        content: &str,
+        entity_uuids: &[(String, Uuid, EntityLabel)],
+        source_episode: Uuid,
+        now: DateTime<Utc>,
+    ) -> usize {
+        if !crate::dep_parser::is_available() {
+            return 0;
+        }
+        if std::env::var("SHODH_CAUSAL_SPINE")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+        {
+            return 0;
+        }
+        let mut minted = 0usize;
+
+        // Entity name → UUID, longest name first so `container ship` beats `ship`.
+        let mut names: Vec<(String, Uuid)> = entity_uuids
+            .iter()
+            .filter(|(n, _, _)| n.trim().len() >= 3)
+            .map(|(n, u, _)| (n.to_lowercase(), *u))
+            .collect();
+        names.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
+        // Word-boundary match (space-padded) so `port` matches "the Port of
+        // Baltimore" but NOT "support"; longest entity name wins (sort above).
+        let match_entity = |span: &str| -> Option<Uuid> {
+            let s = format!(" {} ", span.to_lowercase());
+            names
+                .iter()
+                .find(|(n, _)| s.contains(&format!(" {} ", n)))
+                .map(|(_, u)| *u)
+        };
+
+        // OpenIE — entity→entity typed causal edges (grammar supplies the predicate).
+        if let Some(triples) = crate::openie::extract_triples(content) {
+            for tr in triples {
+                if !tr.causal || tr.low_precision {
+                    continue;
+                }
+                let (Some(from), Some(to)) = (match_entity(&tr.subject), match_entity(&tr.object))
+                else {
+                    continue;
+                };
+                if from == to {
+                    continue;
+                }
+                let rt = Self::relation_type_from_label(tr.relation);
+                let edge = self.build_spine_edge(
+                    from,
+                    to,
+                    rt,
+                    source_episode,
+                    content,
+                    now,
+                    TypingMethod::OpenIe,
+                );
+                if self.add_relationship(edge).is_ok() {
+                    minted += 1;
+                }
+            }
+        }
+
+        // CATENA — event→event edges (the inchoative pivots no entity arm sees):
+        // causal signals mint `Causes`, temporal signals mint `Precedes` — sequence
+        // is never reported as causation.
+        if let Some(links) = crate::catena::extract_event_links(content) {
+            for link in links {
+                let (Some(from), Some(to)) = (
+                    self.get_or_create_event(&link.source, now),
+                    self.get_or_create_event(&link.target, now),
+                ) else {
+                    continue;
+                };
+                if from == to {
+                    continue;
+                }
+                let rt = match link.relation {
+                    crate::causal_vocab::LinkRelation::Causes => RelationType::Causes,
+                    crate::causal_vocab::LinkRelation::Precedes => {
+                        RelationType::Custom("Precedes".to_string())
+                    }
+                };
+                let edge = self.build_spine_edge(
+                    from,
+                    to,
+                    rt,
+                    source_episode,
+                    content,
+                    now,
+                    TypingMethod::Catena,
+                );
+                if self.add_relationship(edge).is_ok() {
+                    minted += 1;
+                }
+            }
+        }
+
+        if minted > 0 {
+            tracing::info!(edges = minted, "causal spine: minted OpenIE + CATENA edges");
+        }
+        minted
     }
 
     /// Load lowercase name->UUID index, or migrate from name_index if empty
@@ -9992,6 +10192,30 @@ mod tests {
         graph.clear_all().unwrap();
         assert_eq!(graph.alias_count(), 0, "GDPR erasure must wipe aliases");
         assert_eq!(graph.resolve_alias("cargo ship"), None);
+    }
+
+    #[test]
+    fn causal_spine_noops_without_parser() {
+        // No SHODH_SPACY_MODEL_PATH in unit tests → the causal-spine pass is a
+        // graceful no-op (additive, never load-bearing for ingest).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let ship = make_entity(&graph, "ship");
+        let bridge = make_entity(&graph, "bridge");
+        let entities = vec![
+            ("ship".to_string(), ship, EntityLabel::Concept),
+            ("bridge".to_string(), bridge, EntityLabel::Concept),
+        ];
+        if crate::dep_parser::is_available() {
+            return;
+        }
+        let minted = graph.mint_causal_spine_edges(
+            "the ship rammed the bridge, causing the collapse",
+            &entities,
+            Uuid::new_v4(),
+            Utc::now(),
+        );
+        assert_eq!(minted, 0, "no parser → no causal-spine edges");
     }
 
     /// Helper: create a directed edge from → to
