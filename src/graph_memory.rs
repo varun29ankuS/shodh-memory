@@ -4982,6 +4982,26 @@ impl GraphMemory {
     /// Note: Limits to top N memories to avoid O(n²) explosion on large retrievals.
     /// Returns the number of edges created/strengthened.
     pub fn record_memory_coactivation(&self, memory_ids: &[Uuid]) -> Result<usize> {
+        // STRENGTHEN-ONLY gate. Read here (not in the hot loop) so the impl is
+        // env-free and unit-testable by parameter. Default OFF pending the
+        // recall-neutrality A/B; opt in with SHODH_COACT_STRENGTHEN_ONLY=1.
+        let strengthen_only = std::env::var("SHODH_COACT_STRENGTHEN_ONLY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        self.record_memory_coactivation_impl(memory_ids, strengthen_only)
+    }
+
+    /// Co-retrieval Hebbian update. `strengthen_only = true`: reinforce edges that
+    /// ALREADY exist between co-active memories; do NOT mint a new CoRetrieved edge
+    /// for every co-retrieved pair. Un-gated all-pairs creation is the recall-time
+    /// flood (measured ~80% of graph edges, bypassing the ingest gates, unbounded
+    /// with query volume — the OOM driver). Mirrors schema-gated consolidation:
+    /// usage strengthens existing structure, it does not wire every co-activation.
+    fn record_memory_coactivation_impl(
+        &self,
+        memory_ids: &[Uuid],
+        strengthen_only: bool,
+    ) -> Result<usize> {
         const MAX_COACTIVATION_SIZE: usize = 20;
 
         // Limit to top N to bound worst-case complexity
@@ -5022,7 +5042,7 @@ impl GraphMemory {
                         batch.put_cf(self.relationships_cf(), key, value);
                         edges_updated += 1;
                     }
-                } else {
+                } else if !strengthen_only {
                     // Create new CoRetrieved edge (bidirectional represented as single edge)
                     // Starts in L1 (working memory) with tier-specific initial weight
                     let edge = RelationshipEdge {
@@ -10606,5 +10626,37 @@ mod tests {
             "a current-schema edge must not be flagged for migration"
         );
         assert_eq!(decoded.provenance.len(), 1);
+    }
+
+    #[test]
+    fn coactivation_strengthen_only_creates_no_new_edges() {
+        // CoRetrieved recall-time flood fix: strengthen-only must never mint a new
+        // CoRetrieved edge for a co-retrieved pair that has no prior edge.
+        let temp = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp.path(), None).unwrap();
+        let mems: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
+
+        // Default (flag off) floods all C(5,2)=10 CoRetrieved edges.
+        let created = graph.record_memory_coactivation_impl(&mems, false).unwrap();
+        assert_eq!(created, 10, "default coactivation floods all-pairs CoRetrieved edges");
+
+        // Strengthen-only on a FRESH graph: no existing edges => nothing created.
+        let temp2 = tempfile::tempdir().unwrap();
+        let graph2 = GraphMemory::new(temp2.path(), None).unwrap();
+        let created2 = graph2.record_memory_coactivation_impl(&mems, true).unwrap();
+        assert_eq!(created2, 0, "strengthen-only must create no new edges on a fresh graph");
+    }
+
+    #[test]
+    fn coactivation_strengthen_only_still_strengthens_existing() {
+        // Strengthen-only keeps the good half: it reinforces edges that already exist.
+        let temp = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp.path(), None).unwrap();
+        let mems: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        // First pass creates the C(3,2)=3 edges.
+        graph.record_memory_coactivation_impl(&mems, false).unwrap();
+        // Strengthen-only pass: all 3 now exist => all strengthened, none created.
+        let strengthened = graph.record_memory_coactivation_impl(&mems, true).unwrap();
+        assert_eq!(strengthened, 3, "strengthen-only reinforces the existing edges");
     }
 }
