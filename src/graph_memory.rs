@@ -10638,13 +10638,19 @@ mod tests {
 
         // Default (flag off) floods all C(5,2)=10 CoRetrieved edges.
         let created = graph.record_memory_coactivation_impl(&mems, false).unwrap();
-        assert_eq!(created, 10, "default coactivation floods all-pairs CoRetrieved edges");
+        assert_eq!(
+            created, 10,
+            "default coactivation floods all-pairs CoRetrieved edges"
+        );
 
         // Strengthen-only on a FRESH graph: no existing edges => nothing created.
         let temp2 = tempfile::tempdir().unwrap();
         let graph2 = GraphMemory::new(temp2.path(), None).unwrap();
         let created2 = graph2.record_memory_coactivation_impl(&mems, true).unwrap();
-        assert_eq!(created2, 0, "strengthen-only must create no new edges on a fresh graph");
+        assert_eq!(
+            created2, 0,
+            "strengthen-only must create no new edges on a fresh graph"
+        );
     }
 
     #[test]
@@ -10657,6 +10663,9 @@ mod tests {
         graph.record_memory_coactivation_impl(&mems, false).unwrap();
         // Strengthen-only pass: all 3 now exist => all strengthened, none created.
         let strengthened = graph.record_memory_coactivation_impl(&mems, true).unwrap();
-        assert_eq!(strengthened, 3, "strengthen-only reinforces the existing edges");
+        assert_eq!(
+            strengthened, 3,
+            "strengthen-only reinforces the existing edges"
+        );
     }
 }
