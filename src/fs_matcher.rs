@@ -22,6 +22,16 @@
 //!     physical corpus where co-actors share roles it carries strong evidence; on
 //!     a financial corpus where roles don't track identity, EM drives its weight
 //!     toward zero — with no code change (measured in Python: +3.61 → +0.05).
+//!   - `causal`: Jaccard overlap of RARE (high-IDF) causal fingerprints → 4 levels
+//!     (the Bhattacharya-Getoor lever: a shared rare cause/effect = strong signal).
+//!   - `embedding`: bucketed cosine of the name embeddings → 4 levels. The semantic
+//!     axis — reaches synonymy character-level `name` misses (`vessel` ≈ `ship`).
+//!
+//! The comparisons span distinct axes (lexical, syntactic, ontological, behavioral,
+//! causal, semantic) on purpose: Fellegi-Sunter assumes conditional independence,
+//! so adding *correlated* features double-counts evidence. Beyond these, the next
+//! gains are KB entity-linking (world-knowledge merges no feature reaches) and m/u
+//! regularization (small-data stability) — not more comparisons.
 //!
 //! FROZEN structure; the m/u weights are the ONLINE-learned part (re-fittable per
 //! domain; streaming-EM update is Phase 4.1). Model-free: consumes pre-extracted
@@ -44,11 +54,17 @@ pub struct MatchRecord {
     /// Bhattacharya-Getoor lever); the comparison just measures overlap, so two
     /// mentions that share a rare cause/effect argue for being the same entity.
     pub rare_causal_fps: HashSet<String>,
+    /// Pre-computed name embedding (e.g. MiniLM). The semantic axis: it reaches
+    /// synonymy that character-level name similarity misses (`vessel` ≈ `ship`,
+    /// `the span` ≈ `bridge`). `None` → no evidence, not disagreement.
+    pub name_embedding: Option<Vec<f32>>,
 }
 
 const NAME_THRESHOLDS: [f64; 3] = [0.92, 0.75, 0.5];
 const NAME_LEVELS: usize = 4;
 const JACCARD_LEVELS: usize = 4; // ≥0.5, ≥0.2, >0, none
+const EMB_THRESHOLDS: [f32; 3] = [0.85, 0.70, 0.55]; // cosine buckets for name embeddings
+const EMB_LEVELS: usize = 4;
 /// Probability floor so a never-observed level can't drive `log2` to ±∞.
 const PROB_FLOOR: f64 = 1e-6;
 
@@ -165,6 +181,38 @@ fn causal_level(a: &MatchRecord, b: &MatchRecord) -> usize {
     jaccard_level(&a.rare_causal_fps, &b.rare_causal_fps)
 }
 
+/// Cosine similarity of two equal-length vectors; 0.0 for empty/mismatched.
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for (x, y) in a.iter().zip(b) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+fn embedding_level(a: &MatchRecord, b: &MatchRecord) -> usize {
+    match (&a.name_embedding, &b.name_embedding) {
+        (Some(x), Some(y)) => {
+            let c = cosine(x, y);
+            for (lvl, &th) in EMB_THRESHOLDS.iter().enumerate() {
+                if c >= th {
+                    return lvl;
+                }
+            }
+            EMB_THRESHOLDS.len()
+        }
+        _ => EMB_LEVELS - 1, // no embedding → lowest bucket (no evidence)
+    }
+}
+
 /// A single comparison: how to bucket a pair, plus the learned m/u per level.
 #[derive(Debug, Clone)]
 pub struct Comparison {
@@ -208,6 +256,7 @@ pub fn default_comparisons() -> Vec<Comparison> {
         Comparison::new("type", 2, type_level),
         Comparison::new("agent_role", JACCARD_LEVELS, agent_role_level),
         Comparison::new("causal", JACCARD_LEVELS, causal_level),
+        Comparison::new("embedding", EMB_LEVELS, embedding_level),
     ]
 }
 
@@ -356,6 +405,16 @@ mod tests {
         }
     }
 
+    fn rec_emb(name: &str, head: &str, ty: &str, emb: &[f32]) -> MatchRecord {
+        MatchRecord {
+            name: name.to_string(),
+            head: head.to_string(),
+            entity_type: ty.to_string(),
+            name_embedding: Some(emb.to_vec()),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn jaro_winkler_basics() {
         assert!((jaro_winkler("dali", "dali") - 1.0).abs() < 1e-9);
@@ -445,6 +504,45 @@ mod tests {
         assert!(
             shares > differs,
             "shared-cause pair {shares} should beat unrelated {differs}"
+        );
+    }
+
+    #[test]
+    fn cosine_is_sane() {
+        assert!((cosine(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6);
+        assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+        assert_eq!(cosine(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn embedding_cosine_reaches_synonymy_name_misses() {
+        // ship / vessel / boat: low string similarity, different heads, but
+        // synonymous (high name-embedding cosine). The semantic axis is what ties
+        // them — character-level `name` cannot.
+        let records = vec![
+            rec_emb("ship", "ship", "Vessel", &[1.0, 0.0, 0.0]),
+            rec_emb("vessel", "vessel", "Vessel", &[0.96, 0.12, 0.0]),
+            rec_emb("boat", "boat", "Vessel", &[0.9, 0.2, 0.0]),
+            rec_emb("bridge", "bridge", "Structure", &[0.0, 0.0, 1.0]),
+            rec_emb("river", "river", "Location", &[0.0, 1.0, 0.0]),
+        ];
+        // Premise: name similarity does NOT tie the synonyms at the top level.
+        assert!(
+            name_level(&records[0], &records[1]) > 0,
+            "ship/vessel are not near-identical strings"
+        );
+
+        let model = FellegiSunter::fit(&records, 25);
+        assert!(
+            model.top_bayes_factor("embedding") > 1.0,
+            "high name-embedding cosine should be positive evidence, got {}",
+            model.top_bayes_factor("embedding")
+        );
+        let syn = model.match_probability(&records[0], &records[1]); // ship~vessel
+        let unrel = model.match_probability(&records[0], &records[3]); // ship~bridge
+        assert!(
+            syn > unrel,
+            "synonym pair {syn} should beat unrelated {unrel}"
         );
     }
 
