@@ -5283,11 +5283,13 @@ impl GraphMemory {
     /// Returns the number of edges created/strengthened.
     pub fn record_memory_coactivation(&self, memory_ids: &[Uuid]) -> Result<usize> {
         // STRENGTHEN-ONLY gate. Read here (not in the hot loop) so the impl is
-        // env-free and unit-testable by parameter. Default OFF pending the
-        // recall-neutrality A/B; opt in with SHODH_COACT_STRENGTHEN_ONLY=1.
+        // env-free and unit-testable by parameter. Default ON: co-retrieval
+        // reinforces existing edges and never mints all-pairs `CoRetrieved` (which
+        // was ~80% of the graph and the OOM driver). Disable with
+        // SHODH_COACT_STRENGTHEN_ONLY=0 to restore the legacy flood.
         let strengthen_only = std::env::var("SHODH_COACT_STRENGTHEN_ONLY")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
         self.record_memory_coactivation_impl(memory_ids, strengthen_only)
     }
 
@@ -5469,13 +5471,9 @@ impl GraphMemory {
             })?;
         let mut batch = WriteBatch::default();
         let mut strengthened = 0;
-        // Count of genuinely-new edges (the `else` branch below), tracked
-        // separately from `strengthened` (which also counts updates to existing
-        // edges) so relationship_count is incremented only for new records.
-        let mut new_edges = 0;
         let mut promotion_boosts = Vec::new();
 
-        for (from_id_str, to_id_str, boost) in edge_boosts {
+        for (from_id_str, to_id_str, _boost) in edge_boosts {
             // Parse UUIDs
             let from_uuid = match Uuid::parse_str(from_id_str) {
                 Ok(u) => u,
@@ -5532,69 +5530,15 @@ impl GraphMemory {
                         });
                     }
                 }
-            } else {
-                // Create new ReplayStrengthened edge
-                // Replay edges start in L2 (episodic) with replay boost applied to initial strength.
-                // Without this, the computed replay priority score was discarded and all new edges
-                // started at identical strength regardless of their consolidation importance.
-                let edge = RelationshipEdge {
-                    uuid: Uuid::new_v4(),
-                    from_entity: from_uuid,
-                    to_entity: to_uuid,
-                    relation_type: RelationType::CoRetrieved,
-                    strength: EdgeTier::L2Episodic.initial_weight() + boost,
-                    created_at: Utc::now(),
-                    valid_at: Utc::now(),
-                    invalidated_at: None,
-                    source_episode_id: None,
-                    context: "replay_strengthened".to_string(),
-                    last_activated: Utc::now(),
-                    activation_count: 1,
-                    ltp_status: LtpStatus::None,
-                    activation_timestamps: None,
-                    tier: EdgeTier::L2Episodic,
-                    // PIPE-5: Replay edges use default confidence
-                    entity_confidence: None,
-                    forman_curvature: None,
-                    endpoint_selectivity: None,
-                    provenance: Vec::new(),
-                };
-
-                let key = edge.uuid.as_bytes();
-                if let Ok(value) = crate::serialization::encode(&edge) {
-                    batch.put_cf(self.relationships_cf(), key, value);
-
-                    // Index both directions
-                    let idx_key_fwd = format!("mem_edge:{from_uuid}:{to_uuid}");
-                    let idx_key_rev = format!("mem_edge:{to_uuid}:{from_uuid}");
-                    batch.put_cf(
-                        self.relationships_cf(),
-                        idx_key_fwd.as_bytes(),
-                        edge.uuid.as_bytes(),
-                    );
-                    batch.put_cf(
-                        self.relationships_cf(),
-                        idx_key_rev.as_bytes(),
-                        edge.uuid.as_bytes(),
-                    );
-
-                    strengthened += 1;
-                    new_edges += 1;
-                }
             }
+            // No `else`: the replay path reinforces EXISTING edges only. It used to
+            // mint a new `CoRetrieved` edge for every boosted memory pair without an
+            // edge — the second all-pairs flood site — REMOVED entirely. Co-retrieval
+            // strengthens structure; it does not create it.
         }
 
         if strengthened > 0 {
             self.db.write(batch)?;
-
-            // Account for genuinely-new edges created above. Mirrors
-            // record_memory_coactivation; without this the counter drifts low
-            // while delete_relationship keeps decrementing, eventually
-            // (pre-saturation) underflowing it.
-            if new_edges > 0 {
-                self.relationship_count
-                    .fetch_add(new_edges, Ordering::Relaxed);
-            }
 
             // Index new replay edges in entity_edges CF so they're visible to
             // traversal and degree-cap enforcement (GQ-11 fix)
