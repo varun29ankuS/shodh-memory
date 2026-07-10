@@ -21,6 +21,7 @@ pub mod backup;
 pub mod config;
 pub mod constants;
 pub mod decay;
+pub mod dep_parser;
 pub mod embeddings;
 pub mod errors;
 pub mod graph_memory;
