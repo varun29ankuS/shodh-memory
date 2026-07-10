@@ -96,6 +96,10 @@ name = "recall-eval"
 path = "src/bin/recall_eval.rs"
 
 [dependencies]
+# Vendored pure-Rust spaCy pipeline (dependency-head parser + POS + lemma) for
+# entity-resolution span-cleaning. Native, no external fetch. Model bundle loaded
+# at runtime from SHODH_SPACY_MODEL_PATH (asset not committed, like GLiNER/MiniLM).
+spacy-rusty = { path = "crates/spacy-rusty" }
 # MCP Protocol
 rmcp = { version = "0.12", features = ["server", "macros", "transport-io"] }
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -317,3 +321,4 @@ rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }
 
 [workspace]
 # Standalone workspace - not part of parent kalki-v2
+members = ["crates/spacy-rusty"]
