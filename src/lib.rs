@@ -25,6 +25,7 @@ pub mod dep_parser;
 pub mod embeddings;
 pub mod entity_resolution;
 pub mod errors;
+pub mod fs_matcher;
 pub mod graph_memory;
 pub mod handlers;
 pub mod integrations;
