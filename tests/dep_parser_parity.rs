@@ -41,8 +41,7 @@ fn in_engine_heads_match_python_spacy_golden() {
         );
         let (mention, want_root, want_pos) = (cols[0], cols[1], cols[2]);
 
-        let head = dep_parser::head_token(mention)
-            .expect("parser available but returned no head");
+        let head = dep_parser::head_token(mention).expect("parser available but returned no head");
         checked += 1;
 
         if head.text != want_root || head.pos != want_pos {
@@ -53,7 +52,10 @@ fn in_engine_heads_match_python_spacy_golden() {
         }
     }
 
-    assert!(checked > 600, "golden set unexpectedly small: {checked} rows");
+    assert!(
+        checked > 600,
+        "golden set unexpectedly small: {checked} rows"
+    );
     assert!(
         mismatches.is_empty(),
         "{}/{} mentions diverged from Python spaCy golden heads:\n{}",

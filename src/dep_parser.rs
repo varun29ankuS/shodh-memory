@@ -161,7 +161,11 @@ mod tests {
             i,
             text: text.to_string(),
             head,
-            dep: if head == i { "ROOT".into() } else { "dep".into() },
+            dep: if head == i {
+                "ROOT".into()
+            } else {
+                "dep".into()
+            },
             pos: pos.to_string(),
             tag: pos.to_string(),
             lemma: text.to_lowercase(),
