@@ -381,6 +381,62 @@ fn normalize(dist: &mut [f64], total: f64) {
     }
 }
 
+/// Cluster records into entities via the learned matcher, precision-first: fit the
+/// model, then union-find over candidate pairs BLOCKED by entity type — only
+/// same-type mentions are compared, and only pairs whose match probability ≥
+/// `threshold` merge. Type-blocking keeps distinct entities that share a name from
+/// fusing (`Baltimore` the Location vs `Baltimore Fire Department` the Organization
+/// never meet); the head/name features discriminate within a type. Returns clusters
+/// of record indices (singletons included). `records` should already be entity
+/// mentions — junk / verb-fragments filtered by the caller.
+pub fn cluster(records: &[MatchRecord], threshold: f64, em_iters: usize) -> Vec<Vec<usize>> {
+    let n = records.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let model = FellegiSunter::fit(records, em_iters);
+
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], x: usize) -> usize {
+        let mut r = x;
+        while parent[r] != r {
+            parent[r] = parent[parent[r]];
+            r = parent[r];
+        }
+        r
+    }
+
+    // Block by entity type; only compare pairs within a block.
+    let mut blocks: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+    for (i, r) in records.iter().enumerate() {
+        blocks.entry(r.entity_type.as_str()).or_default().push(i);
+    }
+    for idxs in blocks.values() {
+        for a in 0..idxs.len() {
+            for b in (a + 1)..idxs.len() {
+                let (i, j) = (idxs[a], idxs[b]);
+                if model.match_probability(&records[i], &records[j]) >= threshold {
+                    let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                    if ri != rj {
+                        parent[rj] = ri;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    for i in 0..n {
+        let root = find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+    let mut clusters: Vec<Vec<usize>> = groups.into_values().collect();
+    for c in clusters.iter_mut() {
+        c.sort_unstable();
+    }
+    clusters
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2749,6 +2749,108 @@ impl GraphMemory {
         minted
     }
 
+    /// Canonicalize the entity graph: run the resolver over the live mentions and
+    /// MERGE each cluster's duplicate mention nodes into its canonical entity —
+    /// re-pointing every edge onto the canonical (add_relationship dedups by type,
+    /// so duplicate edges collapse) and deleting the duplicate node. This is what
+    /// folds `Dali` / `the Dali` / `container ship` into one node and prunes the
+    /// mention-duplication that makes the graph read as a hairball. The resolver
+    /// uses the dependency parser for head detection; no-op returning `(0, 0)` when
+    /// the parser is unavailable. Returns `(nodes_merged, edges_repointed)`.
+    pub fn canonicalize_entities(&self) -> Result<(usize, usize)> {
+        use crate::entity_resolution::parse_mention_tokens;
+        use crate::fs_matcher::{cluster, MatchRecord};
+
+        if !crate::dep_parser::is_available() {
+            return Ok((0, 0));
+        }
+        let entities = self.get_all_entities()?;
+        if entities.len() < 2 {
+            return Ok((0, 0));
+        }
+
+        // Parse each mention (spaCy-rusty) for its syntactic head, drop verb-
+        // fragment junk (`is_entity`), and build a Fellegi-Sunter record (Splink)
+        // with the head + primary type. Parser does head detection + junk routing;
+        // Splink scores the merge.
+        let mut records: Vec<MatchRecord> = Vec::new();
+        let mut meta: Vec<(Uuid, bool, usize)> = Vec::new(); // (uuid, is_proper, mentions)
+        for e in &entities {
+            let Some(parsed) =
+                crate::dep_parser::parse(&e.name).and_then(|t| parse_mention_tokens(&t))
+            else {
+                continue;
+            };
+            if !parsed.is_entity() {
+                continue;
+            }
+            let primary_type = e
+                .labels
+                .first()
+                .map(|l| l.as_str().to_string())
+                .unwrap_or_default();
+            records.push(MatchRecord {
+                name: parsed.clean.to_lowercase(),
+                head: parsed.head.clone(),
+                entity_type: primary_type,
+                ..Default::default()
+            });
+            meta.push((e.uuid, e.is_proper_noun, e.mention_count));
+        }
+        if records.len() < 2 {
+            return Ok((0, 0));
+        }
+
+        // Splink: fit + type-blocked clustering at a precision-first threshold.
+        let clusters = cluster(&records, 0.9, 20);
+
+        let mut merged_nodes = 0usize;
+        let mut repointed = 0usize;
+        for cluster_idxs in clusters {
+            if cluster_idxs.len() < 2 {
+                continue;
+            }
+            // Canonical = the most-proper / most-mentioned member.
+            let canon_idx = *cluster_idxs
+                .iter()
+                .max_by_key(|&&i| (meta[i].1, meta[i].2))
+                .unwrap();
+            let canonical = meta[canon_idx].0;
+            for &i in &cluster_idxs {
+                if i == canon_idx {
+                    continue;
+                }
+                let member = meta[i].0;
+                // Re-point every edge touching the member onto the canonical node.
+                let member_edges = self.get_entity_relationships(&member)?;
+                for edge in member_edges {
+                    let mut ne = edge.clone();
+                    ne.uuid = Uuid::new_v4();
+                    if ne.from_entity == member {
+                        ne.from_entity = canonical;
+                    }
+                    if ne.to_entity == member {
+                        ne.to_entity = canonical;
+                    }
+                    let _ = self.delete_relationship(&edge.uuid);
+                    // Drop self-loops; add_relationship dedups by (from,to,type) so
+                    // duplicate edges between the same entities merge, not multiply.
+                    if ne.from_entity != ne.to_entity && self.add_relationship(ne).is_ok() {
+                        repointed += 1;
+                    }
+                }
+                let _ = self.delete_entity(&member);
+                merged_nodes += 1;
+            }
+        }
+        tracing::info!(
+            merged = merged_nodes,
+            repointed,
+            "canonicalize (Splink): merged duplicate mention nodes into canonical entities"
+        );
+        Ok((merged_nodes, repointed))
+    }
+
     /// Load lowercase name->UUID index, or migrate from name_index if empty
     ///
     /// This enables O(1) case-insensitive entity lookup instead of O(n) linear search.
