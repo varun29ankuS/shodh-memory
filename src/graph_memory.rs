@@ -2858,7 +2858,51 @@ impl GraphMemory {
         }
 
         // Splink: fit + type-blocked clustering at a precision-first threshold.
-        let clusters = cluster(&records, 0.9, 20);
+        let mut clusters = cluster(&records, 0.9, 20);
+
+        // Contrastive projection adapter (ER Task 4.2, Sudowoodo-lite) — GATED.
+        // Self-supervise a tiny projection over the frozen name embeddings from the
+        // confident base merges (within-cluster pairs = positives; cross-type pairs =
+        // negatives, which prevent collapse), then re-cluster in the learned space to
+        // catch coreferent surfaces the frozen embedding missed. Opt in with
+        // SHODH_CONTRASTIVE_ADAPTER=1 so it can be measured before earning the default.
+        let adapter_on = std::env::var("SHODH_CONTRASTIVE_ADAPTER")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if adapter_on {
+            if let Some(dim) = records
+                .iter()
+                .find_map(|r| r.name_embedding.as_ref().map(|e| e.len()))
+            {
+                let mut adapter = crate::contrastive::ContrastiveAdapter::identity(dim);
+                for c in clusters.iter().filter(|c| c.len() >= 2) {
+                    for a in 0..c.len() {
+                        for b in (a + 1)..c.len() {
+                            let (ri, rj) = (&records[c[a]], &records[c[b]]);
+                            if let (Some(ea), Some(eb)) = (&ri.name_embedding, &rj.name_embedding) {
+                                // A negative: the nearest-indexed record of a DIFFERENT
+                                // entity type (never coreferent), guarding over-merge.
+                                let neg = records
+                                    .iter()
+                                    .find(|r| {
+                                        r.entity_type != ri.entity_type
+                                            && r.name_embedding.is_some()
+                                    })
+                                    .and_then(|r| r.name_embedding.clone());
+                                adapter.learn(ea, eb, neg.as_deref());
+                                adapter.learn(eb, ea, neg.as_deref());
+                            }
+                        }
+                    }
+                }
+                for r in records.iter_mut() {
+                    if let Some(e) = r.name_embedding.take() {
+                        r.name_embedding = Some(adapter.project(&e));
+                    }
+                }
+                clusters = cluster(&records, 0.9, 20);
+            }
+        }
 
         let mut merged_nodes = 0usize;
         let mut repointed = 0usize;

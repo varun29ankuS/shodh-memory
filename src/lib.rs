@@ -22,6 +22,7 @@ pub mod backup;
 pub mod catena;
 pub mod causal_vocab;
 pub mod config;
+pub mod contrastive;
 pub mod constants;
 pub mod decay;
 pub mod dep_parser;
