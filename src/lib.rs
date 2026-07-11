@@ -33,6 +33,7 @@ pub mod fs_matcher;
 pub mod graph_memory;
 pub mod handlers;
 pub mod integrations;
+pub mod kb;
 pub mod memory;
 pub mod metrics;
 pub mod middleware;

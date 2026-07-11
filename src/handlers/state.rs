@@ -3824,6 +3824,14 @@ impl MultiUserMemoryManager {
             tracing::debug!(aliases = appos, "seeded appositive aliases");
         }
 
+        // Retrieval-based KB linking (ER Task 3.2) — GATED. Link freshly-extracted
+        // entities to the domain KB (world-knowledge merges the corpus never states,
+        // e.g. Google → Alphabet). No-ops without SHODH_KB_LINKING + a loaded KB.
+        let kb_linked = graph_guard.kb_link_entities(&entity_uuids);
+        if kb_linked > 0 {
+            tracing::debug!(aliases = kb_linked, "seeded KB-link aliases");
+        }
+
         // Aggregate the episode's surprise components (raw facts only —
         // deviation/z-scoring happens at read time against the user's rolling
         // baseline) and persist them on the episode via an idempotent re-put.

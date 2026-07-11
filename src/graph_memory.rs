@@ -2581,6 +2581,57 @@ impl GraphMemory {
         self.seed_aliases(to_seed).unwrap_or(0)
     }
 
+    /// Retrieval-based KB linking (ER Task 3.2) — GATED. For each freshly-extracted
+    /// entity, link its surface to the domain KB (`SHODH_KB_PATH`): exact alias hit,
+    /// else type-blocked embedding nearest-neighbour ≥ `SHODH_KB_LINK_MIN`. When the
+    /// KB's canonical entity already exists as a node in this graph, seed a
+    /// surface→canonical alias so corpus mentions collapse onto the world-knowledge
+    /// entity (`Google` → `Alphabet Inc.`) — a merge no in-corpus matcher reaches.
+    /// No-ops without `SHODH_KB_LINKING=1` or a loaded KB (`SHODH_KB_PATH`). Returns
+    /// aliases seeded.
+    pub fn kb_link_entities(&self, entity_uuids: &[(String, Uuid, EntityLabel)]) -> usize {
+        let on = std::env::var("SHODH_KB_LINKING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !on {
+            return 0;
+        }
+        let Some(kb) = crate::kb::global() else {
+            return 0;
+        };
+        let min = std::env::var("SHODH_KB_LINK_MIN")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.75);
+        let mut seeded = 0usize;
+        for (name, uuid, label) in entity_uuids {
+            if self.resolve_alias(name).is_some() {
+                continue;
+            }
+            let ty = label.as_str().to_lowercase();
+            let kb_hit = kb.link_by_alias(name).or_else(|| {
+                self.get_entity(uuid)
+                    .ok()
+                    .flatten()
+                    .and_then(|e| e.name_embedding)
+                    .and_then(|emb| kb.link_by_embedding(&emb, &ty, min).map(|(e, _)| e))
+            });
+            if let Some(kbe) = kb_hit {
+                if name.eq_ignore_ascii_case(&kbe.label) {
+                    continue;
+                }
+                if let Ok(Some(canon)) = self.find_entity_by_name(&kbe.label) {
+                    if canon.uuid != *uuid
+                        && self.seed_aliases([(name.clone(), canon.uuid)]).is_ok()
+                    {
+                        seeded += 1;
+                    }
+                }
+            }
+        }
+        seeded
+    }
+
     /// Map a causal-spine canonical relation label to a `RelationType`, preferring
     /// the named variants where they exist and falling back to `Custom`.
     fn relation_type_from_label(label: &str) -> RelationType {
