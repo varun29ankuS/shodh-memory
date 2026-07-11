@@ -417,13 +417,10 @@ fn issue_regex() -> &'static regex::Regex {
 use crate::ab_testing;
 use crate::backup;
 use crate::config::ServerConfig;
-use crate::embeddings::{
-    are_ner_models_downloaded, download_ner_models, get_ner_models_dir, ner::NerEntityType,
-    KeywordExtractor, NerConfig, NeuralNer,
-};
+use crate::embeddings::{ner::NerEntityType, KeywordExtractor, NerConfig, NeuralNer};
 use crate::graph_memory::{
-    classify_misc_entity, classify_tag_label, EdgeTier, EntityLabel, EntityNode, EpisodeSource,
-    EpisodicNode, GraphMemory, GraphStats, LtpStatus, RelationshipEdge,
+    classify_tag_label, EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode,
+    GraphMemory, GraphStats, LtpStatus, RelationshipEdge,
 };
 use crate::memory::{
     Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats, MemorySystem,
@@ -730,66 +727,21 @@ impl MultiUserMemoryManager {
 
         let (event_broadcaster, _) = tokio::sync::broadcast::channel(1024);
 
-        let ner_dir = get_ner_models_dir();
-        tracing::debug!("Checking for NER models at {:?}", ner_dir);
-        let neural_ner = if are_ner_models_downloaded() {
-            tracing::debug!("NER models found, using existing files");
-            let config = NerConfig {
-                model_path: ner_dir.join("model.onnx"),
-                tokenizer_path: ner_dir.join("tokenizer.json"),
-                max_length: 128,
-                confidence_threshold: 0.5,
-            };
-            match NeuralNer::new(config) {
-                Ok(ner) => {
-                    info!("Neural NER initialized (TinyBERT model at {:?})", ner_dir);
-                    Arc::new(ner)
+        // NER stage: GLiNER bi-edge production typer when its assets are present
+        // (SHODH_GLINER_MODEL_PATH, default ./models/gliner-bi-edge), else the
+        // rule-based fallback. NeuralNer::new never fails; it logs which path it took.
+        let neural_ner = match NeuralNer::new(NerConfig::default()) {
+            Ok(ner) => {
+                if ner.is_fallback_mode() {
+                    info!("Neural NER using rule-based fallback (GLiNER assets absent)");
+                } else {
+                    info!("Neural NER initialized (GLiNER bi-edge production typer)");
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to initialize neural NER: {}. Using fallback.", e);
-                    Arc::new(NeuralNer::new_fallback(NerConfig::default()))
-                }
+                Arc::new(ner)
             }
-        } else {
-            tracing::debug!("NER models not found at {:?}, will download", ner_dir);
-            info!("Downloading NER models (TinyBERT-NER, ~15MB)...");
-            match download_ner_models(Some(std::sync::Arc::new(|downloaded, total| {
-                if total > 0 {
-                    let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
-                    if percent.is_multiple_of(20) {
-                        tracing::info!("NER model download: {}%", percent);
-                    }
-                }
-            }))) {
-                Ok(ner_dir) => {
-                    info!("NER models downloaded to {:?}", ner_dir);
-                    let config = NerConfig {
-                        model_path: ner_dir.join("model.onnx"),
-                        tokenizer_path: ner_dir.join("tokenizer.json"),
-                        max_length: 128,
-                        confidence_threshold: 0.5,
-                    };
-                    match NeuralNer::new(config) {
-                        Ok(ner) => {
-                            info!("Neural NER initialized after download");
-                            Arc::new(ner)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to initialize downloaded NER: {}. Using fallback.",
-                                e
-                            );
-                            Arc::new(NeuralNer::new_fallback(NerConfig::default()))
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to download NER models: {}. Using rule-based fallback.",
-                        e
-                    );
-                    Arc::new(NeuralNer::new_fallback(NerConfig::default()))
-                }
+            Err(e) => {
+                tracing::warn!("Failed to initialize NER: {}. Using rule-based fallback.", e);
+                Arc::new(NeuralNer::new_fallback(NerConfig::default()))
             }
         };
 
@@ -2672,6 +2624,7 @@ impl MultiUserMemoryManager {
                     confidence: record.confidence,
                     start: record.start_char.unwrap_or(0),
                     end: record.end_char.unwrap_or(record.text.len()),
+                    fine_label: record.fine_label.clone(),
                 })
                 .collect()
         } else if !experience.entities.is_empty() {
@@ -2688,6 +2641,7 @@ impl MultiUserMemoryManager {
                     confidence: 0.8,
                     start: 0,
                     end: name.len(),
+                    fine_label: None,
                 })
                 .collect()
         } else {
@@ -2960,11 +2914,26 @@ impl MultiUserMemoryManager {
         let ner_entities: Vec<(String, EntityNode)> = filtered_entities
             .into_iter()
             .map(|ner_entity| {
-                let label = match ner_entity.entity_type {
-                    NerEntityType::Person => EntityLabel::Person,
-                    NerEntityType::Organization => EntityLabel::Organization,
-                    NerEntityType::Location => EntityLabel::Location,
-                    NerEntityType::Misc => classify_misc_entity(&ner_entity.text),
+                // Primary label + fine type from GLiNER's top-scoring span for this
+                // surface. The fine label rolls up to its coarse EntityLabel via the
+                // schema (kills the MISC→regex funnel); the fallback path has no fine
+                // label and uses the coarse 4-class view directly.
+                let (label, fine_type) = match &ner_entity.fine_label {
+                    Some(fine) => {
+                        let coarse = crate::entity_type::coarse_of(fine)
+                            .map(EntityLabel::from_coarse_id)
+                            .unwrap_or_else(|| EntityLabel::Other(fine.clone()));
+                        (coarse, Some(fine.clone()))
+                    }
+                    None => {
+                        let coarse = match ner_entity.entity_type {
+                            NerEntityType::Person => EntityLabel::Person,
+                            NerEntityType::Organization => EntityLabel::Organization,
+                            NerEntityType::Location => EntityLabel::Location,
+                            NerEntityType::Misc => EntityLabel::Concept,
+                        };
+                        (coarse, None)
+                    }
                 };
                 let node = EntityNode {
                     uuid: uuid::Uuid::new_v4(),
@@ -2994,7 +2963,7 @@ impl MultiUserMemoryManager {
                     },
                     is_proper_noun: !matches!(ner_entity.entity_type, NerEntityType::Misc),
                     selectivity: None,
-                    fine_type: None,
+                    fine_type,
                 };
                 (ner_entity.text, node)
             })
@@ -4079,38 +4048,6 @@ mod tests {
     fn test_classify_tag_label_fallback() {
         assert_eq!(classify_tag_label("react"), EntityLabel::Technology);
         assert_eq!(classify_tag_label("rust"), EntityLabel::Technology);
-    }
-
-    #[test]
-    fn test_classify_misc_entity_concept_suffixes() {
-        assert_eq!(classify_misc_entity("capitalism"), EntityLabel::Concept);
-        assert_eq!(classify_misc_entity("neurology"), EntityLabel::Concept);
-        assert_eq!(classify_misc_entity("complexity"), EntityLabel::Concept);
-        assert_eq!(classify_misc_entity("authentication"), EntityLabel::Concept);
-    }
-
-    #[test]
-    fn test_classify_misc_entity_events() {
-        assert_eq!(classify_misc_entity("conference"), EntityLabel::Event);
-        assert_eq!(classify_misc_entity("hackathon"), EntityLabel::Event);
-    }
-
-    #[test]
-    fn test_classify_misc_entity_skills() {
-        assert_eq!(classify_misc_entity("developer"), EntityLabel::Skill);
-        assert_eq!(classify_misc_entity("engineering"), EntityLabel::Skill);
-    }
-
-    #[test]
-    fn test_classify_misc_entity_product_camelcase() {
-        assert_eq!(classify_misc_entity("RocksDB"), EntityLabel::Product);
-        assert_eq!(classify_misc_entity("GitHub"), EntityLabel::Product);
-    }
-
-    #[test]
-    fn test_classify_misc_entity_default() {
-        // Single lowercase word with no special suffix → Concept
-        assert_eq!(classify_misc_entity("memory"), EntityLabel::Concept);
     }
 
     #[test]

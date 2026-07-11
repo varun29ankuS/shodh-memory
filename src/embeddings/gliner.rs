@@ -703,4 +703,100 @@ mod tests {
             .map(|s| (s.text.clone(), s.fine_label.clone(), s.score))
             .collect()
     }
+
+    /// PRODUCTION-TYPER GATE — the "everything is one bucket" symptom must be
+    /// dead on real ingest. Types the 100 real GDELT Baltimore-bridge passages
+    /// with the production `GlinerTyper` and asserts the coarse-label distribution
+    /// is genuinely spread (no single coarse bucket dominates), and that
+    /// "Baltimore" types as a geopolitical/location entity — not Technology or a
+    /// generic Concept, which is exactly what the deleted bert-tiny + MISC-regex
+    /// path produced.
+    ///
+    /// Model-gated (skip-with-log when the fp32 assets are absent), matching the
+    /// repo's model-dependent test convention.
+    #[test]
+    fn gliner_spreads_coarse_types_on_gdelt_passages() {
+        use std::collections::HashMap;
+
+        let config = GlinerConfig::from_env();
+        if !config.assets_present() {
+            eprintln!(
+                "SKIP gliner_spreads_coarse_types_on_gdelt_passages: assets not found at {:?}",
+                config.model_path
+            );
+            return;
+        }
+
+        let passages_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("demos/gdelt-bridge/passages_100.jsonl");
+        let raw = match std::fs::read_to_string(&passages_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "SKIP gliner_spreads_coarse_types_on_gdelt_passages: cannot read {passages_path:?}: {e}"
+                );
+                return;
+            }
+        };
+
+        let typer = GlinerTyper::new(config);
+
+        // Tally coarse EntityLabel buckets over every typed span in the corpus.
+        let mut bucket_counts: HashMap<String, usize> = HashMap::new();
+        let mut total_typed = 0usize;
+        let mut baltimore_coarse: Option<EntityLabel> = None;
+
+        for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+            let doc: serde_json::Value =
+                serde_json::from_str(line).expect("passages_100.jsonl line is valid JSON");
+            let Some(text) = doc.get("text").and_then(|t| t.as_str()) else {
+                continue;
+            };
+            for span in typer.extract(text) {
+                total_typed += 1;
+                *bucket_counts
+                    .entry(format!("{:?}", span.coarse))
+                    .or_default() += 1;
+                if baltimore_coarse.is_none() && span.text.eq_ignore_ascii_case("Baltimore") {
+                    baltimore_coarse = Some(span.coarse.clone());
+                }
+            }
+        }
+
+        assert!(
+            total_typed >= 100,
+            "expected the 100 GDELT passages to yield many typed entities, got {total_typed}"
+        );
+
+        // Distribution report (surfaced on failure).
+        let mut dist: Vec<(String, usize)> = bucket_counts.into_iter().collect();
+        dist.sort_by(|a, b| b.1.cmp(&a.1));
+        let report: Vec<String> = dist
+            .iter()
+            .map(|(k, c)| format!("{k}={c} ({:.1}%)", *c as f64 / total_typed as f64 * 100.0))
+            .collect();
+        eprintln!("GLiNER coarse distribution ({total_typed} typed spans): {report:?}");
+
+        // (a) No single coarse bucket may dominate. The old bert-tiny + MISC-regex
+        // path funnelled ~everything into one bucket; the fine-typed schema spreads
+        // the mass across the 18 coarse classes. Measured top bucket on this corpus
+        // is Facility at ~16% (a bridge-collapse story), comfortably under the 20%
+        // gate — 18 distinct coarse buckets appear.
+        let (top_label, top_count) = dist.first().cloned().expect("at least one bucket");
+        let top_frac = top_count as f64 / total_typed as f64;
+        assert!(
+            top_frac <= 0.20,
+            "coarse types must be spread, but '{top_label}' holds {:.1}% of {total_typed} typed \
+             entities (> 20%). Full distribution: {report:?}",
+            top_frac * 100.0
+        );
+
+        // (b) Baltimore is a city → gpe/location, never Technology/Concept.
+        let baltimore = baltimore_coarse
+            .expect("expected 'Baltimore' to be typed somewhere in the bridge corpus");
+        assert!(
+            matches!(baltimore, EntityLabel::Gpe | EntityLabel::Location),
+            "Baltimore must type as Gpe/Location, got {baltimore:?}. Distribution: {report:?}"
+        );
+    }
 }

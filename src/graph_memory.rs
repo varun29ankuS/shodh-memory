@@ -477,68 +477,6 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
     EntityLabel::Technology
 }
 
-/// Classify a MISC NER entity (or an otherwise-untyped name) into a more
-/// specific `EntityLabel`.
-///
-/// The NER model only outputs PER/ORG/LOC/MISC. For MISC entities that pass
-/// quality gates, we use heuristic rules to assign a richer ontological type.
-/// This activates type-aware spreading activation and `matches_with_hierarchy()`
-/// in retrieval — `Concept` entities participate in the type hierarchy while
-/// `Other("MISC")` is invisible to it. Shared by every ingest path so the same
-/// name resolves to the same label regardless of entry point.
-pub fn classify_misc_entity(name: &str) -> EntityLabel {
-    let lower = name.to_lowercase();
-
-    // Event-like terms (checked first — "conference" ends with "ence" concept suffix)
-    const EVENT_WORDS: &[&str] = &[
-        "conference",
-        "summit",
-        "meetup",
-        "hackathon",
-        "sprint",
-        "launch",
-        "release",
-        "incident",
-        "outage",
-        "postmortem",
-    ];
-    if EVENT_WORDS.iter().any(|w| lower.contains(w)) {
-        return EntityLabel::Event;
-    }
-
-    // Skill / role indicators (before concept — "engineer" ends with suffix-like patterns)
-    const SKILL_WORDS: &[&str] = &[
-        "engineer",
-        "architect",
-        "developer",
-        "designer",
-        "analyst",
-        "programming",
-        "scripting",
-    ];
-    if SKILL_WORDS.iter().any(|w| lower.contains(w)) {
-        return EntityLabel::Skill;
-    }
-
-    // Concept suffixes — abstract ideas, methodologies, qualities
-    const CONCEPT_SUFFIXES: &[&str] = &[
-        "ism", "ology", "ity", "ness", "ment", "ance", "ence", "tion", "sion",
-    ];
-    if CONCEPT_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
-        return EntityLabel::Concept;
-    }
-
-    // PascalCase proper nouns without spaces/hyphens → likely a Product
-    // (e.g., "JavaScript", "PostgreSQL", "FastAPI", "ChatGPT")
-    let has_internal_upper = name.chars().skip(1).any(|c| c.is_uppercase());
-    if has_internal_upper && !name.contains(' ') && !name.contains('-') && name.len() > 2 {
-        return EntityLabel::Product;
-    }
-
-    // Default: Concept (participates in type hierarchy via Role→Concept parent)
-    EntityLabel::Concept
-}
-
 /// Memory tier for edge consolidation
 ///
 /// Based on hippocampal-cortical memory consolidation research:
@@ -3319,6 +3257,13 @@ impl GraphMemory {
                 // Preserve existing embedding if the incoming one is None
                 if entity.name_embedding.is_none() {
                     entity.name_embedding = existing.name_embedding;
+                }
+
+                // Preserve an existing fine type when the re-mention carries none.
+                // Re-mentions are the common case (pre-extracted names, tags, fallback
+                // entities), and they must not wipe a fine type GLiNER already set.
+                if entity.fine_type.is_none() {
+                    entity.fine_type = existing.fine_type.clone();
                 }
 
                 // Merge summary: first non-empty wins, preserve existing
@@ -9010,16 +8955,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_misc_entity_maps_surface_forms() {
-        assert_eq!(classify_misc_entity("postmortem"), EntityLabel::Event);
-        assert_eq!(classify_misc_entity("backend engineer"), EntityLabel::Skill);
-        assert_eq!(classify_misc_entity("scalability"), EntityLabel::Concept);
-        assert_eq!(classify_misc_entity("PostgreSQL"), EntityLabel::Product);
-        // Plain lowercase noun with no signal → Concept (still type-hierarchy visible)
-        assert_eq!(classify_misc_entity("widget"), EntityLabel::Concept);
-    }
-
-    #[test]
     fn entity_node_fine_type_roundtrips() {
         // Same persistence path production code uses: GraphMemory::add_entity
         // (crate::serialization::encode over postcard) and get_entity
@@ -9047,6 +8982,46 @@ mod tests {
 
         let roundtripped = graph.get_entity(&entity_uuid).unwrap().unwrap();
         assert_eq!(roundtripped.fine_type, Some("bridge".to_string()));
+    }
+
+    #[test]
+    fn add_entity_remention_preserves_existing_fine_type() {
+        // Deferred fix: a re-mention that carries no fine type must NOT wipe the
+        // fine type an earlier mention (e.g. GLiNER) already set. Re-mentions are
+        // the common case (pre-extracted names, tags, fallback entities).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let now = Utc::now();
+
+        let make = |fine: Option<String>| EntityNode {
+            uuid: Uuid::new_v4(),
+            name: "Baltimore".to_string(),
+            labels: vec![EntityLabel::Gpe],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: fine,
+        };
+
+        // First mention: GLiNER typed it "city".
+        let uuid = graph.add_entity(make(Some("city".to_string()))).unwrap();
+        // Re-mention with no fine type (e.g. a tag or fallback entity).
+        let uuid2 = graph.add_entity(make(None)).unwrap();
+        assert_eq!(uuid, uuid2, "re-mention should merge into the same node");
+
+        let merged = graph.get_entity(&uuid).unwrap().unwrap();
+        assert_eq!(
+            merged.fine_type,
+            Some("city".to_string()),
+            "re-mention without a fine type must preserve the existing one"
+        );
+        assert_eq!(merged.mention_count, 2);
     }
 
     #[test]
