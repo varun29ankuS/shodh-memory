@@ -16,6 +16,7 @@
 pub mod chunking;
 pub mod circuit_breaker;
 pub mod downloader;
+pub mod gliner;
 pub mod keywords;
 pub mod minilm;
 pub mod ner;
@@ -34,6 +35,9 @@ pub use downloader::{
 
 // Re-export NER types
 pub use ner::{NerConfig, NerEntity, NerEntityType, NeuralNer};
+
+// Re-export GLiNER bi-edge typer types
+pub use gliner::{GlinerConfig, GlinerTyper, TypedSpan};
 
 // Re-export keyword types
 pub use keywords::{Keyword, KeywordConfig, KeywordExtractor};
