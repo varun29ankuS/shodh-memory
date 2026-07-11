@@ -1,0 +1,1815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>shodh — Associative Memory</title>
+<!--
+  shodh web dashboard — the visualization of ASSOCIATIVE RECALL.
+  A single cue surfaces a CASCADE of associated memories AND the causal chains
+  linking them, lit up together — the brain's spreading activation, made visible.
+  This is the demo for drones/robots: one recall brings up the relevant memories
+  + causal context, like a mind remembering. Sovereign, local, no LLM, no cloud.
+
+  Wiring (all verified against src/ serde structs):
+    GET  /api/events?user_id=&api_key=        SSE — RETRIEVE / PROACTIVE_CONTEXT events
+    POST /api/recall                          {user_id,query,limit,mode} -> surfaces a cascade
+    GET  /api/graph/{user}/universe           stars[] + connections[]  (the spreading-activation graph)
+    GET  /api/users/{user}/stats              tiers / vector / retrievals
+    GET  /api/graph/{user}/stats              entities / relationships / episodes
+    GET  /api/context_status                  connected LLM sessions (model, token%, dir)
+    POST /api/todos/list  POST /api/todos/stats
+  Auth: X-API-Key header for fetch; ?api_key= query for the EventSource stream.
+  CDN d3 for convenience; vendor locally for an air-gapped build.
+-->
+<script src="/assets/d3.v7.min.js"></script>
+<script>window.__SHODH_API_BASE__="http://127.0.0.1:3031";window.__SHODH_API_KEY__="sk-shodh-demo-key";</script>
+<style>
+:root{
+  /* SIGINT console tokens: void/slate surfaces, phosphor primary, signal orange */
+  --bg:#05080d; --bg2:#070c12; --panel:#0b1118; --panel2:#0e151d; --line:#15222f;
+  --line2:#1e3040; --txt:#dce7ee; --txt2:#9fb2c2; --mut:#5d7284; --accent:#35e0d0;
+  --saffron:#ffb782; --gold:#ffd682; --turmeric:#ffc878; --maroon:#ff8c8c;
+  --deepblue:#82a0dc; --live:#96e6aa; --strong:#5f9678; --medium:#8f8a62; --weak:#4a5260;
+  --act:#ff9a5c; --act-dim:#b96f42;
+  --create:#b4e6b4; --retrieve:#ffc896; --proactive:#b4dcff; --update:#ffe082; --del:#ff8c8c;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;height:100%;}
+body{
+  background:
+    radial-gradient(1100px 650px at 78% -8%, rgba(53,224,208,.05) 0, transparent 55%),
+    linear-gradient(rgba(53,224,208,.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(53,224,208,.022) 1px, transparent 1px),
+    var(--bg);
+  background-size:auto, 44px 44px, 44px 44px, auto;
+  color:var(--txt); height:100vh; display:flex; flex-direction:column; overflow:hidden;
+  font-family:"Inter","Segoe UI",system-ui,-apple-system,sans-serif;
+  font-size:13px; -webkit-font-smoothing:antialiased;
+}
+::-webkit-scrollbar{width:8px;height:8px;}
+::-webkit-scrollbar-thumb{background:#2a3343;border-radius:6px;}
+::-webkit-scrollbar-track{background:transparent;}
+.mono{font-family:"Cascadia Code","Cascadia Mono",Consolas,ui-monospace,monospace;}
+h3, .cband, .ghint, .tag, .badge, .crumb, .cue-meta, .bdg, .nav button{
+  font-family:"Cascadia Code","Cascadia Mono",Consolas,ui-monospace,monospace;
+  text-transform:uppercase; letter-spacing:.08em;
+}
+/* HUD corner-notch on the primary panels */
+.panel, .side, .cascade{
+  clip-path:polygon(10px 0,100% 0,100% calc(100% - 10px),calc(100% - 10px) 100%,0 100%,0 10px);
+}
+
+/* ── Header ───────────────────────────────────────────── */
+header{
+  display:flex;align-items:center;gap:14px;padding:11px 16px;
+  border-bottom:1px solid var(--line);background:linear-gradient(180deg,var(--panel) 0,#10141d 100%);
+  flex-shrink:0;
+}
+.brand{display:flex;align-items:center;gap:10px;}
+.brand .mark{height:30px;width:auto;display:block;flex-shrink:0;
+  filter:drop-shadow(0 1px 4px rgba(255,90,40,.35));image-rendering:auto;}
+.brand .wm{display:flex;flex-direction:column;justify-content:center;line-height:1;}
+.brand .wm .name{font-size:19px;font-weight:700;letter-spacing:.3px;
+  background:linear-gradient(90deg,#ff8f5e,#ffd682);-webkit-background-clip:text;background-clip:text;color:transparent;}
+.brand .sub{font-size:9.5px;color:var(--mut);letter-spacing:1.6px;text-transform:uppercase;margin-top:3px;}
+.pulse{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.5px;}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--mut);box-shadow:0 0 0 0 rgba(150,230,170,.6);}
+.pulse.on .dot{background:var(--live);animation:beat 1.8s ease-in-out infinite;}
+.pulse.on{color:var(--live);}
+@keyframes beat{0%,100%{box-shadow:0 0 0 0 rgba(150,230,170,.5);}50%{box-shadow:0 0 0 7px rgba(150,230,170,0);}}
+.stats-strip{display:flex;gap:18px;margin-left:6px;}
+.stat{display:flex;flex-direction:column;line-height:1.15;}
+.stat .v{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums;
+  font-family:"JetBrains Mono","SF Mono",ui-monospace,Consolas,monospace;color:#dfe7f0;}
+.stat .k{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.7px;}
+.spark{margin-left:auto;display:flex;align-items:flex-end;gap:2px;height:26px;}
+.spark .bar{width:3px;background:linear-gradient(180deg,#58a6ff,#2f6fbf);border-radius:1px;min-height:2px;transition:height .25s;}
+.usel{margin-left:14px;display:flex;align-items:center;gap:8px;position:relative;}
+.usel label{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.6px;}
+select,input,button{font-family:inherit;}
+select{background:var(--bg2);color:var(--txt);border:1px solid var(--line2);border-radius:6px;padding:6px 8px;font-size:12px;}
+.tag{font-size:9.5px;color:var(--gold);border:1px solid var(--line2);border-radius:20px;padding:2px 9px;letter-spacing:.5px;background:#13161f;}
+
+/* ── Multi-user identity selector (login + group/overlap) ── */
+.idsel{position:relative;}
+.idbtn{display:flex;align-items:center;gap:8px;background:var(--bg2);color:var(--txt);
+  border:1px solid var(--line2);border-radius:8px;padding:6px 11px;font-size:12px;cursor:pointer;min-width:172px;}
+.idbtn:hover{border-color:var(--accent);}
+.idbtn .who{flex:1;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600;}
+.idbtn .who .grp{color:var(--gold);}
+.idbtn .cnt{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;}
+.idbtn .car{color:var(--mut);font-size:10px;}
+.idmenu{position:absolute;top:calc(100% + 6px);left:0;z-index:40;width:248px;max-height:340px;overflow-y:auto;
+  background:var(--panel2);border:1px solid var(--line2);border-radius:10px;padding:7px;display:none;
+  box-shadow:0 14px 40px rgba(0,0,0,.55);}
+.idmenu.open{display:block;}
+.idmenu .mh{font-size:8.5px;text-transform:uppercase;letter-spacing:1px;color:var(--mut);padding:4px 7px 6px;}
+.idopt{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;cursor:pointer;font-size:12px;color:var(--txt2);}
+.idopt:hover{background:#1a2230;color:var(--txt);}
+.idopt input{appearance:none;-webkit-appearance:none;width:15px;height:15px;border:1.5px solid var(--line2);
+  border-radius:4px;background:var(--bg2);position:relative;cursor:pointer;flex-shrink:0;margin:0;}
+.idopt input:checked{background:linear-gradient(180deg,#ff8f5e,#ffb782);border-color:#ffb782;}
+.idopt input:checked::after{content:"✓";position:absolute;inset:0;display:grid;place-items:center;font-size:10px;color:#1a0f08;font-weight:800;}
+.idopt .un{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.idopt.act{color:var(--txt);}
+.idmenu .addrow{display:flex;gap:6px;margin-top:6px;padding-top:7px;border-top:1px solid var(--line);}
+.idmenu .addrow input{flex:1;background:var(--bg2);color:var(--txt);border:1px solid var(--line2);border-radius:6px;padding:5px 8px;font-size:11px;}
+.idmenu .addrow button{background:#1d2738;color:var(--gold);border:1px solid var(--line2);border-radius:6px;padding:0 10px;font-size:12px;cursor:pointer;}
+.idmenu .addrow button:hover{border-color:var(--gold);color:#fff;}
+.idmenu .grouphint{font-size:9px;color:var(--mut);padding:6px 7px 2px;line-height:1.5;}
+.idmenu .grouphint b{color:var(--turmeric);}
+
+/* ── Layout ───────────────────────────────────────────── */
+main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
+.col{min-height:0;display:flex;flex-direction:column;overflow:hidden;}
+.col.left{border-right:1px solid var(--line);background:var(--panel);}
+.col.right{border-left:1px solid var(--line);background:var(--panel);}
+.col.center{position:relative;background:radial-gradient(900px 600px at 50% 40%,#0d1119 0,var(--bg) 80%);}
+.sechd{display:flex;align-items:center;gap:8px;padding:11px 14px 9px;font-size:10px;text-transform:uppercase;
+  letter-spacing:1.2px;color:var(--mut);border-bottom:1px solid var(--line);flex-shrink:0;}
+.sechd b{color:var(--turmeric);font-weight:700;}
+.sechd .cnt{margin-left:auto;color:var(--mut);font-size:10px;}
+
+/* ── Cue bar (the recall trigger) ─────────────────────── */
+.cuebar{padding:12px 14px;border-bottom:1px solid var(--line);flex-shrink:0;}
+.cuebar .row{display:flex;gap:8px;}
+#cue{flex:1;background:var(--bg2);color:var(--txt);border:1px solid var(--line2);border-radius:8px;
+  padding:10px 12px;font-size:13px;}
+#cue:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(88,166,255,.12);}
+#cue::placeholder{color:var(--mut);}
+.cuebar button{background:linear-gradient(180deg,#1d2738,#141b27);color:var(--gold);border:1px solid var(--line2);
+  border-radius:8px;padding:0 16px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;}
+.cuebar button:hover{border-color:var(--gold);color:#fff;}
+.cuebar .hint{margin-top:7px;font-size:10px;color:var(--mut);}
+.cuebar .hint b{color:var(--retrieve);}
+
+/* ── River (the cascade feed) ─────────────────────────── */
+.river{flex:1;overflow-y:auto;padding:10px 12px;}
+.empty{color:var(--mut);font-size:12px;padding:18px 6px;line-height:1.6;}
+.empty b{color:var(--txt2);}
+.empty .empty-title{font-family:"JetBrains Mono",ui-monospace,monospace;color:var(--txt2);font-size:13px;margin-bottom:8px;letter-spacing:.4px;}
+.empty .demo-cue{display:block;margin-top:14px;background:none;border:1px solid var(--act-dim);color:var(--act);
+  border-radius:7px;padding:8px 14px;font:600 11.5px Inter,sans-serif;cursor:pointer;letter-spacing:.4px;}
+.empty .demo-cue:hover{background:rgba(255,154,92,.1);border-color:var(--act);}
+
+.cascade{border:1px solid var(--line2);border-radius:12px;margin-bottom:14px;background:linear-gradient(180deg,#131a26,#0f141d);
+  overflow:hidden;animation:rise .45s cubic-bezier(.2,.8,.2,1);position:relative;}
+@keyframes rise{from{opacity:0;transform:translateY(10px) scale(.99);}to{opacity:1;transform:none;}}
+.cascade.sel{border-color:var(--retrieve);box-shadow:0 0 0 1px rgba(255,200,150,.25),0 8px 28px rgba(0,0,0,.45);}
+.cascade.glow::before{content:"";position:absolute;inset:0;border-radius:12px;pointer-events:none;
+  box-shadow:0 0 0 1px rgba(255,200,150,.5);animation:fade 2s ease-out forwards;}
+@keyframes fade{from{opacity:1;}to{opacity:0;}}
+
+.casc-hd{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--line);}
+.casc-hd .ico{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:12px;flex-shrink:0;}
+.casc-hd .ttl{flex:1;min-width:0;}
+.casc-hd .cue-q{font-size:13px;font-weight:600;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.casc-hd .cue-q em{font-style:normal;color:var(--retrieve);}
+.casc-hd .cue-meta{font-size:10px;color:var(--mut);margin-top:2px;display:flex;gap:9px;}
+.casc-hd .cue-meta .n{color:var(--turmeric);font-weight:600;}
+.casc-hd .t{font-size:10px;color:var(--mut);white-space:nowrap;}
+
+.casc-body{padding:4px 12px 12px;}
+.cband{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);margin:10px 0 7px;display:flex;align-items:center;gap:7px;}
+.cband::after{content:"";flex:1;height:1px;background:var(--line);}
+.cband .bdg{color:var(--deepblue);font-weight:700;}
+
+/* surfaced memory rows, ranked by score */
+.mem{display:flex;gap:9px;padding:8px;border-radius:8px;margin-bottom:6px;background:#0e131c;
+  border:1px solid #1a2230;cursor:pointer;transition:.12s;}
+.mem:hover{border-color:var(--line2);background:#111722;}
+.mem .rank{font-size:10px;font-weight:700;color:var(--mut);width:16px;text-align:right;padding-top:1px;font-variant-numeric:tabular-nums;}
+.mem .body{flex:1;min-width:0;}
+.mem .txt{font-size:11.5px;line-height:1.45;color:var(--txt2);max-height:48px;overflow:hidden;}
+.mem .mrow{display:flex;align-items:center;gap:9px;margin-top:5px;}
+.scorebar{flex:1;height:4px;border-radius:3px;background:#1a2230;overflow:hidden;max-width:90px;}
+.scorebar i{display:block;height:100%;background:linear-gradient(90deg,#58a6ff,#96e6aa);}
+.mem .sc{font-size:9.5px;color:var(--accent);font-weight:700;font-variant-numeric:tabular-nums;}
+.mem .tier{font-size:9px;color:var(--mut);border:1px solid var(--line2);border-radius:10px;padding:0 6px;}
+
+/* causal chain links (the associative wiring) */
+.chain{display:flex;align-items:center;gap:7px;padding:6px 8px;border-radius:8px;margin-bottom:5px;
+  background:#0d1119;border:1px solid #1a2230;font-size:10.5px;cursor:pointer;}
+.chain:hover{border-color:var(--line2);}
+.chain .node{padding:2px 7px;border-radius:6px;background:#15202e;color:var(--txt2);max-width:120px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.chain .rel{display:flex;flex-direction:column;align-items:center;color:var(--deepblue);min-width:64px;}
+.chain .rel .name{font-size:8.5px;letter-spacing:.4px;text-transform:uppercase;}
+.chain .rel .arr{font-size:13px;line-height:.8;color:var(--medium);}
+.chain .conf{margin-left:auto;font-size:9px;color:var(--mut);font-variant-numeric:tabular-nums;}
+
+/* ── Center: graph ────────────────────────────────────── */
+.gtop{position:absolute;top:0;left:0;right:0;z-index:5;display:flex;align-items:center;gap:10px;
+  padding:11px 14px;pointer-events:none;}
+.gtop .lbl{font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:var(--mut);}
+.gtop .lbl b{color:var(--turmeric);}
+.gtop .activ{margin-left:auto;font-size:10px;color:var(--retrieve);background:#1a1410;border:1px solid #4a3318;
+  border-radius:20px;padding:3px 11px;opacity:0;transition:.3s;pointer-events:auto;display:flex;align-items:center;gap:6px;}
+.gtop .activ.on{opacity:1;}
+.gtop .activ .x{cursor:pointer;color:var(--mut);font-weight:700;}
+.gtop .activ .x:hover{color:#fff;}
+#graph{width:100%;height:100%;display:block;cursor:grab;touch-action:none;}
+#graph:active{cursor:grabbing;}
+.glegend{position:absolute;bottom:12px;left:14px;z-index:5;display:flex;gap:14px;font-size:9.5px;color:var(--mut);
+  background:rgba(11,14,20,.7);border:1px solid var(--line);border-radius:8px;padding:7px 11px;backdrop-filter:blur(4px);}
+.glegend .it{display:flex;align-items:center;gap:5px;}
+.glegend .sw{width:14px;height:3px;border-radius:2px;}
+.glegend .swn{width:9px;height:9px;border-radius:50%;}
+.gloading{position:absolute;inset:0;display:grid;place-items:center;color:var(--mut);font-size:12px;z-index:6;}
+
+/* ── Graph: cluster breadcrumb + drill-down controls ──── */
+.gnav{position:absolute;top:34px;left:14px;z-index:5;display:flex;align-items:center;gap:8px;
+  font-size:11px;color:var(--txt2);pointer-events:auto;}
+.gnav .crumb{display:flex;align-items:center;gap:6px;background:rgba(11,14,20,.72);border:1px solid var(--line);
+  border-radius:8px;padding:5px 10px;backdrop-filter:blur(4px);}
+.gnav .crumb .seg{cursor:pointer;color:var(--turmeric);font-weight:600;}
+.gnav .crumb .seg:hover{color:#fff;}
+.gnav .crumb .seg.cur{color:var(--txt);cursor:default;font-weight:700;}
+.gnav .crumb .seg.cur:hover{color:var(--txt);}
+.gnav .crumb .sep{color:var(--mut);}
+.gnav .mode{color:var(--mut);font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;}
+/* floating tooltip over the canvas */
+#gtip{position:absolute;z-index:7;pointer-events:none;display:none;max-width:240px;
+  background:rgba(14,19,28,.96);border:1px solid var(--line2);border-radius:8px;padding:8px 10px;
+  font-size:11px;color:var(--txt);box-shadow:0 8px 28px rgba(0,0,0,.5);}
+#gtip .tname{font-weight:700;color:var(--gold);margin-bottom:3px;word-break:break-word;}
+#gtip .tmeta{font-size:10px;color:var(--mut);line-height:1.5;}
+#gtip .tmeta b{color:var(--txt2);font-weight:600;}
+.ghint{position:absolute;bottom:12px;right:14px;z-index:5;font-size:9.5px;color:var(--mut);
+  background:rgba(11,14,20,.7);border:1px solid var(--line);border-radius:8px;padding:6px 10px;backdrop-filter:blur(4px);}
+
+/* ── Right column panels ──────────────────────────────── */
+.col.right{overflow-y:auto;}
+.panel{border-bottom:1px solid var(--line);padding:12px 14px;}
+.panel h3{margin:0 0 10px;font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:var(--turmeric);font-weight:700;}
+/* one-line "what question does this panel answer" — plain-language wayfinding */
+.panel .psub{margin:-8px 0 9px;font-size:9.5px;color:var(--mut);line-height:1.4;}
+.kv{display:flex;align-items:center;gap:8px;margin-bottom:7px;font-size:11.5px;}
+.kv .label{color:var(--txt2);width:78px;flex-shrink:0;}
+.kv .meter{flex:1;height:7px;border-radius:4px;background:#161d29;overflow:hidden;}
+.kv .meter i{display:block;height:100%;border-radius:4px;}
+.kv .num{color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums;min-width:40px;text-align:right;}
+.gridkv{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;}
+.gridkv .c .v{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;
+  font-family:"JetBrains Mono","SF Mono",ui-monospace,Consolas,monospace;}
+.gridkv .c .l{font-size:9px;color:var(--mut);text-transform:uppercase;letter-spacing:.6px;}
+
+/* sessions / LLMs */
+.sess{border:1px solid var(--line2);border-radius:8px;padding:9px;margin-bottom:8px;background:#0e131c;}
+.sess .top{display:flex;align-items:center;gap:7px;font-size:11px;}
+.sess .model{font-weight:600;color:var(--deepblue);}
+.sess .dir{margin-left:auto;color:var(--mut);font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px;}
+.sess .tok{margin-top:7px;height:6px;border-radius:4px;background:#161d29;overflow:hidden;}
+.sess .tok i{display:block;height:100%;}
+.sess .tl{display:flex;justify-content:space-between;margin-top:4px;font-size:9px;color:var(--mut);}
+.none{color:var(--mut);font-size:11px;font-style:italic;}
+
+/* detail (selected node/edge/memory) */
+#detail .rel,#anomdetail .rel{font-size:13px;margin:2px 0 8px;line-height:1.5;}
+#detail .rel b,#anomdetail .rel b{color:var(--retrieve);}
+#detail .line,#anomdetail .line{font-size:11px;color:var(--txt2);padding:4px 0;border-top:1px solid var(--line);}
+#detail .line span,#anomdetail .line span{color:var(--mut);}
+.miss{font-size:10px;color:var(--mut);line-height:1.6;}
+.miss b{color:var(--txt2);}
+
+/* screens — TUI-style views (1 LIVE · 2 ANOMALIES · 3 WORK), keys 1/2/3 */
+#tabbar{display:flex;gap:10px;padding:8px 14px 0;border-bottom:1px solid var(--line);}
+#tabbar .tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--mut);
+  font:700 12px Inter,sans-serif;letter-spacing:1.6px;padding:8px 14px 10px;cursor:pointer;text-transform:uppercase;
+  display:flex;align-items:center;gap:8px;}
+#tabbar .tab .key{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:10px;color:var(--mut);
+  border:1px solid var(--line2);border-radius:4px;padding:0 5px;line-height:1.5;}
+#tabbar .tab.on{color:var(--act);border-bottom-color:var(--act);}
+#tabbar .tab.on .key{color:var(--act);border-color:var(--act-dim);}
+#tabbar .tab:hover{color:var(--txt2);}
+#tabbar .tab .badge{background:#5c2b2b;color:#ff9c9c;border-radius:8px;padding:0 6px;font-size:9.5px;margin-left:4px;}
+.screen{padding:16px;}
+.screen .panel{border:1px solid var(--line);border-radius:8px;padding:14px 16px;background:rgba(255,255,255,.015);}
+.anomcols{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:14px;max-width:1440px;margin:0 auto;align-items:start;}
+.anomfeed .anom{font-size:12.5px;padding:9px 0;}
+.anomfeed .anom .why{font-size:11px;}
+.workwrap{max-width:900px;margin:0 auto;}
+#anomdetail .ghl{margin-top:10px;background:none;border:1px solid var(--turmeric);color:var(--turmeric);
+  border-radius:5px;padding:5px 12px;font:600 10.5px Inter,sans-serif;cursor:pointer;letter-spacing:.6px;}
+#anomdetail .ghl:hover{background:rgba(230,160,60,.12);}
+
+/* anomaly feed — deviation from the user's own statistical baseline */
+.anom{padding:6px 0;border-top:1px solid var(--line);font-size:11px;line-height:1.45;}
+.anom:first-child{border-top:none;}
+.anom .sig{display:inline-block;min-width:34px;text-align:center;border-radius:3px;
+  padding:0 4px;font-weight:700;font-size:10px;margin-right:6px;
+  background:#2c3647;color:var(--txt2);}
+.anom.flag .sig{background:#5c2b2b;color:#ff9c9c;}
+.anom.temporal .sig{background:#4a3a1e;color:#ffd682;}
+.anom .prev{color:var(--txt2);}
+.anom .why{display:block;margin-top:2px;font-size:10px;color:var(--mut);}
+.anom .who{color:var(--mut);font-size:9.5px;margin-left:6px;}
+.mini{background:#1c2230;border:1px solid #2c3550;color:var(--fg);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer}.mini:hover{border-color:#4a5a85}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <img class="mark" alt="shodh" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAABAAAAAQACAYAAAB/HSuDAAAACXBIWXMAAA7DAAAOwwHHb6hkAAAAGXRFWHRTb2Z0d2FyZQB3d3cuaW5rc2NhcGUub3Jnm+48GgAAIABJREFUeJzs3Xl0nNl53/nnvlvtVQAIbt3sZi9qdxME0c1NTanV3WJL3rRaE42T+HibGTvjY42XsRRJHseWnChKMsr4eHyck8lJZpx4xj4zR+fMWJGjceJYbY1jW45l+chutWRr64UkQGIpALXXu9z5A0Q3mwRBLFV137fu93OOxCYBVD0EgcJ7f+9zn6u01gIAAAAAAMabY7oAAAAAAAAwfAQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGABAgAAAAAAACxAAAAAAAAAgAUIAAAAAAAAsAABAAAAAAAAFiAAAAAAAADAAgQAAAAAAABYgAAAAAAAAAALEAAAAAAAAGAB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AAAAVAAFAAAAAAAAKoACAAAAAAAAFUABAAAAAACACqAAAAAAAABABVAAAAAAAACgAigAAAAAAABQARQAAAAAAACoAAoAAAAAAABUAAUAAAAAAAAqgAIAAAAAAAAVQAEAAAAAAIAKoAAAAAAAAEAFUAAAAAAAAKACKAAAAAAAAFABFAAAAAAAAKgACgAAAAAAAFQABQAAAAAAACqAAgAAAAAAABVAAQAAAAAAgAqgAAAAAAAAQAVQAAAAAAAAoAIoAAAAAAAAUAEUAAAAAAAAqAAKAAAAAAAAVAAFAAAAAAAAKoACAAAAAAAAFUABAAAAAACACqAAAAAAAABABVAAAAAAAACgAigAAAAAAABQARQAAAAAAACoAAoAAAAAAABUAAUAAAAAAAAqgAIAAAAAAAAVQAEAAAAAAIAKoAAAAAAAAEAFUAAAAAAAAKACKAAAAAAAAFABFAAAAP9/O3YgAAAAACDI33qQCyMAAAYEAAAAAAwIAAAAABgQAAAAADAgAAAAAGBAAAAAAMCAAAAAAIABAQAAAAADAgAAAAAGBAAAAAAMCAAAAAAYEAAAAAAwIAAAAABgQAAAAADAgAAAAACAAQEAAAAAAwIAAAAABgQAAAAADAgAAAAAGBAAAAAAMCAAAAAAYEAAAAAAwIAAAAAAgAEBAAAAAAMCAAAAAAYEAAAAAAwIAAAAABgQAAAAADAgAAAAAGBAAAAAAMCAAAAAAIABAQAAAAADAgAAAAAGBAAAAAAMCAAAAAAYEAAAAAAwIAAAAABgQAAAAADAgAAAAACAAQEAAAAAAwIAAAAABgQAAAAADAgAAAAAGBAAAAAAMCAAAAAAYEAAAAAAwIAAAAAAgAEBAAAAAAMCAAAAAAYEAAAAAAwIAAAAABgQAAAAADAgAAAAAGBAAAAAAMCAAAAAAIABAQAAAAADAgAAAAAGBAAAAAAMCAAAAAAYEAAAAAAwIAAAAABgQAAAAADAgAAAAACAAQEAAAAAAwIAAAAABgQAAAAADAgAAAAAGBAAAAAAMCAAAAAAYEAAAAAAwIAAAAAAgAEBAAAAAAMCAAAAAAYEAAAAAAwIAAAAABgQAAAAADAgAAAAAGBAAAAAAMCAAAAAAIABAQAAAAADAgAAAAAGBAAAAAAMCAAAAAAYEAAAAAAwIAAAAABgQAAAAADAgAAAAACAAQEAAAAAAwIAAAAABgQAAAAADAgAAAAAGBAAAAAAMCAAAAAAYEAAAAAAwIAAAAAAgAEBAAAAAAMCAAAAAAYEAAAAAAwIAAAAABgQAAAAADAgAAAAAGBAAAAAAMCAAAAAAIABAQAAAAADAgAAAAAGBAAAAAAMCAAAAAAYEAAAAAAwIAAAAABgQAAAAADAgAAAAACAAQEAAAAAAwIAAAAABgQAAAAADAgAAAAAGBAAAAAAMCAAAAAAYEAAAAAAwIAAAAAAgAEBAAAAAAMCAAAAAAYEAAAAAAwIAAAAABgQAAAAADAgAAAAAGBAAAAAAMCAAAAAAIABAQAAAAADAgAAAAAGBAAAAAAMCAAAAAAYEAAAAAAwIAAAAABgQAAAAADAgAAAAACAAQEAAAAAAwIAAAAABgQAAAAADAgAAAAAGBAAAAAAMCAAAAAAYEAAAAAAwIAAAAAAgAEBAAAAAAMCAAAAAAYEAAAAAAwIAAAAABgIjWYN7lNDqz4AAAAASUVORK5CYII="/>
+    <div class="wm">
+      <span class="name">shodh</span>
+      <span class="sub">Associative Memory</span>
+    </div>
+  </div>
+  <div class="pulse" id="pulse"><span class="dot"></span><span id="pulse-t">connecting…</span></div>
+  <div class="stats-strip" id="stats-strip"></div>
+  <div class="spark" id="spark" title="events / tick"></div>
+  <div class="usel">
+    <label>identity</label>
+    <div class="idsel">
+      <div class="idbtn" id="idbtn" title="Select one user (isolated) or several (group / overlap)">
+        <span class="who" id="idwho">…</span>
+        <span class="cnt" id="idcnt"></span>
+        <span class="car">▾</span>
+      </div>
+      <div class="idmenu" id="idmenu">
+        <div class="mh">log in as a user · check several to overlap as a group</div>
+        <div id="idlist"></div>
+        <div class="grouphint" id="idhint"></div>
+        <div class="addrow">
+          <input id="idadd" placeholder="add user_id…"/>
+          <button id="idaddbtn" title="Add a user_id">+</button>
+        </div>
+      </div>
+    </div>
+    <span class="tag">LLM-FREE</span>
+    <span class="tag">DETERMINISTIC</span>
+    <span class="tag">ON-DEVICE</span>
+  </div>
+</header>
+
+<!-- TUI-style screens: 1 LIVE (river+graph) · 2 ANOMALIES (analyst) · 3 WORK (GTD) -->
+<nav id="tabbar">
+  <button class="tab on" id="tab-live" onclick="showScreen('live')"><span class="key">1</span>Live</button>
+  <button class="tab" id="tab-anom" onclick="showScreen('anom')"><span class="key">2</span>Anomalies <span class="badge" id="anom-badge" style="display:none">0</span></button>
+  <button class="tab" id="tab-work" onclick="showScreen('work')"><span class="key">3</span>Work</button>
+</nav>
+
+<main>
+  <!-- LEFT: the recall river (cascade feed) -->
+  <div class="col left">
+    <div class="cuebar">
+      <div class="row">
+        <input id="cue" placeholder="cue a recall — e.g. radar development …"/>
+        <button id="recall">Recall</button>
+      </div>
+      <div class="hint">One cue → a <b>cascade</b> of associated memories + the causal chains that surface with them. Live recalls stream in automatically.</div>
+    </div>
+    <div class="sechd"><b>RECALL RIVER</b> · associative cascade <span class="cnt" id="river-cnt"></span></div>
+    <div class="river" id="river">
+      <div class="empty" id="river-empty">
+  <div class="empty-title">The river is still.</div>
+  Each recall blooms into the memories it surfaced and the <b>causal chains</b> that lit up with them — spreading activation, made visible.
+  <button class="demo-cue" id="demo-cue" onclick="demoCue()">cue a recall from this graph →</button>
+</div>
+    </div>
+  </div>
+
+  <!-- CENTER: the spreading-activation graph -->
+  <div class="col center">
+    <div class="gtop">
+      <div class="lbl">KNOWLEDGE GRAPH · <b id="g-user">…</b> · <span id="g-meta">…</span></div>
+      <div class="activ" id="activ"><span id="activ-t"></span><span class="x" id="activ-x">✕</span></div>
+    </div>
+    <div class="gnav" id="gnav" style="display:none">
+      <div class="crumb" id="gcrumb"></div>
+      <span class="mode" id="gmode"></span>
+    </div>
+    <div class="gloading" id="gloading">building graph…</div>
+    <canvas id="graph"></canvas>
+    <div id="gtip"></div>
+    <div class="ghint">scroll to zoom · drag to pan · click a cluster to drill in</div>
+    <div class="glegend">
+      <div class="it"><span class="swn" style="background:#a08cc8"></span>technology</div>
+      <div class="it"><span class="swn" style="background:#7f9cc4"></span>org</div>
+      <div class="it"><span class="swn" style="background:#6fae8f"></span>location</div>
+      <div class="it"><span class="swn" style="background:#c9b280"></span>person</div>
+      <span style="color:#2c3647">│</span>
+      <div class="it"><span class="sw" style="background:#5f9678"></span>strong</div>
+      <div class="it"><span class="sw" style="background:#8f8a62"></span>medium</div>
+      <div class="it"><span class="sw" style="background:#4a5260"></span>weak</div>
+      <span style="color:#2c3647">│</span>
+      <div class="it"><span class="swn" style="background:#ff9a5c"></span>active / anomaly</div>
+    </div>
+  </div>
+
+  <!-- RIGHT: stats / sessions / detail -->
+  <div class="col right">
+    <div class="panel">
+      <h3>Memory Tiers</h3>
+      <div class="psub">how much is held: working → session → long-term</div>
+      <div id="tiers"></div>
+    </div>
+    <div class="panel">
+      <h3>Graph</h3>
+      <div class="psub">entities &amp; typed relations learned from text — no LLM</div>
+      <div class="gridkv" id="graphstats"></div>
+    </div>
+    <div class="panel">
+      <h3>Connected LLMs</h3>
+      <div class="psub">sessions writing to this memory right now</div>
+      <div id="sessions"><div class="none">no active sessions</div></div>
+    </div>
+    <div class="panel" style="border-bottom:none">
+      <h3>Detail / Provenance</h3>
+      <div class="psub">every belief traces to its source episodes</div>
+      <div id="detail"><div class="miss">Click a graph node, an edge, a surfaced memory, or a causal chain.</div></div>
+    </div>
+  </div>
+</main>
+
+<!-- SCREEN 2: ANOMALIES — the analyst view -->
+<section class="screen" id="scr-anom" style="display:none">
+  <div class="anomcols">
+    <div class="anomfeed panel">
+      <h3>Anomalies</h3>
+      <div class="psub">episodes that deviate from this user's own statistical baseline — deterministic, LLM-free. Click a row for the full audit trail.</div>
+      <div id="anomalies"><div class="none">baseline forming…</div></div>
+    </div>
+    <div class="anomside panel">
+      <h3>Audit Trail</h3>
+      <div class="psub">every component: value vs baseline, signed σ — the exact arithmetic behind the flag</div>
+      <div id="anomdetail"><div class="miss">Click an anomaly to see exactly why it was flagged.</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- SCREEN 3: WORK — GTD, in its own room -->
+<section class="screen" id="scr-work" style="display:none">
+  <div class="workwrap panel">
+    <h3>Todos</h3>
+    <div class="psub">open work the agent is tracking</div>
+    <div id="todos"><div class="none">none</div></div>
+  </div>
+</section>
+
+<script>
+"use strict";
+// ── config: dev override injected by the dev-copy script; defaults to same-origin ──
+const API_BASE = window.__SHODH_API_BASE__ || "";
+const API_KEY  = window.__SHODH_API_KEY__  || "";
+const H = API_KEY ? {"X-API-Key":API_KEY} : {};
+const POST_H = Object.assign({"Content-Type":"application/json"}, H);
+
+// Node-type palette: desaturated, dark-tuned, and deliberately COOL —
+// the warm/orange band is reserved for ACTIVITY (recalls, anomalies,
+// active paths). A node may only turn warm by DOING something.
+const TYPEC = {org:"#7f9cc4",organization:"#7f9cc4",company:"#7f9cc4",location:"#6fae8f",loc:"#6fae8f",
+  gpe:"#6fae8f",person:"#c9b280",per:"#c9b280",artifact:"#a08cc8",technology:"#a08cc8",tech:"#a08cc8",
+  product:"#a08cc8",entity:"#6f93b8",event:"#b0a06f",_d:"#77828f"};
+const tc = t => TYPEC[(t||"").toLowerCase()] || TYPEC._d;
+// edge strength colour — matches TUI CONN_STRONG/MEDIUM/WEAK thresholds
+const ec = s => s>=0.7 ? "#5f9678" : s>=0.4 ? "#8f8a62" : "#4a5260";
+const EVCOL = {RETRIEVE:"#ffc896",PROACTIVE_CONTEXT:"#b4dcff",CREATE:"#b4e6b4",UPDATE:"#ffe082",DELETE:"#ff8c8c"};
+const EVICO = {RETRIEVE:"◎",PROACTIVE_CONTEXT:"◉",CREATE:"●",UPDATE:"◐",DELETE:"○"};
+
+const $ = id => document.getElementById(id);
+// ── identity: one or more selected user_ids. ONE = isolated view; 2+ = group
+//    (overlap) view where graphs/streams/stats are UNIONED across the selection.
+const KNOWN_USERS = ["powerhouse-kg","defence-live","default"];   // seed; replaced by /api/users if reachable
+let ALL_USERS = KNOWN_USERS.slice();
+let SELECTED = ["defence-live"];                                  // the active identity (>=1)
+const users = () => SELECTED.slice();
+const isGroup = () => SELECTED.length>1;
+const groupLabel = () => SELECTED.length===1 ? SELECTED[0] : SELECTED.length+" users · group";
+const esc = s => (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+async function api(path, opts){ const r = await fetch(API_BASE+path, opts); if(!r.ok) throw new Error(path+" → "+r.status); return r.json(); }
+const fmt = n => n>=1000 ? (n/1000).toFixed(n>=10000?0:1)+"k" : String(n);
+function relName(r){ if(typeof r!=="string") r=String(r); const m=r.match(/Custom\("(.+)"\)/); return (m?m[1]:r).replace(/([a-z])([A-Z])/g,"$1 $2"); }
+function ago(ts){ const s=(Date.now()-new Date(ts).getTime())/1000; if(s<60)return Math.max(0,Math.round(s))+"s"; if(s<3600)return Math.round(s/60)+"m"; return Math.round(s/3600)+"h"; }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  GRAPH — the spreading-activation map. Lights up on recall.
+// ════════════════════════════════════════════════════════════════════════════
+// ──────────────────────────────────────────────────────────────────────────
+//  The graph is CLUSTER-FIRST. A 2k-node / 87k-edge corpus is unreadable as a
+//  hairball, so we (1) load the universe once, (2) run Louvain community
+//  detection in-browser over the full edge set, (3) render ~20-40 CLUSTER
+//  super-nodes on a CANVAS by default, and (4) DRILL DOWN into a cluster on
+//  click to reveal its members. A recall lights up the cluster(s) that hold the
+//  surfaced entities — the spreading-activation demo survives clustering.
+// ──────────────────────────────────────────────────────────────────────────
+const cv = $("graph");                       // <canvas>
+const ctx = cv.getContext("2d");
+let DPR = Math.max(1, window.devicePixelRatio||1);
+
+// RAW = the whole universe + community structure (built once per user).
+let RAW = null;
+// VIEW = what is on screen right now: super-node graph or a drilled cluster.
+let VIEW = {level:"clusters", clusterId:null, nodes:[], links:[], byId:new Map(), sim:null};
+let activeClusters = null;     // Set<clusterId> lit by the current recall
+let activeMembers  = null;     // Set<entityId> surfaced members (the lit core)
+let hoverNode = null;
+let pinnedNode = null;   // click-pinned node: its whole network stays lit until deselected (Esc / click empty)
+// the canvas pan/zoom transform (we drive d3.zoom but paint manually)
+let GT = d3.zoomIdentity;
+const gzoom = d3.zoom().scaleExtent([0.15, 6]).on("zoom", e=>{ GT = e.transform; draw(); });
+
+// the cluster colour wheel — clusters get distinct hues so they read apart even
+// when most member entity_types collapse to one colour (e.g. "Technology").
+// Cluster hues: one restrained cool family with lightness variation —
+// clusters must read as TERRITORIES of one map, not competing candies,
+// and none may impersonate the activity orange.
+const CLUSTER_HUES = ["#7f9cc4","#6fae8f","#a08cc8","#c9b280","#6f93b8","#8fb3ae",
+  "#b08cb4","#8ba86f","#95a4c9","#79c0b4","#9d8fb8","#b8a86f",
+  "#6a8daa","#84b691","#af9cd4","#a3927a","#7ba6c4","#98b98a"];
+
+// normalize an entity name for cross-user identity. Same surface name across
+// users → one merged node (this is the cross-USER cross-referencing: a shared
+// entity becomes a single bridge linking the users' subgraphs).
+function nameKey(s){ return (s||"").trim().toLowerCase().replace(/\s+/g," "); }
+
+// ── UNION-MERGE several users' universes into one star/connection set ─────────
+//    Nodes are merged by normalized name; each merged node records the set of
+//    contributing users (.users). Edges are remapped to the canonical (by-name)
+//    endpoint ids and unioned (strongest strength wins, like buildRaw dedup).
+function mergeUniverses(unis){
+  const canon = new Map();     // nameKey -> merged star (with .users Set, .id = canonical)
+  const idMap = new Map();     // "user origId" -> canonical id
+  for(const {user:uid, uni} of unis){
+    for(const s of (uni.stars||[])){
+      const k = nameKey(s.name);
+      let m = canon.get(k);
+      if(!m){
+        m = {id:"m:"+k, name:s.name, entity_type:s.entity_type, salience:s.salience||0,
+             mention_count:s.mention_count||0, is_proper_noun:!!s.is_proper_noun, users:new Set()};
+        canon.set(k, m);
+      } else {
+        // keep the strongest signal across users for the merged node
+        m.salience = Math.max(m.salience, s.salience||0);
+        m.mention_count += (s.mention_count||0);
+        m.is_proper_noun = m.is_proper_noun || !!s.is_proper_noun;
+        if(!m.entity_type && s.entity_type) m.entity_type = s.entity_type;
+      }
+      m.users.add(uid);
+      idMap.set(uid+" "+s.id, m.id);
+    }
+  }
+  const stars = [...canon.values()].map(m=>({id:m.id, name:m.name, entity_type:m.entity_type,
+    salience:m.salience, mention_count:m.mention_count, is_proper_noun:m.is_proper_noun,
+    user_count:m.users.size, users:[...m.users]}));
+  const connections=[];
+  for(const {user:uid, uni} of unis){
+    for(const c of (uni.connections||[])){
+      const a = idMap.get(uid+" "+c.from_id), b = idMap.get(uid+" "+c.to_id);
+      if(a==null||b==null) continue;
+      connections.push({id:c.id, from_id:a, to_id:b, relation_type:c.relation_type, strength:c.strength});
+    }
+  }
+  // entities present in 2+ users = the bridges that link the group
+  const shared = stars.filter(s=>s.user_count>1).length;
+  return {stars, connections, shared};
+}
+
+// ── load universe(s) + cluster (re-runs on identity change) ──────────────────
+async function loadGraph(){
+  const sel = users();
+  $("gloading").style.display="grid"; $("gloading").textContent= sel.length>1 ? "merging "+sel.length+" users…" : "building graph…";
+  $("g-user").textContent = groupLabel();
+  activeClusters=null; activeMembers=null; hoverNode=null; pinnedNode=null;
+  if(VIEW.sim){ VIEW.sim.stop(); VIEW.sim=null; }
+  try{
+    let stars, conns, sharedNote="";
+    if(sel.length===1){
+      const u = await api("/api/graph/"+encodeURIComponent(sel[0])+"/universe", {headers:H});
+      stars=u.stars||[]; conns=u.connections||[];
+    } else {
+      // fetch every selected user's universe, then UNION-merge by entity name
+      const unis = await Promise.all(sel.map(async uid=>{
+        try{ return {user:uid, uni: await api("/api/graph/"+encodeURIComponent(uid)+"/universe", {headers:H})}; }
+        catch(_){ return {user:uid, uni:{stars:[],connections:[]}}; }
+      }));
+      const merged = mergeUniverses(unis);
+      stars=merged.stars; conns=merged.connections;
+      sharedNote = " · "+merged.shared+" shared entities bridge the group";
+    }
+    // EDGE BUDGET (information density at scale): a real ingest produces
+    // hundreds of edges per memory; a 100GB corpus produces millions. The
+    // browser must never attempt to cluster them all — keep the STRONGEST
+    // edges up to a budget, say so on screen, and let drill-down fetch depth.
+    // Measured: 126k raw edges froze the client-side build for >75s; 40k
+    // builds in seconds and the strongest-edge subset preserves cluster
+    // structure (weak long-tail edges are exactly what the PMI gate and
+    // pair budget prune at birth on current servers).
+    const EDGE_BUDGET = 40000;
+    let edgeNote = "";
+    if(conns.length > EDGE_BUDGET){
+      const total = conns.length;
+      // Class-aware budget: typed/causal edges are the product's signal and are
+      // RARE — a pure strength cut deletes them en masse (CoOccurs bulk wins).
+      // Keep every non-generic edge, fill the remainder with strongest generics.
+      const GEN = /^(co.?occurs|co.?retrieved|related.?to|associated.?with)$/i;
+      const typed = conns.filter(c=>!GEN.test(String(c.relation_type||"")));
+      const generic = conns.filter(c=>GEN.test(String(c.relation_type||"")));
+      generic.sort((a,b)=>(b.strength||0)-(a.strength||0));
+      conns = typed.concat(generic.slice(0, Math.max(0, EDGE_BUDGET - typed.length)));
+      edgeNote = " · strongest "+fmt(EDGE_BUDGET)+" of "+fmt(total)+" edges";
+    }
+    RAW = buildRaw(stars, conns);
+    RAW.group = sel.length>1; RAW.selUsers = sel;
+    if(!RAW.N){ $("gloading").textContent="no graph yet for "+(sel.length>1?"this group":"this user"); clearCanvas(); $("g-meta").textContent="0 entities"; $("gnav").style.display="none"; return; }
+    clusterRaw(RAW);
+    $("g-meta").textContent = RAW.N+" entities · "+fmt(RAW.E)+" edges · "+RAW.clusters.length+" clusters"+edgeNote+sharedNote;
+    showClusters();
+  }catch(e){
+    $("gloading").style.display="grid"; $("gloading").textContent = "graph load failed: "+e.message;
+    RAW=null; clearCanvas();
+  }
+}
+
+// build the deduped, undirected, weighted adjacency from the raw universe.
+function buildRaw(stars, conns){
+  const idx = new Map(); stars.forEach((s,i)=>idx.set(s.id,i));
+  const N = stars.length;
+  const nodes = stars.map(s=>({id:s.id, name:s.name||"(unnamed)", type:s.entity_type||"entity",
+    sal:s.salience||0, ment:s.mention_count||0, proper:!!s.is_proper_noun, deg:0, wdeg:0, comm:-1,
+    users:s.users||null, ucount:s.user_count||1}));
+  // adjacency: per node a Map<neighborIdx, maxStrength>; also keep relation labels
+  const adj = Array.from({length:N}, ()=>new Map());
+  const relOf = new Map();         // "a|b" (a<b) -> best relation label for the pair.
+  // "Best" prefers TYPED semantics over generic bulk: CoOccurs/CoRetrieved
+  // accumulate huge strengths and would otherwise mask the rare Causes/
+  // LocatedIn/Struck edges that carry the actual signal.
+  const GENERIC = /^(co.?occurs|co.?retrieved|related.?to|associated.?with)$/i;
+  for(const c of conns){
+    const a = idx.get(c.from_id), b = idx.get(c.to_id);
+    if(a==null||b==null||a===b) continue;
+    const w = typeof c.strength==="number"?c.strength:0.5;
+    if((adj[a].get(b)||0) < w){ adj[a].set(b,w); adj[b].set(a,w); }
+    const key = a<b ? a+"|"+b : b+"|"+a;
+    const label = relName(c.relation_type);
+    const cur = relOf.get(key);
+    if(cur==null || (GENERIC.test(cur) && !GENERIC.test(label))) relOf.set(key, label);
+  }
+  let E=0;
+  for(let i=0;i<N;i++){ nodes[i].deg=adj[i].size; for(const [,w] of adj[i]) nodes[i].wdeg+=w; if(i<N) E+=adj[i].size; }
+  E = Math.round(E/2);
+  return {stars, idx, N, E, nodes, adj, relOf, clusters:[], m:0};
+}
+
+// ── Louvain community detection (one level of local moving). On 87k edges this
+//    runs in well under 100ms; it yields 20-30 communities at resolution 1.6. ──
+function clusterRaw(R){
+  const {N, adj, nodes} = R;
+  const k = new Float64Array(N); let m=0;
+  for(let i=0;i<N;i++){ let s=0; for(const [j,w] of adj[i]){ s+=w; if(i<j) m+=w; } k[i]=s; }
+  R.m = m || 1;
+  const RES = 1.6;                              // resolution: higher = more, smaller clusters
+  const comm = new Int32Array(N); for(let i=0;i<N;i++)comm[i]=i;
+  const sigmaTot = new Float64Array(N); for(let i=0;i<N;i++)sigmaTot[i]=k[i];
+  const order = Array.from({length:N},(_,i)=>i);
+  const twoM = 2*R.m;
+  let improved=true, passes=0;
+  while(improved && passes<30){
+    improved=false; passes++;
+    for(const i of order){
+      const ci=comm[i]; sigmaTot[ci]-=k[i];
+      const wc=new Map(); wc.set(ci,0);
+      for(const [nb,w] of adj[i]){ const cn=comm[nb]; wc.set(cn,(wc.get(cn)||0)+w); }
+      let best=ci, bestGain=-Infinity;
+      for(const [c,wic] of wc){ const gain = wic - RES*sigmaTot[c]*k[i]/twoM; if(gain>bestGain){ bestGain=gain; best=c; } }
+      sigmaTot[best]+=k[i]; comm[i]=best;
+      if(best!==ci) improved=true;
+    }
+  }
+  // Absorb micro-clusters: communities of <=MIN_CLUSTER members add visual noise
+  // (lone satellites) without conveying structure, so fold each such node into the
+  // neighbouring community it is most strongly tied to. MIN_CLUSTER scales with
+  // corpus size -- on a 5k-entity news graph a fixed "3" left thousands of
+  // 4-10-member communities alive (a 3,157-label wordball that hung the tab).
+  const MIN_CLUSTER = Math.max(3, Math.ceil(N/400));
+  const csize=new Map(); for(let i=0;i<N;i++)csize.set(comm[i],(csize.get(comm[i])||0)+1);
+  for(let pass=0; pass<6; pass++){
+    let moved=false;
+    for(let i=0;i<N;i++){
+      if((csize.get(comm[i])||0) > MIN_CLUSTER) continue;
+      const wc=new Map();
+      for(const [nb,w] of adj[i]){ const cn=comm[nb]; if(cn===comm[i]) continue; wc.set(cn,(wc.get(cn)||0)+w); }
+      let best=null,bw=-Infinity;
+      for(const [c,w] of wc){ if((csize.get(c)||0)>MIN_CLUSTER && w>bw){ bw=w; best=c; } }
+      if(best!=null && best!==comm[i]){ csize.set(comm[i],csize.get(comm[i])-1); csize.set(best,(csize.get(best)||0)+1); comm[i]=best; moved=true; }
+    }
+    if(!moved) break;
+  }
+  // Hard cap: the overview must stay readable no matter what the community
+  // structure looks like. Keep the biggest MAX_OVERVIEW clusters; fold every
+  // smaller one into the big kept cluster it shares the most edge weight with
+  // (fallback: the smallest kept cluster).
+  const MAX_OVERVIEW = 60;
+  {
+    const ids=[...csize.entries()].filter(([,s])=>s>0).sort((a,b)=>b[1]-a[1]).map(([c])=>c);
+    if(ids.length > MAX_OVERVIEW){
+      const keep=new Set(ids.slice(0, MAX_OVERVIEW));
+      const flow=new Map();          // dropped community -> Map(kept community -> w)
+      for(let i=0;i<N;i++){ const ca=comm[i]; if(keep.has(ca)) continue;
+        let f=flow.get(ca); if(!f){ f=new Map(); flow.set(ca,f); }
+        for(const [nb,w] of adj[i]){ const cb=comm[nb]; if(keep.has(cb)) f.set(cb,(f.get(cb)||0)+w); } }
+      const fallback=ids[MAX_OVERVIEW-1];
+      const dest=new Map();
+      for(const [cid,f] of flow){ let best=fallback,bw=-Infinity;
+        for(const [c,w] of f){ if(w>bw){ bw=w; best=c; } } dest.set(cid,best); }
+      R.foldedInto = new Map();          // destination comm -> folded-node count
+      for(let i=0;i<N;i++){ const c=comm[i]; if(!keep.has(c)){ const d=dest.get(c) ?? fallback;
+        comm[i]=d; R.foldedInto.set(d,(R.foldedInto.get(d)||0)+1); } }
+    }
+  }
+  // compact community ids, build cluster metadata
+  const remap=new Map(), members=[];
+  for(let i=0;i<N;i++){ let cid=comm[i]; if(!remap.has(cid)){ remap.set(cid, members.length); members.push([]); }
+    const m2=remap.get(cid); nodes[i].comm=m2; nodes[i].commOrig=cid; members[m2].push(i); }
+  // a label per cluster: prefer a salient, proper-noun, non-document entity with
+  // high degree; document filenames (".txt") are poor labels so they rank last.
+  const clusters = members.map((mem, cid)=>{
+    let best=mem[0], bestScore=-Infinity; const typeCount=new Map();
+    for(const i of mem){
+      const n=nodes[i]; typeCount.set(n.type,(typeCount.get(n.type)||0)+1);
+      const isDoc = /\.(txt|md|pdf|json|csv)$/i.test(n.name);
+      const score = (n.deg) * (isDoc?0.15:1) * (n.proper?1.3:1) * (1+(n.sal||0));
+      if(score>bestScore){ bestScore=score; best=i; }
+    }
+    let domType="entity", domN=-1;
+    for(const [t,c] of typeCount) if(c>domN){ domN=c; domType=t; }
+    // A bucket that is MOSTLY folded-in long-tail must say so — naming it after
+    // one member ("PISTORINO · 3792 entities") misleads the analyst.
+    const origComm = nodes[mem[0]].commOrig!=null ? nodes[mem[0]].commOrig : null;
+    const folded = (R.foldedInto && R.foldedInto.get(origComm))||0;
+    const isLongTail = folded > mem.length*0.5;
+    return {id:cid, members:mem, size:mem.length,
+      label: isLongTail ? "· long tail ·" : nodes[best].name, labelId:nodes[best].id, longTail:isLongTail,
+      domType, color: isLongTail ? "#3a4656" : CLUSTER_HUES[cid % CLUSTER_HUES.length], x:0, y:0};
+  });
+  // aggregate inter-cluster edge weights for the overview
+  const inter=new Map();           // "a|b" (a<b) -> {w, n}
+  for(let i=0;i<N;i++){ const ca=nodes[i].comm;
+    for(const [j,w] of adj[i]){ if(i>=j) continue; const cb=nodes[j].comm; if(ca===cb) continue;
+      const key = ca<cb ? ca+"|"+cb : cb+"|"+ca; const e=inter.get(key); if(e){ e.w+=w; e.n++; } else inter.set(key,{w,n:1}); } }
+  R.clusterLinks = [...inter.entries()].map(([key,v])=>{ const [a,b]=key.split("|").map(Number);
+    return {source:a, target:b, w:v.w, n:v.n}; });
+  R.clusters = clusters;
+}
+
+// ── canvas sizing (HiDPI) ───────────────────────────────────────────────────
+function sizeCanvas(){
+  const rect = cv.getBoundingClientRect();
+  DPR = Math.max(1, window.devicePixelRatio||1);
+  cv.width = Math.round(rect.width*DPR); cv.height = Math.round(rect.height*DPR);
+  return {w:rect.width, h:rect.height};
+}
+function clearCanvas(){ const {w,h}=sizeCanvas(); ctx.setTransform(DPR,0,0,DPR,0,0); ctx.clearRect(0,0,w,h); }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CLUSTER OVERVIEW  — the default, readable view
+// ════════════════════════════════════════════════════════════════════════════
+// Below this many entities the whole-graph entity view replaces cluster
+// bubbles (shared by showClusters and the activation/highlight logic).
+const SMALL_GRAPH_MAX = 700;   // render individual entity nodes (Obsidian-style) up to this size; cluster-bubble abstraction only for very large graphs
+
+function showClusters(){
+  // SMALL-GRAPH MODE: cluster bubbles only earn their keep at scale. A demo
+  // or young corpus (≤40 entities) reads far better as the actual entity
+  // constellation — show it directly instead of 2-3 opaque super-nodes.
+  if(RAW.nodes.length>0 && RAW.nodes.length<=SMALL_GRAPH_MAX){ return showWholeGraph(); }
+  VIEW.level="clusters"; VIEW.clusterId=null;
+  const {w,h}=sizeCanvas();
+  const maxSize = d3.max(RAW.clusters, c=>c.size)||1;
+  // super-node radius scales with member count (sqrt = area-proportional)
+  const rad = c => 18 + 48*Math.sqrt(c.size/maxSize);
+  const nodes = RAW.clusters.map(c=>({kind:"cluster", id:c.id, label:c.label, size:c.size,
+    color:c.color, domType:c.domType, r:rad(c), x:w/2+(Math.random()-.5)*w*0.6, y:h/2+(Math.random()-.5)*h*0.5}));
+  const byId = new Map(nodes.map(n=>[n.id,n]));
+  const maxW = d3.max(RAW.clusterLinks, l=>l.w)||1;
+  const links = RAW.clusterLinks.map(l=>({source:l.source, target:l.target, w:l.w, n:l.n,
+    sw:0.5+3.5*Math.sqrt(l.w/maxW)}));
+  VIEW.nodes=nodes; VIEW.links=links; VIEW.byId=byId;
+
+  // Strong repulsion + size-aware link distance keeps the dense defence core from
+  // collapsing into a clump; weak link strength lets clusters breathe apart.
+  if(VIEW.sim) VIEW.sim.stop();
+  VIEW.sim = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d=>d.id)
+      .distance(d=>d.source.r+d.target.r+70).strength(d=>Math.min(.3,0.06+0.7*d.w/maxW)))
+    .force("charge", d3.forceManyBody().strength(d=>-340 - 34*d.r).distanceMax(1400))
+    .force("center", d3.forceCenter(w/2,h/2).strength(.04))
+    .force("x", d3.forceX(w/2).strength(.012))
+    .force("y", d3.forceY(h/2).strength(.012))
+    .force("collide", d3.forceCollide().radius(d=>d.r+16).strength(1).iterations(2))
+    .on("tick", draw);
+  // Obsidian-style: weak centering + strong repulsion spreads the graph; a light
+  // pre-warm + slow alpha/velocity decay lets it settle live on screen (the bounce).
+  VIEW.sim.alphaDecay(.012).velocityDecay(.30).alpha(1).restart();
+  for(let i=0;i<60;i++) VIEW.sim.tick();
+  fitView(nodes, 70, false);
+  $("gloading").style.display="none";
+  updateNav();
+  draw();
+  if(activeClusters) applyActivation();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  DRILL-DOWN  — one cluster's members + their intra-cluster edges
+// ════════════════════════════════════════════════════════════════════════════
+// Whole-graph entity view for small corpora: same constellation renderer as
+// the cluster drill-down, over EVERY node. Stays at nav level "clusters" so
+// breadcrumbs/clicks behave as the root view (entity clicks → detail).
+function showWholeGraph(){
+  VIEW.level="clusters"; VIEW.clusterId=null;
+  const {w,h}=sizeCanvas();
+  // Hide orphans (degree-0 entities): after the typed-only gate, entities whose only
+  // links were generic co-occurrence have no typed edge, so they'd float disconnected.
+  // A clean graph shouldn't render debris — they remain in the store and are searchable.
+  const mem = RAW.nodes.map((_,i)=>i).filter(i=>(RAW.nodes[i].deg||0)>0);
+  const maxDeg = d3.max(mem, i=>RAW.nodes[i].deg)||1;
+  const rad = i => 6 + 14*Math.sqrt(RAW.nodes[i].deg/maxDeg);
+  const nodes = mem.map(i=>{ const n=RAW.nodes[i];
+    return {kind:"entity", id:n.id, idx:i, label:n.name, type:n.type, sal:n.sal, ment:n.ment, deg:n.deg,
+      users:n.users, ucount:n.ucount||1, bridge:(n.ucount||1)>1,
+      color:tc(n.type), r:rad(i), x:w/2+(Math.random()-.5)*w*0.6, y:h/2+(Math.random()-.5)*h*0.5}; });
+  const byId = new Map(nodes.map(n=>[n.id,n]));
+  nodes.slice().sort((a,b)=>b.deg-a.deg).forEach((n,i)=>{ n._lr=i; });
+  const links=[];
+  for(const i of mem){ for(const [j,wt] of RAW.adj[i]){ if(i<j){
+    const key = i+"|"+j;
+    links.push({source:RAW.nodes[i].id, target:RAW.nodes[j].id, str:wt, rel:RAW.relOf.get(key)||""}); } } }
+  VIEW.nodes=nodes; VIEW.links=links; VIEW.byId=byId; VIEW.memberTotal=nodes.length;
+
+  if(VIEW.sim) VIEW.sim.stop();
+  const chargeStr = -(240 + 14000/Math.max(12, nodes.length));
+  VIEW.sim = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d=>d.id).distance(d=>52+30/(1+d.str)).strength(d=>0.06+0.16*d.str))
+    .force("charge", d3.forceManyBody().strength(chargeStr).distanceMax(1300))
+    .force("center", d3.forceCenter(w/2,h/2).strength(.03))
+    .force("x", d3.forceX(w/2).strength(.008))
+    .force("y", d3.forceY(h/2).strength(.008))
+    .force("collide", d3.forceCollide().radius(d=>d.r+8).strength(.9).iterations(2))
+    .on("tick", draw);
+  // Obsidian-style spread + live settle (weak centering, strong repulsion, slow decay).
+  VIEW.sim.alphaDecay(.012).velocityDecay(.30).alpha(1).restart();
+  for(let i=0;i<70;i++) VIEW.sim.tick();
+  fitView(nodes, 60, false);
+  $("gloading").style.display="none";
+  updateNav();
+}
+
+function showCluster(cid){
+  const cl = RAW.clusters[cid]; if(!cl) return;
+  VIEW.level="cluster"; VIEW.clusterId=cid;
+  const {w,h}=sizeCanvas();
+  const memSet = new Set(cl.members);
+  // cap members rendered to the most-connected — never dump thousands of nodes.
+  const MEMBER_CAP = 220;
+  let mem = cl.members.slice();
+  if(mem.length>MEMBER_CAP) mem = mem.slice().sort((a,b)=>RAW.nodes[b].deg-RAW.nodes[a].deg).slice(0,MEMBER_CAP);
+  const shown = new Set(mem);
+  const maxDeg = d3.max(mem, i=>RAW.nodes[i].deg)||1;
+  const rad = i => 4 + 11*Math.sqrt(RAW.nodes[i].deg/maxDeg);
+  const nodes = mem.map(i=>{ const n=RAW.nodes[i];
+    return {kind:"entity", id:n.id, idx:i, label:n.name, type:n.type, sal:n.sal, ment:n.ment, deg:n.deg,
+      users:n.users, ucount:n.ucount||1, bridge:(n.ucount||1)>1,
+      color:tc(n.type), r:rad(i), x:w/2+(Math.random()-.5)*w*0.6, y:h/2+(Math.random()-.5)*h*0.5}; });
+  const byId = new Map(nodes.map(n=>[n.id,n]));
+  // rank members by degree so the label budget can show the most-connected first
+  nodes.slice().sort((a,b)=>b.deg-a.deg).forEach((n,i)=>{ n._lr=i; });
+  // intra-cluster edges among shown members; cap to the strongest to stay crisp
+  const links=[];
+  for(const i of mem){ for(const [j,wt] of RAW.adj[i]){ if(i<j && shown.has(j) && memSet.has(j)){
+    const key = i<j ? i+"|"+j : j+"|"+i;
+    links.push({source:RAW.nodes[i].id, target:RAW.nodes[j].id, str:wt, rel:RAW.relOf.get(key)||""}); } } }
+  links.sort((a,b)=>b.str-a.str);
+  const EDGE_CAP = 600;
+  const vlinks = links.slice(0, EDGE_CAP);
+  VIEW.nodes=nodes; VIEW.links=vlinks; VIEW.byId=byId; VIEW.memberTotal=cl.members.length;
+
+  // A cluster is internally dense, so strong repulsion + low link strength is what
+  // makes the members fan out into a readable constellation instead of a clump.
+  if(VIEW.sim) VIEW.sim.stop();
+  const chargeStr = -(80 + 9000/Math.max(20, nodes.length));   // smaller clusters spread wider
+  VIEW.sim = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(vlinks).id(d=>d.id).distance(d=>40+24/(1+d.str)).strength(d=>0.04+0.12*d.str))
+    .force("charge", d3.forceManyBody().strength(chargeStr).distanceMax(600))
+    .force("center", d3.forceCenter(w/2,h/2))
+    .force("x", d3.forceX(w/2).strength(.05))
+    .force("y", d3.forceY(h/2).strength(.05))
+    .force("collide", d3.forceCollide().radius(d=>d.r+7).strength(.9).iterations(2))
+    .on("tick", draw);
+  VIEW.sim.alpha(1).restart();
+  for(let i=0;i<300;i++) VIEW.sim.tick();
+  fitView(nodes, 60, false);
+  $("gloading").style.display="none";
+  updateNav();
+  draw();
+  if(activeMembers) applyActivation();
+}
+
+// ── pan/zoom the transform to frame a set of nodes ──────────────────────────
+function fitView(nodes, pad, animate){
+  const {w,h}=sizeCanvas();
+  const pts = nodes.filter(n=>n.x!=null);
+  if(!pts.length) return;
+  let minx=Infinity,maxx=-Infinity,miny=Infinity,maxy=-Infinity;
+  for(const p of pts){ const r=p.r||8; minx=Math.min(minx,p.x-r);maxx=Math.max(maxx,p.x+r);miny=Math.min(miny,p.y-r);maxy=Math.max(maxy,p.y+r); }
+  pad=pad||40;
+  const bw=Math.max(40,maxx-minx), bh=Math.max(40,maxy-miny);
+  const k=Math.max(.15,Math.min(3,Math.min((w-2*pad)/bw,(h-2*pad)/bh)));
+  const cx=(minx+maxx)/2, cy=(miny+maxy)/2;
+  const t = d3.zoomIdentity.translate(w/2,h/2).scale(k).translate(-cx,-cy);
+  if(animate){ d3.select(cv).transition().duration(650).call(gzoom.transform, t); }
+  else { GT=t; d3.select(cv).call(gzoom.transform, t); }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CANVAS PAINT  — one routine for both views, driven by VIEW.level
+// ════════════════════════════════════════════════════════════════════════════
+function drawGraticule(w,h){
+  // Static instrument etching — polar graticule drawn only when the graph
+  // itself redraws (pan/zoom/data), never on a timer. Zero idle cost: an
+  // on-device product does not burn CPU on ambience.
+  const cx=w/2, cy=h/2, R=Math.hypot(w,h)/2;
+  ctx.save();
+  ctx.strokeStyle="rgba(53,224,208,.045)"; ctx.lineWidth=1;
+  for(let r=90; r<R; r+=90){ ctx.beginPath(); ctx.arc(cx,cy,r,0,2*Math.PI); ctx.stroke(); }
+  ctx.strokeStyle="rgba(53,224,208,.03)";
+  for(let a=0;a<12;a++){ const t=a*Math.PI/6;
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx+R*Math.cos(t), cy+R*Math.sin(t)); ctx.stroke(); }
+  ctx.restore();
+}
+function draw(){
+  if(!RAW) return;
+  const {w,h}=sizeCanvas();
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.clearRect(0,0,w,h);
+  drawGraticule(w,h);
+  ctx.save();
+  ctx.translate(GT.x, GT.y); ctx.scale(GT.k, GT.k);
+
+  // Lit-set choice follows node KIND, not nav level: the whole-graph
+  // small-corpus view shows ENTITY nodes at the "clusters" level, and those
+  // light by member id — testing them against cluster ids lights nothing.
+  // Highlight set: a hovered OR click-PINNED node lights itself + its direct
+  // neighbours and dims the rest (Obsidian-style), reusing the energized-arc
+  // machinery below. Hover is transient; a pinned node's network stays lit until
+  // deselected (Esc / click empty). Falls back to the recall-driven lit set.
+  const neighbourLit = (node) => {
+    if(!node) return null;
+    const s2 = new Set([node.id]);
+    for(const l of VIEW.links){
+      const a=l.source, b=l.target; if(!a||!b) continue;
+      if(a.id===node.id) s2.add(b.id);
+      else if(b.id===node.id) s2.add(a.id);
+    }
+    return s2;
+  };
+  const lit = neighbourLit(hoverNode) || neighbourLit(pinnedNode)
+            || ((VIEW.nodes.length && VIEW.nodes[0].kind==="cluster") ? activeClusters : activeMembers);
+  const dimmed = !!lit;
+
+  // edges first
+  ctx.lineCap="round";
+  for(const l of VIEW.links){
+    const s=l.source, t=l.target; if(!s||!t||s.x==null||t.x==null) continue;
+    let on=true;
+    if(dimmed){
+      on = VIEW.level==="clusters" ? (lit.has(s.id)&&lit.has(t.id))
+                                   : (lit.has(s.id)&&lit.has(t.id));
+    }
+    if(VIEW.level==="clusters"){
+      ctx.strokeStyle = dimmed ? (on ? "rgba(255,154,92,.6)" : "rgba(120,140,170,.05)")
+                               : "rgba(125,150,185,.26)";
+      ctx.lineWidth = (l.sw||1)/GT.k * (dimmed&&on?1.5:1);
+    } else {
+      // Colour by relation CLASS — the causal spine (Causes/Triggers/Precedes/…) is
+      // the product's signal, so it reads as bright energized wiring; typed relations
+      // are cool; generic co-occurrence is faint.
+      const cls = relClass(l.rel);
+      if(dimmed){
+        ctx.strokeStyle = on ? "rgba(255,154,92,.85)" : "rgba(120,140,170,.04)";
+        ctx.lineWidth = (0.6+Math.min(2,l.str*1.6))/GT.k * (on?1.4:1);
+      } else {
+        ctx.strokeStyle = cls==="causal" ? "rgba(255,120,74,.92)"
+                        : cls==="typed"  ? "rgba(120,175,214,.5)"
+                        : cls==="loc"    ? "rgba(120,200,150,.45)"
+                        :                   hexA(ec(l.str), .22);
+        ctx.lineWidth = (cls==="causal" ? 1.8 : 0.7+Math.min(1.5,l.str*1.4))/GT.k;
+      }
+    }
+    if(dimmed && on){
+      // activated connection: curved signal arc with glow — the lit pathway
+      // must read as ENERGIZED, not just recolored.
+      const mx=(s.x+t.x)/2, my=(s.y+t.y)/2;
+      const dx=t.x-s.x, dy=t.y-s.y, dlen=Math.hypot(dx,dy)||1;
+      const bow=Math.min(26/GT.k, dlen*0.12);
+      ctx.shadowColor="rgba(255,154,92,.9)"; ctx.shadowBlur=8/GT.k;
+      ctx.beginPath(); ctx.moveTo(s.x,s.y);
+      ctx.quadraticCurveTo(mx - dy/dlen*bow, my + dx/dlen*bow, t.x, t.y);
+      ctx.stroke(); ctx.shadowBlur=0;
+    } else {
+      ctx.beginPath(); ctx.moveTo(s.x,s.y); ctx.lineTo(t.x,t.y); ctx.stroke();
+    }
+  }
+
+  // nodes
+  for(const n of VIEW.nodes){
+    if(n.x==null) continue;
+    const isLit = !dimmed || lit.has(n.id);
+    const isCore = (VIEW.level==="clusters" ? (activeClusters&&activeClusters.has(n.id))
+                                            : (activeMembers&&activeMembers.has(n.id)));
+    ctx.globalAlpha = dimmed ? (isLit?1:0.08) : 1;
+    // cross-user BRIDGE entity (present in 2+ selected users): gold halo so the
+    // shared nodes that link the group read at a glance.
+    if(n.bridge){
+      ctx.beginPath(); ctx.arc(n.x,n.y,n.r+3.2/GT.k,0,2*Math.PI);
+      ctx.strokeStyle="rgba(255,200,150,.85)"; ctx.lineWidth=2.4/GT.k; ctx.stroke();
+    }
+    const isClusterNode = n.kind==="cluster";
+    if(isClusterNode){
+      // phosphor instrument node: soft-glow core + solid inner ring + dashed
+      // outer ring — reads as a tracked contact, not a flat disc.
+      const grad = ctx.createRadialGradient(n.x,n.y,n.r*0.1, n.x,n.y,n.r);
+      grad.addColorStop(0, hexA(n.color,.42)); grad.addColorStop(.75, hexA(n.color,.16));
+      grad.addColorStop(1, hexA(n.color,.04));
+      ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,2*Math.PI);
+      ctx.fillStyle = grad; ctx.fill();
+      ctx.shadowColor = isCore ? "#ff9a5c" : hexA(n.color,.9);
+      ctx.shadowBlur = (isCore?18:9)/GT.k;
+      ctx.lineWidth = (isCore?2.4:1.5)/GT.k;
+      ctx.strokeStyle = isCore ? "#ff9a5c" : hexA(n.color,.95);
+      ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,2*Math.PI); ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.setLineDash([4/GT.k, 5/GT.k]);
+      ctx.lineWidth = 1/GT.k;
+      ctx.strokeStyle = isCore ? "rgba(255,154,92,.55)" : hexA(n.color,.4);
+      ctx.beginPath(); ctx.arc(n.x,n.y,n.r+4.5/GT.k,0,2*Math.PI); ctx.stroke();
+      ctx.setLineDash([]);
+    } else {
+      ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,2*Math.PI);
+      ctx.fillStyle = n.color; ctx.fill();
+      if(isCore){ ctx.shadowColor="#ff9a5c"; ctx.shadowBlur=14/GT.k; }
+      ctx.lineWidth = (isCore?2.6:1.4)/GT.k;
+      ctx.strokeStyle = isCore ? "#ff9a5c"
+        : (n.bridge ? "#ffb787"
+        : (n===hoverNode ? "#e8eef5" : "#05080d"));
+      ctx.stroke(); ctx.shadowBlur=0;
+    }
+  }
+  ctx.globalAlpha=1;
+
+  // labels — clusters always labelled; entities labelled when sparse/zoomed/lit.
+  // Branch on node KIND (not view level): the whole-graph small-corpus view
+  // shows entity nodes at the "clusters" nav level.
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  if(VIEW.nodes.length && VIEW.nodes[0].kind==="cluster"){
+    for(const n of VIEW.nodes){
+      if(n.x==null) continue;
+      const isLit = !dimmed || lit.has(n.id);
+      ctx.globalAlpha = isLit?1:0.12;
+      // draw at screen scale so the cluster label stays legible at any zoom; a dark
+      // halo (stroke) keeps the name readable even where it overflows the disc.
+      ctx.save(); ctx.translate(n.x,n.y); ctx.scale(1/GT.k,1/GT.k);
+      ctx.lineJoin="round"; ctx.miterLimit=2;
+      // light halo so dark label text stays readable both on the (light) disc and
+      // where it overflows onto the dark canvas background.
+      ctx.font = "600 11px 'Cascadia Code', Consolas, monospace";
+      const LBL = trim(n.label,22).toUpperCase();
+      ctx.strokeStyle="rgba(5,8,13,.92)"; ctx.lineWidth=3.5; ctx.strokeText(LBL,0,0);
+      ctx.fillStyle = "#dff5f2"; ctx.fillText(LBL, 0, 0);
+      ctx.font = "600 9px Inter, sans-serif";
+      ctx.strokeStyle="rgba(8,12,20,.85)"; ctx.lineWidth=3; ctx.strokeText(n.size+" entities",0,13);
+      ctx.fillStyle = "rgba(196,208,222,.8)"; ctx.fillText(n.size+" entities", 0, 13);
+      ctx.restore();
+    }
+  } else {
+    // Label the most-connected members (and any lit core / hovered node). Zooming
+    // in reveals more; this keeps a dense cluster from drowning in overlapping text.
+    const labelCut = VIEW.labelCut!=null ? VIEW.labelCut : 0;
+    const budget = GT.k>1.6 ? 1e9 : (GT.k>1.0 ? 60 : 28);
+    for(const n of VIEW.nodes){
+      if(n.x==null) continue;
+      const isLit = !dimmed || lit.has(n.id);
+      const isCore = activeMembers&&activeMembers.has(n.id);
+      const show = isCore || n===hoverNode || (isLit && n.deg>=labelCut && n._lr<budget);
+      if(!show) continue;
+      ctx.globalAlpha = isLit?1:0.1;
+      ctx.save(); ctx.translate(n.x, n.y+n.r+2); ctx.scale(1/GT.k,1/GT.k);
+      ctx.lineJoin="round"; ctx.font = (isCore?"700 ":"500 ")+"10px Inter, sans-serif";
+      ctx.strokeStyle="rgba(8,12,20,.85)"; ctx.lineWidth=3; ctx.strokeText(trim(n.label,24),0,6);
+      ctx.fillStyle = isCore ? "#ffb787" : "#cdd6e0";
+      ctx.fillText(trim(n.label,24), 0, 6);
+      ctx.restore();
+    }
+  }
+  ctx.globalAlpha=1;
+  ctx.restore();
+}
+function trim(s,n){ s=s||""; return s.length>n ? s.slice(0,n-1)+"…" : s; }
+function hexA(hex,a){ const m=/^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hex||""); if(!m) return "rgba(150,200,150,"+a+")";
+  return "rgba("+parseInt(m[1],16)+","+parseInt(m[2],16)+","+parseInt(m[3],16)+","+a+")"; }
+
+// ── hit-testing in graph coordinates ────────────────────────────────────────
+function nodeAt(sx, sy){
+  const gx=(sx-GT.x)/GT.k, gy=(sy-GT.y)/GT.k;
+  let hit=null, hd=Infinity;
+  for(const n of VIEW.nodes){ if(n.x==null) continue;
+    const dx=n.x-gx, dy=n.y-gy, d=dx*dx+dy*dy; const rr=(n.r+3)*(n.r+3);
+    if(d<=rr && d<hd){ hd=d; hit=n; } }
+  return hit;
+}
+
+// ── canvas interaction: zoom via d3.zoom, click to drill / inspect, hover tip ─
+d3.select(cv).call(gzoom);
+let downXY=null;
+cv.addEventListener("pointerdown", e=>{ downXY=[e.offsetX,e.offsetY]; });
+cv.addEventListener("click", e=>{
+  if(!RAW) return;
+  if(downXY && (Math.abs(e.offsetX-downXY[0])>4 || Math.abs(e.offsetY-downXY[1])>4)) return; // was a drag
+  const n = nodeAt(e.offsetX, e.offsetY);
+  if(!n){ pinnedNode=null; draw(); return; }               // click empty → deselect
+  if(n.kind==="cluster"){ showCluster(n.id); selectClusterDetail(n.id); }
+  else { pinnedNode = (pinnedNode===n ? null : n); selectEntityDetail(n); draw(); }  // click node → pin/unpin its network
+});
+window.addEventListener("keydown", e=>{ if(e.key==="Escape" && pinnedNode){ pinnedNode=null; draw(); } });
+cv.addEventListener("pointermove", e=>{
+  if(!RAW){ return; }
+  const n = nodeAt(e.offsetX, e.offsetY);
+  cv.style.cursor = n ? "pointer" : "grab";
+  if(n!==hoverNode){ hoverNode=n; draw(); }
+  const tip=$("gtip");
+  if(n){
+    if(n.kind==="cluster"){
+      tip.innerHTML = '<div class="tname">'+esc(n.label)+'</div>'+
+        '<div class="tmeta"><b>'+n.size+'</b> entities · dominant type <b>'+esc(n.domType)+'</b><br>click to drill into this cluster</div>';
+    } else {
+      const bridge = n.bridge && n.users && n.users.length>1
+        ? '<br><b style="color:#ffc896">⊕ shared by '+n.users.length+' users:</b> '+esc(n.users.join(", ")) : "";
+      // Causal chain through this node — the typed cause/effect edges touching it,
+      // oriented by direction (the arrow follows cause → effect). The product's signal.
+      const causal = VIEW.links
+        .filter(l=> (l.source.id===n.id||l.target.id===n.id) && relClass(l.rel)==="causal")
+        .slice(0,6).map(l=> l.source.id===n.id
+           ? '<span style="color:#ff9a5c">'+esc(n.label)+'</span> —<i>'+esc(l.rel)+'</i>→ '+esc(l.target.label||l.target.id)
+           : esc(l.source.label||l.source.id)+' —<i>'+esc(l.rel)+'</i>→ <span style="color:#ff9a5c">'+esc(n.label)+'</span>');
+      const causalHtml = causal.length
+        ? '<div class="tmeta" style="margin-top:5px;border-top:1px solid rgba(255,154,92,.28);padding-top:5px"><b style="color:#ff9a5c">⚡ causal chain</b><br>'+causal.join('<br>')+'</div>' : '';
+      tip.innerHTML = '<div class="tname">'+esc(n.label)+'</div>'+
+        '<div class="tmeta">type <b>'+esc(n.type)+'</b> · <b>'+n.deg+'</b> connections · salience <b>'+(n.sal||0).toFixed(2)+'</b>'+bridge+'</div>'+causalHtml;
+    }
+    tip.style.display="block";
+    const r=cv.getBoundingClientRect(); let x=e.offsetX+14, y=e.offsetY+14;
+    if(x>r.width-250) x=e.offsetX-250; if(y>r.height-70) y=e.offsetY-70;
+    tip.style.left=x+"px"; tip.style.top=y+"px";
+  } else tip.style.display="none";
+});
+cv.addEventListener("pointerleave", ()=>{ $("gtip").style.display="none"; hoverNode=null; draw(); });
+
+// ── breadcrumb / mode indicator ─────────────────────────────────────────────
+function updateNav(){
+  const nav=$("gnav"), cr=$("gcrumb"), md=$("gmode");
+  if(!RAW){ nav.style.display="none"; return; }
+  nav.style.display="flex";
+  if(VIEW.level==="clusters"){
+    cr.innerHTML = '<span class="seg cur">All clusters</span>';
+    md.textContent = RAW.clusters.length+" clusters";
+  } else {
+    const cl=RAW.clusters[VIEW.clusterId];
+    cr.innerHTML = '<span class="seg" id="crumb-all">All clusters</span><span class="sep">›</span>'+
+      '<span class="seg cur">'+esc(trim(cl.label,28))+'</span>';
+    md.textContent = (VIEW.nodes.length<VIEW.memberTotal? VIEW.nodes.length+" of "+VIEW.memberTotal : cl.size)+" members";
+    const a=$("crumb-all"); if(a) a.onclick=()=>{ showClusters(); $("detail").innerHTML='<div class="miss">Click a cluster to drill in, or fire a recall to light up the relevant clusters.</div>'; };
+  }
+}
+
+function selectClusterDetail(cid){
+  const cl=RAW.clusters[cid]; if(!cl) return;
+  // top members by degree for the provenance panel
+  const top = cl.members.slice().sort((a,b)=>RAW.nodes[b].deg-RAW.nodes[a].deg).slice(0,6)
+    .map(i=>RAW.nodes[i]);
+  $("detail").innerHTML = '<div class="rel">cluster <b>'+esc(cl.label)+'</b></div>'+
+    '<div class="line"><span>members</span> '+cl.size+' entities</div>'+
+    '<div class="line"><span>dominant type</span> '+esc(cl.domType)+'</div>'+
+    '<div class="line"><span>top entities</span></div>'+
+    top.map(n=>'<div class="line" style="border-top:none;padding:2px 0 2px 8px">• '+esc(trim(n.name,30))+' <span style="color:var(--mut)">('+n.deg+')</span></div>').join("");
+}
+// ── ENTITY DOSSIER ───────────────────────────────────────────────────────────
+// Click an entity -> a working dossier, not a stat card: what we believe about
+// it (typed relations with the neighbour), causal position, and the actual
+// source passages (evidence) pulled live from recall. Actions make it a tool:
+// trace-in-graph, pin to the case file, copy a markdown brief.
+const CAUSAL_RELS = new Set(["Causes","Triggers","ResultsIn","Struck","Damaged","Closed","Killed"]);
+function relClass(rel){
+  const r=(rel||"").replace(/[\s_"()-]/g,"").toLowerCase();    // strip quotes/parens too: Custom("Precedes")
+  if(!r||r==="cooccurs"||r==="relatedto"||r==="coretrieved"||r==="associatedwith") return "weak";
+  if(/caus|trigger|resultsin|struck|rammed|damaged|closed|killed|leadsto|precede|collapsedinto|destroyed|hitby/.test(r)) return "causal";
+  if(r.startsWith("located")) return "loc";
+  return "typed";
+}
+function beliefsOf(n){
+  const idx = RAW.nodes.indexOf(n); if(idx<0) return [];
+  const out=[];
+  for(const [j,w] of RAW.adj[idx]){
+    const key = idx<j ? idx+"|"+j : j+"|"+idx;
+    const rel = RAW.relOf.get(key)||"";
+    out.push({other:RAW.nodes[j], rel, w, cls:relClass(rel)});
+  }
+  const rank={causal:0,typed:1,loc:2,weak:3};
+  out.sort((a,b)=>(rank[a.cls]-rank[b.cls]) || (b.w-a.w));
+  return out;
+}
+function caseFile(){ try{ return JSON.parse(localStorage.getItem("shodh-case")||"[]"); }catch(e){ return []; } }
+function pinEntity(name,type){
+  const cf=caseFile();
+  if(!cf.some(e=>e.name===name)){ cf.push({name,type,at:new Date().toISOString()}); localStorage.setItem("shodh-case", JSON.stringify(cf)); }
+  selectEntityByName(name);
+}
+function selectEntityByName(name){ const n=RAW && RAW.nodes.find(x=>x.name===name); if(n) selectEntityDetail(n); }
+function copyBrief(name){
+  const n=RAW && RAW.nodes.find(x=>x.name===name); if(!n) return;
+  const bel=beliefsOf(n).filter(b=>b.cls!=="weak").slice(0,10);
+  let md="### "+n.name+" ("+n.type+")\n";
+  md+="- mentions: "+(n.ment||0)+" · connections: "+n.deg+"\n";
+  for(const b of bel) md+="- **"+(b.rel||"related to")+"** "+b.other.name+"\n";
+  const ev=window.__DOSSIER_EV&&window.__DOSSIER_EV.name===n.name?window.__DOSSIER_EV.rows:[];
+  if(ev.length){ md+="\nEvidence:\n"; for(const e of ev) md+="> "+e.txt+"\n> — "+e.when+"\n\n"; }
+  navigator.clipboard && navigator.clipboard.writeText(md);
+  const b=$("d-brief"); if(b){ b.textContent="copied ✓"; setTimeout(()=>{b.textContent="copy brief";},1400); }
+}
+function traceEntity(name){
+  const n=RAW && RAW.nodes.find(x=>x.name===name); if(!n) return;
+  const core=[n, ...beliefsOf(n).filter(b=>b.cls==="causal"||b.cls==="typed").slice(0,12).map(b=>b.other)];
+  lightUpMembers(core, "chain: "+trim(n.name,24));
+}
+function selectEntityDetail(n){
+  const bridge = n.bridge && n.users && n.users.length>1
+    ? '<div class="line"><span>shared by</span> <b style="color:var(--retrieve)">'+esc(n.users.join(", "))+'</b></div>'
+    : '';
+  const bel = beliefsOf(n);
+  const strong = bel.filter(b=>b.cls!=="weak").slice(0,8);
+  const weakN  = bel.length - strong.length;
+  const relColor = {causal:"#ff7a6b", typed:"#e8c66a", loc:"#5aa9d6", weak:"var(--mut)"};
+  const beliefRows = strong.length
+    ? strong.map(b=>'<div class="line" style="border-top:none;padding:2px 0 2px 6px">'+
+        '<span style="color:'+relColor[b.cls]+';font-weight:600">'+esc(b.rel||"related to")+'</span> '+
+        '<a href="#" onclick="selectEntityByName(decodeURIComponent(\''+encodeURIComponent(b.other.name)+'\'));return false" style="color:var(--fg)">'+esc(trim(b.other.name,30))+'</a>'+
+        ' <span style="color:var(--mut)">×'+(b.w>=1?Math.round(b.w):b.w.toFixed(1))+'</span></div>').join("")
+    : '<div class="line miss">no typed relations yet — generic co-occurrence only</div>';
+  const nm = encodeURIComponent(n.name);
+  $("detail").innerHTML =
+    '<div class="rel"><b>'+esc(n.label)+'</b> <span class="tag">'+esc(n.type)+'</span>'+(n.bridge?' <span class="tag" style="color:var(--retrieve)">⊕ bridge</span>':'')+'</div>'+
+    '<div class="line"><span>mentions</span> '+(n.ment||0)+' · <span>connections</span> '+n.deg+'</div>'+bridge+
+    '<div class="line" style="margin-top:6px"><span>BELIEFS</span> <span style="color:var(--mut)">('+weakN+' weak hidden)</span></div>'+beliefRows+
+    '<div class="line" style="margin-top:6px"><span>EVIDENCE</span></div><div id="d-evidence"><div class="miss">pulling source passages…</div></div>'+
+    '<div style="margin-top:8px;display:flex;gap:6px">'+
+      '<button class="mini" onclick="traceEntity(decodeURIComponent(\''+nm+'\'))">trace in graph</button>'+
+      '<button class="mini" onclick="pinEntity(decodeURIComponent(\''+nm+'\'),\''+esc(n.type)+'\')">pin '+(caseFile().some(e=>e.name===n.name)?"✓":"+")+'</button>'+
+      '<button class="mini" id="d-brief" onclick="copyBrief(decodeURIComponent(\''+nm+'\'))">copy brief</button>'+
+    '</div>';
+  // live evidence: the entity's actual source passages, dated
+  const uid = SELECTED[0];
+  api("/api/recall",{method:"POST",headers:POST_H,body:JSON.stringify({user_id:uid,query:n.name,limit:4,mode:"hybrid"})})
+    .then(r=>{
+      const rows=(r.memories||[]).map(m=>({txt:trim((m.experience&&m.experience.content)||"",220), when:(m.created_at||"").slice(0,10)}));
+      window.__DOSSIER_EV={name:n.name, rows};
+      const el=$("d-evidence"); if(!el) return;
+      el.innerHTML = rows.length
+        ? rows.map(e=>'<div class="line" style="border-top:none;padding:3px 0 3px 6px;color:var(--fg)">“'+esc(e.txt)+'”<div style="color:var(--mut)">— '+esc(e.when)+'</div></div>').join("")
+        : '<div class="miss">no passages surfaced</div>';
+    }).catch(()=>{ const el=$("d-evidence"); if(el) el.innerHTML='<div class="miss">evidence fetch failed</div>'; });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SPREADING ACTIVATION — a recall lights up the cluster(s) it surfaced, then
+//  (if focused enough) auto-drills into the dominant cluster and lights the
+//  surfaced member entities within. The cue→cascade→subgraph-lights-up demo.
+// ════════════════════════════════════════════════════════════════════════════
+// Focus the graph on ONE surfaced memory: its entities + the edges that
+// connect them. Same matching as the cascade version, scoped to one text,
+// so selecting different memories in the river re-lights different subgraphs.
+function focusMemoryOnGraph(m){
+  if(!RAW) return;
+  const text = ((m.content||"")+" "+((m.experience&&(m.experience.tags||[]).join(" "))||"")).toLowerCase();
+  const scored=[];
+  for(const n of RAW.nodes){
+    const nm=n.name.toLowerCase();
+    if(nm.length<4) continue;
+    if(!text.includes(nm)) continue;
+    const spec=(n.name.includes(" ")?1.5:1)*(nm.length>=8?1.3:1)*(0.5+(n.sal||0));
+    scored.push({n,w:spec*(1+Math.log1p(n.deg||0))});
+  }
+  scored.sort((a,b)=>b.w-a.w);
+  if(!scored.length) return;
+  lightUpMembers(scored.slice(0,12).map(x=>x.n), "memory: "+trim((m.content||""),28));
+}
+function activateFromCascade(res){
+  if(!RAW) return;
+  // 1) map surfaced memory text → graph entities (distinctive matches only)
+  const text = (res.memories||[]).map(m=>m.content||"").join(" ").toLowerCase();
+  const scored=[];
+  for(const n of RAW.nodes){
+    const nm=n.name.toLowerCase();
+    if(nm.length<4) continue;
+    if(/\.(txt|md|pdf|json|csv)$/i.test(n.name)) continue;     // documents aren't entities to light
+    if(!text.includes(nm)) continue;
+    const spec = (n.name.includes(" ")?1.4:1) * (nm.length>=8?1.3:1) * (0.5+(n.sal||0));
+    scored.push({n, w:spec*(1+Math.log1p(n.deg||0))});
+  }
+  scored.sort((a,b)=>b.w-a.w);
+  if(!scored.length){ deactivate(); return; }
+  // keep the distinctive core (cap so dense corpora don't flood)
+  const cap=Math.max(6, Math.min(28, Math.round(scored.length*0.6)));
+  const core = scored.slice(0, scored.length<=10?scored.length:cap).map(x=>x.n);
+  lightUpMembers(core, null);
+}
+
+// Shared lighting mechanism: given graph entity nodes (RAW.nodes items),
+// light them exactly the way a recall cascade does — set the active sets,
+// pick the right view (dominant-cluster drill at scale, whole-graph when
+// small), set the ribbon, and frame the lit nodes. Both entry points
+// (recall cascade, anomaly cross-highlight) go through here so the visual
+// language stays one language.
+function lightUpMembers(core, ribbonText){
+  if(!core.length){ deactivate(); return; }
+  activeMembers = new Set(core.map(n=>n.id));
+  // which clusters do they fall in? weight clusters by core membership
+  const cw=new Map();
+  for(const n of core){ cw.set(n.comm,(cw.get(n.comm)||0)+1); }
+  const litClusters = [...cw.entries()].sort((a,b)=>b[1]-a[1]);
+  activeClusters = new Set(litClusters.map(e=>e[0]));
+
+  $("activ").classList.add("on");
+  const topName = RAW.clusters[litClusters[0][0]] ? RAW.clusters[litClusters[0][0]].label : "";
+  const small = RAW.nodes.length<=SMALL_GRAPH_MAX;
+
+  // focus: if one cluster dominates, drill into it so members light up;
+  // in small-graph mode never drill — every entity is already on screen.
+  const dominant = !small && litClusters[0][1] >= Math.max(2, 0.5*core.length) && litClusters[0][1] >= (litClusters[1]?litClusters[1][1]:0);
+  if(dominant){
+    showCluster(litClusters[0][0]);
+    const litNodes = VIEW.nodes.filter(nd=>activeMembers.has(nd.id));
+    $("activ-t").textContent = ribbonText || ("⚡ "+litNodes.length+" entities lit in cluster “"+trim(topName,20)+"”");
+    // frame the lit members + a little surrounding context
+    if(litNodes.length>=2) fitView(litNodes, 110, true);
+    else fitView(VIEW.nodes, 60, true);
+  } else {
+    if(VIEW.level!=="clusters") showClusters();
+    const litNodes = small
+      ? VIEW.nodes.filter(nd=>activeMembers.has(nd.id))
+      : VIEW.nodes.filter(nd=>activeClusters.has(nd.id));
+    $("activ-t").textContent = ribbonText ||
+      (small ? "⚡ "+core.length+" entities lit"
+             : "⚡ "+core.length+" entities across "+activeClusters.size+" clusters — top: "+trim(topName,20));
+    applyActivation();
+    if(litNodes.length>=2) fitView(litNodes, 90, true); else draw();
+  }
+}
+
+// Cross-highlight: project an anomaly onto the knowledge graph. Matches the
+// episode's entities to graph nodes by uuid (single-user view: star.id IS the
+// entity uuid) with a name-key fallback (group view re-keys merged nodes).
+function anomHighlight(i){
+  const row = ANOM_ROWS[i]; if(!row || !RAW) return;
+  const ents = row.a.entities || [];
+  const wantIds = new Set(), wantNames = new Set();
+  for(const e of ents){ if(e.id) wantIds.add(e.id); if(e.name) wantNames.add(nameKey(e.name)); }
+  const core = RAW.nodes.filter(n => wantIds.has(n.id) || wantNames.has(nameKey(n.name)));
+  showScreen('live');
+  sizeCanvas();   // showScreen's resize is debounced; fit needs real dims NOW
+  if(!core.length){
+    $("activ").classList.add("on");
+    $("activ-t").textContent = "⚠ this anomaly's entities are not in the current graph view";
+    draw();
+    return;
+  }
+  lightUpMembers(core, "⚡ anomaly "+row.a.max_abs_z.toFixed(1)+"σ — "+core.length+" entities lit");
+}
+function applyActivation(){ draw(); }
+function deactivate(){
+  activeClusters=null; activeMembers=null;
+  $("activ").classList.remove("on"); $("activ-t").textContent="";
+  document.querySelectorAll(".cascade.sel").forEach(e=>e.classList.remove("sel"));
+  draw();
+}
+$("activ-x").onclick = deactivate;
+
+// keep the canvas crisp on container resize; re-fit the current view
+let _rezT;
+function onGraphResize(){ if(!RAW) { clearCanvas(); return; }
+  clearTimeout(_rezT); _rezT=setTimeout(()=>{ sizeCanvas();
+    if(VIEW.sim){ VIEW.sim.force("center", d3.forceCenter(cv.getBoundingClientRect().width/2, cv.getBoundingClientRect().height/2)); VIEW.sim.alpha(.2).restart(); }
+    draw(); }, 120); }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  RIVER — render a recall as an associative cascade
+// ════════════════════════════════════════════════════════════════════════════
+let riverCount = 0;
+function buildCascade(ev, fresh){
+  const res = ev.results||{};
+  const mems = res.memories||[];
+  const lin  = res.lineage||[];
+  const q = res.query || ev.content_preview || "(recall)";
+  const col = EVCOL[ev.event_type]||"#ffc896";
+  const wrap = document.createElement("div");
+  wrap.className = "cascade"+(fresh?" glow":"");
+  const memIdx = new Map(mems.map((m,i)=>[m.id,{m,i}]));
+  const nick = id => { const e=memIdx.get(id); return e? ("#"+(e.i+1)) : (id||"").slice(0,6); };
+
+  let memHtml = mems.map((m,i)=>{
+    const sc = typeof m.score==="number"?m.score:0;
+    const pct = Math.max(6,Math.min(100,Math.round(sc*100)));
+    return '<div class="mem" data-mem="'+esc(m.id)+'">'+
+      '<div class="rank">'+(i+1)+'</div><div class="body">'+
+      '<div class="txt">'+esc((m.content||"").slice(0,220))+'</div>'+
+      '<div class="mrow"><div class="scorebar"><i style="width:'+pct+'%"></i></div>'+
+      '<span class="sc">'+sc.toFixed(3)+'</span>'+
+      (m.tier?'<span class="tier">'+esc(String(m.tier).replace(/Tier|Memory/g,""))+'</span>':'')+
+      '</div></div></div>';
+  }).join("");
+  if(!mems.length) memHtml = '<div class="empty" style="padding:6px">no memories surfaced</div>';
+
+  let chainHtml = lin.map(l=>{
+    return '<div class="chain" data-from="'+esc(l.from)+'" data-to="'+esc(l.to)+'">'+
+      '<span class="node">'+nick(l.from)+'</span>'+
+      '<span class="rel"><span class="name">'+esc(relName(l.relation))+'</span><span class="arr">↓</span></span>'+
+      '<span class="node">'+nick(l.to)+'</span>'+
+      '<span class="conf">'+(typeof l.confidence==="number"?l.confidence.toFixed(2):"")+'</span></div>';
+  }).join("");
+
+  wrap.innerHTML =
+    '<div class="casc-hd">'+
+      '<div class="ico" style="background:'+col+'22;color:'+col+'">'+(EVICO[ev.event_type]||"◎")+'</div>'+
+      '<div class="ttl"><div class="cue-q">cue → <em>'+esc(q)+'</em></div>'+
+      '<div class="cue-meta">'+(ev.src_user&&isGroup()?'<span class="n" style="color:var(--gold)">@'+esc(ev.src_user)+'</span> · ':'')+'<span class="n">'+mems.length+'</span> memories surfaced · '+
+        '<span class="n">'+lin.length+'</span> causal links'+
+        (res.latency_ms?' · '+Math.round(res.latency_ms)+'ms · no LLM':'')+'</div></div>'+
+      '<div class="t">'+ago(ev.timestamp||Date.now())+'</div></div>'+
+    '<div class="casc-body">'+
+      '<div class="cband">surfaced memories <span class="bdg">ranked by recall score</span></div>'+memHtml+
+      (lin.length?('<div class="cband">causal chains <span class="bdg">that lit up together</span></div>'+chainHtml):'')+
+    '</div>';
+
+  // interactions
+  wrap.querySelector(".casc-hd").onclick = ()=>{
+    document.querySelectorAll(".cascade.sel").forEach(e=>e.classList.remove("sel"));
+    wrap.classList.add("sel");
+    activateFromCascade(res);   // ← light up the graph
+  };
+  wrap.querySelectorAll(".mem").forEach(el=>el.onclick=(e)=>{e.stopPropagation();
+    const m = mems.find(x=>x.id===el.dataset.mem); if(!m)return;
+    wrap.querySelectorAll(".mem.sel").forEach(x=>x.classList.remove("sel"));
+    el.classList.add("sel");
+    focusMemoryOnGraph(m);                        // ← graph adjusts to THIS memory
+    $("detail").innerHTML = '<div class="rel">surfaced memory</div>'+
+      '<div class="line">'+esc((m.content||"").slice(0,360))+'</div>'+
+      '<div class="line"><span>score</span> '+(m.score||0).toFixed(3)+' · <span>importance</span> '+(m.importance||0).toFixed(2)+'</div>'+
+      '<div class="line"><span>tier</span> '+esc(m.tier||"—")+'</div>'+
+      '<div class="line"><span>id</span> <span class="mono">'+esc((m.id||"").slice(0,18))+'</span></div>';
+  });
+  wrap.querySelectorAll(".chain").forEach(el=>el.onclick=(e)=>{e.stopPropagation();
+    const f=el.dataset.from,t=el.dataset.to; const lk=lin.find(x=>x.from===f&&x.to===t); if(!lk)return;
+    $("detail").innerHTML = '<div class="rel">causal chain</div>'+
+      '<div class="line">'+nick(f)+' —<b> '+esc(relName(lk.relation))+' </b>→ '+nick(t)+'</div>'+
+      '<div class="line"><span>confidence</span> '+(lk.confidence||0).toFixed(3)+'</div>'+
+      '<div class="line miss">A deterministic causal edge between two surfaced memories — the wiring the cue activated.</div>';
+  });
+
+  const r = $("river");
+  const empty = r.querySelector(".empty"); if(empty) empty.remove();
+  r.prepend(wrap);
+  riverCount++; $("river-cnt").textContent = riverCount+" cascades";
+  while(r.children.length>40) r.removeChild(r.lastChild);
+  if(fresh){ document.querySelectorAll(".cascade.sel").forEach(e=>{if(e!==wrap)e.classList.remove("sel");}); wrap.classList.add("sel"); activateFromCascade(res); }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SSE stream — live recalls bloom into the river automatically
+// ════════════════════════════════════════════════════════════════════════════
+// one EventSource per selected user; their recall events are UNIONED into the
+// single river. Each cascade is tagged with the user it streamed from.
+let esList = [];
+const sparkData = new Array(28).fill(0);
+function connectStream(){
+  esList.forEach(es=>{ try{es.close();}catch(_){} }); esList=[];
+  let anyOpen=false;
+  for(const uid of users()){
+    const qs = new URLSearchParams({user_id:uid}); if(API_KEY) qs.set("api_key",API_KEY);
+    const es = new EventSource(API_BASE+"/api/events?"+qs.toString());
+    const onEv = (e)=>{
+      bumpSpark(); setPulse(true);
+      let d; try{ d=JSON.parse(e.data); }catch(_){ return; }
+      if(d.event_type==="RETRIEVE"||d.event_type==="PROACTIVE_CONTEXT"){
+        if(d.results && (d.results.memories||d.results.lineage)){ d.src_user=uid; buildCascade(d, true); }
+      }
+      // Anomaly feed: a dormant pattern reactivating is shown live; each
+      // episode's surprise components debounce-refresh the deviation ranking.
+      if(d.event_type==="temporal_anomaly"){
+        LIVE_TEMPORAL.unshift(d.content_preview||"pattern reactivated");
+        LIVE_TEMPORAL = LIVE_TEMPORAL.slice(0,4);
+        renderAnomalies(users().length>1);
+      }
+      if(d.event_type==="surprise"){ scheduleAnomalies(); }
+    };
+    ["RETRIEVE","PROACTIVE_CONTEXT","CREATE","UPDATE","DELETE","surprise","temporal_anomaly","message"].forEach(t=>es.addEventListener(t,onEv));
+    es.onopen = ()=>{ anyOpen=true; setPulse(true); };
+    es.onerror = ()=>{ if(!esList.some(x=>x.readyState===1)) setPulse(false); };
+    esList.push(es);
+  }
+}
+function setPulse(on){ const p=$("pulse"); p.classList.toggle("on",on); $("pulse-t").textContent = on?"LIVE":"offline"; }
+function bumpSpark(){ if(sparkData.length) sparkData[sparkData.length-1]++; }
+function drawSpark(){
+  const max=Math.max(1,...sparkData);
+  const el=$("spark"); el.innerHTML="";
+  sparkData.slice(-28).forEach(v=>{ const b=document.createElement("div"); b.className="bar";
+    b.style.height=(3+24*v/max)+"px"; el.appendChild(b); });
+}
+setInterval(()=>{ sparkData.push(0); if(sparkData.length>60)sparkData.shift(); drawSpark(); }, 1500);
+
+// ════════════════════════════════════════════════════════════════════════════
+//  RIGHT PANELS — stats, sessions, todos
+// ════════════════════════════════════════════════════════════════════════════
+function bar(label,val,max,color){
+  const pct=Math.max(0,Math.min(100,max?Math.round(100*val/max):0));
+  return '<div class="kv"><span class="label">'+label+'</span>'+
+    '<span class="meter"><i style="width:'+pct+'%;background:'+color+'"></i></span>'+
+    '<span class="num">'+fmt(val)+'</span></div>';
+}
+// fetch one endpoint for every selected user; null on failure
+async function perUser(pathFor){
+  return Promise.all(users().map(async uid=>{ try{ return await pathFor(uid); }catch(_){ return null; } }));
+}
+async function loadStats(){
+  const sel = users();
+  try{
+    const all = (await perUser(uid=>api("/api/users/"+encodeURIComponent(uid)+"/stats",{headers:H}))).filter(Boolean);
+    if(!all.length) throw new Error("none");
+    // SUM additive counters across the selected users; average the importance.
+    const sum = k => all.reduce((a,s)=>a+(s[k]||0),0);
+    const work=sum("working_memory_count"), sess=sum("session_memory_count"),
+          lt=sum("long_term_memory_count"), vix=sum("vector_index_count"),
+          tot=sum("total_memories"), retr=sum("total_retrievals");
+    const impVals = all.map(s=>s.average_importance||0).filter(v=>v>0);
+    const avgImp = impVals.length? impVals.reduce((a,b)=>a+b,0)/impVals.length : 0;
+    const gn=sum("graph_nodes"), ge=sum("graph_edges");
+    const mx = Math.max(work,sess,lt,1);
+    $("tiers").innerHTML =
+      bar("Working", work, mx, "#b4e6b4")+
+      bar("Session", sess, mx, "#ffe082")+
+      bar("Long-term", lt, mx, "#d2a8ff")+
+      bar("Vector idx", vix, mx, "#58a6ff")+
+      '<div class="kv" style="margin-top:9px"><span class="label">Retrievals</span><span class="num" style="min-width:auto;color:var(--turmeric)">'+fmt(retr)+'</span>'+
+      '<span class="label" style="width:auto;margin-left:14px">Avg imp</span><span class="num">'+avgImp.toFixed(2)+'</span></div>'+
+      (sel.length>1?'<div class="kv" style="margin-top:6px"><span class="label" style="width:auto;color:var(--gold)">group of '+sel.length+'</span><span class="num" style="min-width:auto;color:var(--mut);font-weight:400">summed across selected users</span></div>':'');
+    $("stats-strip").innerHTML =
+      '<div class="stat"><span class="v">'+fmt(tot)+'</span><span class="k">memories</span></div>'+
+      '<div class="stat"><span class="v">'+fmt(gn)+'</span><span class="k">entities</span></div>'+
+      '<div class="stat"><span class="v">'+fmt(ge)+'</span><span class="k">edges</span></div>'+
+      '<div class="stat"><span class="v">'+fmt(retr)+'</span><span class="k">recalls</span></div>';
+  }catch(e){ $("tiers").innerHTML='<div class="none">stats unavailable</div>'; }
+  try{
+    const all = (await perUser(uid=>api("/api/graph/"+encodeURIComponent(uid)+"/stats",{headers:H}))).filter(Boolean);
+    if(!all.length) throw new Error("none");
+    const sum = k => all.reduce((a,s)=>a+(s[k]||0),0);
+    const ec2=sum("entity_count"), rc=sum("relationship_count"), ep=sum("episode_count");
+    $("graphstats").innerHTML =
+      '<div class="c"><div class="v" style="color:#82a0dc">'+fmt(ec2)+'</div><div class="l">entities</div></div>'+
+      '<div class="c"><div class="v" style="color:#e6c864">'+fmt(rc)+'</div><div class="l">relationships</div></div>'+
+      '<div class="c"><div class="v" style="color:#b4e6b4">'+fmt(ep)+'</div><div class="l">episodes</div></div>'+
+      '<div class="c"><div class="v" style="color:#d2a8ff">'+(ec2? (rc/ec2).toFixed(1):"0")+'</div><div class="l">avg degree</div></div>';
+  }catch(e){ $("graphstats").innerHTML='<div class="none">graph stats unavailable</div>'; }
+}
+async function loadSessions(){
+  try{
+    const r = await api("/api/context_status",{headers:H});
+    const arr = Array.isArray(r)? r : (r? [r]:[]);
+    const live = arr.filter(s=>s && (s.session_id||s.model||s.tokens_used));
+    if(!live.length){ $("sessions").innerHTML='<div class="none">no active LLM sessions</div>'; return; }
+    const sc=["#ffd682","#ffa08c","#a0dcff","#b4ffb4"];
+    $("sessions").innerHTML = live.map((s,i)=>{
+      const pct = s.percent_used!=null? s.percent_used : (s.tokens_budget? Math.round(100*s.tokens_used/s.tokens_budget):0);
+      const col = pct>=80?"#ff8c8c":pct>=50?"#ffe082":"#96e6aa";
+      const dir = s.current_task || s.session_id || "—";
+      return '<div class="sess"><div class="top"><span class="model">'+esc(s.model||"agent")+'</span>'+
+        '<span class="dir" style="color:'+sc[i%4]+'">'+esc(String(dir).slice(0,22))+'</span></div>'+
+        '<div class="tok"><i style="width:'+Math.min(100,pct)+'%;background:'+col+'"></i></div>'+
+        '<div class="tl"><span>'+fmt(s.tokens_used||0)+' / '+fmt(s.tokens_budget||0)+' tok</span><span style="color:'+col+'">'+pct+'%</span></div></div>';
+    }).join("");
+  }catch(e){ $("sessions").innerHTML='<div class="none">unavailable</div>'; }
+}
+async function loadTodos(){
+  try{
+    const sel = users();
+    const statsAll = (await perUser(uid=>api("/api/todos/stats",{method:"POST",headers:POST_H,body:JSON.stringify({user_id:uid})}))).map(r=>r&&r.stats||{});
+    const sum = k => statsAll.reduce((a,s)=>a+(s[k]||0),0);
+    const open = sum("in_progress")+sum("todo")+sum("backlog"), done=sum("done");
+    if(!(sum("total")>0)){ $("todos").innerHTML='<div class="none">no todos</div>'; return; }
+    let h = '<div class="kv"><span class="label">open</span><span class="num" style="color:var(--saffron)">'+open+'</span>'+
+      '<span class="label" style="width:auto;margin-left:12px">done</span><span class="num" style="color:var(--live)">'+done+'</span></div>';
+    // union open todos across the selected users (tag with @user in group mode)
+    const lists = await perUser(uid=>api("/api/todos/list",{method:"POST",headers:POST_H,body:JSON.stringify({user_id:uid,include_completed:false,limit:6})}).then(r=>({uid,todos:(r&&r.todos)||[]})));
+    const rows=[];
+    for(const l of lists){ if(!l) continue; for(const t of l.todos){ rows.push({uid:l.uid,t}); } }
+    rows.slice(0,6).forEach(({uid,t})=>{ const ic = t.status==="in_progress"?"◐":t.status==="done"?"☑":"○";
+      const who = sel.length>1?'<span style="color:var(--gold)">@'+esc(uid)+'</span> ':'';
+      h += '<div class="line"><span>'+ic+'</span> '+who+esc((t.content||"").slice(0,42))+'</div>'; });
+    $("todos").innerHTML = h;
+  }catch(e){ $("todos").innerHTML='<div class="none">unavailable</div>'; }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  ANOMALIES — deviation from each user's OWN statistical baseline.
+//  POST /api/anomalies returns per-component z-scores over the ingest-time
+//  surprise components with a deterministic explanation (LLM-free, auditable).
+//  SSE: "surprise" (per-episode shape) debounce-refreshes the feed;
+//       "temporal_anomaly" (dormant pattern reactivated) prepends a live row.
+// ════════════════════════════════════════════════════════════════════════════
+// ── screens (TUI-style: keys 1/2/3, mirrors the terminal UI's ViewMode) ──────
+let SCREEN = "live";
+function showScreen(s){
+  SCREEN = s;
+  document.querySelector("main").style.display = s==="live" ? "" : "none";
+  $("scr-anom").style.display = s==="anom" ? "" : "none";
+  $("scr-work").style.display = s==="work" ? "" : "none";
+  ["live","anom","work"].forEach(k=>$("tab-"+k).classList.toggle("on", k===s));
+  if(s==="live"){ onGraphResize(); }   // canvas had zero dims while hidden
+}
+document.addEventListener("keydown", e=>{
+  if(e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  if(e.key==="1") showScreen("live");
+  else if(e.key==="2") showScreen("anom");
+  else if(e.key==="3") showScreen("work");
+});
+
+let LIVE_TEMPORAL = [];   // recent dormant-reactivations (live, cap 4)
+let ANOM_ROWS = [];       // fetched deviation entries (ranked by max |z|)
+let anomTimer = null;
+function scheduleAnomalies(){ clearTimeout(anomTimer); anomTimer=setTimeout(loadAnomalies, 1200); }
+async function loadAnomalies(){
+  try{
+    const sel = users();
+    const all = await perUser(uid=>api("/api/anomalies",{method:"POST",headers:POST_H,
+      body:JSON.stringify({user_id:uid,limit:12})}).then(r=>({uid,r})));
+    const rows=[];
+    for(const x of all){ if(!x||!x.r) continue; for(const a of (x.r.anomalies||[])) rows.push({uid:x.uid,a}); }
+    rows.sort((p,q)=>q.a.max_abs_z-p.a.max_abs_z);
+    ANOM_ROWS = rows.slice(0,12);
+    // tab badge: pull attention only when something is actually flagged
+    const flagged = ANOM_ROWS.filter(x=>x.a.flagged).length;
+    const badge = $("anom-badge");
+    if(flagged>0){ badge.textContent = flagged; badge.style.display=""; } else { badge.style.display="none"; }
+    renderAnomalies(sel.length>1);
+  }catch(e){ $("anomalies").innerHTML='<div class="none">unavailable</div>'; }
+}
+function renderAnomalies(group){
+  let h="";
+  LIVE_TEMPORAL.slice(0,4).forEach(t=>{
+    h += '<div class="anom temporal"><span class="sig">↻</span><span class="prev">'+esc(t)+'</span></div>';
+  });
+  ANOM_ROWS.forEach(({uid,a},i)=>{
+    const who = group?'<span class="who">@'+esc(uid)+'</span>':'';
+    h += '<div class="anom'+(a.flagged?' flag':'')+'" style="cursor:pointer" onclick="anomDetail('+i+')">'+
+      '<span class="sig">'+a.max_abs_z.toFixed(1)+'σ</span>'+
+      '<span class="prev">'+esc((a.content_preview||"").length>72?(a.content_preview||"").slice(0,72)+"…":(a.content_preview||""))+'</span>'+who+
+      (a.explanation?'<span class="why">'+esc(a.explanation)+'</span>':'')+'</div>';
+  });
+  $("anomalies").innerHTML = h || '<div class="none">baseline forming… (needs ≥10 scored episodes)</div>';
+}
+// Click-through: the full audit trail of WHY an episode is unusual — every
+// component, its value, the user's baseline, and the signed deviation.
+function anomDetail(i){
+  const row = ANOM_ROWS[i]; if(!row) return;
+  const a = row.a;
+  let h = '<div class="rel"><b>'+a.max_abs_z.toFixed(1)+'σ deviation</b> — '+esc((a.content_preview||"").slice(0,120))+'</div>';
+  (a.deviations||[]).slice().sort((p,q)=>Math.abs(q.z)-Math.abs(p.z)).forEach(d=>{
+    const col = Math.abs(d.z)>=2 ? "#ff9c9c" : Math.abs(d.z)>=1 ? "#e6c864" : "var(--mut)";
+    h += '<div class="line"><span>'+esc(d.component)+'</span> '+
+      '<b style="color:'+col+'">'+(d.z>=0?"+":"")+d.z.toFixed(2)+'σ</b> '+
+      '<span>('+d.value.toFixed(3)+' vs baseline '+d.baseline_mean.toFixed(3)+' ± '+d.baseline_std.toFixed(3)+')</span></div>';
+  });
+  h += '<div class="line"><span>sample</span> '+a.components.pairs_scored+' pairs · '+a.components.entities_total+' entities · '+new Date(a.created_at).toLocaleString()+'</div>';
+  if((a.entities||[]).length){
+    h += '<div class="line"><span>involves</span> '+a.entities.map(e=>esc(e.name)).join(" · ")+'</div>';
+    h += '<button class="ghl" onclick="anomHighlight('+i+')">⚡ show in graph</button>';
+  }
+  $("anomdetail").innerHTML = h;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Manual recall (fires the cue → the server emits a RETRIEVE event we also catch)
+// ════════════════════════════════════════════════════════════════════════════
+function demoCue(){
+  // The invitation action: cue the graph's own most salient entity, so the
+  // first recall a viewer sees is guaranteed to bloom into a cascade.
+  const pool = (typeof RAW!=="undefined" && RAW && RAW.nodes) ? RAW.nodes : [];
+  const cands = pool.filter(n=>n.proper && n.deg>2);
+  const pick = (cands.length?cands:pool).slice()
+    .sort((a,b)=>((b.sal||0)-(a.sal||0)) || ((b.deg||0)-(a.deg||0)))[0];
+  if(!pick){ $("cue").focus(); return; }
+  $("cue").value = pick.name;
+  fireRecall();
+}
+
+async function fireRecall(){
+  const q = $("cue").value.trim(); if(!q) return;
+  const sel = users();
+  const btn=$("recall"); btn.disabled=true; btn.textContent="…";
+  try{
+    // one cue → recall in EVERY selected user; each result blooms into the river
+    // (so the group's pooled memory answers the cue). SSE also delivers these but
+    // rendering directly keeps the manual cue instant and robust if the stream lags.
+    let any=false;
+    await Promise.all(sel.map(async uid=>{
+      try{
+        const d = await api("/api/recall",{method:"POST",headers:POST_H,
+          body:JSON.stringify({user_id:uid,query:q,limit:8,mode:"hybrid"})});
+        if((d.memories||[]).length||(d.lineage||[]).length){
+          any=true;
+          buildCascade({event_type:"RETRIEVE",timestamp:new Date().toISOString(),content_preview:q,src_user:uid,
+            results:{query:q,memories:(d.memories||[]).map(m=>({id:m.id,
+              content:(m.experience&&m.experience.content)||m.content||"",
+              score:m.score,importance:m.importance,tier:m.tier})), lineage:d.lineage||[], count:d.count}}, true);
+        }
+      }catch(_){ /* per-user failure tolerated in a group recall */ }
+    }));
+    if(!any){ const r=$("river"); const w=document.createElement("div"); w.className="empty";
+      w.innerHTML='no memories surfaced for “'+esc(q)+'”.'; r.prepend(w); }
+  }catch(e){
+    const r=$("river"); const w=document.createElement("div"); w.className="empty";
+    w.innerHTML='recall failed: '+esc(e.message)+' — is the shodh server reachable?'; r.prepend(w);
+  }finally{ btn.disabled=false; btn.textContent="Recall"; }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  IDENTITY SELECTOR — pick one user (isolated) or several (group / overlap)
+// ════════════════════════════════════════════════════════════════════════════
+function renderIdButton(){
+  const sel=users();
+  $("idwho").innerHTML = sel.length===1 ? esc(sel[0])
+    : '<span class="grp">'+sel.length+' users</span>';
+  $("idcnt").textContent = sel.length===1 ? "isolated" : "group · overlap";
+}
+function renderIdMenu(){
+  const sel=new Set(users());
+  $("idlist").innerHTML = ALL_USERS.map(u=>
+    '<label class="idopt'+(sel.has(u)?' act':'')+'"><input type="checkbox" data-u="'+esc(u)+'"'+(sel.has(u)?' checked':'')+'/>'+
+    '<span class="un">'+esc(u)+'</span></label>').join("") || '<div class="grouphint">no users found</div>';
+  $("idhint").innerHTML = sel.size>1
+    ? '<b>group view</b> — '+sel.size+' users overlapped: shared entities merge into one bridging node across users.'
+    : 'check a second user to <b>overlap</b> them as a shared memory pool.';
+  $("idlist").querySelectorAll("input[type=checkbox]").forEach(cb=>{
+    cb.addEventListener("change",()=>{
+      const u=cb.dataset.u;
+      if(cb.checked){ if(!SELECTED.includes(u)) SELECTED.push(u); }
+      else { SELECTED = SELECTED.filter(x=>x!==u); if(!SELECTED.length){ SELECTED=[u]; cb.checked=true; } } // never empty
+      onIdentityChange();
+    });
+  });
+}
+function onIdentityChange(){
+  renderIdButton(); renderIdMenu();
+  $("river").innerHTML='<div class="empty">'+(isGroup()
+    ? 'group view — '+users().length+' users overlapped. Cue a recall to pool their memories.'
+    : 'identity: '+esc(users()[0])+' — cue a recall to see the cascade.')+'</div>';
+  riverCount=0; $("river-cnt").textContent='';
+  deactivate(); loadGraph(); loadStats(); loadSessions(); loadTodos(); loadAnomalies(); connectStream();
+}
+function toggleIdMenu(open){ const m=$("idmenu"); const o = open!=null?open : !m.classList.contains("open");
+  m.classList.toggle("open",o); if(o) renderIdMenu(); }
+$("idbtn").addEventListener("click",e=>{ e.stopPropagation(); toggleIdMenu(); });
+$("idmenu").addEventListener("click",e=>e.stopPropagation());
+document.addEventListener("click",()=>toggleIdMenu(false));
+$("idaddbtn").addEventListener("click",()=>{
+  const v=$("idadd").value.trim(); if(!v) return;
+  if(!ALL_USERS.includes(v)) ALL_USERS.push(v);
+  if(!SELECTED.includes(v)) SELECTED=[v];          // adding a user logs in as it (isolated)
+  $("idadd").value=""; onIdentityChange();
+});
+$("idadd").addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); $("idaddbtn").click(); } });
+// populate the user list dynamically from the backend if reachable
+async function loadUserList(){
+  try{
+    const arr = await api("/api/users",{headers:H});
+    if(Array.isArray(arr) && arr.length){
+      // keep current selection + any seed names, then merge in the live list
+      const merged = Array.from(new Set([...SELECTED, ...arr])).sort();
+      ALL_USERS = merged;
+      renderIdMenu();
+    }
+  }catch(_){ /* keep seed KNOWN_USERS */ }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Boot
+// ════════════════════════════════════════════════════════════════════════════
+$("recall").onclick = fireRecall;
+$("cue").addEventListener("keydown",e=>{if(e.key==="Enter")fireRecall();});
+window.addEventListener("resize", onGraphResize);
+renderIdButton(); renderIdMenu();
+drawSpark();
+loadUserList();
+loadGraph(); loadStats(); loadSessions(); loadTodos(); loadAnomalies(); connectStream();
+setInterval(()=>{ loadStats(); loadSessions(); loadTodos(); loadAnomalies(); }, 15000);
+</script>
+</body>
+</html>

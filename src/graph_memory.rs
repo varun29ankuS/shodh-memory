@@ -2770,9 +2770,15 @@ impl GraphMemory {
         }
 
         // Parse each mention (spaCy-rusty) for its syntactic head, drop verb-
-        // fragment junk (`is_entity`), and build a Fellegi-Sunter record (Splink)
-        // with the head + primary type. Parser does head detection + junk routing;
-        // Splink scores the merge.
+        // fragment junk (`is_entity`), and build a Fellegi-Sunter record with the
+        // full comparison evidence the matcher scores over. This is the
+        // Galárraga (CIKM'14) + CESI (WWW'18) feature union realized as FS
+        // comparisons: name (Jaro-Winkler + IDF), head, type, ATTRIBUTE OVERLAP
+        // (the typed relations the entity participates in — Galárraga's key
+        // signal), and NAME EMBEDDING (CESI's learned-embedding signal). Name
+        // + head + type alone only catch exact duplicates; the relation and
+        // embedding evidence let it merge abbreviations / paraphrases
+        // ("Key Bridge" ≡ "Francis Scott Key Bridge") that surface strings miss.
         let mut records: Vec<MatchRecord> = Vec::new();
         let mut meta: Vec<(Uuid, bool, usize)> = Vec::new(); // (uuid, is_proper, mentions)
         for e in &entities {
@@ -2789,10 +2795,30 @@ impl GraphMemory {
                 .first()
                 .map(|l| l.as_str().to_string())
                 .unwrap_or_default();
+            // Attribute overlap: the TYPED relations this entity participates in.
+            // Generic co-occurrence (CoOccurs/RelatedTo/CoRetrieved) is excluded —
+            // it is undiscriminative (everything co-occurs) and would wash out the
+            // signal. Two mentions of one real entity share these typed relations.
+            let agent_roles: HashSet<String> = self
+                .get_entity_relationships(&e.uuid)
+                .unwrap_or_default()
+                .iter()
+                .filter(|edge| {
+                    !matches!(
+                        edge.relation_type,
+                        RelationType::CoOccurs
+                            | RelationType::RelatedTo
+                            | RelationType::CoRetrieved
+                    )
+                })
+                .map(|edge| edge.relation_type.as_str().to_string())
+                .collect();
             records.push(MatchRecord {
                 name: parsed.clean.to_lowercase(),
                 head: parsed.head.clone(),
                 entity_type: primary_type,
+                agent_roles,
+                name_embedding: e.name_embedding.clone(),
                 ..Default::default()
             });
             meta.push((e.uuid, e.is_proper_noun, e.mention_count));
