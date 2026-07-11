@@ -262,6 +262,7 @@ pub fn import_graph_entities(kg: &MifKnowledgeGraph, graph: &GraphMemory) -> (us
             salience: 0.5,
             is_proper_noun: true,
             selectivity: None,
+            fine_type: entity.fine_type.clone(),
         };
 
         match graph.add_entity(node) {

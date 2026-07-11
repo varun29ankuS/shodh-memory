@@ -631,6 +631,7 @@ mod tests {
             salience: 0.8,
             is_proper_noun: true,
             selectivity: None,
+            fine_type: None,
         }
     }
 

@@ -55,6 +55,7 @@ fn create_entity(
         salience,
         is_proper_noun: is_proper,
         selectivity: None,
+        fine_type: None,
     }
 }
 

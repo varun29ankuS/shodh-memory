@@ -8080,6 +8080,7 @@ impl MemorySystem {
                         .map(|c| c.is_uppercase())
                         .unwrap_or(false),
                     selectivity: None,
+                    fine_type: None,
                 };
                 if graph_guard.add_entity(entity).is_ok() {
                     entities_added += 1;
@@ -8459,6 +8460,7 @@ impl MemorySystem {
                                 .map(|c| c.is_uppercase())
                                 .unwrap_or(false),
                             selectivity: None,
+                            fine_type: None,
                         }
                     })
                     .collect();
@@ -10370,6 +10372,7 @@ mod companion_injection_tests {
             salience: 1.0,
             is_proper_noun: true,
             selectivity: None,
+            fine_type: None,
         };
         graph.add_entity(node).expect("add entity")
     }
@@ -10638,6 +10641,7 @@ mod companion_rerank_tests {
             salience: 1.0,
             is_proper_noun: true,
             selectivity: None,
+            fine_type: None,
         };
         graph.add_entity(node).expect("add entity")
     }

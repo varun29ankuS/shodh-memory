@@ -157,6 +157,14 @@ pub struct EntityNode {
     /// Computed during Forman-Ricci curvature pass. None = not yet computed.
     #[serde(default)]
     pub selectivity: Option<f32>,
+
+    /// Fine-grained schema leaf type (e.g. `"bridge"`, `"malware"`), one level
+    /// more specific than the coarse [`EntityLabel`]. Populated by the GLiNER
+    /// schema-driven typer (`crate::entity_type`); `None` for entities typed
+    /// only at coarse granularity (regex/tag/heuristic extraction paths, or
+    /// records written before this field existed).
+    #[serde(default)]
+    pub fine_type: Option<String>,
 }
 
 fn default_salience() -> f32 {
@@ -980,12 +988,14 @@ fn decode_relationship_edge(data: &[u8]) -> Result<(RelationshipEdge, bool)> {
 }
 
 /// Postcard defaults for trailing `EntityNode` fields added after the postcard
-/// cutover (#192): `selectivity: Option` (None = `0x00`). Keep in sync with any
-/// new trailing field.
-const ENTITY_NODE_DEFAULT_SUFFIX: &[u8] = &[0x00];
+/// cutover (#192), in declaration order: `selectivity: Option` (None = `0x00`),
+/// `fine_type: Option<String>` (None = `0x00`). Keep in sync with any new
+/// trailing field — append one `0x00` (or the field's postcard-encoded default)
+/// per field, in the order the fields appear in the struct.
+const ENTITY_NODE_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00];
 
 /// Decode a stored `EntityNode`, tolerating legacy records written before trailing
-/// fields (e.g. `selectivity`) existed. See [`crate::serialization::try_decode_compat`].
+/// fields (e.g. `selectivity`, `fine_type`) existed. See [`crate::serialization::try_decode_compat`].
 fn decode_entity_node(data: &[u8]) -> Result<(EntityNode, bool)> {
     crate::serialization::try_decode_compat::<EntityNode>(data, ENTITY_NODE_DEFAULT_SUFFIX)
 }
@@ -2735,6 +2745,7 @@ impl GraphMemory {
             salience: EntityExtractor::calculate_base_salience(&EntityLabel::Event, false),
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         self.add_entity(node).ok()
     }
@@ -9009,6 +9020,92 @@ mod tests {
     }
 
     #[test]
+    fn entity_node_fine_type_roundtrips() {
+        // Same persistence path production code uses: GraphMemory::add_entity
+        // (crate::serialization::encode over postcard) and get_entity
+        // (decode_entity_node / try_decode_compat).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let now = Utc::now();
+
+        let entity = EntityNode {
+            uuid: Uuid::new_v4(),
+            name: "Francis Scott Key Bridge".to_string(),
+            labels: vec![EntityLabel::Facility],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: Some("bridge".to_string()),
+        };
+        let entity_uuid = graph.add_entity(entity).unwrap();
+
+        let roundtripped = graph.get_entity(&entity_uuid).unwrap().unwrap();
+        assert_eq!(roundtripped.fine_type, Some("bridge".to_string()));
+    }
+
+    #[test]
+    fn legacy_entity_node_defaults_fine_type_to_none() {
+        // Mirrors the pre-fine_type EntityNode schema (all fields through
+        // `selectivity`, no trailing `fine_type`) — the exact shape of every
+        // EntityNode already written to the live RocksDB store before this
+        // field existed. `decode_entity_node` must backfill fine_type=None
+        // via ENTITY_NODE_DEFAULT_SUFFIX rather than failing to decode.
+        #[derive(serde::Serialize)]
+        struct LegacyEntityNode {
+            uuid: Uuid,
+            name: String,
+            labels: Vec<EntityLabel>,
+            created_at: DateTime<Utc>,
+            last_seen_at: DateTime<Utc>,
+            mention_count: usize,
+            summary: String,
+            attributes: HashMap<String, String>,
+            name_embedding: Option<Vec<f32>>,
+            salience: f32,
+            is_proper_noun: bool,
+            selectivity: Option<f32>,
+        }
+
+        let now = Utc::now();
+        let uuid = Uuid::new_v4();
+        let legacy = LegacyEntityNode {
+            uuid,
+            name: "Legacy Bridge".to_string(),
+            labels: vec![EntityLabel::Facility],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 3,
+            summary: "a pre-fine_type record".to_string(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.7,
+            is_proper_noun: true,
+            selectivity: Some(0.42),
+        };
+
+        let bytes = crate::serialization::encode(&legacy).unwrap();
+        let (decoded, needs_migration) = decode_entity_node(&bytes).unwrap();
+
+        assert_eq!(decoded.uuid, uuid);
+        assert_eq!(decoded.name, "Legacy Bridge");
+        assert_eq!(decoded.selectivity, Some(0.42));
+        assert_eq!(
+            decoded.fine_type, None,
+            "legacy record without fine_type must default to None"
+        );
+        assert!(
+            needs_migration,
+            "legacy-shaped record should be flagged for rewrite-on-read"
+        );
+    }
+
+    #[test]
     fn delete_entity_scrubs_episode_index() {
         let temp_dir = tempfile::tempdir().unwrap();
         let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
@@ -9027,6 +9124,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         let entity_uuid = graph.add_entity(entity).unwrap();
 
@@ -9249,6 +9347,7 @@ mod tests {
                 salience: 0.5,
                 is_proper_noun: false,
                 selectivity: None,
+                fine_type: None,
             })
             .unwrap();
         let (memtables, _readers) = graph.rocksdb_memory_breakdown();
@@ -9931,6 +10030,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         let entity2 = EntityNode {
             uuid: Uuid::new_v4(),
@@ -9945,6 +10045,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
 
         let entity1_uuid = graph.add_entity(entity1.clone()).unwrap();
@@ -9995,6 +10096,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         let entity2 = EntityNode {
             uuid: entity2_uuid,
@@ -10009,6 +10111,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
 
         graph.add_entity(entity1).unwrap();
@@ -10145,6 +10248,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         graph.add_entity(entity).unwrap();
 
@@ -10198,6 +10302,7 @@ mod tests {
                 salience: 0.5,
                 is_proper_noun: false,
                 selectivity: None,
+                fine_type: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -10268,6 +10373,7 @@ mod tests {
                 salience: 0.5,
                 is_proper_noun: false,
                 selectivity: None,
+                fine_type: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -10342,6 +10448,7 @@ mod tests {
                 salience: 0.5,
                 is_proper_noun: false,
                 selectivity: None,
+                fine_type: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -10446,6 +10553,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         // add_entity may dedup and return a different UUID
         graph.add_entity(entity).unwrap()
