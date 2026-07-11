@@ -3815,6 +3815,15 @@ impl MultiUserMemoryManager {
         // SHODH_CAUSAL_SPINE=0. Precision-gated inside (causal families only).
         graph_guard.mint_causal_spine_edges(&experience.content, &entity_uuids, memory_id.0, now);
 
+        // Free-label engine (ER Task 3.1): extract appositive / definite-description
+        // aliases from the text and seed them ("Apple, the iPhone maker" → iPhone
+        // maker = Apple), so later mentions resolve to the canonical node with no KB
+        // and no LLM. No-ops without the dependency parser.
+        let appos = graph_guard.mint_appositive_aliases(&experience.content);
+        if appos > 0 {
+            tracing::debug!(aliases = appos, "seeded appositive aliases");
+        }
+
         // Aggregate the episode's surprise components (raw facts only —
         // deviation/z-scoring happens at read time against the user's rolling
         // baseline) and persist them on the episode via an idempotent re-put.

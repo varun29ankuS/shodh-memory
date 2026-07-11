@@ -2551,6 +2551,36 @@ impl GraphMemory {
         Ok(written)
     }
 
+    /// Extract appositive / definite-description aliases from the episode text and
+    /// seed them (ER Plan Task 3.1 — the LLM-free "free-label engine"). "Apple, the
+    /// iPhone maker" → alias `iphone maker` → Apple's canonical node, so a later
+    /// bare "iPhone maker" mention resolves to Apple (Tier-0 `resolve_alias`)
+    /// instead of forming a duplicate. Model-free (spaCy-rusty appositive parse);
+    /// no-ops without the parser. Returns the number of aliases seeded.
+    pub fn mint_appositive_aliases(&self, content: &str) -> usize {
+        let Some(pairs) = crate::appositive::extract_from_text(content) else {
+            return 0;
+        };
+        if pairs.is_empty() {
+            return 0;
+        }
+        let mut to_seed: Vec<(String, Uuid)> = Vec::new();
+        for p in pairs {
+            // Idempotent: skip if this surface already resolves. The anchor must be
+            // a real entity in this graph — the appositive phrase becomes its alias.
+            if self.resolve_alias(&p.alias).is_some() {
+                continue;
+            }
+            if let Ok(Some(anchor)) = self.find_entity_by_name(&p.canonical) {
+                to_seed.push((p.alias, anchor.uuid));
+            }
+        }
+        if to_seed.is_empty() {
+            return 0;
+        }
+        self.seed_aliases(to_seed).unwrap_or(0)
+    }
+
     /// Map a causal-spine canonical relation label to a `RelationType`, preferring
     /// the named variants where they exist and falling back to `Custom`.
     fn relation_type_from_label(label: &str) -> RelationType {
