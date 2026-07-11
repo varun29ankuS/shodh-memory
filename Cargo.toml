@@ -28,6 +28,7 @@ exclude = [
     "*.py",
     "*.log",
     "*.json",
+    "!src/entity_type/entity-type-schema.json",
     "!Cargo.lock",
     "job_log.txt",
     "macos_log.txt",
