@@ -480,6 +480,18 @@ fn label_to_string(label: &EntityLabel) -> String {
         EntityLabel::Team => "team".to_string(),
         EntityLabel::Role => "role".to_string(),
         EntityLabel::Module => "module".to_string(),
+        EntityLabel::Norp => "norp".to_string(),
+        EntityLabel::Gpe => "gpe".to_string(),
+        EntityLabel::Facility => "facility".to_string(),
+        EntityLabel::Vehicle => "vehicle".to_string(),
+        EntityLabel::Weapon => "weapon".to_string(),
+        EntityLabel::Work => "work".to_string(),
+        EntityLabel::Law => "law".to_string(),
+        EntityLabel::Title => "title".to_string(),
+        EntityLabel::Cyber => "cyber".to_string(),
+        EntityLabel::Money => "money".to_string(),
+        EntityLabel::Quantity => "quantity".to_string(),
+        EntityLabel::Time => "time".to_string(),
         EntityLabel::Other(s) => s.to_lowercase(),
     }
 }

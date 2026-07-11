@@ -982,6 +982,18 @@ impl NeuralNer {
                     | EntityLabel::Pipeline
                     | EntityLabel::Role
                     | EntityLabel::Module
+                    | EntityLabel::Norp
+                    | EntityLabel::Gpe
+                    | EntityLabel::Facility
+                    | EntityLabel::Vehicle
+                    | EntityLabel::Weapon
+                    | EntityLabel::Work
+                    | EntityLabel::Law
+                    | EntityLabel::Title
+                    | EntityLabel::Cyber
+                    | EntityLabel::Money
+                    | EntityLabel::Quantity
+                    | EntityLabel::Time
                     | EntityLabel::Other(_) => NerEntityType::Misc,
                 };
 

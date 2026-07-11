@@ -211,6 +211,30 @@ pub enum EntityLabel {
     Role,
     /// Code modules, packages, crates, libraries, ROS2 packages
     Module,
+    /// Nationalities, religious, or political groups (schema coarse: `norp`)
+    Norp,
+    /// Geopolitical entity — countries, cities, states as political actors (schema coarse: `gpe`)
+    Gpe,
+    /// Buildings, airports, highways, bridges (schema coarse: `facility`)
+    Facility,
+    /// Cars, trains, ships, aircraft (schema coarse: `vehicle`)
+    Vehicle,
+    /// Weapons and munitions (schema coarse: `weapon`)
+    Weapon,
+    /// Titled creative works — books, films, songs, artworks (schema coarse: `work`)
+    Work,
+    /// Named laws, treaties, regulations, court cases (schema coarse: `law`)
+    Law,
+    /// Honorifics and named positions — "President", "CEO" (schema coarse: `title`)
+    Title,
+    /// Malware, CVEs, threat actors, cyber campaigns (schema coarse: `cyber`)
+    Cyber,
+    /// Monetary amounts (schema coarse: `money`)
+    Money,
+    /// Non-monetary measurements — distance, weight, percentages (schema coarse: `quantity`)
+    Quantity,
+    /// Times of day / durations, distinct from calendar `Date` (schema coarse: `time`)
+    Time,
     Other(String),
 }
 
@@ -242,7 +266,50 @@ impl EntityLabel {
             Self::Team => "Team",
             Self::Role => "Role",
             Self::Module => "Module",
+            Self::Norp => "Norp",
+            Self::Gpe => "Gpe",
+            Self::Facility => "Facility",
+            Self::Vehicle => "Vehicle",
+            Self::Weapon => "Weapon",
+            Self::Work => "Work",
+            Self::Law => "Law",
+            Self::Title => "Title",
+            Self::Cyber => "Cyber",
+            Self::Money => "Money",
+            Self::Quantity => "Quantity",
+            Self::Time => "Time",
             Self::Other(s) => s.as_str(),
+        }
+    }
+
+    /// Map a schema coarse id (from `crate::entity_type::schema().coarse`) to the
+    /// matching `EntityLabel` variant.
+    ///
+    /// All 18 coarse ids in the entity-type schema resolve to a real variant —
+    /// GLiNER typing must never degrade a schema-recognized coarse class to
+    /// `Other(String)`. An id outside the schema (e.g. a stale/foreign value)
+    /// still falls back to `Other` rather than panicking.
+    pub fn from_coarse_id(id: &str) -> EntityLabel {
+        match id {
+            "person" => EntityLabel::Person,
+            "organization" => EntityLabel::Organization,
+            "location" => EntityLabel::Location,
+            "product" => EntityLabel::Product,
+            "event" => EntityLabel::Event,
+            "date" => EntityLabel::Date,
+            "norp" => EntityLabel::Norp,
+            "gpe" => EntityLabel::Gpe,
+            "facility" => EntityLabel::Facility,
+            "vehicle" => EntityLabel::Vehicle,
+            "weapon" => EntityLabel::Weapon,
+            "work" => EntityLabel::Work,
+            "law" => EntityLabel::Law,
+            "title" => EntityLabel::Title,
+            "cyber" => EntityLabel::Cyber,
+            "money" => EntityLabel::Money,
+            "quantity" => EntityLabel::Quantity,
+            "time" => EntityLabel::Time,
+            other => EntityLabel::Other(other.to_string()),
         }
     }
 
@@ -7010,6 +7077,18 @@ fn entity_type_color(label: Option<&EntityLabel>) -> String {
         Some(EntityLabel::Team) => "#27AE60".to_string(),   // Green — organizational
         Some(EntityLabel::Role) => "#8E44AD".to_string(),   // Dark purple — roles
         Some(EntityLabel::Module) => "#D35400".to_string(), // Pumpkin — code modules
+        Some(EntityLabel::Norp) => "#C0392B".to_string(),   // Brick red — groups/affiliations
+        Some(EntityLabel::Gpe) => "#5DADE2".to_string(),    // Lighter blue — political geography
+        Some(EntityLabel::Facility) => "#7F8C8D".to_string(), // Slate — built structures
+        Some(EntityLabel::Vehicle) => "#34495E".to_string(), // Dark slate — vehicles
+        Some(EntityLabel::Weapon) => "#922B21".to_string(), // Dark red — weapons
+        Some(EntityLabel::Work) => "#AF7AC5".to_string(),   // Orchid — creative works
+        Some(EntityLabel::Law) => "#6C3483".to_string(),    // Deep violet — legal instruments
+        Some(EntityLabel::Title) => "#CA6F1E".to_string(),  // Burnt orange — honorifics/positions
+        Some(EntityLabel::Cyber) => "#17202A".to_string(),  // Near-black — threats/malware
+        Some(EntityLabel::Money) => "#28B463".to_string(),  // Money green
+        Some(EntityLabel::Quantity) => "#F5B041".to_string(), // Amber — measurements
+        Some(EntityLabel::Time) => "#A569BD".to_string(),   // Violet — distinct from Date's light purple
         Some(EntityLabel::Other(_)) => "#AEB6BF".to_string(), // Gray
         None => "#AEB6BF".to_string(),                      // Gray default
     }
@@ -8139,6 +8218,18 @@ impl EntityExtractor {
             EntityLabel::Team => 0.7,           // Teams are organizational anchors
             EntityLabel::Role => 0.55,          // Roles are semi-generic
             EntityLabel::Module => 0.55,        // Modules are code-level entities
+            EntityLabel::Norp => 0.55,          // Nationalities/groups are moderately salient
+            EntityLabel::Gpe => 0.6,            // Geopolitical entities, on par with Location
+            EntityLabel::Facility => 0.5,       // Facilities are concrete but generic
+            EntityLabel::Vehicle => 0.5,        // Vehicles are concrete but generic
+            EntityLabel::Weapon => 0.55,        // Weapons are specific, notable entities
+            EntityLabel::Work => 0.6,           // Named works are specific, on par with Product
+            EntityLabel::Law => 0.55,           // Named laws/regulations are specific anchors
+            EntityLabel::Title => 0.5,          // Titles are semi-generic, like Role
+            EntityLabel::Cyber => 0.55,         // Cyber entities (CVEs, malware) are specific
+            EntityLabel::Money => 0.4,          // Monetary amounts are structural, like Date
+            EntityLabel::Quantity => 0.35,      // Measurements are structural, low salience
+            EntityLabel::Time => 0.3,           // Time-of-day is structural, like Date
             EntityLabel::Other(_) => 0.3,       // Unknown types get low salience
         };
 
@@ -8533,6 +8624,47 @@ impl Default for EntityExtractor {
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    /// Every one of the 18 schema coarse ids must resolve to a real
+    /// `EntityLabel` variant, never the `Other(String)` fallback. This couples
+    /// the entity-type schema asset (`src/entity_type/entity-type-schema.json`)
+    /// to the type system so future schema drift (a coarse id added to the
+    /// JSON without a matching enum variant) fails CI instead of silently
+    /// degrading GLiNER-typed entities to `Other`.
+    #[test]
+    fn every_schema_coarse_maps_to_a_variant() {
+        for coarse in &crate::entity_type::schema().coarse {
+            let label = EntityLabel::from_coarse_id(&coarse.id);
+            assert!(
+                !matches!(label, EntityLabel::Other(_)),
+                "coarse id `{}` rolled up to Other(_) — EntityLabel::from_coarse_id is missing a variant for it",
+                coarse.id
+            );
+        }
+    }
+
+    /// Every one of the 141 schema fine leaves must roll up (via
+    /// `coarse_of`) to a coarse id that `from_coarse_id` resolves to a real
+    /// `EntityLabel` variant. This is the end-to-end check: a fine label
+    /// GLiNER actually predicts must never dead-end in `Other(_)`.
+    #[test]
+    fn every_fine_rolls_up_to_a_real_variant() {
+        for fine in &crate::entity_type::schema().fine {
+            let coarse_id = crate::entity_type::coarse_of(&fine.label).unwrap_or_else(|| {
+                panic!(
+                    "fine label `{}` has no coarse rollup in the schema",
+                    fine.label
+                )
+            });
+            let label = EntityLabel::from_coarse_id(coarse_id);
+            assert!(
+                !matches!(label, EntityLabel::Other(_)),
+                "fine label `{}` rolls up to coarse `{}` which resolves to Other(_) — EntityLabel::from_coarse_id is missing a variant for it",
+                fine.label,
+                coarse_id
+            );
+        }
+    }
 
     #[test]
     fn spreading_weight_prefers_predicates_over_cooccurrence() {

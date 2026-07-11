@@ -464,6 +464,18 @@ fn parse_entity_label(s: &str) -> EntityLabel {
         "team" => EntityLabel::Team,
         "role" => EntityLabel::Role,
         "module" => EntityLabel::Module,
+        "norp" => EntityLabel::Norp,
+        "gpe" => EntityLabel::Gpe,
+        "facility" => EntityLabel::Facility,
+        "vehicle" => EntityLabel::Vehicle,
+        "weapon" => EntityLabel::Weapon,
+        "work" => EntityLabel::Work,
+        "law" => EntityLabel::Law,
+        "title" => EntityLabel::Title,
+        "cyber" => EntityLabel::Cyber,
+        "money" => EntityLabel::Money,
+        "quantity" => EntityLabel::Quantity,
+        "time" => EntityLabel::Time,
         other => EntityLabel::Other(other.to_string()),
     }
 }
