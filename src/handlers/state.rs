@@ -3436,6 +3436,17 @@ impl MultiUserMemoryManager {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
+        // TYPED-ONLY relation gate (the strongest CoOccurs cull). Where the PMI gate
+        // drops only INCIDENTAL generic edges (PMI < floor), this drops EVERY generic
+        // co-occurrence edge regardless of PMI — the graph retains only edges that
+        // earned a relation type (cue / semantic / learned / label-pair typed) plus
+        // fragment bridges and the causal spine. Turns the co-occurrence mesh into a
+        // pure typed + causal graph. Aggressive: CoOccurs also carries spreading-
+        // activation connectivity, so this is measured, not a default. Opt in with
+        // SHODH_GRAPH_TYPED_ONLY=1. Applies at edge BIRTH; existing graphs don't shrink.
+        let typed_only: bool = std::env::var("SHODH_GRAPH_TYPED_ONLY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         // N (total episodes) and its log (the PMI normalizer), read once outside the
         // O(n^2) pair loop. mention_count is the per-entity document-frequency proxy.
         let total_episodes = graph_guard.total_episode_count().max(1) as f32;
@@ -3705,14 +3716,18 @@ impl MultiUserMemoryManager {
                 // (CoOccurs/RelatedTo), NON-fragment edges — typed edges and fragment
                 // bridges are never pruned. PMI = log2(N / (df_i·df_j)) at birth (co=1);
                 // below the floor means the pair co-occurs no more than chance → noise.
-                if pmi_gate
-                    && !(fragment_of_comention[i] || fragment_of_comention[j])
+                // Generic co-occurrence cull. TYPED-ONLY drops EVERY generic edge;
+                // the PMI gate drops only INCIDENTAL ones (PMI below floor). Neither
+                // touches typed edges (cue/semantic/learned/label) or fragment bridges
+                // — those carry grounding the PMI lacks.
+                let is_generic_prunable = !(fragment_of_comention[i]
+                    || fragment_of_comention[j])
                     && matches!(
                         relation_type,
                         crate::graph_memory::RelationType::CoOccurs
                             | crate::graph_memory::RelationType::RelatedTo
-                    )
-                    && birth_pmi < pmi_gate_min
+                    );
+                if is_generic_prunable && (typed_only || (pmi_gate && birth_pmi < pmi_gate_min))
                 {
                     pmi_gated += 1;
                     // it was tallied as generic above; move the tally to pmi_gated
