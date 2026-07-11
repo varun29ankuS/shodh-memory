@@ -2195,6 +2195,35 @@ impl MultiUserMemoryManager {
                 }
             }
 
+            // Consolidation: canonicalize duplicate mention-nodes into canonical
+            // entities (parser + Fellegi-Sunter/CESI) and seed the merged surfaces
+            // as aliases so future ingests resolve directly (closes the ingest
+            // loop). This is a "sleep" operation — it runs on the heavy cycle, not
+            // per request. No-ops when the dependency parser isn't deployed
+            // (SHODH_SPACY_MODEL_PATH unset). Opt out with SHODH_CONSOLIDATE_CANON=0.
+            let canon_on = std::env::var("SHODH_CONSOLIDATE_CANON")
+                .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+                .unwrap_or(true);
+            if is_heavy && canon_on {
+                if let Ok(graph) = self.get_user_graph(&user_id) {
+                    let graph_guard = graph.write();
+                    match graph_guard.canonicalize_entities() {
+                        Ok((merged, repointed)) if merged > 0 => {
+                            tracing::info!(
+                                user_id = %user_id,
+                                merged,
+                                repointed,
+                                "Consolidation: canonicalized duplicate entities"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::debug!("Canonicalize failed for user {}: {}", user_id, e)
+                        }
+                    }
+                }
+            }
+
             // Release consolidation lock for this user
             self.release_consolidation_lock(&user_id);
         }

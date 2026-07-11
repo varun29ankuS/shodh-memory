@@ -2780,7 +2780,7 @@ impl GraphMemory {
         // embedding evidence let it merge abbreviations / paraphrases
         // ("Key Bridge" ≡ "Francis Scott Key Bridge") that surface strings miss.
         let mut records: Vec<MatchRecord> = Vec::new();
-        let mut meta: Vec<(Uuid, bool, usize)> = Vec::new(); // (uuid, is_proper, mentions)
+        let mut meta: Vec<(Uuid, bool, usize, String)> = Vec::new(); // (uuid, is_proper, mentions, name)
         for e in &entities {
             let Some(parsed) =
                 crate::dep_parser::parse(&e.name).and_then(|t| parse_mention_tokens(&t))
@@ -2821,7 +2821,7 @@ impl GraphMemory {
                 name_embedding: e.name_embedding.clone(),
                 ..Default::default()
             });
-            meta.push((e.uuid, e.is_proper_noun, e.mention_count));
+            meta.push((e.uuid, e.is_proper_noun, e.mention_count, e.name.clone()));
         }
         if records.len() < 2 {
             return Ok((0, 0));
@@ -2832,6 +2832,12 @@ impl GraphMemory {
 
         let mut merged_nodes = 0usize;
         let mut repointed = 0usize;
+        // Alias pairs to seed after merging: every merged surface → its canonical
+        // UUID. `resolve_alias` is checked at ingest (Tier 0), so once seeded, a
+        // future mention of that surface redirects to the canonical node instead of
+        // re-creating the duplicate — this closes the ingest loop (canonicalize →
+        // aliases → cleaner ingest → less to canonicalize).
+        let mut alias_pairs: Vec<(String, Uuid)> = Vec::new();
         for cluster_idxs in clusters {
             if cluster_idxs.len() < 2 {
                 continue;
@@ -2847,6 +2853,12 @@ impl GraphMemory {
                     continue;
                 }
                 let member = meta[i].0;
+                // Remember this surface → canonical mapping (raw name + parsed clean
+                // form) so future ingests of the merged surface resolve directly.
+                alias_pairs.push((meta[i].3.clone(), canonical));
+                if records[i].name != meta[i].3.trim().to_lowercase() {
+                    alias_pairs.push((records[i].name.clone(), canonical));
+                }
                 // Re-point every edge touching the member onto the canonical node.
                 let member_edges = self.get_entity_relationships(&member)?;
                 for edge in member_edges {
@@ -2869,9 +2881,17 @@ impl GraphMemory {
                 merged_nodes += 1;
             }
         }
+        // Close the ingest loop: seed the merged surfaces as aliases of their
+        // canonical node so re-ingesting them never re-creates the duplicate.
+        let aliases_seeded = if alias_pairs.is_empty() {
+            0
+        } else {
+            self.seed_aliases(alias_pairs).unwrap_or(0)
+        };
         tracing::info!(
             merged = merged_nodes,
             repointed,
+            aliases_seeded,
             "canonicalize (Splink): merged duplicate mention nodes into canonical entities"
         );
         Ok((merged_nodes, repointed))
