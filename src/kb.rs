@@ -185,9 +185,27 @@ mod tests {
 
     fn kb() -> DomainKb {
         DomainKb::from_entities(vec![
-            ent("Q20800404", "Alphabet Inc.", &["Google", "Alphabet", "GOOGL"], "organization", vec![1.0, 0.0, 0.0]),
-            ent("Q312", "Apple Inc.", &["Apple", "the iPhone maker"], "organization", vec![0.0, 1.0, 0.0]),
-            ent("Q1297", "Chicago", &["the Windy City"], "location", vec![1.0, 0.0, 0.0]),
+            ent(
+                "Q20800404",
+                "Alphabet Inc.",
+                &["Google", "Alphabet", "GOOGL"],
+                "organization",
+                vec![1.0, 0.0, 0.0],
+            ),
+            ent(
+                "Q312",
+                "Apple Inc.",
+                &["Apple", "the iPhone maker"],
+                "organization",
+                vec![0.0, 1.0, 0.0],
+            ),
+            ent(
+                "Q1297",
+                "Chicago",
+                &["the Windy City"],
+                "location",
+                vec![1.0, 0.0, 0.0],
+            ),
         ])
     }
 
@@ -207,7 +225,10 @@ mod tests {
         let (loc, _) = kb
             .link_by_embedding(&[1.0, 0.0, 0.0], "location", 0.8)
             .expect("location link");
-        assert_eq!(loc.id, "Q1297", "type-blocking must keep org/location apart");
+        assert_eq!(
+            loc.id, "Q1297",
+            "type-blocking must keep org/location apart"
+        );
         let (org, _) = kb
             .link_by_embedding(&[1.0, 0.0, 0.0], "organization", 0.8)
             .expect("org link");

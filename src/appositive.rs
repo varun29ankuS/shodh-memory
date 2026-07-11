@@ -23,14 +23,15 @@ pub struct AliasPair {
 /// Determiner words stripped from the front of a noun phrase so the alias surface
 /// matches how the entity is stored (`the Dali` → `Dali`, `a container ship` →
 /// `container ship`).
-const LEADING_DET: &[&str] = &["the", "a", "an", "its", "their", "his", "her", "our", "this", "that"];
+const LEADING_DET: &[&str] = &[
+    "the", "a", "an", "its", "their", "his", "her", "our", "this", "that",
+];
 
 /// Dependency labels that grow a noun phrase. Traversal follows ONLY these, so the
 /// NP of an anchor never swallows its own appositive/relative-clause/conjunct
 /// branch — "Apple" stays "Apple", not "Apple the iPhone maker".
 const NP_DEPS: &[&str] = &[
-    "det", "predet", "compound", "amod", "poss", "case", "nummod", "nmod", "punct",
-    "flat", "prt",
+    "det", "predet", "compound", "amod", "poss", "case", "nummod", "nmod", "punct", "flat", "prt",
 ];
 
 /// Indices of the noun phrase headed by `root`: the subtree reached following only
@@ -57,7 +58,10 @@ fn np_indices(tokens: &[ParsedToken], root: usize) -> Vec<usize> {
 
 /// Strip a leading determiner and surrounding punctuation/whitespace.
 fn clean_np(s: &str) -> String {
-    let s = s.trim().trim_matches(|c: char| c == ',' || c == ';' || c == '.').trim();
+    let s = s
+        .trim()
+        .trim_matches(|c: char| c == ',' || c == ';' || c == '.')
+        .trim();
     let mut words: Vec<&str> = s.split_whitespace().collect();
     if let Some(first) = words.first() {
         if LEADING_DET.contains(&first.to_lowercase().as_str()) {
@@ -115,10 +119,7 @@ pub fn extract_appositive_aliases(tokens: &[ParsedToken]) -> Vec<AliasPair> {
         }
         let alias = np_surface(tokens, i);
         let canonical = np_surface(tokens, t.head);
-        if !is_valid(&alias)
-            || !is_valid(&canonical)
-            || alias.eq_ignore_ascii_case(&canonical)
-        {
+        if !is_valid(&alias) || !is_valid(&canonical) || alias.eq_ignore_ascii_case(&canonical) {
             continue;
         }
         let key = (alias.to_lowercase(), canonical.to_lowercase());
@@ -165,7 +166,9 @@ mod tests {
         ];
         let pairs = extract_appositive_aliases(&toks);
         assert!(
-            pairs.iter().any(|p| p.alias == "iPhone maker" && p.canonical == "Apple"),
+            pairs
+                .iter()
+                .any(|p| p.alias == "iPhone maker" && p.canonical == "Apple"),
             "got {pairs:?}"
         );
     }

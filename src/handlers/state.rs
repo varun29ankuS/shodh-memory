@@ -3749,15 +3749,13 @@ impl MultiUserMemoryManager {
                 // the PMI gate drops only INCIDENTAL ones (PMI below floor). Neither
                 // touches typed edges (cue/semantic/learned/label) or fragment bridges
                 // — those carry grounding the PMI lacks.
-                let is_generic_prunable = !(fragment_of_comention[i]
-                    || fragment_of_comention[j])
+                let is_generic_prunable = !(fragment_of_comention[i] || fragment_of_comention[j])
                     && matches!(
                         relation_type,
                         crate::graph_memory::RelationType::CoOccurs
                             | crate::graph_memory::RelationType::RelatedTo
                     );
-                if is_generic_prunable && (typed_only || (pmi_gate && birth_pmi < pmi_gate_min))
-                {
+                if is_generic_prunable && (typed_only || (pmi_gate && birth_pmi < pmi_gate_min)) {
                     pmi_gated += 1;
                     // it was tallied as generic above; move the tally to pmi_gated
                     untyped_generic = untyped_generic.saturating_sub(1);
