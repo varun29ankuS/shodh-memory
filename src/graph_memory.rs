@@ -30,6 +30,11 @@ const CF_NAME_INDEX: &str = "name_index";
 const CF_LOWERCASE_INDEX: &str = "lowercase_index";
 const CF_STEMMED_INDEX: &str = "stemmed_index";
 const CF_RELATION_STATS: &str = "relation_stats";
+/// Alias index: a surface form (lowercased) -> the canonical entity UUID it
+/// resolves to. Seeded by the entity resolver (ER Phase 1.2/1.3); consulted first
+/// in `find_entity_by_name` so `container ship`/`cargo ship`/`the Dali` all land
+/// on one canonical node instead of minting parallel mention nodes.
+const CF_ALIAS: &str = "entity_alias";
 
 const GRAPH_CF_NAMES: &[&str] = &[
     CF_ENTITIES,
@@ -42,6 +47,7 @@ const GRAPH_CF_NAMES: &[&str] = &[
     CF_LOWERCASE_INDEX,
     CF_STEMMED_INDEX,
     CF_RELATION_STATS,
+    CF_ALIAS,
 ];
 
 /// Per-(label-pair, relation) evidence counter for the learned pair table
@@ -2114,6 +2120,11 @@ pub struct GraphMemory {
     /// Key: Porter-stemmed lowercase name, Value: Entity UUID
     entity_stemmed_index: Arc<parking_lot::RwLock<HashMap<String, Uuid>>>,
 
+    /// In-memory alias index (loaded from the alias CF): a surface form
+    /// (lowercased) -> the canonical entity UUID it resolves to. Curated by the
+    /// entity resolver; the highest-priority tier in `find_entity_by_name`.
+    entity_alias_index: Arc<parking_lot::RwLock<HashMap<String, Uuid>>>,
+
     // === Atomic counters for O(1) stats (P1 fix) ===
     /// Entity count - initialized from entity_name_index.len(), updated on add
     entity_count: Arc<AtomicUsize>,
@@ -2200,6 +2211,9 @@ impl GraphMemory {
             .cf_handle(CF_STEMMED_INDEX)
             .expect("stemmed_index CF must exist")
     }
+    fn alias_cf(&self) -> &ColumnFamily {
+        self.db.cf_handle(CF_ALIAS).expect("alias CF must exist")
+    }
 
     /// Create a new graph memory system.
     ///
@@ -2262,6 +2276,10 @@ impl GraphMemory {
         // Load/migrate stemmed index for O(1) linguistic lookup
         let entity_stemmed_index = Self::load_or_migrate_stemmed_index(&db, &entity_name_index)?;
 
+        // Load the alias index (surface -> canonical UUID). New CF: empty for
+        // pre-existing DBs, no migration — it is populated only by the resolver.
+        let entity_alias_index = Self::load_alias_index(&db)?;
+
         let entity_count = entity_name_index.len();
 
         // Count relationships and episodes during startup (one-time cost)
@@ -2289,6 +2307,7 @@ impl GraphMemory {
             entity_name_index: Arc::new(parking_lot::RwLock::new(entity_name_index)),
             entity_lowercase_index: Arc::new(parking_lot::RwLock::new(entity_lowercase_index)),
             entity_stemmed_index: Arc::new(parking_lot::RwLock::new(entity_stemmed_index)),
+            entity_alias_index: Arc::new(parking_lot::RwLock::new(entity_alias_index)),
             entity_count: Arc::new(AtomicUsize::new(entity_count)),
             relationship_count: Arc::new(AtomicUsize::new(relationship_count)),
             episode_count: Arc::new(AtomicUsize::new(episode_count)),
@@ -2458,6 +2477,76 @@ impl GraphMemory {
         }
 
         Ok(index)
+    }
+
+    /// Load the alias index (surface -> canonical UUID) from the alias CF. Unlike
+    /// the name indexes there is no migration: the CF is empty until the resolver
+    /// seeds it, and a surface with no alias simply falls through to name lookup.
+    fn load_alias_index(db: &DB) -> Result<HashMap<String, Uuid>> {
+        let alias_cf = db
+            .cf_handle(CF_ALIAS)
+            .ok_or_else(|| anyhow::anyhow!("CF '{}' not found", CF_ALIAS))?;
+        let mut index = HashMap::new();
+        let iter = db.iterator_cf(alias_cf, rocksdb::IteratorMode::Start);
+        for (key, value) in iter.flatten() {
+            if let (Ok(surface), Ok(uuid_bytes)) = (
+                std::str::from_utf8(&key),
+                <[u8; 16]>::try_from(value.as_ref()),
+            ) {
+                index.insert(surface.to_string(), Uuid::from_bytes(uuid_bytes));
+            }
+        }
+        Ok(index)
+    }
+
+    /// Register that `surface` is an alias of the canonical entity `canonical`.
+    /// Idempotent; the surface is trimmed and lowercased so resolution is
+    /// case-insensitive. Persists to the alias CF and the in-memory index.
+    pub fn put_alias(&self, surface: &str, canonical: Uuid) -> Result<()> {
+        let key = surface.trim().to_lowercase();
+        if key.is_empty() {
+            return Ok(());
+        }
+        self.db
+            .put_cf(self.alias_cf(), key.as_bytes(), canonical.as_bytes())?;
+        self.entity_alias_index.write().insert(key, canonical);
+        Ok(())
+    }
+
+    /// Resolve a surface form to its canonical entity UUID, if an alias is
+    /// registered. O(1) in-memory lookup.
+    pub fn resolve_alias(&self, surface: &str) -> Option<Uuid> {
+        let key = surface.trim().to_lowercase();
+        self.entity_alias_index.read().get(&key).copied()
+    }
+
+    /// Number of registered aliases.
+    pub fn alias_count(&self) -> usize {
+        self.entity_alias_index.read().len()
+    }
+
+    /// Seed the alias table from a batch of `(surface, canonical_uuid)` pairs —
+    /// the output of an entity-resolution pass. Written atomically; the in-memory
+    /// index is updated to match. Returns the number of aliases written.
+    pub fn seed_aliases<I>(&self, pairs: I) -> Result<usize>
+    where
+        I: IntoIterator<Item = (String, Uuid)>,
+    {
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut staged: Vec<(String, Uuid)> = Vec::new();
+        for (surface, canonical) in pairs {
+            let key = surface.trim().to_lowercase();
+            if key.is_empty() {
+                continue;
+            }
+            batch.put_cf(self.alias_cf(), key.as_bytes(), canonical.as_bytes());
+            staged.push((key, canonical));
+        }
+        self.db.write(batch)?;
+        let written = staged.len();
+        let mut index = self.entity_alias_index.write();
+        index.extend(staged);
+        Ok(written)
     }
 
     /// Load lowercase name->UUID index, or migrate from name_index if empty
@@ -3019,6 +3108,16 @@ impl GraphMemory {
     /// 4. Substring match - "York" matches "New York City"
     /// 5. Word-level match - "York" matches "New York"
     pub fn find_entity_by_name(&self, name: &str) -> Result<Option<EntityNode>> {
+        // Tier 0: Alias resolution (curated canonical mapping — highest priority).
+        // A surface the resolver merged (e.g. "cargo ship" -> the Dali) resolves
+        // straight to its canonical node rather than matching its own stale
+        // mention. If the canonical UUID is dangling, fall through to name lookup.
+        if let Some(canonical) = self.resolve_alias(name) {
+            if let Some(entity) = self.get_entity(&canonical)? {
+                return Ok(Some(entity));
+            }
+        }
+
         // Tier 1: Exact match (O(1))
         let uuid = {
             let index = self.entity_name_index.read();
@@ -4237,6 +4336,7 @@ impl GraphMemory {
         self.entity_name_index.write().clear();
         self.entity_lowercase_index.write().clear();
         self.entity_stemmed_index.write().clear();
+        self.entity_alias_index.write().clear();
 
         // Reset counters
         self.entity_count.store(0, Ordering::Relaxed);
@@ -4982,6 +5082,26 @@ impl GraphMemory {
     /// Note: Limits to top N memories to avoid O(n²) explosion on large retrievals.
     /// Returns the number of edges created/strengthened.
     pub fn record_memory_coactivation(&self, memory_ids: &[Uuid]) -> Result<usize> {
+        // STRENGTHEN-ONLY gate. Read here (not in the hot loop) so the impl is
+        // env-free and unit-testable by parameter. Default OFF pending the
+        // recall-neutrality A/B; opt in with SHODH_COACT_STRENGTHEN_ONLY=1.
+        let strengthen_only = std::env::var("SHODH_COACT_STRENGTHEN_ONLY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        self.record_memory_coactivation_impl(memory_ids, strengthen_only)
+    }
+
+    /// Co-retrieval Hebbian update. `strengthen_only = true`: reinforce edges that
+    /// ALREADY exist between co-active memories; do NOT mint a new CoRetrieved edge
+    /// for every co-retrieved pair. Un-gated all-pairs creation is the recall-time
+    /// flood (measured ~80% of graph edges, bypassing the ingest gates, unbounded
+    /// with query volume — the OOM driver). Mirrors schema-gated consolidation:
+    /// usage strengthens existing structure, it does not wire every co-activation.
+    fn record_memory_coactivation_impl(
+        &self,
+        memory_ids: &[Uuid],
+        strengthen_only: bool,
+    ) -> Result<usize> {
         const MAX_COACTIVATION_SIZE: usize = 20;
 
         // Limit to top N to bound worst-case complexity
@@ -5022,7 +5142,7 @@ impl GraphMemory {
                         batch.put_cf(self.relationships_cf(), key, value);
                         edges_updated += 1;
                     }
-                } else {
+                } else if !strengthen_only {
                     // Create new CoRetrieved edge (bidirectional represented as single edge)
                     // Starts in L1 (working memory) with tier-specific initial weight
                     let edge = RelationshipEdge {
@@ -9782,6 +9902,98 @@ mod tests {
         graph.add_entity(entity).unwrap()
     }
 
+    #[test]
+    fn alias_resolves_surface_to_canonical() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let dali = make_entity(&graph, "Dali");
+        graph.put_alias("cargo ship", dali).unwrap();
+
+        // Direct resolution, case-insensitive; unknown surfaces miss.
+        assert_eq!(graph.resolve_alias("cargo ship"), Some(dali));
+        assert_eq!(graph.resolve_alias("Cargo Ship"), Some(dali));
+        assert_eq!(graph.resolve_alias("unknown surface"), None);
+
+        // find_entity_by_name redirects the alias to the canonical node (Tier 0).
+        let found = graph.find_entity_by_name("cargo ship").unwrap().unwrap();
+        assert_eq!(found.uuid, dali);
+        assert_eq!(found.name, "Dali");
+    }
+
+    #[test]
+    fn aliases_persist_across_reopen() {
+        // "Canonical set stable across re-runs": the alias table is CF-backed and
+        // reloads into the in-memory index on open.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dali = {
+            let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+            let dali = make_entity(&graph, "Dali");
+            graph.put_alias("the vessel", dali).unwrap();
+            assert_eq!(graph.resolve_alias("the vessel"), Some(dali));
+            dali
+        };
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        assert_eq!(graph.resolve_alias("the vessel"), Some(dali));
+        assert_eq!(
+            graph
+                .find_entity_by_name("the vessel")
+                .unwrap()
+                .unwrap()
+                .name,
+            "Dali"
+        );
+    }
+
+    #[test]
+    fn seed_aliases_writes_batch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let bridge = make_entity(&graph, "Francis Scott Key Bridge");
+
+        let written = graph
+            .seed_aliases([
+                ("Key Bridge".to_string(), bridge),
+                ("the bridge".to_string(), bridge),
+                ("   ".to_string(), bridge), // blank surface is skipped
+            ])
+            .unwrap();
+
+        assert_eq!(written, 2, "blank surface must be skipped");
+        assert_eq!(graph.resolve_alias("key bridge"), Some(bridge));
+        assert_eq!(graph.resolve_alias("the bridge"), Some(bridge));
+        assert_eq!(graph.alias_count(), 2);
+    }
+
+    #[test]
+    fn dangling_alias_falls_through_to_name_lookup() {
+        // An alias pointing at a non-existent canonical UUID must not shadow the
+        // real entity of that surface: Tier 0 returns None, the tiers continue.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let real = make_entity(&graph, "Baltimore");
+        graph.put_alias("baltimore", Uuid::new_v4()).unwrap();
+
+        let found = graph.find_entity_by_name("Baltimore").unwrap().unwrap();
+        assert_eq!(
+            found.uuid, real,
+            "dangling alias must not shadow the real node"
+        );
+    }
+
+    #[test]
+    fn clear_all_wipes_aliases() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let dali = make_entity(&graph, "Dali");
+        graph.put_alias("cargo ship", dali).unwrap();
+        assert_eq!(graph.alias_count(), 1);
+
+        graph.clear_all().unwrap();
+        assert_eq!(graph.alias_count(), 0, "GDPR erasure must wipe aliases");
+        assert_eq!(graph.resolve_alias("cargo ship"), None);
+    }
+
     /// Helper: create a directed edge from → to
     fn make_edge(graph: &GraphMemory, from: Uuid, to: Uuid) -> Uuid {
         let edge = RelationshipEdge {
@@ -10606,5 +10818,46 @@ mod tests {
             "a current-schema edge must not be flagged for migration"
         );
         assert_eq!(decoded.provenance.len(), 1);
+    }
+
+    #[test]
+    fn coactivation_strengthen_only_creates_no_new_edges() {
+        // CoRetrieved recall-time flood fix: strengthen-only must never mint a new
+        // CoRetrieved edge for a co-retrieved pair that has no prior edge.
+        let temp = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp.path(), None).unwrap();
+        let mems: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
+
+        // Default (flag off) floods all C(5,2)=10 CoRetrieved edges.
+        let created = graph.record_memory_coactivation_impl(&mems, false).unwrap();
+        assert_eq!(
+            created, 10,
+            "default coactivation floods all-pairs CoRetrieved edges"
+        );
+
+        // Strengthen-only on a FRESH graph: no existing edges => nothing created.
+        let temp2 = tempfile::tempdir().unwrap();
+        let graph2 = GraphMemory::new(temp2.path(), None).unwrap();
+        let created2 = graph2.record_memory_coactivation_impl(&mems, true).unwrap();
+        assert_eq!(
+            created2, 0,
+            "strengthen-only must create no new edges on a fresh graph"
+        );
+    }
+
+    #[test]
+    fn coactivation_strengthen_only_still_strengthens_existing() {
+        // Strengthen-only keeps the good half: it reinforces edges that already exist.
+        let temp = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp.path(), None).unwrap();
+        let mems: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        // First pass creates the C(3,2)=3 edges.
+        graph.record_memory_coactivation_impl(&mems, false).unwrap();
+        // Strengthen-only pass: all 3 now exist => all strengthened, none created.
+        let strengthened = graph.record_memory_coactivation_impl(&mems, true).unwrap();
+        assert_eq!(
+            strengthened, 3,
+            "strengthen-only reinforces the existing edges"
+        );
     }
 }
