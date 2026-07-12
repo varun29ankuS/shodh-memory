@@ -28,9 +28,8 @@ use anyhow::Result;
 
 // Re-export downloader functions for convenience
 pub use downloader::{
-    are_models_downloaded, are_ner_models_downloaded, download_ner_models, ensure_downloaded,
-    get_cache_dir, get_models_dir, get_ner_models_dir, get_onnx_runtime_path,
-    is_onnx_runtime_downloaded, print_status,
+    are_models_downloaded, ensure_downloaded, get_cache_dir, get_models_dir, get_ner_models_dir,
+    get_onnx_runtime_path, is_onnx_runtime_downloaded, print_status,
 };
 
 // Re-export NER types

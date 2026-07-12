@@ -48,7 +48,7 @@ struct LazyModel {
 impl LazyModel {
     fn new(config: &EmbeddingConfig) -> Result<Self> {
         // Defense in depth: session creation must never precede the runtime
-        // path guard (see LazyNerModel::new for the failure mode). Idempotent.
+        // path guard (see LazyGlinerModel::new for the failure mode). Idempotent.
         let offline_mode = std::env::var("SHODH_OFFLINE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);

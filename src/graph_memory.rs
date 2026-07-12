@@ -348,6 +348,12 @@ impl EntityLabel {
             | Self::Metric
             | Self::Environment
             | Self::Project => &[EntityLabel::Concept],
+            // GLiNER coarse subtypes (schema-driven typing)
+            Self::Gpe | Self::Facility => &[EntityLabel::Location],
+            Self::Vehicle | Self::Weapon => &[EntityLabel::Product],
+            Self::Title => &[EntityLabel::Role],
+            Self::Work | Self::Law | Self::Cyber => &[EntityLabel::Concept],
+            Self::Norp => &[EntityLabel::Organization],
             // Base types and Other have no parents
             _ => &[],
         }
@@ -8620,6 +8626,24 @@ mod tests {
                 coarse_id
             );
         }
+    }
+
+    /// The GLiNER coarse subtypes added alongside the schema (Gpe, Facility,
+    /// Vehicle, Weapon, Title, Work, Law, Cyber, Norp) must roll up through
+    /// `parent_labels()` so type-gated retrieval still matches them — a
+    /// "where"-query expecting `[Location]` must not miss `Gpe`/`Facility`
+    /// entities just because GLiNER typed them at the finer variant.
+    #[test]
+    fn new_coarse_variants_match_their_hierarchy_parent() {
+        assert!(EntityLabel::Gpe.matches_with_hierarchy(&EntityLabel::Location));
+        assert!(EntityLabel::Facility.matches_with_hierarchy(&EntityLabel::Location));
+        assert!(EntityLabel::Vehicle.matches_with_hierarchy(&EntityLabel::Product));
+        assert!(EntityLabel::Weapon.matches_with_hierarchy(&EntityLabel::Product));
+        assert!(EntityLabel::Title.matches_with_hierarchy(&EntityLabel::Role));
+        assert!(EntityLabel::Work.matches_with_hierarchy(&EntityLabel::Concept));
+        assert!(EntityLabel::Law.matches_with_hierarchy(&EntityLabel::Concept));
+        assert!(EntityLabel::Cyber.matches_with_hierarchy(&EntityLabel::Concept));
+        assert!(EntityLabel::Norp.matches_with_hierarchy(&EntityLabel::Organization));
     }
 
     #[test]

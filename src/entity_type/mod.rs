@@ -111,6 +111,14 @@ mod tests {
                 f.coarse
             );
         }
+
+        let fine_labels: std::collections::HashSet<&str> =
+            s.fine.iter().map(|f| f.label.as_str()).collect();
+        assert_eq!(
+            fine_labels.len(),
+            s.fine.len(),
+            "fine label set has duplicates — a dup desyncs the label-embedding row count"
+        );
     }
 
     #[test]

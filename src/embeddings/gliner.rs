@@ -13,14 +13,14 @@
 //!
 //! # The 7 ONNX inputs (all built here, per text)
 //! - `input_ids`      `[1, seq]`  i64 — subword ids of the whitespace-split words,
-//!                    tokenized pre-tokenized (`is_split_into_words`).
+//!   tokenized pre-tokenized (`is_split_into_words`).
 //! - `attention_mask` `[1, seq]`  i64 — all ones (single unpadded text).
 //! - `words_mask`     `[1, seq]`  i64 — 1-based word index at the FIRST subword of
-//!                    each word, 0 for continuation subwords and special tokens
-//!                    (gliner `prepare_word_mask`, skip=0, token_level=False).
+//!   each word, 0 for continuation subwords and special tokens
+//!   (gliner `prepare_word_mask`, skip=0, token_level=False).
 //! - `text_lengths`   `[1, 1]`    i64 — number of words (gliner `seq_length`).
 //! - `span_idx`       `[1, W*Kw, 2]` i64 — every `(start, start+offset)` span for
-//!                    `start in 0..W`, `offset in 0..max_width` (gliner `prepare_span_idx`).
+//!   `start in 0..W`, `offset in 0..max_width` (gliner `prepare_span_idx`).
 //! - `span_mask`      `[1, W*Kw]` bool — span end `<= W-1` (in-range), else false.
 //! - `labels_embeds`  `[141, 384]` f32 — the precomputed fine-label embeddings.
 //!
