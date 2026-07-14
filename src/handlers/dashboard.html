@@ -446,7 +446,11 @@ const POST_H = Object.assign({"Content-Type":"application/json"}, H);
 // active paths). A node may only turn warm by DOING something.
 const TYPEC = {org:"#7f9cc4",organization:"#7f9cc4",company:"#7f9cc4",location:"#6fae8f",loc:"#6fae8f",
   gpe:"#6fae8f",person:"#c9b280",per:"#c9b280",artifact:"#a08cc8",technology:"#a08cc8",tech:"#a08cc8",
-  product:"#a08cc8",entity:"#6f93b8",event:"#b0a06f",_d:"#77828f"};
+  product:"#a08cc8",entity:"#6f93b8",event:"#b0a06f",
+  // coarse EntityLabel variants — server entity_type_color (graph_memory.rs) hex verbatim so client==server
+  norp:"#C0392B",facility:"#7F8C8D",vehicle:"#34495E",weapon:"#922B21",work:"#AF7AC5",law:"#6C3483",
+  title:"#CA6F1E",cyber:"#17202A",money:"#28B463",quantity:"#F5B041",time:"#A569BD",
+  _d:"#77828f"};
 const tc = t => TYPEC[(t||"").toLowerCase()] || TYPEC._d;
 // edge strength colour — matches TUI CONN_STRONG/MEDIUM/WEAK thresholds
 const ec = s => s>=0.7 ? "#5f9678" : s>=0.4 ? "#8f8a62" : "#4a5260";
