@@ -70,6 +70,9 @@ python/shodh_memory/models/minilm-l6/*.onnx
 python/shodh_memory/models/minilm-l6/*.json
 python/shodh_memory/models/bert-tiny-ner/*.onnx
 python/shodh_memory/models/bert-tiny-ner/*.json
+# Runtime model assets — kept in-repo for deployment, loaded at runtime, never committed
+# (spaCy-rusty dep-parser bundle via SHODH_SPACY_MODEL_PATH; GLiNER/MiniLM ONNX)
+models/
 experiments/
 
 # Node.js
@@ -131,3 +134,6 @@ facts_out.json
 # Drafts / working scratch — local-only, never commit (plans, eval scratch, reports, venvs)
 drafts/
 tests/recall/longmemeval/
+
+# reconstructed front crate build dir
+front/target/

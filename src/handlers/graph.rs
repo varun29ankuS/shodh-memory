@@ -274,6 +274,58 @@ pub async fn clear_user_graph(
     })))
 }
 
+/// POST /api/graph/{user_id}/canonicalize - Collapse duplicate mention-nodes
+///
+/// Runs entity-linking over the live graph: the spaCy-rusty parser detects each
+/// mention's syntactic head and routes out verb-fragment junk, then the
+/// Fellegi-Sunter (Splink) matcher clusters the surviving mentions type-blocked
+/// at a precision-first threshold. Each cluster's members are merged into the
+/// most-proper / most-mentioned node, re-pointing edges and deleting the
+/// duplicates. Returns how many nodes were merged and how many edges re-pointed.
+pub async fn canonicalize_user_graph(
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    validation::validate_user_id(&user_id).map_validation_err("user_id")?;
+
+    let graph = state.get_user_graph(&user_id).map_err(AppError::Internal)?;
+
+    let (merged, repointed) = tokio::task::spawn_blocking(move || {
+        let graph_guard = graph.write();
+        graph_guard.canonicalize_entities()
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Task join error: {e}")))?
+    .map_err(AppError::Internal)?;
+
+    info!(
+        "Canonicalized graph for user {}: merged {} mention-nodes, re-pointed {} edges",
+        user_id, merged, repointed
+    );
+
+    state.emit_event(MemoryEvent {
+        event_type: "GRAPH_CANONICALIZE".to_string(),
+        timestamp: chrono::Utc::now(),
+        user_id: user_id.clone(),
+        memory_id: Some(format!("{merged}/{repointed}")),
+        content_preview: Some(format!(
+            "Merged {merged} duplicate mention-nodes, re-pointed {repointed} edges"
+        )),
+        memory_type: Some("graph".to_string()),
+        importance: None,
+        count: Some(merged),
+        entities: None,
+        results: None,
+    });
+
+    Ok(Json(serde_json::json!({
+        "canonicalized": {
+            "merged_nodes": merged,
+            "repointed_edges": repointed
+        }
+    })))
+}
+
 /// POST /api/graph/{user_id}/rebuild - Rebuild graph from all existing memories
 pub async fn rebuild_user_graph(
     State(state): State<AppState>,

@@ -81,6 +81,25 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y llvm-dev libclang-dev clang
 
+      # The production typer is GLiNER bi-edge (ONNX); the recall harness refuses
+      # to measure the FALLBACK NER (results would not reflect the shipped system).
+      # Assets are published as a repo release and cached by tag.
+      - name: Cache GLiNER typer assets
+        id: gliner-cache
+        uses: actions/cache@v4
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+
+      - name: Fetch GLiNER typer assets
+        if: steps.gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+          ls -la models/gliner-bi-edge
+
       - name: Verify baseline is checked in
         run: |
           if [ ! -f tests/recall/locomo-gate-baseline.json ]; then
@@ -98,6 +117,8 @@ jobs:
 
       - name: Run L1 smoke suite vs. baseline
         id: run_eval
+        env:
+          SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
         run: |
           set +e
           # RH-12 (#272): --repeats 5 → per-case latency is the median

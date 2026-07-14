@@ -1974,6 +1974,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
 
         // add_entity forces mention_count=1 for a new entity and +1 on each re-add of
@@ -2070,6 +2071,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         let a = graph.add_entity(mk_entity("Alphaword")).unwrap();
         let b = graph.add_entity(mk_entity("Betaword")).unwrap();

@@ -427,6 +427,7 @@ pub async fn remember(
                         confidence: e.confidence,
                         start_char: Some(e.start),
                         end_char: Some(e.end),
+                        fine_label: e.fine_label,
                     })
                     .collect::<Vec<NerEntityRecord>>(),
                 Err(e) => {
@@ -964,6 +965,7 @@ pub async fn batch_remember(
                         confidence: e.confidence,
                         start_char: Some(e.start),
                         end_char: Some(e.end),
+                        fine_label: e.fine_label,
                     })
                     .collect(),
                 Err(e) => {
@@ -1139,6 +1141,7 @@ pub async fn upsert_memory(
                 confidence: e.confidence,
                 start_char: Some(e.start),
                 end_char: Some(e.end),
+                fine_label: e.fine_label,
             })
             .collect(),
         Err(e) => {

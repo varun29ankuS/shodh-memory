@@ -1,0 +1,39 @@
+spacy-rusty
+Copyright 2026 Mayer Unterberg
+
+This product is an independent, clean-room-style reimplementation of the
+inference pipeline of spaCy and its machine-learning library Thinc. It is not
+affiliated with or endorsed by Explosion AI.
+
+spaCy and Thinc are developed by Explosion AI and released under the MIT
+License:
+
+  - spaCy — https://github.com/explosion/spaCy   (MIT License)
+  - Thinc — https://github.com/explosion/thinc    (MIT License)
+
+At runtime, spacy-rusty loads model artifacts (weights, vocab, tokenizer rules,
+labels) that are exported from spaCy's own trained pipelines
+(en_core_web_sm / md / lg). Those model artifacts are the property of their
+respective authors and are distributed under their own licenses (the
+en_core_web_* models are released by Explosion AI under the MIT License).
+Users who redistribute exported model bundles are responsible for complying
+with the license of the corresponding spaCy model.
+
+No spaCy or Thinc source code is included in this repository. Algorithm
+behavior was matched against spaCy's public releases and verified with golden
+fixtures generated from spaCy itself.
+
+--------------------------------------------------------------------------------
+Modifications by the shodh-memory project (vendored copy)
+--------------------------------------------------------------------------------
+
+This is a vendored copy of spacy-rusty. The following changes were made from
+the upstream source and do not alter any numerical inference output:
+
+  - Shared static-vector table changed from `Rc<Vectors>` to `Arc<Vectors>`
+    (ner.rs, pipeline.rs, tok2vec.rs) so a single loaded pipeline can be shared
+    read-only across the server's async worker threads. Refcount primitive only;
+    identical parse/tag/lemma results.
+  - Cargo.toml: crate-type reduced to `rlib` and default features set to none
+    (the wasm bindgen/capi bindings are target_arch = "wasm32" gated and unused
+    in-engine); the workspace root owns the release profile.
