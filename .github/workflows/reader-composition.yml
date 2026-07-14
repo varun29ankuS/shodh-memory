@@ -1,0 +1,162 @@
+# Reader-composition study — the answer-half on top of shodh's retrieval-half.
+#
+# The memory system is LLM-free; published memory-system numbers (Zep 71.2%
+# LongMemEval) are LLM-judged ANSWER accuracy of full pipelines. This study
+# composes shodh retrieval with a SMALL LOCAL reader (Qwen2.5-3B-Instruct
+# Q4_K_M via llama.cpp, CPU, temp 0, fixed seed) so an answer-half number
+# exists for the composition — measured, pinned, and reproducible.
+#
+# Chain: recall-eval (SHODH_DUMP_CONTEXT) exports exactly the top-k retrieved
+# turn texts per question -> reader answers from ONLY those -> scored two ways
+# (substring-EM = conservative deterministic floor; local-judge = supplementary,
+# explicitly NOT comparable to GPT-4-judged literature numbers).
+name: reader composition study
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'LongMemEval questions (deterministic fixture prefix)'
+        required: false
+        default: '100'
+  push:
+    branches: [feat/reader-composition-study]
+    paths: ['.github/workflows/reader-composition.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: reader-composition
+  cancel-in-progress: true
+
+env:
+  # Resume pointer: when set, reuse contexts.jsonl from that run's artifact
+  # instead of re-running the 3h retrieval pass. Pre-merge verification
+  # convenience; blank it (or remove) before merge.
+  CONTEXTS_RUN_ID: '28767286749'
+
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+      - name: Build recall-eval
+        if: ${{ env.CONTEXTS_RUN_ID == '' }}
+        run: cargo build --release --bin recall-eval
+      - name: Cache embedder model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/shodh-memory/models
+          key: shodh-models-minilm-c9745ed1
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          MODEL_DIR="$HOME/.cache/shodh-memory/models/minilm-l6"
+          mkdir -p "$MODEL_DIR"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          BASE="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          [ -s "$MODEL_DIR/model_quantized.onnx" ] || dl "$MODEL_DIR/model_quantized.onnx" "$BASE/onnx/model_quint8_avx2.onnx"
+          [ -s "$MODEL_DIR/tokenizer.json" ]       || dl "$MODEL_DIR/tokenizer.json" "$BASE/tokenizer.json"
+
+      - name: Download LongMemEval-S (pinned) + build fixture
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          JSON=$(python3 - <<'PY'
+          from huggingface_hub import hf_hub_download
+          print(hf_hub_download(repo_id='xiaowu0162/longmemeval-cleaned',
+                                filename='longmemeval_s_cleaned.json',
+                                repo_type='dataset',
+                                revision='98d7416c24c778c2fee6e6f3006e7a073259d48f'))
+          PY
+          )
+          echo "LME_JSON=$JSON" >> "$GITHUB_ENV"
+          python3 benchmarks/longmemeval_to_harness.py --input "$JSON" --shuffle \
+            --limit "${{ github.event.inputs.limit || '100' }}"
+
+      - name: Reuse contexts from prior run
+        if: ${{ env.CONTEXTS_RUN_ID != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$CONTEXTS_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name reader-composition --dir prev
+          cp prev/contexts.jsonl contexts.jsonl
+          wc -l contexts.jsonl
+
+      - name: Retrieval pass with context dump
+        if: ${{ env.CONTEXTS_RUN_ID == '' }}
+        env:
+          SHODH_DUMP_CONTEXT: contexts.jsonl
+        run: |
+          set -o pipefail
+          ./target/release/recall-eval \
+            --longmemeval tests/recall/longmemeval \
+            --output unused.json --storage ./reader-storage 2>retrieval.log | tee retrieval-stdout.log
+          wc -l contexts.jsonl
+
+      - name: Fetch pinned llama.cpp + reader model
+        run: |
+          LLAMA_TAG=b9878
+          curl -fL --retry 10 -o llama.tar.gz \
+            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-bin-ubuntu-x64.tar.gz"
+          mkdir -p llama && tar -xzf llama.tar.gz -C llama
+          LLAMA_SERVER=$(find llama -name "llama-server" -type f | head -1)
+          chmod +x "$LLAMA_SERVER"
+          echo "LLAMA_SERVER=$PWD/$LLAMA_SERVER" >> "$GITHUB_ENV"
+          QWEN_PIN=7dabda4d13d513e3e842b20f0d435c732f172cbe
+          curl -fL --retry 10 -o qwen3b-q4.gguf \
+            "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/${QWEN_PIN}/qwen2.5-3b-instruct-q4_k_m.gguf"
+          ls -la qwen3b-q4.gguf
+
+      - name: Start llama-server (model loaded once)
+        run: |
+          export LD_LIBRARY_PATH="$(dirname "$LLAMA_SERVER"):$LD_LIBRARY_PATH"
+          nohup "$LLAMA_SERVER" -m qwen3b-q4.gguf -c 8192 --threads 4 \
+            --host 127.0.0.1 --port 8080 > llama-server.log 2>&1 &
+          echo $! > llama.pid
+
+      - name: Reader answers (temp 0, seed 29)
+        run: |
+          python3 benchmarks/reader_composition.py answer \
+            --dump contexts.jsonl --server http://127.0.0.1:8080 \
+            --out answers.jsonl
+          wc -l answers.jsonl
+
+      - name: Score (substring-EM + local judge)
+        run: |
+          python3 benchmarks/reader_composition.py score \
+            --answers answers.jsonl --dataset "$LME_JSON" \
+            --server http://127.0.0.1:8080 --out scores.json
+          echo "## Reader composition — LongMemEval answer-half (local 3B reader)" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          d = json.load(open('scores.json'))
+          print(f"questions: {d['questions']}")
+          print(f"- substring-EM (deterministic floor): **{d['substring_em']:.3f}**")
+          print(f"- local-judge (supplementary; {d['judge_caveat']}): **{d['local_judge']:.3f}**")
+          print("")
+          print("| category | n | EM | local-judge |")
+          print("| --- | --- | --- | --- |")
+          for c, v in d['by_category'].items():
+              print(f"| {c} | {v['n']} | {v['em']:.3f} | {v['judge']:.3f} |")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reader-composition
+          path: |
+            contexts.jsonl
+            answers.jsonl
+            scores.json
+            retrieval-stdout.log
+            llama-server.log
