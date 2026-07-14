@@ -244,6 +244,10 @@ pub fn build_protected_routes(state: AppState) -> Router {
             "/api/graph/{user_id}/rebuild",
             post(graph::rebuild_user_graph),
         )
+        .route(
+            "/api/graph/{user_id}/canonicalize",
+            post(graph::canonicalize_user_graph),
+        )
         .route("/api/graph/entity/find", post(graph::find_entity))
         .route("/api/graph/entities/all", post(graph::get_all_entities))
         .route(

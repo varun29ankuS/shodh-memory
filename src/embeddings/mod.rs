@@ -16,6 +16,7 @@
 pub mod chunking;
 pub mod circuit_breaker;
 pub mod downloader;
+pub mod gliner;
 pub mod keywords;
 pub mod minilm;
 pub mod ner;
@@ -27,13 +28,15 @@ use anyhow::Result;
 
 // Re-export downloader functions for convenience
 pub use downloader::{
-    are_models_downloaded, are_ner_models_downloaded, download_ner_models, ensure_downloaded,
-    get_cache_dir, get_models_dir, get_ner_models_dir, get_onnx_runtime_path,
-    is_onnx_runtime_downloaded, print_status,
+    are_models_downloaded, ensure_downloaded, get_cache_dir, get_models_dir, get_ner_models_dir,
+    get_onnx_runtime_path, is_onnx_runtime_downloaded, print_status,
 };
 
 // Re-export NER types
 pub use ner::{NerConfig, NerEntity, NerEntityType, NeuralNer};
+
+// Re-export GLiNER bi-edge typer types
+pub use gliner::{GlinerConfig, GlinerTyper, TypedSpan};
 
 // Re-export keyword types
 pub use keywords::{Keyword, KeywordConfig, KeywordExtractor};

@@ -16,24 +16,31 @@
 //! - Full offline operation
 
 pub mod ab_testing;
+pub mod appositive;
 pub mod auth;
 pub mod backup;
+pub mod catena;
+pub mod causal_vocab;
 pub mod config;
 pub mod constants;
+pub mod contrastive;
 pub mod decay;
 pub mod dep_parser;
 pub mod embeddings;
 pub mod entity_resolution;
+pub mod entity_type;
 pub mod errors;
 pub mod fs_matcher;
 pub mod graph_memory;
 pub mod handlers;
 pub mod integrations;
+pub mod kb;
 pub mod memory;
 pub mod metrics;
 pub mod middleware;
 pub mod mif;
 pub mod migration;
+pub mod openie;
 pub mod query_parsing;
 pub mod recall_harness;
 pub mod relation_typer;

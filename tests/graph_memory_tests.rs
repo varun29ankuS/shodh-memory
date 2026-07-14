@@ -52,6 +52,7 @@ fn create_entity_from_ner(ner: &NeuralNer, text: &str) -> Vec<EntityNode> {
             salience: entity.confidence,
             is_proper_noun: true,
             selectivity: None,
+            fine_type: None,
         })
         .collect()
 }
@@ -83,6 +84,7 @@ fn create_entity(
         salience,
         is_proper_noun: is_proper,
         selectivity: None,
+        fine_type: None,
     }
 }
 

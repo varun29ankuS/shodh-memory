@@ -157,6 +157,14 @@ pub struct EntityNode {
     /// Computed during Forman-Ricci curvature pass. None = not yet computed.
     #[serde(default)]
     pub selectivity: Option<f32>,
+
+    /// Fine-grained schema leaf type (e.g. `"bridge"`, `"malware"`), one level
+    /// more specific than the coarse [`EntityLabel`]. Populated by the GLiNER
+    /// schema-driven typer (`crate::entity_type`); `None` for entities typed
+    /// only at coarse granularity (regex/tag/heuristic extraction paths, or
+    /// records written before this field existed).
+    #[serde(default)]
+    pub fine_type: Option<String>,
 }
 
 fn default_salience() -> f32 {
@@ -211,6 +219,30 @@ pub enum EntityLabel {
     Role,
     /// Code modules, packages, crates, libraries, ROS2 packages
     Module,
+    /// Nationalities, religious, or political groups (schema coarse: `norp`)
+    Norp,
+    /// Geopolitical entity — countries, cities, states as political actors (schema coarse: `gpe`)
+    Gpe,
+    /// Buildings, airports, highways, bridges (schema coarse: `facility`)
+    Facility,
+    /// Cars, trains, ships, aircraft (schema coarse: `vehicle`)
+    Vehicle,
+    /// Weapons and munitions (schema coarse: `weapon`)
+    Weapon,
+    /// Titled creative works — books, films, songs, artworks (schema coarse: `work`)
+    Work,
+    /// Named laws, treaties, regulations, court cases (schema coarse: `law`)
+    Law,
+    /// Honorifics and named positions — "President", "CEO" (schema coarse: `title`)
+    Title,
+    /// Malware, CVEs, threat actors, cyber campaigns (schema coarse: `cyber`)
+    Cyber,
+    /// Monetary amounts (schema coarse: `money`)
+    Money,
+    /// Non-monetary measurements — distance, weight, percentages (schema coarse: `quantity`)
+    Quantity,
+    /// Times of day / durations, distinct from calendar `Date` (schema coarse: `time`)
+    Time,
     Other(String),
 }
 
@@ -242,7 +274,50 @@ impl EntityLabel {
             Self::Team => "Team",
             Self::Role => "Role",
             Self::Module => "Module",
+            Self::Norp => "Norp",
+            Self::Gpe => "Gpe",
+            Self::Facility => "Facility",
+            Self::Vehicle => "Vehicle",
+            Self::Weapon => "Weapon",
+            Self::Work => "Work",
+            Self::Law => "Law",
+            Self::Title => "Title",
+            Self::Cyber => "Cyber",
+            Self::Money => "Money",
+            Self::Quantity => "Quantity",
+            Self::Time => "Time",
             Self::Other(s) => s.as_str(),
+        }
+    }
+
+    /// Map a schema coarse id (from `crate::entity_type::schema().coarse`) to the
+    /// matching `EntityLabel` variant.
+    ///
+    /// All 18 coarse ids in the entity-type schema resolve to a real variant —
+    /// GLiNER typing must never degrade a schema-recognized coarse class to
+    /// `Other(String)`. An id outside the schema (e.g. a stale/foreign value)
+    /// still falls back to `Other` rather than panicking.
+    pub fn from_coarse_id(id: &str) -> EntityLabel {
+        match id {
+            "person" => EntityLabel::Person,
+            "organization" => EntityLabel::Organization,
+            "location" => EntityLabel::Location,
+            "product" => EntityLabel::Product,
+            "event" => EntityLabel::Event,
+            "date" => EntityLabel::Date,
+            "norp" => EntityLabel::Norp,
+            "gpe" => EntityLabel::Gpe,
+            "facility" => EntityLabel::Facility,
+            "vehicle" => EntityLabel::Vehicle,
+            "weapon" => EntityLabel::Weapon,
+            "work" => EntityLabel::Work,
+            "law" => EntityLabel::Law,
+            "title" => EntityLabel::Title,
+            "cyber" => EntityLabel::Cyber,
+            "money" => EntityLabel::Money,
+            "quantity" => EntityLabel::Quantity,
+            "time" => EntityLabel::Time,
+            other => EntityLabel::Other(other.to_string()),
         }
     }
 
@@ -273,6 +348,12 @@ impl EntityLabel {
             | Self::Metric
             | Self::Environment
             | Self::Project => &[EntityLabel::Concept],
+            // GLiNER coarse subtypes (schema-driven typing)
+            Self::Gpe | Self::Facility => &[EntityLabel::Location],
+            Self::Vehicle | Self::Weapon => &[EntityLabel::Product],
+            Self::Title => &[EntityLabel::Role],
+            Self::Work | Self::Law | Self::Cyber => &[EntityLabel::Concept],
+            Self::Norp => &[EntityLabel::Organization],
             // Base types and Other have no parents
             _ => &[],
         }
@@ -400,68 +481,6 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
 
     // Default: Technology (reasonable fallback for unknown tags)
     EntityLabel::Technology
-}
-
-/// Classify a MISC NER entity (or an otherwise-untyped name) into a more
-/// specific `EntityLabel`.
-///
-/// The NER model only outputs PER/ORG/LOC/MISC. For MISC entities that pass
-/// quality gates, we use heuristic rules to assign a richer ontological type.
-/// This activates type-aware spreading activation and `matches_with_hierarchy()`
-/// in retrieval — `Concept` entities participate in the type hierarchy while
-/// `Other("MISC")` is invisible to it. Shared by every ingest path so the same
-/// name resolves to the same label regardless of entry point.
-pub fn classify_misc_entity(name: &str) -> EntityLabel {
-    let lower = name.to_lowercase();
-
-    // Event-like terms (checked first — "conference" ends with "ence" concept suffix)
-    const EVENT_WORDS: &[&str] = &[
-        "conference",
-        "summit",
-        "meetup",
-        "hackathon",
-        "sprint",
-        "launch",
-        "release",
-        "incident",
-        "outage",
-        "postmortem",
-    ];
-    if EVENT_WORDS.iter().any(|w| lower.contains(w)) {
-        return EntityLabel::Event;
-    }
-
-    // Skill / role indicators (before concept — "engineer" ends with suffix-like patterns)
-    const SKILL_WORDS: &[&str] = &[
-        "engineer",
-        "architect",
-        "developer",
-        "designer",
-        "analyst",
-        "programming",
-        "scripting",
-    ];
-    if SKILL_WORDS.iter().any(|w| lower.contains(w)) {
-        return EntityLabel::Skill;
-    }
-
-    // Concept suffixes — abstract ideas, methodologies, qualities
-    const CONCEPT_SUFFIXES: &[&str] = &[
-        "ism", "ology", "ity", "ness", "ment", "ance", "ence", "tion", "sion",
-    ];
-    if CONCEPT_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
-        return EntityLabel::Concept;
-    }
-
-    // PascalCase proper nouns without spaces/hyphens → likely a Product
-    // (e.g., "JavaScript", "PostgreSQL", "FastAPI", "ChatGPT")
-    let has_internal_upper = name.chars().skip(1).any(|c| c.is_uppercase());
-    if has_internal_upper && !name.contains(' ') && !name.contains('-') && name.len() > 2 {
-        return EntityLabel::Product;
-    }
-
-    // Default: Concept (participates in type hierarchy via Role→Concept parent)
-    EntityLabel::Concept
 }
 
 /// Memory tier for edge consolidation
@@ -745,6 +764,8 @@ pub enum TypingMethod {
     CoOccurrence,
     Glirel,
     OpenIe,
+    /// Event→event causal link from the CATENA event arm (signal + temporal order).
+    Catena,
 }
 
 /// One source episode that attested an edge — the unit of provenance/corroboration.
@@ -911,12 +932,14 @@ fn decode_relationship_edge(data: &[u8]) -> Result<(RelationshipEdge, bool)> {
 }
 
 /// Postcard defaults for trailing `EntityNode` fields added after the postcard
-/// cutover (#192): `selectivity: Option` (None = `0x00`). Keep in sync with any
-/// new trailing field.
-const ENTITY_NODE_DEFAULT_SUFFIX: &[u8] = &[0x00];
+/// cutover (#192), in declaration order: `selectivity: Option` (None = `0x00`),
+/// `fine_type: Option<String>` (None = `0x00`). Keep in sync with any new
+/// trailing field — append one `0x00` (or the field's postcard-encoded default)
+/// per field, in the order the fields appear in the struct.
+const ENTITY_NODE_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00];
 
 /// Decode a stored `EntityNode`, tolerating legacy records written before trailing
-/// fields (e.g. `selectivity`) existed. See [`crate::serialization::try_decode_compat`].
+/// fields (e.g. `selectivity`, `fine_type`) existed. See [`crate::serialization::try_decode_compat`].
 fn decode_entity_node(data: &[u8]) -> Result<(EntityNode, bool)> {
     crate::serialization::try_decode_compat::<EntityNode>(data, ENTITY_NODE_DEFAULT_SUFFIX)
 }
@@ -1818,15 +1841,17 @@ fn person_person_knows() -> bool {
 
 /// Match relational cue phrases in ALREADY-LOWERCASED text → a typed predicate.
 /// Shared by the whole-text and span-scoped extractors below.
-fn predicate_from_cues(t: &str) -> Option<RelationType> {
+fn predicate_from_cues(t: &str) -> Option<(RelationType, &'static str)> {
     use RelationType::*;
-    let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
+    // Return the FIRST cue needle present in `t` (needle order = signal strength),
+    // so the caller learns both the predicate and the exact lexeme that fired.
+    let first = |needles: &[&'static str]| needles.iter().copied().find(|n| t.contains(n));
 
     // Ordered by signal strength; first match wins. Cue fragments are chosen to
     // survive an entity splitting the verb phrase ("X set Y in motion") — real text
     // rarely keeps a relational verb contiguous, so matching only "set in motion"
     // would miss the relation it is meant to capture.
-    if has(&[
+    if let Some(n) = first(&[
         "in motion",
         "brought about",
         "gave rise",
@@ -1838,36 +1863,36 @@ fn predicate_from_cues(t: &str) -> Option<RelationType> {
         "because of",
         "due to",
     ]) {
-        return Some(Triggers);
+        return Some((Triggers, n));
     }
-    if has(&[
+    if let Some(n) = first(&[
         "superseded",
         "replaced by",
         "deprecated",
         "obsoleted",
         "rolled back",
     ]) {
-        return Some(SupersededBy);
+        return Some((SupersededBy, n));
     }
-    if has(&[
+    if let Some(n) = first(&[
         "manages",
         "manager of",
         "oversees",
         "supervises",
         "in charge of",
     ]) {
-        return Some(Manages);
+        return Some((Manages, n));
     }
-    if has(&[
+    if let Some(n) = first(&[
         "works at",
         "works for",
         "employed by",
         "employee of",
         "joined",
     ]) {
-        return Some(WorksAt);
+        return Some((WorksAt, n));
     }
-    if has(&[
+    if let Some(n) = first(&[
         "created",
         "developed",
         "built",
@@ -1875,19 +1900,19 @@ fn predicate_from_cues(t: &str) -> Option<RelationType> {
         "designed",
         "authored",
     ]) {
-        return Some(CreatedBy);
+        return Some((CreatedBy, n));
     }
-    if has(&["depends on", "relies on", "requires", "needs"]) {
-        return Some(DependsOn);
+    if let Some(n) = first(&["depends on", "relies on", "requires", "needs"]) {
+        return Some((DependsOn, n));
     }
-    if has(&["located in", "based in", "headquartered", "situated in"]) {
-        return Some(LocatedIn);
+    if let Some(n) = first(&["located in", "based in", "headquartered", "situated in"]) {
+        return Some((LocatedIn, n));
     }
-    if has(&["part of", "belongs to", "member of", "division of"]) {
-        return Some(PartOf);
+    if let Some(n) = first(&["part of", "belongs to", "member of", "division of"]) {
+        return Some((PartOf, n));
     }
-    if has(&["uses", "using", "powered by", "built on"]) {
-        return Some(Uses);
+    if let Some(n) = first(&["uses", "using", "powered by", "built on"]) {
+        return Some((Uses, n));
     }
     None
 }
@@ -1897,7 +1922,7 @@ fn predicate_from_cues(t: &str) -> Option<RelationType> {
 /// simple single-relation path and unit tests. Prefer `extract_directed_predicate`
 /// at edge-creation time.
 pub fn extract_predicate_from_text(text: &str) -> Option<RelationType> {
-    predicate_from_cues(&text.to_ascii_lowercase())
+    predicate_from_cues(&text.to_ascii_lowercase()).map(|(rt, _)| rt)
 }
 
 /// Span-scoped, DIRECTION-aware predicate recovery. Locates both entity mentions,
@@ -1952,7 +1977,26 @@ pub fn extract_directed_predicate(
         .map(|i| hi + i)
         .unwrap_or(lc.len());
     let sentence = &lc[sent_start..sent_end];
-    let rt = predicate_from_cues(sentence)?;
+    let (rt, cue) = predicate_from_cues(sentence)?;
+
+    // PREDICATE-FRAGMENT GATE. A model-free fallback NER (no GLiNER assets) mints
+    // the cue's OWN words as entities — "motion" from "in motion", "brought" from
+    // "brought about". Such a mention sits INSIDE the predicate span, so it is the
+    // relation lexeme, not a causal argument. Left unchecked it becomes a shared
+    // causal endpoint across every sentence that uses the same cue, welding
+    // unrelated chains into cross-document causal bridges (the fallback-path
+    // lineage flood; the GLiNER typer never emits these predicate spans, so this
+    // gate is a no-op on the model path). An endpoint whose mention overlaps the
+    // fired cue's span is disqualified.
+    if let Some(cue_off) = sentence.find(cue) {
+        let cue_lo = sent_start + cue_off;
+        let cue_hi = cue_lo + cue.len();
+        let overlaps_cue = |lo: usize, len: usize| lo < cue_hi && cue_lo < lo + len;
+        if overlaps_cue(pa, a.len()) || overlaps_cue(pb, b.len()) {
+            return None;
+        }
+    }
+
     // Effect-first constructions: the earlier mention is the EFFECT, not the cause.
     const EFFECT_FIRST_CUES: [&str; 4] = ["because of", "due to", "caused by", "triggered by"];
     let effect_first = EFFECT_FIRST_CUES.iter().any(|c| sentence.contains(c));
@@ -2549,6 +2593,478 @@ impl GraphMemory {
         Ok(written)
     }
 
+    /// Extract appositive / definite-description aliases from the episode text and
+    /// seed them (ER Plan Task 3.1 — the LLM-free "free-label engine"). "Apple, the
+    /// iPhone maker" → alias `iphone maker` → Apple's canonical node, so a later
+    /// bare "iPhone maker" mention resolves to Apple (Tier-0 `resolve_alias`)
+    /// instead of forming a duplicate. Model-free (spaCy-rusty appositive parse);
+    /// no-ops without the parser. Returns the number of aliases seeded.
+    pub fn mint_appositive_aliases(&self, content: &str) -> usize {
+        let Some(pairs) = crate::appositive::extract_from_text(content) else {
+            return 0;
+        };
+        if pairs.is_empty() {
+            return 0;
+        }
+        let mut to_seed: Vec<(String, Uuid)> = Vec::new();
+        for p in pairs {
+            // Idempotent: skip if this surface already resolves. The anchor must be
+            // a real entity in this graph — the appositive phrase becomes its alias.
+            if self.resolve_alias(&p.alias).is_some() {
+                continue;
+            }
+            if let Ok(Some(anchor)) = self.find_entity_by_name(&p.canonical) {
+                to_seed.push((p.alias, anchor.uuid));
+            }
+        }
+        if to_seed.is_empty() {
+            return 0;
+        }
+        self.seed_aliases(to_seed).unwrap_or(0)
+    }
+
+    /// Retrieval-based KB linking (ER Task 3.2) — GATED. For each freshly-extracted
+    /// entity, link its surface to the domain KB (`SHODH_KB_PATH`): exact alias hit,
+    /// else type-blocked embedding nearest-neighbour ≥ `SHODH_KB_LINK_MIN`. When the
+    /// KB's canonical entity already exists as a node in this graph, seed a
+    /// surface→canonical alias so corpus mentions collapse onto the world-knowledge
+    /// entity (`Google` → `Alphabet Inc.`) — a merge no in-corpus matcher reaches.
+    /// No-ops without `SHODH_KB_LINKING=1` or a loaded KB (`SHODH_KB_PATH`). Returns
+    /// aliases seeded.
+    pub fn kb_link_entities(&self, entity_uuids: &[(String, Uuid, EntityLabel)]) -> usize {
+        let on = std::env::var("SHODH_KB_LINKING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !on {
+            return 0;
+        }
+        let Some(kb) = crate::kb::global() else {
+            return 0;
+        };
+        let min = std::env::var("SHODH_KB_LINK_MIN")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.75);
+        let mut seeded = 0usize;
+        for (name, uuid, label) in entity_uuids {
+            if self.resolve_alias(name).is_some() {
+                continue;
+            }
+            let ty = label.as_str().to_lowercase();
+            let kb_hit = kb.link_by_alias(name).or_else(|| {
+                self.get_entity(uuid)
+                    .ok()
+                    .flatten()
+                    .and_then(|e| e.name_embedding)
+                    .and_then(|emb| kb.link_by_embedding(&emb, &ty, min).map(|(e, _)| e))
+            });
+            if let Some(kbe) = kb_hit {
+                if name.eq_ignore_ascii_case(&kbe.label) {
+                    continue;
+                }
+                if let Ok(Some(canon)) = self.find_entity_by_name(&kbe.label) {
+                    if canon.uuid != *uuid
+                        && self.seed_aliases([(name.clone(), canon.uuid)]).is_ok()
+                    {
+                        seeded += 1;
+                    }
+                }
+            }
+        }
+        seeded
+    }
+
+    /// Map a causal-spine canonical relation label to a `RelationType`, preferring
+    /// the named variants where they exist and falling back to `Custom`.
+    fn relation_type_from_label(label: &str) -> RelationType {
+        match label {
+            "Causes" => RelationType::Causes,
+            "Triggers" => RelationType::Triggers,
+            "ResultsIn" => RelationType::ResultsIn,
+            "RelatedTo" => RelationType::RelatedTo,
+            other => RelationType::Custom(other.to_string()),
+        }
+    }
+
+    /// Find or create an EVENT node for a CATENA event lemma. Exact-match reuse so
+    /// repeated events (collapse, blackout) are one node; new events are added
+    /// with `EntityLabel::Event`.
+    fn get_or_create_event(&self, lemma: &str, now: DateTime<Utc>) -> Option<Uuid> {
+        let name = lemma.trim();
+        if name.len() < 3 {
+            return None;
+        }
+        if let Ok(Some(existing)) = self.find_entity_by_name_strict(name) {
+            return Some(existing.uuid);
+        }
+        let node = EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Event],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: EntityExtractor::calculate_base_salience(&EntityLabel::Event, false),
+            is_proper_noun: false,
+            selectivity: None,
+            fine_type: None,
+        };
+        self.add_entity(node).ok()
+    }
+
+    /// Build a causal-spine `RelationshipEdge` with provenance from the given
+    /// typing method. Born strong (typed edges are the spine, not co-occurrence).
+    #[allow(clippy::too_many_arguments)]
+    fn build_spine_edge(
+        &self,
+        from_entity: Uuid,
+        to_entity: Uuid,
+        relation_type: RelationType,
+        source_episode: Uuid,
+        context: &str,
+        now: DateTime<Utc>,
+        typed_by: TypingMethod,
+    ) -> RelationshipEdge {
+        let ctx: String = context.chars().take(150).collect();
+        let span_len = ctx.chars().count() as u32;
+        RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity,
+            to_entity,
+            relation_type,
+            strength: 0.7,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: Some(source_episode),
+            context: ctx,
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            tier: EdgeTier::L1Working,
+            activation_timestamps: None,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: vec![ProvenanceRecord {
+                source_episode_id: source_episode,
+                mention_count: 1,
+                first_observed: now,
+                last_observed: now,
+                confidence: None,
+                evidence_span: Some((0, span_len)),
+                typed_by: Some(typed_by),
+            }],
+        }
+    }
+
+    /// Mint the causal-spine edges for an ingested passage: OpenIE clause-level
+    /// entity→entity causal edges + CATENA event→event edges (the sparse narrative
+    /// spine). Parser-based clause/event extraction reaches causation the
+    /// entity-pair cue typer structurally cannot. Runs only when the dependency
+    /// parser is available (`SHODH_SPACY_MODEL_PATH`) and not disabled via
+    /// `SHODH_CAUSAL_SPINE=0`. Precision-gated: causal families only, abstract-
+    /// social predicates (`supported`/`affected`) skipped. Returns edges minted.
+    pub fn mint_causal_spine_edges(
+        &self,
+        content: &str,
+        entity_uuids: &[(String, Uuid, EntityLabel)],
+        source_episode: Uuid,
+        now: DateTime<Utc>,
+    ) -> usize {
+        if !crate::dep_parser::is_available() {
+            return 0;
+        }
+        if std::env::var("SHODH_CAUSAL_SPINE")
+            .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+        {
+            return 0;
+        }
+        let mut minted = 0usize;
+
+        // Entity name → UUID, longest name first so `container ship` beats `ship`.
+        let mut names: Vec<(String, Uuid)> = entity_uuids
+            .iter()
+            .filter(|(n, _, _)| n.trim().len() >= 3)
+            .map(|(n, u, _)| (n.to_lowercase(), *u))
+            .collect();
+        names.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
+        // Word-boundary match (space-padded) so `port` matches "the Port of
+        // Baltimore" but NOT "support"; longest entity name wins (sort above).
+        let match_entity = |span: &str| -> Option<Uuid> {
+            let s = format!(" {} ", span.to_lowercase());
+            names
+                .iter()
+                .find(|(n, _)| s.contains(&format!(" {} ", n)))
+                .map(|(_, u)| *u)
+        };
+
+        // OpenIE — entity→entity typed causal edges (grammar supplies the predicate).
+        if let Some(triples) = crate::openie::extract_triples(content) {
+            for tr in triples {
+                if !tr.causal || tr.low_precision {
+                    continue;
+                }
+                let (Some(from), Some(to)) = (match_entity(&tr.subject), match_entity(&tr.object))
+                else {
+                    continue;
+                };
+                if from == to {
+                    continue;
+                }
+                let rt = Self::relation_type_from_label(tr.relation);
+                let edge = self.build_spine_edge(
+                    from,
+                    to,
+                    rt,
+                    source_episode,
+                    content,
+                    now,
+                    TypingMethod::OpenIe,
+                );
+                if self.add_relationship(edge).is_ok() {
+                    minted += 1;
+                }
+            }
+        }
+
+        // CATENA — event→event edges (the inchoative pivots no entity arm sees):
+        // causal signals mint `Causes`, temporal signals mint `Precedes` — sequence
+        // is never reported as causation.
+        if let Some(links) = crate::catena::extract_event_links(content) {
+            for link in links {
+                let (Some(from), Some(to)) = (
+                    self.get_or_create_event(&link.source, now),
+                    self.get_or_create_event(&link.target, now),
+                ) else {
+                    continue;
+                };
+                if from == to {
+                    continue;
+                }
+                let rt = match link.relation {
+                    crate::causal_vocab::LinkRelation::Causes => RelationType::Causes,
+                    crate::causal_vocab::LinkRelation::Precedes => {
+                        RelationType::Custom("Precedes".to_string())
+                    }
+                };
+                let edge = self.build_spine_edge(
+                    from,
+                    to,
+                    rt,
+                    source_episode,
+                    content,
+                    now,
+                    TypingMethod::Catena,
+                );
+                if self.add_relationship(edge).is_ok() {
+                    minted += 1;
+                }
+            }
+        }
+
+        if minted > 0 {
+            tracing::info!(edges = minted, "causal spine: minted OpenIE + CATENA edges");
+        }
+        minted
+    }
+
+    /// Canonicalize the entity graph: run the resolver over the live mentions and
+    /// MERGE each cluster's duplicate mention nodes into its canonical entity —
+    /// re-pointing every edge onto the canonical (add_relationship dedups by type,
+    /// so duplicate edges collapse) and deleting the duplicate node. This is what
+    /// folds `Dali` / `the Dali` / `container ship` into one node and prunes the
+    /// mention-duplication that makes the graph read as a hairball. The resolver
+    /// uses the dependency parser for head detection; no-op returning `(0, 0)` when
+    /// the parser is unavailable. Returns `(nodes_merged, edges_repointed)`.
+    pub fn canonicalize_entities(&self) -> Result<(usize, usize)> {
+        use crate::entity_resolution::parse_mention_tokens;
+        use crate::fs_matcher::{cluster, MatchRecord};
+
+        if !crate::dep_parser::is_available() {
+            return Ok((0, 0));
+        }
+        let entities = self.get_all_entities()?;
+        if entities.len() < 2 {
+            return Ok((0, 0));
+        }
+
+        // Parse each mention (spaCy-rusty) for its syntactic head, drop verb-
+        // fragment junk (`is_entity`), and build a Fellegi-Sunter record with the
+        // full comparison evidence the matcher scores over. This is the
+        // Galárraga (CIKM'14) + CESI (WWW'18) feature union realized as FS
+        // comparisons: name (Jaro-Winkler + IDF), head, type, ATTRIBUTE OVERLAP
+        // (the typed relations the entity participates in — Galárraga's key
+        // signal), and NAME EMBEDDING (CESI's learned-embedding signal). Name
+        // + head + type alone only catch exact duplicates; the relation and
+        // embedding evidence let it merge abbreviations / paraphrases
+        // ("Key Bridge" ≡ "Francis Scott Key Bridge") that surface strings miss.
+        let mut records: Vec<MatchRecord> = Vec::new();
+        let mut meta: Vec<(Uuid, bool, usize, String)> = Vec::new(); // (uuid, is_proper, mentions, name)
+        for e in &entities {
+            let Some(parsed) =
+                crate::dep_parser::parse(&e.name).and_then(|t| parse_mention_tokens(&t))
+            else {
+                continue;
+            };
+            if !parsed.is_entity() {
+                continue;
+            }
+            let primary_type = e
+                .labels
+                .first()
+                .map(|l| l.as_str().to_string())
+                .unwrap_or_default();
+            // Attribute overlap: the TYPED relations this entity participates in.
+            // Generic co-occurrence (CoOccurs/RelatedTo/CoRetrieved) is excluded —
+            // it is undiscriminative (everything co-occurs) and would wash out the
+            // signal. Two mentions of one real entity share these typed relations.
+            let agent_roles: HashSet<String> = self
+                .get_entity_relationships(&e.uuid)
+                .unwrap_or_default()
+                .iter()
+                .filter(|edge| {
+                    !matches!(
+                        edge.relation_type,
+                        RelationType::CoOccurs
+                            | RelationType::RelatedTo
+                            | RelationType::CoRetrieved
+                    )
+                })
+                .map(|edge| edge.relation_type.as_str().to_string())
+                .collect();
+            records.push(MatchRecord {
+                name: parsed.clean.to_lowercase(),
+                head: parsed.head.clone(),
+                entity_type: primary_type,
+                agent_roles,
+                name_embedding: e.name_embedding.clone(),
+                ..Default::default()
+            });
+            meta.push((e.uuid, e.is_proper_noun, e.mention_count, e.name.clone()));
+        }
+        if records.len() < 2 {
+            return Ok((0, 0));
+        }
+
+        // Splink: fit + type-blocked clustering at a precision-first threshold.
+        let mut clusters = cluster(&records, 0.9, 20);
+
+        // Contrastive projection adapter (ER Task 4.2, Sudowoodo-lite) — GATED.
+        // Self-supervise a tiny projection over the frozen name embeddings from the
+        // confident base merges (within-cluster pairs = positives; cross-type pairs =
+        // negatives, which prevent collapse), then re-cluster in the learned space to
+        // catch coreferent surfaces the frozen embedding missed. Opt in with
+        // SHODH_CONTRASTIVE_ADAPTER=1 so it can be measured before earning the default.
+        let adapter_on = std::env::var("SHODH_CONTRASTIVE_ADAPTER")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if adapter_on {
+            if let Some(dim) = records
+                .iter()
+                .find_map(|r| r.name_embedding.as_ref().map(|e| e.len()))
+            {
+                let mut adapter = crate::contrastive::ContrastiveAdapter::identity(dim);
+                for c in clusters.iter().filter(|c| c.len() >= 2) {
+                    for a in 0..c.len() {
+                        for b in (a + 1)..c.len() {
+                            let (ri, rj) = (&records[c[a]], &records[c[b]]);
+                            if let (Some(ea), Some(eb)) = (&ri.name_embedding, &rj.name_embedding) {
+                                // A negative: the nearest-indexed record of a DIFFERENT
+                                // entity type (never coreferent), guarding over-merge.
+                                let neg = records
+                                    .iter()
+                                    .find(|r| {
+                                        r.entity_type != ri.entity_type
+                                            && r.name_embedding.is_some()
+                                    })
+                                    .and_then(|r| r.name_embedding.clone());
+                                adapter.learn(ea, eb, neg.as_deref());
+                                adapter.learn(eb, ea, neg.as_deref());
+                            }
+                        }
+                    }
+                }
+                for r in records.iter_mut() {
+                    if let Some(e) = r.name_embedding.take() {
+                        r.name_embedding = Some(adapter.project(&e));
+                    }
+                }
+                clusters = cluster(&records, 0.9, 20);
+            }
+        }
+
+        let mut merged_nodes = 0usize;
+        let mut repointed = 0usize;
+        // Alias pairs to seed after merging: every merged surface → its canonical
+        // UUID. `resolve_alias` is checked at ingest (Tier 0), so once seeded, a
+        // future mention of that surface redirects to the canonical node instead of
+        // re-creating the duplicate — this closes the ingest loop (canonicalize →
+        // aliases → cleaner ingest → less to canonicalize).
+        let mut alias_pairs: Vec<(String, Uuid)> = Vec::new();
+        for cluster_idxs in clusters {
+            if cluster_idxs.len() < 2 {
+                continue;
+            }
+            // Canonical = the most-proper / most-mentioned member.
+            let canon_idx = *cluster_idxs
+                .iter()
+                .max_by_key(|&&i| (meta[i].1, meta[i].2))
+                .unwrap();
+            let canonical = meta[canon_idx].0;
+            for &i in &cluster_idxs {
+                if i == canon_idx {
+                    continue;
+                }
+                let member = meta[i].0;
+                // Remember this surface → canonical mapping (raw name + parsed clean
+                // form) so future ingests of the merged surface resolve directly.
+                alias_pairs.push((meta[i].3.clone(), canonical));
+                if records[i].name != meta[i].3.trim().to_lowercase() {
+                    alias_pairs.push((records[i].name.clone(), canonical));
+                }
+                // Re-point every edge touching the member onto the canonical node.
+                let member_edges = self.get_entity_relationships(&member)?;
+                for edge in member_edges {
+                    let mut ne = edge.clone();
+                    ne.uuid = Uuid::new_v4();
+                    if ne.from_entity == member {
+                        ne.from_entity = canonical;
+                    }
+                    if ne.to_entity == member {
+                        ne.to_entity = canonical;
+                    }
+                    let _ = self.delete_relationship(&edge.uuid);
+                    // Drop self-loops; add_relationship dedups by (from,to,type) so
+                    // duplicate edges between the same entities merge, not multiply.
+                    if ne.from_entity != ne.to_entity && self.add_relationship(ne).is_ok() {
+                        repointed += 1;
+                    }
+                }
+                let _ = self.delete_entity(&member);
+                merged_nodes += 1;
+            }
+        }
+        // Close the ingest loop: seed the merged surfaces as aliases of their
+        // canonical node so re-ingesting them never re-creates the duplicate.
+        let aliases_seeded = if alias_pairs.is_empty() {
+            0
+        } else {
+            self.seed_aliases(alias_pairs).unwrap_or(0)
+        };
+        tracing::info!(
+            merged = merged_nodes,
+            repointed,
+            aliases_seeded,
+            "canonicalize (Splink): merged duplicate mention nodes into canonical entities"
+        );
+        Ok((merged_nodes, repointed))
+    }
+
     /// Load lowercase name->UUID index, or migrate from name_index if empty
     ///
     /// This enables O(1) case-insensitive entity lookup instead of O(n) linear search.
@@ -2768,6 +3284,13 @@ impl GraphMemory {
                 // Preserve existing embedding if the incoming one is None
                 if entity.name_embedding.is_none() {
                     entity.name_embedding = existing.name_embedding;
+                }
+
+                // Preserve an existing fine type when the re-mention carries none.
+                // Re-mentions are the common case (pre-extracted names, tags, fallback
+                // entities), and they must not wipe a fine type GLiNER already set.
+                if entity.fine_type.is_none() {
+                    entity.fine_type = existing.fine_type.clone();
                 }
 
                 // Merge summary: first non-empty wins, preserve existing
@@ -5083,11 +5606,13 @@ impl GraphMemory {
     /// Returns the number of edges created/strengthened.
     pub fn record_memory_coactivation(&self, memory_ids: &[Uuid]) -> Result<usize> {
         // STRENGTHEN-ONLY gate. Read here (not in the hot loop) so the impl is
-        // env-free and unit-testable by parameter. Default OFF pending the
-        // recall-neutrality A/B; opt in with SHODH_COACT_STRENGTHEN_ONLY=1.
+        // env-free and unit-testable by parameter. Default ON: co-retrieval
+        // reinforces existing edges and never mints all-pairs `CoRetrieved` (which
+        // was ~80% of the graph and the OOM driver). Disable with
+        // SHODH_COACT_STRENGTHEN_ONLY=0 to restore the legacy flood.
         let strengthen_only = std::env::var("SHODH_COACT_STRENGTHEN_ONLY")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
         self.record_memory_coactivation_impl(memory_ids, strengthen_only)
     }
 
@@ -5269,13 +5794,9 @@ impl GraphMemory {
             })?;
         let mut batch = WriteBatch::default();
         let mut strengthened = 0;
-        // Count of genuinely-new edges (the `else` branch below), tracked
-        // separately from `strengthened` (which also counts updates to existing
-        // edges) so relationship_count is incremented only for new records.
-        let mut new_edges = 0;
         let mut promotion_boosts = Vec::new();
 
-        for (from_id_str, to_id_str, boost) in edge_boosts {
+        for (from_id_str, to_id_str, _boost) in edge_boosts {
             // Parse UUIDs
             let from_uuid = match Uuid::parse_str(from_id_str) {
                 Ok(u) => u,
@@ -5332,69 +5853,15 @@ impl GraphMemory {
                         });
                     }
                 }
-            } else {
-                // Create new ReplayStrengthened edge
-                // Replay edges start in L2 (episodic) with replay boost applied to initial strength.
-                // Without this, the computed replay priority score was discarded and all new edges
-                // started at identical strength regardless of their consolidation importance.
-                let edge = RelationshipEdge {
-                    uuid: Uuid::new_v4(),
-                    from_entity: from_uuid,
-                    to_entity: to_uuid,
-                    relation_type: RelationType::CoRetrieved,
-                    strength: EdgeTier::L2Episodic.initial_weight() + boost,
-                    created_at: Utc::now(),
-                    valid_at: Utc::now(),
-                    invalidated_at: None,
-                    source_episode_id: None,
-                    context: "replay_strengthened".to_string(),
-                    last_activated: Utc::now(),
-                    activation_count: 1,
-                    ltp_status: LtpStatus::None,
-                    activation_timestamps: None,
-                    tier: EdgeTier::L2Episodic,
-                    // PIPE-5: Replay edges use default confidence
-                    entity_confidence: None,
-                    forman_curvature: None,
-                    endpoint_selectivity: None,
-                    provenance: Vec::new(),
-                };
-
-                let key = edge.uuid.as_bytes();
-                if let Ok(value) = crate::serialization::encode(&edge) {
-                    batch.put_cf(self.relationships_cf(), key, value);
-
-                    // Index both directions
-                    let idx_key_fwd = format!("mem_edge:{from_uuid}:{to_uuid}");
-                    let idx_key_rev = format!("mem_edge:{to_uuid}:{from_uuid}");
-                    batch.put_cf(
-                        self.relationships_cf(),
-                        idx_key_fwd.as_bytes(),
-                        edge.uuid.as_bytes(),
-                    );
-                    batch.put_cf(
-                        self.relationships_cf(),
-                        idx_key_rev.as_bytes(),
-                        edge.uuid.as_bytes(),
-                    );
-
-                    strengthened += 1;
-                    new_edges += 1;
-                }
             }
+            // No `else`: the replay path reinforces EXISTING edges only. It used to
+            // mint a new `CoRetrieved` edge for every boosted memory pair without an
+            // edge — the second all-pairs flood site — REMOVED entirely. Co-retrieval
+            // strengthens structure; it does not create it.
         }
 
         if strengthened > 0 {
             self.db.write(batch)?;
-
-            // Account for genuinely-new edges created above. Mirrors
-            // record_memory_coactivation; without this the counter drifts low
-            // while delete_relationship keeps decrementing, eventually
-            // (pre-saturation) underflowing it.
-            if new_edges > 0 {
-                self.relationship_count
-                    .fetch_add(new_edges, Ordering::Relaxed);
-            }
 
             // Index new replay edges in entity_edges CF so they're visible to
             // traversal and degree-cap enforcement (GQ-11 fix)
@@ -6593,8 +7060,20 @@ fn entity_type_color(label: Option<&EntityLabel>) -> String {
         Some(EntityLabel::Team) => "#27AE60".to_string(),   // Green — organizational
         Some(EntityLabel::Role) => "#8E44AD".to_string(),   // Dark purple — roles
         Some(EntityLabel::Module) => "#D35400".to_string(), // Pumpkin — code modules
+        Some(EntityLabel::Norp) => "#C0392B".to_string(),   // Brick red — groups/affiliations
+        Some(EntityLabel::Gpe) => "#5DADE2".to_string(),    // Lighter blue — political geography
+        Some(EntityLabel::Facility) => "#7F8C8D".to_string(), // Slate — built structures
+        Some(EntityLabel::Vehicle) => "#34495E".to_string(), // Dark slate — vehicles
+        Some(EntityLabel::Weapon) => "#922B21".to_string(), // Dark red — weapons
+        Some(EntityLabel::Work) => "#AF7AC5".to_string(),   // Orchid — creative works
+        Some(EntityLabel::Law) => "#6C3483".to_string(),    // Deep violet — legal instruments
+        Some(EntityLabel::Title) => "#CA6F1E".to_string(),  // Burnt orange — honorifics/positions
+        Some(EntityLabel::Cyber) => "#17202A".to_string(),  // Near-black — threats/malware
+        Some(EntityLabel::Money) => "#28B463".to_string(),  // Money green
+        Some(EntityLabel::Quantity) => "#F5B041".to_string(), // Amber — measurements
+        Some(EntityLabel::Time) => "#A569BD".to_string(), // Violet — distinct from Date's light purple
         Some(EntityLabel::Other(_)) => "#AEB6BF".to_string(), // Gray
-        None => "#AEB6BF".to_string(),                      // Gray default
+        None => "#AEB6BF".to_string(),                    // Gray default
     }
 }
 
@@ -7722,6 +8201,18 @@ impl EntityExtractor {
             EntityLabel::Team => 0.7,           // Teams are organizational anchors
             EntityLabel::Role => 0.55,          // Roles are semi-generic
             EntityLabel::Module => 0.55,        // Modules are code-level entities
+            EntityLabel::Norp => 0.55,          // Nationalities/groups are moderately salient
+            EntityLabel::Gpe => 0.6,            // Geopolitical entities, on par with Location
+            EntityLabel::Facility => 0.5,       // Facilities are concrete but generic
+            EntityLabel::Vehicle => 0.5,        // Vehicles are concrete but generic
+            EntityLabel::Weapon => 0.55,        // Weapons are specific, notable entities
+            EntityLabel::Work => 0.6,           // Named works are specific, on par with Product
+            EntityLabel::Law => 0.55,           // Named laws/regulations are specific anchors
+            EntityLabel::Title => 0.5,          // Titles are semi-generic, like Role
+            EntityLabel::Cyber => 0.55,         // Cyber entities (CVEs, malware) are specific
+            EntityLabel::Money => 0.4,          // Monetary amounts are structural, like Date
+            EntityLabel::Quantity => 0.35,      // Measurements are structural, low salience
+            EntityLabel::Time => 0.3,           // Time-of-day is structural, like Date
             EntityLabel::Other(_) => 0.3,       // Unknown types get low salience
         };
 
@@ -8117,6 +8608,65 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
+    /// Every one of the 18 schema coarse ids must resolve to a real
+    /// `EntityLabel` variant, never the `Other(String)` fallback. This couples
+    /// the entity-type schema asset (`src/entity_type/entity-type-schema.json`)
+    /// to the type system so future schema drift (a coarse id added to the
+    /// JSON without a matching enum variant) fails CI instead of silently
+    /// degrading GLiNER-typed entities to `Other`.
+    #[test]
+    fn every_schema_coarse_maps_to_a_variant() {
+        for coarse in &crate::entity_type::schema().coarse {
+            let label = EntityLabel::from_coarse_id(&coarse.id);
+            assert!(
+                !matches!(label, EntityLabel::Other(_)),
+                "coarse id `{}` rolled up to Other(_) — EntityLabel::from_coarse_id is missing a variant for it",
+                coarse.id
+            );
+        }
+    }
+
+    /// Every one of the 141 schema fine leaves must roll up (via
+    /// `coarse_of`) to a coarse id that `from_coarse_id` resolves to a real
+    /// `EntityLabel` variant. This is the end-to-end check: a fine label
+    /// GLiNER actually predicts must never dead-end in `Other(_)`.
+    #[test]
+    fn every_fine_rolls_up_to_a_real_variant() {
+        for fine in &crate::entity_type::schema().fine {
+            let coarse_id = crate::entity_type::coarse_of(&fine.label).unwrap_or_else(|| {
+                panic!(
+                    "fine label `{}` has no coarse rollup in the schema",
+                    fine.label
+                )
+            });
+            let label = EntityLabel::from_coarse_id(coarse_id);
+            assert!(
+                !matches!(label, EntityLabel::Other(_)),
+                "fine label `{}` rolls up to coarse `{}` which resolves to Other(_) — EntityLabel::from_coarse_id is missing a variant for it",
+                fine.label,
+                coarse_id
+            );
+        }
+    }
+
+    /// The GLiNER coarse subtypes added alongside the schema (Gpe, Facility,
+    /// Vehicle, Weapon, Title, Work, Law, Cyber, Norp) must roll up through
+    /// `parent_labels()` so type-gated retrieval still matches them — a
+    /// "where"-query expecting `[Location]` must not miss `Gpe`/`Facility`
+    /// entities just because GLiNER typed them at the finer variant.
+    #[test]
+    fn new_coarse_variants_match_their_hierarchy_parent() {
+        assert!(EntityLabel::Gpe.matches_with_hierarchy(&EntityLabel::Location));
+        assert!(EntityLabel::Facility.matches_with_hierarchy(&EntityLabel::Location));
+        assert!(EntityLabel::Vehicle.matches_with_hierarchy(&EntityLabel::Product));
+        assert!(EntityLabel::Weapon.matches_with_hierarchy(&EntityLabel::Product));
+        assert!(EntityLabel::Title.matches_with_hierarchy(&EntityLabel::Role));
+        assert!(EntityLabel::Work.matches_with_hierarchy(&EntityLabel::Concept));
+        assert!(EntityLabel::Law.matches_with_hierarchy(&EntityLabel::Concept));
+        assert!(EntityLabel::Cyber.matches_with_hierarchy(&EntityLabel::Concept));
+        assert!(EntityLabel::Norp.matches_with_hierarchy(&EntityLabel::Organization));
+    }
+
     #[test]
     fn spreading_weight_prefers_predicates_over_cooccurrence() {
         // The load-bearing contrast: a real causal predicate must out-weight bare
@@ -8222,6 +8772,58 @@ mod tests {
         // Control: cause-first active voice is unchanged by the fix.
         assert_eq!(
             extract_directed_predicate("Redis caused the outage.", "Redis", "outage"),
+            Some((RelationType::Triggers, true))
+        );
+    }
+
+    #[test]
+    fn extract_directed_predicate_rejects_cue_fragment_endpoints() {
+        // The fallback NER (no GLiNER assets) mints the cue's OWN words as
+        // entities: "motion" from "in motion", "brought" from "brought about".
+        // Those mentions sit inside the predicate span, so they are the relation
+        // lexeme — never a causal argument. Pairing a real event with such a
+        // fragment must recover NO causal edge, or the shared fragment welds every
+        // chain into a cross-document causal bridge (fallback-path lineage flood).
+        assert_eq!(
+            extract_directed_predicate("Vornak set Meslin in motion.", "Vornak", "motion"),
+            None,
+            "'motion' is part of the 'in motion' cue, not a causal endpoint"
+        );
+        assert_eq!(
+            extract_directed_predicate("Vornak set Meslin in motion.", "Meslin", "motion"),
+            None,
+            "'motion' is part of the 'in motion' cue, not a causal endpoint"
+        );
+        assert_eq!(
+            extract_directed_predicate(
+                "the Meslin incident then brought about the Caldor incident.",
+                "the Meslin incident",
+                "brought"
+            ),
+            None,
+            "'brought' is part of the 'brought about' cue, not a causal endpoint"
+        );
+        assert_eq!(
+            extract_directed_predicate(
+                "the Meslin incident then brought about the Caldor incident.",
+                "brought",
+                "the Caldor incident"
+            ),
+            None,
+            "'brought' is part of the 'brought about' cue, not a causal endpoint"
+        );
+        // The genuine argument pair in the SAME sentences still types causal — the
+        // gate removes only the predicate-fragment endpoints, not the relation.
+        assert_eq!(
+            extract_directed_predicate("Vornak set Meslin in motion.", "Vornak", "Meslin"),
+            Some((RelationType::Triggers, true))
+        );
+        assert_eq!(
+            extract_directed_predicate(
+                "the Meslin incident then brought about the Caldor incident.",
+                "the Meslin incident",
+                "the Caldor incident"
+            ),
             Some((RelationType::Triggers, true))
         );
     }
@@ -8450,13 +9052,129 @@ mod tests {
     }
 
     #[test]
-    fn classify_misc_entity_maps_surface_forms() {
-        assert_eq!(classify_misc_entity("postmortem"), EntityLabel::Event);
-        assert_eq!(classify_misc_entity("backend engineer"), EntityLabel::Skill);
-        assert_eq!(classify_misc_entity("scalability"), EntityLabel::Concept);
-        assert_eq!(classify_misc_entity("PostgreSQL"), EntityLabel::Product);
-        // Plain lowercase noun with no signal → Concept (still type-hierarchy visible)
-        assert_eq!(classify_misc_entity("widget"), EntityLabel::Concept);
+    fn entity_node_fine_type_roundtrips() {
+        // Same persistence path production code uses: GraphMemory::add_entity
+        // (crate::serialization::encode over postcard) and get_entity
+        // (decode_entity_node / try_decode_compat).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let now = Utc::now();
+
+        let entity = EntityNode {
+            uuid: Uuid::new_v4(),
+            name: "Francis Scott Key Bridge".to_string(),
+            labels: vec![EntityLabel::Facility],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: Some("bridge".to_string()),
+        };
+        let entity_uuid = graph.add_entity(entity).unwrap();
+
+        let roundtripped = graph.get_entity(&entity_uuid).unwrap().unwrap();
+        assert_eq!(roundtripped.fine_type, Some("bridge".to_string()));
+    }
+
+    #[test]
+    fn add_entity_remention_preserves_existing_fine_type() {
+        // Deferred fix: a re-mention that carries no fine type must NOT wipe the
+        // fine type an earlier mention (e.g. GLiNER) already set. Re-mentions are
+        // the common case (pre-extracted names, tags, fallback entities).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let now = Utc::now();
+
+        let make = |fine: Option<String>| EntityNode {
+            uuid: Uuid::new_v4(),
+            name: "Baltimore".to_string(),
+            labels: vec![EntityLabel::Gpe],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: fine,
+        };
+
+        // First mention: GLiNER typed it "city".
+        let uuid = graph.add_entity(make(Some("city".to_string()))).unwrap();
+        // Re-mention with no fine type (e.g. a tag or fallback entity).
+        let uuid2 = graph.add_entity(make(None)).unwrap();
+        assert_eq!(uuid, uuid2, "re-mention should merge into the same node");
+
+        let merged = graph.get_entity(&uuid).unwrap().unwrap();
+        assert_eq!(
+            merged.fine_type,
+            Some("city".to_string()),
+            "re-mention without a fine type must preserve the existing one"
+        );
+        assert_eq!(merged.mention_count, 2);
+    }
+
+    #[test]
+    fn legacy_entity_node_defaults_fine_type_to_none() {
+        // Mirrors the pre-fine_type EntityNode schema (all fields through
+        // `selectivity`, no trailing `fine_type`) — the exact shape of every
+        // EntityNode already written to the live RocksDB store before this
+        // field existed. `decode_entity_node` must backfill fine_type=None
+        // via ENTITY_NODE_DEFAULT_SUFFIX rather than failing to decode.
+        #[derive(serde::Serialize)]
+        struct LegacyEntityNode {
+            uuid: Uuid,
+            name: String,
+            labels: Vec<EntityLabel>,
+            created_at: DateTime<Utc>,
+            last_seen_at: DateTime<Utc>,
+            mention_count: usize,
+            summary: String,
+            attributes: HashMap<String, String>,
+            name_embedding: Option<Vec<f32>>,
+            salience: f32,
+            is_proper_noun: bool,
+            selectivity: Option<f32>,
+        }
+
+        let now = Utc::now();
+        let uuid = Uuid::new_v4();
+        let legacy = LegacyEntityNode {
+            uuid,
+            name: "Legacy Bridge".to_string(),
+            labels: vec![EntityLabel::Facility],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 3,
+            summary: "a pre-fine_type record".to_string(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.7,
+            is_proper_noun: true,
+            selectivity: Some(0.42),
+        };
+
+        let bytes = crate::serialization::encode(&legacy).unwrap();
+        let (decoded, needs_migration) = decode_entity_node(&bytes).unwrap();
+
+        assert_eq!(decoded.uuid, uuid);
+        assert_eq!(decoded.name, "Legacy Bridge");
+        assert_eq!(decoded.selectivity, Some(0.42));
+        assert_eq!(
+            decoded.fine_type, None,
+            "legacy record without fine_type must default to None"
+        );
+        assert!(
+            needs_migration,
+            "legacy-shaped record should be flagged for rewrite-on-read"
+        );
     }
 
     #[test]
@@ -8478,6 +9196,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         let entity_uuid = graph.add_entity(entity).unwrap();
 
@@ -8700,6 +9419,7 @@ mod tests {
                 salience: 0.5,
                 is_proper_noun: false,
                 selectivity: None,
+                fine_type: None,
             })
             .unwrap();
         let (memtables, _readers) = graph.rocksdb_memory_breakdown();
@@ -9382,6 +10102,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         let entity2 = EntityNode {
             uuid: Uuid::new_v4(),
@@ -9396,6 +10117,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
 
         let entity1_uuid = graph.add_entity(entity1.clone()).unwrap();
@@ -9446,6 +10168,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         let entity2 = EntityNode {
             uuid: entity2_uuid,
@@ -9460,6 +10183,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
 
         graph.add_entity(entity1).unwrap();
@@ -9596,6 +10320,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         graph.add_entity(entity).unwrap();
 
@@ -9649,6 +10374,7 @@ mod tests {
                 salience: 0.5,
                 is_proper_noun: false,
                 selectivity: None,
+                fine_type: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -9719,6 +10445,7 @@ mod tests {
                 salience: 0.5,
                 is_proper_noun: false,
                 selectivity: None,
+                fine_type: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -9793,6 +10520,7 @@ mod tests {
                 salience: 0.5,
                 is_proper_noun: false,
                 selectivity: None,
+                fine_type: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -9897,6 +10625,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         // add_entity may dedup and return a different UUID
         graph.add_entity(entity).unwrap()
@@ -9992,6 +10721,30 @@ mod tests {
         graph.clear_all().unwrap();
         assert_eq!(graph.alias_count(), 0, "GDPR erasure must wipe aliases");
         assert_eq!(graph.resolve_alias("cargo ship"), None);
+    }
+
+    #[test]
+    fn causal_spine_noops_without_parser() {
+        // No SHODH_SPACY_MODEL_PATH in unit tests → the causal-spine pass is a
+        // graceful no-op (additive, never load-bearing for ingest).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let ship = make_entity(&graph, "ship");
+        let bridge = make_entity(&graph, "bridge");
+        let entities = vec![
+            ("ship".to_string(), ship, EntityLabel::Concept),
+            ("bridge".to_string(), bridge, EntityLabel::Concept),
+        ];
+        if crate::dep_parser::is_available() {
+            return;
+        }
+        let minted = graph.mint_causal_spine_edges(
+            "the ship rammed the bridge, causing the collapse",
+            &entities,
+            Uuid::new_v4(),
+            Utc::now(),
+        );
+        assert_eq!(minted, 0, "no parser → no causal-spine edges");
     }
 
     /// Helper: create a directed edge from → to

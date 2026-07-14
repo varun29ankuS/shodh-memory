@@ -180,6 +180,12 @@ pub struct MifGraphEntity {
     pub summary: String,
     pub created_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
+    /// Schema fine-grained leaf type (e.g. `"bridge"`), one level more specific
+    /// than `types` (coarse). Omitted when absent so records from other
+    /// generators / entities without GLiNER-derived fine typing round-trip
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fine_type: Option<String>,
 }
 
 /// An edge in the knowledge graph.
