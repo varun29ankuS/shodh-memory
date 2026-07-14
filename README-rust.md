@@ -67,7 +67,7 @@ fn main() -> Result<()> {
 - **Semantic search** - MiniLM-L6 embeddings (384-dim) for meaning-based retrieval
 - **Hebbian learning** - Connections strengthen when memories co-activate
 - **Activation decay** - Unused memories fade naturally (exponential decay)
-- **Entity extraction** - TinyBERT NER extracts people, orgs, locations
+- **Entity extraction** - GLiNER bi-edge-v2 span typer (schema-driven, 141 fine / 18 coarse types, ONNX, auto-downloaded on first run) with a rule-based fallback
 - **Knowledge graph** - Entity relationships with spreading activation
 - **3-tier architecture** - Working → Session → Long-term memory (Cowan's model)
 - **100% offline** - Works on air-gapped systems after initial model download
@@ -245,8 +245,22 @@ Environment variables:
 
 ```bash
 SHODH_MEMORY_PATH=./data
-SHODH_OFFLINE=true  # Disable auto-download
+SHODH_OFFLINE=true  # Disable auto-download (models must already be present; else NER runs fallback)
 RUST_LOG=info
+
+# Neural NER (GLiNER bi-edge-v2 typer)
+SHODH_GLINER_MODEL_PATH=./models/gliner-bi-edge  # asset dir; default: conventional dirs, else first-run download cache
+SHODH_GLINER_THRESHOLD=0.3                        # span keep threshold (default 0.3)
+
+# Domain knowledge-base entity linking (gated, default OFF)
+SHODH_KB_LINKING=1            # enable KB alias linking (default off)
+SHODH_KB_PATH=./kb.jsonl      # domain KB JSONL asset (unset = no KB loaded)
+SHODH_KB_LINK_MIN=0.75        # minimum link score (default 0.75)
+
+# Learnable / graph tuning
+SHODH_CONTRASTIVE_ADAPTER=1   # contrastive entity-embedding adapter (gated, default off)
+SHODH_CONSOLIDATE_CANON=0     # entity canonicalization during consolidation (default ON; set 0 to disable)
+SHODH_GRAPH_TYPED_ONLY=1      # restrict graph edges to typed relations (gated, default off)
 ```
 
 ## Architecture

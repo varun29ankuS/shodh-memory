@@ -104,7 +104,7 @@ fn populate_memories(memory_system: &mut MemorySystem, count: usize) {
 fn bench_pipeline_step1_ner(c: &mut Criterion) {
     eprintln!("\n╔══════════════════════════════════════════════════════════════╗");
     eprintln!("║  STEP 1: NER EXTRACTION - Named Entity Recognition          ║");
-    eprintln!("║  Model: bert-tiny-NER (~17MB ONNX)                           ║");
+    eprintln!("║  Model: GLiNER bi-edge-v2 (fp32 ONNX)                        ║");
     eprintln!("╚══════════════════════════════════════════════════════════════╝\n");
 
     let ner = setup_ner();
@@ -487,7 +487,7 @@ fn bench_pipeline_breakdown_timing(c: &mut Criterion) {
     println!("╠═══════════════════════════════════════════════════════════════════════════════════════════════╣");
     println!("║  STEP                        │  AVG TIME     │  % OF TOTAL  │  NOTES                         ║");
     println!("╠═══════════════════════════════════════════════════════════════════════════════════════════════╣");
-    println!("║  1. NER Extraction           │  {:>8.2}ms   │   {:>5.1}%     │  bert-tiny-NER (~17MB)        ║", avg_ner, (avg_ner / total) * 100.0);
+    println!("║  1. NER Extraction           │  {:>8.2}ms   │   {:>5.1}%     │  GLiNER bi-edge (ONNX)        ║", avg_ner, (avg_ner / total) * 100.0);
     println!("║  2. Embedding Generation     │  {:>8.2}ms   │   {:>5.1}%     │  MiniLM-L6-v2 (384-dim)       ║", avg_embed, (avg_embed / total) * 100.0);
     println!("║  3. Memory Storage           │  {:>8.2}ms   │   {:>5.1}%     │  RocksDB + HNSW Index         ║", avg_store, (avg_store / total) * 100.0);
     println!("║  4. Memory Retrieval         │  {:>8.2}ms   │   {:>5.1}%     │  Embed + Vector Search        ║", avg_retrieve, (avg_retrieve / total) * 100.0);
