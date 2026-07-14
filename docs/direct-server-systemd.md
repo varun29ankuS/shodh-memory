@@ -18,8 +18,9 @@ Use direct server mode when you want:
 
 ## Command roles
 
-- `shodh server` starts the shared memory engine with HTTP and local IPC.
-- `shodh serve` starts the MCP stdio bridge and uses local IPC.
+- `shodh server` starts the HTTP API and, by default, the local IPC listener.
+- `shodh serve` starts the MCP stdio bridge, preferring local IPC and falling
+  back to `SHODH_API_URL` when IPC is unavailable.
 - `@shodh/memory-mcp` is the npm MCP wrapper used by MCP clients.
 
 Direct server mode runs `shodh server` separately. MCP and REST clients can then
@@ -37,7 +38,7 @@ Create `~/.config/systemd/user/shodh-memory.service`:
 
 ```ini
 [Unit]
-Description=Shodh Memory HTTP server
+Description=Shodh Memory server
 After=network.target
 
 [Service]
@@ -45,6 +46,7 @@ Type=simple
 Environment=SHODH_HOST=127.0.0.1
 Environment=SHODH_PORT=3030
 Environment=SHODH_MEMORY_PATH=%h/.local/share/shodh-memory
+Environment=SHODH_IPC_ENABLED=true
 Environment=SHODH_IPC_ENDPOINT=%h/.local/share/shodh/shodh-memory.sock
 Environment=SHODH_DEV_API_KEY=local-dev-key
 ExecStart=%h/.cargo/bin/shodh server
@@ -72,6 +74,10 @@ Check the server directly:
 curl -sS http://127.0.0.1:3030/health
 ```
 
+Also check the journal for `Local IPC ready at ...`. A socket bind failure is
+non-fatal and leaves the HTTP API running, so HTTP health alone does not confirm
+that IPC is available.
+
 View logs:
 
 ```bash
@@ -97,6 +103,7 @@ native MCP bridge at the same Unix socket:
       "args": ["serve"],
       "env": {
         "SHODH_IPC_ENDPOINT": "/home/you/.local/share/shodh/shodh-memory.sock",
+        "SHODH_API_URL": "http://127.0.0.1:3030",
         "SHODH_API_KEY": "local-dev-key",
         "SHODH_USER_ID": "local-agent"
       }
@@ -106,9 +113,10 @@ native MCP bridge at the same Unix socket:
 ```
 
 Use the full path to `shodh` if your MCP client does not inherit your shell
-`PATH`. Replace `/home/you` with the service user's home directory. The socket
-parent is mode `0700` and the socket is mode `0600`; Shodh refuses unsafe,
-foreign-owned, or live replacement endpoints.
+`PATH`. Replace `/home/you` with the service user's home directory and keep the
+endpoint identical to the service value. The socket parent is mode `0700` and
+the socket is mode `0600`; Shodh refuses unsafe, foreign-owned, or live
+replacement endpoints.
 
 ## User IDs
 

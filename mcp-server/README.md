@@ -70,13 +70,13 @@ env = { SHODH_API_KEY = "your-api-key-here" }
 
 By default the MCP server talks to the backend over HTTP, which works on every
 platform. To route ordinary requests over authenticated local IPC instead, add
-`SHODH_IPC_ENDPOINT` with a **platform-appropriate** value — on Windows the named
-pipe `\\.\pipe\shodh-memory`, on macOS/Linux the absolute Unix socket path printed
-when the server starts (by default under the OS data dir at
-`.../shodh/shodh-memory.sock`). A `\\.\pipe\...` value on macOS/Linux is rejected
-rather than silently forwarded to the spawned backend. Configure it explicitly so
-the MCP client and server cannot disagree because they were launched from different
-environments.
+`SHODH_IPC_ENDPOINT` with a **platform-appropriate** value. On Windows, use the
+per-user named pipe printed by the server (normally
+`\\.\pipe\shodh-memory-<current-user-SID>`); on macOS/Linux, use its absolute Unix
+socket path (under the platform data directory at `shodh/shodh-memory.sock` by
+default). A `\\.\pipe\...` value on macOS/Linux is rejected rather than silently
+forwarded to the spawned backend. The auto-spawn path passes an explicitly
+configured endpoint to the backend so both processes use the same value.
 
 > **Note**: First run downloads the server binary (~15MB) plus embedding model (~23MB). The `startup_timeout_sec = 60` ensures enough time for initial setup.
 
@@ -87,6 +87,7 @@ environments.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SHODH_API_KEY` | **Required**. API key for authentication | - |
+| `SHODH_IPC_ENABLED` | Server listener toggle. The auto-spawned backend honors this value. | `true` |
 | `SHODH_IPC_ENDPOINT` | Local endpoint for MCP requests: a Unix socket path (macOS/Linux) or `\\.\pipe\name` (Windows). When set, ordinary MCP requests use local IPC instead of HTTP. A Windows pipe value on macOS/Linux is rejected. | - |
 | `SHODH_API_URL` | Backend server URL | `http://127.0.0.1:3030` |
 | `SHODH_USER_ID` | User ID for memory isolation | `claude-code` |
@@ -97,11 +98,12 @@ environments.
 
 ### Local IPC
 
-When `SHODH_IPC_ENDPOINT` is set, tool calls, proactive surfacing, health
-checks, resources, and prompts use authenticated local IPC. Each call opens one
-local connection and exchanges one versioned, newline-delimited JSON request
-and response. Frames are limited to eight MiB, and the API key has the same full
-authority that it has through REST. The key is never written to MCP stdout.
+When `SHODH_IPC_ENDPOINT` is set, tool calls, proactive surfacing, health checks,
+resources, and prompts use local IPC. Each call opens one local connection and
+exchanges one versioned, newline-delimited JSON request and response. Frames are
+limited to eight MiB. Ordinary API operations require the same full-authority API
+key as REST; only exact `GET /health` is unauthenticated. The key is never written
+to MCP stdout.
 
 Streaming ingestion remains a WebSocket feature. It is disabled by default in
 IPC mode because the local protocol is finite request/response. To enable it
@@ -109,7 +111,9 @@ explicitly, set `SHODH_STREAM_WEBSOCKET=true` and configure `SHODH_API_URL` for
 the server's HTTP WebSocket endpoint. Ordinary operations continue to use IPC.
 
 If `SHODH_IPC_ENDPOINT` is absent, the MCP server preserves its existing HTTP
-and WebSocket behavior.
+and WebSocket behavior. When the variable is present, it is an explicit transport
+selection: an unavailable IPC endpoint is reported rather than silently retried
+over HTTP.
 
 ## MCP Tools (51 total)
 

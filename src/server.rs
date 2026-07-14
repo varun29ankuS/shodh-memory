@@ -1,4 +1,4 @@
-//! Server bootstrap module — starts the Shodh-Memory HTTP API server.
+//! Server bootstrap module — starts the Shodh-Memory HTTP and local IPC transports.
 //!
 //! Extracted from `main.rs` so that both `shodh-memory-server` (standalone)
 //! and `shodh server` (unified CLI) can start the server with identical behavior.
@@ -48,7 +48,7 @@ pub struct ServerRunConfig {
     pub ipc_endpoint: PathBuf,
 }
 
-/// Start the shodh-memory HTTP server.
+/// Start the shodh-memory server transports.
 ///
 /// This is a **blocking** call that runs until a shutdown signal (Ctrl-C / SIGTERM).
 /// It sets environment variables, pre-initialises the ONNX runtime, builds a tokio
@@ -293,8 +293,8 @@ async fn async_main() -> Result<()> {
         tracing_setup::trace_propagation::propagate_trace_context,
     ));
 
-    // Local IPC is opt-in and MUST NOT be able to take the HTTP transport down
-    // with it: a bind failure degrades to HTTP-only rather than aborting startup
+    // Local IPC is enabled by default but MUST NOT be able to take HTTP down with
+    // it: a bind failure degrades to HTTP-only rather than aborting startup
     // (mirrors the non-fatal zenoh transport start above). This also removes the
     // availability regression where a second instance, or a data dir not at mode
     // 0700, refused to boot the whole daemon.

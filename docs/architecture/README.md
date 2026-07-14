@@ -40,9 +40,6 @@ Shodh-memory is not a vector database. It's a **cognitive memory system** that m
 | [Neuroscience Foundations](./01-neuroscience-foundations.md) | The cognitive science research behind shodh-memory |
 | [3-Tier Memory Model](./02-three-tier-memory.md) | Working, session, and long-term memory tiers |
 | [Hebbian Learning](./03-hebbian-learning.md) | "Neurons that fire together, wire together" |
-| [Knowledge Graph](./04-knowledge-graph.md) | Entity extraction, relationships, spreading activation |
-| [Memory Consolidation](./05-memory-consolidation.md) | Replay, fact extraction, interference detection |
-| [Decay & Forgetting](./06-decay-and-forgetting.md) | Hybrid exponential + power-law decay model |
 | [Local IPC Transport](./07-local-ipc-transport.md) | Authenticated Unix socket and Windows named-pipe integration |
 
 ## Why This Matters for AI Agents
@@ -113,6 +110,6 @@ This enables deployment on:
 
 ## Next Steps
 
-- [Quick Start Guide](../quickstart.md)
+- [Quick Start Guide](../../README-rust.md#quick-start)
 - [API Reference](../../specs/openapi.yaml)
 - [Memory Schema](../../specs/schemas/memory.md)

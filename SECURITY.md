@@ -43,6 +43,7 @@ operator explicitly opts out via an environment variable.
 | **Integration API URLs** | An insecure `http://` override of `GITHUB_API_URL` / `LINEAR_API_URL` for a non-localhost host is warned about. | `SHODH_ENFORCE_HTTPS=true` rejects such overrides and uses the secure default. |
 | **Error responses** | In production (`SHODH_ENV=production`) 5xx responses return a generic message; full detail is logged server-side only. | — |
 | **API authentication** | All `/api/*` routes require an API key. Production refuses authenticated requests when no key is configured. | — |
-| **Transport** | Security headers (`X-Frame-Options`, CSP, `X-Content-Type-Options`, and HSTS in production) are always set. TLS is strongly recommended for any non-localhost deployment. | — |
+| **HTTP transport** | Security headers (`X-Frame-Options`, CSP, `X-Content-Type-Options`, and HSTS in production) are always set. TLS is strongly recommended for any non-localhost deployment. | — |
+| **Local IPC** | Enabled by default. Unix uses a current-user-owned `0700` parent and `0600` socket; Windows uses a protected current-user/LocalSystem DACL and a per-user pipe name. Ordinary requests authenticate before dispatch. | `SHODH_IPC_ENABLED=false` disables the listener. `SHODH_IPC_ENDPOINT` overrides the platform default; on Unix its parent must be a real directory owned by the current user. |
 
 See the configuration documentation for the full list of variables.

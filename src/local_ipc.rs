@@ -56,11 +56,10 @@ const PUBLIC_API_PATHS: &[&str] = &["/api/context/status", "/api/context_status"
 /// Stable endpoint owned by Shodh rather than by the storage-path fallback.
 ///
 /// The Windows default folds the current user's SID into the pipe name. The DACL
-/// already scopes access to the current user + LocalSystem, but the pipe *namespace*
-/// is machine-global: a fixed name lets only the first user on a multi-user host
-/// bind it, and lets any local process pre-create that exact name to intercept
-/// clients. A per-user name removes the cross-user collision and shrinks the
-/// squatting window to a name an attacker must guess the victim's SID to form.
+/// scopes access to the current user + LocalSystem, but the pipe namespace is
+/// machine-global: a fixed name lets only the first user on a multi-user host bind
+/// it. A per-user name removes that cross-user collision; it does not prevent pipe
+/// squatting because local SIDs are discoverable (see the architecture limitations).
 pub fn default_endpoint() -> PathBuf {
     #[cfg(windows)]
     {

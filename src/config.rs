@@ -588,6 +588,8 @@ pub fn print_env_help() {
     );
     println!("  SHODH_PORT             - Server port (default: 3030)");
     println!("  SHODH_MEMORY_PATH      - Storage directory (default: platform data dir, e.g. ~/.local/share/shodh-memory/)");
+    println!("  SHODH_IPC_ENABLED      - Enable local IPC listener (default: true)");
+    println!("  SHODH_IPC_ENDPOINT     - Override the platform-default socket or named pipe");
     println!("  SHODH_API_KEYS         - Comma-separated API keys (required in production)");
     println!("  SHODH_DEV_API_KEY      - Development API key (required in dev if SHODH_API_KEYS not set)");
     println!("  SHODH_MAX_USERS        - Max users in memory LRU (default: 1000)");

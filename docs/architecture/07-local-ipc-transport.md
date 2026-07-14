@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| Status | Implemented (opt-in) |
+| Status | Implemented (enabled by default) |
 | Author | Alex Yanchenko |
 | Created | 2026-07-14 |
 | Scope | Rust engine, Rust/TypeScript MCP clients, local integrations |
@@ -22,14 +22,23 @@ can prefer.
 ## Proposal
 
 When enabled, the engine binds one local endpoint at startup and dispatches local
-requests through the same Axum router used by REST. Unix uses a filesystem socket
-under the platform data directory; Windows uses a named pipe whose name and DACL
-are both scoped to the current user. The endpoint is configurable
+requests through the same Axum router used by REST. By default, Unix uses a
+filesystem socket under the platform data directory; Windows uses a named pipe
+whose name is per-user and whose DACL grants the current user plus LocalSystem.
+The endpoint is configurable
 (`SHODH_IPC_ENDPOINT`) and independent of the memory storage path.
 
-IPC is **opt-in and non-fatal**, mirroring the Zenoh transport:
+Default endpoints are:
 
-- `SHODH_IPC_ENABLED` (default `true`) turns it off with `false`/`0`/`no`/`off`.
+- Linux: `${XDG_DATA_HOME}/shodh/shodh-memory.sock` when `XDG_DATA_HOME` is set,
+  otherwise `~/.local/share/shodh/shodh-memory.sock`.
+- macOS: `~/Library/Application Support/shodh/shodh-memory.sock`.
+- Windows: `\\.\pipe\shodh-memory-<current-user-SID>` (falling back to the bare
+  pipe name only when the SID lookup fails).
+
+IPC is **enabled by default and non-fatal**:
+
+- `SHODH_IPC_ENABLED=false` (also `0`, `no`, or `off`) disables the listener.
 - A bind failure is logged and the process continues serving HTTP only — it never
   aborts startup. This is deliberate: a second instance for the same user, a data
   directory not at mode 0700, or a read-only endpoint parent must not take the
@@ -93,9 +102,9 @@ its status, **not** rejected as an id mismatch.
   unlinking.
 - Windows: the pipe uses `FILE_FLAG_FIRST_PIPE_INSTANCE`, rejects remote clients,
   and carries a protected DACL granting access only to the current user and
-  LocalSystem. The default pipe name is scoped per user (the current user's SID) so
-  a second user can bind their own and an attacker cannot pre-create the victim's
-  exact name without knowing their SID.
+  LocalSystem. The default pipe name includes the current user's SID so different
+  users do not collide. A SID is discoverable and the name does not by itself stop
+  pipe squatting; client-side owner verification remains a known limitation.
 - Per-request read and dispatch deadlines are bounded, and the IPC drain at
   shutdown is bounded by the same timeout as the HTTP drain, so a slow route cannot
   hold the process open and cost the storage flush.
@@ -114,19 +123,31 @@ IPC mode requires explicit opt-in (`SHODH_STREAM_WEBSOCKET=true`).
 
 ## Known limitations
 
+- **Manually classified routes.** The streaming and public-route exclusion lists
+  are maintained beside the IPC transport because Axum does not expose registered
+  routes for enumeration. Dispatch-driving tests cover the current lists, but a new
+  streaming or public HTTP route still requires an explicit IPC exclusion.
 - **Middleware divergence.** IPC dispatches into the route table with only
   `track_metrics` layered on. Rate limiting, CORS, and security headers apply to
   HTTP only; auth, bounds, and concurrency are enforced inside the IPC layer. New
   HTTP middleware does not automatically cover IPC.
-- **Response size.** IPC caps a response body at ~8 MiB; the same route over HTTP
-  has no such cap, so a large-but-legal response can succeed over HTTP and return
-  `413` over IPC.
-- **In-band key.** On a 0600 socket / user-scoped pipe the peer is already the same
-  user, so the API key is defense-in-depth (e.g. against a widened endpoint), not an
-  independent second factor. Peer-credential checks (`SO_PEERCRED` /
+- **Response shape and size.** IPC carries a JSON value and no HTTP headers or
+  content type, so non-JSON exports are not equivalent to their HTTP responses.
+  It also caps a response body at about eight MiB; the same route over HTTP has no
+  such cap and can succeed where IPC returns `413`.
+- **In-band key.** On the legitimate 0600 socket or DACL-protected pipe, OS access
+  is already user-scoped, so the API key is defense-in-depth (e.g. against a widened
+  endpoint), not an independent second factor. Peer-credential checks (`SO_PEERCRED` /
   `GetNamedPipeClientProcessId`) are not yet used.
-- **Windows named-pipe throughput** and **client-side server-owner verification**
-  are tracked as follow-ups (see the repository issues referenced from the review).
+- **Windows client shape.** The TypeScript client uses a bounded pool of helper
+  processes because Node's named-pipe connect cannot be cancelled reliably. This
+  limits throughput, and queued time counts against the request deadline.
+- **Windows server-owner verification.** Clients do not verify the named-pipe
+  server owner before sending the in-band API key. The per-user name prevents
+  cross-user collisions but does not close this pre-creation race.
+- **Pre-auth occupancy.** A same-user peer can occupy a concurrency slot for the
+  full request-read timeout before authenticating; there is no shorter pre-auth
+  deadline.
 
 ## Verification
 
