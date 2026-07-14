@@ -245,9 +245,15 @@ Environment variables:
 
 ```bash
 SHODH_MEMORY_PATH=./data
+SHODH_IPC_ENDPOINT=/home/you/.local/share/shodh/shodh-memory.sock
 SHODH_OFFLINE=true  # Disable auto-download
 RUST_LOG=info
 ```
+
+The server exposes the same finite API operations over authenticated local IPC:
+a Unix-domain socket on Linux/macOS and a current-user-only named pipe on
+Windows. `shodh serve` uses this transport for MCP without HTTP. Streaming
+routes remain WebSocket/SSE-only.
 
 ## Architecture
 

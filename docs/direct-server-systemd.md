@@ -1,7 +1,8 @@
 # Direct server mode with systemd
 
-This guide is for Linux users who want the Rust HTTP server to run as a
-long-lived local service and have MCP or REST clients connect to it.
+This guide is for Linux users who want the Rust server to run as a long-lived
+local service and have MCP clients connect over a Unix socket while REST clients
+remain available over HTTP.
 
 This is optional. The default `npx -y @shodh/memory-mcp` setup is still the
 quickest path for Claude Code, Cursor, Claude Desktop, and other MCP clients.
@@ -17,8 +18,8 @@ Use direct server mode when you want:
 
 ## Command roles
 
-- `shodh server` starts the HTTP API server, usually on `127.0.0.1:3030`.
-- `shodh serve` starts the MCP stdio server.
+- `shodh server` starts the shared memory engine with HTTP and local IPC.
+- `shodh serve` starts the MCP stdio bridge and uses local IPC.
 - `@shodh/memory-mcp` is the npm MCP wrapper used by MCP clients.
 
 Direct server mode runs `shodh server` separately. MCP and REST clients can then
@@ -44,6 +45,7 @@ Type=simple
 Environment=SHODH_HOST=127.0.0.1
 Environment=SHODH_PORT=3030
 Environment=SHODH_MEMORY_PATH=%h/.local/share/shodh-memory
+Environment=SHODH_IPC_ENDPOINT=%h/.local/share/shodh/shodh-memory.sock
 Environment=SHODH_DEV_API_KEY=local-dev-key
 ExecStart=%h/.cargo/bin/shodh server
 Restart=on-failure
@@ -85,7 +87,7 @@ systemctl --user restart shodh-memory.service
 ## MCP client example
 
 If you want an MCP client to use this separately supervised server, point the
-native MCP bridge at the HTTP API:
+native MCP bridge at the same Unix socket:
 
 ```json
 {
@@ -94,7 +96,7 @@ native MCP bridge at the HTTP API:
       "command": "shodh",
       "args": ["serve"],
       "env": {
-        "SHODH_API_URL": "http://127.0.0.1:3030",
+        "SHODH_IPC_ENDPOINT": "/home/you/.local/share/shodh/shodh-memory.sock",
         "SHODH_API_KEY": "local-dev-key",
         "SHODH_USER_ID": "local-agent"
       }
@@ -104,7 +106,9 @@ native MCP bridge at the HTTP API:
 ```
 
 Use the full path to `shodh` if your MCP client does not inherit your shell
-`PATH`.
+`PATH`. Replace `/home/you` with the service user's home directory. The socket
+parent is mode `0700` and the socket is mode `0600`; Shodh refuses unsafe,
+foreign-owned, or live replacement endpoints.
 
 ## User IDs
 

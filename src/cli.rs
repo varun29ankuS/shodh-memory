@@ -87,6 +87,14 @@ enum Commands {
         /// Maximum concurrent requests before load shedding
         #[arg(long, env = "SHODH_MAX_CONCURRENT", default_value_t = 200)]
         max_concurrent: usize,
+
+        /// Local IPC socket or named-pipe endpoint
+        #[arg(
+            long,
+            env = "SHODH_IPC_ENDPOINT",
+            default_value_os_t = shodh_memory::local_ipc::default_endpoint()
+        )]
+        ipc_endpoint: PathBuf,
     },
 
     /// Launch the TUI dashboard
@@ -110,9 +118,13 @@ enum Commands {
 
     /// Run as MCP server (stdio transport)
     Serve {
-        /// API URL for the memory server
-        #[arg(long, env = "SHODH_API_URL", default_value = "http://127.0.0.1:3030")]
-        api_url: String,
+        /// Local IPC socket or named-pipe endpoint
+        #[arg(
+            long,
+            env = "SHODH_IPC_ENDPOINT",
+            default_value_os_t = shodh_memory::local_ipc::default_endpoint()
+        )]
+        ipc_endpoint: PathBuf,
 
         /// API key for authentication
         #[arg(
@@ -281,6 +293,7 @@ async fn main() -> Result<()> {
             production,
             rate_limit,
             max_concurrent,
+            ipc_endpoint,
         } => {
             // server::run() builds its own tokio runtime, so we need to exit
             // the current one first. Drop the async context and call synchronously.
@@ -294,6 +307,7 @@ async fn main() -> Result<()> {
                     production,
                     rate_limit,
                     max_concurrent,
+                    ipc_endpoint,
                 })
             })
             .await?;
@@ -311,15 +325,15 @@ async fn main() -> Result<()> {
         // EXISTING: shodh serve — MCP server
         // =====================================================================
         Commands::Serve {
-            api_url,
+            ipc_endpoint,
             api_key,
             user_id,
         } => {
             eprintln!("Starting shodh MCP server...");
-            eprintln!("  API URL: {}", api_url);
+            eprintln!("  IPC endpoint: {}", ipc_endpoint.display());
             eprintln!("  User ID: {}", user_id);
 
-            let server = ShodhMcpServer::new(api_url, api_key, user_id);
+            let server = ShodhMcpServer::new(ipc_endpoint, api_key, user_id);
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
         }
@@ -875,21 +889,17 @@ fn generate_api_key() -> String {
 // API CLIENT
 // =============================================================================
 
-/// HTTP client for the shodh-memory API (async version for MCP tools)
+/// Local IPC client for MCP tools. Hook and TUI clients remain HTTP clients.
 #[derive(Clone, Debug)]
 struct AsyncApiClient {
-    client: reqwest::Client,
-    base_url: String,
-    api_key: String,
+    client: shodh_memory::local_ipc::IpcClient,
     user_id: String,
 }
 
 impl AsyncApiClient {
-    fn new(base_url: String, api_key: String, user_id: String) -> Self {
+    fn new(ipc_endpoint: PathBuf, api_key: String, user_id: String) -> Self {
         Self {
-            client: reqwest::Client::new(),
-            base_url,
-            api_key,
+            client: shodh_memory::local_ipc::IpcClient::new(ipc_endpoint, api_key),
             user_id,
         }
     }
@@ -899,23 +909,10 @@ impl AsyncApiClient {
         endpoint: &str,
         body: &T,
     ) -> Result<R> {
-        let url = format!("{}{endpoint}", self.base_url);
-        let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("X-API-Key", &self.api_key)
-            .json(body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("API error {status}: {text}");
-        }
-
-        Ok(resp.json().await?)
+        self.client
+            .post(endpoint, body)
+            .await
+            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -1440,9 +1437,9 @@ struct ShodhMcpServer {
 
 #[tool_router]
 impl ShodhMcpServer {
-    fn new(api_url: String, api_key: String, user_id: String) -> Self {
+    fn new(ipc_endpoint: PathBuf, api_key: String, user_id: String) -> Self {
         Self {
-            client: Arc::new(AsyncApiClient::new(api_url, api_key, user_id)),
+            client: Arc::new(AsyncApiClient::new(ipc_endpoint, api_key, user_id)),
             tool_router: Self::tool_router(),
         }
     }

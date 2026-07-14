@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::timeout::TimeoutLayer;
@@ -18,6 +19,7 @@ use crate::{
     config::ServerConfig,
     embeddings::minilm::pre_init_ort_runtime,
     handlers::{self, AppState, MultiUserMemoryManager},
+    local_ipc::{self, LocalIpcServer},
     metrics, middleware,
 };
 
@@ -43,6 +45,7 @@ pub struct ServerRunConfig {
     pub production: bool,
     pub rate_limit: u64,
     pub max_concurrent: usize,
+    pub ipc_endpoint: PathBuf,
 }
 
 /// Start the shodh-memory HTTP server.
@@ -72,6 +75,7 @@ pub fn run(config: ServerRunConfig) -> Result<()> {
         }
         std::env::set_var("SHODH_RATE_LIMIT", config.rate_limit.to_string());
         std::env::set_var("SHODH_MAX_CONCURRENT", config.max_concurrent.to_string());
+        std::env::set_var("SHODH_IPC_ENDPOINT", &config.ipc_endpoint);
     }
 
     // Pre-initialize ORT_DYLIB_PATH before any threads are spawned.
@@ -289,6 +293,17 @@ async fn async_main() -> Result<()> {
         tracing_setup::trace_propagation::propagate_trace_context,
     ));
 
+    // Local IPC dispatches into the same finite route table without the HTTP
+    // transport middleware. Authentication, bounds, and concurrency are
+    // enforced by local_ipc before a request reaches this router.
+    let ipc_router = handlers::build_router(Arc::clone(&manager));
+    let ipc_endpoint = std::env::var_os("SHODH_IPC_ENDPOINT")
+        .map(PathBuf::from)
+        .unwrap_or_else(local_ipc::default_endpoint);
+    let ipc_server = LocalIpcServer::bind(ipc_endpoint)
+        .await
+        .map_err(anyhow::Error::msg)?;
+
     // Start server
     let host = &server_config.host;
     let port = server_config.port;
@@ -300,9 +315,10 @@ async fn async_main() -> Result<()> {
     // Small delay for log flush
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    print_ready_message(addr);
-
     let listener = tokio::net::TcpListener::bind(addr).await?;
+
+    print_ready_message(addr);
+    info!("Local IPC ready at {}", ipc_server.endpoint().display());
 
     // Use a notify to signal the server to stop accepting new connections
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
@@ -318,32 +334,75 @@ async fn async_main() -> Result<()> {
 
     let mut server_handle = tokio::spawn(async move { server.await });
 
-    // Wait for shutdown signal (Ctrl+C / SIGTERM)
-    shutdown_signal_with_drain().await;
+    let ipc_shutdown = CancellationToken::new();
+    let ipc_task_shutdown = ipc_shutdown.clone();
+    let mut ipc_handle = tokio::spawn(ipc_server.serve(
+        ipc_router,
+        ipc_task_shutdown,
+        server_config.max_concurrent_requests,
+        request_timeout,
+    ));
+
+    // A listener failure is terminal: both transports share one manager and
+    // readiness must never degrade silently to an HTTP-only process.
+    let mut terminal_error = None;
+    let mut http_finished = false;
+    let mut ipc_finished = false;
+    tokio::select! {
+        _ = shutdown_signal_with_drain() => {}
+        result = &mut server_handle => {
+            http_finished = true;
+            terminal_error = Some(match result {
+                Ok(Ok(())) => "HTTP server stopped unexpectedly".to_string(),
+                Ok(Err(error)) => format!("HTTP server failed: {error}"),
+                Err(error) => format!("HTTP server task failed: {error}"),
+            });
+        }
+        result = &mut ipc_handle => {
+            ipc_finished = true;
+            terminal_error = Some(match result {
+                Ok(Ok(())) => "local IPC server stopped unexpectedly".to_string(),
+                Ok(Err(error)) => format!("local IPC server failed: {error}"),
+                Err(error) => format!("local IPC server task failed: {error}"),
+            });
+        }
+    }
 
     // Tell the server to stop accepting new connections
     shutdown_notify.notify_one();
+    ipc_shutdown.cancel();
 
     // Give the server a brief moment to finish in-flight requests
     info!(
         "Waiting up to {}s for in-flight requests...",
         SERVER_DRAIN_TIMEOUT_SECS
     );
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(SERVER_DRAIN_TIMEOUT_SECS),
-        &mut server_handle,
-    )
-    .await
-    {
-        Ok(Ok(Ok(()))) => info!("Server stopped gracefully"),
-        Ok(Ok(Err(e))) => error!("Server error: {}", e),
-        Ok(Err(e)) => error!("Server task panicked: {}", e),
-        Err(_) => {
-            info!(
-                "Server drain timed out after {}s, aborting server task",
-                SERVER_DRAIN_TIMEOUT_SECS
-            );
-            server_handle.abort();
+    if !http_finished {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(SERVER_DRAIN_TIMEOUT_SECS),
+            &mut server_handle,
+        )
+        .await
+        {
+            Ok(Ok(Ok(()))) => info!("HTTP server stopped gracefully"),
+            Ok(Ok(Err(e))) => error!("HTTP server error: {}", e),
+            Ok(Err(e)) => error!("HTTP server task panicked: {}", e),
+            Err(_) => {
+                info!(
+                    "HTTP drain timed out after {}s, aborting server task",
+                    SERVER_DRAIN_TIMEOUT_SECS
+                );
+                server_handle.abort();
+                let _ = server_handle.await;
+            }
+        }
+    }
+
+    if !ipc_finished {
+        match ipc_handle.await {
+            Ok(Ok(())) => info!("Local IPC server stopped gracefully"),
+            Ok(Err(e)) => error!("Local IPC server error: {}", e),
+            Err(e) => error!("Local IPC server task panicked: {}", e),
         }
     }
 
@@ -376,7 +435,10 @@ async fn async_main() -> Result<()> {
     // Graceful shutdown with cleanup (flush databases, save indices)
     run_shutdown_cleanup(manager_for_shutdown).await;
 
-    Ok(())
+    match terminal_error {
+        Some(error) => anyhow::bail!(error),
+        None => Ok(()),
+    }
 }
 
 // =============================================================================

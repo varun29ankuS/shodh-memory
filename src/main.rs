@@ -103,6 +103,15 @@ struct Cli {
         global = true
     )]
     max_concurrent: usize,
+
+    /// Local IPC socket or named-pipe endpoint
+    #[arg(
+        long,
+        env = "SHODH_IPC_ENDPOINT",
+        default_value_os_t = shodh_memory::local_ipc::default_endpoint(),
+        global = true
+    )]
+    ipc_endpoint: PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -129,6 +138,7 @@ fn main() -> Result<()> {
                 production: cli.production,
                 rate_limit: cli.rate_limit,
                 max_concurrent: cli.max_concurrent,
+                ipc_endpoint: cli.ipc_endpoint,
             })
         }
         Some(Command::Migrate { dry_run }) => {
