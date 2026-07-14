@@ -269,8 +269,8 @@ Based on Cowan's working memory model:
 
 1. **Install**: `npx -y @shodh/memory-mcp` downloads the package
 2. **Auto-spawn**: On first run, downloads the native server binary (~15MB) and embedding model (~23MB)
-3. **Connect**: MCP client connects to the server over local IPC when
-   `SHODH_IPC_ENDPOINT` is set, otherwise over HTTP
+3. **Connect**: MCP client connects to this MCP server via stdio; backend requests
+   use local IPC when `SHODH_IPC_ENDPOINT` is set, otherwise HTTP
 4. **Ready**: Start using `remember` and `recall` tools
 
 The backend server runs locally and stores all data on your machine. No cloud dependency.

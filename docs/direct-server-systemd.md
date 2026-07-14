@@ -1,7 +1,7 @@
 # Direct server mode with systemd
 
 This guide is for Linux users who want the Rust server to run as a long-lived
-local service and have MCP clients connect over a Unix socket while REST clients
+local service. MCP bridges can reach it over a Unix socket, while REST clients
 remain available over HTTP.
 
 This is optional. The default `npx -y @shodh/memory-mcp` setup is still the
