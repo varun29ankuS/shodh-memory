@@ -21,8 +21,8 @@ use clap::{Parser, ValueEnum};
 use shodh_memory::memory::types::LayerMode;
 use shodh_memory::recall_harness::multihop::analyze_multihop;
 use shodh_memory::recall_harness::report::{
-    compare_to_baseline, AblationReport, DecayReport, LearningCurveReport, MultiHopReport,
-    ReachabilityReport, Report, SelectiveForgettingReport,
+    compare_to_baseline, AblationReport, BridgeReport, DecayReport, LearningCurveReport,
+    MultiHopReport, ReachabilityReport, Report, SelectiveForgettingReport,
 };
 use shodh_memory::recall_harness::runner::{
     analyze_ablation, analyze_funnel, analyze_graph_reachability, analyze_learning_curve,
@@ -259,6 +259,27 @@ struct Args {
     /// chaining. Reports per-layer recall on root-cause vs direct-cause control.
     #[arg(long)]
     lineage: Option<PathBuf>,
+
+    /// W1-C bridge-stressing benchmark: generate synthetic two-cluster worlds
+    /// joined only by bridge memories (gold reachable ONLY across the bridge),
+    /// then report bridge-present vs bridge-deleted recall@10 (the deletion must
+    /// collapse recall — the benchmark's validity check) plus random-vs-targeted
+    /// node-deletion damage curves. The prerequisite gate for topology-aware
+    /// decay and GNCA propagation.
+    #[arg(long)]
+    bridge: Option<PathBuf>,
+
+    /// Independent two-cluster worlds for the bridge benchmark.
+    #[arg(long, default_value_t = shodh_memory::recall_harness::bridge_harness::DEFAULT_UNITS)]
+    bridge_units: usize,
+
+    /// Memories per cluster (per world) for the bridge benchmark.
+    #[arg(long, default_value_t = shodh_memory::recall_harness::bridge_harness::DEFAULT_CLUSTER_SIZE)]
+    bridge_cluster_size: usize,
+
+    /// Bridge memories per world (single-points-of-failure) for the bridge benchmark.
+    #[arg(long, default_value_t = shodh_memory::recall_harness::bridge_harness::DEFAULT_BRIDGES)]
+    bridge_count: usize,
 
     /// LongMemEval-S (ICLR 2025, current SOTA long-term memory benchmark): path
     /// to the fixture dir built by benchmarks/longmemeval_to_harness.py
@@ -517,6 +538,63 @@ fn run(args: &Args) -> Result<i32> {
             "root-cause",
             "direct-cause control",
             "root-cause is reachable only by chaining past the lexical direct-cause distractor; if it stays ~0 across layers, causal/lineage retrieval is not exercised in eval.",
+        );
+        return Ok(EXIT_PASS);
+    }
+
+    // W1-C bridge-stressing benchmark.
+    if let Some(b_path) = &args.bridge {
+        let report = shodh_memory::recall_harness::bridge_harness::analyze_bridge_recall(
+            &inputs,
+            args.bridge_units,
+            args.bridge_cluster_size,
+            args.bridge_count,
+        )
+        .context("bridge benchmark")?;
+        write_bridge(b_path, &report)?;
+        eprintln!(
+            "recall-eval: bridge benchmark (units={}, cluster={}, bridges/unit={}, nodes={})",
+            report.units, report.cluster_size, report.bridges_per_unit, report.total_nodes
+        );
+        println!(
+            "## Bridge-stressing benchmark ({}, {} cases over {} nodes)\n",
+            report.suite, report.bridge_cases, report.total_nodes
+        );
+        println!(
+            "Present recall curve: @10 = **{:.4}**  ·  @50 = {:.4}  ·  @100 = {:.4}  ·  full = **{:.4}**",
+            report.bridge_present_recall_at_10,
+            report.bridge_present_recall_at_50,
+            report.bridge_present_recall_at_100,
+            report.bridge_present_recall_full,
+        );
+        println!(
+            "Bridge-present recall@10 = **{:.4}**  ·  bridge-deleted recall@10 = **{:.4}**  (collapse Δ = {:+.4})",
+            report.bridge_present_recall_at_10,
+            report.bridge_deleted_recall_at_10,
+            report.bridge_deleted_recall_at_10 - report.bridge_present_recall_at_10
+        );
+        println!(
+            "\n_@10 is the graph-propagation target (near-zero until wave-2 lands); `full` is the reachability floor (gold retrieved but buried)._\n"
+        );
+        println!(
+            "\n| nodes deleted | random recall@10 | targeted recall@10 | asymmetry (rand − targ) |"
+        );
+        println!("| --- | --- | --- | --- |");
+        for row in &report.damage {
+            println!(
+                "| {:.0}% ({}) | {:.4} | {:.4} | {:+.4} |",
+                row.fraction * 100.0,
+                row.deleted_nodes,
+                row.random_recall_at_10,
+                row.targeted_recall_at_10,
+                row.random_recall_at_10 - row.targeted_recall_at_10
+            );
+        }
+        println!(
+            "\nRatchet (post wave-2): bridge deletion must collapse present@10, and targeted (bridge-first) \
+             deletion must degrade far more than random at equal budget — the asymmetry topology-aware \
+             decay is meant to protect. Until 2-hop graph propagation surfaces gold into the top-10, \
+             present@10 ≈ 0 while `full` stays high (gold retrieved but buried): that gap IS the baseline."
         );
         return Ok(EXIT_PASS);
     }
@@ -878,6 +956,19 @@ fn print_cap_ladder(
         prev = Some(r.multihop_p_at_1);
     }
     println!("\nP@1 is the metric: the capability-correct item must rank #1 above its equi-confusable distractors (recall@10 saturates because the whole confusable set fits the top-10 window). {note}");
+}
+
+fn write_bridge(path: &std::path::Path, report: &BridgeReport) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating output dir {}", parent.display()))?;
+        }
+    }
+    let json = serde_json::to_vec_pretty(report).context("serialising bridge report")?;
+    std::fs::write(path, &json)
+        .with_context(|| format!("writing bridge report to {}", path.display()))?;
+    Ok(())
 }
 
 fn write_decay(path: &std::path::Path, report: &DecayReport) -> Result<()> {

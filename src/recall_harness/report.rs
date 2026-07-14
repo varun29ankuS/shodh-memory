@@ -130,6 +130,82 @@ pub struct SelectiveForgettingReport {
     pub rows: Vec<SelectiveForgettingRow>,
 }
 
+/// One damage point in the W1-C bridge-stressing curve. `fraction` is the share
+/// of memory nodes deleted; `random_recall_at_10` and `targeted_recall_at_10` are
+/// bridge-crossing recall@10 after deleting that share uniformly-at-random vs
+/// bridge-first. Gold memories are protected from deletion in BOTH modes, so the
+/// curves isolate TOPOLOGY damage (path availability) from gold availability. The
+/// interesting signal is the ASYMMETRY: targeted deletion (which removes the
+/// bridge single-points-of-failure) collapses recall far faster than random
+/// deletion of dense-cluster interior at the same node budget — the asymmetry
+/// topology-aware decay is meant to protect against.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BridgeDamageRow {
+    /// Fraction of total memory nodes deleted (e.g. 0.05, 0.10, 0.15).
+    pub fraction: f64,
+    /// Number of nodes actually deleted at this fraction.
+    pub deleted_nodes: usize,
+    /// Bridge-crossing recall@10 after deleting `fraction` of nodes at random.
+    #[serde(rename = "random_recall@10")]
+    pub random_recall_at_10: f64,
+    /// Bridge-crossing recall@10 after deleting `fraction` of nodes bridge-first.
+    #[serde(rename = "targeted_recall@10")]
+    pub targeted_recall_at_10: f64,
+}
+
+/// W1-C bridge-stressing benchmark report.
+///
+/// Bridge-crossing queries anchor their surface in cluster A but their gold
+/// answer lives in cluster B, reachable ONLY by traversing a small set of bridge
+/// memories that share entities with both clusters. `bridge_present_recall_at_10`
+/// is the headline; `bridge_deleted_recall_at_10` is the same queries after every
+/// bridge memory is deleted. The present-recall CURVE (`@10 / @50 / @100 / full`)
+/// separates two distinct facts: the wider cutoffs (esp. `full`) report whether
+/// gold is retrieved AT ALL (the reachability / plumbing floor — a broken ingest
+/// zeroes it), while `@10` reports whether the graph leg has surfaced gold into
+/// the answerable top-k. Today the graph does NOT propagate 2 hops across the
+/// bridge into the top-10, so `@10` is ~0 while `full` is high: that gap is the
+/// honest baseline the wave-2 topology-aware propagation must close. The
+/// `bridge_present@10 ≫ bridge_deleted@10` collapse and the targeted-vs-random
+/// `damage` asymmetry only become non-trivial once that propagation lands; until
+/// then they are reported (not gated) so the ratchet is visible.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BridgeReport {
+    pub suite: String,
+    pub git_sha: String,
+    /// Independent 2-cluster worlds generated (each with its own entity namespace).
+    pub units: usize,
+    /// Memories per cluster (per world).
+    pub cluster_size: usize,
+    /// Bridge memories per world (the single-points-of-failure).
+    pub bridges_per_unit: usize,
+    /// Total bridge-crossing query cases (one per world).
+    pub bridge_cases: usize,
+    /// Total memory nodes ingested (the deletion denominator).
+    pub total_nodes: usize,
+    /// Baseline bridge-crossing recall@10 with all bridges present. The wave-2
+    /// target: ~0 until 2-hop graph propagation surfaces gold into the top-10.
+    #[serde(rename = "bridge_present_recall@10")]
+    pub bridge_present_recall_at_10: f64,
+    /// Present-recall at the wider @50 cutoff (diagnostic depth signal).
+    #[serde(rename = "bridge_present_recall@50")]
+    pub bridge_present_recall_at_50: f64,
+    /// Present-recall at the @100 cutoff (diagnostic depth signal).
+    #[serde(rename = "bridge_present_recall@100")]
+    pub bridge_present_recall_at_100: f64,
+    /// Present-recall over the FULL pool (k = total_nodes): is gold retrieved at
+    /// all? The reachability / plumbing floor — high today (gold is present but
+    /// buried), and the regression guard for the 0.0000-everywhere failure mode.
+    #[serde(rename = "bridge_present_recall_full")]
+    pub bridge_present_recall_full: f64,
+    /// Bridge-crossing recall@10 after deleting EVERY bridge memory. Becomes the
+    /// validity check (must collapse below present@10) once propagation lands.
+    #[serde(rename = "bridge_deleted_recall@10")]
+    pub bridge_deleted_recall_at_10: f64,
+    /// Random-vs-targeted deletion degradation curves at escalating node budgets.
+    pub damage: Vec<BridgeDamageRow>,
+}
+
 /// One row in the unified ablation matrix: a named config (a set of query-time
 /// flag overrides) and its aggregate metrics over the suite. The whole point is
 /// a single, re-runnable table where each fix/component is a row you can see and
