@@ -357,6 +357,7 @@ SHODH_API_KEYS=key1,key2,key3     # Comma-separated API keys
 SHODH_HOST=127.0.0.1              # Bind address (default: localhost)
 SHODH_PORT=3030                   # Port (default: 3030)
 SHODH_MEMORY_PATH=/var/lib/shodh  # Data directory
+SHODH_IPC_ENDPOINT=/run/user/1000/shodh/shodh-memory.sock
 SHODH_REQUEST_TIMEOUT=60          # Request timeout in seconds
 SHODH_MAX_CONCURRENT=200          # Max concurrent requests
 SHODH_ROCKSDB_BLOCK_CACHE_MB=256  # Shared RocksDB block cache (MiB)

@@ -245,6 +245,7 @@ Environment variables:
 
 ```bash
 SHODH_MEMORY_PATH=./data
+SHODH_IPC_ENDPOINT=/home/you/.local/share/shodh/shodh-memory.sock
 SHODH_OFFLINE=true  # Disable auto-download (models must already be present; else NER runs fallback)
 RUST_LOG=info
 
@@ -262,6 +263,11 @@ SHODH_CONTRASTIVE_ADAPTER=1   # contrastive entity-embedding adapter (gated, def
 SHODH_CONSOLIDATE_CANON=0     # entity canonicalization during consolidation (default ON; set 0 to disable)
 SHODH_GRAPH_TYPED_ONLY=1      # restrict graph edges to typed relations (gated, default off)
 ```
+
+The server exposes the same finite API operations over authenticated local IPC:
+a Unix-domain socket on Linux/macOS and a current-user-only named pipe on
+Windows. `shodh serve` uses this transport for MCP without HTTP. Streaming
+routes remain WebSocket/SSE-only.
 
 ## Architecture
 

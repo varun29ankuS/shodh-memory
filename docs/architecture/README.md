@@ -43,6 +43,7 @@ Shodh-memory is not a vector database. It's a **cognitive memory system** that m
 | [Knowledge Graph](./04-knowledge-graph.md) | Entity extraction, relationships, spreading activation |
 | [Memory Consolidation](./05-memory-consolidation.md) | Replay, fact extraction, interference detection |
 | [Decay & Forgetting](./06-decay-and-forgetting.md) | Hybrid exponential + power-law decay model |
+| [Local IPC Transport](./07-local-ipc-transport.md) | Authenticated Unix socket and Windows named-pipe integration |
 
 ## Why This Matters for AI Agents
 

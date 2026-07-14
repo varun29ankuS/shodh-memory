@@ -32,6 +32,7 @@ import { nextReconnectDelay, serializeAndValidateBody, shouldWarnInsecureApiUrl 
 import { stripSystemNoise, getContent as _getContent, getType as _getType, formatSurfacedMemories as _formatSurfacedMemories, formatToolCallContent } from "./string-utils";
 import { TokenTracker } from "./token-tracking";
 import { resolvePackageVersion } from "./version";
+import { ShodhIpcClient } from "./ipc-client";
 
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
@@ -54,10 +55,15 @@ function resolveApiUrl(): string {
 }
 const API_URL = resolveApiUrl();
 const WS_URL = API_URL.replace(/^http/, "ws") + "/api/stream";
+const IPC_ENDPOINT = process.env.SHODH_IPC_ENDPOINT?.trim() || "";
+const IPC_WEBSOCKET_STREAM_ENABLED = Boolean(IPC_ENDPOINT)
+  && process.env.SHODH_STREAM !== "false"
+  && process.env.SHODH_STREAM_WEBSOCKET === "true";
 const USER_ID = process.env.SHODH_USER_ID || "claude-code";
 
 // Detect whether the server is local (safe for auto-generated keys)
 function isLocalServer(): boolean {
+  if (IPC_ENDPOINT) return true;
   try {
     const url = new URL(API_URL);
     const host = url.hostname;
@@ -114,6 +120,8 @@ if (apiKeySource === "SHODH_DEV_API_KEY") {
 } else if (apiKeySource && apiKeySource !== "auto-generated" && apiKeySource !== "sandbox") {
   console.error(`[shodh-memory] API key loaded from ${apiKeySource}.`);
 }
+const IPC_CLIENT = IPC_ENDPOINT ? new ShodhIpcClient(IPC_ENDPOINT, API_KEY) : null;
+const BACKEND_LOCATION = IPC_ENDPOINT || API_URL;
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1000;
 const REQUEST_TIMEOUT_MS = 10000;
@@ -123,7 +131,8 @@ const REQUEST_TIMEOUT_MS = 10000;
 const WRITE_TIMEOUT_MS = 30000;
 
 // Warn if non-localhost URL uses HTTP (security risk)
-if (shouldWarnInsecureApiUrl(API_URL, process.env.SHODH_ALLOW_HTTP)) {
+if ((!IPC_ENDPOINT || IPC_WEBSOCKET_STREAM_ENABLED)
+    && shouldWarnInsecureApiUrl(API_URL, process.env.SHODH_ALLOW_HTTP)) {
   console.error("[shodh-memory] WARNING: Using HTTP for a non-localhost server is insecure.");
   console.error("[shodh-memory] Set SHODH_API_URL to an https:// URL, or set SHODH_ALLOW_HTTP=true to suppress this warning.");
 }
@@ -204,7 +213,11 @@ function resetTokenSession(): void {
 }
 
 // Streaming ingestion settings
-let STREAM_ENABLED = process.env.SHODH_STREAM !== "false"; // enabled by default
+// Local IPC is request/response only. WebSocket streaming remains available as
+// an explicit opt-in using SHODH_STREAM_WEBSOCKET=true and SHODH_API_URL.
+let STREAM_ENABLED = IPC_ENDPOINT
+  ? IPC_WEBSOCKET_STREAM_ENABLED
+  : process.env.SHODH_STREAM !== "false";
 const STREAM_MIN_CONTENT_LENGTH = 50; // minimum content length to stream
 
 // Proactive surfacing settings
@@ -366,10 +379,14 @@ function streamFlush(): void {
 }
 
 // Initialize stream connection on server start
-console.error("[Stream] Initializing connection to", WS_URL);
-connectStream().catch((err) => {
-  console.error("[Stream] Initial connection failed:", err);
-});
+if (STREAM_ENABLED) {
+  console.error("[Stream] Initializing WebSocket connection to", WS_URL);
+  connectStream().catch((err) => {
+    console.error("[Stream] Initial connection failed:", err);
+  });
+} else if (IPC_ENDPOINT) {
+  console.error("[Stream] Disabled in IPC mode; set SHODH_STREAM_WEBSOCKET=true to opt in");
+}
 
 // Types matching the Rust API response structure
 // Note: API returns memory_type in simplified responses, experience_type in legacy
@@ -421,6 +438,42 @@ interface SurfacedMemory {
   relevance_score: number;
 }
 
+async function backendRequest<T>(
+  endpoint: string,
+  method: string = "GET",
+  body?: object,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<T> {
+  if (IPC_CLIENT) {
+    return IPC_CLIENT.request<T>(endpoint, method, body ?? null, timeoutMs);
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${API_URL}${endpoint}`, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": API_KEY,
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "Unknown error");
+      throw new Error(`API error ${response.status}: ${errorText}`);
+    }
+    try {
+      return await response.json() as T;
+    } catch {
+      throw new Error(`API returned invalid JSON from ${endpoint}`);
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // Surface relevant memories based on context (non-blocking, returns null on failure)
 async function surfaceRelevant(context: string, maxResults: number = 3): Promise<SurfacedMemory[] | null> {
   if (!PROACTIVE_SURFACING || context.length < PROACTIVE_MIN_CONTEXT_LENGTH) {
@@ -428,34 +481,19 @@ async function surfaceRelevant(context: string, maxResults: number = 3): Promise
   }
 
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s timeout for surfacing
-
-    const response = await fetch(`${API_URL}/api/relevant`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": API_KEY,
-      },
-      body: JSON.stringify({
+    const result = await backendRequest<{ memories?: SurfacedMemory[] }>(
+      "/api/relevant",
+      "POST",
+      {
         user_id: USER_ID,
         context: context.slice(0, 2000),
         config: {
           semantic_threshold: 0.65,
           max_results: maxResults,
         },
-      }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      clearTimeout(timeoutId);
-      return null;
-    }
-
-    // Parse JSON within the same timeout scope — prevents hang on slow response body
-    const result = await response.json() as { memories?: SurfacedMemory[] };
-    clearTimeout(timeoutId);
+      },
+      3000,
+    );
     return result.memories || null;
   } catch (e) {
     console.error("[Proactive] Failed to surface memories:", e);
@@ -500,40 +538,15 @@ async function apiCall<T>(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const controller = new AbortController();
       const timeout = method === "GET" ? REQUEST_TIMEOUT_MS : WRITE_TIMEOUT_MS;
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-      const options: RequestInit = {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          "X-API-Key": API_KEY,
-        },
-        signal: controller.signal,
-      };
 
       if (body) {
         const bodyValidation = serializeAndValidateBody(body, MAX_CONTENT_LENGTH);
         if (!bodyValidation.ok) {
           throw new Error(bodyValidation.error);
         }
-        options.body = bodyValidation.serialized;
       }
-
-      const response = await fetch(`${API_URL}${endpoint}`, options);
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        const errorText = await response.text().catch(() => 'Unknown error');
-        throw new Error(`API error ${response.status}: ${errorText}`);
-      }
-
-      try {
-        return await response.json() as T;
-      } catch {
-        throw new Error(`API returned invalid JSON from ${endpoint}`);
-      }
+      return await backendRequest<T>(endpoint, method, body, timeout);
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
 
@@ -553,9 +566,9 @@ async function apiCall<T>(
 
   // Provide helpful error message
   const errMsg = lastError?.message || 'Unknown error';
-  if (errMsg.includes('ECONNREFUSED') || errMsg.includes('fetch failed')) {
+  if (errMsg.includes('ECONNREFUSED') || errMsg.includes('ENOENT') || errMsg.includes('fetch failed')) {
     throw new Error(
-      `Cannot connect to shodh-memory server at ${API_URL}. ` +
+      `Cannot connect to shodh-memory server at ${BACKEND_LOCATION}. ` +
       `Start the server with: shodh-memory-server`
     );
   }
@@ -565,15 +578,8 @@ async function apiCall<T>(
 // Check if server is available
 async function isServerAvailable(): Promise<boolean> {
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
-
-    const response = await fetch(`${API_URL}/health`, {
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    return response.ok;
+    await backendRequest("/health", "GET", undefined, 2000);
+    return true;
   } catch {
     return false;
   }
@@ -1630,7 +1636,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       content: [
         {
           type: "text",
-          text: `Memory server unavailable at ${API_URL}. Please ensure shodh-memory-server is running.\n\nTo start: cd shodh-memory && cargo run`,
+          text: `Memory server unavailable at ${BACKEND_LOCATION}. Please ensure shodh-memory-server is running.\n\nTo start: shodh-memory-server`,
         },
       ],
       isError: true,
@@ -4790,19 +4796,7 @@ function getBinaryPath(): string | null {
 }
 
 async function isServerRunning(): Promise<boolean> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-
-    const response = await fetch(`${API_URL}/health`, {
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-    return response.ok;
-  } catch {
-    return false;
-  }
+  return isServerAvailable();
 }
 
 async function waitForServer(maxAttempts: number = 30): Promise<boolean> {
@@ -4817,14 +4811,8 @@ async function waitForServer(maxAttempts: number = 30): Promise<boolean> {
 
 async function validateApiKey(): Promise<boolean> {
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    const response = await fetch(`${API_URL}/api/health`, {
-      headers: { "X-API-Key": API_KEY },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    return response.ok;
+    await backendRequest("/api/users", "GET", undefined, 3000);
+    return true;
   } catch {
     return false;
   }
@@ -4833,7 +4821,7 @@ async function validateApiKey(): Promise<boolean> {
 async function ensureServerRunning(): Promise<void> {
   // Check if already running
   if (await isServerRunning()) {
-    console.error("[shodh-memory] Backend server already running at", API_URL);
+    console.error("[shodh-memory] Backend server already running at", BACKEND_LOCATION);
     // If we auto-generated a key, verify it works against the running server
     if (!process.env.SHODH_API_KEY && isLocalServer()) {
       const keyWorks = await validateApiKey();
@@ -4848,8 +4836,8 @@ async function ensureServerRunning(): Promise<void> {
   }
 
   if (!AUTO_SPAWN_ENABLED) {
-    console.error("[shodh-memory] Server not running at", API_URL);
-    console.error("[shodh-memory] Auto-spawn disabled (SHODH_AUTO_SPAWN=false).");
+    console.error("[shodh-memory] Server not running at", BACKEND_LOCATION);
+    console.error("[shodh-memory] Auto-spawn disabled (SHODH_NO_AUTO_SPAWN=true).");
     console.error("[shodh-memory] Start the server manually:");
     console.error("[shodh-memory]   shodh-memory-server");
     console.error("[shodh-memory] Or with Docker:");
@@ -4887,6 +4875,7 @@ async function ensureServerRunning(): Promise<void> {
     "SHODH_REQUEST_TIMEOUT", "SHODH_WRITE_MODE", "SHODH_OFFLINE",
     "SHODH_LAZY_LOAD", "SHODH_ONNX_THREADS", "SHODH_VECTOR_BACKEND",
     "SHODH_CORS_ORIGINS", "SHODH_CORS_MAX_AGE", "SHODH_CORS_CREDENTIALS",
+    "SHODH_IPC_ENABLED", "SHODH_IPC_ENDPOINT",
     "RUST_LOG",
   ]);
   for (const [key, value] of Object.entries(process.env)) {
@@ -4900,6 +4889,11 @@ async function ensureServerRunning(): Promise<void> {
       // Pass through all non-SHODH env vars (PATH, HOME, etc.)
       serverEnv[key] = value;
     }
+  }
+  if (IPC_ENDPOINT) {
+    serverEnv["SHODH_IPC_ENDPOINT"] = IPC_ENDPOINT;
+  } else {
+    delete serverEnv["SHODH_IPC_ENDPOINT"];
   }
   // Always pass the API key for auth
   serverEnv["SHODH_DEV_API_KEY"] = API_KEY;
@@ -5020,7 +5014,7 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`Shodh-Memory MCP server v${SERVER_VERSION} running`);
-  console.error(`Connecting to: ${API_URL}`);
+  console.error(`Connecting to: ${BACKEND_LOCATION}`);
   console.error(`User ID: ${USER_ID}`);
   console.error(`Streaming: ${STREAM_ENABLED ? "enabled" : "disabled"}`);
   console.error(`Proactive surfacing: ${PROACTIVE_SURFACING ? "enabled" : "disabled (SHODH_PROACTIVE=false)"}`);

@@ -260,16 +260,18 @@ pub async fn auth_middleware(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
+/// Process-global lock for tests that manipulate environment variables.
+/// `env::set_var` / `env::remove_var` are not thread-safe, so every test across the
+/// crate that touches auth env vars must hold this one lock for its duration. It is
+/// `pub(crate)` so the `local_ipc` auth tests serialize against auth.rs's own env
+/// tests rather than racing them.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::to_bytes;
-    use std::sync::Mutex;
-
-    /// Process-global lock for tests that manipulate environment variables.
-    /// `env::set_var` / `env::remove_var` are not thread-safe, so all tests
-    /// that touch auth env vars must hold this lock for the duration of the test.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Clear all auth-related env vars to isolate tests.
     /// Caller MUST hold `ENV_LOCK` — this is not enforced at compile time.

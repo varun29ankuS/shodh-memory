@@ -315,6 +315,15 @@ rocksdb = { version = "0.24", default-features = false, features = ["lz4", "jema
 # Fundamental fix requires facebook/rocksdb#14403 (custom allocator C API for mimalloc).
 [target.'cfg(windows)'.dependencies]
 rocksdb = { version = "0.24", default-features = false, features = ["lz4"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [workspace]
 # Standalone workspace - not part of parent kalki-v2

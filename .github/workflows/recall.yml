@@ -50,6 +50,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Releases are not copied to forks, so always fetch the canonical model assets.
+  GLINER_ASSET_REPOSITORY: varun29ankuS/shodh-memory
   TOLERANCE: ${{ github.event.inputs.tolerance || '2.0' }}
   # PR runs are always the gated `full`/5; only a manual dispatch can widen to
   # per-stage diagnosis (`all`) or a fast single repeat.
@@ -97,7 +99,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p models/gliner-bi-edge
-          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GLINER_ASSET_REPOSITORY" --dir models/gliner-bi-edge
           ls -la models/gliner-bi-edge
 
       - name: Verify baseline is checked in
