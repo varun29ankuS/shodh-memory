@@ -7050,9 +7050,9 @@ fn entity_type_color(label: Option<&EntityLabel>) -> String {
         Some(EntityLabel::Cyber) => "#17202A".to_string(),  // Near-black — threats/malware
         Some(EntityLabel::Money) => "#28B463".to_string(),  // Money green
         Some(EntityLabel::Quantity) => "#F5B041".to_string(), // Amber — measurements
-        Some(EntityLabel::Time) => "#A569BD".to_string(),   // Violet — distinct from Date's light purple
+        Some(EntityLabel::Time) => "#A569BD".to_string(), // Violet — distinct from Date's light purple
         Some(EntityLabel::Other(_)) => "#AEB6BF".to_string(), // Gray
-        None => "#AEB6BF".to_string(),                      // Gray default
+        None => "#AEB6BF".to_string(),                    // Gray default
     }
 }
 

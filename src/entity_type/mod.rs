@@ -98,7 +98,11 @@ mod tests {
     #[test]
     fn every_fine_rolls_up_to_a_real_coarse() {
         let s = schema();
-        assert_eq!(s.coarse.len(), 18, "coarse tier must have exactly 18 classes");
+        assert_eq!(
+            s.coarse.len(),
+            18,
+            "coarse tier must have exactly 18 classes"
+        );
         assert_eq!(s.fine.len(), 141, "fine tier must have exactly 141 labels");
 
         let coarse_ids: std::collections::HashSet<&str> =

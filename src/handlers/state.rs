@@ -740,7 +740,10 @@ impl MultiUserMemoryManager {
                 Arc::new(ner)
             }
             Err(e) => {
-                tracing::warn!("Failed to initialize NER: {}. Using rule-based fallback.", e);
+                tracing::warn!(
+                    "Failed to initialize NER: {}. Using rule-based fallback.",
+                    e
+                );
                 Arc::new(NeuralNer::new_fallback(NerConfig::default()))
             }
         };

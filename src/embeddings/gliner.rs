@@ -370,8 +370,8 @@ impl GlinerTyper {
         let labels_embeds = model.label_embeds.clone();
 
         // Build tensors and run.
-        let v_input_ids = Value::from_array((vec![1usize, seq], input_ids))
-            .context("GLiNER input_ids tensor")?;
+        let v_input_ids =
+            Value::from_array((vec![1usize, seq], input_ids)).context("GLiNER input_ids tensor")?;
         let v_attention = Value::from_array((vec![1usize, seq], attention_mask))
             .context("GLiNER attention_mask tensor")?;
         let v_words_mask = Value::from_array((vec![1usize, seq], words_mask))
@@ -408,7 +408,11 @@ impl GlinerTyper {
 
         // logits: [batch=1, L(words), K(max_width), C(num_labels)].
         if shape.len() != 4 {
-            anyhow::bail!("GLiNER logits rank {} != 4 (shape {:?})", shape.len(), &shape[..]);
+            anyhow::bail!(
+                "GLiNER logits rank {} != 4 (shape {:?})",
+                shape.len(),
+                &shape[..]
+            );
         }
         let l_dim = shape[1] as usize;
         let k_dim = shape[2] as usize;
@@ -668,10 +672,9 @@ mod tests {
 
         // Dali → the ship's name. Accept the vessel family (schema carries a
         // dedicated `cargo ship`; parity KEY_ENTITIES allows the family).
-        let ship_family: HashSet<&str> =
-            ["ship", "cargo ship", "warship", "vessel", "watercraft"]
-                .into_iter()
-                .collect();
+        let ship_family: HashSet<&str> = ["ship", "cargo ship", "warship", "vessel", "watercraft"]
+            .into_iter()
+            .collect();
         let dali = label_for("Dali");
         assert!(
             dali.as_deref().is_some_and(|l| ship_family.contains(l)),
@@ -688,7 +691,10 @@ mod tests {
         );
 
         // Coarse rollup sanity: Baltimore's coarse is a real schema variant, not Other.
-        if let Some(b) = spans.iter().find(|s| s.text.eq_ignore_ascii_case("Baltimore")) {
+        if let Some(b) = spans
+            .iter()
+            .find(|s| s.text.eq_ignore_ascii_case("Baltimore"))
+        {
             assert!(
                 !matches!(b.coarse, EntityLabel::Other(_)),
                 "Baltimore coarse should roll up to a schema variant, got {:?}",
