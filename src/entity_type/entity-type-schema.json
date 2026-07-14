@@ -1,0 +1,962 @@
+{
+ "version": "1.0",
+ "note": "is-a type hierarchy; kinship/roles are RELATIONS not types. GLiNER predicts FINE labels only; coarse rollup applied after.",
+ "coarse": [
+  {
+   "id": "person",
+   "onto": "PERSON",
+   "source": "ontonotes",
+   "wikidata": "Q215627"
+  },
+  {
+   "id": "norp",
+   "onto": "NORP",
+   "source": "ontonotes",
+   "wikidata": null
+  },
+  {
+   "id": "organization",
+   "onto": "ORG",
+   "source": "ontonotes",
+   "wikidata": "Q43229"
+  },
+  {
+   "id": "gpe",
+   "onto": "GPE",
+   "source": "ontonotes",
+   "wikidata": "Q1048835"
+  },
+  {
+   "id": "location",
+   "onto": "LOC",
+   "source": "ontonotes",
+   "wikidata": "Q2221906"
+  },
+  {
+   "id": "facility",
+   "onto": "FAC",
+   "source": "ontonotes",
+   "wikidata": "Q13226383"
+  },
+  {
+   "id": "vehicle",
+   "onto": "VEH",
+   "source": "domain",
+   "wikidata": "Q42889"
+  },
+  {
+   "id": "product",
+   "onto": "PRODUCT",
+   "source": "ontonotes",
+   "wikidata": "Q2424752"
+  },
+  {
+   "id": "weapon",
+   "onto": "WEAPON",
+   "source": "ic",
+   "wikidata": "Q728"
+  },
+  {
+   "id": "event",
+   "onto": "EVENT",
+   "source": "ontonotes",
+   "wikidata": "Q1656682"
+  },
+  {
+   "id": "work",
+   "onto": "WORK",
+   "source": "ontonotes",
+   "wikidata": "Q386724"
+  },
+  {
+   "id": "law",
+   "onto": "LAW",
+   "source": "ontonotes",
+   "wikidata": "Q7748"
+  },
+  {
+   "id": "title",
+   "onto": "TITLE",
+   "source": "domain",
+   "wikidata": null
+  },
+  {
+   "id": "cyber",
+   "onto": "CYBER",
+   "source": "ic",
+   "wikidata": null
+  },
+  {
+   "id": "money",
+   "onto": "MONEY",
+   "source": "ontonotes",
+   "wikidata": "Q1368"
+  },
+  {
+   "id": "quantity",
+   "onto": "QUANTITY",
+   "source": "ontonotes",
+   "wikidata": "Q309314"
+  },
+  {
+   "id": "date",
+   "onto": "DATE",
+   "source": "ontonotes",
+   "wikidata": "Q205892"
+  },
+  {
+   "id": "time",
+   "onto": "TIME",
+   "source": "ontonotes",
+   "wikidata": "Q11471"
+  }
+ ],
+ "fine": [
+  {
+   "label": "politician",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q82955"
+  },
+  {
+   "label": "head of state",
+   "coarse": "person",
+   "source": "ic-geopol",
+   "wikidata": "Q48352"
+  },
+  {
+   "label": "head of government",
+   "coarse": "person",
+   "source": "ic-geopol",
+   "wikidata": "Q2285706"
+  },
+  {
+   "label": "diplomat",
+   "coarse": "person",
+   "source": "ic-geopol",
+   "wikidata": "Q193391"
+  },
+  {
+   "label": "monarch",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q116"
+  },
+  {
+   "label": "military officer",
+   "coarse": "person",
+   "source": "ic-military",
+   "wikidata": "Q189290"
+  },
+  {
+   "label": "soldier",
+   "coarse": "person",
+   "source": "ic-military",
+   "wikidata": "Q4991371"
+  },
+  {
+   "label": "intelligence officer",
+   "coarse": "person",
+   "source": "ic",
+   "wikidata": null
+  },
+  {
+   "label": "terrorist",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": null
+  },
+  {
+   "label": "insurgent",
+   "coarse": "person",
+   "source": "ic-geopol",
+   "wikidata": null
+  },
+  {
+   "label": "criminal",
+   "coarse": "person",
+   "source": "ic",
+   "wikidata": null
+  },
+  {
+   "label": "author",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q482980"
+  },
+  {
+   "label": "journalist",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q1930187"
+  },
+  {
+   "label": "scientist",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q901"
+  },
+  {
+   "label": "engineer",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q81096"
+  },
+  {
+   "label": "physician",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q39631"
+  },
+  {
+   "label": "lawyer",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q40348"
+  },
+  {
+   "label": "judge",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q16533"
+  },
+  {
+   "label": "religious leader",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": null
+  },
+  {
+   "label": "businessperson",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q43845"
+  },
+  {
+   "label": "academic",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q3400985"
+  },
+  {
+   "label": "artist",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q483501"
+  },
+  {
+   "label": "musician",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q639669"
+  },
+  {
+   "label": "actor",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q33999"
+  },
+  {
+   "label": "athlete",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q2066131"
+  },
+  {
+   "label": "coach",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q41583"
+  },
+  {
+   "label": "film director",
+   "coarse": "person",
+   "source": "figer",
+   "wikidata": "Q2526255"
+  },
+  {
+   "label": "nationality",
+   "coarse": "norp",
+   "source": "ontonotes",
+   "wikidata": null
+  },
+  {
+   "label": "ethnic group",
+   "coarse": "norp",
+   "source": "figer",
+   "wikidata": "Q41710"
+  },
+  {
+   "label": "religion",
+   "coarse": "norp",
+   "source": "figer",
+   "wikidata": "Q9174"
+  },
+  {
+   "label": "religious group",
+   "coarse": "norp",
+   "source": "ontonotes",
+   "wikidata": null
+  },
+  {
+   "label": "political ideology",
+   "coarse": "norp",
+   "source": "ic-geopol",
+   "wikidata": "Q7257"
+  },
+  {
+   "label": "company",
+   "coarse": "organization",
+   "source": "figer",
+   "wikidata": "Q783794"
+  },
+  {
+   "label": "government agency",
+   "coarse": "organization",
+   "source": "ic",
+   "wikidata": "Q327333"
+  },
+  {
+   "label": "intelligence agency",
+   "coarse": "organization",
+   "source": "ic",
+   "wikidata": "Q47913"
+  },
+  {
+   "label": "military organization",
+   "coarse": "organization",
+   "source": "ic-military",
+   "wikidata": "Q1520223"
+  },
+  {
+   "label": "armed group",
+   "coarse": "organization",
+   "source": "ic-geopol",
+   "wikidata": null
+  },
+  {
+   "label": "terrorist organization",
+   "coarse": "organization",
+   "source": "figer",
+   "wikidata": null
+  },
+  {
+   "label": "criminal organization",
+   "coarse": "organization",
+   "source": "ic",
+   "wikidata": "Q1786828"
+  },
+  {
+   "label": "political party",
+   "coarse": "organization",
+   "source": "figer",
+   "wikidata": "Q7278"
+  },
+  {
+   "label": "international organization",
+   "coarse": "organization",
+   "source": "ic-geopol",
+   "wikidata": "Q484652"
+  },
+  {
+   "label": "ngo",
+   "coarse": "organization",
+   "source": "general",
+   "wikidata": "Q79913"
+  },
+  {
+   "label": "educational institution",
+   "coarse": "organization",
+   "source": "figer",
+   "wikidata": "Q2385804"
+  },
+  {
+   "label": "news agency",
+   "coarse": "organization",
+   "source": "figer",
+   "wikidata": "Q192283"
+  },
+  {
+   "label": "financial institution",
+   "coarse": "organization",
+   "source": "ic-finance",
+   "wikidata": "Q22687"
+  },
+  {
+   "label": "front company",
+   "coarse": "organization",
+   "source": "ic-finance",
+   "wikidata": null
+  },
+  {
+   "label": "sports team",
+   "coarse": "organization",
+   "source": "figer",
+   "wikidata": "Q12973014"
+  },
+  {
+   "label": "airline",
+   "coarse": "organization",
+   "source": "figer",
+   "wikidata": "Q46970"
+  },
+  {
+   "label": "country",
+   "coarse": "gpe",
+   "source": "figer",
+   "wikidata": "Q6256"
+  },
+  {
+   "label": "city",
+   "coarse": "gpe",
+   "source": "figer",
+   "wikidata": "Q515"
+  },
+  {
+   "label": "state or province",
+   "coarse": "gpe",
+   "source": "figer",
+   "wikidata": "Q10864048"
+  },
+  {
+   "label": "capital city",
+   "coarse": "gpe",
+   "source": "general",
+   "wikidata": "Q5119"
+  },
+  {
+   "label": "county",
+   "coarse": "gpe",
+   "source": "figer",
+   "wikidata": "Q28575"
+  },
+  {
+   "label": "disputed territory",
+   "coarse": "gpe",
+   "source": "ic-geopol",
+   "wikidata": null
+  },
+  {
+   "label": "body of water",
+   "coarse": "location",
+   "source": "figer",
+   "wikidata": "Q15324"
+  },
+  {
+   "label": "river",
+   "coarse": "location",
+   "source": "figer",
+   "wikidata": "Q4022"
+  },
+  {
+   "label": "sea",
+   "coarse": "location",
+   "source": "maritime",
+   "wikidata": "Q165"
+  },
+  {
+   "label": "strait",
+   "coarse": "location",
+   "source": "maritime",
+   "wikidata": "Q37901"
+  },
+  {
+   "label": "mountain",
+   "coarse": "location",
+   "source": "figer",
+   "wikidata": "Q8502"
+  },
+  {
+   "label": "island",
+   "coarse": "location",
+   "source": "figer",
+   "wikidata": "Q23442"
+  },
+  {
+   "label": "region",
+   "coarse": "location",
+   "source": "ontonotes",
+   "wikidata": null
+  },
+  {
+   "label": "border",
+   "coarse": "location",
+   "source": "ic-geopol",
+   "wikidata": null
+  },
+  {
+   "label": "building",
+   "coarse": "facility",
+   "source": "figer",
+   "wikidata": "Q41176"
+  },
+  {
+   "label": "airport",
+   "coarse": "facility",
+   "source": "figer",
+   "wikidata": "Q1248784"
+  },
+  {
+   "label": "seaport",
+   "coarse": "facility",
+   "source": "maritime",
+   "wikidata": "Q44782"
+  },
+  {
+   "label": "bridge",
+   "coarse": "facility",
+   "source": "disaster",
+   "wikidata": "Q12280"
+  },
+  {
+   "label": "road",
+   "coarse": "facility",
+   "source": "figer",
+   "wikidata": "Q34442"
+  },
+  {
+   "label": "railway station",
+   "coarse": "facility",
+   "source": "figer",
+   "wikidata": "Q55488"
+  },
+  {
+   "label": "power station",
+   "coarse": "facility",
+   "source": "disaster",
+   "wikidata": "Q159719"
+  },
+  {
+   "label": "dam",
+   "coarse": "facility",
+   "source": "disaster",
+   "wikidata": "Q12323"
+  },
+  {
+   "label": "pipeline",
+   "coarse": "facility",
+   "source": "disaster",
+   "wikidata": "Q819230"
+  },
+  {
+   "label": "military base",
+   "coarse": "facility",
+   "source": "ic-military",
+   "wikidata": "Q245016"
+  },
+  {
+   "label": "border crossing",
+   "coarse": "facility",
+   "source": "ic-geopol",
+   "wikidata": null
+  },
+  {
+   "label": "hospital",
+   "coarse": "facility",
+   "source": "figer",
+   "wikidata": "Q16917"
+  },
+  {
+   "label": "checkpoint",
+   "coarse": "facility",
+   "source": "ic",
+   "wikidata": null
+  },
+  {
+   "label": "ship",
+   "coarse": "vehicle",
+   "source": "maritime",
+   "wikidata": "Q11446"
+  },
+  {
+   "label": "cargo ship",
+   "coarse": "vehicle",
+   "source": "maritime",
+   "wikidata": "Q105999"
+  },
+  {
+   "label": "warship",
+   "coarse": "vehicle",
+   "source": "ic-military",
+   "wikidata": "Q3114762"
+  },
+  {
+   "label": "submarine",
+   "coarse": "vehicle",
+   "source": "ic-military",
+   "wikidata": "Q2811"
+  },
+  {
+   "label": "aircraft",
+   "coarse": "vehicle",
+   "source": "figer",
+   "wikidata": "Q11436"
+  },
+  {
+   "label": "military aircraft",
+   "coarse": "vehicle",
+   "source": "ic-military",
+   "wikidata": "Q216916"
+  },
+  {
+   "label": "drone",
+   "coarse": "vehicle",
+   "source": "ic-military",
+   "wikidata": "Q484000"
+  },
+  {
+   "label": "satellite",
+   "coarse": "vehicle",
+   "source": "general",
+   "wikidata": "Q26540"
+  },
+  {
+   "label": "spacecraft",
+   "coarse": "vehicle",
+   "source": "figer",
+   "wikidata": "Q40218"
+  },
+  {
+   "label": "land vehicle",
+   "coarse": "vehicle",
+   "source": "figer",
+   "wikidata": "Q42889"
+  },
+  {
+   "label": "software",
+   "coarse": "product",
+   "source": "figer",
+   "wikidata": "Q7397"
+  },
+  {
+   "label": "computer hardware",
+   "coarse": "product",
+   "source": "figer",
+   "wikidata": "Q3966"
+  },
+  {
+   "label": "vaccine",
+   "coarse": "product",
+   "source": "medicine",
+   "wikidata": "Q134808"
+  },
+  {
+   "label": "drug",
+   "coarse": "product",
+   "source": "medicine",
+   "wikidata": "Q8386"
+  },
+  {
+   "label": "chemical compound",
+   "coarse": "product",
+   "source": "figer",
+   "wikidata": "Q11173"
+  },
+  {
+   "label": "commodity",
+   "coarse": "product",
+   "source": "ic-finance",
+   "wikidata": "Q317623"
+  },
+  {
+   "label": "consumer product",
+   "coarse": "product",
+   "source": "ontonotes",
+   "wikidata": null
+  },
+  {
+   "label": "firearm",
+   "coarse": "weapon",
+   "source": "ic-military",
+   "wikidata": "Q12796"
+  },
+  {
+   "label": "missile",
+   "coarse": "weapon",
+   "source": "ic-military",
+   "wikidata": "Q40949"
+  },
+  {
+   "label": "explosive device",
+   "coarse": "weapon",
+   "source": "ic-military",
+   "wikidata": "Q80831"
+  },
+  {
+   "label": "artillery",
+   "coarse": "weapon",
+   "source": "ic-military",
+   "wikidata": "Q41207"
+  },
+  {
+   "label": "chemical weapon",
+   "coarse": "weapon",
+   "source": "ic-cbrn",
+   "wikidata": "Q178795"
+  },
+  {
+   "label": "biological weapon",
+   "coarse": "weapon",
+   "source": "ic-cbrn",
+   "wikidata": "Q178561"
+  },
+  {
+   "label": "nuclear weapon",
+   "coarse": "weapon",
+   "source": "ic-cbrn",
+   "wikidata": "Q12876"
+  },
+  {
+   "label": "weapon system",
+   "coarse": "weapon",
+   "source": "ic-military",
+   "wikidata": null
+  },
+  {
+   "label": "armed conflict",
+   "coarse": "event",
+   "source": "figer",
+   "wikidata": "Q198"
+  },
+  {
+   "label": "military operation",
+   "coarse": "event",
+   "source": "ic-military",
+   "wikidata": "Q645883"
+  },
+  {
+   "label": "terrorist attack",
+   "coarse": "event",
+   "source": "figer",
+   "wikidata": "Q2223653"
+  },
+  {
+   "label": "cyberattack",
+   "coarse": "event",
+   "source": "ic-cyber",
+   "wikidata": null
+  },
+  {
+   "label": "assassination",
+   "coarse": "event",
+   "source": "ic",
+   "wikidata": "Q3882219"
+  },
+  {
+   "label": "coup",
+   "coarse": "event",
+   "source": "ic-geopol",
+   "wikidata": "Q45382"
+  },
+  {
+   "label": "protest",
+   "coarse": "event",
+   "source": "ic-geopol",
+   "wikidata": "Q273120"
+  },
+  {
+   "label": "election",
+   "coarse": "event",
+   "source": "figer",
+   "wikidata": "Q40231"
+  },
+  {
+   "label": "summit",
+   "coarse": "event",
+   "source": "ic-geopol",
+   "wikidata": null
+  },
+  {
+   "label": "natural disaster",
+   "coarse": "event",
+   "source": "disaster",
+   "wikidata": "Q8065"
+  },
+  {
+   "label": "accident",
+   "coarse": "event",
+   "source": "disaster",
+   "wikidata": "Q171558"
+  },
+  {
+   "label": "explosion",
+   "coarse": "event",
+   "source": "disaster",
+   "wikidata": "Q179057"
+  },
+  {
+   "label": "pandemic",
+   "coarse": "event",
+   "source": "disaster",
+   "wikidata": "Q12184"
+  },
+  {
+   "label": "sports event",
+   "coarse": "event",
+   "source": "figer",
+   "wikidata": "Q16510064"
+  },
+  {
+   "label": "written work",
+   "coarse": "work",
+   "source": "figer",
+   "wikidata": "Q47461344"
+  },
+  {
+   "label": "intelligence report",
+   "coarse": "work",
+   "source": "ic",
+   "wikidata": null
+  },
+  {
+   "label": "publication",
+   "coarse": "work",
+   "source": "figer",
+   "wikidata": "Q732577"
+  },
+  {
+   "label": "film",
+   "coarse": "work",
+   "source": "figer",
+   "wikidata": "Q11424"
+  },
+  {
+   "label": "musical work",
+   "coarse": "work",
+   "source": "figer",
+   "wikidata": "Q2188189"
+  },
+  {
+   "label": "broadcast program",
+   "coarse": "work",
+   "source": "figer",
+   "wikidata": "Q15416"
+  },
+  {
+   "label": "website",
+   "coarse": "work",
+   "source": "figer",
+   "wikidata": "Q35127"
+  },
+  {
+   "label": "treaty",
+   "coarse": "law",
+   "source": "ic-geopol",
+   "wikidata": "Q131569"
+  },
+  {
+   "label": "statute",
+   "coarse": "law",
+   "source": "figer",
+   "wikidata": "Q7748"
+  },
+  {
+   "label": "un resolution",
+   "coarse": "law",
+   "source": "ic-geopol",
+   "wikidata": "Q1140333"
+  },
+  {
+   "label": "court case",
+   "coarse": "law",
+   "source": "general",
+   "wikidata": "Q2334719"
+  },
+  {
+   "label": "sanction",
+   "coarse": "law",
+   "source": "ic-finance",
+   "wikidata": null
+  },
+  {
+   "label": "job title",
+   "coarse": "title",
+   "source": "ontonotes",
+   "wikidata": null
+  },
+  {
+   "label": "military rank",
+   "coarse": "title",
+   "source": "ic-military",
+   "wikidata": "Q56019"
+  },
+  {
+   "label": "award",
+   "coarse": "title",
+   "source": "figer",
+   "wikidata": "Q618779"
+  },
+  {
+   "label": "malware",
+   "coarse": "cyber",
+   "source": "ic-cyber",
+   "wikidata": "Q14001"
+  },
+  {
+   "label": "threat actor",
+   "coarse": "cyber",
+   "source": "ic-cyber",
+   "wikidata": null
+  },
+  {
+   "label": "vulnerability",
+   "coarse": "cyber",
+   "source": "ic-cyber",
+   "wikidata": null
+  },
+  {
+   "label": "network indicator",
+   "coarse": "cyber",
+   "source": "ic-cyber",
+   "wikidata": null
+  },
+  {
+   "label": "botnet",
+   "coarse": "cyber",
+   "source": "ic-cyber",
+   "wikidata": "Q182490"
+  },
+  {
+   "label": "monetary amount",
+   "coarse": "money",
+   "source": "ontonotes",
+   "wikidata": null
+  },
+  {
+   "label": "currency",
+   "coarse": "money",
+   "source": "ic-finance",
+   "wikidata": "Q8142"
+  },
+  {
+   "label": "measurement",
+   "coarse": "quantity",
+   "source": "ontonotes",
+   "wikidata": null
+  },
+  {
+   "label": "casualty count",
+   "coarse": "quantity",
+   "source": "disaster",
+   "wikidata": null
+  },
+  {
+   "label": "date",
+   "coarse": "date",
+   "source": "ontonotes",
+   "wikidata": null
+  },
+  {
+   "label": "time period",
+   "coarse": "date",
+   "source": "ontonotes",
+   "wikidata": null
+  },
+  {
+   "label": "time",
+   "coarse": "time",
+   "source": "ontonotes",
+   "wikidata": null
+  }
+ ]
+}

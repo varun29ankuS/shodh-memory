@@ -619,6 +619,11 @@ pub struct NerEntityRecord {
     /// Character offset of entity end in source content
     #[serde(default)]
     pub end_char: Option<usize>,
+    /// GLiNER fine label (schema leaf, e.g. "bridge") of the top-scoring span,
+    /// carried from Pass-1 NER through to graph insertion so `EntityNode.fine_type`
+    /// and the precise primary label survive. `None` on the rule-based path.
+    #[serde(default)]
+    pub fine_label: Option<String>,
 }
 
 /// Raw per-episode surprise components, computed at ingest from graph

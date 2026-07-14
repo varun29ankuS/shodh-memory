@@ -1,0 +1,10087 @@
+{
+"source": "gdelt-bridge cooc_graph.json (Baltimore Key Bridge collapse)",
+"entities": [
+{
+"id": "94d3f080-df6a-438d-8b64-d5ea47c199cc",
+"label": "Baltimore",
+"types": [
+"Concept",
+"Location"
+],
+"proper": true,
+"mentions": 173
+},
+{
+"id": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"label": "bridge collapses",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 32
+},
+{
+"id": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Francis Scott Key Bridge",
+"types": [
+"Infrastructure"
+],
+"proper": true,
+"mentions": 32
+},
+{
+"id": "8b5090a7-071b-4bf1-950d-4d864786e1a5",
+"label": "bridge",
+"types": [
+"Concept",
+"Infrastructure"
+],
+"proper": true,
+"mentions": 31
+},
+{
+"id": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Maryland",
+"types": [
+"Concept",
+"Location"
+],
+"proper": true,
+"mentions": 30
+},
+{
+"id": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "early tuesday",
+"types": [
+"Concept",
+"Date"
+],
+"proper": false,
+"mentions": 28
+},
+{
+"id": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"label": "coast guard",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 25
+},
+{
+"id": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Patapsco River",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 24
+},
+{
+"id": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Baltimore Fire Department",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 19
+},
+{
+"id": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "cargo ship",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 18
+},
+{
+"id": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"label": "baltimore bridge",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 17
+},
+{
+"id": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Tuesday",
+"types": [
+"Concept",
+"Date"
+],
+"proper": false,
+"mentions": 17
+},
+{
+"id": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Wes Moore",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 16
+},
+{
+"id": "0cf91b80-15c1-4480-a537-f1ff41ead4f7",
+"label": "Shannon Gilreath",
+"types": [
+"Concept",
+"Person"
+],
+"proper": true,
+"mentions": 15
+},
+{
+"id": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Maryland Department of Transportation",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 14
+},
+{
+"id": "21ef1e94-b997-402b-897f-12ed3e2bc323",
+"label": "ship",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 13
+},
+{
+"id": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"label": "container ship",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 12
+},
+{
+"id": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"label": "major bridge",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 12
+},
+{
+"id": "9657b3d5-2ae3-4746-8d6b-5dab9595fb47",
+"label": "tuesday night",
+"types": [
+"Concept",
+"Date"
+],
+"proper": false,
+"mentions": 12
+},
+{
+"id": "dc4a4902-e13e-419e-a187-81d5d12033f4",
+"label": "Gilreath",
+"types": [
+"Concept",
+"Person"
+],
+"proper": true,
+"mentions": 12
+},
+{
+"id": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"label": "called dali",
+"types": [
+"Concept",
+"Organization",
+"Vessel"
+],
+"proper": true,
+"mentions": 11
+},
+{
+"id": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "baltimore early",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 11
+},
+{
+"id": "4f7db74c-c380-4557-a3f9-59eabde90a1a",
+"label": "Rear Adm",
+"types": [
+"Concept",
+"Role"
+],
+"proper": false,
+"mentions": 11
+},
+{
+"id": "bfbfb3e3-debb-42da-9d02-0aae467450ea",
+"label": "presumed dead",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 11
+},
+{
+"id": "78988d7a-6dda-4020-a234-e8166f69d358",
+"label": "Kevin Cartwright",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 10
+},
+{
+"id": "a793cf01-97ee-435b-9c68-4cf005c9b2d4",
+"label": "Maryland State Police",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 10
+},
+{
+"id": "fb30b9b5-f39c-4076-9eb8-c61a3ad0516e",
+"label": "maryland gov",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 10
+},
+{
+"id": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"label": "lost power",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 9
+},
+{
+"id": "c163b952-97fe-4347-b784-7821f4025384",
+"label": "rear",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 9
+},
+{
+"id": "0fa6387a-0673-491c-adf6-15a045fd3033",
+"label": "Shannon N",
+"types": [
+"Concept",
+"Person"
+],
+"proper": true,
+"mentions": 8
+},
+{
+"id": "36044704-832b-41db-a9f5-9b05e39c4afd",
+"label": "water temperatures",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 8
+},
+{
+"id": "574117b8-4b0b-4126-9565-f8f09e422f8d",
+"label": "Brandon M Scott",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 8
+},
+{
+"id": "59ddb88c-faa9-40ff-8976-db0b40d63d0b",
+"label": "Hang Seng",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 8
+},
+{
+"id": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "river",
+"types": [
+"Concept",
+"Location"
+],
+"proper": true,
+"mentions": 8
+},
+{
+"id": "88150ed2-f263-4c2a-9c56-c3b49ff7d8e2",
+"label": "adm",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 8
+},
+{
+"id": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"label": "Mass casualty event",
+"types": [
+"Concept",
+"Event"
+],
+"proper": false,
+"mentions": 8
+},
+{
+"id": "995b4112-c7ae-4952-a310-8258e607fbba",
+"label": "rapid speed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 8
+},
+{
+"id": "b9d227de-67d1-4ccc-8ed1-f04166f05186",
+"label": "Brawner Builders.¬†",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 8
+},
+{
+"id": "1671b288-1583-4d71-b4b4-3c1d8fcf3b60",
+"label": "Nikkei",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 7
+},
+{
+"id": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "SpaceX",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 7
+},
+{
+"id": "36112cdb-8ce1-4095-ae1f-984ea0c562e2",
+"label": "SK Hynix‚Äôs",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 7
+},
+{
+"id": "387867d5-8be1-4102-8103-4bafb28f9b60",
+"label": "Mayor",
+"types": [
+"Role"
+],
+"proper": false,
+"mentions": 7
+},
+{
+"id": "423dab3e-a61f-4aa2-a788-0ceba6e6a5fc",
+"label": "Amazon‚Äôs",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 7
+},
+{
+"id": "4a800e79-8c28-42fa-830f-33bed2fa3e98",
+"label": "Associated Press",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 7
+},
+{
+"id": "4eeae50c-595b-47ad-a51a-8f9e85936717",
+"label": "enabling authorities",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 7
+},
+{
+"id": "50f14c96-e116-4c97-ad93-cc5e5dec0d49",
+"label": "temperatures",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 7
+},
+{
+"id": "586849ef-182b-477d-b395-7eddefbb84e1",
+"label": "Dow",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 7
+},
+{
+"id": "5b1ab1eb-ea22-4f95-a6de-da6705695866",
+"label": "Nasdaq",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 7
+},
+{
+"id": "82406389-983b-4998-ad76-9b4c7d62b27f",
+"label": "ship barreling",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 7
+},
+{
+"id": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"label": "baltimore collapsed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 7
+},
+{
+"id": "9fb55a5a-5f01-4454-9159-56470bdfc03d",
+"label": "Johnny Olszewski Jr",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 7
+},
+{
+"id": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Nasdaq-100",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 7
+},
+{
+"id": "c4e71272-2434-437b-a335-102622dbb964",
+"label": "Strait of Hormuz",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 7
+},
+{
+"id": "d852cbac-8d61-492a-86cf-067a2b2ecd97",
+"label": "Key Bridge",
+"types": [
+"Concept",
+"Infrastructure"
+],
+"proper": true,
+"mentions": 7
+},
+{
+"id": "f966a008-cd83-4705-93f6-1ddbccdc8d4b",
+"label": "search teams",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 7
+},
+{
+"id": "fbd7c52e-5279-44f7-9e66-ce8e09b098cd",
+"label": "Paul Wiedefeld",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 7
+},
+{
+"id": "01e41fec-b6be-453d-b68f-f697575a5db7",
+"label": "Samsung",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 6
+},
+{
+"id": "1d3588b2-9dac-437e-818e-a65338d9d9af",
+"label": "gov",
+"types": [
+"Concept",
+"Role"
+],
+"proper": false,
+"mentions": 6
+},
+{
+"id": "2f402f0c-32e4-4729-a4da-39ba97ad142a",
+"label": "Amazon",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 6
+},
+{
+"id": "4044f975-e253-4a0b-8e8b-eb3e91589088",
+"label": "Jeffrey Pritzker",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 6
+},
+{
+"id": "57f4c83d-546f-417c-9b1c-bd9a306396cc",
+"label": "Stawell",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 6
+},
+{
+"id": "647eb434-0ea9-4d91-a415-bea5fcc48130",
+"label": "vehicle traffic",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 6
+},
+{
+"id": "6673b1b5-f332-404f-b858-53bab47639c0",
+"label": "Rear Admiral",
+"types": [
+"Role"
+],
+"proper": false,
+"mentions": 6
+},
+{
+"id": "769d21b0-6cf2-46c9-b013-03066d716013",
+"label": "Sri Lanka",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 6
+},
+{
+"id": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "multiple vehicles",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 6
+},
+{
+"id": "86421eab-3227-42b2-8846-7b4ec6e1863d",
+"label": "large ship",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 6
+},
+{
+"id": "975e2c11-597b-4398-8f37-d2b7986c18a3",
+"label": "mayday call",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 6
+},
+{
+"id": "a70acfba-3313-4aca-a78a-96fb083dbeec",
+"label": "Micron",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 6
+},
+{
+"id": "b35ddfe4-491d-4206-87bf-afe25f21b1da",
+"label": "collapsed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 6
+},
+{
+"id": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"label": "ship lost",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 6
+},
+{
+"id": "df9830dd-3449-4547-8666-757d8a63cfa5",
+"label": "stop cars",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 6
+},
+{
+"id": "01b2a94c-dd6e-4ceb-b185-725390ac0a2c",
+"label": "Russel",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 5
+},
+{
+"id": "2064da5a-896a-437f-915e-f5377b704c4d",
+"label": "rescue operation",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 5
+},
+{
+"id": "5337216f-d2ec-4039-84eb-e625db6da91e",
+"label": "baltimore francis",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 5
+},
+{
+"id": "60063dda-1e20-4685-9751-e89d3bef6a70",
+"label": "Xbox",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 5
+},
+{
+"id": "643259c2-8d42-4515-b52d-b8ba5c66df68",
+"label": "Baltimore Police Department",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 5
+},
+{
+"id": "663ba705-7d38-4786-a3c6-062f5d2151c6",
+"label": "Drago",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 5
+},
+{
+"id": "a741580e-bd3d-43bd-9551-b09d9f5f2bb1",
+"label": "construction workers",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 5
+},
+{
+"id": "b9020072-eb76-4897-9e8e-2c28c3f45902",
+"label": "mass casualty",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 5
+},
+{
+"id": "b969bcfc-4a9f-45ea-bd56-0ae5714c6643",
+"label": "rescued",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 5
+},
+{
+"id": "d23dacd0-ec18-4666-95cc-3bbcdeaa6d7e",
+"label": "amazon readies",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 5
+},
+{
+"id": "d7c8a040-e65b-4477-a848-4c6418b3a654",
+"label": "construction crew",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 5
+},
+{
+"id": "d9a26f82-cc99-448f-8bae-0c50a894b509",
+"label": "Rivian‚Äôs",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 5
+},
+{
+"id": "e6be1c16-9a33-4f1d-b7fd-b283de142384",
+"label": "call moments",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 5
+},
+{
+"id": "e89fe217-7eb9-4e75-a977-4456ec50dd11",
+"label": "authorities",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 5
+},
+{
+"id": "f8a32a15-f0b2-4370-9381-8f1f4a8aa452",
+"label": "Col Roland Butler",
+"types": [
+"Concept",
+"Person"
+],
+"proper": true,
+"mentions": 5
+},
+{
+"id": "fc9f56c2-82b5-4611-90d0-4fe61f83926d",
+"label": "limit vehicle",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 5
+},
+{
+"id": "0a6eb3e5-abb0-4a45-9531-8d6a481642c3",
+"label": "Baltimore County's",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "ship crashed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "120dd479-a3ed-45d3-be1c-eb40381a6411",
+"label": "executive vice",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "1bd58b45-d2c4-4db7-bdef-19f2002cac81",
+"label": "NBC News",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 4
+},
+{
+"id": "1db8dea0-48d3-4ec1-8d2e-2d1d3e73b838",
+"label": "federal government",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 4
+},
+{
+"id": "2599ace2-ee02-47bf-be3f-52c522faad1e",
+"label": "search",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "378df2b9-964b-4d5b-8607-ee73eb2965fa",
+"label": "emergency personnel",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "42aaf13d-4a3a-4575-9dbb-9565927fe9bd",
+"label": "crew issued",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "49778625-c29a-4069-89e3-d594d5160804",
+"label": "East Coast",
+"types": [
+"Concept",
+"Location"
+],
+"proper": true,
+"mentions": 4
+},
+{
+"id": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"label": "livestream",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "63d77043-28af-49fe-8d8e-d2f97f413b3d",
+"label": "ship collision",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "655adbbf-313b-47a0-9947-4c0dca043325",
+"label": "admiral shannon",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "7ed4f2bf-c31b-4095-851a-150f36b2b3de",
+"label": "crew",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "8e710193-fd9d-44a1-b2f3-9ad2d9a9f480",
+"label": "baltimore harbor",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "9a5fbcde-898c-4e6e-9737-4fa9491fc937",
+"label": "Joe Biden",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 4
+},
+{
+"id": "a445cbe7-a700-4be0-8daa-31a6cbbc2f38",
+"label": "governor",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "b9c64e8e-d318-4403-b36a-754fa3dadce8",
+"label": "early morning",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "c38a5bc7-7944-496a-862f-19998974b649",
+"label": "catastrophic",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"label": "I-695 Key Bridge",
+"types": [
+"Infrastructure",
+"Location"
+],
+"proper": true,
+"mentions": 4
+},
+{
+"id": "d229c93b-d748-4465-bfad-6bb58223d4ac",
+"label": "James Wallace",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 4
+},
+{
+"id": "d97ebae1-13a6-416a-8b2d-f0eec3494214",
+"label": "fire",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "df599671-4fe1-40c7-a3a4-bf2955c9431e",
+"label": "filling potholes",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "e31bebe9-b195-48da-a005-6054f2f6dfb0",
+"label": "Reuters",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 4
+},
+{
+"id": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"label": "vehicles fell",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 4
+},
+{
+"id": "048bc0a1-aa89-47a0-b2b6-af7ab5def054",
+"label": "BBC",
+"types": [
+"Organization",
+"Technology"
+],
+"proper": true,
+"mentions": 3
+},
+{
+"id": "13bd4484-7ef0-4ce7-877d-3bbc0b3e152a",
+"label": "ship rams",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"label": "local time",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "2501a3c5-0002-41bc-8cca-fe2d553ccf84",
+"label": "large vessel",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "2db053fd-a87b-4f6a-8008-8babeca35690",
+"label": "baltimore biggest",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "33221859-5d24-4051-954a-4cd2b45fc5a4",
+"label": "water",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "36895cb9-3067-485b-8d55-b3eaa7162be0",
+"label": "Synergy Marine Group, LSEG",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 3
+},
+{
+"id": "3aa5f698-9f28-43f7-b964-18a52cb7056a",
+"label": "director of communications",
+"types": [
+"Concept",
+"Role"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "41526a8c-29dc-4b6d-b25c-3ff7ed0b2f58",
+"label": "collapsed early",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"label": "ship struck",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "510a9dce-a63e-4ba8-919e-8c0c7082e47d",
+"label": "powerless cargo",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "59717022-c999-4b17-ac84-304707b354fe",
+"label": "speed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "5b7cb12d-a009-46b9-b739-73b3581fdb09",
+"label": "Social Media",
+"types": [
+"Concept",
+"Technology"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "6eb2c2f9-5c41-42e3-b2f1-d74dc0d4b5eb",
+"label": "maryland governor",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "71cde808-4c9c-4815-bcb2-56b6079d9289",
+"label": "city",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "73c55ae7-a887-49a7-9601-13050d924a53",
+"label": "kilometer",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "75c6d29c-8905-454f-b5c7-68883483c4e0",
+"label": "black smoke",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "75ed6673-c080-4dcc-b007-dbb242bd36f8",
+"label": "Jasper News",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 3
+},
+{
+"id": "8eca266d-738b-4929-96c6-54a83ea5ba57",
+"label": "emergency crews",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "904063b7-91dd-41d9-afb2-19eec8a3dfa7",
+"label": "Colombo",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 3
+},
+{
+"id": "ba80b844-b53e-420c-9a3c-12b309c519fb",
+"label": "multiple",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "bc58257f-3d63-4236-bff2-7628cf32e5c3",
+"label": "port",
+"types": [
+"Concept",
+"Facility"
+],
+"proper": true,
+"mentions": 3
+},
+{
+"id": "cf211aba-1f60-402c-af1d-b82af735aa38",
+"label": "people",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "ed86a0cb-b603-4ad6-81e7-62598a4f33b9",
+"label": "drove amazon",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "f1b9b8d2-8844-4bb2-8562-7d513b11c976",
+"label": "major rescue",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 3
+},
+{
+"id": "035a0440-0989-4bc6-aa46-26e703381933",
+"label": "Prince Harry",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "05b2439b-90de-4e00-8924-df2952b41626",
+"label": "extensive search",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "06bb6326-f8ab-4775-a7bf-483c439c16a5",
+"label": "condition",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "0e783db0-b292-4139-ba32-8228db49b3f3",
+"label": "people missing",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "0f2fc14e-3bc6-4609-9741-e4c00b264e92",
+"label": "catastrophic collapse",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "1261295c-404f-4098-bbe1-9a1f8f5c657e",
+"label": "transported",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "14200196-a72e-41ee-b6f1-613dddba690a",
+"label": "caught fire",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "1438cb48-c0b0-4d40-9746-497ebb15c637",
+"label": "boat struck",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "1501aace-57a5-4dc4-9077-9306365dc1b7",
+"label": "vix",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "17d73e89-0329-4c72-ab09-dd6d5ee9137c",
+"label": "gst",
+"types": [
+"Concept",
+"Technology"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "1ae454d6-e422-474e-a520-6d4e87d9ff5d",
+"label": "construction company",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "1bca0e17-6f88-4989-87bc-f0d629bcb462",
+"label": "FTSE",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "2080cfe8-d6b5-4f18-815d-fc492a64aa0f",
+"label": "iconic francis",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "20f55ebb-ea54-45a7-9b0b-284cb3adc7b8",
+"label": "Chief",
+"types": [
+"Concept",
+"Role"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "222ce9c4-330f-4ffd-90ad-a3872b778440",
+"label": "Wall Street Journal",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "277b5108-5880-4340-9d26-6ddcbba9cf63",
+"label": "mid-Atlantic",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "28d6fccb-ccec-47aa-8089-1189b15ad2ab",
+"label": "Wilshire",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"label": "travelling outbound",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "35e6284b-2f05-4f3a-9ff0-e4b33a465002",
+"label": "Getty Images",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "37929ddb-4ac0-486c-9515-95307ad186dd",
+"label": "shocking spectacle",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "3c975b00-acc5-4eba-aebe-efd182f226be",
+"label": "singapore-flagged",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "3d1bc51e-6194-478a-800c-23d75e61c5af",
+"label": "Port of Baltimore",
+"types": [
+"Concept",
+"Facility"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "4047b09a-1ed8-4817-8f10-5ef8752ab668",
+"label": "Mr Cartwright",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "408d93e2-14e0-41b1-bdcb-104e011b70a7",
+"label": "superintendent",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "4346595f-436e-4110-979b-6783812c8daf",
+"label": "people believed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "4722a28c-d078-4e22-b441-742b272fbe2a",
+"label": "night",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "4738f9f3-826f-40bd-bbb4-2fcba1491dd9",
+"label": "active search",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "4ec85429-969e-4051-8620-f87a7cacc2ea",
+"label": "LSEG",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "4f2fb4f7-e607-497d-acb8-b71cfa3cce7f",
+"label": "updates",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "523f2af0-e0d6-46f0-9634-aeb05cb0beff",
+"label": "long bridge",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "5298431e-ad2d-4338-b768-04f91144cb0f",
+"label": "Brandon Sun",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "547727da-a2f8-4183-8ee6-9cce4c6267a8",
+"label": "Council",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "5ace884c-c855-408c-b52f-7807964667d9",
+"label": "dundalk hosted",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "5cd25e1c-ef35-4b6e-80ce-39d5d7035770",
+"label": "dire emergency",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "608f9671-3c1c-4ee0-8f73-03eaf9fb557c",
+"label": "Jasper",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "622514b5-4a94-44e0-b867-61a2ef1590aa",
+"label": "singapore-flagged cargo",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "62341631-a175-4120-b29e-ba1fed301ad7",
+"label": "Dundalk",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "64cf1e0a-e2e7-4c2b-8049-43ab73587ee6",
+"label": "chief james",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "64ed4baf-a078-451d-87a0-865d88128b66",
+"label": "gold price",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "677fff0e-9510-44ec-ab8d-9138b05d78ab",
+"label": "authorities began",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "69718187-2e51-46da-a5f0-854f47496ed6",
+"label": "Lutnick‚Äôs",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "6d73034b-da4d-4f34-bd19-48913b9df8db",
+"label": "Miami",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "7319ab20-9bb7-4838-b4ce-e59fafb879ca",
+"label": "major portion",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "73650d53-6672-45a1-9ac3-bae943ca5d8c",
+"label": "deficit widen",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "74ec5fb7-54e9-4be4-b94a-9123566e74d2",
+"label": "Interstate 695",
+"types": [
+"Infrastructure"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "7731d4fa-bf0a-4bc3-a157-89be0ad1b527",
+"label": "city police",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "78a02323-268a-4b67-8d09-9c8103ac6757",
+"label": "National Transportation Security Board",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "7d0805e0-9d14-410f-b59b-9d1dafbf67c7",
+"label": "Marmot Basin",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "7e37e27b-f1bd-481e-98e2-d7c39e1a58d0",
+"label": "CNN‚Äôs",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "7f377c2b-be38-4569-97db-7cb529ebc21e",
+"label": "Singapore-based",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "8092dbe0-474d-4eb2-b1b6-5901f44fcc68",
+"label": "video",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "8677d526-6c4f-47af-9b64-3e1b285b763e",
+"label": "YouTube",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "8b235149-26b1-49c0-bec2-348f7fecf976",
+"label": "emergency",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "8ba47899-676a-441b-9059-d726c39a7031",
+"label": "early hours",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "8c045738-f587-47b2-a6f4-1e8f43e6f2be",
+"label": "rescue mission",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "8c682a82-7862-4a2b-950a-2d11da146bb2",
+"label": "Turner Station",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "8de03675-9912-4675-9827-b415771ed039",
+"label": "EuroStoxx",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "8e126c1f-ea20-4f09-ad44-bf772954c0a1",
+"label": "began searching",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "8f369334-d370-4f20-a0a0-097cc8bb7570",
+"label": "ship issued",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "915d946a-c9f1-4a5c-b393-3e7b22885c27",
+"label": "editor",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "91ffa4a2-70e3-4134-89de-fe878c6f0c7c",
+"label": "senior executive",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "92b19651-efbf-4792-b641-0be685aeaf46",
+"label": "baltimore fire",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "92dd25c3-0e1d-4b5d-8db4-c0163652cac6",
+"label": "collapsed tuesday",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "92feb8a2-b013-4b4a-998a-e757ff57e711",
+"label": "March 27",
+"types": [
+"Date"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "9331f93f-269f-40bc-a1a8-0cb6bbf75ec9",
+"label": "trauma center",
+"types": [
+"Facility"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "9ab4409b-2c2a-46df-9d82-1cef2165436c",
+"label": "large container",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "9b2cb8f3-5118-42a5-bc4e-3c55f75ed51c",
+"label": "calls",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"label": "causing",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "a6a8969a-c7a7-4b00-92a3-0ae1986afff8",
+"label": "E-Edition",
+"types": [
+"Product"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "a8e64086-6af1-4ac5-b308-ed97f30c636d",
+"label": "repairing potholes",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "aac3dfb9-641e-4b16-8a00-5c9993c1668f",
+"label": "paul",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "ab47341e-d405-4c77-ae4c-da4ce24cc85a",
+"label": "large boat",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "ad20b8cb-c616-440e-ba2e-853fffbdfe3c",
+"label": "Financial Times",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "b0af8b37-51b0-419e-95d2-3060a1c0b5f0",
+"label": "Mr Moore",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "b1f073a7-37fc-4b96-95eb-219335d8ae0b",
+"label": "Cantor Fitzgerald",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "b5b8e3e1-3822-4e0d-b191-8a2f748b3d42",
+"label": "Baltimore‚Äôs",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "c3fe42be-90e4-45f3-af4d-650ffa5b2969",
+"label": "CFC",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "c7a86a83-d260-4f34-a287-724f083ffd7e",
+"label": "CNN",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "ccb62e8a-04ca-4fe1-bc03-8681ceb0dc5e",
+"label": "coverage updates",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "d157570e-4ac6-4436-9d44-1f1c15bb4333",
+"label": "twitter",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "d4a05194-45e5-4cf9-b0ae-6713b8cec8f4",
+"label": "transportation secretary",
+"types": [
+"Concept",
+"Role"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "d71009a3-1f50-47e3-a188-8ef893060533",
+"label": "scott key",
+"types": [
+"Infrastructure"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "dad3304a-f2ff-4330-bd71-8ce86db38e2b",
+"label": "francis scott",
+"types": [
+"Infrastructure"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "dd983e50-f996-445b-998f-5d393732bd33",
+"label": "frigid waters",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "de6990d7-f8f3-4254-8c81-4c1ecf787b05",
+"label": "WYPR",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "df0c8c62-038c-4ba1-8943-0642a047c932",
+"label": "live updates",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "e1a0d932-e60d-420d-ae70-ff7c10668c2f",
+"label": "Olive Baptist Church",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "e20bba6b-39b8-4632-9ca6-b2435329c596",
+"label": "developing mass",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "e2a2edf0-4faa-4cf2-b812-e26dafe04fb6",
+"label": "singapore-flagged container",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "e2c164b4-5f9a-4f12-bd9a-829cd43869bc",
+"label": "interfaith prayer",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "e32bf6d2-c4e8-4eab-8289-648756c2ea0a",
+"label": "12 million vehicles",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "e3af4bab-f102-474d-8eb9-89ca5c8d8985",
+"label": "president",
+"types": [
+"Concept",
+"Role"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "e6086280-664b-4910-aec1-a897f38fb6d5",
+"label": "workers rescued",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "e9584ef9-13c0-477d-91a8-10450c465162",
+"label": "Fiat‚Äôs",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "eb6003e9-921f-4749-b3a1-db4f5b8be316",
+"label": "company brawner",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "edb8235d-9666-459a-844a-7190519c73f0",
+"label": "county executive",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "efcd90ea-bbb3-4c1b-9f8c-34ce2e15acd6",
+"label": "prayer vigil",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "f0f8f7d0-db38-4c75-b8a1-ecdee08dbb67",
+"label": "Jennifer Homendy",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "f3017b9f-750b-4960-847c-a45bb8262c5a",
+"label": "told reporters",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "f4a389b5-de04-41d4-8dca-6019feb0acf7",
+"label": "shipping port",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 2
+},
+{
+"id": "f56e41cb-b23c-4a83-b1ce-7116049e4237",
+"label": "bridge’s",
+"types": [
+"Infrastructure"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "f580c2b2-18a9-4b81-adf8-f46d417e3fbb",
+"label": "Fifth Coast Guard District",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "f5b28de4-1b62-4f98-a7d9-b7477a31ad11",
+"label": "Daily Mail",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "fb29ad32-6938-41cb-b492-644bfb0ce8b3",
+"label": "Shutterstock",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 2
+},
+{
+"id": "00308451-c59f-4add-bc23-7ffdd7d57530",
+"label": "major",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "00b38da9-a9f7-4956-8323-837a6e35be6f",
+"label": "entire road",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "00d82abe-3fb6-4c99-842b-de03e816d8c6",
+"label": "families",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "0151a938-b01f-43b0-be1b-48c9c5e42a1e",
+"label": "individuals",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "03eeb169-28f2-4ff5-bc43-89894239f0f6",
+"label": "operations",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "04f25cff-07ee-4440-996d-9f66aaebcb55",
+"label": "multiple emergency",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "0551eee9-3039-4f81-891d-20deec2ea5b9",
+"label": "date march",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "08f1825f-affc-4295-b521-6a3592cd2179",
+"label": "mammoth cargo",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "095a349a-d0f4-448c-8ae2-384dcf4ed22a",
+"label": "bridge fell",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "09c79755-385c-4e3c-a72a-130a78089c77",
+"label": "feared dead",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "09f0215d-4a9e-4f39-8eb2-533e64aff129",
+"label": "individual",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "0ab20360-1ca8-436f-a401-b074d2db513d",
+"label": "Widefield",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "0bd3c85d-4cab-46cf-9ae1-e5374b26d84e",
+"label": "General News Grampians",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "0c0284ad-92e6-48b7-82f0-ab8d720d516c",
+"label": "local",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "0c90b407-17ba-40a4-977f-83650bd3b93f",
+"label": "interfaith prayer vigil",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "0df72f3d-9ee0-41c1-9067-4edd9a8ff069",
+"label": "seaboard",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "0eddcc8a-b753-4dc6-92a0-7f45362a5d7a",
+"label": "American Pilots Association",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "0f47fe39-8b46-4d94-b20d-afcfd4d33299",
+"label": "efforts",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "0f5da540-299f-4ad6-b57b-d3ee693d1ce8",
+"label": "emergency rescue",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "0f9577ad-c6a6-4cca-b4e4-24d5a0a673f0",
+"label": "detoured",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "0fb72539-0d1c-402f-90bd-4fa24ea01a8d",
+"label": "Stawell Warriors",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "0fe0c3a0-f549-4740-8c2d-ffbc8eade80e",
+"label": "Wimmera",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "0ff36d6c-1567-45a6-9770-4a9eae8b1a08",
+"label": "attacks",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "11361930-198e-4d4a-8909-9b015bf8dc4e",
+"label": "Hot Summer Guide",
+"types": [
+"Event"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "11774373-58a5-4189-a94c-946ff956ba7b",
+"label": "BALITMORE BRIDGE",
+"types": [
+"Infrastructure"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "11ce741f-7cd5-4a45-ae09-a2ccd4f6733b",
+"label": "US National Data Buoy Centre",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "1221e444-b6b7-45eb-a514-bebecbf30b42",
+"label": "Patapsco",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "125dcef9-f9e3-4705-9e8e-8eaaa8d7ef22",
+"label": "Clay Diamond",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "1278eb68-5ba5-4040-84f6-3a1cdb5ee037",
+"label": "auctions",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1279470c-7765-40d0-b6c9-cc545157e156",
+"label": "fire department",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "130ae874-6636-4f21-8793-cc4e69561012",
+"label": "biden vows",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "13b31004-447c-41d3-8db1-04132ca01ac2",
+"label": "shocking",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "13f9adae-a563-49d3-b570-dee6c9be216f",
+"label": "dali rests",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "15970db3-83e9-4566-8b71-0133b212434c",
+"label": "hormuz attacks",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "182fe851-467a-4108-b418-67112aeecd33",
+"label": "brug update",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "18498cea-3c1f-43e6-a828-972455f2243e",
+"label": "Rocky Mountain Outlook",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "187d04d4-3b66-4ed5-a86f-aab3fe376269",
+"label": "Buttigieg",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "19145ddb-7fd5-43d8-8480-e7ca1abbd753",
+"label": "saved",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1932e657-696f-486f-8852-6c196a660b1b",
+"label": "column posted",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "19955d12-3aa7-4f06-9998-a451be852822",
+"label": "causing multiple",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1b11cea0-c363-4902-917a-46f01512bdad",
+"label": "channel made",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1b8a0578-ce51-45a7-b037-b456a6f7473d",
+"label": "Canmore News",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "1c1a9887-c2b4-43b6-8c55-e3a123e47993",
+"label": "chip stocks",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1c32d168-37fe-498e-ba12-6ed25d17a290",
+"label": "collision march",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1d2de015-37a3-4471-8c3e-59c8b0e4bd96",
+"label": "boat crashes",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1d650943-7880-49fb-9082-489bd7e2e91f",
+"label": "vessel appeared",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1d9bd957-9edb-4713-9835-2b158b989c84",
+"label": "bridge tumble",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1d9d5fdd-b52b-4044-8b1a-fd0532c7d069",
+"label": "story",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1db2f273-6c08-41b0-9c3a-6a60d9c8b46e",
+"label": "Guatemala",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "1e6b6239-d329-441d-a6ed-5871d5158c48",
+"label": "resume wednesday",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1ebb0616-9e5f-4514-955d-96cae1a7113d",
+"label": "American",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1edd3988-53fb-4b59-af8b-7b2004d79ad0",
+"label": "regular rate",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1f064b03-c796-42f4-9c2f-fafcbb0260fe",
+"label": "Fire Chief",
+"types": [
+"Role"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1f31cda4-dedc-4829-be7a-8f70ed75389c",
+"label": "fallen francis",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "1f4eae84-f803-40fe-bcf7-efd69a7d7d28",
+"label": "curtisbay; curtiscreek",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "1fad9760-55d8-4941-8b16-448cc167dd12",
+"label": "painful today",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "204203eb-75de-4b91-9a62-d7a4ec7b9782",
+"label": "face major",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "2074972e-2f56-471f-97c6-7c04e1ea4140",
+"label": "Baltimore bridge collapse disaster",
+"types": [
+"Event"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "20b178fb-f412-49a9-8c83-741b58d69b0d",
+"label": "effort continued",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "21d26d18-9385-445d-bdc8-142e8793c9ae",
+"label": "authority advised",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "223a06c0-d82e-4e47-81b9-b496c850f37f",
+"label": "collapse cellphone",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "248ae2b8-4243-408b-8aeb-052a70923461",
+"label": "äôs crew",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "24cd2295-c635-468b-9853-cb514363429f",
+"label": "toppled shortly",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "25055a1b-b7f2-4a17-a2d9-7f0db1389b0b",
+"label": "morning due",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "250de787-eb1b-4379-b7d9-0ecb0466ebaa",
+"label": "politics growth",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "25139d90-2357-4cc9-99f2-f894d4a4755d",
+"label": "ship warning",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "25fd3a88-83a1-4143-b5a4-7baef9da3d09",
+"label": "rise",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "26acccc7-424f-4dcb-ab5d-7bf1d77094d2",
+"label": "vehicles",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "26e20912-314b-4bf4-84db-02634762b3f3",
+"label": "shipping vessel",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "26e31fb8-e40d-40f3-a461-bf0f90e66772",
+"label": "Melissa Alonso",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "2783803a-373e-4e2e-a819-7fd282179146",
+"label": "21twelve",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "27bbe39b-60ef-4934-8026-21899becbfe9",
+"label": "bbc reported",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "2a329040-c100-40d6-bf42-6bbec68d8109",
+"label": "bridge causing",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "2b56f5f7-45cc-468c-9b07-4da53100f761",
+"label": "oeffff gaat",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "2b58fd08-1187-40b4-9b1d-5ce4a554415b",
+"label": "Foreign Office",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "2c45bdff-9dae-4ab1-92b9-695331b5a12b",
+"label": "business directory",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "2c7caf6b-44c6-432b-b5e9-0d5cb04983e7",
+"label": "search-and-rescue effort",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "2db9f0a6-f9dc-4b98-938a-6ebf0939e400",
+"label": "ship named",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "2dd411d2-15b1-4a93-b37f-988e3942db4d",
+"label": "lost hope",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "2e10426f-2d79-4593-a272-f9e57ff32691",
+"label": "Nadine Yousif",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "2e2a43c3-fc2d-413a-acb4-e5042f89edbf",
+"label": "vessel dali",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "2f25854d-0898-4939-943c-c8ecdbd7159f",
+"label": "regular",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "2f2aac43-8900-46ae-8c35-4f6e137c9511",
+"label": "department told",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "2ff5ffab-80ce-4de6-bea7-39e8420b3840",
+"label": "price",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "303ef2f4-3d87-4285-ab5b-a5dfd7ace601",
+"label": "puffs",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "310279a3-ecd9-4023-9f04-185d702f9792",
+"label": "busy francis",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "310a07c6-6888-432d-906f-798192bffa21",
+"label": "believed dead",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "31436b54-425f-4627-967e-94580e9b59e6",
+"label": "road structure",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "314d5081-0943-4c5f-a13c-c14fb0f9ae2f",
+"label": "passed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "314e17c6-34d3-415c-9874-f37e90b7760b",
+"label": "ship hit",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "328d977a-1760-4d43-8a4a-1894680e0153",
+"label": "people left",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "32b89913-02c6-40a6-a535-1cbf02998c77",
+"label": "support structures",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "335be101-041b-4f9c-ae80-9f8dcb6f0432",
+"label": "guide obits",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "336fd57a-efba-418f-a7c4-99971af8d08f",
+"label": "Mexico",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "3388c432-fa59-475f-895a-7555c74c858f",
+"label": "äìsouth",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "344de7e3-7095-4a0c-9f14-97ddb9b0161e",
+"label": "Honduras",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "3462a547-7b0b-4476-9f64-010c8245ead1",
+"label": "toy",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "34e05676-9417-46a3-82d6-604eb961cb5a",
+"label": "supports",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "3534af51-2ab9-4a57-81da-03c93709c6fe",
+"label": "long francis",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "3586e6a6-73e0-4884-b208-eb791ed4a2bf",
+"label": "increases",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "3600e798-1a9c-414f-929f-8de53cb1a72b",
+"label": "posted early",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "364e95f5-fa3c-4dee-a776-0a29a6ccfe97",
+"label": "Jasper Transit",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "367c326e-5453-4034-9e83-e0d792facc24",
+"label": "updated march",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "370cfde2-0594-436b-8a36-0cf315cef2a4",
+"label": "announce tonight",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "37204379-a3fa-4dd5-9071-84572c4badb9",
+"label": "singapore-based cargo",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "373b7e26-fc0d-440a-a24e-71143a35431f",
+"label": "latest stories",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "37f78b9b-bd2a-4070-868f-e3a3f04e40a9",
+"label": "search resuming",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "381e63d1-ee3b-472e-ae75-0cd5a20ceab7",
+"label": "warning",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "38f0fd84-b5ff-40d1-8c7b-b8faa8c95d33",
+"label": "enjoy unlimited",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "38f93df0-731e-41d1-9ea4-e6dc1b708d5e",
+"label": "price increases",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "3a6c3e7b-4f51-47e4-b5c2-71554ce70104",
+"label": "Careers",
+"types": [
+"Role"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "3b1d0e4f-86bf-4063-a615-800e7e59dd69",
+"label": "cars fall",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "3b24a829-d05d-4c9e-a7f9-a609c4000669",
+"label": "All",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "3b5bc624-ce86-4a1b-bdaa-bdbf4016943e",
+"label": "James W",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "3b6c46ea-3359-4a33-9a83-86747e5be263",
+"label": "chip",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "3c480054-7229-4769-aea3-b2c3de8bdc2f",
+"label": "shocking video",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "3df9fe52-dabd-429c-9c5e-f7815f4d47da",
+"label": "harbour tunnel",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "3e4858ae-d133-4e95-8590-9ee1b37224fb",
+"label": "Greece",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "3eb0b593-991e-470a-9d85-131900bf0bdb",
+"label": "Commander",
+"types": [
+"Role"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "3f342f37-b240-4d29-b919-61d8cf19a76b",
+"label": "Jack Forrest",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "3f443eea-fcb1-460c-9b56-7d8303d82eb2",
+"label": "longer",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "402342cc-6d1e-4645-b799-5e5594f003a9",
+"label": "matter",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "40bbf76a-1613-46fa-b028-54972f4b38b8",
+"label": "livestream captured",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "413e8114-82bf-4de1-96b0-545f0cb728fd",
+"label": "MD of Bighorn News",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "415b227e-09de-45a0-9c91-fc3be5adbf60",
+"label": "moment francis",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "419e9497-8be6-4147-9aef-1e9a42b56e71",
+"label": "dramatic footage",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "42c88ea6-c73c-4872-92d2-ad3a8e76dc6a",
+"label": "Jonty30",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "434587fd-3ee5-4d8b-abdd-b3252a34fc78",
+"label": "writers today",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "43c8b2e6-928e-4937-8327-e55b79190d15",
+"label": "reporting",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "451b4861-1bab-4477-acb4-66db79ddb839",
+"label": "time reporting",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "45320a3f-5f8b-40a4-a4f4-059405a2bd4f",
+"label": "collapse due",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "463d820e-8f04-409f-b826-3b3c2c0d1f8b",
+"label": "alive",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "467e6a18-0b26-4e85-b6cc-6dca5cdadbee",
+"label": "keywords",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "48391d11-afce-4d9b-bc0f-70a2454cc199",
+"label": "painful",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "495bb5dd-b980-44f2-9507-d04248e31be6",
+"label": "frigid patapsco",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "499e9b73-ede5-47f2-be72-887c46b2c1e5",
+"label": "usa collapsed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "4b526e0d-482d-4991-a848-6222ce9a2cf0",
+"label": "frantic search-and-rescue",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "4b5a2952-a3dd-40c1-b18d-48be803dbf8f",
+"label": "Washington Post",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "4c44f69b-5b93-4cdc-9bb8-2bf3a64a07b5",
+"label": "interstate highway",
+"types": [
+"Infrastructure"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "4d33c1d4-aaed-481e-b908-c4f2e69bb157",
+"label": "offering plans",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "4eaf58b2-888b-4338-8b8b-4d0b55a7ea90",
+"label": "flag flies",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "4fa29239-d477-4ce9-a588-ba248ad955b1",
+"label": "recovery mission",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "5037993a-23d1-467e-932f-32f10daca286",
+"label": "passenger trains",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "50bf31da-d728-4faa-9192-e1ded78ba891",
+"label": "Kate Middleton's",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "5110b48b-0abe-4e41-af52-a48e72af6b01",
+"label": "increasingly treacherous",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "51dc7317-b4b0-4fb7-9677-eb13e77b6ca3",
+"label": "media",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "533ddd33-b705-408b-ae01-dff060eb4942",
+"label": "earnings beat",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "541664cd-86ff-4426-ae79-7ba2d413bc56",
+"label": "governor vowed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "544f1327-042c-45ba-81fe-b39a82aa5323",
+"label": "Press",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "5453cf64-964b-4549-a9d4-612cff0045c1",
+"label": "department chief",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "552d9d9f-0aa5-4db0-b616-b0ee376e383d",
+"label": "turn back",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "56467524-4acc-4efa-88e8-fbe70de3dfe2",
+"label": "nbc",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "566fd9e0-f95a-42c2-81e8-333b5a0716cf",
+"label": "Royal Farms",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "5733e758-e5d3-41df-a371-d456ca52309e",
+"label": "n’t imagine",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "579bbfa4-6dad-46ec-912a-f68a0da274a7",
+"label": "measures hitting",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "5866fa36-2a24-4faa-90d8-e159d5591fa6",
+"label": "Banff News",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "5881bdf7-a76f-42cb-8428-0f561fd9240c",
+"label": "emergency operation",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "58b26b93-9402-4a19-a247-c0326de576ca",
+"label": "major emergency",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "59c69c14-8057-42f6-87be-0e372c1f7e8d",
+"label": "Colonel Roland Butler, Jr",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "59cb23b0-02a4-4671-8787-85d309df826e",
+"label": "file",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "5ac28835-4499-4e57-ad98-cd1c2ae19fff",
+"label": "banner earlier",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "5baf0aee-db76-402e-9eba-8a1e804bdc26",
+"label": "sea director",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "5bfed51d-a5df-4f53-9429-ebb702317522",
+"label": "Spain",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "5cac3ba3-cca3-4cc2-a8be-f8ef45ed1e72",
+"label": "response agencies",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "5daa6aad-c2f5-452d-8ba9-4a33f9307fea",
+"label": "guard rear",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "5dbcea6b-d5c9-4707-9500-22c5ecfa1670",
+"label": "registered owner",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "5dfe9c3e-9b5a-48c7-91be-19b3e42c8401",
+"label": "mirror reports",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "5fd2c8c5-a489-4932-8b1f-8c82d0ca4b80",
+"label": "routine work",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "60042a40-0adf-423a-942e-34b5ab270540",
+"label": "guard called",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "60067378-4d6b-43ab-89e3-b4e35e7827ee",
+"label": "add free",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "6023df42-2d58-4ed6-997e-8243717a1bad",
+"label": "India",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "60a6f193-1325-433b-8e3e-81107298839e",
+"label": "live baltimore",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "60c4dc29-c438-4c7a-97a7-2fa629be5a26",
+"label": "Great West Digital Agency",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "6256a96c-8b89-4cbd-a1f2-6583ac3c1b5f",
+"label": "award-winning app",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "63f3e507-ece7-4b5e-8fad-cf54d921ef61",
+"label": "officials",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "63f47880-1819-463a-9e2b-0c9e6157067a",
+"label": "STAWELL Lions",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "644c2f04-af1d-42f4-93e1-77e72b649835",
+"label": "travelling",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "64ec20b9-b479-43a8-8134-8b494dad3dcc",
+"label": "micron stock",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "65587808-7310-4832-a98d-2461702ee79d",
+"label": "Turkey",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "65fb1623-eaec-4310-9792-30b6b0d0fdc5",
+"label": "utc tuesday",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "663b4569-9d59-47bb-aaba-486874a9d095",
+"label": "All; Drago",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "664b00f7-7eb5-4070-bc5a-40c563d50d84",
+"label": "massive cargo",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "66a4ae46-f61e-41f1-932f-7f7619c6e6af",
+"label": "badnav",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "66ffe81c-13f5-4064-8c0d-de79ef7d52c0",
+"label": "updates newsletter",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "67c4a5cc-a036-4806-91d9-b899b924f491",
+"label": "hospital",
+"types": [
+"Facility"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "67d2b478-ec2e-4b56-8a66-e4174949fdab",
+"label": "baltimore head",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "67deebe6-06e1-4bcd-9fa9-e6938bd4155a",
+"label": "äòmove heaven",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "68acb5ee-75e6-460b-ba1d-c0d4df311470",
+"label": "baltimore naar",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "6a8fb21f-ab25-4394-aa4f-48813fff446a",
+"label": "page sign",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "6affbcbd-8d68-4401-9623-40a9a5ff1712",
+"label": "advertisement read",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "6c045c0d-6ad4-401b-874b-fe5ded2a851d",
+"label": "left unaccounted",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "6c897dd2-0037-4bf6-8291-44967fad7795",
+"label": "fearful",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "6cbe0964-8c1f-48c3-847b-d54d4a7f179a",
+"label": "interactive puzzles",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "7069374a-8d50-4368-8b2f-343649719a13",
+"label": "unaccounted",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "7099fcbe-eae3-4aab-aa8f-66f8ce675993",
+"label": "March 26, 2024",
+"types": [
+"Date"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "718b14d4-ea80-423d-bea2-4983fa412ca0",
+"label": "dead advertisement",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "72781cb0-69a6-42cc-b194-dd500a719344",
+"label": "key points",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "730e619d-cd29-4279-a90e-c66155593082",
+"label": "DAX",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "74518146-f8ed-431f-9646-ce48881b0b44",
+"label": "heart",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "752e657d-10ae-46be-a88e-afeaf802336e",
+"label": "Col",
+"types": [
+"Role"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "75e55afb-019f-4646-8753-79f989d362f5",
+"label": "Horsham",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "767114c7-b189-4d84-86a3-dd6afcd3b9a0",
+"label": "maryland collapsed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "786ab296-f19f-48bc-a81e-9a2a3f860148",
+"label": "company",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "79314daf-41ad-476b-b528-9c18c938d262",
+"label": "workers believed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "7936bdc5-edbf-42f3-ba6a-e94c991d4443",
+"label": "baltimore traffic",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "799ad765-ee1e-47ab-a29e-8fc0fcc26643",
+"label": "weeks",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "7a13db08-d81f-4c59-9e7f-87d252d6415e",
+"label": "busiest ports",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "7a62443f-6bd2-4f35-bf7a-d24d9e312277",
+"label": "advertisement nbc",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "7a84634f-5831-42b4-a94d-5bd858de57e7",
+"label": "executive director",
+"types": [
+"Role"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "7b8e7236-d811-40a1-a5eb-8cc928c133dc",
+"label": "bridge toppled",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "7bc16d8e-3845-46ee-9ae7-6c34b0d46a31",
+"label": "Antwerpen",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "7d426f1d-e18e-415c-a734-edcda289908f",
+"label": "dead",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "7dc29b2d-77ae-4b36-86d1-55dab668ab9f",
+"label": "eastern seaboard",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "7dc87dc7-886f-4786-9322-8beb504a615f",
+"label": "Tiffany Wertheimer",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "7fce6ffa-8162-47c8-84e1-08213a655681",
+"label": "continue overnight",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "80aedd0e-7230-4ce0-a9c6-97cdb9cb1098",
+"label": "lseg data",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "80b3c51b-c11b-4f92-9c29-166766da2e4a",
+"label": "phase",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "80dcf417-053f-486f-970a-bf0919ecf858",
+"label": "cnn heeft",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8206dc05-0545-43c1-bdae-a4f1c14b417c",
+"label": "BNO News",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "823bc715-7c97-4317-8e60-912bfa27f7b6",
+"label": "setting sail",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8298faa9-a901-4993-a017-7228858bea39",
+"label": "PDT",
+"types": [
+"Technology"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "82eb52f7-1727-4ede-89b3-f6f42ed8f707",
+"label": "authority posted",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "83955139-ae78-4f20-ae36-69c4b89ea1d4",
+"label": "THE Great Western",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "83cb379b-9300-46e8-a0e9-11900445667e",
+"label": "conference earlier",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "84a2b374-12b3-4433-a126-8b131f115cd8",
+"label": "vessel neared",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "84aae0fe-f3fa-4b89-82cb-ae998fdeee5b",
+"label": "Stoney Nakoda News",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "852dcbd3-7ad7-48bb-961b-d3c81085748b",
+"label": "Jacqueline Howard",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "85b20450-7c0b-4eb6-8963-e8d19d5677d3",
+"label": "Free Press",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "86326284-1dc8-4822-b6ed-31e93194dcf1",
+"label": "bridge triggering",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "86daa15a-44b0-4b23-a226-58399ea819a5",
+"label": "Bay Area Mechanical Services",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "87137ac5-f1be-40ff-b782-b2f570e433d9",
+"label": "alaskaerik",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8713f271-d982-4f05-a7fe-dbc57d507515",
+"label": "Biden Administration",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "87a9adc9-ab9a-4930-8476-d18711ee2217",
+"label": "personnel",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "87f88d23-368b-4982-b62a-fb5a453feff8",
+"label": "hit",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8839cb3d-b760-422e-8ffa-8d43faa1ac25",
+"label": "recovered buttigieg",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "88745333-5043-4d85-8657-a0af428e6a73",
+"label": "Andy Middleton",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "89059a93-08c6-4de9-8b72-9086ee2aa0fe",
+"label": "dali monday",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "894dd285-793b-46e6-aebb-96a76438e894",
+"label": "announced tuesday",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8a5eb903-6093-4d96-aef2-8906989e8502",
+"label": "work filling",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8a6b72ff-e857-4c3f-b668-e2b692440014",
+"label": "Jason Paterson",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "8abc30aa-088d-4a65-9688-f9c60f348a15",
+"label": "farms convenience",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8b434de6-490b-4888-a1ba-ba2e185dabf0",
+"label": "Sonar",
+"types": [
+"Technology"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8c839a21-0f2b-45e8-9125-f79d5112d31a",
+"label": "state transportation",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8ce790e1-9e3c-449f-9197-23d78789bbe4",
+"label": "videos show",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8d0882e2-4921-4ff2-bc96-aafc9145f0b4",
+"label": "bond offering",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8e07c9c9-5a3e-4961-a4e0-3ecb3413debe",
+"label": "Paul Widefield",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "8e24d48a-5d1b-4e7c-b252-53b3339a6806",
+"label": "missing presumed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8f3f860a-a7aa-4887-b04a-99ff6dddc874",
+"label": "guard officials",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8f473d91-2822-4ac6-b733-3784aeb0fd47",
+"label": "support column",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "8fcab8a7-93c6-47ab-a2f6-1df141110963",
+"label": "attacks lift",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "90f0f71c-e229-4c61-bfbb-05282fcdcd3c",
+"label": "Lauren Mascarenhas",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "91259432-ddde-4f6e-bfc4-d13757868daa",
+"label": "guard searching",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "9214ed4a-f55a-4458-b024-8dd76ad30b8c",
+"label": "british football",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "92691afa-508b-4c9f-9e68-b37b350c3771",
+"label": "rate",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "92dff70c-4f35-4afd-9539-630d49d4d6c1",
+"label": "response moving",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "930462e0-3b1c-4abe-a57f-3abf9b45261e",
+"label": "water oeffff",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "933059b2-b435-4737-90ec-f5469605d425",
+"label": "partially crumbling",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "9333afc1-a3d8-43dd-8c79-8fd8d337bf9e",
+"label": "Madeline Halpert",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "9366956f-5126-4084-b28d-61abd5d41dbd",
+"label": "guard",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "936a7e16-7b80-41b1-8a12-355b049dc9d4",
+"label": "hours",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "9382b8f6-befe-43bc-aa16-b3b6f679ed16",
+"label": "tractor-trailer",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "93aed26d-5b1d-4a5b-a7a9-b5fd8f79b14b",
+"label": "posted march",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "95ab918c-8ee8-4283-9293-bbbff01c8143",
+"label": "official called",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "95b669e9-7a59-4028-9f80-3f6277d29c01",
+"label": "football pitches",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "9666a2f7-9dc3-41bf-a57a-ceceb22d9df8",
+"label": "conference tuesday",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "98d02c8c-34ee-4bed-a1ae-9e98ad1fefa1",
+"label": "terrible accident",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "99037e61-b44a-4fce-9aab-5763a85a468b",
+"label": "largest ports",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "99164416-d141-40a9-9cda-611ed67b8435",
+"label": "Six people",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "99214c9f-77eb-44ad-b1ef-35ebfca8387a",
+"label": "local company",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "99697df5-7ccb-4259-a20e-cb04adb09db9",
+"label": "trucks",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "9c030e25-bf40-4ae7-b9fe-3baf52284778",
+"label": "seng",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "9d5b7776-ef65-44bb-a65b-5e69dae2bc6f",
+"label": "deficit",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "9e0d13cb-7299-414a-b7bf-3b59d749c835",
+"label": "diverting traffic",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "9e2ec005-f28c-41d7-8046-9d2aeb186da9",
+"label": "ntsb chair",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "9f315720-3e6e-4f51-b722-21124141c371",
+"label": "crew made",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "9f33b939-8c5e-45f0-b9fd-dd21c06d35d5",
+"label": "guard-listed vessels",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "9f45efa7-fd12-4a92-8b82-407469d8c4da",
+"label": "Maine",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "a19e7904-a1f7-4c67-8b66-5b51c5942b17",
+"label": "smoke billowed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "a1ae19a9-1fc6-4fd7-93cf-71279e7cc537",
+"label": "Brandon Livesay",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "a2b10396-b5fa-4d8f-a0b3-2b429fcd8af4",
+"label": "America",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "a48234fa-595b-49de-b013-387113344f33",
+"label": "day informed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "a4cc9d04-4f83-49d7-a66d-5eb89fa00fab",
+"label": "based",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "a57e605c-ce0c-4f15-9c9e-5e91fcaf8cda",
+"label": "police officials",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "a59e618b-5668-4899-afbb-9cd74b10f8f6",
+"label": "treacherous currents",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "a6d428f9-a76c-45db-9d21-3fce23bf8ea1",
+"label": "pitches long",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "a7ad8c45-69ed-480f-92f8-b099b8e0d3e8",
+"label": "maryland early",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "a7e389e2-c8ae-4367-bc77-b2a204f262e1",
+"label": "campaign",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "a802266f-266b-475e-83ac-30ab837b1cb2",
+"label": "Metro's",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "a83f52bd-1e74-4130-a5a7-1f36ba066f92",
+"label": "agency search",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "a9629c81-2e15-4886-aac2-5b93e5d40668",
+"label": "Harford County Volunteer Fire and EMS",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "a9d196b5-2695-4c80-a03d-9d306199db0e",
+"label": "lights flickered",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "aa14c2a3-9571-4a78-a2f4-57183c850b8a",
+"label": "dali crash",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "aa33554f-3be6-428a-a81f-927fc8a252a1",
+"label": "Tueday",
+"types": [
+"Date"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "ab140d50-8c30-437c-9551-a5eb64d1624d",
+"label": "cards early",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "ac5835c7-633e-4964-afee-b28ecf6dbb97",
+"label": "qualified returning",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "ade80bdb-ae93-4743-82e8-6be243ca5021",
+"label": "amid",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "ae2bd2a1-0cab-435a-aaa5-f5823026ad82",
+"label": "large",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "af842274-69e8-4254-8e83-06ce821be6f2",
+"label": "LEA SKENE",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "afa0c7f8-2d41-48d1-bd5b-83b1379a85d2",
+"label": "cellphone video",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "afebebfc-820f-47f2-809b-a4868e0e4ff2",
+"label": "rebuilding",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b0c96db4-b86b-4415-b51c-8d4a5a530ce1",
+"label": "Rear Adm Shannon Gilreath",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "b1486776-fff8-46fa-a46e-b1b8cb48cef5",
+"label": "transition",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b1b538b6-048b-44ef-bede-1216914d26db",
+"label": "latest coverage",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b29d7ee9-e805-4015-bc03-aa2f1c96f0f5",
+"label": "suspended",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b2fb993a-f755-4575-8141-f43f3c977365",
+"label": "data show",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b38091a3-dc22-44e3-9dd1-91cb5c3214f6",
+"label": "dark waters",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b395e859-2005-4749-9c85-037aeab61959",
+"label": "posted",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b3cbb309-8979-4152-858f-ba84d7dcf75d",
+"label": "american flag",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b483ed6c-1c04-4fda-9275-616f5059a52b",
+"label": "mirror",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b5507886-e704-4a1d-aa3e-09561913d77d",
+"label": "RMO 25",
+"types": [
+"Event"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b5a2f16a-f568-4b62-9bb0-a4137286ce18",
+"label": "missing workers",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b69970c5-8ab6-4add-bd9c-5d29e19c6be4",
+"label": "efforts turned",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b733c81d-f2da-4480-9740-7698f78d9bd7",
+"label": "director andy",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b757b9b7-91b7-417b-94e4-5726751d2e99",
+"label": "NBC 5 DFW",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "b7c3ff57-d9a1-49c6-ac42-dea440e2c7a2",
+"label": "handling",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b7e9c94b-9769-4570-a2eb-697b1119f059",
+"label": "Home News",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "b8c04e7c-eead-41d6-9ba3-43c50aa9e860",
+"label": "foreseeable future",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b8d34cc1-841b-4996-bd89-9e7f42460047",
+"label": "vessel travelling",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "b9e4eacf-7ef5-4a17-84f6-3406b17bc2e4",
+"label": "NTSB",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "bdaab261-02f8-4392-95f4-051f1af25fef",
+"label": "stories start",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "be21b8ab-3697-4423-a51c-c0507efc47ff",
+"label": "scene",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "bf116e85-ff5f-4e8a-a53b-c21aa783afaa",
+"label": "Ruth Comerford",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "bfd6095c-84d0-4279-b37b-8fb923f2df9d",
+"label": "Treasury",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "bfec8981-dddc-4bf5-b3be-cc8c4368e2be",
+"label": "baltimore showed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c0070f00-431e-46a7-8df0-ba661fb5dddf",
+"label": "ipo change",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c10611b6-1f1b-406a-9a90-54d228ce86cc",
+"label": "cold",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c1486374-8f9d-4bd8-951b-5bd5a3a9661a",
+"label": "bow",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c1c5c294-b8e8-4e2b-9933-bf650b5afd9d",
+"label": "naar colombo",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c2dba2cd-6979-4568-9b17-cb0dcae9693e",
+"label": "ship hurtled",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c372197f-adf7-4cd4-ad98-499829d025a6",
+"label": "officials transitioned",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c37c300f-bc73-470a-b7cd-787eea64eece",
+"label": "secretary",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c3af8c6f-ff2a-43ba-bb30-9ea356ea6258",
+"label": "Baltimore Banner",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "c3c68732-527d-4b1d-8e11-fbb990e1e9c5",
+"label": "ship destroyed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c3f9515d-c8a6-43bb-a3e0-933b602d0b3a",
+"label": "light trucks",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c4bd83c2-3f41-492c-a23e-ceae0ddb82e9",
+"label": "University of Maryland Medical Center",
+"types": [
+"Facility"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "c4fe61ea-3703-43f8-9281-e99a009c80a6",
+"label": "workers possibly",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c56080f9-ec79-4bb7-ac5a-3d32fa28b20b",
+"label": "guard announced",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c5762590-e0a4-4e93-9f07-a5a2fc748e87",
+"label": "survival diminished",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c651a558-1054-4055-a6d4-cf4ed302c3ed",
+"label": "David Jones",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "c68154c4-9a94-4fd3-87d8-bfed4a4aa10a",
+"label": "moored boat",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c817e8f1-bb78-432d-b871-d05b33e62322",
+"label": "major link",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c877084b-b6d3-4976-b174-19027973562c",
+"label": "guard told",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c8a2a34c-2085-46e3-adfd-6a17ec24621e",
+"label": "Access News Break",
+"types": [
+"Product"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "c8c31d6b-1d7d-40ff-a13d-5c07195046cc",
+"label": "press conference",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "ca208db1-d03f-4b5a-932a-c92ecc867156",
+"label": "search efforts",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "ca58ff21-641e-4b73-ab5b-fee0e15d5368",
+"label": "bridge gave",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "cad9aa0e-af26-4f81-93b4-97b9650ba118",
+"label": "Baltimore Sun",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "caeb20c8-11fb-49f5-89b9-0a039971bbe2",
+"label": "Amy Simonson",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "cbfbc8d6-8054-4edd-8625-b28887b61e5e",
+"label": "crumbled early",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "ccab19cf-f893-488a-9729-1fcb97e87fcf",
+"label": "Grace Ocean Pte Ltd",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "ccbae82b-e85a-4cd3-adb8-b4cee5cdb5ed",
+"label": "biggest bridge",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "cd49b07f-d2e3-4cad-9884-595f84e6ff7c",
+"label": "El Salvador",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "cdd0d300-ce1d-4982-9e88-d560a7e81f71",
+"label": "evening press",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "cdd88ee8-ffdf-4015-83d4-f68a2dc28312",
+"label": "water early",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "ce4b16f1-7f7c-4dd4-b245-87bc2ff5c894",
+"label": "Francis Scott Key Ridge",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "d136bb2b-8d7b-4abc-9026-4e90e6a92c19",
+"label": "Apostleship of the Sea",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "d2107824-f82a-416e-b59c-8f632ea85e40",
+"label": "saved lives",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "d292cb1d-50b9-4ea2-a1b1-53bdff51e7eb",
+"label": "mayday shortly",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "d321b827-eaf5-4c97-ac74-37ec4d143606",
+"label": "Lake Louise News",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "d5548aa4-995b-41da-aaf7-389b8d765093",
+"label": "hang",
+"types": [
+"Concept",
+"Organization"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "d65b0bd8-849f-478a-80dc-643ab58349bf",
+"label": "coast",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "d79b5fe5-a932-48ee-809a-0426415a79b2",
+"label": "agencies received",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "d876cade-98b2-417e-ad04-16d789bad5f9",
+"label": "bridge moments",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "d8b13026-43ea-4092-ace7-c8a93259d084",
+"label": "collapse officials",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "d97e9391-4b56-4cfb-b80c-0e228d24e8fc",
+"label": "neared",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "d9fb151f-3ccd-4f7f-afcf-9f0764ed9a78",
+"label": "Detective Niki Fennoy",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "daf36fc5-62c0-49ee-99de-cdc652c74545",
+"label": "Brandon Drenon",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "de945ef5-325b-4cc3-9fe1-5bd71d0eca5e",
+"label": "missing men",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "defa8190-0860-4894-acf5-ed439ff2cfdb",
+"label": "received",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "df06ffcc-5e01-4c35-9755-f803062cdfac",
+"label": "Middleton",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "df420a71-d045-464f-8f82-e98da559bc20",
+"label": "NBC4",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "e041270b-2644-4bab-a258-0c299e6d9c62",
+"label": "city collapses",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "e0d6144a-d62b-47a3-bb07-52c47abbebf8",
+"label": "structure falling",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "e1246556-2433-47bf-a228-a8ea32a53ff4",
+"label": "partial bridge",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "e13ec41d-6c0c-4a5d-ba64-d8a62f863269",
+"label": "topics",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "e14a307b-dbfb-4f16-a7dd-3032402bda05",
+"label": "helicopters",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "e16b8c7c-8c63-4fb7-aa33-4a753f4de1c0",
+"label": "China",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "e1766a52-7d8b-4777-8f25-15d185645f18",
+"label": "gold",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "e3c2bfcd-24eb-41a9-b724-d153571ff66a",
+"label": "Pete Buttigieg",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "e40a57d7-9963-470b-80f4-26a2b9347627",
+"label": "Kananaskis Country News",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "e40d59f3-b6b4-4c69-b3ab-45ca98882bca",
+"label": "sending people",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "e4169d5b-dda5-4cf7-b2e5-f61b033404da",
+"label": "advertisement",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "e4a3f078-9196-4483-a424-b8fc143cdc08",
+"label": "traffic alert",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "e56988e4-d023-411c-bd51-8857c5179ae5",
+"label": "roadway",
+"types": [
+"Infrastructure"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "e5abeb69-8291-454f-b300-610d60f1c8de",
+"label": "Latest News Warriors",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "e6542c89-580f-400b-9ac6-367cf17128b3",
+"label": "believed missing",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "e67e0abd-3890-4198-88c7-7c07d40b1fc3",
+"label": "Lions",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "e7c7ad1c-ffde-40e7-a640-cf5c8fe4b8e2",
+"label": "Vox Populi",
+"types": [
+"Organization"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "e8960a6b-5119-4b8c-9814-6b33d0c063e9",
+"label": "main north",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "eac711d3-1fe5-4475-8a82-a8926505c02c",
+"label": "bodies removed",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "eb2496c9-503e-4ab5-81c6-15672431f6f5",
+"label": "diminished visibility",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "eb32411d-d95a-48ee-a4e3-c0fee62f0a46",
+"label": "attack’ read",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "eb407efb-4b55-43e3-b49c-a04f25343da6",
+"label": "boat",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "eb4885e8-f284-4415-8783-f40f79ba44de",
+"label": "terror keywords",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "ed88e429-3c8a-4086-8502-f475bc5e3a20",
+"label": "wes",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "edd3ed4f-66ec-4ed2-bc37-ba4f9dfcc434",
+"label": "indefinite closure",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "edec6028-1d90-4914-9927-d09dc64d7823",
+"label": "partners",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "ef706fd7-7597-450f-a92e-d09e998d0c17",
+"label": "huge bond",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f03519c6-7864-4f82-b5b3-43030aea826e",
+"label": "face",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f0c0b04b-0a32-4a34-89a8-b34d92fe9c27",
+"label": "Tarik Habte",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "f1033bf2-8335-43bb-89fe-1ebed53c309e",
+"label": "audience advertising",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f1acee69-df11-41a8-8ec4-79a4f5d28890",
+"label": "USA",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "f2088dd3-b3b0-4a17-96a4-9b56146c0d79",
+"label": "uur",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f24e605a-67bd-449c-bcf9-63f1bc577735",
+"label": "water baltimore",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f2bc3c7f-6b98-4c5b-a3b1-b9cb127257d6",
+"label": "News Break",
+"types": [
+"Product"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f2f1af3b-7fd1-447c-ba64-417da53a92ef",
+"label": "CEO",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f34a6f24-529b-4503-9558-64a92950aa07",
+"label": "governor wes",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f34fad31-23ce-4e3d-96d2-d54484cfc683",
+"label": "collapse key",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f37a8963-bc52-415a-b8ff-35357f78b324",
+"label": "calendar discover",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f385cc2a-005a-45c2-b785-66bce82930c5",
+"label": "rebuild baltimore",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f38a8f4a-42c0-4fd2-a7a0-4e83f27ca096",
+"label": "terrifying collapse",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f46258f4-b0f3-4244-914a-3bc7614e813b",
+"label": "lift",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f4719e87-d3fb-4bbf-aba1-94e7ef60a966",
+"label": "navigation",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f49323e0-c509-4e51-8889-f04252de4b1a",
+"label": "Laura Coates",
+"types": [
+"Person"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "f51fb9e5-c303-4642-9145-977c92d4e004",
+"label": "reportedly fallen",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f578c1cd-6b1e-4719-a13d-c72aedc03c55",
+"label": "Pasadena, Md",
+"types": [
+"Location"
+],
+"proper": true,
+"mentions": 1
+},
+{
+"id": "f5c044a5-1955-4c04-8279-9eb2c906afda",
+"label": "incident tuesday",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f5cfce2f-0041-4e4a-9ebf-fa76a9e63d32",
+"label": "crew filling",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f628aef0-ea67-4396-a797-8f8f96405fd6",
+"label": "barrelling",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f6ea8706-fee1-4e1b-a92d-a02f0fab2f68",
+"label": "drop",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f6fc937c-dca2-4853-b3d8-c8d1a54ec4a9",
+"label": "chilly waters",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f764ff9a-aca6-4385-b643-0d3fb5e8b078",
+"label": "het water",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "f7f5c7a4-2cb5-4a74-b7a5-d2786d07cea7",
+"label": "offer",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "fa2ddd76-346f-4420-a02c-25441070cae0",
+"label": "rapid",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "fa6a07c2-0e8c-4884-b6f9-49926c472a12",
+"label": "trade deficit",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "fb338985-c966-44f3-a373-b4da50ed3e37",
+"label": "affected",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "fcd80ec8-ab16-4a5a-a065-b0f7141632b5",
+"label": "sentdefender posted",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "fde7aa60-a285-4b75-9c82-01358de33f65",
+"label": "lights",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+},
+{
+"id": "ffdfe714-5e36-41c2-bdfc-b7067c9e6c58",
+"label": "bridge early",
+"types": [
+"Concept"
+],
+"proper": false,
+"mentions": 1
+}
+],
+"causal_edges": [
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "94d3f080-df6a-438d-8b64-d5ea47c199cc",
+"label": "Triggers"
+},
+{
+"source": "94d3f080-df6a-438d-8b64-d5ea47c199cc",
+"target": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"label": "Triggers"
+},
+{
+"source": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"target": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "Triggers"
+},
+{
+"source": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"target": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"label": "Triggers"
+},
+{
+"source": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"target": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "Triggers"
+},
+{
+"source": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"target": "94d3f080-df6a-438d-8b64-d5ea47c199cc",
+"label": "Triggers"
+},
+{
+"source": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"target": "86421eab-3227-42b2-8846-7b4ec6e1863d",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "Triggers"
+},
+{
+"source": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"target": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"label": "Triggers"
+},
+{
+"source": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"target": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"label": "Triggers"
+},
+{
+"source": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "1df246e2-4477-40c9-97dc-65b922516887",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"label": "Triggers"
+},
+{
+"source": "f56e41cb-b23c-4a83-b1ce-7116049e4237",
+"target": "fb30b9b5-f39c-4076-9eb8-c61a3ad0516e",
+"label": "Triggers"
+},
+{
+"source": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"target": "f4a389b5-de04-41d4-8dca-6019feb0acf7",
+"label": "Triggers"
+},
+{
+"source": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "86421eab-3227-42b2-8846-7b4ec6e1863d",
+"target": "a7ad8c45-69ed-480f-92f8-b099b8e0d3e8",
+"label": "Triggers"
+},
+{
+"source": "86421eab-3227-42b2-8846-7b4ec6e1863d",
+"target": "9657b3d5-2ae3-4746-8d6b-5dab9595fb47",
+"label": "Triggers"
+},
+{
+"source": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"target": "86421eab-3227-42b2-8846-7b4ec6e1863d",
+"label": "Triggers"
+},
+{
+"source": "64ed4baf-a078-451d-87a0-865d88128b66",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "36112cdb-8ce1-4095-ae1f-984ea0c562e2",
+"target": "60063dda-1e20-4685-9751-e89d3bef6a70",
+"label": "Triggers"
+},
+{
+"source": "36112cdb-8ce1-4095-ae1f-984ea0c562e2",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "36112cdb-8ce1-4095-ae1f-984ea0c562e2",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "64ed4baf-a078-451d-87a0-865d88128b66",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "36112cdb-8ce1-4095-ae1f-984ea0c562e2",
+"target": "01e41fec-b6be-453d-b68f-f697575a5db7",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"label": "Triggers"
+},
+{
+"source": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "bfbfb3e3-debb-42da-9d02-0aae467450ea",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "b9c64e8e-d318-4403-b36a-754fa3dadce8",
+"target": "277b5108-5880-4340-9d26-6ddcbba9cf63",
+"label": "Triggers"
+},
+{
+"source": "92feb8a2-b013-4b4a-998a-e757ff57e711",
+"target": "277b5108-5880-4340-9d26-6ddcbba9cf63",
+"label": "Triggers"
+},
+{
+"source": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"target": "277b5108-5880-4340-9d26-6ddcbba9cf63",
+"label": "Triggers"
+},
+{
+"source": "915d946a-c9f1-4a5c-b393-3e7b22885c27",
+"target": "277b5108-5880-4340-9d26-6ddcbba9cf63",
+"label": "Triggers"
+},
+{
+"source": "2080cfe8-d6b5-4f18-815d-fc492a64aa0f",
+"target": "277b5108-5880-4340-9d26-6ddcbba9cf63",
+"label": "Triggers"
+},
+{
+"source": "ccb62e8a-04ca-4fe1-bc03-8681ceb0dc5e",
+"target": "277b5108-5880-4340-9d26-6ddcbba9cf63",
+"label": "Triggers"
+},
+{
+"source": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"target": "277b5108-5880-4340-9d26-6ddcbba9cf63",
+"label": "Triggers"
+},
+{
+"source": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "1df246e2-4477-40c9-97dc-65b922516887",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "8ba47899-676a-441b-9059-d726c39a7031",
+"label": "Triggers"
+},
+{
+"source": "ab47341e-d405-4c77-ae4c-da4ce24cc85a",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"target": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"label": "Triggers"
+},
+{
+"source": "1438cb48-c0b0-4d40-9746-497ebb15c637",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "1438cb48-c0b0-4d40-9746-497ebb15c637",
+"target": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"label": "Triggers"
+},
+{
+"source": "ab47341e-d405-4c77-ae4c-da4ce24cc85a",
+"target": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"label": "Triggers"
+},
+{
+"source": "ab47341e-d405-4c77-ae4c-da4ce24cc85a",
+"target": "1438cb48-c0b0-4d40-9746-497ebb15c637",
+"label": "Triggers"
+},
+{
+"source": "1438cb48-c0b0-4d40-9746-497ebb15c637",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "ab47341e-d405-4c77-ae4c-da4ce24cc85a",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "1438cb48-c0b0-4d40-9746-497ebb15c637",
+"label": "Triggers"
+},
+{
+"source": "ab47341e-d405-4c77-ae4c-da4ce24cc85a",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"target": "df599671-4fe1-40c7-a3a4-bf2955c9431e",
+"label": "Triggers"
+},
+{
+"source": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"target": "60042a40-0adf-423a-942e-34b5ab270540",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"target": "a741580e-bd3d-43bd-9551-b09d9f5f2bb1",
+"label": "Triggers"
+},
+{
+"source": "a1ae19a9-1fc6-4fd7-93cf-71279e7cc537",
+"target": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"label": "Triggers"
+},
+{
+"source": "4346595f-436e-4110-979b-6783812c8daf",
+"target": "8b5090a7-071b-4bf1-950d-4d864786e1a5",
+"label": "Triggers"
+},
+{
+"source": "78988d7a-6dda-4020-a234-e8166f69d358",
+"target": "8b5090a7-071b-4bf1-950d-4d864786e1a5",
+"label": "Triggers"
+},
+{
+"source": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"target": "8b5090a7-071b-4bf1-950d-4d864786e1a5",
+"label": "Triggers"
+},
+{
+"source": "378df2b9-964b-4d5b-8607-ee73eb2965fa",
+"target": "8b5090a7-071b-4bf1-950d-4d864786e1a5",
+"label": "Triggers"
+},
+{
+"source": "4a800e79-8c28-42fa-830f-33bed2fa3e98",
+"target": "8b5090a7-071b-4bf1-950d-4d864786e1a5",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "d157570e-4ac6-4436-9d44-1f1c15bb4333",
+"label": "Triggers"
+},
+{
+"source": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"target": "663ba705-7d38-4786-a3c6-062f5d2151c6",
+"label": "Triggers"
+},
+{
+"source": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"target": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"label": "Triggers"
+},
+{
+"source": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"target": "fcd80ec8-ab16-4a5a-a065-b0f7141632b5",
+"label": "Triggers"
+},
+{
+"source": "45320a3f-5f8b-40a4-a4f4-059405a2bd4f",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"target": "45320a3f-5f8b-40a4-a4f4-059405a2bd4f",
+"label": "Triggers"
+},
+{
+"source": "9e0d13cb-7299-414a-b7bf-3b59d749c835",
+"target": "21d26d18-9385-445d-bdc8-142e8793c9ae",
+"label": "Triggers"
+},
+{
+"source": "45320a3f-5f8b-40a4-a4f4-059405a2bd4f",
+"target": "21d26d18-9385-445d-bdc8-142e8793c9ae",
+"label": "Triggers"
+},
+{
+"source": "048bc0a1-aa89-47a0-b2b6-af7ab5def054",
+"target": "45320a3f-5f8b-40a4-a4f4-059405a2bd4f",
+"label": "Triggers"
+},
+{
+"source": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"target": "769d21b0-6cf2-46c9-b013-03066d716013",
+"label": "Triggers"
+},
+{
+"source": "904063b7-91dd-41d9-afb2-19eec8a3dfa7",
+"target": "21d26d18-9385-445d-bdc8-142e8793c9ae",
+"label": "Triggers"
+},
+{
+"source": "769d21b0-6cf2-46c9-b013-03066d716013",
+"target": "048bc0a1-aa89-47a0-b2b6-af7ab5def054",
+"label": "Triggers"
+},
+{
+"source": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"target": "9e0d13cb-7299-414a-b7bf-3b59d749c835",
+"label": "Triggers"
+},
+{
+"source": "769d21b0-6cf2-46c9-b013-03066d716013",
+"target": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"label": "Triggers"
+},
+{
+"source": "9e0d13cb-7299-414a-b7bf-3b59d749c835",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "3df9fe52-dabd-429c-9c5e-f7815f4d47da",
+"target": "45320a3f-5f8b-40a4-a4f4-059405a2bd4f",
+"label": "Triggers"
+},
+{
+"source": "048bc0a1-aa89-47a0-b2b6-af7ab5def054",
+"target": "21d26d18-9385-445d-bdc8-142e8793c9ae",
+"label": "Triggers"
+},
+{
+"source": "048bc0a1-aa89-47a0-b2b6-af7ab5def054",
+"target": "3df9fe52-dabd-429c-9c5e-f7815f4d47da",
+"label": "Triggers"
+},
+{
+"source": "769d21b0-6cf2-46c9-b013-03066d716013",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "9e0d13cb-7299-414a-b7bf-3b59d749c835",
+"target": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"label": "Triggers"
+},
+{
+"source": "3df9fe52-dabd-429c-9c5e-f7815f4d47da",
+"target": "9e0d13cb-7299-414a-b7bf-3b59d749c835",
+"label": "Triggers"
+},
+{
+"source": "769d21b0-6cf2-46c9-b013-03066d716013",
+"target": "45320a3f-5f8b-40a4-a4f4-059405a2bd4f",
+"label": "Triggers"
+},
+{
+"source": "3df9fe52-dabd-429c-9c5e-f7815f4d47da",
+"target": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"label": "Triggers"
+},
+{
+"source": "769d21b0-6cf2-46c9-b013-03066d716013",
+"target": "21d26d18-9385-445d-bdc8-142e8793c9ae",
+"label": "Triggers"
+},
+{
+"source": "9e0d13cb-7299-414a-b7bf-3b59d749c835",
+"target": "45320a3f-5f8b-40a4-a4f4-059405a2bd4f",
+"label": "Triggers"
+},
+{
+"source": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"target": "21d26d18-9385-445d-bdc8-142e8793c9ae",
+"label": "Triggers"
+},
+{
+"source": "3df9fe52-dabd-429c-9c5e-f7815f4d47da",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "3df9fe52-dabd-429c-9c5e-f7815f4d47da",
+"target": "21d26d18-9385-445d-bdc8-142e8793c9ae",
+"label": "Triggers"
+},
+{
+"source": "769d21b0-6cf2-46c9-b013-03066d716013",
+"target": "3df9fe52-dabd-429c-9c5e-f7815f4d47da",
+"label": "Triggers"
+},
+{
+"source": "769d21b0-6cf2-46c9-b013-03066d716013",
+"target": "9e0d13cb-7299-414a-b7bf-3b59d749c835",
+"label": "Triggers"
+},
+{
+"source": "904063b7-91dd-41d9-afb2-19eec8a3dfa7",
+"target": "45320a3f-5f8b-40a4-a4f4-059405a2bd4f",
+"label": "Triggers"
+},
+{
+"source": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"target": "3df9fe52-dabd-429c-9c5e-f7815f4d47da",
+"label": "Triggers"
+},
+{
+"source": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"target": "048bc0a1-aa89-47a0-b2b6-af7ab5def054",
+"label": "Triggers"
+},
+{
+"source": "048bc0a1-aa89-47a0-b2b6-af7ab5def054",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "904063b7-91dd-41d9-afb2-19eec8a3dfa7",
+"target": "048bc0a1-aa89-47a0-b2b6-af7ab5def054",
+"label": "Triggers"
+},
+{
+"source": "904063b7-91dd-41d9-afb2-19eec8a3dfa7",
+"target": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"label": "Triggers"
+},
+{
+"source": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"target": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"label": "Triggers"
+},
+{
+"source": "048bc0a1-aa89-47a0-b2b6-af7ab5def054",
+"target": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"label": "Triggers"
+},
+{
+"source": "904063b7-91dd-41d9-afb2-19eec8a3dfa7",
+"target": "9e0d13cb-7299-414a-b7bf-3b59d749c835",
+"label": "Triggers"
+},
+{
+"source": "904063b7-91dd-41d9-afb2-19eec8a3dfa7",
+"target": "3df9fe52-dabd-429c-9c5e-f7815f4d47da",
+"label": "Triggers"
+},
+{
+"source": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"target": "904063b7-91dd-41d9-afb2-19eec8a3dfa7",
+"label": "Triggers"
+},
+{
+"source": "21d26d18-9385-445d-bdc8-142e8793c9ae",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "048bc0a1-aa89-47a0-b2b6-af7ab5def054",
+"target": "9e0d13cb-7299-414a-b7bf-3b59d749c835",
+"label": "Triggers"
+},
+{
+"source": "45320a3f-5f8b-40a4-a4f4-059405a2bd4f",
+"target": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"label": "Triggers"
+},
+{
+"source": "904063b7-91dd-41d9-afb2-19eec8a3dfa7",
+"target": "769d21b0-6cf2-46c9-b013-03066d716013",
+"label": "Triggers"
+},
+{
+"source": "904063b7-91dd-41d9-afb2-19eec8a3dfa7",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "21d26d18-9385-445d-bdc8-142e8793c9ae",
+"label": "Triggers"
+},
+{
+"source": "2064da5a-896a-437f-915e-f5377b704c4d",
+"target": "58b26b93-9402-4a19-a247-c0326de576ca",
+"label": "Triggers"
+},
+{
+"source": "5881bdf7-a76f-42cb-8428-0f561fd9240c",
+"target": "58b26b93-9402-4a19-a247-c0326de576ca",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "f1b9b8d2-8844-4bb2-8562-7d513b11c976",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "499e9b73-ede5-47f2-be72-887c46b2c1e5",
+"label": "Triggers"
+},
+{
+"source": "f1b9b8d2-8844-4bb2-8562-7d513b11c976",
+"target": "58b26b93-9402-4a19-a247-c0326de576ca",
+"label": "Triggers"
+},
+{
+"source": "2064da5a-896a-437f-915e-f5377b704c4d",
+"target": "0f5da540-299f-4ad6-b57b-d3ee693d1ce8",
+"label": "Triggers"
+},
+{
+"source": "2064da5a-896a-437f-915e-f5377b704c4d",
+"target": "5881bdf7-a76f-42cb-8428-0f561fd9240c",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "2064da5a-896a-437f-915e-f5377b704c4d",
+"label": "Triggers"
+},
+{
+"source": "f1b9b8d2-8844-4bb2-8562-7d513b11c976",
+"target": "5881bdf7-a76f-42cb-8428-0f561fd9240c",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "58b26b93-9402-4a19-a247-c0326de576ca",
+"label": "Triggers"
+},
+{
+"source": "f1b9b8d2-8844-4bb2-8562-7d513b11c976",
+"target": "0f5da540-299f-4ad6-b57b-d3ee693d1ce8",
+"label": "Triggers"
+},
+{
+"source": "f1b9b8d2-8844-4bb2-8562-7d513b11c976",
+"target": "499e9b73-ede5-47f2-be72-887c46b2c1e5",
+"label": "Triggers"
+},
+{
+"source": "0f5da540-299f-4ad6-b57b-d3ee693d1ce8",
+"target": "499e9b73-ede5-47f2-be72-887c46b2c1e5",
+"label": "Triggers"
+},
+{
+"source": "f1b9b8d2-8844-4bb2-8562-7d513b11c976",
+"target": "2064da5a-896a-437f-915e-f5377b704c4d",
+"label": "Triggers"
+},
+{
+"source": "2064da5a-896a-437f-915e-f5377b704c4d",
+"target": "499e9b73-ede5-47f2-be72-887c46b2c1e5",
+"label": "Triggers"
+},
+{
+"source": "58b26b93-9402-4a19-a247-c0326de576ca",
+"target": "0f5da540-299f-4ad6-b57b-d3ee693d1ce8",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "0f5da540-299f-4ad6-b57b-d3ee693d1ce8",
+"label": "Triggers"
+},
+{
+"source": "5881bdf7-a76f-42cb-8428-0f561fd9240c",
+"target": "0f5da540-299f-4ad6-b57b-d3ee693d1ce8",
+"label": "Triggers"
+},
+{
+"source": "58b26b93-9402-4a19-a247-c0326de576ca",
+"target": "499e9b73-ede5-47f2-be72-887c46b2c1e5",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "5881bdf7-a76f-42cb-8428-0f561fd9240c",
+"label": "Triggers"
+},
+{
+"source": "5881bdf7-a76f-42cb-8428-0f561fd9240c",
+"target": "499e9b73-ede5-47f2-be72-887c46b2c1e5",
+"label": "Triggers"
+},
+{
+"source": "79314daf-41ad-476b-b528-9c18c938d262",
+"target": "310a07c6-6888-432d-906f-798192bffa21",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "79314daf-41ad-476b-b528-9c18c938d262",
+"label": "Triggers"
+},
+{
+"source": "79314daf-41ad-476b-b528-9c18c938d262",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "310a07c6-6888-432d-906f-798192bffa21",
+"label": "Triggers"
+},
+{
+"source": "310a07c6-6888-432d-906f-798192bffa21",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "495bb5dd-b980-44f2-9507-d04248e31be6",
+"target": "d4a05194-45e5-4cf9-b0ae-6713b8cec8f4",
+"label": "Triggers"
+},
+{
+"source": "495bb5dd-b980-44f2-9507-d04248e31be6",
+"target": "e3c2bfcd-24eb-41a9-b724-d153571ff66a",
+"label": "Triggers"
+},
+{
+"source": "24cd2295-c635-468b-9853-cb514363429f",
+"target": "495bb5dd-b980-44f2-9507-d04248e31be6",
+"label": "Triggers"
+},
+{
+"source": "7b8e7236-d811-40a1-a5eb-8cc928c133dc",
+"target": "d4a05194-45e5-4cf9-b0ae-6713b8cec8f4",
+"label": "Triggers"
+},
+{
+"source": "7b8e7236-d811-40a1-a5eb-8cc928c133dc",
+"target": "e3c2bfcd-24eb-41a9-b724-d153571ff66a",
+"label": "Triggers"
+},
+{
+"source": "24cd2295-c635-468b-9853-cb514363429f",
+"target": "e3c2bfcd-24eb-41a9-b724-d153571ff66a",
+"label": "Triggers"
+},
+{
+"source": "7b8e7236-d811-40a1-a5eb-8cc928c133dc",
+"target": "24cd2295-c635-468b-9853-cb514363429f",
+"label": "Triggers"
+},
+{
+"source": "24cd2295-c635-468b-9853-cb514363429f",
+"target": "d4a05194-45e5-4cf9-b0ae-6713b8cec8f4",
+"label": "Triggers"
+},
+{
+"source": "7b8e7236-d811-40a1-a5eb-8cc928c133dc",
+"target": "495bb5dd-b980-44f2-9507-d04248e31be6",
+"label": "Triggers"
+},
+{
+"source": "b8c04e7c-eead-41d6-9ba3-43c50aa9e860",
+"target": "92dff70c-4f35-4afd-9539-630d49d4d6c1",
+"label": "Triggers"
+},
+{
+"source": "664b00f7-7eb5-4070-bc5a-40c563d50d84",
+"target": "eac711d3-1fe5-4475-8a82-a8926505c02c",
+"label": "Triggers"
+},
+{
+"source": "92dff70c-4f35-4afd-9539-630d49d4d6c1",
+"target": "eac711d3-1fe5-4475-8a82-a8926505c02c",
+"label": "Triggers"
+},
+{
+"source": "664b00f7-7eb5-4070-bc5a-40c563d50d84",
+"target": "25055a1b-b7f2-4a17-a2d9-7f0db1389b0b",
+"label": "Triggers"
+},
+{
+"source": "b8c04e7c-eead-41d6-9ba3-43c50aa9e860",
+"target": "eac711d3-1fe5-4475-8a82-a8926505c02c",
+"label": "Triggers"
+},
+{
+"source": "b8c04e7c-eead-41d6-9ba3-43c50aa9e860",
+"target": "664b00f7-7eb5-4070-bc5a-40c563d50d84",
+"label": "Triggers"
+},
+{
+"source": "664b00f7-7eb5-4070-bc5a-40c563d50d84",
+"target": "92dff70c-4f35-4afd-9539-630d49d4d6c1",
+"label": "Triggers"
+},
+{
+"source": "25055a1b-b7f2-4a17-a2d9-7f0db1389b0b",
+"target": "eac711d3-1fe5-4475-8a82-a8926505c02c",
+"label": "Triggers"
+},
+{
+"source": "b8c04e7c-eead-41d6-9ba3-43c50aa9e860",
+"target": "25055a1b-b7f2-4a17-a2d9-7f0db1389b0b",
+"label": "Triggers"
+},
+{
+"source": "25055a1b-b7f2-4a17-a2d9-7f0db1389b0b",
+"target": "92dff70c-4f35-4afd-9539-630d49d4d6c1",
+"label": "Triggers"
+},
+{
+"source": "3f443eea-fcb1-460c-9b56-7d8303d82eb2",
+"target": "df420a71-d045-464f-8f82-e98da559bc20",
+"label": "Triggers"
+},
+{
+"source": "4f2fb4f7-e607-497d-acb8-b71cfa3cce7f",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "4f2fb4f7-e607-497d-acb8-b71cfa3cce7f",
+"target": "df420a71-d045-464f-8f82-e98da559bc20",
+"label": "Triggers"
+},
+{
+"source": "1d9d5fdd-b52b-4044-8b1a-fd0532c7d069",
+"target": "df420a71-d045-464f-8f82-e98da559bc20",
+"label": "Triggers"
+},
+{
+"source": "3f443eea-fcb1-460c-9b56-7d8303d82eb2",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "1d9d5fdd-b52b-4044-8b1a-fd0532c7d069",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "b1b538b6-048b-44ef-bede-1216914d26db",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "b1b538b6-048b-44ef-bede-1216914d26db",
+"target": "df420a71-d045-464f-8f82-e98da559bc20",
+"label": "Triggers"
+},
+{
+"source": "e8960a6b-5119-4b8c-9814-6b33d0c063e9",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "9f45efa7-fd12-4a92-8b82-407469d8c4da",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "6d73034b-da4d-4f34-bd19-48913b9df8db",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "49778625-c29a-4069-89e3-d594d5160804",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "933059b2-b435-4737-90ec-f5469605d425",
+"target": "3c480054-7229-4769-aea3-b2c3de8bdc2f",
+"label": "Triggers"
+},
+{
+"source": "f51fb9e5-c303-4642-9145-977c92d4e004",
+"target": "3c480054-7229-4769-aea3-b2c3de8bdc2f",
+"label": "Triggers"
+},
+{
+"source": "f51fb9e5-c303-4642-9145-977c92d4e004",
+"target": "933059b2-b435-4737-90ec-f5469605d425",
+"label": "Triggers"
+},
+{
+"source": "f56e41cb-b23c-4a83-b1ce-7116049e4237",
+"target": "34e05676-9417-46a3-82d6-604eb961cb5a",
+"label": "Triggers"
+},
+{
+"source": "34e05676-9417-46a3-82d6-604eb961cb5a",
+"target": "995b4112-c7ae-4952-a310-8258e607fbba",
+"label": "Triggers"
+},
+{
+"source": "34e05676-9417-46a3-82d6-604eb961cb5a",
+"target": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"label": "Triggers"
+},
+{
+"source": "34e05676-9417-46a3-82d6-604eb961cb5a",
+"target": "c1486374-8f9d-4bd8-951b-5bd5a3a9661a",
+"label": "Triggers"
+},
+{
+"source": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"target": "995b4112-c7ae-4952-a310-8258e607fbba",
+"label": "Triggers"
+},
+{
+"source": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"target": "3462a547-7b0b-4476-9f64-010c8245ead1",
+"label": "Triggers"
+},
+{
+"source": "c1486374-8f9d-4bd8-951b-5bd5a3a9661a",
+"target": "995b4112-c7ae-4952-a310-8258e607fbba",
+"label": "Triggers"
+},
+{
+"source": "f56e41cb-b23c-4a83-b1ce-7116049e4237",
+"target": "995b4112-c7ae-4952-a310-8258e607fbba",
+"label": "Triggers"
+},
+{
+"source": "34e05676-9417-46a3-82d6-604eb961cb5a",
+"target": "3462a547-7b0b-4476-9f64-010c8245ead1",
+"label": "Triggers"
+},
+{
+"source": "c1486374-8f9d-4bd8-951b-5bd5a3a9661a",
+"target": "fb30b9b5-f39c-4076-9eb8-c61a3ad0516e",
+"label": "Triggers"
+},
+{
+"source": "f56e41cb-b23c-4a83-b1ce-7116049e4237",
+"target": "c1486374-8f9d-4bd8-951b-5bd5a3a9661a",
+"label": "Triggers"
+},
+{
+"source": "34e05676-9417-46a3-82d6-604eb961cb5a",
+"target": "fb30b9b5-f39c-4076-9eb8-c61a3ad0516e",
+"label": "Triggers"
+},
+{
+"source": "3462a547-7b0b-4476-9f64-010c8245ead1",
+"target": "c1486374-8f9d-4bd8-951b-5bd5a3a9661a",
+"label": "Triggers"
+},
+{
+"source": "f56e41cb-b23c-4a83-b1ce-7116049e4237",
+"target": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"label": "Triggers"
+},
+{
+"source": "3462a547-7b0b-4476-9f64-010c8245ead1",
+"target": "995b4112-c7ae-4952-a310-8258e607fbba",
+"label": "Triggers"
+},
+{
+"source": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"target": "c1486374-8f9d-4bd8-951b-5bd5a3a9661a",
+"label": "Triggers"
+},
+{
+"source": "f56e41cb-b23c-4a83-b1ce-7116049e4237",
+"target": "3462a547-7b0b-4476-9f64-010c8245ead1",
+"label": "Triggers"
+},
+{
+"source": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"target": "fb30b9b5-f39c-4076-9eb8-c61a3ad0516e",
+"label": "Triggers"
+},
+{
+"source": "3462a547-7b0b-4476-9f64-010c8245ead1",
+"target": "fb30b9b5-f39c-4076-9eb8-c61a3ad0516e",
+"label": "Triggers"
+},
+{
+"source": "b3cbb309-8979-4152-858f-ba84d7dcf75d",
+"target": "0551eee9-3039-4f81-891d-20deec2ea5b9",
+"label": "Triggers"
+},
+{
+"source": "13f9adae-a563-49d3-b570-dee6c9be216f",
+"target": "0551eee9-3039-4f81-891d-20deec2ea5b9",
+"label": "Triggers"
+},
+{
+"source": "c68154c4-9a94-4fd3-87d8-bfed4a4aa10a",
+"target": "0551eee9-3039-4f81-891d-20deec2ea5b9",
+"label": "Triggers"
+},
+{
+"source": "f578c1cd-6b1e-4719-a13d-c72aedc03c55",
+"target": "0551eee9-3039-4f81-891d-20deec2ea5b9",
+"label": "Triggers"
+},
+{
+"source": "4eaf58b2-888b-4338-8b8b-4d0b55a7ea90",
+"target": "0551eee9-3039-4f81-891d-20deec2ea5b9",
+"label": "Triggers"
+},
+{
+"source": "84a2b374-12b3-4433-a126-8b131f115cd8",
+"target": "fb30b9b5-f39c-4076-9eb8-c61a3ad0516e",
+"label": "Triggers"
+},
+{
+"source": "84a2b374-12b3-4433-a126-8b131f115cd8",
+"target": "f56e41cb-b23c-4a83-b1ce-7116049e4237",
+"label": "Triggers"
+},
+{
+"source": "75c6d29c-8905-454f-b5c7-68883483c4e0",
+"target": "fb30b9b5-f39c-4076-9eb8-c61a3ad0516e",
+"label": "Triggers"
+},
+{
+"source": "a9d196b5-2695-4c80-a03d-9d306199db0e",
+"target": "f56e41cb-b23c-4a83-b1ce-7116049e4237",
+"label": "Triggers"
+},
+{
+"source": "75c6d29c-8905-454f-b5c7-68883483c4e0",
+"target": "f56e41cb-b23c-4a83-b1ce-7116049e4237",
+"label": "Triggers"
+},
+{
+"source": "303ef2f4-3d87-4285-ab5b-a5dfd7ace601",
+"target": "fb30b9b5-f39c-4076-9eb8-c61a3ad0516e",
+"label": "Triggers"
+},
+{
+"source": "a9d196b5-2695-4c80-a03d-9d306199db0e",
+"target": "fb30b9b5-f39c-4076-9eb8-c61a3ad0516e",
+"label": "Triggers"
+},
+{
+"source": "303ef2f4-3d87-4285-ab5b-a5dfd7ace601",
+"target": "f56e41cb-b23c-4a83-b1ce-7116049e4237",
+"label": "Triggers"
+},
+{
+"source": "f4a389b5-de04-41d4-8dca-6019feb0acf7",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "f38a8f4a-42c0-4fd2-a7a0-4e83f27ca096",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "f38a8f4a-42c0-4fd2-a7a0-4e83f27ca096",
+"target": "f4a389b5-de04-41d4-8dca-6019feb0acf7",
+"label": "Triggers"
+},
+{
+"source": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"target": "f38a8f4a-42c0-4fd2-a7a0-4e83f27ca096",
+"label": "Triggers"
+},
+{
+"source": "af842274-69e8-4254-8e83-06ce821be6f2",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "544f1327-042c-45ba-81fe-b39a82aa5323",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "af842274-69e8-4254-8e83-06ce821be6f2",
+"target": "544f1327-042c-45ba-81fe-b39a82aa5323",
+"label": "Triggers"
+},
+{
+"source": "91ffa4a2-70e3-4134-89de-fe878c6f0c7c",
+"target": "a19e7904-a1f7-4c67-8b66-5b51c5942b17",
+"label": "Triggers"
+},
+{
+"source": "786ab296-f19f-48bc-a81e-9a2a3f860148",
+"target": "91ffa4a2-70e3-4134-89de-fe878c6f0c7c",
+"label": "Triggers"
+},
+{
+"source": "786ab296-f19f-48bc-a81e-9a2a3f860148",
+"target": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"label": "Triggers"
+},
+{
+"source": "91ffa4a2-70e3-4134-89de-fe878c6f0c7c",
+"target": "14200196-a72e-41ee-b6f1-613dddba690a",
+"label": "Triggers"
+},
+{
+"source": "91ffa4a2-70e3-4134-89de-fe878c6f0c7c",
+"target": "51dc7317-b4b0-4fb7-9677-eb13e77b6ca3",
+"label": "Triggers"
+},
+{
+"source": "786ab296-f19f-48bc-a81e-9a2a3f860148",
+"target": "75c6d29c-8905-454f-b5c7-68883483c4e0",
+"label": "Triggers"
+},
+{
+"source": "91ffa4a2-70e3-4134-89de-fe878c6f0c7c",
+"target": "37929ddb-4ac0-486c-9515-95307ad186dd",
+"label": "Triggers"
+},
+{
+"source": "786ab296-f19f-48bc-a81e-9a2a3f860148",
+"target": "a19e7904-a1f7-4c67-8b66-5b51c5942b17",
+"label": "Triggers"
+},
+{
+"source": "786ab296-f19f-48bc-a81e-9a2a3f860148",
+"target": "14200196-a72e-41ee-b6f1-613dddba690a",
+"label": "Triggers"
+},
+{
+"source": "786ab296-f19f-48bc-a81e-9a2a3f860148",
+"target": "51dc7317-b4b0-4fb7-9677-eb13e77b6ca3",
+"label": "Triggers"
+},
+{
+"source": "91ffa4a2-70e3-4134-89de-fe878c6f0c7c",
+"target": "402342cc-6d1e-4645-b799-5e5594f003a9",
+"label": "Triggers"
+},
+{
+"source": "786ab296-f19f-48bc-a81e-9a2a3f860148",
+"target": "402342cc-6d1e-4645-b799-5e5594f003a9",
+"label": "Triggers"
+},
+{
+"source": "786ab296-f19f-48bc-a81e-9a2a3f860148",
+"target": "37929ddb-4ac0-486c-9515-95307ad186dd",
+"label": "Triggers"
+},
+{
+"source": "91ffa4a2-70e3-4134-89de-fe878c6f0c7c",
+"target": "75c6d29c-8905-454f-b5c7-68883483c4e0",
+"label": "Triggers"
+},
+{
+"source": "91ffa4a2-70e3-4134-89de-fe878c6f0c7c",
+"target": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "86326284-1dc8-4822-b6ed-31e93194dcf1",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "d292cb1d-50b9-4ea2-a1b1-53bdff51e7eb",
+"label": "Triggers"
+},
+{
+"source": "86326284-1dc8-4822-b6ed-31e93194dcf1",
+"target": "d292cb1d-50b9-4ea2-a1b1-53bdff51e7eb",
+"label": "Triggers"
+},
+{
+"source": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"target": "cdd88ee8-ffdf-4015-83d4-f68a2dc28312",
+"label": "Triggers"
+},
+{
+"source": "86421eab-3227-42b2-8846-7b4ec6e1863d",
+"target": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"label": "Triggers"
+},
+{
+"source": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"target": "40bbf76a-1613-46fa-b028-54972f4b38b8",
+"label": "Triggers"
+},
+{
+"source": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"target": "cdd88ee8-ffdf-4015-83d4-f68a2dc28312",
+"label": "Triggers"
+},
+{
+"source": "cdd88ee8-ffdf-4015-83d4-f68a2dc28312",
+"target": "86daa15a-44b0-4b23-a226-58399ea819a5",
+"label": "Triggers"
+},
+{
+"source": "86421eab-3227-42b2-8846-7b4ec6e1863d",
+"target": "cdd88ee8-ffdf-4015-83d4-f68a2dc28312",
+"label": "Triggers"
+},
+{
+"source": "40bbf76a-1613-46fa-b028-54972f4b38b8",
+"target": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"label": "Triggers"
+},
+{
+"source": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"target": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"label": "Triggers"
+},
+{
+"source": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"target": "86daa15a-44b0-4b23-a226-58399ea819a5",
+"label": "Triggers"
+},
+{
+"source": "86421eab-3227-42b2-8846-7b4ec6e1863d",
+"target": "86daa15a-44b0-4b23-a226-58399ea819a5",
+"label": "Triggers"
+},
+{
+"source": "40bbf76a-1613-46fa-b028-54972f4b38b8",
+"target": "cdd88ee8-ffdf-4015-83d4-f68a2dc28312",
+"label": "Triggers"
+},
+{
+"source": "40bbf76a-1613-46fa-b028-54972f4b38b8",
+"target": "86421eab-3227-42b2-8846-7b4ec6e1863d",
+"label": "Triggers"
+},
+{
+"source": "40bbf76a-1613-46fa-b028-54972f4b38b8",
+"target": "86daa15a-44b0-4b23-a226-58399ea819a5",
+"label": "Triggers"
+},
+{
+"source": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"target": "86daa15a-44b0-4b23-a226-58399ea819a5",
+"label": "Triggers"
+},
+{
+"source": "86421eab-3227-42b2-8846-7b4ec6e1863d",
+"target": "86421eab-3227-42b2-8846-7b4ec6e1863d",
+"label": "Triggers"
+},
+{
+"source": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"target": "a7ad8c45-69ed-480f-92f8-b099b8e0d3e8",
+"label": "Triggers"
+},
+{
+"source": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"target": "9657b3d5-2ae3-4746-8d6b-5dab9595fb47",
+"label": "Triggers"
+},
+{
+"source": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"target": "a7ad8c45-69ed-480f-92f8-b099b8e0d3e8",
+"label": "Triggers"
+},
+{
+"source": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"target": "9657b3d5-2ae3-4746-8d6b-5dab9595fb47",
+"label": "Triggers"
+},
+{
+"source": "a7ad8c45-69ed-480f-92f8-b099b8e0d3e8",
+"target": "9657b3d5-2ae3-4746-8d6b-5dab9595fb47",
+"label": "Triggers"
+},
+{
+"source": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"target": "63d77043-28af-49fe-8d8e-d2f97f413b3d",
+"label": "Triggers"
+},
+{
+"source": "4b5a2952-a3dd-40c1-b18d-48be803dbf8f",
+"target": "36895cb9-3067-485b-8d55-b3eaa7162be0",
+"label": "Triggers"
+},
+{
+"source": "e2a2edf0-4faa-4cf2-b812-e26dafe04fb6",
+"target": "63d77043-28af-49fe-8d8e-d2f97f413b3d",
+"label": "Triggers"
+},
+{
+"source": "e31bebe9-b195-48da-a005-6054f2f6dfb0",
+"target": "63d77043-28af-49fe-8d8e-d2f97f413b3d",
+"label": "Triggers"
+},
+{
+"source": "36895cb9-3067-485b-8d55-b3eaa7162be0",
+"target": "63d77043-28af-49fe-8d8e-d2f97f413b3d",
+"label": "Triggers"
+},
+{
+"source": "4b5a2952-a3dd-40c1-b18d-48be803dbf8f",
+"target": "63d77043-28af-49fe-8d8e-d2f97f413b3d",
+"label": "Triggers"
+},
+{
+"source": "2db9f0a6-f9dc-4b98-938a-6ebf0939e400",
+"target": "36895cb9-3067-485b-8d55-b3eaa7162be0",
+"label": "Triggers"
+},
+{
+"source": "e2a2edf0-4faa-4cf2-b812-e26dafe04fb6",
+"target": "36895cb9-3067-485b-8d55-b3eaa7162be0",
+"label": "Triggers"
+},
+{
+"source": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"target": "e31bebe9-b195-48da-a005-6054f2f6dfb0",
+"label": "Triggers"
+},
+{
+"source": "e2a2edf0-4faa-4cf2-b812-e26dafe04fb6",
+"target": "e31bebe9-b195-48da-a005-6054f2f6dfb0",
+"label": "Triggers"
+},
+{
+"source": "2db9f0a6-f9dc-4b98-938a-6ebf0939e400",
+"target": "e31bebe9-b195-48da-a005-6054f2f6dfb0",
+"label": "Triggers"
+},
+{
+"source": "e31bebe9-b195-48da-a005-6054f2f6dfb0",
+"target": "36895cb9-3067-485b-8d55-b3eaa7162be0",
+"label": "Triggers"
+},
+{
+"source": "4b5a2952-a3dd-40c1-b18d-48be803dbf8f",
+"target": "e31bebe9-b195-48da-a005-6054f2f6dfb0",
+"label": "Triggers"
+},
+{
+"source": "2db9f0a6-f9dc-4b98-938a-6ebf0939e400",
+"target": "63d77043-28af-49fe-8d8e-d2f97f413b3d",
+"label": "Triggers"
+},
+{
+"source": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"target": "36895cb9-3067-485b-8d55-b3eaa7162be0",
+"label": "Triggers"
+},
+{
+"source": "e041270b-2644-4bab-a258-0c299e6d9c62",
+"target": "65fb1623-eaec-4310-9792-30b6b0d0fdc5",
+"label": "Triggers"
+},
+{
+"source": "223a06c0-d82e-4e47-81b9-b496c850f37f",
+"target": "65fb1623-eaec-4310-9792-30b6b0d0fdc5",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "223a06c0-d82e-4e47-81b9-b496c850f37f",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "afa0c7f8-2d41-48d1-bd5b-83b1379a85d2",
+"label": "Triggers"
+},
+{
+"source": "e041270b-2644-4bab-a258-0c299e6d9c62",
+"target": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"label": "Triggers"
+},
+{
+"source": "e041270b-2644-4bab-a258-0c299e6d9c62",
+"target": "223a06c0-d82e-4e47-81b9-b496c850f37f",
+"label": "Triggers"
+},
+{
+"source": "afa0c7f8-2d41-48d1-bd5b-83b1379a85d2",
+"target": "65fb1623-eaec-4310-9792-30b6b0d0fdc5",
+"label": "Triggers"
+},
+{
+"source": "223a06c0-d82e-4e47-81b9-b496c850f37f",
+"target": "afa0c7f8-2d41-48d1-bd5b-83b1379a85d2",
+"label": "Triggers"
+},
+{
+"source": "e041270b-2644-4bab-a258-0c299e6d9c62",
+"target": "afa0c7f8-2d41-48d1-bd5b-83b1379a85d2",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "65fb1623-eaec-4310-9792-30b6b0d0fdc5",
+"label": "Triggers"
+},
+{
+"source": "f6ea8706-fee1-4e1b-a92d-a02f0fab2f68",
+"target": "60063dda-1e20-4685-9751-e89d3bef6a70",
+"label": "Triggers"
+},
+{
+"source": "f6ea8706-fee1-4e1b-a92d-a02f0fab2f68",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "36112cdb-8ce1-4095-ae1f-984ea0c562e2",
+"target": "d23dacd0-ec18-4666-95cc-3bbcdeaa6d7e",
+"label": "Triggers"
+},
+{
+"source": "64ed4baf-a078-451d-87a0-865d88128b66",
+"target": "d23dacd0-ec18-4666-95cc-3bbcdeaa6d7e",
+"label": "Triggers"
+},
+{
+"source": "f6ea8706-fee1-4e1b-a92d-a02f0fab2f68",
+"target": "01e41fec-b6be-453d-b68f-f697575a5db7",
+"label": "Triggers"
+},
+{
+"source": "f6ea8706-fee1-4e1b-a92d-a02f0fab2f68",
+"target": "d23dacd0-ec18-4666-95cc-3bbcdeaa6d7e",
+"label": "Triggers"
+},
+{
+"source": "f6ea8706-fee1-4e1b-a92d-a02f0fab2f68",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "64ed4baf-a078-451d-87a0-865d88128b66",
+"target": "60063dda-1e20-4685-9751-e89d3bef6a70",
+"label": "Triggers"
+},
+{
+"source": "64ed4baf-a078-451d-87a0-865d88128b66",
+"target": "01e41fec-b6be-453d-b68f-f697575a5db7",
+"label": "Triggers"
+},
+{
+"source": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"target": "4047b09a-1ed8-4817-8f10-5ef8752ab668",
+"label": "Triggers"
+},
+{
+"source": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"target": "b35ddfe4-491d-4206-87bf-afe25f21b1da",
+"label": "Triggers"
+},
+{
+"source": "43c8b2e6-928e-4937-8327-e55b79190d15",
+"target": "b35ddfe4-491d-4206-87bf-afe25f21b1da",
+"label": "Triggers"
+},
+{
+"source": "43c8b2e6-928e-4937-8327-e55b79190d15",
+"target": "4047b09a-1ed8-4817-8f10-5ef8752ab668",
+"label": "Triggers"
+},
+{
+"source": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"target": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"label": "Triggers"
+},
+{
+"source": "b8d34cc1-841b-4996-bd89-9e7f42460047",
+"target": "4047b09a-1ed8-4817-8f10-5ef8752ab668",
+"label": "Triggers"
+},
+{
+"source": "43c8b2e6-928e-4937-8327-e55b79190d15",
+"target": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"label": "Triggers"
+},
+{
+"source": "b35ddfe4-491d-4206-87bf-afe25f21b1da",
+"target": "4047b09a-1ed8-4817-8f10-5ef8752ab668",
+"label": "Triggers"
+},
+{
+"source": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"target": "b35ddfe4-491d-4206-87bf-afe25f21b1da",
+"label": "Triggers"
+},
+{
+"source": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"target": "4047b09a-1ed8-4817-8f10-5ef8752ab668",
+"label": "Triggers"
+},
+{
+"source": "b8d34cc1-841b-4996-bd89-9e7f42460047",
+"target": "b35ddfe4-491d-4206-87bf-afe25f21b1da",
+"label": "Triggers"
+},
+{
+"source": "b8d34cc1-841b-4996-bd89-9e7f42460047",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "b8d34cc1-841b-4996-bd89-9e7f42460047",
+"target": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"label": "Triggers"
+},
+{
+"source": "43c8b2e6-928e-4937-8327-e55b79190d15",
+"target": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"label": "Triggers"
+},
+{
+"source": "9cd17d13-4ec2-472b-abf3-46aef34b32eb",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "b8d34cc1-841b-4996-bd89-9e7f42460047",
+"target": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"label": "Triggers"
+},
+{
+"source": "b35ddfe4-491d-4206-87bf-afe25f21b1da",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "43c8b2e6-928e-4937-8327-e55b79190d15",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "43c8b2e6-928e-4937-8327-e55b79190d15",
+"target": "b8d34cc1-841b-4996-bd89-9e7f42460047",
+"label": "Triggers"
+},
+{
+"source": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"target": "9657b3d5-2ae3-4746-8d6b-5dab9595fb47",
+"label": "Triggers"
+},
+{
+"source": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"target": "f24e605a-67bd-449c-bcf9-63f1bc577735",
+"label": "Triggers"
+},
+{
+"source": "f24e605a-67bd-449c-bcf9-63f1bc577735",
+"target": "9657b3d5-2ae3-4746-8d6b-5dab9595fb47",
+"label": "Triggers"
+},
+{
+"source": "2dd411d2-15b1-4a93-b37f-988e3942db4d",
+"target": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "13bd4484-7ef0-4ce7-877d-3bbc0b3e152a",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"label": "Triggers"
+},
+{
+"source": "2dd411d2-15b1-4a93-b37f-988e3942db4d",
+"target": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"label": "Triggers"
+},
+{
+"source": "13bd4484-7ef0-4ce7-877d-3bbc0b3e152a",
+"target": "8e710193-fd9d-44a1-b2f3-9ad2d9a9f480",
+"label": "Triggers"
+},
+{
+"source": "b69970c5-8ab6-4add-bd9c-5d29e19c6be4",
+"target": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"label": "Triggers"
+},
+{
+"source": "b69970c5-8ab6-4add-bd9c-5d29e19c6be4",
+"target": "13bd4484-7ef0-4ce7-877d-3bbc0b3e152a",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "8e710193-fd9d-44a1-b2f3-9ad2d9a9f480",
+"label": "Triggers"
+},
+{
+"source": "15950cf2-56d1-4e45-a152-473855c74c6f",
+"target": "b69970c5-8ab6-4add-bd9c-5d29e19c6be4",
+"label": "Triggers"
+},
+{
+"source": "2dd411d2-15b1-4a93-b37f-988e3942db4d",
+"target": "b69970c5-8ab6-4add-bd9c-5d29e19c6be4",
+"label": "Triggers"
+},
+{
+"source": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"target": "13bd4484-7ef0-4ce7-877d-3bbc0b3e152a",
+"label": "Triggers"
+},
+{
+"source": "2dd411d2-15b1-4a93-b37f-988e3942db4d",
+"target": "13bd4484-7ef0-4ce7-877d-3bbc0b3e152a",
+"label": "Triggers"
+},
+{
+"source": "2dd411d2-15b1-4a93-b37f-988e3942db4d",
+"target": "8e710193-fd9d-44a1-b2f3-9ad2d9a9f480",
+"label": "Triggers"
+},
+{
+"source": "b69970c5-8ab6-4add-bd9c-5d29e19c6be4",
+"target": "8e710193-fd9d-44a1-b2f3-9ad2d9a9f480",
+"label": "Triggers"
+},
+{
+"source": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"target": "8e710193-fd9d-44a1-b2f3-9ad2d9a9f480",
+"label": "Triggers"
+},
+{
+"source": "25139d90-2357-4cc9-99f2-f894d4a4755d",
+"target": "63d77043-28af-49fe-8d8e-d2f97f413b3d",
+"label": "Triggers"
+},
+{
+"source": "25139d90-2357-4cc9-99f2-f894d4a4755d",
+"target": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Triggers"
+},
+{
+"source": "63d77043-28af-49fe-8d8e-d2f97f413b3d",
+"target": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Triggers"
+},
+{
+"source": "2064da5a-896a-437f-915e-f5377b704c4d",
+"target": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Triggers"
+},
+{
+"source": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"target": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Triggers"
+},
+{
+"source": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"target": "78988d7a-6dda-4020-a234-e8166f69d358",
+"label": "Triggers"
+},
+{
+"source": "f1b9b8d2-8844-4bb2-8562-7d513b11c976",
+"target": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Triggers"
+},
+{
+"source": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"target": "78988d7a-6dda-4020-a234-e8166f69d358",
+"label": "Triggers"
+},
+{
+"source": "2064da5a-896a-437f-915e-f5377b704c4d",
+"target": "78988d7a-6dda-4020-a234-e8166f69d358",
+"label": "Triggers"
+},
+{
+"source": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"target": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Triggers"
+},
+{
+"source": "f1b9b8d2-8844-4bb2-8562-7d513b11c976",
+"target": "78988d7a-6dda-4020-a234-e8166f69d358",
+"label": "Triggers"
+},
+{
+"source": "d852cbac-8d61-492a-86cf-067a2b2ecd97",
+"target": "5cac3ba3-cca3-4cc2-a8be-f8ef45ed1e72",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "5cac3ba3-cca3-4cc2-a8be-f8ef45ed1e72",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "1bd58b45-d2c4-4db7-bdef-19f2002cac81",
+"label": "Triggers"
+},
+{
+"source": "d852cbac-8d61-492a-86cf-067a2b2ecd97",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "d852cbac-8d61-492a-86cf-067a2b2ecd97",
+"target": "8b235149-26b1-49c0-bec2-348f7fecf976",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "8b235149-26b1-49c0-bec2-348f7fecf976",
+"label": "Triggers"
+},
+{
+"source": "d852cbac-8d61-492a-86cf-067a2b2ecd97",
+"target": "1bd58b45-d2c4-4db7-bdef-19f2002cac81",
+"label": "Triggers"
+},
+{
+"source": "d852cbac-8d61-492a-86cf-067a2b2ecd97",
+"target": "7a62443f-6bd2-4f35-bf7a-d24d9e312277",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "7a62443f-6bd2-4f35-bf7a-d24d9e312277",
+"label": "Triggers"
+},
+{
+"source": "df599671-4fe1-40c7-a3a4-bf2955c9431e",
+"target": "8e07c9c9-5a3e-4961-a4e0-3ecb3413debe",
+"label": "Triggers"
+},
+{
+"source": "37204379-a3fa-4dd5-9071-84572c4badb9",
+"target": "8e07c9c9-5a3e-4961-a4e0-3ecb3413debe",
+"label": "Triggers"
+},
+{
+"source": "8f369334-d370-4f20-a0a0-097cc8bb7570",
+"target": "8e07c9c9-5a3e-4961-a4e0-3ecb3413debe",
+"label": "Triggers"
+},
+{
+"source": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"target": "8e07c9c9-5a3e-4961-a4e0-3ecb3413debe",
+"label": "Triggers"
+},
+{
+"source": "ffdfe714-5e36-41c2-bdfc-b7067c9e6c58",
+"target": "8e07c9c9-5a3e-4961-a4e0-3ecb3413debe",
+"label": "Triggers"
+},
+{
+"source": "9657b3d5-2ae3-4746-8d6b-5dab9595fb47",
+"target": "8e07c9c9-5a3e-4961-a4e0-3ecb3413debe",
+"label": "Triggers"
+},
+{
+"source": "dd983e50-f996-445b-998f-5d393732bd33",
+"target": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"label": "Triggers"
+},
+{
+"source": "08f1825f-affc-4295-b521-6a3592cd2179",
+"target": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"label": "Triggers"
+},
+{
+"source": "7ed4f2bf-c31b-4095-851a-150f36b2b3de",
+"target": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"label": "Triggers"
+},
+{
+"source": "ce4b16f1-7f7c-4dd4-b245-87bc2ff5c894",
+"target": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"label": "Triggers"
+},
+{
+"source": "c2dba2cd-6979-4568-9b17-cb0dcae9693e",
+"target": "0ba0ea03-a01d-4899-8338-530b1f82e4f0",
+"label": "Triggers"
+},
+{
+"source": "a59e618b-5668-4899-afbb-9cd74b10f8f6",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "1b11cea0-c363-4902-917a-46f01512bdad",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "7fce6ffa-8162-47c8-84e1-08213a655681",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "a793cf01-97ee-435b-9c68-4cf005c9b2d4",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "eb2496c9-503e-4ab5-81c6-15672431f6f5",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "5110b48b-0abe-4e41-af52-a48e72af6b01",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "8f3f860a-a7aa-4887-b04a-99ff6dddc874",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "2074972e-2f56-471f-97c6-7c04e1ea4140",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "bfbfb3e3-debb-42da-9d02-0aae467450ea",
+"target": "8e710193-fd9d-44a1-b2f3-9ad2d9a9f480",
+"label": "Triggers"
+},
+{
+"source": "8e710193-fd9d-44a1-b2f3-9ad2d9a9f480",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "2074972e-2f56-471f-97c6-7c04e1ea4140",
+"target": "8e710193-fd9d-44a1-b2f3-9ad2d9a9f480",
+"label": "Triggers"
+},
+{
+"source": "2074972e-2f56-471f-97c6-7c04e1ea4140",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "8e710193-fd9d-44a1-b2f3-9ad2d9a9f480",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"target": "8e710193-fd9d-44a1-b2f3-9ad2d9a9f480",
+"label": "Triggers"
+},
+{
+"source": "bfbfb3e3-debb-42da-9d02-0aae467450ea",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"target": "99164416-d141-40a9-9cda-611ed67b8435",
+"label": "Triggers"
+},
+{
+"source": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"target": "99164416-d141-40a9-9cda-611ed67b8435",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "99164416-d141-40a9-9cda-611ed67b8435",
+"label": "Triggers"
+},
+{
+"source": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"target": "99164416-d141-40a9-9cda-611ed67b8435",
+"label": "Triggers"
+},
+{
+"source": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"target": "99164416-d141-40a9-9cda-611ed67b8435",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "99164416-d141-40a9-9cda-611ed67b8435",
+"label": "Triggers"
+},
+{
+"source": "1278eb68-5ba5-4040-84f6-3a1cdb5ee037",
+"target": "60063dda-1e20-4685-9751-e89d3bef6a70",
+"label": "Triggers"
+},
+{
+"source": "64ec20b9-b479-43a8-8134-8b494dad3dcc",
+"target": "60063dda-1e20-4685-9751-e89d3bef6a70",
+"label": "Triggers"
+},
+{
+"source": "36112cdb-8ce1-4095-ae1f-984ea0c562e2",
+"target": "d9a26f82-cc99-448f-8bae-0c50a894b509",
+"label": "Triggers"
+},
+{
+"source": "64ec20b9-b479-43a8-8134-8b494dad3dcc",
+"target": "01e41fec-b6be-453d-b68f-f697575a5db7",
+"label": "Triggers"
+},
+{
+"source": "25fd3a88-83a1-4143-b5a4-7baef9da3d09",
+"target": "60063dda-1e20-4685-9751-e89d3bef6a70",
+"label": "Triggers"
+},
+{
+"source": "1278eb68-5ba5-4040-84f6-3a1cdb5ee037",
+"target": "d9a26f82-cc99-448f-8bae-0c50a894b509",
+"label": "Triggers"
+},
+{
+"source": "64ec20b9-b479-43a8-8134-8b494dad3dcc",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "1278eb68-5ba5-4040-84f6-3a1cdb5ee037",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "25fd3a88-83a1-4143-b5a4-7baef9da3d09",
+"target": "01e41fec-b6be-453d-b68f-f697575a5db7",
+"label": "Triggers"
+},
+{
+"source": "64ec20b9-b479-43a8-8134-8b494dad3dcc",
+"target": "d9a26f82-cc99-448f-8bae-0c50a894b509",
+"label": "Triggers"
+},
+{
+"source": "1278eb68-5ba5-4040-84f6-3a1cdb5ee037",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "1278eb68-5ba5-4040-84f6-3a1cdb5ee037",
+"target": "01e41fec-b6be-453d-b68f-f697575a5db7",
+"label": "Triggers"
+},
+{
+"source": "25fd3a88-83a1-4143-b5a4-7baef9da3d09",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "25fd3a88-83a1-4143-b5a4-7baef9da3d09",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "25fd3a88-83a1-4143-b5a4-7baef9da3d09",
+"target": "d9a26f82-cc99-448f-8bae-0c50a894b509",
+"label": "Triggers"
+},
+{
+"source": "64ec20b9-b479-43a8-8134-8b494dad3dcc",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "15970db3-83e9-4566-8b71-0133b212434c",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "c4e71272-2434-437b-a335-102622dbb964",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "64ed4baf-a078-451d-87a0-865d88128b66",
+"target": "2f402f0c-32e4-4729-a4da-39ba97ad142a",
+"label": "Triggers"
+},
+{
+"source": "8fcab8a7-93c6-47ab-a2f6-1df141110963",
+"target": "a70acfba-3313-4aca-a78a-96fb083dbeec",
+"label": "Triggers"
+},
+{
+"source": "15970db3-83e9-4566-8b71-0133b212434c",
+"target": "2f402f0c-32e4-4729-a4da-39ba97ad142a",
+"label": "Triggers"
+},
+{
+"source": "64ed4baf-a078-451d-87a0-865d88128b66",
+"target": "a70acfba-3313-4aca-a78a-96fb083dbeec",
+"label": "Triggers"
+},
+{
+"source": "15970db3-83e9-4566-8b71-0133b212434c",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "c4e71272-2434-437b-a335-102622dbb964",
+"target": "a70acfba-3313-4aca-a78a-96fb083dbeec",
+"label": "Triggers"
+},
+{
+"source": "15970db3-83e9-4566-8b71-0133b212434c",
+"target": "a70acfba-3313-4aca-a78a-96fb083dbeec",
+"label": "Triggers"
+},
+{
+"source": "c4e71272-2434-437b-a335-102622dbb964",
+"target": "2f402f0c-32e4-4729-a4da-39ba97ad142a",
+"label": "Triggers"
+},
+{
+"source": "c4e71272-2434-437b-a335-102622dbb964",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "8fcab8a7-93c6-47ab-a2f6-1df141110963",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "8fcab8a7-93c6-47ab-a2f6-1df141110963",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "8fcab8a7-93c6-47ab-a2f6-1df141110963",
+"target": "2f402f0c-32e4-4729-a4da-39ba97ad142a",
+"label": "Triggers"
+},
+{
+"source": "378df2b9-964b-4d5b-8607-ee73eb2965fa",
+"target": "9fb55a5a-5f01-4454-9159-56470bdfc03d",
+"label": "Triggers"
+},
+{
+"source": "fb338985-c966-44f3-a373-b4da50ed3e37",
+"target": "574117b8-4b0b-4126-9565-f8f09e422f8d",
+"label": "Triggers"
+},
+{
+"source": "378df2b9-964b-4d5b-8607-ee73eb2965fa",
+"target": "0a6eb3e5-abb0-4a45-9531-8d6a481642c3",
+"label": "Triggers"
+},
+{
+"source": "fb338985-c966-44f3-a373-b4da50ed3e37",
+"target": "0a6eb3e5-abb0-4a45-9531-8d6a481642c3",
+"label": "Triggers"
+},
+{
+"source": "4047b09a-1ed8-4817-8f10-5ef8752ab668",
+"target": "9fb55a5a-5f01-4454-9159-56470bdfc03d",
+"label": "Triggers"
+},
+{
+"source": "4047b09a-1ed8-4817-8f10-5ef8752ab668",
+"target": "387867d5-8be1-4102-8103-4bafb28f9b60",
+"label": "Triggers"
+},
+{
+"source": "4047b09a-1ed8-4817-8f10-5ef8752ab668",
+"target": "0a6eb3e5-abb0-4a45-9531-8d6a481642c3",
+"label": "Triggers"
+},
+{
+"source": "378df2b9-964b-4d5b-8607-ee73eb2965fa",
+"target": "387867d5-8be1-4102-8103-4bafb28f9b60",
+"label": "Triggers"
+},
+{
+"source": "fb338985-c966-44f3-a373-b4da50ed3e37",
+"target": "edb8235d-9666-459a-844a-7190519c73f0",
+"label": "Triggers"
+},
+{
+"source": "378df2b9-964b-4d5b-8607-ee73eb2965fa",
+"target": "edb8235d-9666-459a-844a-7190519c73f0",
+"label": "Triggers"
+},
+{
+"source": "4047b09a-1ed8-4817-8f10-5ef8752ab668",
+"target": "574117b8-4b0b-4126-9565-f8f09e422f8d",
+"label": "Triggers"
+},
+{
+"source": "378df2b9-964b-4d5b-8607-ee73eb2965fa",
+"target": "574117b8-4b0b-4126-9565-f8f09e422f8d",
+"label": "Triggers"
+},
+{
+"source": "fb338985-c966-44f3-a373-b4da50ed3e37",
+"target": "9fb55a5a-5f01-4454-9159-56470bdfc03d",
+"label": "Triggers"
+},
+{
+"source": "fb338985-c966-44f3-a373-b4da50ed3e37",
+"target": "387867d5-8be1-4102-8103-4bafb28f9b60",
+"label": "Triggers"
+},
+{
+"source": "4047b09a-1ed8-4817-8f10-5ef8752ab668",
+"target": "edb8235d-9666-459a-844a-7190519c73f0",
+"label": "Triggers"
+},
+{
+"source": "b9020072-eb76-4897-9e8e-2c28c3f45902",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "2a329040-c100-40d6-bf42-6bbec68d8109",
+"target": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"label": "Triggers"
+},
+{
+"source": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"target": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"label": "Triggers"
+},
+{
+"source": "b9020072-eb76-4897-9e8e-2c28c3f45902",
+"target": "2a329040-c100-40d6-bf42-6bbec68d8109",
+"label": "Triggers"
+},
+{
+"source": "1d2de015-37a3-4471-8c3e-59c8b0e4bd96",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "1d2de015-37a3-4471-8c3e-59c8b0e4bd96",
+"target": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"label": "Triggers"
+},
+{
+"source": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"target": "2a329040-c100-40d6-bf42-6bbec68d8109",
+"label": "Triggers"
+},
+{
+"source": "1d2de015-37a3-4471-8c3e-59c8b0e4bd96",
+"target": "2a329040-c100-40d6-bf42-6bbec68d8109",
+"label": "Triggers"
+},
+{
+"source": "1d2de015-37a3-4471-8c3e-59c8b0e4bd96",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "b9020072-eb76-4897-9e8e-2c28c3f45902",
+"target": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"label": "Triggers"
+},
+{
+"source": "2a329040-c100-40d6-bf42-6bbec68d8109",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "1d2de015-37a3-4471-8c3e-59c8b0e4bd96",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "b9020072-eb76-4897-9e8e-2c28c3f45902",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "b9020072-eb76-4897-9e8e-2c28c3f45902",
+"target": "1d2de015-37a3-4471-8c3e-59c8b0e4bd96",
+"label": "Triggers"
+},
+{
+"source": "b9020072-eb76-4897-9e8e-2c28c3f45902",
+"target": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"label": "Triggers"
+},
+{
+"source": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "2a329040-c100-40d6-bf42-6bbec68d8109",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"target": "1d2de015-37a3-4471-8c3e-59c8b0e4bd96",
+"label": "Triggers"
+},
+{
+"source": "b9020072-eb76-4897-9e8e-2c28c3f45902",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "2a329040-c100-40d6-bf42-6bbec68d8109",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "1bca0e17-6f88-4989-87bc-f0d629bcb462",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "1671b288-1583-4d71-b4b4-3c1d8fcf3b60",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "730e619d-cd29-4279-a90e-c66155593082",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "586849ef-182b-477d-b395-7eddefbb84e1",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "28d6fccb-ccec-47aa-8089-1189b15ad2ab",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "1671b288-1583-4d71-b4b4-3c1d8fcf3b60",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "8de03675-9912-4675-9827-b415771ed039",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "730e619d-cd29-4279-a90e-c66155593082",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "28d6fccb-ccec-47aa-8089-1189b15ad2ab",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "8de03675-9912-4675-9827-b415771ed039",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "59ddb88c-faa9-40ff-8976-db0b40d63d0b",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "59ddb88c-faa9-40ff-8976-db0b40d63d0b",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "586849ef-182b-477d-b395-7eddefbb84e1",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "1bca0e17-6f88-4989-87bc-f0d629bcb462",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "73650d53-6672-45a1-9ac3-bae943ca5d8c",
+"target": "423dab3e-a61f-4aa2-a788-0ceba6e6a5fc",
+"label": "Triggers"
+},
+{
+"source": "73650d53-6672-45a1-9ac3-bae943ca5d8c",
+"target": "60063dda-1e20-4685-9751-e89d3bef6a70",
+"label": "Triggers"
+},
+{
+"source": "73650d53-6672-45a1-9ac3-bae943ca5d8c",
+"target": "c4e71272-2434-437b-a335-102622dbb964",
+"label": "Triggers"
+},
+{
+"source": "73650d53-6672-45a1-9ac3-bae943ca5d8c",
+"target": "aad9b871-09d6-4ea0-9e59-689e632f8e66",
+"label": "Triggers"
+},
+{
+"source": "73650d53-6672-45a1-9ac3-bae943ca5d8c",
+"target": "20db49ce-1c7c-4e97-8d8f-df759de30a00",
+"label": "Triggers"
+},
+{
+"source": "73650d53-6672-45a1-9ac3-bae943ca5d8c",
+"target": "01e41fec-b6be-453d-b68f-f697575a5db7",
+"label": "Triggers"
+},
+{
+"source": "73650d53-6672-45a1-9ac3-bae943ca5d8c",
+"target": "d23dacd0-ec18-4666-95cc-3bbcdeaa6d7e",
+"label": "Triggers"
+},
+{
+"source": "63f3e507-ece7-4b5e-8fad-cf54d921ef61",
+"target": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "Triggers"
+},
+{
+"source": "463d820e-8f04-409f-b826-3b3c2c0d1f8b",
+"target": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "Triggers"
+},
+{
+"source": "0151a938-b01f-43b0-be1b-48c9c5e42a1e",
+"target": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "Triggers"
+},
+{
+"source": "0151a938-b01f-43b0-be1b-48c9c5e42a1e",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "9657b3d5-2ae3-4746-8d6b-5dab9595fb47",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "63f3e507-ece7-4b5e-8fad-cf54d921ef61",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "9657b3d5-2ae3-4746-8d6b-5dab9595fb47",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "463d820e-8f04-409f-b826-3b3c2c0d1f8b",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "63f3e507-ece7-4b5e-8fad-cf54d921ef61",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "9657b3d5-2ae3-4746-8d6b-5dab9595fb47",
+"target": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "Triggers"
+},
+{
+"source": "463d820e-8f04-409f-b826-3b3c2c0d1f8b",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "0151a938-b01f-43b0-be1b-48c9c5e42a1e",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"target": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"target": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "Triggers"
+},
+{
+"source": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"target": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"label": "Triggers"
+},
+{
+"source": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "8ba47899-676a-441b-9059-d726c39a7031",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "415b227e-09de-45a0-9c91-fc3be5adbf60",
+"target": "1df246e2-4477-40c9-97dc-65b922516887",
+"label": "Triggers"
+},
+{
+"source": "415b227e-09de-45a0-9c91-fc3be5adbf60",
+"target": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"label": "Triggers"
+},
+{
+"source": "415b227e-09de-45a0-9c91-fc3be5adbf60",
+"target": "8ba47899-676a-441b-9059-d726c39a7031",
+"label": "Triggers"
+},
+{
+"source": "415b227e-09de-45a0-9c91-fc3be5adbf60",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "8ba47899-676a-441b-9059-d726c39a7031",
+"label": "Triggers"
+},
+{
+"source": "8ba47899-676a-441b-9059-d726c39a7031",
+"target": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"label": "Triggers"
+},
+{
+"source": "415b227e-09de-45a0-9c91-fc3be5adbf60",
+"target": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"label": "Triggers"
+},
+{
+"source": "7099fcbe-eae3-4aab-aa8f-66f8ce675993",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "367c326e-5453-4034-9e83-e0d792facc24",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "bfbfb3e3-debb-42da-9d02-0aae467450ea",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"target": "1438cb48-c0b0-4d40-9746-497ebb15c637",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"label": "Triggers"
+},
+{
+"source": "ab47341e-d405-4c77-ae4c-da4ce24cc85a",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"target": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "9be8dd45-a47b-4bfb-a783-9ec60c142541",
+"target": "ab47341e-d405-4c77-ae4c-da4ce24cc85a",
+"label": "Triggers"
+},
+{
+"source": "1438cb48-c0b0-4d40-9746-497ebb15c637",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "e6be1c16-9a33-4f1d-b7fd-b283de142384",
+"target": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"label": "Triggers"
+},
+{
+"source": "4eeae50c-595b-47ad-a51a-8f9e85936717",
+"target": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"label": "Triggers"
+},
+{
+"source": "fc9f56c2-82b5-4611-90d0-4fe61f83926d",
+"target": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"label": "Triggers"
+},
+{
+"source": "1df246e2-4477-40c9-97dc-65b922516887",
+"target": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"label": "Triggers"
+},
+{
+"source": "975e2c11-597b-4398-8f37-d2b7986c18a3",
+"target": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"label": "Triggers"
+},
+{
+"source": "42aaf13d-4a3a-4575-9dbb-9565927fe9bd",
+"target": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"label": "Triggers"
+},
+{
+"source": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"target": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"label": "Triggers"
+},
+{
+"source": "647eb434-0ea9-4d91-a415-bea5fcc48130",
+"target": "4ce5e37e-5685-4d64-b453-65bbcc703461",
+"label": "Triggers"
+},
+{
+"source": "1932e657-696f-486f-8852-6c196a660b1b",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "13bd4484-7ef0-4ce7-877d-3bbc0b3e152a",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "93aed26d-5b1d-4a5b-a7a9-b5fd8f79b14b",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "510a9dce-a63e-4ba8-919e-8c0c7082e47d",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "8f473d91-2822-4ac6-b733-3784aeb0fd47",
+"target": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Triggers"
+},
+{
+"source": "20b178fb-f412-49a9-8c83-741b58d69b0d",
+"target": "b9c64e8e-d318-4403-b36a-754fa3dadce8",
+"label": "Triggers"
+},
+{
+"source": "2c7caf6b-44c6-432b-b5e9-0d5cb04983e7",
+"target": "769d21b0-6cf2-46c9-b013-03066d716013",
+"label": "Triggers"
+},
+{
+"source": "2c7caf6b-44c6-432b-b5e9-0d5cb04983e7",
+"target": "b9c64e8e-d318-4403-b36a-754fa3dadce8",
+"label": "Triggers"
+},
+{
+"source": "4b526e0d-482d-4991-a848-6222ce9a2cf0",
+"target": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"label": "Triggers"
+},
+{
+"source": "20b178fb-f412-49a9-8c83-741b58d69b0d",
+"target": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Triggers"
+},
+{
+"source": "20b178fb-f412-49a9-8c83-741b58d69b0d",
+"target": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"label": "Triggers"
+},
+{
+"source": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"target": "769d21b0-6cf2-46c9-b013-03066d716013",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "769d21b0-6cf2-46c9-b013-03066d716013",
+"label": "Triggers"
+},
+{
+"source": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"target": "b9c64e8e-d318-4403-b36a-754fa3dadce8",
+"label": "Triggers"
+},
+{
+"source": "4b526e0d-482d-4991-a848-6222ce9a2cf0",
+"target": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Triggers"
+},
+{
+"source": "b9c64e8e-d318-4403-b36a-754fa3dadce8",
+"target": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Triggers"
+},
+{
+"source": "2c7caf6b-44c6-432b-b5e9-0d5cb04983e7",
+"target": "20b178fb-f412-49a9-8c83-741b58d69b0d",
+"label": "Triggers"
+},
+{
+"source": "20b178fb-f412-49a9-8c83-741b58d69b0d",
+"target": "769d21b0-6cf2-46c9-b013-03066d716013",
+"label": "Triggers"
+},
+{
+"source": "4b526e0d-482d-4991-a848-6222ce9a2cf0",
+"target": "b9c64e8e-d318-4403-b36a-754fa3dadce8",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "b9c64e8e-d318-4403-b36a-754fa3dadce8",
+"label": "Triggers"
+},
+{
+"source": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"target": "769d21b0-6cf2-46c9-b013-03066d716013",
+"label": "Triggers"
+},
+{
+"source": "2c7caf6b-44c6-432b-b5e9-0d5cb04983e7",
+"target": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Triggers"
+},
+{
+"source": "4b526e0d-482d-4991-a848-6222ce9a2cf0",
+"target": "20b178fb-f412-49a9-8c83-741b58d69b0d",
+"label": "Triggers"
+},
+{
+"source": "b9c64e8e-d318-4403-b36a-754fa3dadce8",
+"target": "769d21b0-6cf2-46c9-b013-03066d716013",
+"label": "Triggers"
+},
+{
+"source": "2c7caf6b-44c6-432b-b5e9-0d5cb04983e7",
+"target": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"label": "Triggers"
+},
+{
+"source": "20b178fb-f412-49a9-8c83-741b58d69b0d",
+"target": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"label": "Triggers"
+},
+{
+"source": "4b526e0d-482d-4991-a848-6222ce9a2cf0",
+"target": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"label": "Triggers"
+},
+{
+"source": "4b526e0d-482d-4991-a848-6222ce9a2cf0",
+"target": "769d21b0-6cf2-46c9-b013-03066d716013",
+"label": "Triggers"
+},
+{
+"source": "2c7caf6b-44c6-432b-b5e9-0d5cb04983e7",
+"target": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"label": "Triggers"
+},
+{
+"source": "47b459b5-4ce1-4993-9498-ba96aca9a90c",
+"target": "0e3e8b84-19d7-426e-b5a3-2d8a7f0229c6",
+"label": "Triggers"
+},
+{
+"source": "4b526e0d-482d-4991-a848-6222ce9a2cf0",
+"target": "2c7caf6b-44c6-432b-b5e9-0d5cb04983e7",
+"label": "Triggers"
+},
+{
+"source": "df599671-4fe1-40c7-a3a4-bf2955c9431e",
+"target": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"label": "Triggers"
+},
+{
+"source": "a741580e-bd3d-43bd-9551-b09d9f5f2bb1",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "a741580e-bd3d-43bd-9551-b09d9f5f2bb1",
+"target": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"label": "Triggers"
+},
+{
+"source": "a1ae19a9-1fc6-4fd7-93cf-71279e7cc537",
+"target": "60042a40-0adf-423a-942e-34b5ab270540",
+"label": "Triggers"
+},
+{
+"source": "a1ae19a9-1fc6-4fd7-93cf-71279e7cc537",
+"target": "df599671-4fe1-40c7-a3a4-bf2955c9431e",
+"label": "Triggers"
+},
+{
+"source": "df599671-4fe1-40c7-a3a4-bf2955c9431e",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "a1ae19a9-1fc6-4fd7-93cf-71279e7cc537",
+"target": "a741580e-bd3d-43bd-9551-b09d9f5f2bb1",
+"label": "Triggers"
+},
+{
+"source": "60042a40-0adf-423a-942e-34b5ab270540",
+"target": "df599671-4fe1-40c7-a3a4-bf2955c9431e",
+"label": "Triggers"
+},
+{
+"source": "a1ae19a9-1fc6-4fd7-93cf-71279e7cc537",
+"target": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"label": "Triggers"
+},
+{
+"source": "60042a40-0adf-423a-942e-34b5ab270540",
+"target": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"label": "Triggers"
+},
+{
+"source": "a741580e-bd3d-43bd-9551-b09d9f5f2bb1",
+"target": "df599671-4fe1-40c7-a3a4-bf2955c9431e",
+"label": "Triggers"
+},
+{
+"source": "a1ae19a9-1fc6-4fd7-93cf-71279e7cc537",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "60042a40-0adf-423a-942e-34b5ab270540",
+"target": "a741580e-bd3d-43bd-9551-b09d9f5f2bb1",
+"label": "Triggers"
+},
+{
+"source": "60042a40-0adf-423a-942e-34b5ab270540",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "df0c8c62-038c-4ba1-8943-0642a047c932",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "1c32d168-37fe-498e-ba12-6ed25d17a290",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "63d77043-28af-49fe-8d8e-d2f97f413b3d",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"label": "Triggers"
+},
+{
+"source": "63d77043-28af-49fe-8d8e-d2f97f413b3d",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "1c32d168-37fe-498e-ba12-6ed25d17a290",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "df0c8c62-038c-4ba1-8943-0642a047c932",
+"label": "Triggers"
+},
+{
+"source": "63d77043-28af-49fe-8d8e-d2f97f413b3d",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "df0c8c62-038c-4ba1-8943-0642a047c932",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "1c32d168-37fe-498e-ba12-6ed25d17a290",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "19955d12-3aa7-4f06-9998-a451be852822",
+"target": "387867d5-8be1-4102-8103-4bafb28f9b60",
+"label": "Triggers"
+},
+{
+"source": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "2501a3c5-0002-41bc-8cca-fe2d553ccf84",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "574117b8-4b0b-4126-9565-f8f09e422f8d",
+"label": "Triggers"
+},
+{
+"source": "19955d12-3aa7-4f06-9998-a451be852822",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "2501a3c5-0002-41bc-8cca-fe2d553ccf84",
+"target": "574117b8-4b0b-4126-9565-f8f09e422f8d",
+"label": "Triggers"
+},
+{
+"source": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"target": "d157570e-4ac6-4436-9d44-1f1c15bb4333",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "2501a3c5-0002-41bc-8cca-fe2d553ccf84",
+"label": "Triggers"
+},
+{
+"source": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"target": "387867d5-8be1-4102-8103-4bafb28f9b60",
+"label": "Triggers"
+},
+{
+"source": "2501a3c5-0002-41bc-8cca-fe2d553ccf84",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "2501a3c5-0002-41bc-8cca-fe2d553ccf84",
+"target": "387867d5-8be1-4102-8103-4bafb28f9b60",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"target": "574117b8-4b0b-4126-9565-f8f09e422f8d",
+"label": "Triggers"
+},
+{
+"source": "d157570e-4ac6-4436-9d44-1f1c15bb4333",
+"target": "387867d5-8be1-4102-8103-4bafb28f9b60",
+"label": "Triggers"
+},
+{
+"source": "19955d12-3aa7-4f06-9998-a451be852822",
+"target": "9fb55a5a-5f01-4454-9159-56470bdfc03d",
+"label": "Triggers"
+},
+{
+"source": "19955d12-3aa7-4f06-9998-a451be852822",
+"target": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"label": "Triggers"
+},
+{
+"source": "d157570e-4ac6-4436-9d44-1f1c15bb4333",
+"target": "574117b8-4b0b-4126-9565-f8f09e422f8d",
+"label": "Triggers"
+},
+{
+"source": "d157570e-4ac6-4436-9d44-1f1c15bb4333",
+"target": "9fb55a5a-5f01-4454-9159-56470bdfc03d",
+"label": "Triggers"
+},
+{
+"source": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"target": "9fb55a5a-5f01-4454-9159-56470bdfc03d",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"target": "19955d12-3aa7-4f06-9998-a451be852822",
+"label": "Triggers"
+},
+{
+"source": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"target": "387867d5-8be1-4102-8103-4bafb28f9b60",
+"label": "Triggers"
+},
+{
+"source": "19955d12-3aa7-4f06-9998-a451be852822",
+"target": "574117b8-4b0b-4126-9565-f8f09e422f8d",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "d157570e-4ac6-4436-9d44-1f1c15bb4333",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "19955d12-3aa7-4f06-9998-a451be852822",
+"label": "Triggers"
+},
+{
+"source": "2501a3c5-0002-41bc-8cca-fe2d553ccf84",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "2501a3c5-0002-41bc-8cca-fe2d553ccf84",
+"target": "d157570e-4ac6-4436-9d44-1f1c15bb4333",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "9fb55a5a-5f01-4454-9159-56470bdfc03d",
+"label": "Triggers"
+},
+{
+"source": "2501a3c5-0002-41bc-8cca-fe2d553ccf84",
+"target": "9fb55a5a-5f01-4454-9159-56470bdfc03d",
+"label": "Triggers"
+},
+{
+"source": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"target": "574117b8-4b0b-4126-9565-f8f09e422f8d",
+"label": "Triggers"
+},
+{
+"source": "19955d12-3aa7-4f06-9998-a451be852822",
+"target": "d157570e-4ac6-4436-9d44-1f1c15bb4333",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "387867d5-8be1-4102-8103-4bafb28f9b60",
+"label": "Triggers"
+},
+{
+"source": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"target": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"label": "Triggers"
+},
+{
+"source": "2501a3c5-0002-41bc-8cca-fe2d553ccf84",
+"target": "19955d12-3aa7-4f06-9998-a451be852822",
+"label": "Triggers"
+},
+{
+"source": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"target": "9fb55a5a-5f01-4454-9159-56470bdfc03d",
+"label": "Triggers"
+},
+{
+"source": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"target": "d157570e-4ac6-4436-9d44-1f1c15bb4333",
+"label": "Triggers"
+},
+{
+"source": "378df2b9-964b-4d5b-8607-ee73eb2965fa",
+"target": "be21b8ab-3697-4423-a51c-c0507efc47ff",
+"label": "Triggers"
+},
+{
+"source": "378df2b9-964b-4d5b-8607-ee73eb2965fa",
+"target": "59cb23b0-02a4-4671-8787-85d309df826e",
+"label": "Triggers"
+},
+{
+"source": "be21b8ab-3697-4423-a51c-c0507efc47ff",
+"target": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"label": "Triggers"
+},
+{
+"source": "378df2b9-964b-4d5b-8607-ee73eb2965fa",
+"target": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"label": "Triggers"
+},
+{
+"source": "9b2cb8f3-5118-42a5-bc4e-3c55f75ed51c",
+"target": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"label": "Triggers"
+},
+{
+"source": "9b2cb8f3-5118-42a5-bc4e-3c55f75ed51c",
+"target": "be21b8ab-3697-4423-a51c-c0507efc47ff",
+"label": "Triggers"
+},
+{
+"source": "be21b8ab-3697-4423-a51c-c0507efc47ff",
+"target": "59cb23b0-02a4-4671-8787-85d309df826e",
+"label": "Triggers"
+},
+{
+"source": "9b2cb8f3-5118-42a5-bc4e-3c55f75ed51c",
+"target": "59cb23b0-02a4-4671-8787-85d309df826e",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "59cb23b0-02a4-4671-8787-85d309df826e",
+"label": "Triggers"
+},
+{
+"source": "378df2b9-964b-4d5b-8607-ee73eb2965fa",
+"target": "9b2cb8f3-5118-42a5-bc4e-3c55f75ed51c",
+"label": "Triggers"
+},
+{
+"source": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "b9d227de-67d1-4ccc-8ed1-f04166f05186",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "dc4a4902-e13e-419e-a187-81d5d12033f4",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "4044f975-e253-4a0b-8e8b-eb3e91589088",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "fb30b9b5-f39c-4076-9eb8-c61a3ad0516e",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "120dd479-a3ed-45d3-be1c-eb40381a6411",
+"target": "f1e3dc5a-f098-48f6-8aa8-904220bb7027",
+"label": "Triggers"
+},
+{
+"source": "ab140d50-8c30-437c-9551-a5eb64d1624d",
+"target": "7a13db08-d81f-4c59-9e7f-87d252d6415e",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "b38091a3-dc22-44e3-9dd1-91cb5c3214f6",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "ab140d50-8c30-437c-9551-a5eb64d1624d",
+"label": "Triggers"
+},
+{
+"source": "b38091a3-dc22-44e3-9dd1-91cb5c3214f6",
+"target": "0fa6387a-0673-491c-adf6-15a045fd3033",
+"label": "Triggers"
+},
+{
+"source": "b38091a3-dc22-44e3-9dd1-91cb5c3214f6",
+"target": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "6673b1b5-f332-404f-b858-53bab47639c0",
+"label": "Triggers"
+},
+{
+"source": "7a13db08-d81f-4c59-9e7f-87d252d6415e",
+"target": "6673b1b5-f332-404f-b858-53bab47639c0",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "0fa6387a-0673-491c-adf6-15a045fd3033",
+"label": "Triggers"
+},
+{
+"source": "b38091a3-dc22-44e3-9dd1-91cb5c3214f6",
+"target": "6673b1b5-f332-404f-b858-53bab47639c0",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "7a13db08-d81f-4c59-9e7f-87d252d6415e",
+"label": "Triggers"
+},
+{
+"source": "7a13db08-d81f-4c59-9e7f-87d252d6415e",
+"target": "0fa6387a-0673-491c-adf6-15a045fd3033",
+"label": "Triggers"
+},
+{
+"source": "b38091a3-dc22-44e3-9dd1-91cb5c3214f6",
+"target": "7a13db08-d81f-4c59-9e7f-87d252d6415e",
+"label": "Triggers"
+},
+{
+"source": "7a13db08-d81f-4c59-9e7f-87d252d6415e",
+"target": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"label": "Triggers"
+},
+{
+"source": "ab140d50-8c30-437c-9551-a5eb64d1624d",
+"target": "6673b1b5-f332-404f-b858-53bab47639c0",
+"label": "Triggers"
+},
+{
+"source": "ab140d50-8c30-437c-9551-a5eb64d1624d",
+"target": "b38091a3-dc22-44e3-9dd1-91cb5c3214f6",
+"label": "Triggers"
+},
+{
+"source": "ab140d50-8c30-437c-9551-a5eb64d1624d",
+"target": "0fa6387a-0673-491c-adf6-15a045fd3033",
+"label": "Triggers"
+},
+{
+"source": "ab140d50-8c30-437c-9551-a5eb64d1624d",
+"target": "2d7b3d1b-d106-488f-b31a-89b8291db17c",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"label": "Triggers"
+},
+{
+"source": "451b4861-1bab-4477-acb4-66db79ddb839",
+"target": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"label": "Triggers"
+},
+{
+"source": "d79b5fe5-a932-48ee-809a-0426415a79b2",
+"target": "451b4861-1bab-4477-acb4-66db79ddb839",
+"label": "Triggers"
+},
+{
+"source": "451b4861-1bab-4477-acb4-66db79ddb839",
+"target": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"label": "Triggers"
+},
+{
+"source": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"target": "78988d7a-6dda-4020-a234-e8166f69d358",
+"label": "Triggers"
+},
+{
+"source": "d79b5fe5-a932-48ee-809a-0426415a79b2",
+"target": "78988d7a-6dda-4020-a234-e8166f69d358",
+"label": "Triggers"
+},
+{
+"source": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"target": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"label": "Triggers"
+},
+{
+"source": "451b4861-1bab-4477-acb4-66db79ddb839",
+"target": "78988d7a-6dda-4020-a234-e8166f69d358",
+"label": "Triggers"
+},
+{
+"source": "9b2cb8f3-5118-42a5-bc4e-3c55f75ed51c",
+"target": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"label": "Triggers"
+},
+{
+"source": "9b2cb8f3-5118-42a5-bc4e-3c55f75ed51c",
+"target": "78988d7a-6dda-4020-a234-e8166f69d358",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "78988d7a-6dda-4020-a234-e8166f69d358",
+"label": "Triggers"
+},
+{
+"source": "9b2cb8f3-5118-42a5-bc4e-3c55f75ed51c",
+"target": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"label": "Triggers"
+},
+{
+"source": "9b2cb8f3-5118-42a5-bc4e-3c55f75ed51c",
+"target": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"label": "Triggers"
+},
+{
+"source": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"target": "451b4861-1bab-4477-acb4-66db79ddb839",
+"label": "Triggers"
+},
+{
+"source": "d79b5fe5-a932-48ee-809a-0426415a79b2",
+"target": "33bdcd68-808d-46ba-a7e4-e020f9f580ae",
+"label": "Triggers"
+},
+{
+"source": "d79b5fe5-a932-48ee-809a-0426415a79b2",
+"target": "18e20f13-c341-4867-9cd5-06e0195a76ab",
+"label": "Triggers"
+},
+{
+"source": "d79b5fe5-a932-48ee-809a-0426415a79b2",
+"target": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"label": "Triggers"
+},
+{
+"source": "9b2cb8f3-5118-42a5-bc4e-3c55f75ed51c",
+"target": "451b4861-1bab-4477-acb4-66db79ddb839",
+"label": "Triggers"
+},
+{
+"source": "eeddb3e4-bd7f-401b-8faa-3578701fcd8b",
+"target": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"label": "Triggers"
+},
+{
+"source": "1438cb48-c0b0-4d40-9746-497ebb15c637",
+"target": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"label": "Triggers"
+},
+{
+"source": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"target": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"label": "Triggers"
+},
+{
+"source": "7c519aa7-2b99-4926-b023-b56ef3f50ba0",
+"target": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"label": "Triggers"
+},
+{
+"source": "ab47341e-d405-4c77-ae4c-da4ce24cc85a",
+"target": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"label": "Triggers"
+},
+{
+"source": "13bd4484-7ef0-4ce7-877d-3bbc0b3e152a",
+"target": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "Triggers"
+},
+{
+"source": "510a9dce-a63e-4ba8-919e-8c0c7082e47d",
+"target": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "13bd4484-7ef0-4ce7-877d-3bbc0b3e152a",
+"target": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"label": "Triggers"
+},
+{
+"source": "13bd4484-7ef0-4ce7-877d-3bbc0b3e152a",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"label": "Triggers"
+},
+{
+"source": "510a9dce-a63e-4ba8-919e-8c0c7082e47d",
+"target": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"label": "Triggers"
+},
+{
+"source": "13bd4484-7ef0-4ce7-877d-3bbc0b3e152a",
+"target": "bdd5f8bf-457d-4e93-933c-147d5b412d60",
+"label": "Triggers"
+},
+{
+"source": "510a9dce-a63e-4ba8-919e-8c0c7082e47d",
+"target": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"label": "Triggers"
+},
+{
+"source": "510a9dce-a63e-4ba8-919e-8c0c7082e47d",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "1df246e2-4477-40c9-97dc-65b922516887",
+"target": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"label": "Triggers"
+},
+{
+"source": "541664cd-86ff-4426-ae79-7ba2d413bc56",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"target": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"label": "Triggers"
+},
+{
+"source": "1df246e2-4477-40c9-97dc-65b922516887",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "d876cade-98b2-417e-ad04-16d789bad5f9",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "d876cade-98b2-417e-ad04-16d789bad5f9",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "1df246e2-4477-40c9-97dc-65b922516887",
+"target": "541664cd-86ff-4426-ae79-7ba2d413bc56",
+"label": "Triggers"
+},
+{
+"source": "541664cd-86ff-4426-ae79-7ba2d413bc56",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "d876cade-98b2-417e-ad04-16d789bad5f9",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "d876cade-98b2-417e-ad04-16d789bad5f9",
+"label": "Triggers"
+},
+{
+"source": "541664cd-86ff-4426-ae79-7ba2d413bc56",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "541664cd-86ff-4426-ae79-7ba2d413bc56",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "0ee4944d-b003-435b-8d9d-7c6c80239b83",
+"label": "Triggers"
+},
+{
+"source": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"target": "d876cade-98b2-417e-ad04-16d789bad5f9",
+"label": "Triggers"
+},
+{
+"source": "541664cd-86ff-4426-ae79-7ba2d413bc56",
+"target": "d876cade-98b2-417e-ad04-16d789bad5f9",
+"label": "Triggers"
+},
+{
+"source": "1df246e2-4477-40c9-97dc-65b922516887",
+"target": "d876cade-98b2-417e-ad04-16d789bad5f9",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "541664cd-86ff-4426-ae79-7ba2d413bc56",
+"target": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"label": "Triggers"
+},
+{
+"source": "280b9da7-bda7-409b-8089-4ca31db8ef6a",
+"target": "f723a557-7a7d-4a8c-ace5-339fd44e6989",
+"label": "Triggers"
+},
+{
+"source": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "1df246e2-4477-40c9-97dc-65b922516887",
+"target": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"label": "Triggers"
+},
+{
+"source": "5ace884c-c855-408c-b52f-7807964667d9",
+"target": "b5b8e3e1-3822-4e0d-b191-8a2f748b3d42",
+"label": "Triggers"
+},
+{
+"source": "86cb96d6-6c96-4df7-9d6b-3b7745d92aa0",
+"target": "b5b8e3e1-3822-4e0d-b191-8a2f748b3d42",
+"label": "Triggers"
+},
+{
+"source": "e2c164b4-5f9a-4f12-bd9a-829cd43869bc",
+"target": "b5b8e3e1-3822-4e0d-b191-8a2f748b3d42",
+"label": "Triggers"
+},
+{
+"source": "efcd90ea-bbb3-4c1b-9f8c-34ce2e15acd6",
+"target": "b5b8e3e1-3822-4e0d-b191-8a2f748b3d42",
+"label": "Triggers"
+},
+{
+"source": "c38a5bc7-7944-496a-862f-19998974b649",
+"target": "b5b8e3e1-3822-4e0d-b191-8a2f748b3d42",
+"label": "Triggers"
+},
+{
+"source": "e1a0d932-e60d-420d-ae70-ff7c10668c2f",
+"target": "b5b8e3e1-3822-4e0d-b191-8a2f748b3d42",
+"label": "Triggers"
+},
+{
+"source": "49778625-c29a-4069-89e3-d594d5160804",
+"target": "b5b8e3e1-3822-4e0d-b191-8a2f748b3d42",
+"label": "Triggers"
+},
+{
+"source": "8c682a82-7862-4a2b-950a-2d11da146bb2",
+"target": "b5b8e3e1-3822-4e0d-b191-8a2f748b3d42",
+"label": "Triggers"
+},
+{
+"source": "87db2dcd-e756-4d08-aa91-a7d7587ac6e5",
+"target": "f4a389b5-de04-41d4-8dca-6019feb0acf7",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "f4a389b5-de04-41d4-8dca-6019feb0acf7",
+"label": "Triggers"
+},
+{
+"source": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"target": "f4a389b5-de04-41d4-8dca-6019feb0acf7",
+"label": "Triggers"
+},
+{
+"source": "2390d8aa-cef3-4630-9633-2723a9d5f1ea",
+"target": "f4a389b5-de04-41d4-8dca-6019feb0acf7",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "717f2cd9-5bdb-46fc-8ee9-c58e9176abf8",
+"target": "f4a389b5-de04-41d4-8dca-6019feb0acf7",
+"label": "Triggers"
+},
+{
+"source": "8917b5de-d91f-4d45-9e1c-62a145a31000",
+"target": "f4a389b5-de04-41d4-8dca-6019feb0acf7",
+"label": "Triggers"
+},
+{
+"source": "fcd80ec8-ab16-4a5a-a065-b0f7141632b5",
+"target": "663ba705-7d38-4786-a3c6-062f5d2151c6",
+"label": "Triggers"
+},
+{
+"source": "fcd80ec8-ab16-4a5a-a065-b0f7141632b5",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "663ba705-7d38-4786-a3c6-062f5d2151c6",
+"target": "1ba0f65d-f246-4c33-afa8-14352441d309",
+"label": "Triggers"
+},
+{
+"source": "bfbfb3e3-debb-42da-9d02-0aae467450ea",
+"target": "622514b5-4a94-44e0-b867-61a2ef1590aa",
+"label": "Triggers"
+},
+{
+"source": "8ba47899-676a-441b-9059-d726c39a7031",
+"target": "98d02c8c-34ee-4bed-a1ae-9e98ad1fefa1",
+"label": "Triggers"
+},
+{
+"source": "8e24d48a-5d1b-4e7c-b252-53b3339a6806",
+"target": "8ba47899-676a-441b-9059-d726c39a7031",
+"label": "Triggers"
+},
+{
+"source": "c3c68732-527d-4b1d-8e11-fbb990e1e9c5",
+"target": "e3af4bab-f102-474d-8eb9-89ca5c8d8985",
+"label": "Triggers"
+},
+{
+"source": "c3c68732-527d-4b1d-8e11-fbb990e1e9c5",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "8e24d48a-5d1b-4e7c-b252-53b3339a6806",
+"target": "622514b5-4a94-44e0-b867-61a2ef1590aa",
+"label": "Triggers"
+},
+{
+"source": "622514b5-4a94-44e0-b867-61a2ef1590aa",
+"target": "e3af4bab-f102-474d-8eb9-89ca5c8d8985",
+"label": "Triggers"
+},
+{
+"source": "622514b5-4a94-44e0-b867-61a2ef1590aa",
+"target": "8ba47899-676a-441b-9059-d726c39a7031",
+"label": "Triggers"
+},
+{
+"source": "e3af4bab-f102-474d-8eb9-89ca5c8d8985",
+"target": "98d02c8c-34ee-4bed-a1ae-9e98ad1fefa1",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "c3c68732-527d-4b1d-8e11-fbb990e1e9c5",
+"label": "Triggers"
+},
+{
+"source": "bfbfb3e3-debb-42da-9d02-0aae467450ea",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "8e24d48a-5d1b-4e7c-b252-53b3339a6806",
+"target": "98d02c8c-34ee-4bed-a1ae-9e98ad1fefa1",
+"label": "Triggers"
+},
+{
+"source": "c3c68732-527d-4b1d-8e11-fbb990e1e9c5",
+"target": "98d02c8c-34ee-4bed-a1ae-9e98ad1fefa1",
+"label": "Triggers"
+},
+{
+"source": "622514b5-4a94-44e0-b867-61a2ef1590aa",
+"target": "98d02c8c-34ee-4bed-a1ae-9e98ad1fefa1",
+"label": "Triggers"
+},
+{
+"source": "8e24d48a-5d1b-4e7c-b252-53b3339a6806",
+"target": "e3af4bab-f102-474d-8eb9-89ca5c8d8985",
+"label": "Triggers"
+},
+{
+"source": "bfbfb3e3-debb-42da-9d02-0aae467450ea",
+"target": "8ba47899-676a-441b-9059-d726c39a7031",
+"label": "Triggers"
+},
+{
+"source": "622514b5-4a94-44e0-b867-61a2ef1590aa",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "e3af4bab-f102-474d-8eb9-89ca5c8d8985",
+"label": "Triggers"
+},
+{
+"source": "8ba47899-676a-441b-9059-d726c39a7031",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "622514b5-4a94-44e0-b867-61a2ef1590aa",
+"target": "c3c68732-527d-4b1d-8e11-fbb990e1e9c5",
+"label": "Triggers"
+},
+{
+"source": "8e24d48a-5d1b-4e7c-b252-53b3339a6806",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "bfbfb3e3-debb-42da-9d02-0aae467450ea",
+"target": "98d02c8c-34ee-4bed-a1ae-9e98ad1fefa1",
+"label": "Triggers"
+},
+{
+"source": "8e24d48a-5d1b-4e7c-b252-53b3339a6806",
+"target": "c3c68732-527d-4b1d-8e11-fbb990e1e9c5",
+"label": "Triggers"
+},
+{
+"source": "8e24d48a-5d1b-4e7c-b252-53b3339a6806",
+"target": "bfbfb3e3-debb-42da-9d02-0aae467450ea",
+"label": "Triggers"
+},
+{
+"source": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"target": "98d02c8c-34ee-4bed-a1ae-9e98ad1fefa1",
+"label": "Triggers"
+},
+{
+"source": "622514b5-4a94-44e0-b867-61a2ef1590aa",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "8ba47899-676a-441b-9059-d726c39a7031",
+"target": "e3af4bab-f102-474d-8eb9-89ca5c8d8985",
+"label": "Triggers"
+},
+{
+"source": "bfbfb3e3-debb-42da-9d02-0aae467450ea",
+"target": "e3af4bab-f102-474d-8eb9-89ca5c8d8985",
+"label": "Triggers"
+},
+{
+"source": "c7bd08ad-170b-465d-a032-ca830d607547",
+"target": "98d02c8c-34ee-4bed-a1ae-9e98ad1fefa1",
+"label": "Triggers"
+},
+{
+"source": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"target": "e3af4bab-f102-474d-8eb9-89ca5c8d8985",
+"label": "Triggers"
+},
+{
+"source": "c3c68732-527d-4b1d-8e11-fbb990e1e9c5",
+"target": "8ba47899-676a-441b-9059-d726c39a7031",
+"label": "Triggers"
+},
+{
+"source": "8e24d48a-5d1b-4e7c-b252-53b3339a6806",
+"target": "c7bd08ad-170b-465d-a032-ca830d607547",
+"label": "Triggers"
+},
+{
+"source": "bfbfb3e3-debb-42da-9d02-0aae467450ea",
+"target": "c3c68732-527d-4b1d-8e11-fbb990e1e9c5",
+"label": "Triggers"
+},
+{
+"source": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"target": "3600e798-1a9c-414f-929f-8de53cb1a72b",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "2db053fd-a87b-4f6a-8008-8babeca35690",
+"label": "Triggers"
+},
+{
+"source": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"target": "2db053fd-a87b-4f6a-8008-8babeca35690",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "8092dbe0-474d-4eb2-b1b6-5901f44fcc68",
+"label": "Triggers"
+},
+{
+"source": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"target": "8092dbe0-474d-4eb2-b1b6-5901f44fcc68",
+"label": "Triggers"
+},
+{
+"source": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"target": "7936bdc5-edbf-42f3-ba6a-e94c991d4443",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "e4a3f078-9196-4483-a424-b8fc143cdc08",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "7936bdc5-edbf-42f3-ba6a-e94c991d4443",
+"label": "Triggers"
+},
+{
+"source": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"target": "e4a3f078-9196-4483-a424-b8fc143cdc08",
+"label": "Triggers"
+},
+{
+"source": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"target": "6a7932de-e4f6-48c0-a0f2-2556cb6674a3",
+"label": "Triggers"
+},
+{
+"source": "56188243-c9aa-43ee-a7d2-da0d966f045a",
+"target": "3600e798-1a9c-414f-929f-8de53cb1a72b",
+"label": "Triggers"
+},
+{
+"source": "c6a375c7-f416-4147-bb34-cd21d8b21d89",
+"target": "d157570e-4ac6-4436-9d44-1f1c15bb4333",
+"label": "Triggers"
+},
+{
+"source": "ccbae82b-e85a-4cd3-adb8-b4cee5cdb5ed",
+"target": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"label": "Triggers"
+},
+{
+"source": "98d62d25-4767-473a-899f-9e5eab2c0da3",
+"target": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"label": "Triggers"
+},
+{
+"source": "8ce790e1-9e3c-449f-9197-23d78789bbe4",
+"target": "4cf37b57-ea9d-4829-829a-b59bb5277fbd",
+"label": "Triggers"
+}
+]
+}

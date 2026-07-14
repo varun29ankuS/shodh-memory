@@ -417,13 +417,10 @@ fn issue_regex() -> &'static regex::Regex {
 use crate::ab_testing;
 use crate::backup;
 use crate::config::ServerConfig;
-use crate::embeddings::{
-    are_ner_models_downloaded, download_ner_models, get_ner_models_dir, ner::NerEntityType,
-    KeywordExtractor, NerConfig, NeuralNer,
-};
+use crate::embeddings::{ner::NerEntityType, KeywordExtractor, NerConfig, NeuralNer};
 use crate::graph_memory::{
-    classify_misc_entity, classify_tag_label, EdgeTier, EntityLabel, EntityNode, EpisodeSource,
-    EpisodicNode, GraphMemory, GraphStats, LtpStatus, RelationshipEdge,
+    classify_tag_label, EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode,
+    GraphMemory, GraphStats, LtpStatus, RelationshipEdge,
 };
 use crate::memory::{
     Experience, FeedbackStore, FileMemoryStore, MemoryConfig, MemoryId, MemoryStats, MemorySystem,
@@ -730,66 +727,24 @@ impl MultiUserMemoryManager {
 
         let (event_broadcaster, _) = tokio::sync::broadcast::channel(1024);
 
-        let ner_dir = get_ner_models_dir();
-        tracing::debug!("Checking for NER models at {:?}", ner_dir);
-        let neural_ner = if are_ner_models_downloaded() {
-            tracing::debug!("NER models found, using existing files");
-            let config = NerConfig {
-                model_path: ner_dir.join("model.onnx"),
-                tokenizer_path: ner_dir.join("tokenizer.json"),
-                max_length: 128,
-                confidence_threshold: 0.5,
-            };
-            match NeuralNer::new(config) {
-                Ok(ner) => {
-                    info!("Neural NER initialized (TinyBERT model at {:?})", ner_dir);
-                    Arc::new(ner)
+        // NER stage: GLiNER bi-edge production typer when its assets are present
+        // (SHODH_GLINER_MODEL_PATH, default ./models/gliner-bi-edge), else the
+        // rule-based fallback. NeuralNer::new never fails; it logs which path it took.
+        let neural_ner = match NeuralNer::new(NerConfig::default()) {
+            Ok(ner) => {
+                if ner.is_fallback_mode() {
+                    info!("Neural NER using rule-based fallback (GLiNER assets absent)");
+                } else {
+                    info!("Neural NER initialized (GLiNER bi-edge production typer)");
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to initialize neural NER: {}. Using fallback.", e);
-                    Arc::new(NeuralNer::new_fallback(NerConfig::default()))
-                }
+                Arc::new(ner)
             }
-        } else {
-            tracing::debug!("NER models not found at {:?}, will download", ner_dir);
-            info!("Downloading NER models (TinyBERT-NER, ~15MB)...");
-            match download_ner_models(Some(std::sync::Arc::new(|downloaded, total| {
-                if total > 0 {
-                    let percent = (downloaded as f64 / total as f64 * 100.0) as u32;
-                    if percent.is_multiple_of(20) {
-                        tracing::info!("NER model download: {}%", percent);
-                    }
-                }
-            }))) {
-                Ok(ner_dir) => {
-                    info!("NER models downloaded to {:?}", ner_dir);
-                    let config = NerConfig {
-                        model_path: ner_dir.join("model.onnx"),
-                        tokenizer_path: ner_dir.join("tokenizer.json"),
-                        max_length: 128,
-                        confidence_threshold: 0.5,
-                    };
-                    match NeuralNer::new(config) {
-                        Ok(ner) => {
-                            info!("Neural NER initialized after download");
-                            Arc::new(ner)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to initialize downloaded NER: {}. Using fallback.",
-                                e
-                            );
-                            Arc::new(NeuralNer::new_fallback(NerConfig::default()))
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to download NER models: {}. Using rule-based fallback.",
-                        e
-                    );
-                    Arc::new(NeuralNer::new_fallback(NerConfig::default()))
-                }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to initialize NER: {}. Using rule-based fallback.",
+                    e
+                );
+                Arc::new(NeuralNer::new_fallback(NerConfig::default()))
             }
         };
 
@@ -2195,6 +2150,35 @@ impl MultiUserMemoryManager {
                 }
             }
 
+            // Consolidation: canonicalize duplicate mention-nodes into canonical
+            // entities (parser + Fellegi-Sunter/CESI) and seed the merged surfaces
+            // as aliases so future ingests resolve directly (closes the ingest
+            // loop). This is a "sleep" operation — it runs on the heavy cycle, not
+            // per request. No-ops when the dependency parser isn't deployed
+            // (SHODH_SPACY_MODEL_PATH unset). Opt out with SHODH_CONSOLIDATE_CANON=0.
+            let canon_on = std::env::var("SHODH_CONSOLIDATE_CANON")
+                .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+                .unwrap_or(true);
+            if is_heavy && canon_on {
+                if let Ok(graph) = self.get_user_graph(&user_id) {
+                    let graph_guard = graph.write();
+                    match graph_guard.canonicalize_entities() {
+                        Ok((merged, repointed)) if merged > 0 => {
+                            tracing::info!(
+                                user_id = %user_id,
+                                merged,
+                                repointed,
+                                "Consolidation: canonicalized duplicate entities"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::debug!("Canonicalize failed for user {}: {}", user_id, e)
+                        }
+                    }
+                }
+            }
+
             // Release consolidation lock for this user
             self.release_consolidation_lock(&user_id);
         }
@@ -2643,6 +2627,7 @@ impl MultiUserMemoryManager {
                     confidence: record.confidence,
                     start: record.start_char.unwrap_or(0),
                     end: record.end_char.unwrap_or(record.text.len()),
+                    fine_label: record.fine_label.clone(),
                 })
                 .collect()
         } else if !experience.entities.is_empty() {
@@ -2659,6 +2644,7 @@ impl MultiUserMemoryManager {
                     confidence: 0.8,
                     start: 0,
                     end: name.len(),
+                    fine_label: None,
                 })
                 .collect()
         } else {
@@ -2939,11 +2925,26 @@ impl MultiUserMemoryManager {
         let ner_entities: Vec<(String, EntityNode)> = filtered_entities
             .into_iter()
             .map(|ner_entity| {
-                let label = match ner_entity.entity_type {
-                    NerEntityType::Person => EntityLabel::Person,
-                    NerEntityType::Organization => EntityLabel::Organization,
-                    NerEntityType::Location => EntityLabel::Location,
-                    NerEntityType::Misc => classify_misc_entity(&ner_entity.text),
+                // Primary label + fine type from GLiNER's top-scoring span for this
+                // surface. The fine label rolls up to its coarse EntityLabel via the
+                // schema (kills the MISC→regex funnel); the fallback path has no fine
+                // label and uses the coarse 4-class view directly.
+                let (label, fine_type) = match &ner_entity.fine_label {
+                    Some(fine) => {
+                        let coarse = crate::entity_type::coarse_of(fine)
+                            .map(EntityLabel::from_coarse_id)
+                            .unwrap_or_else(|| EntityLabel::Other(fine.clone()));
+                        (coarse, Some(fine.clone()))
+                    }
+                    None => {
+                        let coarse = match ner_entity.entity_type {
+                            NerEntityType::Person => EntityLabel::Person,
+                            NerEntityType::Organization => EntityLabel::Organization,
+                            NerEntityType::Location => EntityLabel::Location,
+                            NerEntityType::Misc => EntityLabel::Concept,
+                        };
+                        (coarse, None)
+                    }
                 };
                 let node = EntityNode {
                     uuid: uuid::Uuid::new_v4(),
@@ -2973,6 +2974,7 @@ impl MultiUserMemoryManager {
                     },
                     is_proper_noun: !matches!(ner_entity.entity_type, NerEntityType::Misc),
                     selectivity: None,
+                    fine_type,
                 };
                 (ner_entity.text, node)
             })
@@ -3012,6 +3014,7 @@ impl MultiUserMemoryManager {
                             ),
                             is_proper_noun: false,
                             selectivity: None,
+                            fine_type: None,
                         },
                     ))
                 } else {
@@ -3083,6 +3086,7 @@ impl MultiUserMemoryManager {
                         ),
                         is_proper_noun: true,
                         selectivity: None,
+                        fine_type: None,
                     },
                 ))
             })
@@ -3117,6 +3121,7 @@ impl MultiUserMemoryManager {
                         ),
                         is_proper_noun: true,
                         selectivity: None,
+                        fine_type: None,
                     },
                 ))
             })
@@ -3162,6 +3167,7 @@ impl MultiUserMemoryManager {
                             ),
                             is_proper_noun: false,
                             selectivity: None,
+                            fine_type: None,
                         },
                     ))
                 })
@@ -3444,6 +3450,17 @@ impl MultiUserMemoryManager {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
+        // TYPED-ONLY relation gate (the strongest CoOccurs cull). Where the PMI gate
+        // drops only INCIDENTAL generic edges (PMI < floor), this drops EVERY generic
+        // co-occurrence edge regardless of PMI — the graph retains only edges that
+        // earned a relation type (cue / semantic / learned / label-pair typed) plus
+        // fragment bridges and the causal spine. Turns the co-occurrence mesh into a
+        // pure typed + causal graph. Aggressive: CoOccurs also carries spreading-
+        // activation connectivity, so this is measured, not a default. Opt in with
+        // SHODH_GRAPH_TYPED_ONLY=1. Applies at edge BIRTH; existing graphs don't shrink.
+        let typed_only: bool = std::env::var("SHODH_GRAPH_TYPED_ONLY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         // N (total episodes) and its log (the PMI normalizer), read once outside the
         // O(n^2) pair loop. mention_count is the per-entity document-frequency proxy.
         let total_episodes = graph_guard.total_episode_count().max(1) as f32;
@@ -3713,15 +3730,17 @@ impl MultiUserMemoryManager {
                 // (CoOccurs/RelatedTo), NON-fragment edges — typed edges and fragment
                 // bridges are never pruned. PMI = log2(N / (df_i·df_j)) at birth (co=1);
                 // below the floor means the pair co-occurs no more than chance → noise.
-                if pmi_gate
-                    && !(fragment_of_comention[i] || fragment_of_comention[j])
+                // Generic co-occurrence cull. TYPED-ONLY drops EVERY generic edge;
+                // the PMI gate drops only INCIDENTAL ones (PMI below floor). Neither
+                // touches typed edges (cue/semantic/learned/label) or fragment bridges
+                // — those carry grounding the PMI lacks.
+                let is_generic_prunable = !(fragment_of_comention[i] || fragment_of_comention[j])
                     && matches!(
                         relation_type,
                         crate::graph_memory::RelationType::CoOccurs
                             | crate::graph_memory::RelationType::RelatedTo
-                    )
-                    && birth_pmi < pmi_gate_min
-                {
+                    );
+                if is_generic_prunable && (typed_only || (pmi_gate && birth_pmi < pmi_gate_min)) {
                     pmi_gated += 1;
                     // it was tallied as generic above; move the tally to pmi_gated
                     untyped_generic = untyped_generic.saturating_sub(1);
@@ -3769,6 +3788,31 @@ impl MultiUserMemoryManager {
                     tracing::debug!("Failed to add relationship: {}", e);
                 }
             }
+        }
+
+        // === Causal spine (parser-based clause/event causal extraction) ===
+        // OpenIE mints entity→entity typed causal edges from clause grammar and
+        // CATENA mints event→event edges (the sparse narrative spine) — causation
+        // the entity-pair cue typer structurally cannot reach. Live whenever the
+        // dependency parser is deployed (SHODH_SPACY_MODEL_PATH); disable with
+        // SHODH_CAUSAL_SPINE=0. Precision-gated inside (causal families only).
+        graph_guard.mint_causal_spine_edges(&experience.content, &entity_uuids, memory_id.0, now);
+
+        // Free-label engine (ER Task 3.1): extract appositive / definite-description
+        // aliases from the text and seed them ("Apple, the iPhone maker" → iPhone
+        // maker = Apple), so later mentions resolve to the canonical node with no KB
+        // and no LLM. No-ops without the dependency parser.
+        let appos = graph_guard.mint_appositive_aliases(&experience.content);
+        if appos > 0 {
+            tracing::debug!(aliases = appos, "seeded appositive aliases");
+        }
+
+        // Retrieval-based KB linking (ER Task 3.2) — GATED. Link freshly-extracted
+        // entities to the domain KB (world-knowledge merges the corpus never states,
+        // e.g. Google → Alphabet). No-ops without SHODH_KB_LINKING + a loaded KB.
+        let kb_linked = graph_guard.kb_link_entities(&entity_uuids);
+        if kb_linked > 0 {
+            tracing::debug!(aliases = kb_linked, "seeded KB-link aliases");
         }
 
         // Aggregate the episode's surprise components (raw facts only —
@@ -4109,38 +4153,6 @@ mod tests {
     fn test_classify_tag_label_fallback() {
         assert_eq!(classify_tag_label("react"), EntityLabel::Technology);
         assert_eq!(classify_tag_label("rust"), EntityLabel::Technology);
-    }
-
-    #[test]
-    fn test_classify_misc_entity_concept_suffixes() {
-        assert_eq!(classify_misc_entity("capitalism"), EntityLabel::Concept);
-        assert_eq!(classify_misc_entity("neurology"), EntityLabel::Concept);
-        assert_eq!(classify_misc_entity("complexity"), EntityLabel::Concept);
-        assert_eq!(classify_misc_entity("authentication"), EntityLabel::Concept);
-    }
-
-    #[test]
-    fn test_classify_misc_entity_events() {
-        assert_eq!(classify_misc_entity("conference"), EntityLabel::Event);
-        assert_eq!(classify_misc_entity("hackathon"), EntityLabel::Event);
-    }
-
-    #[test]
-    fn test_classify_misc_entity_skills() {
-        assert_eq!(classify_misc_entity("developer"), EntityLabel::Skill);
-        assert_eq!(classify_misc_entity("engineering"), EntityLabel::Skill);
-    }
-
-    #[test]
-    fn test_classify_misc_entity_product_camelcase() {
-        assert_eq!(classify_misc_entity("RocksDB"), EntityLabel::Product);
-        assert_eq!(classify_misc_entity("GitHub"), EntityLabel::Product);
-    }
-
-    #[test]
-    fn test_classify_misc_entity_default() {
-        // Single lowercase word with no special suffix → Concept
-        assert_eq!(classify_misc_entity("memory"), EntityLabel::Concept);
     }
 
     #[test]

@@ -32,15 +32,6 @@ const MODEL_QUANTIZED_URL: &str = "https://huggingface.co/sentence-transformers/
 const TOKENIZER_URL: &str =
     "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/tokenizer.json";
 
-/// URLs for NER model files (TinyBERT-finetuned-NER, ~14.5MB quantized)
-/// Using a lightweight 4-layer TinyBERT model optimized for edge devices
-/// Source: onnx-community/TinyBERT-finetuned-NER-ONNX (fine-tuned on CoNLL2003)
-/// Pinned to commit 9b03777d for reproducibility
-const NER_MODEL_URL: &str =
-    "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/onnx/model_quantized.onnx";
-const NER_TOKENIZER_URL: &str =
-    "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/tokenizer.json";
-
 /// SHA-256 checksums for model integrity verification
 /// Verified against pinned commit hashes above — these will not drift
 struct ModelChecksums;
@@ -60,16 +51,6 @@ impl ModelChecksums {
     /// Pinned: sentence-transformers/all-MiniLM-L6-v2 @ c9745ed1
     const TOKENIZER: Option<&'static str> =
         Some("be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037");
-
-    /// NER quantized model checksum (model_quantized.onnx)
-    /// Pinned: onnx-community/TinyBERT-finetuned-NER-ONNX @ 9b03777d
-    const NER_MODEL: Option<&'static str> =
-        Some("ba4a1a00cf1600cae8e7cf3fda4650c825811719065b51041256392edd3647b8");
-
-    /// NER tokenizer checksum (tokenizer.json)
-    /// Pinned: onnx-community/TinyBERT-finetuned-NER-ONNX @ 9b03777d
-    const NER_TOKENIZER: Option<&'static str> =
-        Some("d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66");
 }
 
 /// Pinned ONNX Runtime version — the single source of truth. Must satisfy the
@@ -161,38 +142,6 @@ pub fn are_models_downloaded() -> bool {
         if let Ok(valid) = verify_checksum(&tokenizer_path, expected) {
             if !valid {
                 tracing::warn!("Tokenizer file checksum mismatch — will re-download");
-                let _ = fs::remove_file(&tokenizer_path);
-                return false;
-            }
-        }
-    }
-
-    true
-}
-
-/// Check if NER model files are downloaded and valid
-pub fn are_ner_models_downloaded() -> bool {
-    let models_dir = get_ner_models_dir();
-    let model_path = models_dir.join("model.onnx");
-    let tokenizer_path = models_dir.join("tokenizer.json");
-
-    if !model_path.exists() || !tokenizer_path.exists() {
-        return false;
-    }
-
-    if let Some(expected) = ModelChecksums::NER_MODEL {
-        if let Ok(valid) = verify_checksum(&model_path, expected) {
-            if !valid {
-                tracing::warn!("NER model file checksum mismatch — will re-download");
-                let _ = fs::remove_file(&model_path);
-                return false;
-            }
-        }
-    }
-    if let Some(expected) = ModelChecksums::NER_TOKENIZER {
-        if let Ok(valid) = verify_checksum(&tokenizer_path, expected) {
-            if !valid {
-                tracing::warn!("NER tokenizer file checksum mismatch — will re-download");
                 let _ = fs::remove_file(&tokenizer_path);
                 return false;
             }
@@ -569,48 +518,6 @@ pub fn download_models_internal(
     Ok(models_dir)
 }
 
-/// Download NER model files (TinyBERT-finetuned-NER, ~14.5MB quantized)
-/// This is opt-in via SHODH_NEURAL_NER=true environment variable
-pub fn download_ner_models(progress: Option<ProgressCallback>) -> Result<PathBuf> {
-    let models_dir = get_ner_models_dir();
-
-    if are_ner_models_downloaded() {
-        tracing::info!("NER models already downloaded at {:?}", models_dir);
-        return Ok(models_dir);
-    }
-
-    tracing::info!(
-        "Downloading TinyBERT-NER model to {:?} (~14.5MB)",
-        models_dir
-    );
-
-    // Download model (~14.5MB quantized)
-    let model_path = models_dir.join("model.onnx");
-    tracing::info!("Downloading NER model_quantized.onnx (~14.5MB)");
-    download_file_with_checksum(
-        NER_MODEL_URL,
-        &model_path,
-        progress.as_ref().map(|p| p.as_ref()),
-        ModelChecksums::NER_MODEL,
-    )?;
-
-    // Download tokenizer (~700KB)
-    let tokenizer_path = models_dir.join("tokenizer.json");
-    tracing::info!("Downloading NER tokenizer.json");
-    download_file_with_checksum(
-        NER_TOKENIZER_URL,
-        &tokenizer_path,
-        progress.as_ref().map(|p| p.as_ref()),
-        ModelChecksums::NER_TOKENIZER,
-    )?;
-
-    tracing::info!(
-        "TinyBERT-NER model downloaded successfully to {:?}",
-        models_dir
-    );
-    Ok(models_dir)
-}
-
 /// Download ONNX Runtime
 pub fn download_onnx_runtime(progress: Option<ProgressCallback>) -> Result<PathBuf> {
     let onnx_dir = get_onnx_runtime_dir();
@@ -881,23 +788,16 @@ pub fn ensure_downloaded(progress: Option<ProgressCallback>) -> Result<(PathBuf,
 pub fn print_status() {
     let cache_dir = get_cache_dir();
     let models_downloaded = are_models_downloaded();
-    let ner_models_downloaded = are_ner_models_downloaded();
     let onnx_downloaded = is_onnx_runtime_downloaded();
 
     println!("Shodh-Memory Cache Status:");
     println!("  Cache directory: {cache_dir:?}");
     println!("  Embedding models downloaded: {models_downloaded}");
-    println!("  NER models downloaded: {ner_models_downloaded}");
     println!("  ONNX Runtime downloaded: {onnx_downloaded}");
 
     if models_downloaded {
         let models_dir = get_models_dir();
         println!("  Embedding model path: {models_dir:?}");
-    }
-
-    if ner_models_downloaded {
-        let ner_dir = get_ner_models_dir();
-        println!("  NER model path: {ner_dir:?}");
     }
 
     if onnx_downloaded {
