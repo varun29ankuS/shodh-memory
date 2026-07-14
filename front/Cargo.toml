@@ -1,0 +1,18 @@
+# Standalone workspace — a thin front crate that lives under shodh-memory/ but
+# is NOT a member of the main crate's workspace (it has its own light deps).
+[workspace]
+
+[package]
+name = "shodh-front"
+version = "0.1.0"
+edition = "2021"
+description = "shodh-front — the Associative Memory dashboard: serves the UI and proxies the API to the shodh backend"
+
+[[bin]]
+name = "shodh-front"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }

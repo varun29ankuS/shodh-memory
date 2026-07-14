@@ -1,0 +1,2 @@
+# Vendored crate: tracked to upstream, not reformatted to our style.
+disable_all_formatting = true
