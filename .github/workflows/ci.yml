@@ -157,6 +157,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run unit tests
+        env:
+          SHODH_OFFLINE: "1"   # no GLiNER auto-download in CI; smoke job fetches release assets
         run: |
           cargo test --lib --no-fail-fast 2>&1 | tee test-output.txt
 
@@ -194,6 +196,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run integration tests
+        env:
+          SHODH_OFFLINE: "1"   # no GLiNER auto-download in CI; smoke job fetches release assets
         run: |
           cargo test \
             --test adaptive_memory_tests \

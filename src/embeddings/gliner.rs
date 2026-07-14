@@ -97,6 +97,8 @@ impl GlinerConfig {
                         .map(|p| PathBuf::from(p).join("models/gliner-bi-edge")),
                     Some(PathBuf::from("./models/gliner-bi-edge")),
                     Some(PathBuf::from("../models/gliner-bi-edge")),
+                    // First-run auto-download target (see `download_gliner_models`).
+                    Some(super::downloader::get_gliner_models_dir()),
                     dirs::data_dir().map(|p| p.join("shodh-memory/models/gliner-bi-edge")),
                 ];
                 candidates

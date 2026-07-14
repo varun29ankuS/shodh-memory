@@ -49,7 +49,7 @@ print(summary["learnings"])  # Recent learnings
 - **Hebbian learning** — Connections strengthen when memories are used together
 - **Activation decay** — Unused memories fade naturally
 - **Idempotent** — Content-hash dedup prevents duplicate memories
-- **Entity extraction** — TinyBERT NER extracts people, orgs, locations
+- **Entity extraction** — GLiNER bi-edge-v2 span typer (schema-driven, 141 fine / 18 coarse types, ONNX, auto-downloaded on first run) with a rule-based fallback
 - **100% offline** — Works on air-gapped systems
 
 ## Memory Types

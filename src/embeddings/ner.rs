@@ -229,7 +229,44 @@ impl NeuralNer {
     /// assets are present, otherwise degrades to the rule-based fallback (logged).
     /// Never fails — the `Result` is retained for call-site stability.
     pub fn new(config: NerConfig) -> Result<Self> {
-        let gliner = GlinerTyper::from_env();
+        let mut gliner = GlinerTyper::from_env();
+
+        // First-run provisioning: if no distribution shipped the assets and we
+        // are online, fetch them from the pinned release into the cache dir
+        // (a `GlinerConfig::from_env` candidate), then retry — mirroring the
+        // MiniLM / ONNX-runtime auto-download. Without this, end users
+        // (cargo install / pip / Docker-runtime) silently run the rule-based
+        // fallback because only CI ever provisions GLiNER.
+        if !gliner.is_available() {
+            let offline = std::env::var("SHODH_OFFLINE")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if offline {
+                tracing::warn!(
+                    "GLiNER bi-edge assets not found and SHODH_OFFLINE set — NER degrading to rule-based fallback"
+                );
+            } else {
+                tracing::info!(
+                    "GLiNER bi-edge assets not found — downloading from release {}",
+                    crate::embeddings::downloader::GLINER_RELEASE_TAG
+                );
+                let progress = Some(crate::embeddings::downloader::make_stderr_progress(
+                    "GLiNER model (149 MB)".to_string(),
+                ));
+                match crate::embeddings::downloader::download_gliner_models(progress) {
+                    Ok(dir) => {
+                        tracing::info!("GLiNER bi-edge assets ready at {:?}", dir);
+                        gliner = GlinerTyper::from_env();
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "GLiNER asset download failed ({e}) — NER degrading to rule-based fallback"
+                        );
+                    }
+                }
+            }
+        }
+
         let use_fallback = !gliner.is_available();
         if use_fallback {
             tracing::warn!(

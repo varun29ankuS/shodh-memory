@@ -28,13 +28,29 @@ jobs:
       - name: Install LLVM (ONNX runtime build dep)
         run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
 
-      - name: Cache models
+      - name: Cache MiniLM embedder
         uses: actions/cache@v4
         with:
           path: ~/.cache/shodh-memory/models
           key: shodh-models-minilm-c9745ed1
 
-      - name: Pre-fetch models (MiniLM + TinyBERT NER)
+      - name: Cache GLiNER typer assets
+        id: gliner-cache
+        uses: actions/cache@v4
+        with:
+          path: models/gliner-bi-edge
+          key: gliner-bi-edge-onnx-v1
+
+      - name: Fetch GLiNER typer assets
+        if: steps.gliner-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p models/gliner-bi-edge
+          gh release download gliner-bi-edge-onnx-v1 --repo "$GITHUB_REPOSITORY" --dir models/gliner-bi-edge
+          ls -la models/gliner-bi-edge
+
+      - name: Pre-fetch MiniLM embedder
         run: |
           dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
           M="$HOME/.cache/shodh-memory/models/minilm-l6"; mkdir -p "$M"
@@ -42,13 +58,11 @@ jobs:
           B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
           [ -s "$M/model_quantized.onnx" ] || dl "$M/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
           [ -s "$M/tokenizer.json" ]       || dl "$M/tokenizer.json" "$B/tokenizer.json"
-          N="$HOME/.cache/shodh-memory/models/bert-tiny-ner"; mkdir -p "$N"
-          NPIN=9b03777d9832105fbe419f258127fb2ec3eb09d7
-          NB="https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/$NPIN"
-          [ -s "$N/model.onnx" ]      || dl "$N/model.onnx" "$NB/onnx/model_quantized.onnx"
-          [ -s "$N/tokenizer.json" ]  || dl "$N/tokenizer.json" "$NB/tokenizer.json"
 
       - name: Run probe
+        env:
+          # Attribute the REAL typer's memory (GLiNER bi-edge), not the fallback.
+          SHODH_GLINER_MODEL_PATH: ${{ github.workspace }}/models/gliner-bi-edge
         run: |
           set -o pipefail
           cargo test --test onnx_memory_probe -- --ignored --nocapture 2>&1 | tee probe.log

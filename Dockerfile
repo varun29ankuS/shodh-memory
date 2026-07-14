@@ -37,23 +37,35 @@ RUN curl -L -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/downlo
 
 ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 
-# Pre-download embedding models (cacheable independent of source code)
-# MiniLM-L6-v2 quantized (~23MB) + tokenizer (~700KB)
-# NER TinyBERT quantized (~14.5MB) + tokenizer (~700KB)
-# Pinned to immutable HuggingFace commit hashes with SHA-256 verification
-RUN mkdir -p /models/minilm-l6 /models/bert-tiny-ner \
+# Pre-download embedding + NER models (cacheable independent of source code)
+# MiniLM-L6-v2 quantized (~23MB) + tokenizer (~700KB) — pinned HuggingFace commit
+# GLiNER bi-edge-v2 ONNX typer (~149MB model + label embeddings + tokenizer) —
+#   pinned repo release `gliner-bi-edge-onnx-v1`; this is the SOLE neural typer,
+#   so baking it here is what makes the image run real NER instead of the
+#   rule-based fallback. All assets SHA-256 verified.
+ARG GLINER_RELEASE=gliner-bi-edge-onnx-v1
+ARG GLINER_BASE=https://github.com/varun29ankuS/shodh-memory/releases/download/${GLINER_RELEASE}
+RUN mkdir -p /models/minilm-l6 /models/gliner-bi-edge \
     && curl -fSL -o /models/minilm-l6/model_quantized.onnx \
        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/onnx/model_quint8_avx2.onnx" \
     && curl -fSL -o /models/minilm-l6/tokenizer.json \
        "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/c9745ed1d9f207416be6d2e6f8de32d1f16199bf/tokenizer.json" \
-    && curl -fSL -o /models/bert-tiny-ner/model.onnx \
-       "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/onnx/model_quantized.onnx" \
-    && curl -fSL -o /models/bert-tiny-ner/tokenizer.json \
-       "https://huggingface.co/onnx-community/TinyBERT-finetuned-NER-ONNX/resolve/9b03777d9832105fbe419f258127fb2ec3eb09d7/tokenizer.json" \
+    && curl -fSL -o /models/gliner-bi-edge/model.onnx              "${GLINER_BASE}/model.onnx" \
+    && curl -fSL -o /models/gliner-bi-edge/label_embeddings.bin    "${GLINER_BASE}/label_embeddings.bin" \
+    && curl -fSL -o /models/gliner-bi-edge/label_embeddings.json   "${GLINER_BASE}/label_embeddings.json" \
+    && curl -fSL -o /models/gliner-bi-edge/tokenizer.json          "${GLINER_BASE}/tokenizer.json" \
+    && curl -fSL -o /models/gliner-bi-edge/tokenizer_config.json   "${GLINER_BASE}/tokenizer_config.json" \
+    && curl -fSL -o /models/gliner-bi-edge/special_tokens_map.json "${GLINER_BASE}/special_tokens_map.json" \
+    && curl -fSL -o /models/gliner-bi-edge/gliner_config.json      "${GLINER_BASE}/gliner_config.json" \
     && echo "b941bf19f1f1283680f449fa6a7336bb5600bdcd5f84d10ddc5cd72218a0fd21  /models/minilm-l6/model_quantized.onnx" | sha256sum -c - \
     && echo "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037  /models/minilm-l6/tokenizer.json" | sha256sum -c - \
-    && echo "ba4a1a00cf1600cae8e7cf3fda4650c825811719065b51041256392edd3647b8  /models/bert-tiny-ner/model.onnx" | sha256sum -c - \
-    && echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  /models/bert-tiny-ner/tokenizer.json" | sha256sum -c -
+    && echo "209eaeb7fe6703cfa458fd7e4f084a9b078f0cbafe941ee4aae1b68c5a190d02  /models/gliner-bi-edge/model.onnx" | sha256sum -c - \
+    && echo "f07cc0fecf3c8bd73a6bb4593e887a6b2ce8ed5d7022c9847407e611a0ed0a74  /models/gliner-bi-edge/label_embeddings.bin" | sha256sum -c - \
+    && echo "30979ba33114adae74705a5405901f67e4b90458dc4ab581e4387b35def3b525  /models/gliner-bi-edge/label_embeddings.json" | sha256sum -c - \
+    && echo "2315a8bea85452f3c4e8ce980f7853cac013820238e7776a4e48159037a5f164  /models/gliner-bi-edge/tokenizer.json" | sha256sum -c - \
+    && echo "1270f8070c3ad1184d77bb700826a03bf0a99f0029b074383079203fec56116f  /models/gliner-bi-edge/tokenizer_config.json" | sha256sum -c - \
+    && echo "e386620cb5e9f6570fe98481fde86167b4236cdebdcc42308652574122561619  /models/gliner-bi-edge/special_tokens_map.json" | sha256sum -c - \
+    && echo "3ba491748b955c28c33ac5e78b7dc7e6a8c1968f676cbfe5776788e854e02623  /models/gliner-bi-edge/gliner_config.json" | sha256sum -c -
 
 # Create dummy sources to build and cache dependencies
 RUN mkdir -p src src/bin benches tests \
@@ -99,8 +111,8 @@ RUN ldconfig
 
 # Copy pre-downloaded models into the image (eliminates runtime downloads)
 # Directory structure matches what the downloader expects:
-#   minilm-l6/model_quantized.onnx + tokenizer.json  (embedding model)
-#   bert-tiny-ner/model.onnx + tokenizer.json         (NER model)
+#   minilm-l6/model_quantized.onnx + tokenizer.json      (embedding model)
+#   gliner-bi-edge/model.onnx + label_embeddings.* + ...  (GLiNER neural typer)
 COPY --from=builder --chown=shodh:shodh /models /home/shodh/.cache/shodh-memory/models
 
 # Switch to non-root user
@@ -118,14 +130,16 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
 
 # Set environment variables
 # ORT_DYLIB_PATH: tells ort crate where libonnxruntime.so is (skips runtime download)
-# SHODH_MODEL_PATH: tells embedder where pre-baked models are (skips model download)
+# SHODH_MODEL_PATH: tells embedder where the pre-baked MiniLM model is (skips download)
+# SHODH_GLINER_MODEL_PATH: tells the NER stage where the pre-baked GLiNER typer is
+#   (skips first-run download; without it the image would run rule-based fallback NER)
 ENV RUST_LOG=info \
     SHODH_HOST=0.0.0.0 \
     SHODH_PORT=3030 \
     SHODH_MEMORY_PATH=/data \
     ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so \
     SHODH_MODEL_PATH=/home/shodh/.cache/shodh-memory/models/minilm-l6 \
-    SHODH_NER_MODEL_PATH=/home/shodh/.cache/shodh-memory/models/bert-tiny-ner \
+    SHODH_GLINER_MODEL_PATH=/home/shodh/.cache/shodh-memory/models/gliner-bi-edge \
     LD_LIBRARY_PATH=/usr/local/lib
 
 # Run the binary

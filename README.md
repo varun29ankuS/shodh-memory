@@ -49,7 +49,7 @@ Every other memory system delegates intelligence to LLM API calls — that's why
 Storing a memory makes **zero LLM calls**. Recalling makes **zero LLM calls**. Entity extraction, relation typing, knowledge-graph construction, causal tracing, ranking, decay, consolidation — all of it runs locally as algorithms, not API round-trips:
 
 - **Local embeddings** — MiniLM (22MB, INT8) via ONNX Runtime, on-device semantic search
-- **Local NER** — TinyBERT (14MB, INT8) extracts people, places, organizations from every memory
+- **Local NER** — GLiNER bi-edge-v2 span typer (ONNX, schema-driven: 141 fine / 18 coarse entity types), auto-downloaded on first run from the pinned release, with a rule-based fallback
 - **Typed relation extraction without an LLM** — directed lexical cues + exemplar-matched semantic typing build a typed knowledge graph (`LocatedIn`, `WorksAt`, `Causes`…) from plain text
 - **Causal lineage** — "what was the root cause of X?" is answered by walking typed causal edges backward through the graph, not by asking a model
 - **Mathematical memory dynamics** — Hebbian strengthening, exponential→power-law decay, spreading activation, long-term potentiation

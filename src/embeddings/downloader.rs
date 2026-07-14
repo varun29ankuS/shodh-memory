@@ -53,6 +53,60 @@ impl ModelChecksums {
         Some("be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037");
 }
 
+/// GitHub release tag hosting the GLiNER bi-edge ONNX typer assets.
+///
+/// The production typer is `knowledgator/gliner-bi-edge-v2.0` exported to ONNX
+/// (text tower + precomputed label embeddings). The assets are published as a
+/// repo release; end-user distributions (`cargo install`, pip, Docker) fetch
+/// them on first run — CI is not a distribution channel.
+pub const GLINER_RELEASE_TAG: &str = "gliner-bi-edge-onnx-v1";
+
+/// Base download URL for the GLiNER release assets (`<base>/<asset>`).
+const GLINER_RELEASE_BASE_URL: &str =
+    "https://github.com/varun29ankuS/shodh-memory/releases/download/gliner-bi-edge-onnx-v1";
+
+/// GLiNER bi-edge asset manifest: `(filename, SHA-256)`.
+///
+/// Checksums are pinned to release [`GLINER_RELEASE_TAG`] and were computed from
+/// the published release assets (verified byte-identical to the checked-in
+/// `models/gliner-bi-edge/` working copy). `model.onnx` is the fp32 text tower
+/// (~149 MB); the typer loads `model.onnx`, `tokenizer.json`, and
+/// `label_embeddings.bin`, the rest ship for parity with the release and future
+/// use. A checksum mismatch on any asset triggers a re-download.
+const GLINER_ASSETS: &[(&str, &str)] = &[
+    (
+        "model.onnx",
+        "209eaeb7fe6703cfa458fd7e4f084a9b078f0cbafe941ee4aae1b68c5a190d02",
+    ),
+    (
+        "label_embeddings.bin",
+        "f07cc0fecf3c8bd73a6bb4593e887a6b2ce8ed5d7022c9847407e611a0ed0a74",
+    ),
+    (
+        "label_embeddings.json",
+        "30979ba33114adae74705a5405901f67e4b90458dc4ab581e4387b35def3b525",
+    ),
+    (
+        "tokenizer.json",
+        "2315a8bea85452f3c4e8ce980f7853cac013820238e7776a4e48159037a5f164",
+    ),
+    (
+        "tokenizer_config.json",
+        "1270f8070c3ad1184d77bb700826a03bf0a99f0029b074383079203fec56116f",
+    ),
+    (
+        "special_tokens_map.json",
+        "e386620cb5e9f6570fe98481fde86167b4236cdebdcc42308652574122561619",
+    ),
+    (
+        "gliner_config.json",
+        "3ba491748b955c28c33ac5e78b7dc7e6a8c1968f676cbfe5776788e854e02623",
+    ),
+];
+
+/// The GLiNER assets the typer must load to run (`GlinerConfig::assets_present`).
+const GLINER_REQUIRED_ASSETS: &[&str] = &["model.onnx", "tokenizer.json", "label_embeddings.bin"];
+
 /// Pinned ONNX Runtime version — the single source of truth. Must satisfy the
 /// `ort` crate's minimum (2.0.0-rc.11 requires >= 1.23.x); the download URL
 /// AND the cache directory are both derived from this, so bumping the pin
@@ -103,6 +157,37 @@ pub fn get_models_dir() -> PathBuf {
 /// Get the models directory for NER (bert-tiny-ner)
 pub fn get_ner_models_dir() -> PathBuf {
     get_cache_dir().join("models").join("bert-tiny-ner")
+}
+
+/// Get the cache directory for the GLiNER bi-edge typer assets.
+///
+/// This is the first-run download target and is registered as a resolution
+/// candidate in `GlinerConfig::from_env`, so assets fetched here are found on
+/// the next construction without any extra configuration.
+pub fn get_gliner_models_dir() -> PathBuf {
+    get_cache_dir().join("models").join("gliner-bi-edge")
+}
+
+/// Check whether every GLiNER asset is present in the cache dir and matches its
+/// pinned SHA-256. A mismatched (corrupt / partial / stale) asset is deleted so
+/// the next [`download_gliner_models`] re-fetches it.
+///
+/// Full-file hashing is intentional (mirrors [`are_models_downloaded`]); it runs
+/// only on the download path, never on the hot typing path.
+pub fn are_gliner_models_downloaded() -> bool {
+    let dir = get_gliner_models_dir();
+    for (name, expected) in GLINER_ASSETS {
+        let path = dir.join(name);
+        if !path.exists() {
+            return false;
+        }
+        if let Ok(false) = verify_checksum(&path, expected) {
+            tracing::warn!("GLiNER asset {name} checksum mismatch — will re-download");
+            let _ = fs::remove_file(&path);
+            return false;
+        }
+    }
+    true
 }
 
 /// Get the ONNX Runtime directory — keyed by the pinned runtime version.
@@ -518,6 +603,66 @@ pub fn download_models_internal(
     Ok(models_dir)
 }
 
+/// Download the GLiNER bi-edge typer assets from the pinned GitHub release.
+///
+/// Mirrors [`download_models`]: assets are cached under
+/// `<cache>/models/gliner-bi-edge` (a `GlinerConfig::from_env` resolution
+/// candidate) and each is verified against its pinned SHA-256 as it downloads.
+/// Already-present, checksum-valid assets are skipped, so an interrupted
+/// download resumes at the first missing/corrupt file. Returns the asset
+/// directory on success.
+///
+/// The largest asset (`model.onnx`, ~149 MB) reports through the caller-supplied
+/// `progress`; the small assets render their own labelled stderr bars when
+/// progress is requested (matching the MiniLM model/tokenizer split).
+pub fn download_gliner_models(progress: Option<ProgressCallback>) -> Result<PathBuf> {
+    let dir = get_gliner_models_dir();
+
+    if are_gliner_models_downloaded() {
+        tracing::info!("GLiNER bi-edge assets already downloaded at {:?}", dir);
+        return Ok(dir);
+    }
+
+    tracing::info!(
+        "Downloading GLiNER bi-edge typer assets (release {}) to {:?}",
+        GLINER_RELEASE_TAG,
+        dir
+    );
+    fs::create_dir_all(&dir).context("Failed to create GLiNER cache directory")?;
+
+    for (name, checksum) in GLINER_ASSETS {
+        let dest = dir.join(name);
+        // Resume: skip assets already present and checksum-valid.
+        if dest.exists() && matches!(verify_checksum(&dest, checksum), Ok(true)) {
+            tracing::info!("GLiNER asset {name} already present and valid");
+            continue;
+        }
+
+        let url = format!("{GLINER_RELEASE_BASE_URL}/{name}");
+        if *name == "model.onnx" {
+            download_file_with_checksum(
+                &url,
+                &dest,
+                progress.as_ref().map(|p| p.as_ref()),
+                Some(checksum),
+            )?;
+        } else {
+            let bar: Option<ProgressCallback> = progress
+                .as_ref()
+                .map(|_| make_stderr_progress(format!("GLiNER {name}")));
+            download_file_with_checksum(
+                &url,
+                &dest,
+                bar.as_ref().map(|p| p.as_ref()),
+                Some(checksum),
+            )?;
+        }
+    }
+
+    tracing::info!("GLiNER bi-edge assets downloaded successfully to {:?}", dir);
+    Ok(dir)
+}
+
 /// Download ONNX Runtime
 pub fn download_onnx_runtime(progress: Option<ProgressCallback>) -> Result<PathBuf> {
     let onnx_dir = get_onnx_runtime_dir();
@@ -790,10 +935,23 @@ pub fn print_status() {
     let models_downloaded = are_models_downloaded();
     let onnx_downloaded = is_onnx_runtime_downloaded();
 
+    // Resolve the GLiNER typer through the SAME path the NER stage uses, so
+    // status reflects what actually loads (env var, package dir, or cache).
+    let gliner_cfg = crate::embeddings::gliner::GlinerConfig::from_env();
+    let gliner_present = gliner_cfg.assets_present();
+
     println!("Shodh-Memory Cache Status:");
     println!("  Cache directory: {cache_dir:?}");
     println!("  Embedding models downloaded: {models_downloaded}");
     println!("  ONNX Runtime downloaded: {onnx_downloaded}");
+    println!(
+        "  GLiNER typer ({GLINER_RELEASE_TAG}): {}",
+        if gliner_present {
+            "present"
+        } else {
+            "MISSING — NER runs rule-based fallback"
+        }
+    );
 
     if models_downloaded {
         let models_dir = get_models_dir();
@@ -804,6 +962,25 @@ pub fn print_status() {
         if let Some(path) = get_onnx_runtime_path() {
             println!("  ONNX Runtime path: {path:?}");
         }
+    }
+
+    if gliner_present {
+        if let Some(base) = gliner_cfg.model_path.parent() {
+            println!("  GLiNER model path: {base:?}");
+        }
+    } else {
+        if let Some(base) = gliner_cfg.model_path.parent() {
+            let missing: Vec<&str> = GLINER_REQUIRED_ASSETS
+                .iter()
+                .copied()
+                .filter(|asset| !base.join(asset).exists())
+                .collect();
+            println!("  GLiNER expected at: {base:?} (missing: {missing:?})");
+        }
+        println!(
+            "  GLiNER auto-download: fetched from release {GLINER_RELEASE_TAG} on first run \
+             (skipped when SHODH_OFFLINE is set)"
+        );
     }
 }
 
@@ -821,6 +998,59 @@ mod tests {
     fn test_models_dir() {
         let models_dir = get_models_dir();
         assert!(models_dir.to_string_lossy().contains("minilm-l6"));
+    }
+
+    /// GLiNER assets cache under `<cache>/models/gliner-bi-edge` — the same path
+    /// registered as a `GlinerConfig::from_env` candidate, so a first-run
+    /// download is discovered on the next construction. No network.
+    #[test]
+    fn gliner_models_dir_is_cache_scoped() {
+        let dir = get_gliner_models_dir();
+        let s = dir.to_string_lossy().replace('\\', "/");
+        assert!(s.contains("shodh-memory"), "got {s}");
+        assert!(s.ends_with("models/gliner-bi-edge"), "got {s}");
+    }
+
+    /// The asset manifest is well-formed: 7 entries, every checksum a 64-char
+    /// lowercase-hex SHA-256, and the three files the typer loads are present.
+    /// No network.
+    #[test]
+    fn gliner_asset_manifest_is_wellformed() {
+        assert_eq!(GLINER_ASSETS.len(), 7, "expected 7 release assets");
+        for (name, sum) in GLINER_ASSETS {
+            assert!(!name.is_empty(), "empty asset name");
+            assert_eq!(sum.len(), 64, "{name}: SHA-256 must be 64 hex chars");
+            assert!(
+                sum.bytes().all(|b| b.is_ascii_hexdigit()),
+                "{name}: checksum is not hex"
+            );
+        }
+        for required in GLINER_REQUIRED_ASSETS {
+            assert!(
+                GLINER_ASSETS.iter().any(|(n, _)| n == required),
+                "manifest is missing load-bearing asset {required}"
+            );
+        }
+    }
+
+    /// Every asset URL derives from the one pinned release base + tag, and ends
+    /// with its filename — the download URL and checksum table cannot drift
+    /// apart. No network.
+    #[test]
+    fn gliner_asset_urls_target_pinned_release() {
+        assert!(
+            GLINER_RELEASE_BASE_URL.ends_with(GLINER_RELEASE_TAG),
+            "base URL must embed the pinned release tag"
+        );
+        for (name, _) in GLINER_ASSETS {
+            let url = format!("{GLINER_RELEASE_BASE_URL}/{name}");
+            assert!(
+                url.starts_with("https://github.com/varun29ankuS/shodh-memory/releases/download/"),
+                "unexpected host: {url}"
+            );
+            assert!(url.contains(GLINER_RELEASE_TAG), "tag missing from {url}");
+            assert!(url.ends_with(name), "url must end with asset name: {url}");
+        }
     }
 
     /// Regression for the stale-cache upgrade panic: the runtime cache MUST be

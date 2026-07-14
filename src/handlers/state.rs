@@ -207,7 +207,7 @@ fn entity_blocklist() -> &'static std::collections::HashSet<&'static str> {
             "if",
             "as",
             "am",
-            // Programming tokens: keywords that bert-tiny misclassifies as entities
+            // Programming tokens: keywords the NER typer can misclassify as entities
             "impl",
             "fn",
             "pub",
