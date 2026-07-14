@@ -391,14 +391,13 @@ pub fn tarjan_topology(adj: &[Vec<usize>]) -> SimpleTopology {
         }
     }
 
-    // Normalize per-component denom is folded into node_split via comp size; but
-    // node_split holds RAW products across components of different sizes, so
-    // normalize each node against its own component's max. Recover comp size from
-    // the DFS: a node's component root has size == comp_size and disc order, but
-    // we no longer track roots here — instead normalize using the same c²/4 the
-    // bridges used, recomputed per node via its retained component size.
-    // To keep this exact and cheap, recompute node normalization in a second pass
-    // using union-find-free component sizing already encoded in `size` at roots.
+    // node_split holds RAW split products across components of different sizes,
+    // so normalize each node against its own component's c²/4 (same denominator
+    // the bridge scores use). Component membership/size is re-derived inside
+    // `normalize_node_scores` by an iterative flood fill over `adj` — the DFS
+    // `size` array is passed through but intentionally unused there (flood fill
+    // is the single source of truth; reusing DFS root sizes is a known
+    // constant-factor optimization if this ever runs default-ON).
     let node_score = normalize_node_scores(adj, &disc, &size, &node_split);
 
     SimpleTopology {

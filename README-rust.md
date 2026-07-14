@@ -261,6 +261,7 @@ SHODH_KB_LINK_MIN=0.75        # minimum link score (default 0.75)
 SHODH_CONTRASTIVE_ADAPTER=1   # contrastive entity-embedding adapter (gated, default off)
 SHODH_CONSOLIDATE_CANON=0     # entity canonicalization during consolidation (default ON; set 0 to disable)
 SHODH_GRAPH_TYPED_ONLY=1      # restrict graph edges to typed relations (gated, default off)
+SHODH_TOPOLOGY_AWARE_DECAY=1  # bridge-protection in the prune gate (gated, default off)
 ```
 
 ## Architecture
