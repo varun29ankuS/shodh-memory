@@ -2201,6 +2201,18 @@ pub struct GraphMemory {
     /// Entities that may have become orphaned from pruned edges.
     /// Checked during flush_pending_maintenance().
     pending_orphan_checks: parking_lot::Mutex<Vec<Uuid>>,
+
+    /// Topology-aware decay (W1-B): smoothed per-node structural protection in
+    /// `[0, 1]`, carried across heavy cycles for hysteresis. Recomputed (not
+    /// persisted) each heavy cycle from the current edge set when
+    /// `SHODH_TOPOLOGY_AWARE_DECAY` is on — persisting it would go stale the
+    /// instant any edge is added or pruned, and would cost a full entities-CF
+    /// rewrite per cycle (like the curvature pass) for a value consumed only
+    /// within the same cycle's prune decision. In-memory means a process restart
+    /// re-derives protection from current structure (conservative: it never
+    /// over-protects, it just loses the "was recently a bridge" tail). Empty and
+    /// untouched when the flag is off.
+    topology_protection: parking_lot::RwLock<HashMap<Uuid, f32>>,
 }
 
 impl GraphMemory {
@@ -2360,6 +2372,7 @@ impl GraphMemory {
             pending_prune: parking_lot::Mutex::new(Vec::new()),
             pending_temporal_anomalies: parking_lot::Mutex::new(Vec::new()),
             pending_orphan_checks: parking_lot::Mutex::new(Vec::new()),
+            topology_protection: parking_lot::RwLock::new(HashMap::new()),
         };
 
         if entity_count > 0 || relationship_count > 0 || episode_count > 0 {
@@ -6301,6 +6314,7 @@ impl GraphMemory {
         &self,
         edges: &mut [RelationshipEdge],
         now: DateTime<Utc>,
+        protection: Option<&crate::decay::TopologyProtection>,
     ) -> Result<Vec<Uuid>> {
         if edges.is_empty() {
             return Ok(Vec::new());
@@ -6313,22 +6327,31 @@ impl GraphMemory {
                 anyhow::anyhow!("synapse_update_lock timeout in batch_decay_edges_in_place_at")
             })?;
         let mut batch = WriteBatch::default();
-        let mut to_prune = Vec::new();
+        // Indices (into `edges`) the BASE (time+usage) gate flagged for pruning.
+        // Decisions are deferred so the topology rescue budget can be computed
+        // against the full candidate count for this cycle.
+        let mut flagged: Vec<usize> = Vec::new();
 
-        for edge in edges.iter_mut() {
+        for (i, edge) in edges.iter_mut().enumerate() {
             let strength_before = edge.strength;
             let should_prune = edge.decay_at(now);
 
             // Only write back edges whose strength actually changed (or need pruning).
             // With 300s maintenance intervals, most edges won't have meaningful decay,
             // so this reduces the WriteBatch from ~12MB (all 34k edges) to ~150KB.
+            // Rescued edges keep this decayed strength written; the rescue defends
+            // EXISTENCE, not strength — a bridge re-evaluated next cycle.
             if should_prune || (edge.strength - strength_before).abs() > f32::EPSILON {
                 let key = edge.uuid.as_bytes();
                 match crate::serialization::encode(&*edge) {
                     Ok(value) => {
                         batch.put_cf(self.relationships_cf(), key, value);
+                        // Flag for prune only on a successful write-back, exactly
+                        // as the pre-W1-B code did — an edge that fails to
+                        // serialize is neither written nor pruned (byte-identical
+                        // to today when protection is None).
                         if should_prune {
-                            to_prune.push(edge.uuid);
+                            flagged.push(i);
                         }
                     }
                     Err(e) => {
@@ -6338,8 +6361,102 @@ impl GraphMemory {
             }
         }
 
+        // Base prune set = every flagged edge. Topology-aware decay (W1-B) rescues
+        // a BUDGETED top slice of the flagged edges whose loss would fragment the
+        // graph. With `protection == None` (flag off) this is byte-identical to
+        // the pre-W1-B behaviour: every flagged edge is pruned.
+        let to_prune = self.select_prune_set(edges, &flagged, protection);
+
         self.db.write(batch)?;
         Ok(to_prune)
+    }
+
+    /// Apply the topology-aware rescue budget to the base prune set.
+    ///
+    /// `flagged` are the indices the base (time+usage) gate wants to prune this
+    /// cycle. When protection is present, edges touching genuine structure
+    /// (`edge_protection > TOPOLOGY_RESCUE_MIN_PROTECTION`) are rescue-eligible;
+    /// they are ranked by the keep score `strength + α · protection` and the top
+    /// `ceil(BUDGET_FRAC · |flagged|)` (≥1 when any qualify) are spared. Everything
+    /// else is pruned. Ranking (not an absolute threshold) is the measured choice:
+    /// step-1 showed bridge scores are corpus-relative and compressed, so the
+    /// budget bounds forgetting-loss while rank picks the genuinely critical edges.
+    fn select_prune_set(
+        &self,
+        edges: &[RelationshipEdge],
+        flagged: &[usize],
+        protection: Option<&crate::decay::TopologyProtection>,
+    ) -> Vec<Uuid> {
+        let Some(prot) = protection else {
+            return flagged.iter().map(|&i| edges[i].uuid).collect();
+        };
+        if flagged.is_empty() {
+            return Vec::new();
+        }
+
+        // Rescue-eligible flagged edges, keyed by keep score (descending rank).
+        let mut eligible: Vec<(usize, f32)> = Vec::new();
+        for &i in flagged {
+            let e = &edges[i];
+            let p = prot.edge_protection(&e.from_entity, &e.to_entity);
+            if p > crate::constants::TOPOLOGY_RESCUE_MIN_PROTECTION {
+                let keep = crate::decay::topology_keep_score(
+                    e.strength,
+                    p,
+                    crate::constants::TOPOLOGY_RESCUE_ALPHA,
+                );
+                eligible.push((i, keep));
+            }
+        }
+
+        let budget = ((crate::constants::TOPOLOGY_RESCUE_BUDGET_FRAC * flagged.len() as f32).ceil()
+            as usize)
+            .max(1)
+            .min(eligible.len());
+
+        eligible.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let rescued: std::collections::HashSet<usize> =
+            eligible.iter().take(budget).map(|(i, _)| *i).collect();
+
+        if !rescued.is_empty() {
+            tracing::debug!(
+                rescued = rescued.len(),
+                flagged = flagged.len(),
+                budget,
+                "Topology-aware decay: rescued bridge edges from prune"
+            );
+        }
+
+        flagged
+            .iter()
+            .filter(|&&i| !rescued.contains(&i))
+            .map(|&i| edges[i].uuid)
+            .collect()
+    }
+
+    /// Compute this cycle's raw topology protection over the active edge set and
+    /// smooth it against the stored (previous-cycle) map via hysteresis, updating
+    /// the stored map in place. Returns the protection (smoothed node scores +
+    /// this cycle's bridge-pair set) used by the prune gate.
+    fn compute_and_smooth_topology(
+        &self,
+        edges: &[RelationshipEdge],
+    ) -> crate::decay::TopologyProtection {
+        let pairs: Vec<(Uuid, Uuid)> = edges.iter().map(|e| (e.from_entity, e.to_entity)).collect();
+        let raw = crate::decay::compute_topology_protection(&pairs);
+
+        let mut guard = self.topology_protection.write();
+        let smoothed = crate::decay::smooth_protection(
+            &guard,
+            &raw.node_protection,
+            crate::constants::TOPOLOGY_HYSTERESIS_DECAY,
+        );
+        *guard = smoothed.clone();
+
+        crate::decay::TopologyProtection {
+            node_protection: smoothed,
+            bridge_pairs: raw.bridge_pairs,
+        }
     }
 
     /// Apply synaptic homeostasis: global downscaling of all edge strengths.
@@ -6433,8 +6550,23 @@ impl GraphMemory {
             return Ok(crate::memory::types::GraphDecayResult::default());
         }
 
+        // W1-B topology-aware decay (default OFF). When on, compute per-node
+        // structural protection ONCE per heavy cycle over the active edge set —
+        // this is the "sleep" pass, colocated with the existing full decay, never
+        // per-write or at recall time. `None` ⇒ the prune gate is byte-identical
+        // to today's time+usage-only decision.
+        let topo_on = std::env::var("SHODH_TOPOLOGY_AWARE_DECAY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let protection = if topo_on {
+            Some(self.compute_and_smooth_topology(&all_edges))
+        } else {
+            None
+        };
+
         // Apply decay in-place on already-deserialized edges (avoids double deserialization)
-        let to_prune = self.batch_decay_edges_in_place_at(&mut all_edges, now)?;
+        let to_prune =
+            self.batch_decay_edges_in_place_at(&mut all_edges, now, protection.as_ref())?;
 
         if to_prune.is_empty() {
             return Ok(crate::memory::types::GraphDecayResult::default());
@@ -8606,7 +8738,7 @@ impl Default for EntityExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use chrono::{Duration, TimeZone};
 
     /// Every one of the 18 schema coarse ids must resolve to a real
     /// `EntityLabel` variant, never the `Other(String)` fallback. This couples
@@ -11611,6 +11743,287 @@ mod tests {
         assert_eq!(
             strengthened, 3,
             "strengthen-only reinforces the existing edges"
+        );
+    }
+
+    // =========================================================================
+    // W1-B measurement — articulation/bridge signal distribution on a REAL graph.
+    //
+    // The surviving demo RocksDB stores are unloadable (`demo-data/bridge/graph`
+    // has only its WAL `000004.log`; the MANIFEST/CURRENT were lost to OneDrive
+    // sync — the documented file-watcher failure mode — and `defence-live` is
+    // empty), so this uses the task's sanctioned fallback: ingest the W1-C bridge
+    // corpus through the real production pipeline (neural NER mints the entity
+    // nodes) and measure the resulting graph. Ignored (pays one full pipeline
+    // ingest; not run in CI). Run explicitly:
+    //   cargo test --lib measure_topology_signal_on_real_graph -- --ignored --nocapture
+    // Override unit count with SHODH_TOPO_MEASURE_UNITS (default 24, the e2e size).
+    // =========================================================================
+    #[test]
+    #[ignore = "pays one full pipeline ingest; run explicitly for the W1-B numbers table."]
+    fn measure_topology_signal_on_real_graph() {
+        use crate::recall_harness::bridge_harness::generate_bridge_fixtures;
+        use crate::recall_harness::runner::{build_manager, ingest_corpus, EVAL_USER};
+
+        // Deterministic single-threaded NER so the ingested topology is reproducible.
+        unsafe {
+            for (k, v) in [("SHODH_ONNX_THREADS", "1"), ("RAYON_NUM_THREADS", "1")] {
+                if std::env::var_os(k).is_none() {
+                    std::env::set_var(k, v);
+                }
+            }
+        }
+
+        let units: usize = std::env::var("SHODH_TOPO_MEASURE_UNITS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(24);
+        let fx = generate_bridge_fixtures(units, 6, 1);
+
+        let storage =
+            std::env::temp_dir().join(format!("shodh-topo-measure-{}", Uuid::new_v4().simple()));
+        let _ = std::fs::remove_dir_all(&storage);
+        let manager = build_manager(&storage).expect("build manager");
+        ingest_corpus(&manager, &fx.corpus).expect("ingest bridge corpus");
+        let graph = manager.get_user_graph(EVAL_USER).expect("user graph");
+        let edges = graph.read().get_all_relationships().expect("relationships");
+        let pairs: Vec<(Uuid, Uuid)> = edges.iter().map(|e| (e.from_entity, e.to_entity)).collect();
+
+        // Distinct entities that appear in an active edge (the structural graph).
+        let mut distinct: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        for (a, b) in &pairs {
+            distinct.insert(*a);
+            distinct.insert(*b);
+        }
+        let node_count = distinct.len();
+
+        let prot = crate::decay::compute_topology_protection(&pairs);
+        let artic_nodes = prot.node_protection.len(); // only critical nodes are stored
+        let bridge_edges = prot.bridge_pairs.len();
+
+        // Continuous score distribution over the critical (nonzero) nodes.
+        let mut scores: Vec<f32> = prot.node_protection.values().copied().collect();
+        scores.sort_by(|a, b| a.total_cmp(b));
+        let pct = |p: f64| -> f32 {
+            if scores.is_empty() {
+                return 0.0;
+            }
+            let idx = ((p / 100.0) * (scores.len() as f64 - 1.0)).round() as usize;
+            scores[idx.min(scores.len() - 1)]
+        };
+        let artic_frac = if node_count > 0 {
+            artic_nodes as f64 / node_count as f64
+        } else {
+            0.0
+        };
+        // Fraction of nodes above a candidate rescue floor (0.15) — the true
+        // "would be rescued" population, which the budget cap then bounds.
+        let above_floor = scores.iter().filter(|&&s| s >= 0.15).count();
+
+        eprintln!("W1B_MEASURE corpus=bridge-fixtures units={units}");
+        eprintln!(
+            "W1B_MEASURE nodes={node_count} active_edges={} distinct_undirected_edges={}",
+            pairs.len(),
+            {
+                let mut u: std::collections::HashSet<(Uuid, Uuid)> =
+                    std::collections::HashSet::new();
+                for (a, b) in &pairs {
+                    if a != b {
+                        u.insert(if a <= b { (*a, *b) } else { (*b, *a) });
+                    }
+                }
+                u.len()
+            }
+        );
+        eprintln!(
+            "W1B_MEASURE critical_nodes={artic_nodes} articulation_fraction={artic_frac:.4} bridge_edges={bridge_edges}"
+        );
+        eprintln!(
+            "W1B_MEASURE score_pctile p50={:.3} p75={:.3} p90={:.3} p95={:.3} p99={:.3} max={:.3}",
+            pct(50.0),
+            pct(75.0),
+            pct(90.0),
+            pct(95.0),
+            pct(99.0),
+            scores.last().copied().unwrap_or(0.0)
+        );
+        eprintln!(
+            "W1B_MEASURE nodes_at_or_above_0.15={above_floor} ({:.4} of all nodes)",
+            if node_count > 0 {
+                above_floor as f64 / node_count as f64
+            } else {
+                0.0
+            }
+        );
+
+        drop(graph);
+        drop(manager);
+        let _ = std::fs::remove_dir_all(&storage);
+    }
+
+    // =========================================================================
+    // W1-B two-cluster decay simulation.
+    //
+    // Two dense clusters (triangles, so intra-cluster edges are redundant — NOT
+    // bridges) joined by a SINGLE bridge edge. Age every edge equally past the
+    // L2 prune threshold; the base gate flags all of them. With topology-aware
+    // decay the bridge is rescued while the equally-old redundant cluster edges
+    // are pruned; with the feature off, every flagged edge (bridge included) is
+    // pruned — today's byte-identical behaviour.
+    // =========================================================================
+
+    fn l2_edge(from: Uuid, to: Uuid, last_activated: DateTime<Utc>) -> RelationshipEdge {
+        RelationshipEdge {
+            uuid: Uuid::new_v4(), // overwritten by add_relationship
+            from_entity: from,
+            to_entity: to,
+            relation_type: RelationType::RelatedTo,
+            strength: 0.5,
+            created_at: last_activated,
+            valid_at: last_activated,
+            invalidated_at: None,
+            source_episode_id: None,
+            context: String::new(),
+            last_activated,
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            activation_timestamps: None,
+            tier: EdgeTier::L2Episodic,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: Vec::new(),
+        }
+    }
+
+    /// Build two triangle clusters joined by one bridge edge. Returns the graph,
+    /// its tempdir (kept alive), and the bridge edge's uuid. All edges share
+    /// `origin` as `last_activated`, so a single aged `decay_at(now)` flags them
+    /// together.
+    fn build_two_cluster_bridge_graph(
+        origin: DateTime<Utc>,
+    ) -> (GraphMemory, tempfile::TempDir, Uuid) {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        // Cluster A = {a0,a1,a2}, Cluster B = {b0,b1,b2}. a0<->b0 is the bridge.
+        let a: [Uuid; 3] = [
+            Uuid::from_u128(0xA0),
+            Uuid::from_u128(0xA1),
+            Uuid::from_u128(0xA2),
+        ];
+        let b: [Uuid; 3] = [
+            Uuid::from_u128(0xB0),
+            Uuid::from_u128(0xB1),
+            Uuid::from_u128(0xB2),
+        ];
+        for &id in a.iter().chain(b.iter()) {
+            let entity = EntityNode {
+                uuid: id,
+                name: format!("e{id}"),
+                labels: vec![EntityLabel::Concept],
+                created_at: origin,
+                last_seen_at: origin,
+                mention_count: 1,
+                summary: String::new(),
+                attributes: std::collections::HashMap::new(),
+                name_embedding: None,
+                salience: 0.5,
+                is_proper_noun: false,
+                selectivity: None,
+                fine_type: None,
+            };
+            graph.add_entity(entity).unwrap();
+        }
+
+        // Dense (triangle) intra-cluster edges — redundant, never bridges.
+        for &(x, y) in &[(0usize, 1usize), (1, 2), (2, 0)] {
+            graph.add_relationship(l2_edge(a[x], a[y], origin)).unwrap();
+            graph.add_relationship(l2_edge(b[x], b[y], origin)).unwrap();
+        }
+        // The single bridge edge.
+        let bridge_uuid = graph.add_relationship(l2_edge(a[0], b[0], origin)).unwrap();
+
+        (graph, dir, bridge_uuid)
+    }
+
+    #[test]
+    fn topology_decay_rescues_bridge_prunes_redundant_cluster_edges() {
+        let origin = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let (graph, _dir, bridge_uuid) = build_two_cluster_bridge_graph(origin);
+
+        // Snapshot the active edges, then age them ~60 days in one jump so the L2
+        // min-prune-age (30d) is cleared and strength floors below threshold.
+        let mut edges = graph.get_all_relationships().unwrap();
+        assert_eq!(edges.len(), 7, "6 cluster edges + 1 bridge");
+        let now = origin + Duration::days(60);
+
+        let mut flagged: Vec<usize> = Vec::new();
+        for (i, e) in edges.iter_mut().enumerate() {
+            if e.decay_at(now) {
+                flagged.push(i);
+            }
+        }
+        assert_eq!(
+            flagged.len(),
+            7,
+            "all equally-aged edges flagged by base gate"
+        );
+
+        // Topology protection over the (connectivity-unchanged) edge set.
+        let prot = graph.compute_and_smooth_topology(&edges);
+        assert!(
+            prot.bridge_pairs.len() == 1,
+            "exactly one bridge pair, got {}",
+            prot.bridge_pairs.len()
+        );
+
+        // FLAG OFF (None): byte-identical to today — every flagged edge pruned.
+        let off = graph.select_prune_set(&edges, &flagged, None);
+        assert_eq!(off.len(), 7, "flag off prunes all flagged edges");
+        assert!(off.contains(&bridge_uuid), "flag off prunes the bridge too");
+
+        // FLAG ON: the bridge is rescued; the 6 redundant edges are pruned.
+        let on = graph.select_prune_set(&edges, &flagged, Some(&prot));
+        assert_eq!(on.len(), 6, "flag on rescues exactly the bridge");
+        assert!(
+            !on.contains(&bridge_uuid),
+            "the single bridge edge must survive the prune pass"
+        );
+        // The rescue removes exactly the bridge from the prune set.
+        let off_set: std::collections::HashSet<Uuid> = off.into_iter().collect();
+        let on_set: std::collections::HashSet<Uuid> = on.into_iter().collect();
+        let diff: Vec<&Uuid> = off_set.difference(&on_set).collect();
+        assert_eq!(
+            diff,
+            vec![&bridge_uuid],
+            "ON differs from OFF by only the bridge"
+        );
+    }
+
+    #[test]
+    fn topology_decay_flag_off_is_end_to_end_byte_identical() {
+        // Full apply_decay_at path with the env flag UNSET (default): the prune
+        // outcome must equal a graph with no topology consideration at all. We
+        // assert the bridge is NOT spared when the feature is off.
+        // Guard: this test's premise is "feature off". If the flag is set in the
+        // environment the byte-identical claim can't be exercised — skip rather
+        // than fail spuriously. No in-suite test sets it, so this is normally live.
+        if std::env::var_os("SHODH_TOPOLOGY_AWARE_DECAY").is_some() {
+            return;
+        }
+        let origin = Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap();
+        let (graph, _dir, bridge_uuid) = build_two_cluster_bridge_graph(origin);
+
+        let now = origin + Duration::days(60);
+        let result = graph.apply_decay_at(now).unwrap();
+        assert!(
+            result.pruned_count >= 7,
+            "all aged edges pruned when flag off"
+        );
+        assert!(
+            graph.get_relationship(&bridge_uuid).unwrap().is_none(),
+            "with the feature off the bridge is pruned like any other edge"
         );
     }
 }

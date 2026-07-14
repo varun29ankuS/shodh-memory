@@ -1557,6 +1557,54 @@ pub const LTP_MIN_STRENGTH: f32 = 0.01;
 pub const LTP_PRUNE_FLOOR: f32 = 0.05;
 
 // =============================================================================
+// TOPOLOGY-AWARE DECAY (W1-B) — bridge protection in the prune gate.
+//
+// Gated behind SHODH_TOPOLOGY_AWARE_DECAY (default OFF). A low-traffic node that
+// is the ONLY connector between two clusters is exactly what multi-hop retrieval
+// needs alive (measured: fragment bridges took lineage r@10 0.05 → 1.0), but
+// time+usage decay is blind to structure. In the heavy "sleep" cycle an iterative
+// Tarjan pass scores each node's structural criticality; a budgeted top slice of
+// prune-candidate edges whose loss would fragment the graph is rescued.
+// =============================================================================
+
+/// Hysteresis decay applied to a node's smoothed protection each heavy cycle it
+/// is NOT structurally critical. `protection = max(new_score, old · decay)`.
+///
+/// Articulation status flickers as edges churn; toggling protection with it would
+/// forget a bridge in the single cycle it is briefly bypassed. At 0.5 the smoothed
+/// value halves per quiet cycle (1.0 → 0.5 → 0.25 → 0.125), so protection persists
+/// ≈4 cycles ≈1 day at the ~6h heavy-cycle cadence — long enough to ride churn,
+/// short enough that a genuinely dissolved bridge stops being protected within a
+/// day. Measured articulation fraction was low (3.17% on the W1-C ingested graph),
+/// so this smoothing acts on a small, well-separated population, not a noisy mass.
+pub const TOPOLOGY_HYSTERESIS_DECAY: f32 = 0.5;
+
+/// Weight α on structural protection in the prune-gate keep score
+/// `keep = post_decay_strength + α · protection`. Used as the RANKING key that
+/// orders rescue-eligible prune candidates (a near-threshold protected bridge
+/// outranks a fully-dead one), not as an absolute gate — the step-1 measurement
+/// showed absolute scores are corpus-relative and compressed (max 0.16), so
+/// selection is by rank within a budget, not by clearing a fixed threshold.
+pub const TOPOLOGY_RESCUE_ALPHA: f32 = 0.6;
+
+/// Rescue-budget cap as a fraction of the prune candidates in a single cycle. At
+/// most this fraction (rounded up, ≥1 when any structure qualifies) of the edges
+/// that WOULD be pruned this cycle may be rescued, so over-protection can never
+/// defeat forgetting — the product's differentiator. On the measured graph only 1
+/// of 2202 undirected edges was a true bridge and 3.17% of nodes were articulation
+/// points, so the eligible population is naturally tiny; this 5% ceiling is a
+/// safety bound, rarely the active constraint.
+pub const TOPOLOGY_RESCUE_BUDGET_FRAC: f32 = 0.05;
+
+/// Minimum smoothed protection for an edge to be RESCUE-ELIGIBLE. A small epsilon
+/// (not an absolute magnitude threshold): it admits any edge touching genuine
+/// structure (articulation point / bridge endpoint, whose raw score is > 0) while
+/// rejecting numerical noise, and lets the rank + budget do the real selection.
+/// An absolute magnitude cutoff was rejected because step-1 showed scores are
+/// corpus-relative (the single true bridge was the p99 = max at only 0.16).
+pub const TOPOLOGY_RESCUE_MIN_PROTECTION: f32 = 1e-3;
+
+// =============================================================================
 // MULTI-SCALE LTP CONSTANTS (PIPE-4)
 // Based on multi-timescale memory consolidation research
 // Different activation patterns indicate different types of learning:
