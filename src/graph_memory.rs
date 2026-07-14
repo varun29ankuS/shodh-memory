@@ -1841,15 +1841,17 @@ fn person_person_knows() -> bool {
 
 /// Match relational cue phrases in ALREADY-LOWERCASED text → a typed predicate.
 /// Shared by the whole-text and span-scoped extractors below.
-fn predicate_from_cues(t: &str) -> Option<RelationType> {
+fn predicate_from_cues(t: &str) -> Option<(RelationType, &'static str)> {
     use RelationType::*;
-    let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
+    // Return the FIRST cue needle present in `t` (needle order = signal strength),
+    // so the caller learns both the predicate and the exact lexeme that fired.
+    let first = |needles: &[&'static str]| needles.iter().copied().find(|n| t.contains(n));
 
     // Ordered by signal strength; first match wins. Cue fragments are chosen to
     // survive an entity splitting the verb phrase ("X set Y in motion") — real text
     // rarely keeps a relational verb contiguous, so matching only "set in motion"
     // would miss the relation it is meant to capture.
-    if has(&[
+    if let Some(n) = first(&[
         "in motion",
         "brought about",
         "gave rise",
@@ -1861,36 +1863,36 @@ fn predicate_from_cues(t: &str) -> Option<RelationType> {
         "because of",
         "due to",
     ]) {
-        return Some(Triggers);
+        return Some((Triggers, n));
     }
-    if has(&[
+    if let Some(n) = first(&[
         "superseded",
         "replaced by",
         "deprecated",
         "obsoleted",
         "rolled back",
     ]) {
-        return Some(SupersededBy);
+        return Some((SupersededBy, n));
     }
-    if has(&[
+    if let Some(n) = first(&[
         "manages",
         "manager of",
         "oversees",
         "supervises",
         "in charge of",
     ]) {
-        return Some(Manages);
+        return Some((Manages, n));
     }
-    if has(&[
+    if let Some(n) = first(&[
         "works at",
         "works for",
         "employed by",
         "employee of",
         "joined",
     ]) {
-        return Some(WorksAt);
+        return Some((WorksAt, n));
     }
-    if has(&[
+    if let Some(n) = first(&[
         "created",
         "developed",
         "built",
@@ -1898,19 +1900,19 @@ fn predicate_from_cues(t: &str) -> Option<RelationType> {
         "designed",
         "authored",
     ]) {
-        return Some(CreatedBy);
+        return Some((CreatedBy, n));
     }
-    if has(&["depends on", "relies on", "requires", "needs"]) {
-        return Some(DependsOn);
+    if let Some(n) = first(&["depends on", "relies on", "requires", "needs"]) {
+        return Some((DependsOn, n));
     }
-    if has(&["located in", "based in", "headquartered", "situated in"]) {
-        return Some(LocatedIn);
+    if let Some(n) = first(&["located in", "based in", "headquartered", "situated in"]) {
+        return Some((LocatedIn, n));
     }
-    if has(&["part of", "belongs to", "member of", "division of"]) {
-        return Some(PartOf);
+    if let Some(n) = first(&["part of", "belongs to", "member of", "division of"]) {
+        return Some((PartOf, n));
     }
-    if has(&["uses", "using", "powered by", "built on"]) {
-        return Some(Uses);
+    if let Some(n) = first(&["uses", "using", "powered by", "built on"]) {
+        return Some((Uses, n));
     }
     None
 }
@@ -1920,7 +1922,7 @@ fn predicate_from_cues(t: &str) -> Option<RelationType> {
 /// simple single-relation path and unit tests. Prefer `extract_directed_predicate`
 /// at edge-creation time.
 pub fn extract_predicate_from_text(text: &str) -> Option<RelationType> {
-    predicate_from_cues(&text.to_ascii_lowercase())
+    predicate_from_cues(&text.to_ascii_lowercase()).map(|(rt, _)| rt)
 }
 
 /// Span-scoped, DIRECTION-aware predicate recovery. Locates both entity mentions,
@@ -1975,7 +1977,26 @@ pub fn extract_directed_predicate(
         .map(|i| hi + i)
         .unwrap_or(lc.len());
     let sentence = &lc[sent_start..sent_end];
-    let rt = predicate_from_cues(sentence)?;
+    let (rt, cue) = predicate_from_cues(sentence)?;
+
+    // PREDICATE-FRAGMENT GATE. A model-free fallback NER (no GLiNER assets) mints
+    // the cue's OWN words as entities — "motion" from "in motion", "brought" from
+    // "brought about". Such a mention sits INSIDE the predicate span, so it is the
+    // relation lexeme, not a causal argument. Left unchecked it becomes a shared
+    // causal endpoint across every sentence that uses the same cue, welding
+    // unrelated chains into cross-document causal bridges (the fallback-path
+    // lineage flood; the GLiNER typer never emits these predicate spans, so this
+    // gate is a no-op on the model path). An endpoint whose mention overlaps the
+    // fired cue's span is disqualified.
+    if let Some(cue_off) = sentence.find(cue) {
+        let cue_lo = sent_start + cue_off;
+        let cue_hi = cue_lo + cue.len();
+        let overlaps_cue = |lo: usize, len: usize| lo < cue_hi && cue_lo < lo + len;
+        if overlaps_cue(pa, a.len()) || overlaps_cue(pb, b.len()) {
+            return None;
+        }
+    }
+
     // Effect-first constructions: the earlier mention is the EFFECT, not the cause.
     const EFFECT_FIRST_CUES: [&str; 4] = ["because of", "due to", "caused by", "triggered by"];
     let effect_first = EFFECT_FIRST_CUES.iter().any(|c| sentence.contains(c));
@@ -8751,6 +8772,58 @@ mod tests {
         // Control: cause-first active voice is unchanged by the fix.
         assert_eq!(
             extract_directed_predicate("Redis caused the outage.", "Redis", "outage"),
+            Some((RelationType::Triggers, true))
+        );
+    }
+
+    #[test]
+    fn extract_directed_predicate_rejects_cue_fragment_endpoints() {
+        // The fallback NER (no GLiNER assets) mints the cue's OWN words as
+        // entities: "motion" from "in motion", "brought" from "brought about".
+        // Those mentions sit inside the predicate span, so they are the relation
+        // lexeme — never a causal argument. Pairing a real event with such a
+        // fragment must recover NO causal edge, or the shared fragment welds every
+        // chain into a cross-document causal bridge (fallback-path lineage flood).
+        assert_eq!(
+            extract_directed_predicate("Vornak set Meslin in motion.", "Vornak", "motion"),
+            None,
+            "'motion' is part of the 'in motion' cue, not a causal endpoint"
+        );
+        assert_eq!(
+            extract_directed_predicate("Vornak set Meslin in motion.", "Meslin", "motion"),
+            None,
+            "'motion' is part of the 'in motion' cue, not a causal endpoint"
+        );
+        assert_eq!(
+            extract_directed_predicate(
+                "the Meslin incident then brought about the Caldor incident.",
+                "the Meslin incident",
+                "brought"
+            ),
+            None,
+            "'brought' is part of the 'brought about' cue, not a causal endpoint"
+        );
+        assert_eq!(
+            extract_directed_predicate(
+                "the Meslin incident then brought about the Caldor incident.",
+                "brought",
+                "the Caldor incident"
+            ),
+            None,
+            "'brought' is part of the 'brought about' cue, not a causal endpoint"
+        );
+        // The genuine argument pair in the SAME sentences still types causal — the
+        // gate removes only the predicate-fragment endpoints, not the relation.
+        assert_eq!(
+            extract_directed_predicate("Vornak set Meslin in motion.", "Vornak", "Meslin"),
+            Some((RelationType::Triggers, true))
+        );
+        assert_eq!(
+            extract_directed_predicate(
+                "the Meslin incident then brought about the Caldor incident.",
+                "the Meslin incident",
+                "the Caldor incident"
+            ),
             Some((RelationType::Triggers, true))
         );
     }
