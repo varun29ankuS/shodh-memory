@@ -251,7 +251,7 @@ const B_TARGET_SUFFIX: &[&str] = &[
 const DETAIL_WORDS: &[&str] = &[
     "amber", "cobalt", "crimson", "emerald", "indigo", "ivory", "jade", "maroon", "ochre",
     "russet", "saffron", "teal", "auburn", "beryl", "cerulean", "damson", "ebony", "fawn",
-    "garnet", "heather", "iris", "juniper", "khaki", "lilac",
+    "garnet", "heather", "iris", "jasper", "khaki", "lilac",
 ];
 
 /// Cycle a base word list, appending a block suffix past the first pass so names
@@ -976,7 +976,7 @@ mod tests {
         let mut missing: Vec<String> = Vec::new();
         for u in 0..units {
             for name in [anchor_name(u), b_target_name(u)] {
-                match g.find_entity_by_name(&name) {
+                match g.find_entity_by_name_strict(&name) {
                     Ok(Some(_)) => {}
                     _ => missing.push(name),
                 }
