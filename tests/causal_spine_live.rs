@@ -71,6 +71,7 @@ fn causal_spine_on_real_bridge_prose() {
             salience: 1.0,
             is_proper_noun: true,
             selectivity: None,
+            fine_type: None,
         };
         let uuid = graph.add_entity(node).unwrap();
         entities.push((name.to_string(), uuid, label));

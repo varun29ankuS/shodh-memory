@@ -52,6 +52,7 @@ fn create_entity_from_ner(
         salience,
         is_proper_noun: is_proper,
         selectivity: None,
+        fine_type: None,
     }
 }
 
@@ -82,6 +83,7 @@ fn create_entity(
         salience,
         is_proper_noun: is_proper,
         selectivity: None,
+        fine_type: None,
     }
 }
 

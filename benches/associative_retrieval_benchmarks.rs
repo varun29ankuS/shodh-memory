@@ -41,6 +41,7 @@ fn create_entity(name: &str, label: EntityLabel, salience: f32) -> EntityNode {
         salience,
         is_proper_noun: true,
         selectivity: None,
+        fine_type: None,
     }
 }
 

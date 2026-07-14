@@ -299,38 +299,49 @@ pub struct MemorySystem {
     prediction_cache: moka::sync::Cache<MemoryId, f32>,
 }
 
-/// Resolve an entity name to a graph label and salience using pre-extracted NER data.
+/// Resolve an entity name to a graph label, salience, and fine type using
+/// pre-extracted NER data.
 ///
-/// Returns (EntityLabel, salience) based on NER type mapping, defaulting to (Concept, 0.5).
+/// When the NER record carries a GLiNER fine label, the primary [`EntityLabel`]
+/// is its schema coarse rollup (and the fine label rides along as `fine_type`).
+/// Otherwise it maps the coarse 4-class type, defaulting untyped names to
+/// (`Concept`, 0.5, `None`).
 fn resolve_entity_label(
     entity_name: &str,
-    ner_lookup: &std::collections::HashMap<String, (String, f32)>,
-) -> (crate::graph_memory::EntityLabel, f32) {
-    if let Some((ner_type, confidence)) = ner_lookup.get(&entity_name.to_lowercase()) {
+    ner_lookup: &std::collections::HashMap<String, (String, f32, Option<String>)>,
+) -> (crate::graph_memory::EntityLabel, f32, Option<String>) {
+    use crate::graph_memory::EntityLabel;
+    if let Some((ner_type, confidence, fine)) = ner_lookup.get(&entity_name.to_lowercase()) {
+        if let Some(fine) = fine {
+            let coarse = crate::entity_type::coarse_of(fine)
+                .map(EntityLabel::from_coarse_id)
+                .unwrap_or_else(|| EntityLabel::Other(fine.clone()));
+            return (coarse, *confidence, Some(fine.clone()));
+        }
         let label = match ner_type.as_str() {
-            "PER" => crate::graph_memory::EntityLabel::Person,
-            "ORG" => crate::graph_memory::EntityLabel::Organization,
-            "LOC" => crate::graph_memory::EntityLabel::Location,
-            // MISC / anything else: use the shared heuristic so a name resolves
-            // to the same richer label here as on the handler ingest path,
-            // instead of collapsing every non-PER/ORG/LOC entity to Concept.
-            _ => crate::graph_memory::classify_misc_entity(entity_name),
+            "PER" => EntityLabel::Person,
+            "ORG" => EntityLabel::Organization,
+            "LOC" => EntityLabel::Location,
+            _ => EntityLabel::Concept,
         };
-        (label, *confidence)
+        (label, *confidence, None)
     } else {
-        // No NER hit — still classify by surface form rather than defaulting to
-        // Concept, keeping this path consistent with process_experience_into_graph.
-        (crate::graph_memory::classify_misc_entity(entity_name), 0.5)
+        (EntityLabel::Concept, 0.5, None)
     }
 }
 
 /// Build a lookup table from NER entity records for label resolution.
 fn build_ner_lookup(
     ner_entities: &[NerEntityRecord],
-) -> std::collections::HashMap<String, (String, f32)> {
+) -> std::collections::HashMap<String, (String, f32, Option<String>)> {
     ner_entities
         .iter()
-        .map(|r| (r.text.to_lowercase(), (r.entity_type.clone(), r.confidence)))
+        .map(|r| {
+            (
+                r.text.to_lowercase(),
+                (r.entity_type.clone(), r.confidence, r.fine_label.clone()),
+            )
+        })
         .collect()
 }
 
@@ -389,15 +400,15 @@ mod char_truncate_tests {
 #[cfg(test)]
 mod resolve_entity_label_tests {
     use super::resolve_entity_label;
-    use crate::graph_memory::{classify_misc_entity, EntityLabel};
+    use crate::graph_memory::EntityLabel;
     use std::collections::HashMap;
 
     #[test]
     fn ner_per_org_loc_map_directly() {
         let mut lookup = HashMap::new();
-        lookup.insert("alice".to_string(), ("PER".to_string(), 0.9));
-        lookup.insert("acme".to_string(), ("ORG".to_string(), 0.8));
-        lookup.insert("paris".to_string(), ("LOC".to_string(), 0.7));
+        lookup.insert("alice".to_string(), ("PER".to_string(), 0.9, None));
+        lookup.insert("acme".to_string(), ("ORG".to_string(), 0.8, None));
+        lookup.insert("paris".to_string(), ("LOC".to_string(), 0.7, None));
         assert_eq!(
             resolve_entity_label("Alice", &lookup).0,
             EntityLabel::Person
@@ -413,25 +424,35 @@ mod resolve_entity_label_tests {
     }
 
     #[test]
-    fn misc_uses_shared_classifier_not_blanket_concept() {
+    fn fine_label_drives_coarse_rollup_and_fine_type() {
         let mut lookup = HashMap::new();
-        lookup.insert("postgresql".to_string(), ("MISC".to_string(), 0.6));
-        // Previously every non-PER/ORG/LOC entity collapsed to Concept; now it
-        // resolves through the same heuristic the handler path uses.
-        let (label, conf) = resolve_entity_label("PostgreSQL", &lookup);
-        assert_eq!(label, classify_misc_entity("PostgreSQL"));
-        assert_eq!(label, EntityLabel::Product);
+        // GLiNER typed "Baltimore" as the fine label "city" → coarse gpe.
+        lookup.insert(
+            "baltimore".to_string(),
+            ("LOC".to_string(), 0.6, Some("city".to_string())),
+        );
+        let (label, conf, fine) = resolve_entity_label("Baltimore", &lookup);
+        assert_eq!(label, EntityLabel::Gpe);
+        assert_eq!(fine.as_deref(), Some("city"));
         assert_eq!(conf, 0.6);
     }
 
     #[test]
-    fn unknown_name_classified_by_surface_form() {
+    fn misc_without_fine_label_defaults_to_concept() {
+        let mut lookup = HashMap::new();
+        lookup.insert("widget".to_string(), ("MISC".to_string(), 0.6, None));
+        let (label, conf, fine) = resolve_entity_label("widget", &lookup);
+        assert_eq!(label, EntityLabel::Concept);
+        assert!(fine.is_none());
+        assert_eq!(conf, 0.6);
+    }
+
+    #[test]
+    fn unknown_name_defaults_to_concept() {
         let lookup = HashMap::new();
-        // No NER hit: still classified instead of defaulting to Concept blindly.
-        assert_eq!(
-            resolve_entity_label("postmortem", &lookup).0,
-            EntityLabel::Event
-        );
+        let (label, _, fine) = resolve_entity_label("postmortem", &lookup);
+        assert_eq!(label, EntityLabel::Concept);
+        assert!(fine.is_none());
     }
 }
 
@@ -8080,6 +8101,7 @@ impl MemorySystem {
                         .map(|c| c.is_uppercase())
                         .unwrap_or(false),
                     selectivity: None,
+                    fine_type: None,
                 };
                 if graph_guard.add_entity(entity).is_ok() {
                     entities_added += 1;
@@ -8441,7 +8463,8 @@ impl MemorySystem {
                     .iter()
                     .zip(entity_embeddings)
                     .map(|(entity_name, embedding)| {
-                        let (label, salience) = resolve_entity_label(entity_name, &ner_lookup);
+                        let (label, salience, fine_type) =
+                            resolve_entity_label(entity_name, &ner_lookup);
                         crate::graph_memory::EntityNode {
                             uuid: Uuid::new_v4(),
                             name: entity_name.clone(),
@@ -8459,6 +8482,7 @@ impl MemorySystem {
                                 .map(|c| c.is_uppercase())
                                 .unwrap_or(false),
                             selectivity: None,
+                            fine_type,
                         }
                     })
                     .collect();
@@ -10370,6 +10394,7 @@ mod companion_injection_tests {
             salience: 1.0,
             is_proper_noun: true,
             selectivity: None,
+            fine_type: None,
         };
         graph.add_entity(node).expect("add entity")
     }
@@ -10638,6 +10663,7 @@ mod companion_rerank_tests {
             salience: 1.0,
             is_proper_noun: true,
             selectivity: None,
+            fine_type: None,
         };
         graph.add_entity(node).expect("add entity")
     }

@@ -380,6 +380,7 @@ pub async fn add_entity(
         salience: 0.5,
         is_proper_noun: true,
         selectivity: None,
+        fine_type: None,
     };
 
     graph_guard.add_entity(entity).map_err(AppError::Internal)?;

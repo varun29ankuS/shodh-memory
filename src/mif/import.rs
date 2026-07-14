@@ -262,6 +262,7 @@ pub fn import_graph_entities(kg: &MifKnowledgeGraph, graph: &GraphMemory) -> (us
             salience: 0.5,
             is_proper_noun: true,
             selectivity: None,
+            fine_type: entity.fine_type.clone(),
         };
 
         match graph.add_entity(node) {
@@ -464,6 +465,18 @@ fn parse_entity_label(s: &str) -> EntityLabel {
         "team" => EntityLabel::Team,
         "role" => EntityLabel::Role,
         "module" => EntityLabel::Module,
+        "norp" => EntityLabel::Norp,
+        "gpe" => EntityLabel::Gpe,
+        "facility" => EntityLabel::Facility,
+        "vehicle" => EntityLabel::Vehicle,
+        "weapon" => EntityLabel::Weapon,
+        "work" => EntityLabel::Work,
+        "law" => EntityLabel::Law,
+        "title" => EntityLabel::Title,
+        "cyber" => EntityLabel::Cyber,
+        "money" => EntityLabel::Money,
+        "quantity" => EntityLabel::Quantity,
+        "time" => EntityLabel::Time,
         other => EntityLabel::Other(other.to_string()),
     }
 }

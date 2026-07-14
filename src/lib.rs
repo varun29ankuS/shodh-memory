@@ -28,6 +28,7 @@ pub mod decay;
 pub mod dep_parser;
 pub mod embeddings;
 pub mod entity_resolution;
+pub mod entity_type;
 pub mod errors;
 pub mod fs_matcher;
 pub mod graph_memory;

@@ -1584,6 +1584,7 @@ mod tests {
             confidence: 0.95,
             start: 0,
             end: 9,
+            fine_label: None,
         };
 
         let detected = DetectedEntity::from(&ner_entity);

@@ -157,6 +157,14 @@ pub struct EntityNode {
     /// Computed during Forman-Ricci curvature pass. None = not yet computed.
     #[serde(default)]
     pub selectivity: Option<f32>,
+
+    /// Fine-grained schema leaf type (e.g. `"bridge"`, `"malware"`), one level
+    /// more specific than the coarse [`EntityLabel`]. Populated by the GLiNER
+    /// schema-driven typer (`crate::entity_type`); `None` for entities typed
+    /// only at coarse granularity (regex/tag/heuristic extraction paths, or
+    /// records written before this field existed).
+    #[serde(default)]
+    pub fine_type: Option<String>,
 }
 
 fn default_salience() -> f32 {
@@ -211,6 +219,30 @@ pub enum EntityLabel {
     Role,
     /// Code modules, packages, crates, libraries, ROS2 packages
     Module,
+    /// Nationalities, religious, or political groups (schema coarse: `norp`)
+    Norp,
+    /// Geopolitical entity — countries, cities, states as political actors (schema coarse: `gpe`)
+    Gpe,
+    /// Buildings, airports, highways, bridges (schema coarse: `facility`)
+    Facility,
+    /// Cars, trains, ships, aircraft (schema coarse: `vehicle`)
+    Vehicle,
+    /// Weapons and munitions (schema coarse: `weapon`)
+    Weapon,
+    /// Titled creative works — books, films, songs, artworks (schema coarse: `work`)
+    Work,
+    /// Named laws, treaties, regulations, court cases (schema coarse: `law`)
+    Law,
+    /// Honorifics and named positions — "President", "CEO" (schema coarse: `title`)
+    Title,
+    /// Malware, CVEs, threat actors, cyber campaigns (schema coarse: `cyber`)
+    Cyber,
+    /// Monetary amounts (schema coarse: `money`)
+    Money,
+    /// Non-monetary measurements — distance, weight, percentages (schema coarse: `quantity`)
+    Quantity,
+    /// Times of day / durations, distinct from calendar `Date` (schema coarse: `time`)
+    Time,
     Other(String),
 }
 
@@ -242,7 +274,50 @@ impl EntityLabel {
             Self::Team => "Team",
             Self::Role => "Role",
             Self::Module => "Module",
+            Self::Norp => "Norp",
+            Self::Gpe => "Gpe",
+            Self::Facility => "Facility",
+            Self::Vehicle => "Vehicle",
+            Self::Weapon => "Weapon",
+            Self::Work => "Work",
+            Self::Law => "Law",
+            Self::Title => "Title",
+            Self::Cyber => "Cyber",
+            Self::Money => "Money",
+            Self::Quantity => "Quantity",
+            Self::Time => "Time",
             Self::Other(s) => s.as_str(),
+        }
+    }
+
+    /// Map a schema coarse id (from `crate::entity_type::schema().coarse`) to the
+    /// matching `EntityLabel` variant.
+    ///
+    /// All 18 coarse ids in the entity-type schema resolve to a real variant —
+    /// GLiNER typing must never degrade a schema-recognized coarse class to
+    /// `Other(String)`. An id outside the schema (e.g. a stale/foreign value)
+    /// still falls back to `Other` rather than panicking.
+    pub fn from_coarse_id(id: &str) -> EntityLabel {
+        match id {
+            "person" => EntityLabel::Person,
+            "organization" => EntityLabel::Organization,
+            "location" => EntityLabel::Location,
+            "product" => EntityLabel::Product,
+            "event" => EntityLabel::Event,
+            "date" => EntityLabel::Date,
+            "norp" => EntityLabel::Norp,
+            "gpe" => EntityLabel::Gpe,
+            "facility" => EntityLabel::Facility,
+            "vehicle" => EntityLabel::Vehicle,
+            "weapon" => EntityLabel::Weapon,
+            "work" => EntityLabel::Work,
+            "law" => EntityLabel::Law,
+            "title" => EntityLabel::Title,
+            "cyber" => EntityLabel::Cyber,
+            "money" => EntityLabel::Money,
+            "quantity" => EntityLabel::Quantity,
+            "time" => EntityLabel::Time,
+            other => EntityLabel::Other(other.to_string()),
         }
     }
 
@@ -273,6 +348,12 @@ impl EntityLabel {
             | Self::Metric
             | Self::Environment
             | Self::Project => &[EntityLabel::Concept],
+            // GLiNER coarse subtypes (schema-driven typing)
+            Self::Gpe | Self::Facility => &[EntityLabel::Location],
+            Self::Vehicle | Self::Weapon => &[EntityLabel::Product],
+            Self::Title => &[EntityLabel::Role],
+            Self::Work | Self::Law | Self::Cyber => &[EntityLabel::Concept],
+            Self::Norp => &[EntityLabel::Organization],
             // Base types and Other have no parents
             _ => &[],
         }
@@ -400,68 +481,6 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
 
     // Default: Technology (reasonable fallback for unknown tags)
     EntityLabel::Technology
-}
-
-/// Classify a MISC NER entity (or an otherwise-untyped name) into a more
-/// specific `EntityLabel`.
-///
-/// The NER model only outputs PER/ORG/LOC/MISC. For MISC entities that pass
-/// quality gates, we use heuristic rules to assign a richer ontological type.
-/// This activates type-aware spreading activation and `matches_with_hierarchy()`
-/// in retrieval — `Concept` entities participate in the type hierarchy while
-/// `Other("MISC")` is invisible to it. Shared by every ingest path so the same
-/// name resolves to the same label regardless of entry point.
-pub fn classify_misc_entity(name: &str) -> EntityLabel {
-    let lower = name.to_lowercase();
-
-    // Event-like terms (checked first — "conference" ends with "ence" concept suffix)
-    const EVENT_WORDS: &[&str] = &[
-        "conference",
-        "summit",
-        "meetup",
-        "hackathon",
-        "sprint",
-        "launch",
-        "release",
-        "incident",
-        "outage",
-        "postmortem",
-    ];
-    if EVENT_WORDS.iter().any(|w| lower.contains(w)) {
-        return EntityLabel::Event;
-    }
-
-    // Skill / role indicators (before concept — "engineer" ends with suffix-like patterns)
-    const SKILL_WORDS: &[&str] = &[
-        "engineer",
-        "architect",
-        "developer",
-        "designer",
-        "analyst",
-        "programming",
-        "scripting",
-    ];
-    if SKILL_WORDS.iter().any(|w| lower.contains(w)) {
-        return EntityLabel::Skill;
-    }
-
-    // Concept suffixes — abstract ideas, methodologies, qualities
-    const CONCEPT_SUFFIXES: &[&str] = &[
-        "ism", "ology", "ity", "ness", "ment", "ance", "ence", "tion", "sion",
-    ];
-    if CONCEPT_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
-        return EntityLabel::Concept;
-    }
-
-    // PascalCase proper nouns without spaces/hyphens → likely a Product
-    // (e.g., "JavaScript", "PostgreSQL", "FastAPI", "ChatGPT")
-    let has_internal_upper = name.chars().skip(1).any(|c| c.is_uppercase());
-    if has_internal_upper && !name.contains(' ') && !name.contains('-') && name.len() > 2 {
-        return EntityLabel::Product;
-    }
-
-    // Default: Concept (participates in type hierarchy via Role→Concept parent)
-    EntityLabel::Concept
 }
 
 /// Memory tier for edge consolidation
@@ -913,12 +932,14 @@ fn decode_relationship_edge(data: &[u8]) -> Result<(RelationshipEdge, bool)> {
 }
 
 /// Postcard defaults for trailing `EntityNode` fields added after the postcard
-/// cutover (#192): `selectivity: Option` (None = `0x00`). Keep in sync with any
-/// new trailing field.
-const ENTITY_NODE_DEFAULT_SUFFIX: &[u8] = &[0x00];
+/// cutover (#192), in declaration order: `selectivity: Option` (None = `0x00`),
+/// `fine_type: Option<String>` (None = `0x00`). Keep in sync with any new
+/// trailing field — append one `0x00` (or the field's postcard-encoded default)
+/// per field, in the order the fields appear in the struct.
+const ENTITY_NODE_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00];
 
 /// Decode a stored `EntityNode`, tolerating legacy records written before trailing
-/// fields (e.g. `selectivity`) existed. See [`crate::serialization::try_decode_compat`].
+/// fields (e.g. `selectivity`, `fine_type`) existed. See [`crate::serialization::try_decode_compat`].
 fn decode_entity_node(data: &[u8]) -> Result<(EntityNode, bool)> {
     crate::serialization::try_decode_compat::<EntityNode>(data, ENTITY_NODE_DEFAULT_SUFFIX)
 }
@@ -2668,6 +2689,7 @@ impl GraphMemory {
             salience: EntityExtractor::calculate_base_salience(&EntityLabel::Event, false),
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         self.add_entity(node).ok()
     }
@@ -3241,6 +3263,13 @@ impl GraphMemory {
                 // Preserve existing embedding if the incoming one is None
                 if entity.name_embedding.is_none() {
                     entity.name_embedding = existing.name_embedding;
+                }
+
+                // Preserve an existing fine type when the re-mention carries none.
+                // Re-mentions are the common case (pre-extracted names, tags, fallback
+                // entities), and they must not wipe a fine type GLiNER already set.
+                if entity.fine_type.is_none() {
+                    entity.fine_type = existing.fine_type.clone();
                 }
 
                 // Merge summary: first non-empty wins, preserve existing
@@ -7010,6 +7039,18 @@ fn entity_type_color(label: Option<&EntityLabel>) -> String {
         Some(EntityLabel::Team) => "#27AE60".to_string(),   // Green — organizational
         Some(EntityLabel::Role) => "#8E44AD".to_string(),   // Dark purple — roles
         Some(EntityLabel::Module) => "#D35400".to_string(), // Pumpkin — code modules
+        Some(EntityLabel::Norp) => "#C0392B".to_string(),   // Brick red — groups/affiliations
+        Some(EntityLabel::Gpe) => "#5DADE2".to_string(),    // Lighter blue — political geography
+        Some(EntityLabel::Facility) => "#7F8C8D".to_string(), // Slate — built structures
+        Some(EntityLabel::Vehicle) => "#34495E".to_string(), // Dark slate — vehicles
+        Some(EntityLabel::Weapon) => "#922B21".to_string(), // Dark red — weapons
+        Some(EntityLabel::Work) => "#AF7AC5".to_string(),   // Orchid — creative works
+        Some(EntityLabel::Law) => "#6C3483".to_string(),    // Deep violet — legal instruments
+        Some(EntityLabel::Title) => "#CA6F1E".to_string(),  // Burnt orange — honorifics/positions
+        Some(EntityLabel::Cyber) => "#17202A".to_string(),  // Near-black — threats/malware
+        Some(EntityLabel::Money) => "#28B463".to_string(),  // Money green
+        Some(EntityLabel::Quantity) => "#F5B041".to_string(), // Amber — measurements
+        Some(EntityLabel::Time) => "#A569BD".to_string(),   // Violet — distinct from Date's light purple
         Some(EntityLabel::Other(_)) => "#AEB6BF".to_string(), // Gray
         None => "#AEB6BF".to_string(),                      // Gray default
     }
@@ -8139,6 +8180,18 @@ impl EntityExtractor {
             EntityLabel::Team => 0.7,           // Teams are organizational anchors
             EntityLabel::Role => 0.55,          // Roles are semi-generic
             EntityLabel::Module => 0.55,        // Modules are code-level entities
+            EntityLabel::Norp => 0.55,          // Nationalities/groups are moderately salient
+            EntityLabel::Gpe => 0.6,            // Geopolitical entities, on par with Location
+            EntityLabel::Facility => 0.5,       // Facilities are concrete but generic
+            EntityLabel::Vehicle => 0.5,        // Vehicles are concrete but generic
+            EntityLabel::Weapon => 0.55,        // Weapons are specific, notable entities
+            EntityLabel::Work => 0.6,           // Named works are specific, on par with Product
+            EntityLabel::Law => 0.55,           // Named laws/regulations are specific anchors
+            EntityLabel::Title => 0.5,          // Titles are semi-generic, like Role
+            EntityLabel::Cyber => 0.55,         // Cyber entities (CVEs, malware) are specific
+            EntityLabel::Money => 0.4,          // Monetary amounts are structural, like Date
+            EntityLabel::Quantity => 0.35,      // Measurements are structural, low salience
+            EntityLabel::Time => 0.3,           // Time-of-day is structural, like Date
             EntityLabel::Other(_) => 0.3,       // Unknown types get low salience
         };
 
@@ -8534,6 +8587,65 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
+    /// Every one of the 18 schema coarse ids must resolve to a real
+    /// `EntityLabel` variant, never the `Other(String)` fallback. This couples
+    /// the entity-type schema asset (`src/entity_type/entity-type-schema.json`)
+    /// to the type system so future schema drift (a coarse id added to the
+    /// JSON without a matching enum variant) fails CI instead of silently
+    /// degrading GLiNER-typed entities to `Other`.
+    #[test]
+    fn every_schema_coarse_maps_to_a_variant() {
+        for coarse in &crate::entity_type::schema().coarse {
+            let label = EntityLabel::from_coarse_id(&coarse.id);
+            assert!(
+                !matches!(label, EntityLabel::Other(_)),
+                "coarse id `{}` rolled up to Other(_) — EntityLabel::from_coarse_id is missing a variant for it",
+                coarse.id
+            );
+        }
+    }
+
+    /// Every one of the 141 schema fine leaves must roll up (via
+    /// `coarse_of`) to a coarse id that `from_coarse_id` resolves to a real
+    /// `EntityLabel` variant. This is the end-to-end check: a fine label
+    /// GLiNER actually predicts must never dead-end in `Other(_)`.
+    #[test]
+    fn every_fine_rolls_up_to_a_real_variant() {
+        for fine in &crate::entity_type::schema().fine {
+            let coarse_id = crate::entity_type::coarse_of(&fine.label).unwrap_or_else(|| {
+                panic!(
+                    "fine label `{}` has no coarse rollup in the schema",
+                    fine.label
+                )
+            });
+            let label = EntityLabel::from_coarse_id(coarse_id);
+            assert!(
+                !matches!(label, EntityLabel::Other(_)),
+                "fine label `{}` rolls up to coarse `{}` which resolves to Other(_) — EntityLabel::from_coarse_id is missing a variant for it",
+                fine.label,
+                coarse_id
+            );
+        }
+    }
+
+    /// The GLiNER coarse subtypes added alongside the schema (Gpe, Facility,
+    /// Vehicle, Weapon, Title, Work, Law, Cyber, Norp) must roll up through
+    /// `parent_labels()` so type-gated retrieval still matches them — a
+    /// "where"-query expecting `[Location]` must not miss `Gpe`/`Facility`
+    /// entities just because GLiNER typed them at the finer variant.
+    #[test]
+    fn new_coarse_variants_match_their_hierarchy_parent() {
+        assert!(EntityLabel::Gpe.matches_with_hierarchy(&EntityLabel::Location));
+        assert!(EntityLabel::Facility.matches_with_hierarchy(&EntityLabel::Location));
+        assert!(EntityLabel::Vehicle.matches_with_hierarchy(&EntityLabel::Product));
+        assert!(EntityLabel::Weapon.matches_with_hierarchy(&EntityLabel::Product));
+        assert!(EntityLabel::Title.matches_with_hierarchy(&EntityLabel::Role));
+        assert!(EntityLabel::Work.matches_with_hierarchy(&EntityLabel::Concept));
+        assert!(EntityLabel::Law.matches_with_hierarchy(&EntityLabel::Concept));
+        assert!(EntityLabel::Cyber.matches_with_hierarchy(&EntityLabel::Concept));
+        assert!(EntityLabel::Norp.matches_with_hierarchy(&EntityLabel::Organization));
+    }
+
     #[test]
     fn spreading_weight_prefers_predicates_over_cooccurrence() {
         // The load-bearing contrast: a real causal predicate must out-weight bare
@@ -8867,13 +8979,129 @@ mod tests {
     }
 
     #[test]
-    fn classify_misc_entity_maps_surface_forms() {
-        assert_eq!(classify_misc_entity("postmortem"), EntityLabel::Event);
-        assert_eq!(classify_misc_entity("backend engineer"), EntityLabel::Skill);
-        assert_eq!(classify_misc_entity("scalability"), EntityLabel::Concept);
-        assert_eq!(classify_misc_entity("PostgreSQL"), EntityLabel::Product);
-        // Plain lowercase noun with no signal → Concept (still type-hierarchy visible)
-        assert_eq!(classify_misc_entity("widget"), EntityLabel::Concept);
+    fn entity_node_fine_type_roundtrips() {
+        // Same persistence path production code uses: GraphMemory::add_entity
+        // (crate::serialization::encode over postcard) and get_entity
+        // (decode_entity_node / try_decode_compat).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let now = Utc::now();
+
+        let entity = EntityNode {
+            uuid: Uuid::new_v4(),
+            name: "Francis Scott Key Bridge".to_string(),
+            labels: vec![EntityLabel::Facility],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: Some("bridge".to_string()),
+        };
+        let entity_uuid = graph.add_entity(entity).unwrap();
+
+        let roundtripped = graph.get_entity(&entity_uuid).unwrap().unwrap();
+        assert_eq!(roundtripped.fine_type, Some("bridge".to_string()));
+    }
+
+    #[test]
+    fn add_entity_remention_preserves_existing_fine_type() {
+        // Deferred fix: a re-mention that carries no fine type must NOT wipe the
+        // fine type an earlier mention (e.g. GLiNER) already set. Re-mentions are
+        // the common case (pre-extracted names, tags, fallback entities).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let now = Utc::now();
+
+        let make = |fine: Option<String>| EntityNode {
+            uuid: Uuid::new_v4(),
+            name: "Baltimore".to_string(),
+            labels: vec![EntityLabel::Gpe],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: fine,
+        };
+
+        // First mention: GLiNER typed it "city".
+        let uuid = graph.add_entity(make(Some("city".to_string()))).unwrap();
+        // Re-mention with no fine type (e.g. a tag or fallback entity).
+        let uuid2 = graph.add_entity(make(None)).unwrap();
+        assert_eq!(uuid, uuid2, "re-mention should merge into the same node");
+
+        let merged = graph.get_entity(&uuid).unwrap().unwrap();
+        assert_eq!(
+            merged.fine_type,
+            Some("city".to_string()),
+            "re-mention without a fine type must preserve the existing one"
+        );
+        assert_eq!(merged.mention_count, 2);
+    }
+
+    #[test]
+    fn legacy_entity_node_defaults_fine_type_to_none() {
+        // Mirrors the pre-fine_type EntityNode schema (all fields through
+        // `selectivity`, no trailing `fine_type`) — the exact shape of every
+        // EntityNode already written to the live RocksDB store before this
+        // field existed. `decode_entity_node` must backfill fine_type=None
+        // via ENTITY_NODE_DEFAULT_SUFFIX rather than failing to decode.
+        #[derive(serde::Serialize)]
+        struct LegacyEntityNode {
+            uuid: Uuid,
+            name: String,
+            labels: Vec<EntityLabel>,
+            created_at: DateTime<Utc>,
+            last_seen_at: DateTime<Utc>,
+            mention_count: usize,
+            summary: String,
+            attributes: HashMap<String, String>,
+            name_embedding: Option<Vec<f32>>,
+            salience: f32,
+            is_proper_noun: bool,
+            selectivity: Option<f32>,
+        }
+
+        let now = Utc::now();
+        let uuid = Uuid::new_v4();
+        let legacy = LegacyEntityNode {
+            uuid,
+            name: "Legacy Bridge".to_string(),
+            labels: vec![EntityLabel::Facility],
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 3,
+            summary: "a pre-fine_type record".to_string(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.7,
+            is_proper_noun: true,
+            selectivity: Some(0.42),
+        };
+
+        let bytes = crate::serialization::encode(&legacy).unwrap();
+        let (decoded, needs_migration) = decode_entity_node(&bytes).unwrap();
+
+        assert_eq!(decoded.uuid, uuid);
+        assert_eq!(decoded.name, "Legacy Bridge");
+        assert_eq!(decoded.selectivity, Some(0.42));
+        assert_eq!(
+            decoded.fine_type, None,
+            "legacy record without fine_type must default to None"
+        );
+        assert!(
+            needs_migration,
+            "legacy-shaped record should be flagged for rewrite-on-read"
+        );
     }
 
     #[test]
@@ -8895,6 +9123,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         let entity_uuid = graph.add_entity(entity).unwrap();
 
@@ -9117,6 +9346,7 @@ mod tests {
                 salience: 0.5,
                 is_proper_noun: false,
                 selectivity: None,
+                fine_type: None,
             })
             .unwrap();
         let (memtables, _readers) = graph.rocksdb_memory_breakdown();
@@ -9799,6 +10029,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         let entity2 = EntityNode {
             uuid: Uuid::new_v4(),
@@ -9813,6 +10044,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
 
         let entity1_uuid = graph.add_entity(entity1.clone()).unwrap();
@@ -9863,6 +10095,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         let entity2 = EntityNode {
             uuid: entity2_uuid,
@@ -9877,6 +10110,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
 
         graph.add_entity(entity1).unwrap();
@@ -10013,6 +10247,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         graph.add_entity(entity).unwrap();
 
@@ -10066,6 +10301,7 @@ mod tests {
                 salience: 0.5,
                 is_proper_noun: false,
                 selectivity: None,
+                fine_type: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -10136,6 +10372,7 @@ mod tests {
                 salience: 0.5,
                 is_proper_noun: false,
                 selectivity: None,
+                fine_type: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -10210,6 +10447,7 @@ mod tests {
                 salience: 0.5,
                 is_proper_noun: false,
                 selectivity: None,
+                fine_type: None,
             };
             graph.add_entity(entity).unwrap();
         }
@@ -10314,6 +10552,7 @@ mod tests {
             salience: 0.5,
             is_proper_noun: false,
             selectivity: None,
+            fine_type: None,
         };
         // add_entity may dedup and return a different UUID
         graph.add_entity(entity).unwrap()
