@@ -634,6 +634,9 @@ mod tests {
                 experience_type: ExperienceType::Context,
                 content: format!("Session history seed entry number {i}"),
                 entities: vec!["session-summary".to_string()],
+                // The handler queries recall_by_tags(["session-summary"]); tag the
+                // seed the way production does, not just via `entities`.
+                tags: vec!["session-summary".to_string()],
                 metadata,
                 ..Default::default()
             };
