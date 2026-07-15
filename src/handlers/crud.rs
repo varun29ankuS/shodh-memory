@@ -70,13 +70,29 @@ pub struct ListMemoriesRequest {
 #[derive(Debug, Serialize)]
 pub struct ListMemoryItem {
     pub id: String,
+    /// Content preview, truncated to 500 chars. Check `content_truncated` before
+    /// treating this as the full content — fetch GET /api/memories/{id} for the
+    /// complete text.
     pub content: String,
+    /// True if `content` was cut short of the memory's actual content. When true,
+    /// `content_length` holds the true character count so callers know how much
+    /// is missing.
+    pub content_truncated: bool,
+    /// True character length of the full (untruncated) content.
+    pub content_length: usize,
     pub memory_type: String,
     pub importance: f32,
     pub tags: Vec<String>,
     pub created_at: String,
     pub tier: String,
 }
+
+/// Hard ceiling on the content preview returned by the memory-listing endpoints
+/// (`/api/list/{user_id}`, `/api/memories`). Content beyond this length is cut off
+/// in `ListMemoryItem::content`; `content_truncated`/`content_length` on the item
+/// signal when that happened so callers know to fetch the full record rather than
+/// silently treating the preview as complete.
+const LIST_CONTENT_PREVIEW_CHARS: usize = 500;
 
 // =============================================================================
 // UPDATE/DELETE RESPONSE TYPES
@@ -297,14 +313,25 @@ pub async fn list_memories(
     let memories: Vec<ListMemoryItem> = filtered
         .into_iter()
         .take(limit)
-        .map(|m| ListMemoryItem {
-            id: m.id.0.to_string(),
-            content: m.experience.content.chars().take(500).collect(),
-            memory_type: format!("{:?}", m.experience.experience_type),
-            importance: m.importance(),
-            tags: m.experience.entities.clone(),
-            created_at: m.created_at.to_rfc3339(),
-            tier: format!("{:?}", m.tier),
+        .map(|m| {
+            let content_length = m.experience.content.chars().count();
+            let content_truncated = content_length > LIST_CONTENT_PREVIEW_CHARS;
+            ListMemoryItem {
+                id: m.id.0.to_string(),
+                content: m
+                    .experience
+                    .content
+                    .chars()
+                    .take(LIST_CONTENT_PREVIEW_CHARS)
+                    .collect(),
+                content_truncated,
+                content_length,
+                memory_type: format!("{:?}", m.experience.experience_type),
+                importance: m.importance(),
+                tags: m.experience.entities.clone(),
+                created_at: m.created_at.to_rfc3339(),
+                tier: format!("{:?}", m.tier),
+            }
         })
         .collect();
 
@@ -404,14 +431,25 @@ async fn list_memories_inner(
     let memories: Vec<ListMemoryItem> = filtered
         .into_iter()
         .take(limit)
-        .map(|m| ListMemoryItem {
-            id: m.id.0.to_string(),
-            content: m.experience.content.chars().take(500).collect(),
-            memory_type: format!("{:?}", m.experience.experience_type),
-            importance: m.importance(),
-            tags: m.experience.entities.clone(),
-            created_at: m.created_at.to_rfc3339(),
-            tier: format!("{:?}", m.tier),
+        .map(|m| {
+            let content_length = m.experience.content.chars().count();
+            let content_truncated = content_length > LIST_CONTENT_PREVIEW_CHARS;
+            ListMemoryItem {
+                id: m.id.0.to_string(),
+                content: m
+                    .experience
+                    .content
+                    .chars()
+                    .take(LIST_CONTENT_PREVIEW_CHARS)
+                    .collect(),
+                content_truncated,
+                content_length,
+                memory_type: format!("{:?}", m.experience.experience_type),
+                importance: m.importance(),
+                tags: m.experience.entities.clone(),
+                created_at: m.created_at.to_rfc3339(),
+                tier: format!("{:?}", m.tier),
+            }
         })
         .collect();
 
@@ -1061,5 +1099,73 @@ fn parse_experience_type(type_str: &str) -> Result<ExperienceType, AppError> {
             field: "memory_type".to_string(),
             reason: format!("Invalid memory type: {type_str}"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::handlers::test_helpers::{self, TestHarness};
+    use crate::memory::Experience;
+    use axum::http::StatusCode;
+
+    /// Regression test for the silent-truncation bug: `/api/list/{user_id}`
+    /// used to cut content to 500 chars with no signal it was incomplete.
+    /// Verifies `content_truncated`/`content_length` correctly flag a long
+    /// memory and correctly report `false`/exact-length for a short one.
+    #[tokio::test]
+    async fn list_memories_marks_truncated_content() {
+        let harness = TestHarness::new();
+        let user_id = "truncation-user";
+
+        let long_content = "a".repeat(600);
+        let short_content = "b".repeat(42);
+
+        {
+            let memory = harness.manager.get_user_memory(user_id).unwrap();
+            let guard = memory.read();
+            guard
+                .remember(
+                    Experience {
+                        content: long_content.clone(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap();
+            guard
+                .remember(
+                    Experience {
+                        content: short_content.clone(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+
+        let req = test_helpers::get(&format!("/api/list/{user_id}?limit=10"));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let memories = body["memories"].as_array().unwrap();
+        assert_eq!(memories.len(), 2);
+
+        let long_item = memories
+            .iter()
+            .find(|m| m["content_truncated"] == true)
+            .expect("expected one truncated item");
+        assert_eq!(long_item["content_length"], 600u64);
+        assert_eq!(
+            long_item["content"].as_str().unwrap().chars().count(),
+            500,
+            "preview must still be capped at 500 chars"
+        );
+
+        let short_item = memories
+            .iter()
+            .find(|m| m["content_truncated"] == false)
+            .expect("expected one non-truncated item");
+        assert_eq!(short_item["content_length"], 42u64);
+        assert_eq!(short_item["content"], short_content);
     }
 }

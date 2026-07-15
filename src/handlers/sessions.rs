@@ -350,8 +350,14 @@ fn default_history_limit() -> usize {
 #[derive(Debug, Deserialize)]
 pub struct SessionHistoryRequest {
     pub user_id: String,
+    /// Max sessions to return. Defaults to 10, clamped to [`validation::MAX_LIMIT`].
     #[serde(default = "default_history_limit")]
     pub limit: usize,
+    /// Sessions to skip before collecting `limit` results. Defaults to 0.
+    /// Combine with `total` in the response to page through results beyond
+    /// [`validation::MAX_LIMIT`] (e.g. offset += limit).
+    #[serde(default)]
+    pub offset: Option<usize>,
     #[serde(default)]
     pub group_by_project: bool,
 }
@@ -383,10 +389,14 @@ pub struct SessionHistoryResponse {
     pub success: bool,
     pub sessions: Vec<SessionHistoryEntry>,
     pub project_threads: Vec<ProjectThread>,
+    /// Total matching sessions (not just the returned page). Compare against
+    /// `offset + sessions.len()` to know whether more pages remain.
     pub total: usize,
 }
 
 /// POST /api/sessions/history - Get persisted session history with project continuity
+/// `limit` defaults to 10 and is clamped to [`validation::MAX_LIMIT`]; `offset`
+/// defaults to 0. Use `total` in the response to page through results.
 pub async fn session_history(
     State(state): State<AppState>,
     Json(req): Json<SessionHistoryRequest>,
@@ -396,7 +406,8 @@ pub async fn session_history(
     let memory = state
         .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
-    let limit = req.limit.min(100);
+    let limit = req.limit.min(validation::MAX_LIMIT);
+    let offset = req.offset.unwrap_or(0);
     let group = req.group_by_project;
 
     let result = tokio::task::spawn_blocking(move || {
@@ -404,8 +415,11 @@ pub async fn session_history(
         let tags = vec!["session-summary".to_string()];
 
         // Fetch ALL matching memories (recall_by_tags truncates on random HashSet order,
-        // so we over-fetch with a high cap and sort/truncate ourselves).
-        let memories = ms.recall_by_tags(&tags, 500)?;
+        // so we over-fetch with a high cap and sort/truncate ourselves). The cap is
+        // validation::MAX_LIMIT so it never silently hides sessions the caller could
+        // otherwise reach via `limit`+`offset` paging (see issue #407 for the same
+        // silent-cap-with-no-way-to-page pattern this mirrors).
+        let memories = ms.recall_by_tags(&tags, validation::MAX_LIMIT)?;
 
         let mut entries: Vec<SessionHistoryEntry> = memories
             .iter()
@@ -438,18 +452,19 @@ pub async fn session_history(
             }
         });
 
-        entries.truncate(limit);
+        let total = entries.len();
+        let paged: Vec<SessionHistoryEntry> =
+            entries.into_iter().skip(offset).take(limit).collect();
 
         let threads = if group {
-            compute_project_threads(&entries)
+            compute_project_threads(&paged)
         } else {
             vec![]
         };
 
-        let total = entries.len();
         Ok::<_, anyhow::Error>(SessionHistoryResponse {
             success: true,
-            sessions: entries,
+            sessions: paged,
             project_threads: threads,
             total,
         })
@@ -596,4 +611,89 @@ fn uf_find_root(parent: &[usize], mut i: usize) -> usize {
         i = parent[i];
     }
     i
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::handlers::test_helpers::{self, TestHarness};
+    use crate::memory::{Experience, ExperienceType};
+    use axum::http::StatusCode;
+
+    /// Seed `n` distinct session-summary-tagged memories (unique content so the
+    /// content-hash dedup in `remember()` doesn't collapse them, unique
+    /// `session_id` metadata so the history handler's dedup-by-session_id keeps
+    /// every entry).
+    fn seed_session_summaries(harness: &TestHarness, user_id: &str, n: usize) {
+        let memory = harness.manager.get_user_memory(user_id).unwrap();
+        let guard = memory.read();
+        for i in 0..n {
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("session_id".to_string(), format!("session-{i}"));
+            metadata.insert("started_at".to_string(), chrono::Utc::now().to_rfc3339());
+            let experience = Experience {
+                experience_type: ExperienceType::Context,
+                content: format!("Session history seed entry number {i}"),
+                entities: vec!["session-summary".to_string()],
+                // The handler queries recall_by_tags(["session-summary"]); tag the
+                // seed the way production does, not just via `entities`.
+                tags: vec!["session-summary".to_string()],
+                metadata,
+                ..Default::default()
+            };
+            guard.remember(experience, None).unwrap();
+        }
+    }
+
+    /// Regression test for the silent-cap-at-100 bug: previously `limit` was
+    /// hard-clamped to 100 with no way to page past it. Seeds 105 sessions (above
+    /// the old cap) and verifies `limit` > 100 is honored and `offset` pages
+    /// correctly, while `total` always reports the true total.
+    #[tokio::test]
+    async fn session_history_offset_and_limit_above_old_cap() {
+        let harness = TestHarness::new();
+        let user_id = "session-history-user";
+        seed_session_summaries(&harness, user_id, 105);
+
+        // limit=102 (> old hard cap of 100), offset=0 -> first 102 of 105 sessions.
+        let req = test_helpers::post_json(
+            "/api/sessions/history",
+            &serde_json::json!({ "user_id": user_id, "limit": 102, "offset": 0 }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["sessions"].as_array().unwrap().len(),
+            102,
+            "limit above the old 100-session cap must be honored"
+        );
+        assert_eq!(body["total"], 105);
+
+        // offset=102 pages past what the old cap made permanently unreachable.
+        let req = test_helpers::post_json(
+            "/api/sessions/history",
+            &serde_json::json!({ "user_id": user_id, "limit": 102, "offset": 102 }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["sessions"].as_array().unwrap().len(),
+            3,
+            "offset must skip past the first page (105 - 102 = 3 remaining)"
+        );
+        assert_eq!(body["total"], 105);
+
+        // Existing callers omitting limit/offset keep the old default of 10.
+        let req = test_helpers::post_json(
+            "/api/sessions/history",
+            &serde_json::json!({ "user_id": user_id }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["sessions"].as_array().unwrap().len(),
+            10,
+            "default limit must be unchanged for existing callers"
+        );
+        assert_eq!(body["total"], 105);
+    }
 }

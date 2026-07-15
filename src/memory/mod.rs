@@ -9598,10 +9598,14 @@ impl MemorySystem {
     /// on entity overlap. Each cluster gets a template-generated narrative and
     /// heuristic-based causal chain detection (keyword analysis on temporally
     /// ordered facts).
+    ///
+    /// Returns ALL clusters found (sorted by support, highest first) — callers
+    /// are responsible for paginating (`skip`/`take`) the result. Pagination is
+    /// intentionally not done here so the caller can report an accurate total
+    /// cluster count alongside a paged slice (see `handlers::facts::fact_narratives`).
     pub fn build_fact_narratives(
         &self,
         user_id: &str,
-        limit: usize,
         entity_filter: Option<&str>,
     ) -> Result<Vec<FactCluster>> {
         let facts = if let Some(entity) = entity_filter {
@@ -9663,7 +9667,6 @@ impl MemorySystem {
             .collect();
 
         clusters.sort_by(|a, b| b.total_support.cmp(&a.total_support));
-        clusters.truncate(limit);
         Ok(clusters)
     }
 
