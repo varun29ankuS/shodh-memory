@@ -3967,6 +3967,20 @@ pub(crate) fn is_structural_non_entity(name: &str) -> bool {
         return true;
     }
 
+    // Hex-id / UUID fragments where an incidental 3+ letter run (e.g. "8dea",
+    // "1cdb") slips the letter-run rule below: every whitespace token is hex and
+    // the string carries a digit. Spares real hex-letter words ("cafe"/"face" have
+    // no digit) and multi-word names ("The Dali" tokens are not all hex).
+    {
+        let toks: Vec<&str> = name.split_whitespace().collect();
+        if !toks.is_empty()
+            && toks.iter().all(|t| t.chars().all(|c| c.is_ascii_hexdigit()))
+            && name.chars().any(|c| c.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+
     // No run of 3+ consecutive letters -> not a word/name. Kills hex-id and code
     // fragments ("46ec 53a6", "1cdb0c73c b8") from URL slugs and article ids.
     let mut run = 0usize;
