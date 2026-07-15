@@ -345,6 +345,27 @@ fn build_ner_lookup(
         .collect()
 }
 
+/// Decide whether intent-gated SUM fusion should fire for a recall.
+///
+/// Pure gating predicate extracted so the fusion-mode decision is unit-testable
+/// in isolation from the full recall pipeline. Calibrated weighted-SUM fusion
+/// (`SHODH_FUSION_SUM`) measures a multi_hop / full@10 gain over the FLAT default
+/// but trades single_hop down; gating it to fire ONLY under a positive multi-hop
+/// intent classification — and only on a `Full`-layer recall (production path) —
+/// keeps the FLAT + per-query adaptive gate for single_hop queries while capturing
+/// SUM's multi_hop lift. `flag_on` is the `SHODH_FUSION_SUM_INTENT` opt-in;
+/// `entity_count` / `relations` are the same intent inputs the companion-injection
+/// gate uses (query-NER ∪ parser focal entities, parsed ontological relations).
+fn sum_intent_fusion_fires(
+    flag_on: bool,
+    layer_full: bool,
+    query: &str,
+    entity_count: usize,
+    relations: &[String],
+) -> bool {
+    flag_on && layer_full && query_parser::detect_multihop_intent(query, entity_count, relations)
+}
+
 /// Tokenize text into word-level tokens for boundary-safe matching.
 ///
 /// Splits on non-alphanumeric characters (preserving apostrophes for contractions),
@@ -394,6 +415,44 @@ mod char_truncate_tests {
         assert_eq!(char_truncate(emoji, 3), emoji);
         // The result is always a prefix shorter-or-equal in bytes.
         assert!(char_truncate(cjk, 2).len() < cjk.len());
+    }
+}
+
+#[cfg(test)]
+mod sum_intent_fusion_gate_tests {
+    use super::sum_intent_fusion_fires;
+
+    // The canonical planted 2-hop query: two grounded entities + connective
+    // "that" + bridge verbs — detect_multihop_intent classifies it multi-hop.
+    const MULTIHOP_Q: &str = "Who does the colleague that Vorland works closely with manage?";
+    // Single entity, no relational bridge — a 1-hop lookup.
+    const SINGLE_HOP_Q: &str = "What is Vorland's email?";
+
+    #[test]
+    fn multihop_query_selects_sum_path_when_flag_on_and_full_layer() {
+        // Flag on + Full layer + multi-hop intent → SUM fusion fires.
+        assert!(sum_intent_fusion_fires(true, true, MULTIHOP_Q, 2, &[]));
+    }
+
+    #[test]
+    fn single_hop_query_keeps_default_path() {
+        // Flag on + Full layer but NO multi-hop intent → SUM does not fire
+        // (single_hop keeps FLAT + the per-query adaptive gate).
+        assert!(!sum_intent_fusion_fires(true, true, SINGLE_HOP_Q, 1, &[]));
+    }
+
+    #[test]
+    fn flag_off_never_fires_even_on_multihop() {
+        // Flag off must be byte-identical to the default: SUM never selected,
+        // regardless of intent or layer.
+        assert!(!sum_intent_fusion_fires(false, true, MULTIHOP_Q, 2, &[]));
+    }
+
+    #[test]
+    fn non_full_layer_never_fires() {
+        // The gate is a production-path (Full-layer) feature; shallower recall
+        // layers keep the default fusion even for a multi-hop query.
+        assert!(!sum_intent_fusion_fires(true, false, MULTIHOP_Q, 2, &[]));
     }
 }
 
@@ -3763,9 +3822,57 @@ impl MemorySystem {
             // leg per candidate), vector AND BM25 both contribute additively, and the sweep
             // finds the mix that ranks the present-but-buried gold (96% present at fusion,
             // mean-rank 14.3) into top-10. Default off → fusion unchanged.
-            let sum_fusion = std::env::var("SHODH_FUSION_SUM")
+            let sum_fusion_explicit = std::env::var("SHODH_FUSION_SUM")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
+            // SHODH_FUSION_SUM_INTENT: intent-gated SUM fusion — the strictly-non-
+            // regressing variant of SHODH_FUSION_SUM. On locomo-gate (100 real cases,
+            // read-only-sealed substrate) the global SUM mode lifts multi_hop (+0.040)
+            // and full@10 (+0.010) over the FLAT default but trades single_hop (−0.029):
+            // additive consensus surfaces scattered multi-hop companion evidence yet
+            // dilutes a single BM25-exact gold. Gating SUM to fire ONLY when the
+            // multi-hop intent detector opens on a Full-layer recall keeps FLAT + the
+            // per-query adaptive gate for single_hop while capturing SUM's multi_hop /
+            // temporal lift. Reuses the SAME intent inputs as the companion-injection
+            // gate (query-NER ∪ parser focal entities, parsed ontological relations) and
+            // SUM's existing weights (SHODH_FW_VEC/_BM25/_GRAPH). The intent computation
+            // short-circuits when the flag is off, so a default recall is byte-identical.
+            let sum_intent_flag = std::env::var("SHODH_FUSION_SUM_INTENT")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let sum_intent_fires = if sum_intent_flag && layer_full {
+                let relation_surfaces: Vec<String> = onto_intent
+                    .relation_types
+                    .iter()
+                    .map(|r| format!("{r:?}"))
+                    .collect();
+                let entity_count = query
+                    .ner_entities
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .len()
+                    .max(query_analysis.focal_entities.len());
+                sum_intent_fusion_fires(
+                    sum_intent_flag,
+                    layer_full,
+                    query_text,
+                    entity_count,
+                    &relation_surfaces,
+                )
+            } else {
+                false
+            };
+            let sum_fusion = sum_fusion_explicit || sum_intent_fires;
+            if sum_intent_fires {
+                // Dedicated target so eval runs can capture the intent-gated SUM fire
+                // rate with RUST_LOG=error,sum_intent_fusion=info (same telemetry pattern
+                // as companion_injection / companion_rerank): zero lines = the intent gate
+                // never opened on the suite.
+                tracing::info!(
+                    target: "sum_intent_fusion",
+                    "intent-gated SUM fusion selected for this recall"
+                );
+            }
             let env_w = |key: &str, default: f32| -> f32 {
                 std::env::var(key)
                     .ok()
