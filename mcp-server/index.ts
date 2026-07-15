@@ -16,6 +16,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
+  type CallToolRequest,
   ListToolsRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
@@ -34,6 +35,7 @@ import { TokenTracker } from "./token-tracking";
 import { resolvePackageVersion } from "./version";
 import { renderContent, MEMORY_PREVIEW_MAX } from "./memory-format";
 import { ShodhIpcClient, type WindowsIpcHelper } from "./ipc-client";
+import { DrainController } from "./drain";
 
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
@@ -136,6 +138,60 @@ const REQUEST_TIMEOUT_MS = 10000;
 // persists data before post-processing (graph, lineage, temporal facts).
 // Issue #109: 10s was too short, causing retries that created duplicate memories.
 const WRITE_TIMEOUT_MS = 30000;
+
+// -----------------------------------------------------------------------------
+// In-flight drain on stdin EOF (issue #405)
+// -----------------------------------------------------------------------------
+// MCP hosts (e.g. Claude Desktop) close the shim's stdin on a thread switch but
+// leave stdout open. A tool call mid-flight when stdin EOFs can still be
+// answered over stdout — provided the process does not exit first. The drain
+// controller keeps us alive until in-flight calls settle, bounded by a grace
+// window, then delivers an error for anything still stuck so the caller never
+// eats the host's ~4-minute call timeout.
+
+// Shape any tool response can take (mirrors the handler's return union).
+type CallToolResult = {
+  content: { type: string; text: string }[];
+  isError?: boolean;
+  _meta?: unknown;
+};
+
+// Grace window for draining in-flight tool calls after stdin EOF. Derived from
+// the request budget so a slow-but-progressing backend call is never truncated:
+// a retried idempotent GET can take up to RETRY_ATTEMPTS * REQUEST_TIMEOUT_MS of
+// timeouts, and a write up to WRITE_TIMEOUT_MS — 3*10s + 30s = 60s covers a
+// handler that chains both. Still far below the host's ~240s call timeout, so
+// the caller always gets a response (real, or an abandon error) well in time.
+const DRAIN_GRACE_MS = RETRY_ATTEMPTS * REQUEST_TIMEOUT_MS + WRITE_TIMEOUT_MS;
+
+// Result returned to a tool call still in flight when the grace window expires.
+const DRAIN_ABANDON_RESULT: CallToolResult = {
+  content: [
+    {
+      type: "text",
+      text:
+        "Error: the MCP session ended (host closed stdin) before this tool call finished, " +
+        "and the shim's drain grace window elapsed while the backend was still working. " +
+        "The request was abandoned during shutdown; the backend may have already applied the change. " +
+        "Re-check state or retry in a new session.",
+    },
+  ],
+  isError: true,
+};
+
+// True while stdout can still carry a response back to the host.
+function isStdoutWritable(): boolean {
+  const out = process.stdout;
+  return Boolean(out) && out.writable !== false && !out.writableEnded && !out.destroyed;
+}
+
+// Constructed here; `gracefulShutdown` is a hoisted function declaration below.
+const drain = new DrainController<CallToolResult>({
+  graceMs: DRAIN_GRACE_MS,
+  abandonResult: DRAIN_ABANDON_RESULT,
+  isOutputWritable: isStdoutWritable,
+  shutdown: (reason) => gracefulShutdown(reason),
+});
 
 // Warn if non-localhost URL uses HTTP (security risk)
 if ((!IPC_ENDPOINT || IPC_WEBSOCKET_STREAM_ENABLED)
@@ -1637,7 +1693,7 @@ function autoStreamContext(toolName: string, args: Record<string, unknown>): voi
 }
 
 // Handle tool calls
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+const handleCallTool = async (request: CallToolRequest) => {
   const { name, arguments: args } = request.params;
 
   // Ensure streaming is connected (lazy reconnect on tool calls)
@@ -4148,7 +4204,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   }
-});
+};
+
+// Register the tool handler under drain tracking (issue #405): the in-flight
+// count drives whether a stdin EOF shuts down immediately or drains first.
+server.setRequestHandler(CallToolRequestSchema, (request) =>
+  drain.track(() => handleCallTool(request)),
+);
 
 // List resources (static commands + dynamic memories)
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
@@ -5010,8 +5072,25 @@ function gracefulShutdown(reason: string, code: number = 0) {
 // stdin "end" fires when EOF is read (host closed write end of pipe).
 // stdin "close" fires when the underlying resource is freed.
 // Both are terminal — the host is gone, there's no session to evict.
-process.stdin.on("end", () => gracefulShutdown("stdin closed (MCP session ended), shutting down..."));
-process.stdin.on("close", () => gracefulShutdown("stdin pipe closed, shutting down..."));
+// Issue #405: hosts close stdin (not stdout) on a thread switch. Route the EOF
+// through the drain controller so any in-flight tool call finishes and its
+// response is written to the still-open stdout before we exit.
+process.stdin.on("end", () => drain.onStdinClose("stdin closed (MCP session ended), shutting down..."));
+process.stdin.on("close", () => drain.onStdinClose("stdin pipe closed, shutting down..."));
+
+// If stdout dies while we are mid-drain there is nothing left to deliver to —
+// abandon in-flight calls and exit instead of waiting out the grace window.
+// Outside a drain, a stdout error means the host is gone: preserve the prior
+// uncaught-EPIPE behaviour (log + exit) rather than silently swallowing it.
+process.stdout.on("error", (err) => {
+  if (drain.isDraining) {
+    drain.onOutputLost("stdout errored during drain, shutting down...");
+  } else {
+    console.error("[shodh-memory] stdout error:", err);
+    gracefulShutdown("stdout errored, shutting down...", 1);
+  }
+});
+process.stdout.on("close", () => drain.onOutputLost("stdout closed during drain, shutting down..."));
 
 // Catch unhandled errors to ensure cleanup runs
 process.on("uncaughtException", (err) => {
