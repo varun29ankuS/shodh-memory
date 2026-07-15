@@ -381,14 +381,49 @@ fn normalize(dist: &mut [f64], total: f64) {
     }
 }
 
+/// Coarse **block-key** normalization for canonicalization blocking (graph-wave-1
+/// W1-A). Canonicalization blocks mentions by entity type so only same-type
+/// mentions are ever compared (the precision-first design of [`cluster`]). But the
+/// GLiNER schema-driven typer splits ONE real-world referent across sibling coarse
+/// blocks: a city is typed `Gpe` in one mention and `Location` in another, a bridge
+/// `Facility` in one and `Location` in another — and two mentions in different
+/// blocks can NEVER merge, no matter how identical their surfaces, because they are
+/// never compared. `block_key` folds those measured-confusable siblings onto a
+/// shared block key so the mentions at least ENTER the same candidate set. It does
+/// NOT touch the stored label, and it does NOT touch the `type` comparison feature:
+/// a folded pair still registers a *type disagreement* inside the Fellegi-Sunter
+/// score, so the model demands stronger name/head/embedding evidence to merge across
+/// the fold — that residual penalty plus the 0.9 threshold are the precision guard.
+///
+/// Folds (coarse [`crate::graph_memory::EntityLabel::as_str`] values, mirroring the
+/// `Gpe|Facility → Location` rollup already encoded in `EntityLabel::parent_labels`):
+///   - `"Gpe"`      → `"Location"`  (geopolitical entity ≡ the place it denotes;
+///                                   GDELT `city` split ~75% Gpe / ~25% Location)
+///   - `"Facility"` → `"Location"`  (bridge / airport / building typed as a place)
+///
+/// Deliberately conservative — every extra fold multiplies comparison volume and
+/// false-merge exposure, so only splits with a *measured same-referent* confusion
+/// are folded. `Norp`↔`Organization` and `Work` are intentionally NOT folded: they
+/// mix DISTINCT referents (a nationality vs an institution) rather than one referent
+/// split across labels, and their surfaces rarely coincide (`"Americans"` ≠
+/// `"United States"`), so folding would add cost without pairs-completeness gain.
+/// Any unlisted label is its own block key (identity).
+pub fn block_key(entity_type: &str) -> &str {
+    match entity_type {
+        "Gpe" | "Facility" => "Location",
+        other => other,
+    }
+}
+
 /// Cluster records into entities via the learned matcher, precision-first: fit the
-/// model, then union-find over candidate pairs BLOCKED by entity type — only
-/// same-type mentions are compared, and only pairs whose match probability ≥
-/// `threshold` merge. Type-blocking keeps distinct entities that share a name from
-/// fusing (`Baltimore` the Location vs `Baltimore Fire Department` the Organization
-/// never meet); the head/name features discriminate within a type. Returns clusters
-/// of record indices (singletons included). `records` should already be entity
-/// mentions — junk / verb-fragments filtered by the caller.
+/// model, then union-find over candidate pairs BLOCKED by [`block_key`] (a coarse
+/// normalization of entity type) — only same-block mentions are compared, and only
+/// pairs whose match probability ≥ `threshold` merge. Block-key blocking keeps
+/// distinct entities that share a name from fusing (`Baltimore` the Location vs
+/// `Baltimore Fire Department` the Organization never meet, since Organization does
+/// not fold into Location); the head/name features discriminate within a block.
+/// Returns clusters of record indices (singletons included). `records` should
+/// already be entity mentions — junk / verb-fragments filtered by the caller.
 pub fn cluster(records: &[MatchRecord], threshold: f64, em_iters: usize) -> Vec<Vec<usize>> {
     let n = records.len();
     if n == 0 {
@@ -406,10 +441,14 @@ pub fn cluster(records: &[MatchRecord], threshold: f64, em_iters: usize) -> Vec<
         r
     }
 
-    // Block by entity type; only compare pairs within a block.
+    // Block by coarse block-key (folds Gpe/Facility → Location); only compare
+    // pairs within a block. Folding recovers cross-block merges the typer split.
     let mut blocks: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
     for (i, r) in records.iter().enumerate() {
-        blocks.entry(r.entity_type.as_str()).or_default().push(i);
+        blocks
+            .entry(block_key(r.entity_type.as_str()))
+            .or_default()
+            .push(i);
     }
     for idxs in blocks.values() {
         for a in 0..idxs.len() {
@@ -469,6 +508,250 @@ mod tests {
             name_embedding: Some(emb.to_vec()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn block_key_folds_gpe_and_facility_into_location() {
+        // The two measured same-referent splits fold onto Location …
+        assert_eq!(block_key("Gpe"), "Location");
+        assert_eq!(block_key("Facility"), "Location");
+        // … Location is its own key (fold is idempotent) …
+        assert_eq!(block_key("Location"), "Location");
+        // … and every other label is left as its own block key (identity),
+        // including the deliberately-unfolded Norp / Organization / Work.
+        for id in [
+            "Person",
+            "Organization",
+            "Norp",
+            "Work",
+            "Vehicle",
+            "Product",
+            "Concept",
+            "Technology",
+            "",
+            "SomeCustomType",
+        ] {
+            assert_eq!(block_key(id), id, "{id:?} must be its own block key");
+        }
+    }
+
+    #[test]
+    fn gpe_and_location_mentions_of_one_surface_now_merge() {
+        // The W1-A payoff: "baltimore" typed Gpe in one mention and Location in
+        // another is ONE city. Before the fold the two land in different blocks
+        // and can never be compared; after the fold they co-block and the
+        // identical name + head + embedding clear the 0.9 threshold despite the
+        // residual type disagreement. A distinct Organization that merely shares
+        // the "baltimore" token ("baltimore fire department") is the negative
+        // control — Organization does not fold into Location, so it stays apart.
+        let emb_city = [1.0f32, 0.0, 0.0];
+        let emb_bridge = [0.0f32, 1.0, 0.0];
+        let records = vec![
+            rec_emb("baltimore", "baltimore", "Gpe", &emb_city), // 0
+            rec_emb("baltimore", "baltimore", "Location", &emb_city), // 1  (dup of 0, cross-block)
+            rec_emb("key bridge", "bridge", "Facility", &emb_bridge), // 2
+            rec_emb("key bridge", "bridge", "Location", &emb_bridge), // 3  (dup of 2, cross-block)
+            rec_emb(
+                "baltimore fire department",
+                "department",
+                "Organization",
+                &[0.0, 0.0, 1.0],
+            ), // 4  (negative control)
+        ];
+        let clusters = cluster(&records, 0.9, 25);
+        let root_of = |i: usize| {
+            clusters
+                .iter()
+                .position(|c| c.contains(&i))
+                .expect("every record lands in exactly one cluster")
+        };
+        assert_eq!(
+            root_of(0),
+            root_of(1),
+            "Gpe + Location 'baltimore' must merge after the fold (clusters={clusters:?})"
+        );
+        assert_eq!(
+            root_of(2),
+            root_of(3),
+            "Facility + Location 'key bridge' must merge after the fold (clusters={clusters:?})"
+        );
+        assert_ne!(
+            root_of(0),
+            root_of(4),
+            "distinct Organization sharing only a token must NOT merge into the city"
+        );
+    }
+
+    /// Harness corpus for the record-linkage blocking analysis (PC / RR).
+    ///
+    /// GDELT's typed export (`cooc_graph.json`) is not present in this checkout,
+    /// so this is a deterministic, documented stand-in that reproduces the
+    /// *measured* GDELT type-confusion patterns (Baltimore `city` split Gpe /
+    /// Location; Key Bridge split Facility / Location) plus within-block
+    /// duplicates and hard distractors that must stay apart. Identical surfaces
+    /// carry identical embeddings, as the live `canonicalize_entities` path
+    /// supplies `name_embedding` per mention.
+    fn blocking_analysis_corpus() -> Vec<MatchRecord> {
+        let e_city = [1.0f32, 0.0, 0.0, 0.0];
+        let e_bridge = [0.0f32, 1.0, 0.0, 0.0];
+        let e_river = [0.0f32, 0.0, 1.0, 0.0];
+        let e_ship = [0.0f32, 0.0, 0.0, 1.0];
+        let e_org = [0.5f32, 0.5, 0.0, 0.0];
+        vec![
+            // Baltimore the city — split across Gpe / Location (the measured 75/25).
+            rec_emb("baltimore", "baltimore", "Gpe", &e_city),
+            rec_emb("baltimore", "baltimore", "Location", &e_city),
+            rec_emb("baltimore", "baltimore", "Gpe", &e_city),
+            // Key Bridge — split across Facility / Location.
+            rec_emb("key bridge", "bridge", "Facility", &e_bridge),
+            rec_emb("key bridge", "bridge", "Location", &e_bridge),
+            rec_emb("key bridge", "bridge", "Facility", &e_bridge),
+            // Patapsco river — both mentions typed Location (within-block dup).
+            rec_emb("patapsco river", "river", "Location", &e_river),
+            rec_emb("patapsco river", "river", "Location", &e_river),
+            // The Dali — both mentions typed Vehicle (within-block dup).
+            rec_emb("dali", "dali", "Vehicle", &e_ship),
+            rec_emb("dali", "dali", "Vehicle", &e_ship),
+            // Hard distractors — must NOT merge with the city / bridge / river.
+            rec_emb(
+                "baltimore fire department",
+                "department",
+                "Organization",
+                &e_org,
+            ),
+            rec_emb("ntsb", "ntsb", "Organization", &e_org),
+        ]
+    }
+
+    #[test]
+    fn block_key_raises_pairs_completeness_and_lowers_reduction_ratio() {
+        // Record-linkage blocking theory, measured on the harness corpus:
+        //   * Pairs-completeness (PC): of the TRUE-duplicate pairs — the pairs
+        //     an all-pairs (unblocked) FS run at 0.9 merges — what fraction are
+        //     co-blocked (hence comparable) before vs after the fold?
+        //   * Reduction ratio (RR): fraction of all C(n,2) pairs that blocking
+        //     avoids comparing — the cost the fold trades away.
+        let records = blocking_analysis_corpus();
+        let n = records.len();
+        let model = FellegiSunter::fit(&records, 25);
+
+        // Truth set: unblocked all-pairs merges at 0.9 (the ceiling the blocking
+        // is trying to preserve).
+        let mut truth: Vec<(usize, usize)> = Vec::new();
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if model.match_probability(&records[i], &records[j]) >= 0.9 {
+                    truth.push((i, j));
+                }
+            }
+        }
+        assert!(
+            !truth.is_empty(),
+            "harness corpus must contain FS-detectable duplicate pairs"
+        );
+
+        // Co-blocked fraction of the truth set, and comparisons performed, under a
+        // given block-key function.
+        let analyze = |key: &dyn Fn(&str) -> String| -> (f64, usize) {
+            let pc_hits = truth
+                .iter()
+                .filter(|(i, j)| {
+                    key(records[*i].entity_type.as_str()) == key(records[*j].entity_type.as_str())
+                })
+                .count();
+            let mut counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for r in &records {
+                *counts.entry(key(r.entity_type.as_str())).or_default() += 1;
+            }
+            let comparisons: usize = counts.values().map(|&c| c * c.saturating_sub(1) / 2).sum();
+            (pc_hits as f64 / truth.len() as f64, comparisons)
+        };
+
+        let raw = |t: &str| t.to_string(); // before: block on raw entity type
+        let folded = |t: &str| block_key(t).to_string(); // after: block on block_key
+        let total_pairs = n * (n - 1) / 2;
+
+        let (pc_before, cmp_before) = analyze(&raw);
+        let (pc_after, cmp_after) = analyze(&folded);
+        let rr_before = 1.0 - cmp_before as f64 / total_pairs as f64;
+        let rr_after = 1.0 - cmp_after as f64 / total_pairs as f64;
+
+        // Merge-rate (mentions / cluster) proxy under each blocking, on the SAME
+        // fitted model — the end metric direction.
+        let clusters_before = clusters_with_key(&records, &model, 0.9, &raw);
+        let clusters_after = clusters_with_key(&records, &model, 0.9, &folded);
+        let mr_before = n as f64 / clusters_before as f64;
+        let mr_after = n as f64 / clusters_after as f64;
+
+        println!(
+            "\n[W1-A blocking analysis] n={n} truth_pairs={} total_pairs={total_pairs}\n\
+             PC_before={pc_before:.3} PC_after={pc_after:.3}\n\
+             RR_before={rr_before:.3} RR_after={rr_after:.3} (cmp {cmp_before}->{cmp_after})\n\
+             merge_rate_before={mr_before:.3} merge_rate_after={mr_after:.3} \
+             (clusters {clusters_before}->{clusters_after})\n",
+            truth.len()
+        );
+
+        assert!(
+            pc_after > pc_before,
+            "the fold must recover co-blocked true pairs (PC {pc_before:.3}->{pc_after:.3})"
+        );
+        assert!(
+            rr_after <= rr_before,
+            "folding blocks can only add comparisons (RR {rr_before:.3}->{rr_after:.3})"
+        );
+        assert!(
+            mr_after >= mr_before,
+            "merge-rate must not fall (fewer clusters expected) ({mr_before:.3}->{mr_after:.3})"
+        );
+    }
+
+    /// Cluster count under an arbitrary block-key mapping, over a pre-fit model —
+    /// the test-side mirror of `cluster`'s union-find, so PC / RR / merge-rate are
+    /// all measured against the SAME fitted weights.
+    fn clusters_with_key(
+        records: &[MatchRecord],
+        model: &FellegiSunter,
+        threshold: f64,
+        key: &dyn Fn(&str) -> String,
+    ) -> usize {
+        let n = records.len();
+        let mut parent: Vec<usize> = (0..n).collect();
+        fn find(p: &mut [usize], x: usize) -> usize {
+            let mut r = x;
+            while p[r] != r {
+                p[r] = p[p[r]];
+                r = p[r];
+            }
+            r
+        }
+        let mut blocks: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, r) in records.iter().enumerate() {
+            blocks
+                .entry(key(r.entity_type.as_str()))
+                .or_default()
+                .push(i);
+        }
+        for idxs in blocks.values() {
+            for a in 0..idxs.len() {
+                for b in (a + 1)..idxs.len() {
+                    let (i, j) = (idxs[a], idxs[b]);
+                    if model.match_probability(&records[i], &records[j]) >= threshold {
+                        let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                        if ri != rj {
+                            parent[rj] = ri;
+                        }
+                    }
+                }
+            }
+        }
+        let mut roots = std::collections::HashSet::new();
+        for i in 0..n {
+            roots.insert(find(&mut parent, i));
+        }
+        roots.len()
     }
 
     #[test]

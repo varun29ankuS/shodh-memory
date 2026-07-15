@@ -509,6 +509,20 @@ def top_clusters_repr(clusters, info, n=12):
     return out
 
 
+# Coarse block-key fold — the Rust `fs_matcher::block_key` (graph-wave-1 W1-A)
+# ported for this harness: at BLOCK time only, sibling coarse ids that the GLiNER
+# typer splits one real-world referent across are folded onto a shared key so the
+# mentions are at least compared. Schema coarse ids are lowercase here
+# ("gpe"/"facility"/"location"), matching src/entity_type/entity-type-schema.json.
+# Conservative by design (only measured same-referent splits): gpe|facility ->
+# location; norp/work deliberately NOT folded. See w1a-report.md.
+BLOCK_KEY_FOLD = {"gpe": "location", "facility": "location"}
+
+
+def block_key(coarse: str) -> str:
+    return BLOCK_KEY_FOLD.get(coarse, coarse)
+
+
 def canonicalize_gliner(gliner_result, block_on: str = "fine"):
     """block_on='fine' mirrors entity_resolve_v2.py literally (type-block on
     whatever the typer's single "types" field holds — for GLiNER that is the
@@ -518,12 +532,24 @@ def canonicalize_gliner(gliner_result, block_on: str = "fine"):
     gate regresses ("two coupled vocabularies... coarse rollup for blocking")
     — included so a regression has an immediate, measured next step instead
     of only a verdict.
+    block_on='blockkey' applies the shipped Rust `fs_matcher::block_key` fold on
+    top of the coarse rollup (gpe|facility -> location), so this harness reflects
+    what production canonicalization actually blocks on after W1-A. The 'fine' and
+    'coarse' numbers above are kept as bert-tiny-era history / prescribed-remedy
+    baselines and are NOT recomputed by this mode.
     """
     spans = gliner_result["all_spans"]
-    key_field = "fine" if block_on == "fine" else "coarse"
+    if block_on == "fine":
+        type_of = lambda s: s["fine"]
+    elif block_on == "coarse":
+        type_of = lambda s: s["coarse"]
+    elif block_on == "blockkey":
+        type_of = lambda s: block_key(s["coarse"])
+    else:
+        raise ValueError(f"unknown block_on={block_on!r}")
     agg = Counter()
     for s in spans:
-        agg[(s["text"], s[key_field])] += 1
+        agg[(s["text"], type_of(s))] += 1
     mentions = []
     for idx, ((surface, label), count) in enumerate(agg.items()):
         mentions.append(
@@ -593,6 +619,11 @@ def main():
     print(f"  {after_canon_coarse['valid_mentions']} valid mentions -> {after_canon_coarse['clusters']} clusters "
           f"({after_canon_coarse['mentions_per_cluster']:.2f} mentions/cluster), merges={after_canon_coarse['merges_by_rule']}")
 
+    print("\n[3/4] Canonicalization (D12 gate) — GLiNER AFTER, block_key blocking (W1-A, shipped fold gpe|facility->location)…")
+    after_canon_blockkey = canonicalize_gliner(after, block_on="blockkey")
+    print(f"  {after_canon_blockkey['valid_mentions']} valid mentions -> {after_canon_blockkey['clusters']} clusters "
+          f"({after_canon_blockkey['mentions_per_cluster']:.2f} mentions/cluster), merges={after_canon_blockkey['merges_by_rule']}")
+
     gate_pass = after_canon["mentions_per_cluster"] >= before_canon["mentions_per_cluster"]
     print(f"\n  D12 GATE (fine-label blocking, mentions/cluster must not drop): "
           f"{before_canon['mentions_per_cluster']:.2f} (before) -> {after_canon['mentions_per_cluster']:.2f} (after) "
@@ -629,6 +660,7 @@ def main():
             key_entities=before["key_entities"],
         ),
         after_coarse_blocked=after_canon_coarse,
+        after_blockkey_blocked=after_canon_blockkey,
         after=after_canon | dict(
             passages=after["passages"],
             total_spans=after["total_spans"],
