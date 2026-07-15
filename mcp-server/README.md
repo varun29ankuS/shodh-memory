@@ -280,6 +280,11 @@ Based on Cowan's working memory model:
 3. **Connect**: MCP client connects to this MCP server via stdio; backend requests
    use local IPC when `SHODH_IPC_ENDPOINT` is set, otherwise HTTP
 4. **Ready**: Start using `remember` and `recall` tools
+5. **Session end**: when the host closes stdin (e.g. a Claude Desktop thread
+   switch), the shim finishes any in-flight tool call and writes its response to
+   the still-open stdout before exiting, so a mid-flight request is never
+   silently dropped. Draining is bounded by a grace window; if it elapses the
+   caller receives an explicit error instead of waiting out the host timeout.
 
 The backend server runs locally and stores all data on your machine. No cloud dependency.
 
