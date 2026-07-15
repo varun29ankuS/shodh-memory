@@ -743,11 +743,17 @@ fn gold_ranks(
         .collect()
 }
 
-/// GNCA attribution study: ingest the bridge corpus ONCE, then measure every
-/// case's gold position under `SHODH_NCA_SPREAD` off and on, decomposing the
-/// movement into reach (nomination) vs rank (reorder). The flag is a per-recall
-/// env read, so toggling it between the two passes over the SAME live system
-/// isolates the mechanism with no re-ingest confound.
+/// GNCA attribution study: decompose bridge-crossing gold movement WITH vs
+/// WITHOUT `SHODH_NCA_SPREAD` into reach (nomination) vs rank (reorder).
+///
+/// Each condition ingests its OWN fresh copy of the corpus. This is required, not
+/// cosmetic: the graph leg strengthens traversed edges at read time (Hebbian
+/// `batch_strengthen_synapses`, ungated by `SHODH_RECALL_READONLY`), so re-running
+/// recall over the SAME system mutates it — the treatment pass would see the
+/// baseline pass's strengthened edges and the comparison would be confounded. With
+/// separate ingests each case queries pristine edges (bridge units are disjoint
+/// namespaces, so within one pass no unit contaminates another), and the ONLY
+/// difference between the two numbers is the flag.
 pub fn analyze_bridge_nca_attribution(
     inputs: &RunInputs,
     units: usize,
@@ -757,21 +763,31 @@ pub fn analyze_bridge_nca_attribution(
     pin_env();
     let fx = generate_bridge_fixtures(units, cluster_size, bridges_per_unit);
     let total_nodes = fx.corpus.len();
-    let (manager, id_map) = ingest_fresh(inputs, &fx, "bridge_nca_attrib")?;
-    let system = manager.get_user_memory(EVAL_USER)?;
 
-    // Toggle the flag around each pass; restore the caller's prior value after.
     let prev = std::env::var_os("SHODH_NCA_SPREAD");
-    // SAFETY: harness is single-threaded at this point (RAYON pinned to 1);
-    // production never calls this path.
+    // SAFETY: harness is single-threaded here (RAYON pinned to 1); production never
+    // calls this path. Ingest does not read the flag (it only gates recall spread),
+    // so setting it before each fresh ingest simply pins the flag for that pass.
     unsafe {
         std::env::set_var("SHODH_NCA_SPREAD", "0");
     }
-    let base = gold_ranks(&system, &fx.cases, &id_map, total_nodes);
+    let (m_base, id_base) = ingest_fresh(inputs, &fx, "bridge_nca_base")?;
+    let base = {
+        let s = m_base.get_user_memory(EVAL_USER)?;
+        gold_ranks(&s, &fx.cases, &id_base, total_nodes)
+    };
+    drop(m_base);
+
     unsafe {
         std::env::set_var("SHODH_NCA_SPREAD", "1");
     }
-    let nca = gold_ranks(&system, &fx.cases, &id_map, total_nodes);
+    let (m_treat, id_treat) = ingest_fresh(inputs, &fx, "bridge_nca_treat")?;
+    let nca = {
+        let s = m_treat.get_user_memory(EVAL_USER)?;
+        gold_ranks(&s, &fx.cases, &id_treat, total_nodes)
+    };
+    drop(m_treat);
+
     unsafe {
         match prev {
             Some(v) => std::env::set_var("SHODH_NCA_SPREAD", v),
@@ -807,8 +823,6 @@ pub fn analyze_bridge_nca_attribution(
             (None, None) => {}
         }
     }
-
-    drop(manager);
 
     Ok(BridgeNcaAttribution {
         cases: n,
@@ -1094,51 +1108,63 @@ mod tests {
     // recall path must be byte-identical to before the flag existed. We prove the
     // gate is inert by asserting the FULL ranked id list of every bridge case is
     // identical between "flag unset" and "flag=0" (both take the default PPR path;
-    // the NCA branch is never entered), on a real ingest.
+    // the NCA branch is never entered).
+    //
+    // Each condition uses its OWN fresh ingest: the graph leg strengthens traversed
+    // edges at read time (Hebbian, ungated by readonly), so re-querying one system
+    // mutates it and the second pass would differ for reasons unrelated to the
+    // flag. Two pristine, deterministically-identical ingests share the same
+    // mutation trajectory under the same code path, so any difference is the flag.
     #[test]
-    #[ignore = "pays one pipeline ingest; verifies SHODH_NCA_SPREAD OFF is byte-identical to unset."]
+    #[ignore = "pays two pipeline ingests; verifies SHODH_NCA_SPREAD OFF is byte-identical to unset."]
     fn nca_flag_off_is_byte_identical() {
         let dir = unique_storage_dir("nca-off-identical");
         let inputs = test_inputs(dir.clone());
         pin_env();
         let fx = generate_bridge_fixtures(4, 6, 1);
         let total = fx.corpus.len();
-        let (manager, _id_map) = ingest_fresh(&inputs, &fx, "nca_off_identical").expect("ingest");
-        let system = manager.get_user_memory(EVAL_USER).expect("system");
 
-        let rankings =
-            |system: &parking_lot::RwLock<crate::memory::MemorySystem>| -> Vec<Vec<Uuid>> {
-                fx.cases
-                    .iter()
-                    .map(|case| {
-                        let query = Query {
-                            query_text: Some(case.query.clone()),
-                            ner_entities: Some(case.anchor_names.clone()),
-                            max_results: total,
-                            layers: LayerMode::Full,
-                            ..Default::default()
-                        };
-                        system
-                            .read()
-                            .recall(&query)
-                            .unwrap_or_default()
-                            .iter()
-                            .map(|m| m.id.0)
-                            .collect()
-                    })
-                    .collect()
-            };
+        // Fresh ingest → per-case ranked list of CORPUS IDS (stable across ingests,
+        // unlike freshly-minted uuids), so the full ordering is comparable.
+        let ranked_corpus_ids = |sub: &str| -> Vec<Vec<String>> {
+            let (manager, id_map) = ingest_fresh(&inputs, &fx, sub).expect("ingest");
+            let rev: std::collections::HashMap<Uuid, String> =
+                id_map.iter().map(|(cid, u)| (*u, cid.clone())).collect();
+            let system = manager.get_user_memory(EVAL_USER).expect("system");
+            let out = fx
+                .cases
+                .iter()
+                .map(|case| {
+                    let query = Query {
+                        query_text: Some(case.query.clone()),
+                        ner_entities: Some(case.anchor_names.clone()),
+                        max_results: total,
+                        layers: LayerMode::Full,
+                        ..Default::default()
+                    };
+                    system
+                        .read()
+                        .recall(&query)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|m| rev.get(&m.id.0).cloned())
+                        .collect::<Vec<String>>()
+                })
+                .collect();
+            drop(manager);
+            out
+        };
 
         let prev = std::env::var_os("SHODH_NCA_SPREAD");
         // SAFETY: single-threaded harness; production never runs this path.
         unsafe {
             std::env::remove_var("SHODH_NCA_SPREAD");
         }
-        let unset = rankings(&system);
+        let unset = ranked_corpus_ids("nca_off_unset");
         unsafe {
             std::env::set_var("SHODH_NCA_SPREAD", "0");
         }
-        let zero = rankings(&system);
+        let zero = ranked_corpus_ids("nca_off_zero");
         unsafe {
             match prev {
                 Some(v) => std::env::set_var("SHODH_NCA_SPREAD", v),
@@ -1151,7 +1177,6 @@ mod tests {
             "SHODH_NCA_SPREAD=0 must be byte-identical to unset (the flag gate must be inert when off)"
         );
 
-        drop(manager);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
