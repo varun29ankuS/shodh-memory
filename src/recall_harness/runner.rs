@@ -1097,6 +1097,11 @@ pub fn run_longmemeval(
     // report_key -> (sum recall, scored count) over every requested mode.
     let mut mode_agg: BTreeMap<String, (f64, usize)> = BTreeMap::new();
 
+    // SHODH_FUSION_DUMP=<path>: append, per question (production/primary pass
+    // only), the three RAW pre-fusion legs + this question's gold turn ids, for
+    // the offline calibrated-fusion ablation. Default unset → no dump, no cost.
+    let fusion_dump_path = std::env::var("SHODH_FUSION_DUMP").ok();
+
     for (qi, case) in cases.iter().enumerate() {
         let corpus_path = base_dir.join(&case.corpus);
         let corpus_txt = std::fs::read_to_string(&corpus_path)
@@ -1159,6 +1164,11 @@ pub fn run_longmemeval(
 
         for &mode in &modes {
             query.layers = mode;
+            // Arm the per-leg dump only for the primary (production) pass so the
+            // dumped legs correspond to the headline recall, not a lower ladder mode.
+            if fusion_dump_path.is_some() && mode == primary_mode {
+                crate::memory::fusion_dump::begin();
+            }
             let memories = system.read().recall(&query).unwrap_or_default();
             let topk: HashSet<Uuid> = memories.iter().take(k).map(|m| m.id.0).collect();
 
@@ -1174,6 +1184,38 @@ pub fn run_longmemeval(
 
             // Headline aggregates track the production (primary) pass only.
             if mode == primary_mode {
+                // Drain the per-leg dump (armed above) and append one JSONL record:
+                // the three raw legs + this question's resolved gold turn ids, so the
+                // offline analysis can join gold to candidates in the same id space.
+                if let Some(dump_path) = &fusion_dump_path {
+                    if let Some(legs) = crate::memory::fusion_dump::take() {
+                        use std::io::Write as _;
+                        let mut legs_map = serde_json::Map::new();
+                        for (leg, items) in legs {
+                            let arr: Vec<serde_json::Value> = items
+                                .iter()
+                                .map(|(id, s)| serde_json::json!([id.0.to_string(), s]))
+                                .collect();
+                            legs_map.insert(leg, serde_json::Value::Array(arr));
+                        }
+                        let line = serde_json::json!({
+                            "question_id": case.id,
+                            "category": case.category,
+                            "gold": gold_uuids
+                                .iter()
+                                .map(|u| u.to_string())
+                                .collect::<Vec<_>>(),
+                            "legs": legs_map,
+                        });
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(dump_path)
+                        {
+                            let _ = writeln!(f, "{line}");
+                        }
+                    }
+                }
                 // SHODH_DUMP_CONTEXT=<path>: append one JSONL record per question
                 // with the retrieved top-k turn TEXTS (production pass only).
                 // Feeds the reader-composition study: an external reader model

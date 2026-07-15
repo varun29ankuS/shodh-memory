@@ -11,6 +11,7 @@ pub mod context;
 pub mod facts;
 pub mod feedback;
 pub mod files;
+pub mod fusion_dump;
 pub mod fusion_features;
 pub mod gold_funnel;
 pub mod graph_retrieval;
@@ -3640,6 +3641,34 @@ impl MemorySystem {
             // SHODH_GRAPH_RESERVE_K injection before truncation below).
             let graph_topn: Vec<MemoryId> =
                 graph_results.iter().map(|(id, _, _)| id.clone()).collect();
+
+            // Fusion-ablation per-leg dump (SHODH_FUSION_DUMP, armed by the recall
+            // harness only). Capture the three RAW pre-fusion legs here, where they
+            // coexist untouched: BM25 and dense-vector from the hybrid component
+            // scores, graph from spreading activation. This is before any
+            // experimental leg mutation (isolate-leg, weight overrides), so an
+            // offline calibrated-fusion A/B/C replays on the true magnitudes. The
+            // `is_armed` guard keeps this a no-op in production.
+            if crate::memory::fusion_dump::is_armed() {
+                crate::memory::fusion_dump::record_leg(
+                    "bm25",
+                    hybrid_components
+                        .iter()
+                        .filter(|(_, (b, _))| *b > 0.0)
+                        .map(|(id, (b, _))| (id.clone(), *b)),
+                );
+                crate::memory::fusion_dump::record_leg(
+                    "vector",
+                    hybrid_components
+                        .iter()
+                        .filter(|(_, (_, v))| *v > 0.0)
+                        .map(|(id, (_, v))| (id.clone(), *v)),
+                );
+                crate::memory::fusion_dump::record_leg(
+                    "graph",
+                    graph_results.iter().map(|(id, a, _)| (id.clone(), *a)),
+                );
+            }
 
             // E3 fusion-fix B (gated) — activation-proportional additive term
             // (SHODH_GRAPH_ACT_ADD=<scale>). The graph RRF (~w/(k+rank)) is tiny
