@@ -838,6 +838,305 @@ fn personalized_pagerank(
     Ok((activation, passage_activation, traversed))
 }
 
+// =============================================================================
+// Wave-2 GNCA deterministic spread (SHODH_NCA_SPREAD). A per-query, TRANSIENT
+// activation vector that makes structural bridges carry ranking signal — the
+// deterministic (non-learned) baseline the EmbedKGQA / learned-Δ bake-off must
+// beat before any learned propagation is written.
+//
+// Brittleness designed against: undifferentiated spreading has lost every time
+// on this sparse co-occurrence graph (CoRetrieved 80% flood, reach_inject
+// harmful, spreading mini-fusion pollution). So the spread here is honest only
+// because it is (1) TRANSIENT — never mutates stored edge strengths; (2)
+// FLOOD-GATED — receiver-normalised convex-combination diffusion with a PPR
+// restart term, so activation is bounded by the seed peak and cannot
+// runaway-saturate, plus a nomination floor that drops trace non-seed mass; (3)
+// BRIDGE-SELECTIVE — the conductance boost keys on `decay::tarjan_topology`
+// bridge edges (the SAME topology wave-1 decay protects), so mass is directed
+// across the structural single-points-of-failure rather than diffused over
+// dense-cluster hubs.
+//
+// Update rule (per step): a_{t+1}[v] = (1−r)·Σ_{u∈N(v)} c(u,v)·a_t[u] + r·a₀[v]
+// with conductance c(u,v) = w(u,v)^α·(1+β·bridge(u,v)) / Z_v, Z_v the sum of the
+// same numerator over v's neighbours (RECEIVER normalisation ⇒ the propagated
+// term is a convex combination of neighbour activations ⇒ 0 ≤ a_t[v] ≤ max(a₀),
+// the anti-flood guarantee).
+// =============================================================================
+
+/// Tunable parameters for the deterministic GNCA transient spread. Defaults are
+/// distribution-aware against the bridge benchmark's measured co-occurrence graph
+/// (justified in the wave-2 report); every term is overridable for the sweep.
+#[derive(Debug, Clone, Copy)]
+struct NcaParams {
+    /// Restart probability `r` — the PPR-style anti-flood gate. `0.5` gives a
+    /// geometric spread radius of ≈1/r = 2 hops before restart mass dominates,
+    /// matching the seed→bridge→target depth of this graph (3-hop mass ≈0.125,
+    /// negligible), so spread reaches the bridge without flooding beyond it.
+    restart: f32,
+    /// Conductance strength-compression exponent `α (<1)`. Co-occurrence strength
+    /// scales with mention count; a single-mention bridge edge is ≈√(dense/1)
+    /// weaker than a 6-mention cluster edge. `α=0.5` (the codebase's existing
+    /// 1/√ degree-normalisation convention) compresses that gap so a
+    /// surviving-weak bridge still transmits.
+    alpha: f32,
+    /// Bridge conductance boost `β`: a bridge edge's conductance is multiplied by
+    /// `(1+β)`. `β=2.0` (×3) roughly offsets the post-α single-vs-dense
+    /// co-occurrence deficit (√6 ≈ 2.45) and gives the bridge a net edge over the
+    /// competing intra-cluster fan-out at the anchor.
+    beta: f32,
+    /// Propagation steps `K`. Seed→bridge→target is ≤2 entity hops; `K=3` adds one
+    /// relaxation step for downstream consolidation. Beyond K=3 the restart mass
+    /// dominates and further steps are inert.
+    steps: usize,
+    /// Nomination floor as a FRACTION of the peak activation: a non-seed entity
+    /// whose final activation is below `θ·peak` is dropped (the flood guard that
+    /// stops trace diffusion mass from injecting spurious episodes). Relative to
+    /// the peak so it scales with the query rather than an arbitrary absolute.
+    theta_frac: f32,
+}
+
+impl NcaParams {
+    fn from_env() -> Self {
+        let f = |k: &str, d: f32| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(d)
+        };
+        let u = |k: &str, d: usize| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(d)
+        };
+        NcaParams {
+            restart: f("SHODH_NCA_R", 0.5).clamp(0.01, 0.99),
+            alpha: f("SHODH_NCA_ALPHA", 0.5).clamp(0.05, 1.0),
+            beta: f("SHODH_NCA_BETA", 2.0).max(0.0),
+            steps: u("SHODH_NCA_K", 3).clamp(1, 8),
+            theta_frac: f("SHODH_NCA_THETA", 0.01).clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// Observability counters for one NCA spread (transient, per query).
+#[derive(Debug, Default, Clone, Copy)]
+struct NcaLegStats {
+    /// Entity nodes in the transient subgraph.
+    nodes: usize,
+    /// Bridge edges detected by `tarjan_topology` in the subgraph.
+    bridges: usize,
+    /// Non-seed entities carried above the flood floor into the candidate set.
+    nominated: usize,
+}
+
+/// Intern an entity UUID into the dense NCA node index with an undirected weighted
+/// neighbour map row (max-dedup of parallel / both-direction edges).
+fn nca_intern(
+    u: Uuid,
+    nodes: &mut Vec<Uuid>,
+    node_idx: &mut HashMap<Uuid, usize>,
+    nbr: &mut Vec<HashMap<usize, f32>>,
+) -> usize {
+    if let Some(&i) = node_idx.get(&u) {
+        return i;
+    }
+    let i = nodes.len();
+    nodes.push(u);
+    nbr.push(HashMap::new());
+    node_idx.insert(u, i);
+    i
+}
+
+/// Deterministic GNCA transient spread over the local entity subgraph. Returns
+/// (entity → final transient activation, traversed edge uuids, leg stats).
+///
+/// The subgraph is the TRUE undirected co-occurrence graph: the neighbour of an
+/// edge is always its OTHER endpoint (not the legacy `to_entity`), so the pass is
+/// independent of `SHODH_GRAPH_EDGE_DIR` and feeds `tarjan_topology` a correct
+/// symmetric adjacency (bridge detection requires it). Stored edge strengths are
+/// NEVER mutated — the activation vector lives and dies within this call.
+fn nca_spread(
+    graph: &GraphMemory,
+    seeds: &HashMap<Uuid, f32>,
+    intent: Option<&OntologicalIntent>,
+    predicate_weights: bool,
+    params: NcaParams,
+) -> Result<(HashMap<Uuid, f32>, Vec<Uuid>, NcaLegStats)> {
+    const MAX_NODES: usize = 5000;
+    const MAX_EDGES_PER_NODE: usize = 100;
+    let expand_hops = params.steps.max(2);
+
+    let mut nodes: Vec<Uuid> = Vec::new();
+    let mut node_idx: HashMap<Uuid, usize> = HashMap::new();
+    // Undirected weighted neighbour rows (max-dedup of parallel / both-dir edges).
+    let mut nbr: Vec<HashMap<usize, f32>> = Vec::new();
+    let mut traversed: Vec<Uuid> = Vec::new();
+    let mut label_cache: HashMap<Uuid, Option<Vec<EntityLabel>>> = HashMap::new();
+
+    // Deterministic node interning order (sorted seed frontier): a different index
+    // assignment reorders the per-node conductance sums, and f32 addition is
+    // non-associative — sorting makes the whole spread bit-reproducible.
+    let mut frontier: Vec<Uuid> = seeds.keys().copied().collect();
+    frontier.sort_unstable();
+    let mut visited: HashSet<Uuid> = frontier.iter().copied().collect();
+    for &s in &frontier {
+        nca_intern(s, &mut nodes, &mut node_idx, &mut nbr);
+    }
+
+    for _ in 0..expand_hops {
+        if nodes.len() >= MAX_NODES {
+            break;
+        }
+        let mut next: Vec<Uuid> = Vec::new();
+        for &u in &frontier {
+            let ui = nca_intern(u, &mut nodes, &mut node_idx, &mut nbr);
+            let edges = graph.get_entity_relationships_limited(&u, Some(MAX_EDGES_PER_NODE))?;
+            for edge in edges {
+                // True undirected neighbour — the endpoint that is NOT `u`.
+                let nb = if edge.from_entity == u {
+                    edge.to_entity
+                } else {
+                    edge.from_entity
+                };
+                if nb == u {
+                    continue; // defensive: strip self-loops (tarjan requires it)
+                }
+                let w = ppr_edge_weight(
+                    &edge,
+                    nb,
+                    intent,
+                    predicate_weights,
+                    graph,
+                    &mut label_cache,
+                );
+                if w <= 0.0 {
+                    continue;
+                }
+                let ti = nca_intern(nb, &mut nodes, &mut node_idx, &mut nbr);
+                // Symmetric max-dedup: a co-occurrence is one undirected conductor.
+                let e = nbr[ui].entry(ti).or_insert(0.0);
+                if w > *e {
+                    *e = w;
+                }
+                let e = nbr[ti].entry(ui).or_insert(0.0);
+                if w > *e {
+                    *e = w;
+                }
+                traversed.push(edge.uuid);
+                if visited.insert(nb) {
+                    next.push(nb);
+                }
+            }
+            if nodes.len() >= MAX_NODES {
+                break;
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+
+    let n = nodes.len();
+    let mut stats = NcaLegStats {
+        nodes: n,
+        ..Default::default()
+    };
+    if n == 0 {
+        return Ok((HashMap::new(), traversed, stats));
+    }
+
+    // Structural bridges via the SAME iterative Tarjan pass wave-1 decay uses. The
+    // simple unweighted adjacency is the neighbour-key set of each row.
+    let simple_adj: Vec<Vec<usize>> = nbr.iter().map(|m| m.keys().copied().collect()).collect();
+    let topo = crate::decay::tarjan_topology(&simple_adj);
+    let bridge_set: HashSet<(usize, usize)> = topo.bridges.iter().copied().collect();
+    stats.bridges = bridge_set.len();
+    let is_bridge = |a: usize, b: usize| -> bool {
+        let key = if a < b { (a, b) } else { (b, a) };
+        bridge_set.contains(&key)
+    };
+
+    // Receiver-normalised conductance: for each node v, cond[v] = [(u, c(u,v)/Z_v)]
+    // over v's neighbours u, sorted by u for deterministic summation.
+    let mut cond: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n];
+    for v in 0..n {
+        let mut neigh: Vec<(usize, f32)> = nbr[v].iter().map(|(&u, &w)| (u, w)).collect();
+        neigh.sort_unstable_by_key(|(u, _)| *u);
+        let mut raws: Vec<(usize, f32)> = Vec::with_capacity(neigh.len());
+        let mut z = 0.0f32;
+        for (u, w) in neigh {
+            let boost = if is_bridge(u, v) {
+                1.0 + params.beta
+            } else {
+                1.0
+            };
+            let raw = w.max(0.0).powf(params.alpha) * boost;
+            z += raw;
+            raws.push((u, raw));
+        }
+        if z > 0.0 {
+            for (u, raw) in raws {
+                cond[v].push((u, raw / z));
+            }
+        }
+    }
+
+    // Restart vector a₀ (L1-normalised seed activations, sorted for determinism).
+    let mut seed_pairs: Vec<(usize, f32)> = seeds
+        .iter()
+        .filter_map(|(u, w)| node_idx.get(u).map(|&i| (i, w.max(0.0))))
+        .collect();
+    seed_pairs.sort_unstable_by_key(|(i, _)| *i);
+    let zseed: f32 = seed_pairs.iter().map(|(_, w)| *w).sum::<f32>().max(1e-9);
+    let mut a0 = vec![0.0f32; n];
+    for (i, w) in &seed_pairs {
+        a0[*i] += *w / zseed;
+    }
+
+    // K-step transient propagation. Bounded: the propagated term is a convex
+    // combination (Σ cond = 1) so a_t stays in [0, max(a₀)].
+    let mut a = a0.clone();
+    for _ in 0..params.steps {
+        let mut nxt = vec![0.0f32; n];
+        for v in 0..n {
+            let mut acc = 0.0f32;
+            for &(u, c) in &cond[v] {
+                acc += c * a[u];
+            }
+            nxt[v] = (1.0 - params.restart) * acc + params.restart * a0[v];
+        }
+        a = nxt;
+    }
+
+    // Readout: re-rank present candidates by final activation AND nominate new
+    // nodes above the flood floor. Seeds are always kept; non-seed trace mass
+    // below θ·peak is dropped so diffusion noise cannot inject spurious episodes.
+    let peak = a.iter().copied().fold(0.0f32, f32::max).max(1e-9);
+    let floor = params.theta_frac * peak;
+    let seed_set: HashSet<usize> = seed_pairs.iter().map(|(i, _)| *i).collect();
+    let mut activation = HashMap::with_capacity(n);
+    for i in 0..n {
+        let val = a[i];
+        if val <= 0.0 {
+            continue;
+        }
+        let is_seed = seed_set.contains(&i);
+        if !is_seed && val < floor {
+            continue;
+        }
+        activation.insert(nodes[i], val);
+        if !is_seed {
+            stats.nominated += 1;
+        }
+    }
+
+    traversed.sort_unstable();
+    traversed.dedup();
+    Ok((activation, traversed, stats))
+}
+
 /// Reachability injection (complete, threshold-free spreading). For every entity within
 /// REACH_HOPS of a query seed, compute its best-path activation — the max over paths of the
 /// edge-weight product, distance-decayed — with NO threshold pruning. The reachability
@@ -1277,7 +1576,41 @@ pub fn spreading_activation_retrieve_with_stats(
         .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
         .unwrap_or(true);
 
-    if ppr_enabled {
+    // SHODH_NCA_SPREAD (wave-2, default OFF): deterministic GNCA transient spread
+    // — a bridge-selective, flood-gated SIBLING to PPR. When on it REPLACES the
+    // spreading step (its final transient activation becomes `activation_map`,
+    // consumed by the shared episode-scoring path below); when off this branch is
+    // never entered and the pipeline is byte-identical to the PPR/BFS default.
+    let nca_enabled = std::env::var("SHODH_NCA_SPREAD")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if nca_enabled {
+        let params = NcaParams::from_env();
+        let pred_w = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        tracing::info!(
+            "🧬 Using GNCA transient spread ({} seed entities, r={}, α={}, β={}, K={})",
+            activation_map.len(),
+            params.restart,
+            params.alpha,
+            params.beta,
+            params.steps
+        );
+        let (nca_map, edges, leg) = nca_spread(graph, &activation_map, intent_ref, pred_w, params)?;
+        tracing::info!(
+            "🧬 GNCA spread: {} nodes, {} bridges, {} nominated → {} activated entities",
+            leg.nodes,
+            leg.bridges,
+            leg.nominated,
+            nca_map.len()
+        );
+        activation_map = nca_map;
+        traversed_edges = edges;
+        stats.entities_activated = activation_map.len();
+        stats.graph_hops = params.steps;
+    } else if ppr_enabled {
         let pred_w = std::env::var("SHODH_GRAPH_PREDICATE_WEIGHTS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
