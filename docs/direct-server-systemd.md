@@ -1,7 +1,8 @@
 # Direct server mode with systemd
 
-This guide is for Linux users who want the Rust HTTP server to run as a
-long-lived local service and have MCP or REST clients connect to it.
+This guide is for Linux users who want the Rust server to run as a long-lived
+local service. MCP bridges can reach it over a Unix socket, while REST clients
+remain available over HTTP.
 
 This is optional. The default `npx -y @shodh/memory-mcp` setup is still the
 quickest path for Claude Code, Cursor, Claude Desktop, and other MCP clients.
@@ -17,8 +18,9 @@ Use direct server mode when you want:
 
 ## Command roles
 
-- `shodh server` starts the HTTP API server, usually on `127.0.0.1:3030`.
-- `shodh serve` starts the MCP stdio server.
+- `shodh server` starts the HTTP API and, by default, the local IPC listener.
+- `shodh serve` starts the MCP stdio bridge, preferring local IPC and falling
+  back to `SHODH_API_URL` when IPC is unavailable.
 - `@shodh/memory-mcp` is the npm MCP wrapper used by MCP clients.
 
 Direct server mode runs `shodh server` separately. MCP and REST clients can then
@@ -36,7 +38,7 @@ Create `~/.config/systemd/user/shodh-memory.service`:
 
 ```ini
 [Unit]
-Description=Shodh Memory HTTP server
+Description=Shodh Memory server
 After=network.target
 
 [Service]
@@ -44,6 +46,9 @@ Type=simple
 Environment=SHODH_HOST=127.0.0.1
 Environment=SHODH_PORT=3030
 Environment=SHODH_MEMORY_PATH=%h/.local/share/shodh-memory
+Environment=SHODH_IPC_ENABLED=true
+Environment=SHODH_IPC_ENDPOINT=%h/.local/share/shodh/shodh-memory.sock
+Environment=SHODH_IPC_REQUIRED=true
 Environment=SHODH_DEV_API_KEY=local-dev-key
 ExecStart=%h/.cargo/bin/shodh server
 Restart=on-failure
@@ -70,6 +75,10 @@ Check the server directly:
 curl -sS http://127.0.0.1:3030/health
 ```
 
+Also check the journal for `Local IPC ready at ...`. With
+`SHODH_IPC_REQUIRED=true`, a socket bind failure makes service activation fail;
+without it, the server logs the failure and continues HTTP-only.
+
 View logs:
 
 ```bash
@@ -85,7 +94,7 @@ systemctl --user restart shodh-memory.service
 ## MCP client example
 
 If you want an MCP client to use this separately supervised server, point the
-native MCP bridge at the HTTP API:
+native MCP bridge at the same Unix socket:
 
 ```json
 {
@@ -94,6 +103,7 @@ native MCP bridge at the HTTP API:
       "command": "shodh",
       "args": ["serve"],
       "env": {
+        "SHODH_IPC_ENDPOINT": "/home/you/.local/share/shodh/shodh-memory.sock",
         "SHODH_API_URL": "http://127.0.0.1:3030",
         "SHODH_API_KEY": "local-dev-key",
         "SHODH_USER_ID": "local-agent"
@@ -104,7 +114,10 @@ native MCP bridge at the HTTP API:
 ```
 
 Use the full path to `shodh` if your MCP client does not inherit your shell
-`PATH`.
+`PATH`. Replace `/home/you` with the service user's home directory and keep the
+endpoint identical to the service value. The socket parent is mode `0700` and
+the socket is mode `0600`; Shodh refuses unsafe, foreign-owned, or live
+replacement endpoints.
 
 ## User IDs
 

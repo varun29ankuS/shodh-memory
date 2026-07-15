@@ -245,6 +245,9 @@ Environment variables:
 
 ```bash
 SHODH_MEMORY_PATH=./data
+# SHODH_IPC_ENABLED=false  # Local IPC is enabled by default; false disables it
+# SHODH_IPC_ENDPOINT=/private/path/shodh-memory.sock  # Optional platform-specific override
+# SHODH_IPC_REQUIRED=true  # Fail closed instead of falling back to HTTP
 SHODH_OFFLINE=true  # Disable auto-download (models must already be present; else NER runs fallback)
 RUST_LOG=info
 
@@ -262,6 +265,15 @@ SHODH_CONTRASTIVE_ADAPTER=1   # contrastive entity-embedding adapter (gated, def
 SHODH_CONSOLIDATE_CANON=0     # entity canonicalization during consolidation (default ON; set 0 to disable)
 SHODH_GRAPH_TYPED_ONLY=1      # restrict graph edges to typed relations (gated, default off)
 ```
+
+The server exposes finite JSON API operations over authenticated local IPC: a
+Unix-domain socket on Linux/macOS and a current-user-scoped named pipe on Windows.
+Endpoint challenge/response and per-request HMAC proofs keep the reusable key off
+the wire.
+Native `shodh serve` prefers IPC and falls back to `SHODH_API_URL` when the
+endpoint is unavailable unless `SHODH_IPC_REQUIRED=true`. Streaming routes remain WebSocket/SSE-only. See the
+[local IPC architecture](docs/architecture/07-local-ipc-transport.md) for exact
+defaults and limitations.
 
 ## Architecture
 
