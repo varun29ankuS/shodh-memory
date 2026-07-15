@@ -40,10 +40,26 @@ pub struct MemoryWithHierarchy {
 // LIST MEMORIES TYPES
 // =============================================================================
 
+/// Hard ceiling on `limit` for the memory-listing endpoints (`/api/list/{user_id}`,
+/// `/api/memories`). Callers may request any `limit`, but it is always clamped to
+/// this value to bound per-request memory use (each returned item clones up to
+/// 500 chars of content plus tags/metadata) and RocksDB scan cost. Large exports
+/// should page through with repeated `offset`-advancing requests rather than
+/// requesting everything in one call.
+///
+/// See issue #407: the previous hard cap of 1000 (with no way to page past it)
+/// made records beyond the first 1000 permanently unreachable via this API.
+const MAX_LIST_LIMIT: usize = 10_000;
+
 /// Query parameters for listing memories
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
+    /// Max items to return. Defaults to 100, clamped to [`MAX_LIST_LIMIT`].
     pub limit: Option<usize>,
+    /// Items to skip before collecting `limit` results. Defaults to 0.
+    /// Combine with `total` in the response to page through results beyond
+    /// `MAX_LIST_LIMIT` (e.g. offset=10000, offset=20000, ...).
+    pub offset: Option<usize>,
     #[serde(rename = "type")]
     pub memory_type: Option<String>,
     /// Text search query - filters by content or tags (case-insensitive)
@@ -54,6 +70,9 @@ pub struct ListQuery {
 #[derive(Debug, Serialize)]
 pub struct ListResponse {
     pub memories: Vec<ListMemoryItem>,
+    /// Total number of memories matching the filters (`type`/`query`), independent
+    /// of `limit`/`offset`. Callers can compare `memories.len() + offset` against
+    /// `total` to know whether more pages remain.
     pub total: usize,
 }
 
@@ -61,7 +80,10 @@ pub struct ListResponse {
 #[derive(Debug, Deserialize)]
 pub struct ListMemoriesRequest {
     pub user_id: String,
+    /// Max items to return. Defaults to 100, clamped to [`MAX_LIST_LIMIT`].
     pub limit: Option<usize>,
+    /// Items to skip before collecting `limit` results. Defaults to 0.
+    pub offset: Option<usize>,
     #[serde(rename = "type")]
     pub memory_type: Option<String>,
     pub query: Option<String>,
@@ -254,7 +276,9 @@ pub async fn get_memory(
 // =============================================================================
 
 /// GET /api/list/{user_id} - List all memories for a user
-/// Query params: ?limit=100&type=Decision
+/// Query params: ?limit=100&offset=0&type=Decision
+/// `limit` defaults to 100 and is clamped to [`MAX_LIST_LIMIT`]; `offset` defaults
+/// to 0. Use `total` in the response to page through results (offset += limit).
 #[tracing::instrument(skip(state), fields(user_id = %user_id))]
 pub async fn list_memories(
     State(state): State<AppState>,
@@ -308,10 +332,12 @@ pub async fn list_memories(
     }
 
     let total = filtered.len();
-    let limit = query.limit.unwrap_or(100).min(1000);
+    let limit = query.limit.unwrap_or(100).min(MAX_LIST_LIMIT);
+    let offset = query.offset.unwrap_or(0);
 
     let memories: Vec<ListMemoryItem> = filtered
         .into_iter()
+        .skip(offset)
         .take(limit)
         .map(|m| {
             let content_length = m.experience.content.chars().count();
@@ -352,13 +378,16 @@ pub async fn list_memories_post(
 #[derive(Debug, Deserialize)]
 pub struct ListMemoriesQuery {
     pub user_id: String,
+    /// Max items to return. Defaults to 100, clamped to [`MAX_LIST_LIMIT`].
     pub limit: Option<usize>,
+    /// Items to skip before collecting `limit` results. Defaults to 0.
+    pub offset: Option<usize>,
     #[serde(rename = "type")]
     pub memory_type: Option<String>,
     pub query: Option<String>,
 }
 
-/// GET /api/memories?user_id=...&limit=... - List memories via query params
+/// GET /api/memories?user_id=...&limit=...&offset=... - List memories via query params
 /// Cloudflare Worker compatibility alias for POST /api/memories
 #[tracing::instrument(skip(state), fields(user_id = %params.user_id))]
 pub async fn list_memories_get(
@@ -368,6 +397,7 @@ pub async fn list_memories_get(
     let req = ListMemoriesRequest {
         user_id: params.user_id,
         limit: params.limit,
+        offset: params.offset,
         memory_type: params.memory_type,
         query: params.query,
     };
@@ -426,10 +456,12 @@ async fn list_memories_inner(
     }
 
     let total = filtered.len();
-    let limit = req.limit.unwrap_or(100).min(1000);
+    let limit = req.limit.unwrap_or(100).min(MAX_LIST_LIMIT);
+    let offset = req.offset.unwrap_or(0);
 
     let memories: Vec<ListMemoryItem> = filtered
         .into_iter()
+        .skip(offset)
         .take(limit)
         .map(|m| {
             let content_length = m.experience.content.chars().count();

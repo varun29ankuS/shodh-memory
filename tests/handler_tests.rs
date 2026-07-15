@@ -24,6 +24,7 @@ use shodh_memory::{
     handlers::{
         build_probe_routes, build_protected_routes, build_public_routes, MultiUserMemoryManager,
     },
+    memory::types::{Experience, ExperienceType},
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -74,6 +75,27 @@ impl Harness {
             shodh_memory::auth::auth_middleware,
         ));
         Router::new().merge(probe).merge(public).merge(protected)
+    }
+
+    /// Seed `count` distinct memories for `user_id` directly through the memory
+    /// system, bypassing HTTP and the real embedder (a canned 384-dim vector is
+    /// supplied so `remember()` skips embedding generation). This is the same
+    /// direct-call pattern `brutal_stress_tests.rs` uses for bulk seeding, and is
+    /// necessary here to seed 1000+ records without paying ~300-500ms/record of
+    /// real embedding-generation cost per the timing measured in
+    /// `test_brutal_timing_record`.
+    fn seed_memories(&self, user_id: &str, count: usize) {
+        let memory = self.mgr.get_user_memory(user_id).expect("get_user_memory");
+        let guard = memory.read();
+        for i in 0..count {
+            let exp = Experience {
+                experience_type: ExperienceType::Learning,
+                content: format!("pagination-seed-{user_id}-{i:06}"),
+                embeddings: Some(vec![0.01_f32; 384]),
+                ..Default::default()
+            };
+            guard.remember(exp, None).expect("seed remember");
+        }
     }
 }
 
@@ -549,6 +571,206 @@ async fn list_memories_post_empty() {
     )
     .await;
     assert!(status.is_success());
+}
+
+// ── Issue #407: offset/limit pagination on the list endpoints ──
+
+/// GET /api/list/{user_id} (list_memories): offset actually skips records rather
+/// than being silently ignored. Pages of 10, chunked from a known-good full
+/// listing, must match the corresponding slice — proving `.skip(offset)` lines
+/// up with the same ordering `get_all_memories()` produces.
+#[tokio::test]
+async fn list_memories_get_offset_paginates_distinct_pages() {
+    let h = Harness::new();
+    h.seed_memories("offset-user", 30);
+
+    let (status, full_body) = json_of(h.app(), authed_get("/api/list/offset-user?limit=30")).await;
+    assert_eq!(status, StatusCode::OK);
+    let full_ids: Vec<String> = full_body["memories"]
+        .as_array()
+        .expect("memories array")
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(full_ids.len(), 30, "expected all 30 seeded memories");
+
+    for (page_index, expected_chunk) in full_ids.chunks(10).enumerate() {
+        let offset = page_index * 10;
+        let (status, body) = json_of(
+            h.app(),
+            authed_get(&format!("/api/list/offset-user?limit=10&offset={offset}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let page_ids: Vec<String> = body["memories"]
+            .as_array()
+            .expect("memories array")
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            page_ids, expected_chunk,
+            "page at offset={offset} should equal slice [{offset}..{offset}+10] of the full list"
+        );
+    }
+
+    // Past-the-end offset returns an empty page, not an error.
+    let (status, body) = json_of(
+        h.app(),
+        authed_get("/api/list/offset-user?limit=10&offset=1000"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["memories"].as_array().unwrap().is_empty());
+}
+
+/// POST /api/memories (list_memories_inner via list_memories_post): offset in the
+/// request body composes with limit to walk distinct, non-overlapping pages.
+#[tokio::test]
+async fn list_memories_post_offset_paginates_distinct_pages() {
+    let h = Harness::new();
+    h.seed_memories("post-offset-user", 12);
+
+    let (status, page0) = json_of(
+        h.app(),
+        authed_post(
+            "/api/memories",
+            json!({"user_id": "post-offset-user", "limit": 5, "offset": 0}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, page1) = json_of(
+        h.app(),
+        authed_post(
+            "/api/memories",
+            json!({"user_id": "post-offset-user", "limit": 5, "offset": 5}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let ids0: std::collections::HashSet<String> = page0["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    let ids1: std::collections::HashSet<String> = page1["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids0.len(), 5);
+    assert_eq!(ids1.len(), 5);
+    assert!(
+        ids0.is_disjoint(&ids1),
+        "offset=0 and offset=5 pages must not overlap: {ids0:?} vs {ids1:?}"
+    );
+}
+
+/// GET /api/memories?...&offset=... (list_memories_get -> list_memories_inner):
+/// confirms `offset` is threaded from `ListMemoriesQuery` into `ListMemoriesRequest`
+/// rather than being dropped on the query-param path.
+#[tokio::test]
+async fn list_memories_get_query_offset_is_threaded() {
+    let h = Harness::new();
+    h.seed_memories("get-query-offset-user", 12);
+
+    let (status, page0) = json_of(
+        h.app(),
+        authed_get("/api/memories?user_id=get-query-offset-user&limit=5&offset=0"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, page1) = json_of(
+        h.app(),
+        authed_get("/api/memories?user_id=get-query-offset-user&limit=5&offset=5"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let ids0: std::collections::HashSet<String> = page0["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    let ids1: std::collections::HashSet<String> = page1["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        ids0.is_disjoint(&ids1),
+        "offset must be threaded through the GET query-param path, not ignored"
+    );
+}
+
+/// A `limit` above the old hard-coded 1000 cap must actually return more than
+/// 1000 records when the store has more — the core regression from #407.
+#[tokio::test]
+async fn list_memories_limit_above_1000_returns_more_than_1000() {
+    let h = Harness::new();
+    let seeded: usize = 1200;
+    h.seed_memories("big-user", seeded);
+
+    let (status, body) = json_of(h.app(), authed_get("/api/list/big-user?limit=2000")).await;
+    assert_eq!(status, StatusCode::OK);
+    let memories = body["memories"].as_array().expect("memories array");
+    assert!(
+        memories.len() > 1000,
+        "limit=2000 over {seeded} stored memories must exceed the old hard cap of 1000, got {}",
+        memories.len()
+    );
+    assert_eq!(
+        memories.len(),
+        seeded,
+        "all {seeded} seeded memories should be returned under the new MAX_LIST_LIMIT ceiling"
+    );
+    assert_eq!(body["total"].as_u64().unwrap(), seeded as u64);
+}
+
+/// `total` must reflect the full filtered count, not the page size — so callers
+/// can tell whether they've received everything.
+#[tokio::test]
+async fn list_memories_total_reflects_full_count_not_page_size() {
+    let h = Harness::new();
+    let seeded: usize = 15;
+    h.seed_memories("total-user", seeded);
+
+    let (status, body) =
+        json_of(h.app(), authed_get("/api/list/total-user?limit=3&offset=5")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["memories"].as_array().unwrap().len(),
+        3,
+        "page size should honor limit=3"
+    );
+    assert_eq!(
+        body["total"].as_u64().unwrap(),
+        seeded as u64,
+        "total must reflect the full filtered count, independent of limit/offset"
+    );
+}
+
+/// Callers that don't pass offset/limit keep the pre-#407 defaults: limit=100,
+/// offset=0 (i.e. from the start).
+#[tokio::test]
+async fn list_memories_default_limit_and_offset_unchanged() {
+    let h = Harness::new();
+    h.seed_memories("defaults-user", 5);
+
+    let (status, body) = json_of(h.app(), authed_get("/api/list/defaults-user")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["memories"].as_array().unwrap().len(),
+        5,
+        "default limit=100 should return all 5 seeded memories"
+    );
+    assert_eq!(body["total"].as_u64().unwrap(), 5);
 }
 
 #[tokio::test]
