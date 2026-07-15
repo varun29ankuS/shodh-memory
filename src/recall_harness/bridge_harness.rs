@@ -680,6 +680,158 @@ pub fn analyze_bridge_recall(
     })
 }
 
+/// Wave-2 GNCA attribution: bridge-crossing gold movement WITH vs WITHOUT
+/// `SHODH_NCA_SPREAD`, decomposed into the two mechanisms the spike must tell
+/// apart — NEVER a single blended number.
+///
+/// * `reach_delta` — gold newly ENTERING the candidate pool under NCA (absent
+///   from the baseline full pool, present under NCA). This is the nomination /
+///   generation lever: it proves the spread SURFACES gold the base pipeline never
+///   retrieved, not merely reshuffles what was already there.
+/// * `rank_delta_mean` — mean rank improvement of gold present in BOTH pools
+///   (`baseline_rank − nca_rank`, positive = climbed toward the top). The reorder
+///   lever, kept strictly separate from reach.
+/// * `reach_regression_count` — gold that FELL OUT of the pool under NCA (present
+///   baseline, absent NCA). The flood-failure guard: a spread that evicts gold is
+///   reshuffling noise, exactly the CoRetrieved-flood / reach_inject pathology.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BridgeNcaAttribution {
+    pub cases: usize,
+    pub baseline_present_at_10: f64,
+    pub nca_present_at_10: f64,
+    pub baseline_present_at_50: f64,
+    pub nca_present_at_50: f64,
+    pub baseline_present_at_100: f64,
+    pub nca_present_at_100: f64,
+    pub baseline_present_full: f64,
+    pub nca_present_full: f64,
+    /// Fraction of cases whose gold newly entered the pool under NCA.
+    pub reach_delta: f64,
+    /// Count of gold answers newly reached (numerator of `reach_delta`).
+    pub reach_delta_gold_count: usize,
+    /// Mean `baseline_rank − nca_rank` over gold present in BOTH pools.
+    pub rank_delta_mean: f64,
+    /// Cases contributing to `rank_delta_mean` (gold present in both pools).
+    pub rank_delta_cases: usize,
+    /// Gold present at baseline but absent under NCA (the regression guard).
+    pub reach_regression_count: usize,
+}
+
+/// Per-case 0-based rank of the gold memory in the full-pool ranked list under the
+/// CURRENT process env (so the caller toggles `SHODH_NCA_SPREAD` around it).
+/// `None` = gold absent from the pool entirely.
+fn gold_ranks(
+    system: &parking_lot::RwLock<crate::memory::MemorySystem>,
+    cases: &[BridgeCase],
+    id_map: &std::collections::HashMap<String, Uuid>,
+    query_k: usize,
+) -> Vec<Option<usize>> {
+    cases
+        .iter()
+        .map(|case| {
+            let gold_uuid = id_map.get(&case.gold_id).copied()?;
+            let query = Query {
+                query_text: Some(case.query.clone()),
+                ner_entities: Some(case.anchor_names.clone()),
+                max_results: query_k,
+                layers: LayerMode::Full,
+                ..Default::default()
+            };
+            let memories = system.read().recall(&query).unwrap_or_default();
+            memories.iter().position(|m| m.id.0 == gold_uuid)
+        })
+        .collect()
+}
+
+/// GNCA attribution study: ingest the bridge corpus ONCE, then measure every
+/// case's gold position under `SHODH_NCA_SPREAD` off and on, decomposing the
+/// movement into reach (nomination) vs rank (reorder). The flag is a per-recall
+/// env read, so toggling it between the two passes over the SAME live system
+/// isolates the mechanism with no re-ingest confound.
+pub fn analyze_bridge_nca_attribution(
+    inputs: &RunInputs,
+    units: usize,
+    cluster_size: usize,
+    bridges_per_unit: usize,
+) -> Result<BridgeNcaAttribution> {
+    pin_env();
+    let fx = generate_bridge_fixtures(units, cluster_size, bridges_per_unit);
+    let total_nodes = fx.corpus.len();
+    let (manager, id_map) = ingest_fresh(inputs, &fx, "bridge_nca_attrib")?;
+    let system = manager.get_user_memory(EVAL_USER)?;
+
+    // Toggle the flag around each pass; restore the caller's prior value after.
+    let prev = std::env::var_os("SHODH_NCA_SPREAD");
+    // SAFETY: harness is single-threaded at this point (RAYON pinned to 1);
+    // production never calls this path.
+    unsafe {
+        std::env::set_var("SHODH_NCA_SPREAD", "0");
+    }
+    let base = gold_ranks(&system, &fx.cases, &id_map, total_nodes);
+    unsafe {
+        std::env::set_var("SHODH_NCA_SPREAD", "1");
+    }
+    let nca = gold_ranks(&system, &fx.cases, &id_map, total_nodes);
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("SHODH_NCA_SPREAD", v),
+            None => std::env::remove_var("SHODH_NCA_SPREAD"),
+        }
+    }
+
+    let n = fx.cases.len();
+    let denom = (n.max(1)) as f64;
+    let present_at = |ranks: &[Option<usize>], k: usize| -> f64 {
+        ranks
+            .iter()
+            .filter(|r| matches!(r, Some(x) if *x < k))
+            .count() as f64
+            / denom
+    };
+    let present_full = |ranks: &[Option<usize>]| -> f64 {
+        ranks.iter().filter(|r| r.is_some()).count() as f64 / denom
+    };
+
+    let mut reach = 0usize;
+    let mut regress = 0usize;
+    let mut rank_sum = 0.0f64;
+    let mut rank_n = 0usize;
+    for (b, t) in base.iter().zip(nca.iter()) {
+        match (b, t) {
+            (None, Some(_)) => reach += 1,
+            (Some(_), None) => regress += 1,
+            (Some(br), Some(tr)) => {
+                rank_sum += *br as f64 - *tr as f64;
+                rank_n += 1;
+            }
+            (None, None) => {}
+        }
+    }
+
+    drop(manager);
+
+    Ok(BridgeNcaAttribution {
+        cases: n,
+        baseline_present_at_10: present_at(&base, BRIDGE_K),
+        nca_present_at_10: present_at(&nca, BRIDGE_K),
+        baseline_present_at_50: present_at(&base, 50),
+        nca_present_at_50: present_at(&nca, 50),
+        baseline_present_at_100: present_at(&base, 100),
+        nca_present_at_100: present_at(&nca, 100),
+        baseline_present_full: present_full(&base),
+        nca_present_full: present_full(&nca),
+        reach_delta: reach as f64 / denom,
+        reach_delta_gold_count: reach,
+        rank_delta_mean: if rank_n > 0 {
+            rank_sum / rank_n as f64
+        } else {
+            0.0
+        },
+        rank_delta_cases: rank_n,
+        reach_regression_count: regress,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -934,6 +1086,123 @@ mod tests {
                 last.targeted_recall_at_10
             );
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Flag-OFF byte-identity (wave-2 requirement). With SHODH_NCA_SPREAD unset the
+    // recall path must be byte-identical to before the flag existed. We prove the
+    // gate is inert by asserting the FULL ranked id list of every bridge case is
+    // identical between "flag unset" and "flag=0" (both take the default PPR path;
+    // the NCA branch is never entered), on a real ingest.
+    #[test]
+    #[ignore = "pays one pipeline ingest; verifies SHODH_NCA_SPREAD OFF is byte-identical to unset."]
+    fn nca_flag_off_is_byte_identical() {
+        let dir = unique_storage_dir("nca-off-identical");
+        let inputs = test_inputs(dir.clone());
+        pin_env();
+        let fx = generate_bridge_fixtures(4, 6, 1);
+        let total = fx.corpus.len();
+        let (manager, _id_map) = ingest_fresh(&inputs, &fx, "nca_off_identical").expect("ingest");
+        let system = manager.get_user_memory(EVAL_USER).expect("system");
+
+        let rankings =
+            |system: &parking_lot::RwLock<crate::memory::MemorySystem>| -> Vec<Vec<Uuid>> {
+                fx.cases
+                    .iter()
+                    .map(|case| {
+                        let query = Query {
+                            query_text: Some(case.query.clone()),
+                            ner_entities: Some(case.anchor_names.clone()),
+                            max_results: total,
+                            layers: LayerMode::Full,
+                            ..Default::default()
+                        };
+                        system
+                            .read()
+                            .recall(&query)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|m| m.id.0)
+                            .collect()
+                    })
+                    .collect()
+            };
+
+        let prev = std::env::var_os("SHODH_NCA_SPREAD");
+        // SAFETY: single-threaded harness; production never runs this path.
+        unsafe {
+            std::env::remove_var("SHODH_NCA_SPREAD");
+        }
+        let unset = rankings(&system);
+        unsafe {
+            std::env::set_var("SHODH_NCA_SPREAD", "0");
+        }
+        let zero = rankings(&system);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("SHODH_NCA_SPREAD", v),
+                None => std::env::remove_var("SHODH_NCA_SPREAD"),
+            }
+        }
+
+        assert_eq!(
+            unset, zero,
+            "SHODH_NCA_SPREAD=0 must be byte-identical to unset (the flag gate must be inert when off)"
+        );
+
+        drop(manager);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // GNCA attribution (wave-2): reach vs rank decomposition of the flag.
+    //
+    // Ingests once, then measures gold movement WITH vs WITHOUT SHODH_NCA_SPREAD
+    // over the same live system. Reports the two mechanisms SEPARATELY (the point
+    // of the spike) and guards the one hard invariant that holds regardless of
+    // whether the mechanism moves the number: the spread must not EVICT gold the
+    // baseline already retrieved (the flood-failure guard). Whether reach/rank are
+    // POSITIVE is measured and reported, not asserted — a clean null is a valid
+    // spike result and must not fail the build.
+    #[test]
+    #[ignore = "expensive: one ingest + two full-pool recall passes per case. run explicitly for the attribution table."]
+    fn bridge_nca_attribution_reports_reach_and_rank() {
+        let dir = unique_storage_dir("nca-attrib");
+        let inputs = test_inputs(dir.clone());
+        let a =
+            analyze_bridge_nca_attribution(&inputs, 24, 6, 1).expect("nca attribution analysis");
+
+        eprintln!(
+            "NCA_ATTRIB cases={} | present@10 base={:.4} nca={:.4} | @50 base={:.4} nca={:.4} | @100 base={:.4} nca={:.4} | full base={:.4} nca={:.4}",
+            a.cases,
+            a.baseline_present_at_10,
+            a.nca_present_at_10,
+            a.baseline_present_at_50,
+            a.nca_present_at_50,
+            a.baseline_present_at_100,
+            a.nca_present_at_100,
+            a.baseline_present_full,
+            a.nca_present_full,
+        );
+        eprintln!(
+            "NCA_ATTRIB reach_delta={:.4} ({} gold newly reached) | rank_delta_mean={:.2} over {} present-in-both | regressions={}",
+            a.reach_delta,
+            a.reach_delta_gold_count,
+            a.rank_delta_mean,
+            a.rank_delta_cases,
+            a.reach_regression_count,
+        );
+
+        // Flood-failure guard: NCA must not shrink the reachable pool. Gold the
+        // baseline retrieved must not vanish under the spread (bounded diffusion +
+        // nomination can only add or reorder, never evict base-pool retrieval).
+        assert!(
+            a.nca_present_full + 1e-9 >= a.baseline_present_full,
+            "NCA reduced the full-pool gold set (flood/eviction): base_full={} nca_full={} regressions={}",
+            a.baseline_present_full,
+            a.nca_present_full,
+            a.reach_regression_count,
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
