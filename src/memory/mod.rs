@@ -2114,8 +2114,12 @@ impl MemorySystem {
                     "Delegating to index-based retrieval engine for robotics mode"
                 );
                 let results = self.retriever.search(query, query.max_results)?;
-                if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
-                    tracing::debug!("Retrieval count: {count}");
+                // Sibling of the access-count/coactivation gates elsewhere in this
+                // function: also a usage write, so read-only recall must skip it too.
+                if !Self::recall_readonly() {
+                    if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+                        tracing::debug!("Retrieval count: {count}");
+                    }
                 }
                 return Ok(RetrievalResult {
                     memories: results,
