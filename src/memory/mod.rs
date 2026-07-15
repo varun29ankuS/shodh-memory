@@ -3316,21 +3316,6 @@ impl MemorySystem {
 
         // ===========================================================================
         // LAYER 4: BM25 + RRF FUSION
-        // ===========================================================================
-        // E3 fusion-fix (rank-based, post-Layer-5): reserve a FINAL slot for the
-        // graph's top-K-by-RANK candidates that BM25 missed (graph-exclusive).
-        // The magnitude additives could not cleanly fix multi-hop because the
-        // distal answer's signal is in its graph RANK, not its (low) activation
-        // magnitude. This keys on rank, and — unlike approach A, which injected
-        // before Layer-5 and was re-dropped — it is applied after Layer-5 scoring,
-        // gated to graph-exclusive so it never displaces a BM25-ranked correct
-        // hit. Default 0 → off.
-        let graph_reserve_final: usize = std::env::var("SHODH_GRAPH_RESERVE_FINAL")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let mut graph_exclusive_reserve: Vec<MemoryId> = Vec::new();
-
         // SHODH_DISABLE_BOOSTS=<family,...> — ablation kill-switch for the post-fusion
         // boost stack. Each token disables one boost family at recall time so its
         // marginal contribution can be measured against the calibrated FLAT baseline
@@ -3634,43 +3619,6 @@ impl MemorySystem {
                 s.linguistic_weight = linguistic_w;
             }
 
-            // E3 fusion-fix A — reserved graph quota. Capture the graph leg's
-            // ranked ids so the top-N can be guaranteed a slot in the final
-            // top-k regardless of RRF dilution by BM25's lexical crowd (see the
-            // SHODH_GRAPH_RESERVE_K injection before truncation below).
-            let graph_topn: Vec<MemoryId> =
-                graph_results.iter().map(|(id, _, _)| id.clone()).collect();
-
-            // E3 fusion-fix B (gated) — activation-proportional additive term
-            // (SHODH_GRAPH_ACT_ADD=<scale>). The graph RRF (~w/(k+rank)) is tiny
-            // and gets diluted by BM25's many weak lexical matches; this adds a
-            // non-dilutable term proportional to spreading activation so a
-            // confident graph hit competes on the fused scale. Default unset → 0.
-            //
-            // CRITICAL gate: apply the boost ONLY to graph candidates that BM25/
-            // vector did NOT already rank in their top window (`hybrid_top`). A
-            // global boost is catastrophic on lexical corpora (LoCoMo recall@10
-            // −0.187 at scale 0.5) because it floods the top-k with graph-
-            // activated memories that are WRONG when BM25 is right. Restricting
-            // it to graph-EXCLUSIVE finds (the answer BM25 buried) repairs the
-            // multi-hop dilution without disturbing the BM25 backbone: if BM25
-            // already ranks a memory highly, trust it; only lift what the graph
-            // found and lexical retrieval missed.
-            let graph_act_add: f32 = std::env::var("SHODH_GRAPH_ACT_ADD")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0.0);
-            // G3 prototype (SHODH_ACTR_NORM): self-calibrate the additive by
-            // normalising activation to its own max in this query's spread. The
-            // graph's BEST candidate then always gets the full term (fixes E3,
-            // where link_i has a clear activation peak) while diffuse/tangential
-            // activation stays small (spares LoCoMo, where the graph is noisy).
-            // This is the calibration a raw scalar additive lacked — no scale
-            // threaded E3-fix vs LoCoMo-safe because raw activation magnitude
-            // varies by corpus; the ratio activation/max does not.
-            let actr_norm = std::env::var("SHODH_ACTR_NORM")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
             let max_activation = graph_results
                 .iter()
                 .map(|(_, a, _)| *a)
@@ -3687,46 +3635,7 @@ impl MemorySystem {
             let v2_fusion = std::env::var("SHODH_FUSION_V2")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            let hybrid_top: std::collections::HashSet<MemoryId> =
-                if graph_act_add > 0.0 || graph_reserve_final > 0 || v2_fusion {
-                    hybrid_ids
-                        .iter()
-                        .take(query.max_results.max(1))
-                        .map(|(id, _)| id.clone())
-                        .collect()
-                } else {
-                    std::collections::HashSet::new()
-                };
 
-            // Capture the graph-exclusive top-K-by-rank for the post-Layer-5
-            // reserve (the answer the graph ranks highly but BM25 missed).
-            if graph_reserve_final > 0 {
-                graph_exclusive_reserve = graph_topn
-                    .iter()
-                    .filter(|id| !hybrid_top.contains(*id))
-                    .take(graph_reserve_final)
-                    .cloned()
-                    .collect();
-            }
-
-            // G3 (SHODH_ACTR_FUSION): replace the rank-reciprocal RRF base
-            // (graph_w/(k+rank) — a sub-0.01 crumb BM25's ranked crowd buries) with a
-            // calibrated MAGNITUDE additive: each leg's score normalised to its own
-            // max in this query and entered at full leg-weight, so the graph's
-            // confident hit competes on the fused scale instead of as a rank crumb
-            // (the triple-confirmed lock: ontology 0.65→0.083, multi-hop 0.43→0,
-            // lineage buried). Density weights remain the LoCoMo guard (dense/noisy
-            // graph → low graph_w → small contribution). The multiplicative
-            // activation bonus + gated additive below are RRF patches the magnitude
-            // makes redundant, so they collapse to no-ops under ACT-R.
-            let actr_fusion = std::env::var("SHODH_ACTR_FUSION")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            let max_hybrid = hybrid_ids
-                .iter()
-                .map(|(_, s)| *s)
-                .fold(0.0_f32, f32::max)
-                .max(1e-6);
             // Leg sizes for Borda normalisation (legs are already rank-sorted here).
             let n_graph = graph_results.len().max(1) as f32;
             let n_hybrid = hybrid_ids.len().max(1) as f32;
@@ -3816,8 +3725,7 @@ impl MemorySystem {
             let rrf_escape = std::env::var("SHODH_FUSION_RRF")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            let flat_fusion =
-                explicit_flat || (!rrf_escape && !v2_fusion && !actr_fusion && !sum_fusion);
+            let flat_fusion = explicit_flat || (!rrf_escape && !v2_fusion && !sum_fusion);
 
             // SHODH_FLAT_ADAPTIVE: LEARNED per-query leg trust (approach C, stage 1). A GLOBAL
             // vector-trust trades multi_hop↔single_hop (run 27221406266) — single_hop wants
@@ -4140,7 +4048,7 @@ impl MemorySystem {
                     let borda = graph_w * ((n_graph - r as f32) / n_graph);
                     let rescue = graph_w * (activation / max_activation).clamp(0.0, 1.0);
                     borda + rescue
-                } else if actr_fusion || flat_fusion {
+                } else if flat_fusion {
                     // Calibrated magnitude: the graph's best hit enters at graph_w,
                     // not a graph_w/(k+rank) crumb.
                     graph_w * (activation / max_activation).clamp(0.0, 1.0)
@@ -4151,8 +4059,8 @@ impl MemorySystem {
                 *fused.entry(id.clone()).or_insert(0.0) += rrf_score;
                 heb.insert(id.clone(), *h);
 
-                // Multiplicative activation bonus (RRF-only; no-op under ACT-R / V2 / SUM).
-                let activation_factor = if actr_fusion || v2_fusion || sum_fusion {
+                // Multiplicative activation bonus (RRF-only; no-op under V2 / SUM).
+                let activation_factor = if v2_fusion || sum_fusion {
                     1.0
                 } else {
                     1.0 + graph_w
@@ -4161,18 +4069,6 @@ impl MemorySystem {
                 };
                 if let Some(score) = fused.get_mut(id) {
                     *score *= activation_factor;
-                    // Gated additive: only lift graph-exclusive finds (absent from
-                    // BM25/vector's top window), never memories BM25 already ranks.
-                    // With SHODH_ACTR_NORM the magnitude is self-normalised
-                    // (activation/max) so it is calibrated across corpora.
-                    if graph_act_add > 0.0 && !hybrid_top.contains(id) {
-                        let mag = if actr_norm {
-                            (activation / max_activation).clamp(0.0, 1.0)
-                        } else {
-                            activation.clamp(0.0, 1.0)
-                        };
-                        *score += graph_w * graph_act_add * mag;
-                    }
                 }
 
                 // Track per-memory graph RRF contribution
@@ -4200,7 +4096,7 @@ impl MemorySystem {
             }
 
             // Hybrid (BM25+vector) leg.
-            for (r, (id, hybrid_raw)) in hybrid_ids.iter().enumerate() {
+            for (r, (id, _hybrid_raw)) in hybrid_ids.iter().enumerate() {
                 let hybrid_rrf = if sum_fusion {
                     // Calibrated weighted-SUM: vector and BM25 each min-max normalised and
                     // added with sweepable weights. The sweep (SHODH_FW_VEC/_BM25) tunes the
@@ -4225,9 +4121,6 @@ impl MemorySystem {
                 } else if v2_fusion {
                     // Borda: rank-1 ≈ full hybrid_w (scale-invariant, no crumb).
                     hybrid_w * ((n_hybrid - r as f32) / n_hybrid)
-                } else if actr_fusion {
-                    // Calibrated magnitude, parallel to the graph leg.
-                    hybrid_w * (hybrid_raw / max_hybrid).clamp(0.0, 1.0)
                 } else {
                     hybrid_w / (k + (r + 1) as f32)
                 };
@@ -4684,38 +4577,6 @@ impl MemorySystem {
                     // Re-sort after boosting since ranks may have changed.
                     // Tie-break by MemoryId — same rationale as the pre-rerank sort above.
                     res.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-                }
-            }
-
-            // E3 fusion-fix A — reserved graph quota (SHODH_GRAPH_RESERVE_K=N).
-            // `res` is sorted by fused score; truncation to max_results drops the
-            // graph's correct-but-deep-ranked multi-hop answer once BM25's lexical
-            // crowd dilutes it. Guarantee the top-N graph-leg candidates a slot
-            // within the kept window: any reserved id ranked beyond max_results is
-            // promoted to the tail of the window (displacing the lowest-scored
-            // non-reserved kept item). Default unset → no change.
-            if let Some(reserve_k) = std::env::var("SHODH_GRAPH_RESERVE_K")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .filter(|&n| n > 0)
-            {
-                let mr = query.max_results.max(1);
-                if res.len() > mr {
-                    let reserved: Vec<MemoryId> =
-                        graph_topn.iter().take(reserve_k).cloned().collect();
-                    for mid in reserved {
-                        // Already inside the kept window? nothing to do.
-                        if res.iter().take(mr).any(|(id, _)| id == &mid) {
-                            continue;
-                        }
-                        // Present further down? promote it to the window tail.
-                        if let Some(cur) = res.iter().position(|(id, _)| id == &mid) {
-                            if cur >= mr {
-                                let item = res.remove(cur);
-                                res.insert(mr - 1, item);
-                            }
-                        }
-                    }
                 }
             }
 
@@ -5464,27 +5325,6 @@ impl MemorySystem {
                     .then_with(|| b.created_at.cmp(&a.created_at))
                     .then_with(|| a.id.cmp(&b.id))
             });
-
-            // Post-Layer-5 graph-exclusive rank reserve: ensure each reserved
-            // candidate present in `memories` lands within the kept window by
-            // promoting it to the window tail (displacing the lowest-scored
-            // non-reserved kept item). Applied after the final sort, before the
-            // cutoff — the only place a distal multi-hop answer can be guaranteed
-            // survival without inflating its score upstream.
-            if graph_reserve_final > 0 && !graph_exclusive_reserve.is_empty() {
-                let mr = query.max_results.max(1);
-                for rid in &graph_exclusive_reserve {
-                    if memories.iter().take(mr).any(|m| m.id == *rid) {
-                        continue;
-                    }
-                    if let Some(cur) = memories.iter().position(|m| m.id == *rid) {
-                        if cur >= mr {
-                            let item = memories.remove(cur);
-                            memories.insert(mr - 1, item);
-                        }
-                    }
-                }
-            }
 
             memories.truncate(query.max_results);
         }
