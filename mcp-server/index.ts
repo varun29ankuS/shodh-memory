@@ -32,6 +32,7 @@ import { nextReconnectDelay, serializeAndValidateBody, shouldWarnInsecureApiUrl 
 import { stripSystemNoise, getContent as _getContent, getType as _getType, formatSurfacedMemories as _formatSurfacedMemories, formatToolCallContent } from "./string-utils";
 import { TokenTracker } from "./token-tracking";
 import { resolvePackageVersion } from "./version";
+import { renderContent, MEMORY_PREVIEW_MAX } from "./memory-format";
 import { ShodhIpcClient, type WindowsIpcHelper } from "./ipc-client";
 
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
@@ -512,7 +513,7 @@ function formatSurfacedMemories(memories: SurfacedMemory[]): string {
   if (!memories || memories.length === 0) return "";
 
   const formatted = memories
-    .map((m, i) => `  ${i + 1}. [${((m.relevance_score ?? 0) * 100).toFixed(0)}%] ${m.content.slice(0, 80)}...`)
+    .map((m, i) => `  ${i + 1}. [${((m.relevance_score ?? 0) * 100).toFixed(0)}%] ${renderContent(m.content, undefined, 80, false)}`)
     .join("\n");
 
   return `\n\n[Relevant memories surfaced]\n${formatted}`;
@@ -731,7 +732,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "recall",
-        description: "Search memories AND todos using semantic similarity. Returns both relevant memories and matching todos. Use this to find past experiences, decisions, context, or pending work. Modes: 'semantic' (vector similarity), 'associative' (graph traversal), 'temporal' (time-based retrieval), 'hybrid' (combined), 'spatial' (geo-location based), 'mission' (mission context), 'action_outcome' (reward-based learning).",
+        description: "Search memories AND todos using semantic similarity. Returns both relevant memories and matching todos. Use this to find past experiences, decisions, context, or pending work. Modes: 'semantic' (vector similarity), 'associative' (graph traversal), 'temporal' (time-based retrieval), 'hybrid' (combined), 'spatial' (geo-location based), 'mission' (mission context), 'action_outcome' (reward-based learning). Memory bodies are returned as previews (default 500 chars); when truncated the output carries an explicit marker with real lengths and a read_memory hint — a preview without a marker is complete. Pass full_content:true to get full bodies inline.",
         inputSchema: {
           type: "object",
           properties: {
@@ -807,13 +808,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "boolean",
               description: "Enable retrieval diagnostics. Returns per-stage timing breakdown and per-memory score attribution showing exactly why each memory ranked where it did. Useful for debugging bad recalls.",
             },
+            full_content: {
+              type: "boolean",
+              description: "Return complete memory bodies inline instead of previews. Increases token usage; prefer for small result sets. Default false — previews are capped and explicitly marked when truncated.",
+              default: false,
+            },
           },
           required: ["query"],
         },
       },
       {
         name: "recall_by_tags",
-        description: "Find memories by tags. Returns memories matching ANY of the provided tags. Useful for finding memories by category (e.g., 'tool:Edit', 'file:src/main.rs', 'source:hook', 'error', 'session-summary').",
+        description: "Find memories by tags. Returns memories matching ANY of the provided tags. Useful for finding memories by category (e.g., 'tool:Edit', 'file:src/main.rs', 'source:hook', 'error', 'session-summary'). Memory bodies are returned as previews (default 500 chars); when truncated the output carries an explicit marker with real lengths and a read_memory hint — a preview without a marker is complete. Pass full_content:true to get full bodies inline.",
         inputSchema: {
           type: "object",
           properties: {
@@ -826,6 +832,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "number",
               description: "Maximum number of results (default: 50)",
               default: 50,
+            },
+            full_content: {
+              type: "boolean",
+              description: "Return complete memory bodies inline instead of previews. Increases token usage; prefer for small result sets. Default false — previews are capped and explicitly marked when truncated.",
+              default: false,
             },
           },
           required: ["tags"],
@@ -990,7 +1001,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "proactive_context",
-        description: "REQUIRED: Call this tool with EVERY user message to surface relevant memories and build conversation history. Pass the user's message as context. This enables: (1) retrieving memories relevant to what the user is asking, (2) building persistent memory of the conversation for future sessions. The system analyzes entities, semantic similarity, and recency to find contextually appropriate memories. Auto-ingest stores the context automatically. USAGE: Always call this FIRST when you receive a user message, passing their message as the context parameter.",
+        description: "REQUIRED: Call this tool with EVERY user message to surface relevant memories and build conversation history. Pass the user's message as context. This enables: (1) retrieving memories relevant to what the user is asking, (2) building persistent memory of the conversation for future sessions. The system analyzes entities, semantic similarity, and recency to find contextually appropriate memories. Auto-ingest stores the context automatically. USAGE: Always call this FIRST when you receive a user message, passing their message as the context parameter. Surfaced memory bodies are previews (default 500 chars); when truncated the output carries an explicit marker with real lengths and a read_memory hint — a preview without a marker is complete. Pass full_content:true to get full bodies inline (increases token usage).",
         inputSchema: {
           type: "object",
           properties: {
@@ -1042,6 +1053,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 required: ["tool_name", "success"],
               },
               description: "Tool/actuator actions performed since last proactive_context call. Used for causal feedback attribution.",
+            },
+            full_content: {
+              type: "boolean",
+              description: "Return complete memory bodies inline instead of previews. Increases token usage; prefer for small result sets. Default false — previews are capped and explicitly marked when truncated.",
+              default: false,
             },
           },
           required: ["context"],
@@ -1767,7 +1783,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Format response with branded display
         let response = `🐘 Memory Stored\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-        response += `📝 ${content.slice(0, 60)}${content.length > 60 ? '...' : ''}\n`;
+        response += `📝 ${renderContent(content, result.id, 60, false)}\n`;
         response += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
         response += `Type: ${type}`;
         if (tags.length > 0) {
@@ -1785,7 +1801,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           query, limit: rawLimit = 5, mode = "hybrid", session_id,
           robot_id, mission_id, geo_lat, geo_lon, geo_radius_meters,
           action_type, reward_min, reward_max, outcome_type, failures_only,
-          terrain_type, tags, debug: debugMode,
+          terrain_type, tags, debug: debugMode, full_content = false,
         } = args as {
           query: string; limit?: number; mode?: string; session_id?: string;
           robot_id?: string; mission_id?: string;
@@ -1793,6 +1809,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           action_type?: string; reward_min?: number; reward_max?: number;
           outcome_type?: string; failures_only?: boolean;
           terrain_type?: string; tags?: string[]; debug?: boolean;
+          full_content?: boolean;
         };
 
         if (!query || query.length === 0) {
@@ -1978,7 +1995,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const timeStr = formatTime(m.created_at);
 
             response += `• ${matchBar} ${score}% │ ${timeStr}\n`;
-            response += `  ${content.slice(0, 200)}${content.length > 200 ? '...' : ''}\n`;
+            response += `  ${renderContent(content, m.id, MEMORY_PREVIEW_MAX, full_content)}\n`;
             response += `  ┗━ ${getType(m)}${m.tier ? ` │ ${m.tier}` : ''} │ ${m.id}\n`;
             if (i < memories.length - 1) response += `\n`;
           }
@@ -1998,7 +2015,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const timeStr = formatTime(t.created_at);
 
             response += `• ${matchBar} ${score}% │ ${timeStr}\n`;
-            response += `  ${statusIcon} ${t.content.slice(0, 180)}${t.content.length > 180 ? '...' : ''}\n`;
+            response += `  ${statusIcon} ${renderContent(t.content, undefined, 180, full_content)}\n`;
             response += `  ┗━ ${t.short_id} │ ${t.status} │ ${t.priority}`;
             if (t.project) response += ` │ ${t.project}`;
             response += `\n`;
@@ -2091,7 +2108,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "recall_by_tags": {
-        const { tags, limit: rawTagLimit = 50 } = args as { tags: string[]; limit?: number };
+        const { tags, limit: rawTagLimit = 50, full_content = false } = args as { tags: string[]; limit?: number; full_content?: boolean };
 
         if (!tags || tags.length === 0) {
           return {
@@ -2123,7 +2140,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const m = tagMemories[i];
           const content = getContent(m);
           const memTags = (m.experience?.tags || []).join(", ");
-          tagResponse += `${String(i + 1).padStart(2)}. ${content.slice(0, 150)}${content.length > 150 ? "..." : ""}\n`;
+          tagResponse += `${String(i + 1).padStart(2)}. ${renderContent(content, m.id, MEMORY_PREVIEW_MAX, full_content)}\n`;
           tagResponse += `    ┗━ ${getType(m)} │ tags: [${memTags}] │ ${m.id}\n\n`;
         }
 
@@ -2200,7 +2217,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (include_context && context.length > 0) {
           response += `📁 PROJECT CONTEXT\n`;
           for (const m of context.slice(0, max_items)) {
-            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? '...' : ''}\n`;
+            response += `   • ${renderContent(getContent(m), m.id, 70, false)}\n`;
           }
           response += `\n`;
         }
@@ -2208,7 +2225,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (include_decisions && decisions.length > 0) {
           response += `📋 DECISIONS\n`;
           for (const m of decisions.slice(0, max_items)) {
-            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? '...' : ''}\n`;
+            response += `   • ${renderContent(getContent(m), m.id, 70, false)}\n`;
           }
           response += `\n`;
         }
@@ -2216,7 +2233,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (include_learnings && learnings.length > 0) {
           response += `💡 LEARNINGS\n`;
           for (const m of learnings.slice(0, max_items)) {
-            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? '...' : ''}\n`;
+            response += `   • ${renderContent(getContent(m), m.id, 70, false)}\n`;
           }
           response += `\n`;
         }
@@ -2224,7 +2241,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (patterns.length > 0) {
           response += `🔄 PATTERNS\n`;
           for (const m of patterns.slice(0, max_items)) {
-            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? '...' : ''}\n`;
+            response += `   • ${renderContent(getContent(m), m.id, 70, false)}\n`;
           }
           response += `\n`;
         }
@@ -2232,7 +2249,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (errors.length > 0) {
           response += `⚠️ ERRORS TO AVOID\n`;
           for (const m of errors.slice(0, Math.min(3, max_items))) {
-            response += `   • ${getContent(m).slice(0, 70)}${getContent(m).length > 70 ? '...' : ''}\n`;
+            response += `   • ${renderContent(getContent(m), m.id, 70, false)}\n`;
           }
         }
 
@@ -2296,7 +2313,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             'Conversation': '💬',
           }[getType(m)] || '📦';
 
-          response += `${String(i + 1).padStart(2)}. ${typeIcon} ${content.slice(0, 150)}${content.length > 150 ? '...' : ''}\n`;
+          response += `${String(i + 1).padStart(2)}. ${typeIcon} ${renderContent(content, m.id, MEMORY_PREVIEW_MAX, false)}\n`;
           response += `    ┗━ ${getType(m)}${m.tier ? ` │ ${m.tier}` : ''} │ ${m.id}\n`;
         }
 
@@ -2644,6 +2661,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           memory_types = [],
           auto_ingest = true,
           tool_actions = [],
+          full_content = false,
         } = args as {
           context: string;
           semantic_threshold?: number;
@@ -2653,6 +2671,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           memory_types?: string[];
           auto_ingest?: boolean;
           tool_actions?: { tool_name: string; inputs?: Record<string, string>; success: boolean; output_snippet?: string; reward?: number }[];
+          full_content?: boolean;
         };
 
         // --- Response types matching ProactiveContextResponse (Rust backend) ---
@@ -2850,7 +2869,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               const statusIcon = t.status === "in_progress" ? "🔄" : t.status === "blocked" ? "🚫" : "☐";
               const proj = t.project ? ` [${t.project}]` : "";
               const due = t.due_date ? ` (due: ${t.due_date})` : "";
-              todoBlock += `  ${statusIcon} ${t.priority} ${t.short_id}: ${t.content.slice(0, 60)}${t.content.length > 60 ? '...' : ''}${proj}${due}\n`;
+              todoBlock += `  ${statusIcon} ${t.priority} ${t.short_id}: ${renderContent(t.content, undefined, 60, full_content)}${proj}${due}\n`;
               todoBlock += `     ${t.relevance_reason}\n`;
             }
           }
@@ -2907,12 +2926,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
 
             const importanceBar = m.importance >= 0.8 ? '🔴' : m.importance >= 0.5 ? '🟡' : '⚪';
-            // Truncate at sentence boundary within 200 chars for cleaner display
-            let preview = m.content;
-            if (preview.length > 200) {
-              const sentenceEnd = preview.slice(0, 200).lastIndexOf('. ');
-              preview = sentenceEnd > 80 ? preview.slice(0, sentenceEnd + 1) : preview.slice(0, 200) + '...';
-            }
+            const preview = renderContent(m.content, m.id, MEMORY_PREVIEW_MAX, full_content);
             return `${i + 1}. ${importanceBar} [${score}%]${timeStr} ${preview}\n   ${m.memory_type}${m.tier ? ` | ${m.tier}` : ''} | ${m.relevance_reason}${entityMatchStr}${tagsStr}`;
           })
           .join("\n\n");
@@ -4651,7 +4665,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
         memories.forEach((m) => {
           const content = getContent(m);
           const type = getType(m);
-          const preview = content.length > 100 ? content.slice(0, 100) + "..." : content;
+          const preview = renderContent(content, m.id, MEMORY_PREVIEW_MAX, false);
           parts.push(`- [${type}] ${preview}`);
         });
 

@@ -129,12 +129,14 @@ mutually untrusted tenants require an authorization boundary.
 | Tool | Description |
 |------|-------------|
 | `remember` | Store a memory with optional type, tags, and metadata |
-| `recall` | Semantic search to find relevant memories |
-| `proactive_context` | Auto-surface relevant memories for current context |
+| `recall` | Semantic search to find relevant memories. Pass `full_content: true` for complete bodies inline |
+| `proactive_context` | Auto-surface relevant memories for current context. Pass `full_content: true` for complete bodies inline |
 | `context_summary` | Get categorized context for session bootstrap |
 | `list_memories` | List all stored memories |
 | `read_memory` | Read full content of a specific memory by ID |
 | `forget` | Delete a specific memory by ID |
+
+> **Memory previews and truncation.** `recall`, `recall_by_tags`, and `proactive_context` return **previews** of each memory body (default cap: 500 characters). When a body is longer than the cap, the output is truncated with an **explicit, honest marker** that reports the real lengths and the follow-up call, e.g. `…[truncated 500/2340 chars — read_memory("<id>") for full]`. A preview is never silently cut off — the absence of a marker means you are seeing the complete body. To get complete bodies inline (no markers), pass `full_content: true` on any of those three tools; this increases token usage, so prefer it for small result sets. `read_memory` always returns the full, untruncated content.
 </details>
 
 <details>
