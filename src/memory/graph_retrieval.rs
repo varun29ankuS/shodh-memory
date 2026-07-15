@@ -49,6 +49,7 @@ use crate::constants::{
 use crate::embeddings::Embedder;
 use crate::graph_memory::{EdgeTier, EntityLabel, EpisodicNode, GraphMemory, RelationType};
 use crate::memory::query_parser::{infer_ontological_intent, OntologicalIntent};
+use crate::memory::recall_readonly;
 use crate::memory::types::MemoryTier;
 // Note: compute_relevance removed - using unified density-weighted scoring directly
 use crate::memory::query_parser::{analyze_query, QueryAnalysis};
@@ -1818,8 +1819,13 @@ pub fn spreading_activation_retrieve_with_stats(
 
     // Hebbian reinforcement: strengthen edges traversed during spreading activation
     // Other traversal methods (traverse_from_entity, traverse_weighted, traverse_bidirectional)
-    // all call batch_strengthen_synapses — spreading activation should too
-    if !stats.traversed_edges.is_empty() {
+    // all call batch_strengthen_synapses — spreading activation should too.
+    // SHODH_RECALL_READONLY gate: this is a graph-leg mutation, so read-only
+    // recall (eval repeats) must skip it exactly like the access-count and
+    // coactivation writes in mod.rs do — the traversed-edge STATS are still
+    // collected above (`stats.traversed_edges`) so diagnostics are unaffected,
+    // only the persistent strength MUTATION is skipped.
+    if !stats.traversed_edges.is_empty() && !recall_readonly() {
         if let Err(e) = graph.batch_strengthen_synapses(&stats.traversed_edges) {
             tracing::debug!("Spreading activation edge strengthening failed: {}", e);
         }
@@ -2533,5 +2539,173 @@ mod tests {
         // Should be less than typical initial activation
         // (IC_NOUN * (1 + SALIENCE_BOOST_FACTOR) = 2.3 * 2 = 4.6 max)
         assert!(min_threshold < 1.0);
+    }
+
+    /// Process-global lock for tests that manipulate `SHODH_RECALL_READONLY`.
+    /// `env::set_var`/`remove_var` are not thread-safe against concurrent
+    /// readers on other test threads (same pattern as `auth.rs`'s `ENV_LOCK`).
+    static RECALL_READONLY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Regression test for the measurement-integrity bug: spreading activation's
+    /// Hebbian reinforcement (`graph.batch_strengthen_synapses` on the traversed
+    /// edges) ran unconditionally, never checking `SHODH_RECALL_READONLY`. Every
+    /// "read-only" eval query still strengthened the edges it traversed, so
+    /// repeat N+1 of the same query saw different (stronger) edges than repeat
+    /// N purely from having been queried once already — a same-system A/B
+    /// confound the eval harness's read-only gate exists specifically to
+    /// prevent (see `recall_readonly()`'s doc comment in `memory/mod.rs`).
+    ///
+    /// Asserts: under the flag, two recall passes leave the traversed edge's
+    /// strength byte-identical; with the flag unset (production default), the
+    /// same edge strengthens, proving the feature itself is untouched.
+    #[test]
+    fn spreading_activation_readonly_gate_skips_hebbian_strengthening() {
+        use crate::graph_memory::{
+            EdgeTier, EntityLabel, EntityNode, GraphMemory, LtpStatus, RelationType,
+            RelationshipEdge,
+        };
+        use chrono::Utc;
+
+        let _env_guard = RECALL_READONLY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Defensive reset (matches auth.rs's `clear_auth_env` idiom): don't
+        // trust a prior test's cleanup, since `recall_readonly()` re-reads the
+        // env on every call rather than caching it.
+        std::env::remove_var("SHODH_RECALL_READONLY");
+
+        struct StubEmbedder;
+        impl crate::embeddings::Embedder for StubEmbedder {
+            fn encode(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![0.1, 0.2, 0.3, 0.4])
+            }
+            fn dimension(&self) -> usize {
+                4
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let mk_entity = |name: &str| EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels: vec![EntityLabel::Concept],
+            created_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 1.0,
+            is_proper_noun: false,
+            selectivity: None,
+            fine_type: None,
+        };
+        let widget = graph.add_entity(mk_entity("widget")).unwrap();
+        let gadget = graph.add_entity(mk_entity("gadget")).unwrap();
+
+        let now = Utc::now();
+        // `add_relationship` overwrites `edge.uuid` with a fresh UUID on
+        // insert (graph_memory.rs) — capture the UUID it actually assigned
+        // rather than trusting the one passed in.
+        let edge_uuid = graph
+            .add_relationship(RelationshipEdge {
+                uuid: Uuid::new_v4(),
+                from_entity: widget,
+                to_entity: gadget,
+                relation_type: RelationType::RelatedTo,
+                strength: 0.5,
+                created_at: now,
+                valid_at: now,
+                invalidated_at: None,
+                source_episode_id: None,
+                context: String::new(),
+                last_activated: now,
+                activation_count: 1,
+                ltp_status: LtpStatus::None,
+                activation_timestamps: None,
+                tier: EdgeTier::L2Episodic,
+                entity_confidence: None,
+                forman_curvature: None,
+                endpoint_selectivity: None,
+                provenance: Vec::new(),
+            })
+            .unwrap();
+
+        let strength_of = |g: &GraphMemory| -> f32 {
+            g.get_relationship(&edge_uuid)
+                .unwrap()
+                .expect("edge must still exist")
+                .strength
+        };
+
+        let query = Query {
+            query_text: Some("widget".to_string()),
+            ..Query::default()
+        };
+        let embedder = StubEmbedder;
+        let episode_to_memory = |_ep: &EpisodicNode| -> Result<Option<SharedMemory>> { Ok(None) };
+
+        let run_recall = || {
+            spreading_activation_retrieve_with_stats(
+                "widget",
+                &query,
+                &graph,
+                &embedder,
+                None,
+                None,
+                None,
+                episode_to_memory,
+            )
+        };
+
+        // Sanity: the graph leg must actually traverse the widget->gadget edge,
+        // or the assertions below would hold vacuously (nothing to strengthen).
+        let (_, sanity_stats) = run_recall().expect("sanity recall");
+        assert!(
+            sanity_stats.traversed_edges.contains(&edge_uuid),
+            "spreading activation must traverse the seeded edge for this test \
+             to exercise the Hebbian-strengthening gate; traversed={:?}",
+            sanity_stats.traversed_edges
+        );
+
+        // --- SHODH_RECALL_READONLY=1: two passes, byte-identical strength ---
+        std::env::set_var("SHODH_RECALL_READONLY", "1");
+
+        let strength_ro_0 = strength_of(&graph);
+        run_recall().expect("recall #1 (read-only)");
+        let strength_ro_1 = strength_of(&graph);
+        run_recall().expect("recall #2 (read-only)");
+        let strength_ro_2 = strength_of(&graph);
+
+        assert_eq!(
+            strength_ro_0.to_bits(),
+            strength_ro_1.to_bits(),
+            "SHODH_RECALL_READONLY=1 must leave edge strength byte-identical \
+             after recall #1 (got {strength_ro_0} -> {strength_ro_1}) — this is \
+             the graph-leg Hebbian-strengthening leak this test guards against"
+        );
+        assert_eq!(
+            strength_ro_1.to_bits(),
+            strength_ro_2.to_bits(),
+            "SHODH_RECALL_READONLY=1 must leave edge strength byte-identical \
+             after recall #2 (got {strength_ro_1} -> {strength_ro_2})"
+        );
+
+        // --- production default (flag unset): strengthening still happens ---
+        std::env::remove_var("SHODH_RECALL_READONLY");
+
+        let strength_prod_0 = strength_of(&graph);
+        run_recall().expect("recall #3 (production default)");
+        let strength_prod_1 = strength_of(&graph);
+
+        assert!(
+            strength_prod_1 > strength_prod_0,
+            "flag unset (production default) must still strengthen the \
+             traversed edge (Hebbian learning), got {strength_prod_0} -> {strength_prod_1}"
+        );
+
+        std::env::remove_var("SHODH_RECALL_READONLY");
     }
 }

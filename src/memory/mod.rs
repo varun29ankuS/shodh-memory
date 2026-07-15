@@ -77,6 +77,29 @@ fn companion_gate_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// `SHODH_RECALL_READONLY=1` — recall performs NO usage writes: no access-count
+/// persistence, no co-retrieval/coactivation edge creation, no Hebbian edge
+/// strengthening anywhere in the recall path (including the graph leg's
+/// spreading-activation traversal in `graph_retrieval.rs`). Set by the eval
+/// harness (`pin_harness_threads`, `recall_eval` binary startup): eval repeats
+/// measure variance, not learning curves, and FLAT fusion made graph magnitude
+/// load-bearing, so first-repeat usage writes were shifting later repeats'
+/// rankings (L1 smoke non-determinism, PR #325 checks). Production default
+/// (flag unset): writes on, unchanged.
+///
+/// This is the SINGLE SOURCE OF TRUTH for the gate. Every recall-path mutation
+/// site — in this module or a sibling (`graph_retrieval`, etc.) — must check
+/// this function rather than re-deriving the env check ad hoc, or a new write
+/// site can silently reintroduce the same measurement-integrity bug (see the
+/// graph-leg Hebbian strengthening fix this function's introduction shipped
+/// alongside: spreading activation was calling `batch_strengthen_synapses`
+/// unconditionally, bypassing the gate entirely).
+pub(crate) fn recall_readonly() -> bool {
+    std::env::var("SHODH_RECALL_READONLY")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
 use crate::constants::{
     DEFAULT_COMPRESSION_AGE_DAYS, DEFAULT_IMPORTANCE_THRESHOLD, DEFAULT_MAX_HEAP_PER_USER_MB,
     DEFAULT_SESSION_MEMORY_SIZE_MB, DEFAULT_WORKING_MEMORY_SIZE, EDGE_SEMANTIC_WEIGHT_FLOOR,
@@ -1418,15 +1441,13 @@ impl MemorySystem {
     /// - Non-semantic search: Uses importance * temporal decay
     /// - Zero shortcuts, no TODOs, enterprise-grade
     /// SHODH_RECALL_READONLY=1 — recall performs no usage writes (access-count
-    /// persistence, co-retrieval edge creation). Set by the eval harness:
-    /// eval repeats measure variance, not learning curves, and FLAT fusion
-    /// made graph magnitude load-bearing, so first-repeat usage writes were
-    /// shifting later repeats' rankings (L1 smoke non-determinism,
-    /// PR #325 checks). Production default: writes on.
+    /// persistence, co-retrieval edge creation). Delegates to the module-level
+    /// `recall_readonly()` (single source of truth — every recall-path mutation
+    /// site, including sibling modules like `graph_retrieval`, must check the
+    /// same function, not re-derive the env check ad hoc). See that function's
+    /// doc for the full rationale.
     fn recall_readonly() -> bool {
-        std::env::var("SHODH_RECALL_READONLY")
-            .map(|v| v == "1")
-            .unwrap_or(false)
+        recall_readonly()
     }
 
     /// Harvest provenance companions for the already-ranked `memories`.
@@ -1936,8 +1957,12 @@ impl MemorySystem {
         }
 
         // Increment and persist retrieval counter
-        if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
-            self.stats.write().total_retrievals = count;
+        // Sibling of the access-count/coactivation gate above: also a usage
+        // write, so read-only recall must skip it too.
+        if !Self::recall_readonly() {
+            if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+                self.stats.write().total_retrievals = count;
+            }
         }
 
         Ok(RetrievalResult {
@@ -5345,7 +5370,9 @@ impl MemorySystem {
 
         // Increment and persist retrieval counter
         // RH-8 gate: retrieval counter mutates persistent state — only in `Full` mode.
-        if layer_full {
+        // Also a usage write, so read-only recall must skip it (sibling of the
+        // access-count/coactivation gates above).
+        if layer_full && !Self::recall_readonly() {
             if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
                 self.stats.write().total_retrievals = count;
             }
