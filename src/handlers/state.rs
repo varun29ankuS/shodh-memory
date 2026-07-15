@@ -3974,7 +3974,9 @@ pub(crate) fn is_structural_non_entity(name: &str) -> bool {
     {
         let toks: Vec<&str> = name.split_whitespace().collect();
         if !toks.is_empty()
-            && toks.iter().all(|t| t.chars().all(|c| c.is_ascii_hexdigit()))
+            && toks
+                .iter()
+                .all(|t| t.chars().all(|c| c.is_ascii_hexdigit()))
             && name.chars().any(|c| c.is_ascii_digit())
         {
             return true;
