@@ -14,7 +14,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 const LONG_ABOUT: &str = r#"
 Shodh-Memory is a cognitive memory system for AI agents, featuring:
@@ -103,6 +105,15 @@ struct Cli {
         global = true
     )]
     max_concurrent: usize,
+
+    /// Local IPC socket or named-pipe endpoint
+    #[arg(
+        long,
+        env = "SHODH_IPC_ENDPOINT",
+        default_value_os_t = shodh_memory::local_ipc::default_endpoint(),
+        global = true
+    )]
+    ipc_endpoint: PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -114,6 +125,12 @@ enum Command {
         /// Report what would be migrated without writing any data
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Internal safe named-pipe exchange used by the TypeScript client on Windows.
+    #[command(hide = true)]
+    IpcExchange {
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
     },
 }
 
@@ -129,6 +146,7 @@ fn main() -> Result<()> {
                 production: cli.production,
                 rate_limit: cli.rate_limit,
                 max_concurrent: cli.max_concurrent,
+                ipc_endpoint: cli.ipc_endpoint,
             })
         }
         Some(Command::Migrate { dry_run }) => {
@@ -144,6 +162,30 @@ fn main() -> Result<()> {
             if !report.errors.is_empty() {
                 std::process::exit(1);
             }
+            Ok(())
+        }
+        Some(Command::IpcExchange { timeout_ms }) => {
+            let mut encoded = Vec::new();
+            std::io::stdin()
+                .take((shodh_memory::local_ipc::MAX_FRAME_BYTES + 1) as u64)
+                .read_to_end(&mut encoded)?;
+            if encoded.len() > shodh_memory::local_ipc::MAX_FRAME_BYTES {
+                anyhow::bail!("IPC helper request exceeds the frame limit");
+            }
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let response = runtime
+                .block_on(shodh_memory::local_ipc::exchange_encoded(
+                    &cli.ipc_endpoint,
+                    &encoded,
+                    Duration::from_millis(timeout_ms.max(1)),
+                ))
+                .map_err(anyhow::Error::msg)?;
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&response)?;
+            stdout.write_all(b"\n")?;
+            stdout.flush()?;
             Ok(())
         }
     }

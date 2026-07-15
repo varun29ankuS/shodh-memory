@@ -1,4 +1,4 @@
-//! Server bootstrap module — starts the Shodh-Memory HTTP API server.
+//! Server bootstrap module — starts the Shodh-Memory HTTP and local IPC transports.
 //!
 //! Extracted from `main.rs` so that both `shodh-memory-server` (standalone)
 //! and `shodh server` (unified CLI) can start the server with identical behavior.
@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::signal;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::timeout::TimeoutLayer;
@@ -18,6 +19,7 @@ use crate::{
     config::ServerConfig,
     embeddings::minilm::pre_init_ort_runtime,
     handlers::{self, AppState, MultiUserMemoryManager},
+    local_ipc::{self, LocalIpcServer},
     metrics, middleware,
 };
 
@@ -43,9 +45,10 @@ pub struct ServerRunConfig {
     pub production: bool,
     pub rate_limit: u64,
     pub max_concurrent: usize,
+    pub ipc_endpoint: PathBuf,
 }
 
-/// Start the shodh-memory HTTP server.
+/// Start the shodh-memory server transports.
 ///
 /// This is a **blocking** call that runs until a shutdown signal (Ctrl-C / SIGTERM).
 /// It sets environment variables, pre-initialises the ONNX runtime, builds a tokio
@@ -72,6 +75,7 @@ pub fn run(config: ServerRunConfig) -> Result<()> {
         }
         std::env::set_var("SHODH_RATE_LIMIT", config.rate_limit.to_string());
         std::env::set_var("SHODH_MAX_CONCURRENT", config.max_concurrent.to_string());
+        std::env::set_var("SHODH_IPC_ENDPOINT", &config.ipc_endpoint);
     }
 
     // Pre-initialize ORT_DYLIB_PATH before any threads are spawned.
@@ -289,6 +293,52 @@ async fn async_main() -> Result<()> {
         tracing_setup::trace_propagation::propagate_trace_context,
     ));
 
+    // Local IPC remains availability-first by default. Operators that rely on its
+    // isolation boundary can opt into fail-closed startup with IPC_REQUIRED.
+    let ipc_enabled = std::env::var("SHODH_IPC_ENABLED")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true);
+    let ipc_required = std::env::var("SHODH_IPC_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    if ipc_required && !ipc_enabled {
+        anyhow::bail!("SHODH_IPC_REQUIRED=true conflicts with SHODH_IPC_ENABLED=false");
+    }
+    let ipc_server = if ipc_enabled {
+        let ipc_endpoint = std::env::var_os("SHODH_IPC_ENDPOINT")
+            .map(PathBuf::from)
+            .unwrap_or_else(local_ipc::default_endpoint);
+        match LocalIpcServer::bind(ipc_endpoint).await {
+            Ok(server) => Some(server),
+            Err(error) if ipc_required => {
+                anyhow::bail!("required local IPC endpoint could not bind: {error}")
+            }
+            Err(error) => {
+                error!("Local IPC disabled: {error}. HTTP server will continue without it.");
+                None
+            }
+        }
+    } else {
+        info!("Local IPC: disabled (set SHODH_IPC_ENABLED=true to enable)");
+        None
+    };
+    // IPC dispatches into the same finite route table as HTTP, minus the HTTP-only
+    // middleware — track_metrics is layered so IPC traffic stays visible to
+    // Prometheus; rate limiting, CORS, and security headers deliberately do not
+    // apply (auth, bounds, and concurrency are enforced inside local_ipc).
+    let ipc_router = handlers::build_router(Arc::clone(&manager))
+        .layer(axum::middleware::from_fn(middleware::track_metrics));
+
     // Start server
     let host = &server_config.host;
     let port = server_config.port;
@@ -300,9 +350,9 @@ async fn async_main() -> Result<()> {
     // Small delay for log flush
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    print_ready_message(addr);
-
     let listener = tokio::net::TcpListener::bind(addr).await?;
+
+    print_ready_message(addr);
 
     // Use a notify to signal the server to stop accepting new connections
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
@@ -318,32 +368,109 @@ async fn async_main() -> Result<()> {
 
     let mut server_handle = tokio::spawn(async move { server.await });
 
-    // Wait for shutdown signal (Ctrl+C / SIGTERM)
-    shutdown_signal_with_drain().await;
+    let ipc_shutdown = CancellationToken::new();
+    let ipc_task_shutdown = ipc_shutdown.clone();
+    let ipc_max_concurrent = server_config.max_concurrent_requests;
+    if let Some(ref server) = ipc_server {
+        info!("Local IPC ready at {}", server.endpoint().display());
+    }
+    let mut ipc_handle = tokio::spawn(async move {
+        match ipc_server {
+            Some(server) => {
+                server
+                    .serve(
+                        ipc_router,
+                        ipc_task_shutdown,
+                        ipc_max_concurrent,
+                        request_timeout,
+                    )
+                    .await
+            }
+            None => {
+                // Nothing bound; park until shutdown so this task never "finishes
+                // unexpectedly" and trips the terminal-error path below.
+                ipc_task_shutdown.cancelled().await;
+                Ok(())
+            }
+        }
+    });
+
+    // A listener failure is terminal: both transports share one manager and
+    // readiness must never degrade silently to an HTTP-only process.
+    let mut terminal_error = None;
+    let mut http_finished = false;
+    let mut ipc_finished = false;
+    tokio::select! {
+        _ = shutdown_signal_with_drain() => {}
+        result = &mut server_handle => {
+            http_finished = true;
+            terminal_error = Some(match result {
+                Ok(Ok(())) => "HTTP server stopped unexpectedly".to_string(),
+                Ok(Err(error)) => format!("HTTP server failed: {error}"),
+                Err(error) => format!("HTTP server task failed: {error}"),
+            });
+        }
+        result = &mut ipc_handle => {
+            ipc_finished = true;
+            terminal_error = Some(match result {
+                Ok(Ok(())) => "local IPC server stopped unexpectedly".to_string(),
+                Ok(Err(error)) => format!("local IPC server failed: {error}"),
+                Err(error) => format!("local IPC server task failed: {error}"),
+            });
+        }
+    }
 
     // Tell the server to stop accepting new connections
     shutdown_notify.notify_one();
+    ipc_shutdown.cancel();
 
     // Give the server a brief moment to finish in-flight requests
     info!(
         "Waiting up to {}s for in-flight requests...",
         SERVER_DRAIN_TIMEOUT_SECS
     );
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(SERVER_DRAIN_TIMEOUT_SECS),
-        &mut server_handle,
-    )
-    .await
-    {
-        Ok(Ok(Ok(()))) => info!("Server stopped gracefully"),
-        Ok(Ok(Err(e))) => error!("Server error: {}", e),
-        Ok(Err(e)) => error!("Server task panicked: {}", e),
-        Err(_) => {
-            info!(
-                "Server drain timed out after {}s, aborting server task",
-                SERVER_DRAIN_TIMEOUT_SECS
-            );
-            server_handle.abort();
+    if !http_finished {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(SERVER_DRAIN_TIMEOUT_SECS),
+            &mut server_handle,
+        )
+        .await
+        {
+            Ok(Ok(Ok(()))) => info!("HTTP server stopped gracefully"),
+            Ok(Ok(Err(e))) => error!("HTTP server error: {}", e),
+            Ok(Err(e)) => error!("HTTP server task panicked: {}", e),
+            Err(_) => {
+                info!(
+                    "HTTP drain timed out after {}s, aborting server task",
+                    SERVER_DRAIN_TIMEOUT_SECS
+                );
+                server_handle.abort();
+                let _ = server_handle.await;
+            }
+        }
+    }
+
+    if !ipc_finished {
+        // Bound the IPC drain exactly like the HTTP drain above: a slow route must
+        // not be able to hold the process open past the deadline and cost us the
+        // storage flush that shutdown exists to guarantee.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(SERVER_DRAIN_TIMEOUT_SECS),
+            &mut ipc_handle,
+        )
+        .await
+        {
+            Ok(Ok(Ok(()))) => info!("Local IPC server stopped gracefully"),
+            Ok(Ok(Err(e))) => error!("Local IPC server error: {}", e),
+            Ok(Err(e)) => error!("Local IPC server task panicked: {}", e),
+            Err(_) => {
+                info!(
+                    "Local IPC drain timed out after {}s, aborting IPC task",
+                    SERVER_DRAIN_TIMEOUT_SECS
+                );
+                ipc_handle.abort();
+                let _ = ipc_handle.await;
+            }
         }
     }
 
@@ -376,7 +503,10 @@ async fn async_main() -> Result<()> {
     // Graceful shutdown with cleanup (flush databases, save indices)
     run_shutdown_cleanup(manager_for_shutdown).await;
 
-    Ok(())
+    match terminal_error {
+        Some(error) => anyhow::bail!(error),
+        None => Ok(()),
+    }
 }
 
 // =============================================================================
