@@ -52,9 +52,15 @@ pub async fn export_mif(
     let memory_sys = state
         .get_user_memory(&user_id)
         .map_err(AppError::Internal)?;
+    // Every read below feeds directly into the exported document. Swallowing a
+    // store-read error here (the old `.unwrap_or_default()` behavior) would let
+    // an export "succeed" while silently omitting memories/todos/projects/
+    // reminders — the worst shape of silent data loss, since the caller has no
+    // signal their backup is incomplete. Propagate instead so a failed read
+    // fails the export loudly.
     let memories = {
         let guard = memory_sys.read();
-        guard.get_all_memories().unwrap_or_default()
+        guard.get_all_memories().map_err(AppError::Internal)?
     };
 
     let graph = if req.include_graph {
@@ -66,14 +72,17 @@ pub async fn export_mif(
     let todos = state
         .todo_store
         .list_todos_for_user(&user_id, None)
-        .unwrap_or_default();
+        .map_err(AppError::Internal)?;
 
-    let projects = state.todo_store.list_projects(&user_id).unwrap_or_default();
+    let projects = state
+        .todo_store
+        .list_projects(&user_id)
+        .map_err(AppError::Internal)?;
 
     let reminders = state
         .prospective_store
         .list_for_user(&user_id, None)
-        .unwrap_or_default();
+        .map_err(AppError::Internal)?;
 
     let since = req
         .since
@@ -543,4 +552,95 @@ pub async fn get_uncompressed_old(
         .collect();
 
     Ok(Json(RetrieveResponse { memories, count }))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::handlers::test_helpers::{self, TestHarness};
+    use crate::memory::{Experience, Project};
+    use axum::http::StatusCode;
+
+    /// Happy path: export returns the real seeded memory + project, not an
+    /// empty/silently-truncated document. Covers the code paths touched by the
+    /// `.unwrap_or_default()` -> `.map_err(AppError::Internal)?` fix.
+    #[tokio::test]
+    async fn export_mif_returns_real_data() {
+        let harness = TestHarness::new();
+        let user_id = "mif-export-user";
+
+        {
+            let memory = harness.manager.get_user_memory(user_id).unwrap();
+            let guard = memory.read();
+            guard
+                .remember(
+                    Experience {
+                        content: "MIF export happy-path memory".to_string(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        let project = Project::new(user_id.to_string(), "Export Test Project".to_string());
+        harness.manager.todo_store.store_project(&project).unwrap();
+
+        let req = test_helpers::post_json(
+            "/api/export/mif",
+            &serde_json::json!({ "user_id": user_id }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["memories"].as_array().unwrap().len(),
+            1,
+            "export must include the real seeded memory"
+        );
+        assert_eq!(
+            body["projects"].as_array().unwrap().len(),
+            1,
+            "export must include the real seeded project"
+        );
+        assert_eq!(body["projects"][0]["name"], "Export Test Project");
+    }
+
+    /// Regression test for the silent-empty-export bug: a store-read error used
+    /// to be swallowed by `.unwrap_or_default()`, so an export could "succeed"
+    /// with an empty document and no signal anything was wrong. It must now
+    /// fail loudly instead.
+    ///
+    /// Fault injection: `TodoStore::list_projects` does
+    /// `serde_json::from_slice::<Project>(&value)?` per entry in the `projects`
+    /// column family, genuinely propagating a deserialize error (unlike
+    /// `get_all_memories`, whose lower layer swallows per-item errors and isn't
+    /// injectable without further production changes). Writing a malformed
+    /// value under a key `list_projects` will scan gives us a real read failure
+    /// to verify propagation against.
+    #[tokio::test]
+    async fn export_mif_propagates_project_store_read_error() {
+        let harness = TestHarness::new();
+        let user_id = "mif-export-corrupt-user";
+
+        let cf = harness
+            .manager
+            .shared_db
+            .cf_handle("projects")
+            .expect("projects CF must exist");
+        let key = format!("{user_id}:{}", uuid::Uuid::new_v4());
+        harness
+            .manager
+            .shared_db
+            .put_cf(cf, key.as_bytes(), b"not valid json")
+            .unwrap();
+
+        let req = test_helpers::post_json(
+            "/api/export/mif",
+            &serde_json::json!({ "user_id": user_id }),
+        );
+        let (status, _body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a corrupted store read must fail the export, not silently return an empty document"
+        );
+    }
 }

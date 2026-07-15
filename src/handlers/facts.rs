@@ -249,8 +249,14 @@ fn default_narratives_limit() -> usize {
 #[derive(Debug, Deserialize)]
 pub struct FactNarrativesRequest {
     pub user_id: String,
+    /// Max clusters to return. Defaults to 20, clamped to [`validation::MAX_LIMIT`].
     #[serde(default = "default_narratives_limit")]
     pub limit: usize,
+    /// Clusters to skip before collecting `limit` results. Defaults to 0.
+    /// Combine with `total_clusters` in the response to page through results
+    /// beyond `validation::MAX_LIMIT` (e.g. offset += limit).
+    #[serde(default)]
+    pub offset: Option<usize>,
     #[serde(default)]
     pub entity_filter: Option<String>,
 }
@@ -260,11 +266,16 @@ pub struct FactNarrativesRequest {
 pub struct FactNarrativesResponse {
     pub success: bool,
     pub clusters: Vec<FactCluster>,
+    /// Total facts across ALL matching clusters (not just the returned page).
     pub total_facts: usize,
+    /// Total matching clusters (not just the returned page). Compare against
+    /// `offset + clusters.len()` to know whether more pages remain.
     pub total_clusters: usize,
 }
 
 /// POST /api/facts/narratives - Get fact narratives clustered by topic
+/// `limit` defaults to 20 and is clamped to [`validation::MAX_LIMIT`]; `offset`
+/// defaults to 0. Use `total_clusters` in the response to page through results.
 pub async fn fact_narratives(
     State(state): State<AppState>,
     Json(req): Json<FactNarrativesRequest>,
@@ -275,23 +286,112 @@ pub async fn fact_narratives(
         .get_user_memory(&req.user_id)
         .map_err(AppError::Internal)?;
     let user_id = req.user_id.clone();
-    let limit = req.limit.min(50);
+    let limit = req.limit.min(validation::MAX_LIMIT);
+    let offset = req.offset.unwrap_or(0);
     let entity_filter = req.entity_filter.clone();
 
     let clusters = tokio::task::spawn_blocking(move || {
         let ms = memory.read();
-        ms.build_fact_narratives(&user_id, limit, entity_filter.as_deref())
+        ms.build_fact_narratives(&user_id, entity_filter.as_deref())
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
     .map_err(AppError::Internal)?;
 
-    let total_facts: usize = clusters.iter().map(|c| c.facts.len()).sum();
     let total_clusters = clusters.len();
+    let total_facts: usize = clusters.iter().map(|c| c.facts.len()).sum();
+
+    let paged_clusters: Vec<FactCluster> = clusters.into_iter().skip(offset).take(limit).collect();
+
     Ok(Json(FactNarrativesResponse {
         success: true,
-        clusters,
+        clusters: paged_clusters,
         total_facts,
         total_clusters,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::handlers::test_helpers::{self, TestHarness};
+    use crate::memory::{FactType, SemanticFact};
+    use axum::http::StatusCode;
+
+    /// Seed `n` independent 2-fact clusters (each pair shares a unique topic entity,
+    /// so `build_fact_narratives` groups them into exactly `n` clusters — none of
+    /// them hit the hub-entity exclusion since each topic entity only appears twice).
+    fn seed_narrative_clusters(harness: &TestHarness, user_id: &str, n: usize) {
+        let memory = harness.manager.get_user_memory(user_id).unwrap();
+        let guard = memory.read();
+        let store = guard.fact_store();
+        for i in 0..n {
+            for j in 0..2 {
+                let fact = SemanticFact {
+                    id: format!("fact-{i}-{j}"),
+                    fact: format!("Topic {i} statement {j}"),
+                    confidence: 0.8,
+                    support_count: 3,
+                    source_memories: vec![],
+                    related_entities: vec![format!("topic{i}")],
+                    created_at: chrono::Utc::now(),
+                    last_reinforced: chrono::Utc::now(),
+                    fact_type: FactType::Pattern,
+                };
+                store.store(user_id, &fact).unwrap();
+            }
+        }
+    }
+
+    /// Regression test for the silent-cap-at-50 bug: previously `limit` was
+    /// hard-clamped to 50 with no way to page past it. Seeds 60 clusters (above
+    /// the old cap) and verifies `limit` > 50 is honored and `offset` pages
+    /// correctly, while `total_clusters` always reports the true total.
+    #[tokio::test]
+    async fn narratives_offset_and_limit_above_old_cap() {
+        let harness = TestHarness::new();
+        let user_id = "narratives-user";
+        seed_narrative_clusters(&harness, user_id, 60);
+
+        // limit=55 (> old hard cap of 50), offset=0 -> first 55 of 60 clusters.
+        let req = test_helpers::post_json(
+            "/api/facts/narratives",
+            &serde_json::json!({ "user_id": user_id, "limit": 55, "offset": 0 }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["clusters"].as_array().unwrap().len(),
+            55,
+            "limit above the old 50-cluster cap must be honored"
+        );
+        assert_eq!(body["total_clusters"], 60);
+
+        // offset=55 pages past what the old cap made permanently unreachable.
+        let req = test_helpers::post_json(
+            "/api/facts/narratives",
+            &serde_json::json!({ "user_id": user_id, "limit": 55, "offset": 55 }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["clusters"].as_array().unwrap().len(),
+            5,
+            "offset must skip past the first page (60 - 55 = 5 remaining)"
+        );
+        assert_eq!(body["total_clusters"], 60);
+
+        // Existing callers omitting limit/offset keep the old default of 20.
+        let req = test_helpers::post_json(
+            "/api/facts/narratives",
+            &serde_json::json!({ "user_id": user_id }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["clusters"].as_array().unwrap().len(),
+            20,
+            "default limit must be unchanged for existing callers"
+        );
+        assert_eq!(body["total_clusters"], 60);
+    }
 }
