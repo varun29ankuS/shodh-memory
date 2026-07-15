@@ -82,15 +82,27 @@ fn load_from_dir(dir: &Path) -> Option<Arc<Pipeline>> {
     }
 }
 
-/// Resolve the bundle directory from `SHODH_SPACY_MODEL_PATH` and load it.
-fn load_from_env() -> Option<Arc<Pipeline>> {
-    let dir = std::env::var_os("SHODH_SPACY_MODEL_PATH")?;
-    load_from_dir(Path::new(&dir))
+/// Resolve the `en_core_web_sm` bundle and load it. Resolution order, so the
+/// causal spine is live by default when the bundle is present (no env required):
+///   1. `SHODH_SPACY_MODEL_PATH` — explicit override.
+///   2. the conventional cache dir (`~/.cache/shodh-memory/models/en_core_web_sm`),
+///      mirroring how GLiNER/MiniLM auto-resolve.
+///   3. a repo-relative `models/en_core_web_sm` — developer/eval convenience.
+fn load_bundle() -> Option<Arc<Pipeline>> {
+    if let Some(dir) = std::env::var_os("SHODH_SPACY_MODEL_PATH") {
+        if let Some(p) = load_from_dir(Path::new(&dir)) {
+            return Some(p);
+        }
+    }
+    if let Some(p) = load_from_dir(&crate::embeddings::downloader::get_spacy_models_dir()) {
+        return Some(p);
+    }
+    load_from_dir(Path::new("models/en_core_web_sm"))
 }
 
-/// The shared pipeline, or `None` when no model is configured/available.
+/// The shared pipeline, or `None` when no model is available.
 pub fn pipeline() -> Option<&'static Arc<Pipeline>> {
-    PIPELINE.get_or_init(load_from_env).as_ref()
+    PIPELINE.get_or_init(load_bundle).as_ref()
 }
 
 /// Whether the dependency parser is available in this process.

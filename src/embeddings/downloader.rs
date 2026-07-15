@@ -159,6 +159,13 @@ pub fn get_ner_models_dir() -> PathBuf {
     get_cache_dir().join("models").join("bert-tiny-ner")
 }
 
+/// Get the bundle directory for the dependency parser (en_core_web_sm).
+/// Mirrors the other model dirs so the causal spine can auto-load from the
+/// conventional cache location without requiring `SHODH_SPACY_MODEL_PATH`.
+pub fn get_spacy_models_dir() -> PathBuf {
+    get_cache_dir().join("models").join("en_core_web_sm")
+}
+
 /// Get the cache directory for the GLiNER bi-edge typer assets.
 ///
 /// This is the first-run download target and is registered as a resolution
