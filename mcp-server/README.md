@@ -89,8 +89,9 @@ configured endpoint to the backend so both processes use the same value.
 | `SHODH_API_KEY` | **Required**. API key for authentication | - |
 | `SHODH_IPC_ENABLED` | Server listener toggle. The auto-spawned backend honors this value. | `true` |
 | `SHODH_IPC_ENDPOINT` | Local endpoint for MCP requests: a Unix socket path (macOS/Linux) or `\\.\pipe\name` (Windows). When set, ordinary MCP requests use local IPC instead of HTTP. A Windows pipe value on macOS/Linux is rejected. | - |
+| `SHODH_IPC_REQUIRED` | Fail closed when IPC cannot bind or authenticate. The TypeScript client also requires `SHODH_IPC_ENDPOINT` when enabled. | `false` |
 | `SHODH_API_URL` | Backend server URL | `http://127.0.0.1:3030` |
-| `SHODH_USER_ID` | User ID for memory isolation | `claude-code` |
+| `SHODH_USER_ID` | Logical memory namespace; not an authorization tenant | `claude-code` |
 | `SHODH_NO_AUTO_SPAWN` | Set to `true` to disable auto-starting the backend | `false` |
 | `SHODH_STREAM` | Enable/disable streaming ingestion | `true` |
 | `SHODH_STREAM_WEBSOCKET` | In IPC mode only, explicitly opt into WebSocket streaming through `SHODH_API_URL` | `false` |
@@ -101,9 +102,10 @@ configured endpoint to the backend so both processes use the same value.
 When `SHODH_IPC_ENDPOINT` is set, tool calls, proactive surfacing, health checks,
 resources, and prompts use local IPC. Each call opens one local connection and
 exchanges one versioned, newline-delimited JSON request and response. Frames are
-limited to eight MiB. Ordinary API operations require the same full-authority API
-key as REST; only exact `GET /health` is unauthenticated. The key is never written
-to MCP stdout.
+limited to eight MiB. An empty-auth health challenge first proves the endpoint
+knows the configured key. Ordinary requests then use HMAC proofs bound to that
+server instance and request body; the reusable API key is never sent over IPC or
+written to MCP stdout.
 
 Streaming ingestion remains a WebSocket feature. It is disabled by default in
 IPC mode because the local protocol is finite request/response. To enable it
@@ -114,6 +116,10 @@ If `SHODH_IPC_ENDPOINT` is absent, the MCP server preserves its existing HTTP
 and WebSocket behavior. When the variable is present, it is an explicit transport
 selection: an unavailable IPC endpoint is reported rather than silently retried
 over HTTP.
+
+`SHODH_USER_ID` remains a logical namespace, as it is over REST. A configured API
+key has authority across namespaces. Use separate server/key instances when
+mutually untrusted tenants require an authorization boundary.
 
 ## MCP Tools (51 total)
 

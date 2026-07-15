@@ -4097,6 +4097,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "spacy-rusty",
+ "subtle",
  "tantivy",
  "tar",
  "tempfile",

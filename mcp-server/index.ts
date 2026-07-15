@@ -32,7 +32,7 @@ import { nextReconnectDelay, serializeAndValidateBody, shouldWarnInsecureApiUrl 
 import { stripSystemNoise, getContent as _getContent, getType as _getType, formatSurfacedMemories as _formatSurfacedMemories, formatToolCallContent } from "./string-utils";
 import { TokenTracker } from "./token-tracking";
 import { resolvePackageVersion } from "./version";
-import { ShodhIpcClient } from "./ipc-client";
+import { ShodhIpcClient, type WindowsIpcHelper } from "./ipc-client";
 
 const __filename = (typeof import.meta !== "undefined" && import.meta.url) ? fileURLToPath(import.meta.url) : "";
 const __dirname = __filename ? path.dirname(__filename) : process.cwd();
@@ -56,6 +56,10 @@ function resolveApiUrl(): string {
 const API_URL = resolveApiUrl();
 const WS_URL = API_URL.replace(/^http/, "ws") + "/api/stream";
 const IPC_ENDPOINT = process.env.SHODH_IPC_ENDPOINT?.trim() || "";
+const IPC_REQUIRED = /^(1|true|yes|on)$/i.test(process.env.SHODH_IPC_REQUIRED?.trim() || "");
+if (IPC_REQUIRED && !IPC_ENDPOINT) {
+  throw new Error("SHODH_IPC_REQUIRED requires SHODH_IPC_ENDPOINT for the TypeScript MCP client");
+}
 const IPC_WEBSOCKET_STREAM_ENABLED = Boolean(IPC_ENDPOINT)
   && process.env.SHODH_STREAM !== "false"
   && process.env.SHODH_STREAM_WEBSOCKET === "true";
@@ -120,7 +124,9 @@ if (apiKeySource === "SHODH_DEV_API_KEY") {
 } else if (apiKeySource && apiKeySource !== "auto-generated" && apiKeySource !== "sandbox") {
   console.error(`[shodh-memory] API key loaded from ${apiKeySource}.`);
 }
-const IPC_CLIENT = IPC_ENDPOINT ? new ShodhIpcClient(IPC_ENDPOINT, API_KEY) : null;
+const IPC_CLIENT = IPC_ENDPOINT
+  ? new ShodhIpcClient(IPC_ENDPOINT, API_KEY, getWindowsIpcHelper())
+  : null;
 const BACKEND_LOCATION = IPC_ENDPOINT || API_URL;
 const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 1000;
@@ -4795,6 +4801,12 @@ function getBinaryPath(): string | null {
   return null;
 }
 
+function getWindowsIpcHelper(): WindowsIpcHelper | undefined {
+  if (process.platform !== "win32") return undefined;
+  const command = getBinaryPath();
+  return command ? { command, args: ["ipc-exchange"] } : undefined;
+}
+
 async function isServerRunning(): Promise<boolean> {
   return isServerAvailable();
 }
@@ -4875,7 +4887,7 @@ async function ensureServerRunning(): Promise<void> {
     "SHODH_REQUEST_TIMEOUT", "SHODH_WRITE_MODE", "SHODH_OFFLINE",
     "SHODH_LAZY_LOAD", "SHODH_ONNX_THREADS", "SHODH_VECTOR_BACKEND",
     "SHODH_CORS_ORIGINS", "SHODH_CORS_MAX_AGE", "SHODH_CORS_CREDENTIALS",
-    "SHODH_IPC_ENABLED", "SHODH_IPC_ENDPOINT",
+    "SHODH_IPC_ENABLED", "SHODH_IPC_ENDPOINT", "SHODH_IPC_REQUIRED",
     "RUST_LOG",
   ]);
   for (const [key, value] of Object.entries(process.env)) {

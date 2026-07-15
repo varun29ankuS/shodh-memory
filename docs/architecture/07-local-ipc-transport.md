@@ -7,7 +7,7 @@
 | Created | 2026-07-14 |
 | Scope | Rust engine, Rust/TypeScript MCP clients, local integrations |
 | Platforms | Unix-domain sockets and Windows named pipes |
-| Protocol | Version 1, newline-delimited JSON |
+| Protocol | Version 2, newline-delimited JSON + HMAC endpoint proof |
 
 ## Problem
 
@@ -43,6 +43,10 @@ IPC is **enabled by default and non-fatal**:
   aborts startup. This is deliberate: a second instance for the same user, a data
   directory not at mode 0700, or a read-only endpoint parent must not take the
   whole daemon down.
+- `SHODH_IPC_REQUIRED=true` switches both the server and native Rust client to
+  fail-closed behavior. A disabled or unbindable listener aborts server startup,
+  and the client refuses HTTP fallback. The TypeScript client also requires an
+  explicit `SHODH_IPC_ENDPOINT` when this mode is set.
 
 The transport is request/response only. Streaming routes remain on their existing
 WebSocket / server-sent-event transports and are refused (`501`) over IPC rather
@@ -58,9 +62,10 @@ Request envelope:
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "id": "client-correlation-id",
-  "auth": "configured-api-key",
+  "auth": "request:<server-nonce>:<hmac-sha256>",
+  "challenge": "",
   "method": "POST",
   "path": "/api/recall",
   "body": {}
@@ -71,50 +76,57 @@ Response envelope:
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "id": "client-correlation-id",
+  "auth": "response:<hmac-sha256>",
   "status": 200,
   "body": {}
 }
 ```
 
+Before an ordinary request, a client sends exact `GET /health` with empty `auth`
+and a random 32-byte `challenge`. The server returns its per-process nonce plus an
+HMAC proof for each configured API key. A client continues only when its key
+verifies one proof. Ordinary requests then carry an HMAC bound to that server
+nonce, request ID, method, path, and raw JSON body. The reusable API key is never
+put on the IPC wire. Responses carry a proof bound to the request proof, ID, and
+status.
+
 Frames are UTF-8 JSON terminated by a newline and bounded at eight MiB. The
 version is mandatory. Clients reject malformed UTF-8, unknown envelope fields,
-invalid status codes, missing frame delimiters, trailing data, and oversized
-frames. A response whose `id` is empty is treated as a server-side protocol error
-(the server could not recover a correlation id from the request) and surfaced via
-its status, **not** rejected as an id mismatch.
+invalid status codes, missing frame delimiters, trailing data, oversized frames,
+and missing or invalid server proofs. A response whose `id` is empty is a
+pre-authentication protocol error; authenticated clients reject it as untrusted.
 
 ## Security and lifecycle
 
-- Only an exact unauthenticated `GET /health` probe is public. The exemption
-  matches the raw request path byte-for-byte, which is strictly narrower than the
-  parsed `/api/` gate, so it cannot be widened into an `/api` route by dot-segments
-  or encoding.
-- All ordinary `/api/*` routes authenticate with the configured API key (constant-
-  time comparison, `auth::validate_api_key`) **before** method or route-policy
-  evaluation.
+- Only an exact `GET /health` probe has empty `auth`. A challenged probe proves
+  the server knows a configured key without disclosing that key; an unchallenged
+  probe remains available for basic local health tooling.
+- All ordinary `/api/*` routes verify their keyed request proof **before** method,
+  route-policy, or body-value processing. The body remains `RawValue` until that
+  check succeeds.
 - Public context-status, streaming, webhook, and HTML routes are not exposed
   through IPC.
-- Unix: the endpoint's parent directory is owned by the current user and forced to
-  mode 0700 (tightened if it pre-exists looser); the socket is 0600. Stale-socket
-  cleanup checks ownership, type, liveness, and device/inode identity before
-  unlinking.
+- Unix: the endpoint's parent directory is opened with `O_DIRECTORY|O_NOFOLLOW`,
+  verified as current-user-owned, and tightened by handle to 0700; the socket is
+  0600. Both sides assert peer UID. Stale-socket cleanup checks ownership, type,
+  liveness, and device/inode identity before unlinking.
 - Windows: the pipe uses `FILE_FLAG_FIRST_PIPE_INSTANCE`, rejects remote clients,
   and carries a protected DACL granting access only to the current user and
-  LocalSystem. The default pipe name includes the current user's SID so different
-  users do not collide. A SID is discoverable and the name does not by itself stop
-  pipe squatting; client-side owner verification remains a known limitation.
-- Per-request read and dispatch deadlines are bounded, and the IPC drain at
-  shutdown is bounded by the same timeout as the HTTP drain, so a slow route cannot
-  hold the process open and cost the storage flush.
+  LocalSystem. Rust clients explicitly request `SECURITY_IDENTIFICATION`; both
+  sides verify the peer process account. The TypeScript client routes pipe I/O
+  through the bundled Rust binary because Node's file APIs cannot set those SQOS
+  flags safely.
+- At most 16 connections may occupy the pre-authentication stage, each for at most
+  two seconds. Authenticated dispatch has its own configured concurrency limit.
+  Shutdown drain remains bounded by the HTTP drain deadline.
 
 ## Client integration
 
-The Rust MCP client (`shodh serve`) prefers IPC when the endpoint answers a health
-probe and falls back to HTTP at `SHODH_API_URL` otherwise — so `SHODH_API_URL`
-keeps working and a client never hard-fails every tool call merely because IPC is
-unavailable while HTTP is up.
+The Rust MCP client (`shodh serve`) prefers IPC when the endpoint passes the
+authenticated challenge and falls back to HTTP at `SHODH_API_URL` otherwise,
+unless `SHODH_IPC_REQUIRED=true` selects fail-closed behavior.
 
 The TypeScript MCP client selects IPC when `SHODH_IPC_ENDPOINT` is set and retains
 HTTP behavior when it is absent. A `\\.\pipe\` endpoint on a non-Windows platform is
@@ -135,27 +147,20 @@ IPC mode requires explicit opt-in (`SHODH_STREAM_WEBSOCKET=true`).
   content type, so non-JSON exports are not equivalent to their HTTP responses.
   It also caps a response body at about eight MiB; the same route over HTTP has no
   such cap and can succeed where IPC returns `413`.
-- **In-band key.** On the legitimate 0600 socket or DACL-protected pipe, OS access
-  is already user-scoped, so the API key is defense-in-depth (e.g. against a widened
-  endpoint), not an independent second factor. Peer-credential checks (`SO_PEERCRED` /
-  `GetNamedPipeClientProcessId`) are not yet used.
+- **Logical namespaces are not authorization tenants.** `user_id` selects a memory
+  namespace. API keys remain full-authority credentials across namespaces for both
+  HTTP and IPC; peer UID/SID cannot be mapped safely to application identifiers
+  such as `claude-code` or a robot ID. Deploy separate server/key instances when
+  mutually untrusted tenants require isolation.
 - **Windows client shape.** The TypeScript client uses a bounded pool of helper
-  processes because Node's named-pipe connect cannot be cancelled reliably. This
-  limits throughput, and queued time counts against the request deadline.
-- **Windows server-owner verification.** Clients do not verify the named-pipe
-  server owner before sending the in-band API key. The per-user name prevents
-  cross-user collisions but does not close this pre-creation race.
-- **Pre-auth occupancy.** A same-user peer can occupy a concurrency slot for the
-  full request-read timeout before authenticating; there is no shorter pre-auth
+  processes so Windows pipe I/O stays killable and receives Rust's SQOS and peer
+  checks. This limits throughput, and queued time counts against the request
   deadline.
 
 ## Verification
 
-The suite includes protocol, authentication-order and key-enforcement (valid and
-wrong key over the real validator), exact-`GET /health` probe, frame-boundary,
-delayed-second-frame, streaming/public-route policy (driving dispatch, not the
-const arrays), protocol-error-code, API-key redaction, and — platform-gated — a
-Unix endpoint-permission test (0700 parent, 0600 socket) and a Windows DACL test.
-A cross-implementation test that runs the real server against the real TypeScript
-client does not yet exist; the two protocol implementations are verified
-independently.
+The suite includes challenge/response and request-proof parity, key non-disclosure,
+body-tamper rejection, authentication order, exact-`GET /health`, frame boundaries,
+delayed-second-frame handling, streaming/public-route policy, API-key redaction,
+and platform-gated endpoint permission/DACL and peer-account checks. The Rust and
+TypeScript implementations exercise the same length-prefixed HMAC field framing.

@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use std::env;
+use subtle::ConstantTimeEq;
 
 use crate::errors::ErrorResponse;
 
@@ -115,36 +116,13 @@ impl IntoResponse for AuthError {
     }
 }
 
-/// Constant-time string comparison to prevent timing attacks
-///
-/// Compares all bytes of both strings to prevent length-based timing leaks.
-/// The comparison time is constant regardless of where differences occur.
+/// Compiler-resistant constant-time comparison for equal-length key material.
 pub(crate) fn constant_time_compare(a: &str, b: &str) -> bool {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let a_len = a_bytes.len();
-    let b_len = b_bytes.len();
-    let max_len = std::cmp::max(a_len, b_len);
-
-    // Track whether lengths match (0 if equal, non-zero otherwise)
-    // Use u32 to avoid truncation: (usize as u8) wraps at 256, so lengths
-    // differing by a multiple of 256 would falsely compare as equal.
-    let mut result: u32 = (a_len ^ b_len) as u32;
-
-    // Compare all bytes up to max_len, using 0 for out-of-bounds indices
-    // This ensures constant time regardless of actual lengths
-    for i in 0..max_len {
-        let byte_a = if i < a_len { a_bytes[i] } else { 0 };
-        let byte_b = if i < b_len { b_bytes[i] } else { 0 };
-        result |= (byte_a ^ byte_b) as u32;
-    }
-
-    result == 0
+    a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
-/// Validate API key against configured keys using constant-time comparison
-pub fn validate_api_key(provided_key: &str) -> Result<(), AuthError> {
-    // Get API keys from environment.
+/// Resolve API keys using the one precedence rule shared by HTTP and local IPC.
+pub(crate) fn configured_api_keys() -> Result<Vec<String>, AuthError> {
     // Resolution order: SHODH_API_KEYS (plural, comma-separated) → SHODH_API_KEY (singular)
     //                 → SHODH_DEV_API_KEY (dev mode) → NotConfigured error
     let valid_keys = match env::var("SHODH_API_KEYS") {
@@ -179,9 +157,18 @@ pub fn validate_api_key(provided_key: &str) -> Result<(), AuthError> {
         },
     };
 
-    let keys: Vec<&str> = valid_keys.split(',').map(|k| k.trim()).collect();
+    Ok(valid_keys
+        .split(',')
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
 
-    // Use constant-time comparison to prevent timing attacks
+/// Validate API key against configured keys using constant-time comparison.
+pub fn validate_api_key(provided_key: &str) -> Result<(), AuthError> {
+    let keys = configured_api_keys()?;
+
     let mut found = false;
     for key in &keys {
         if constant_time_compare(key, provided_key) {

@@ -44,6 +44,6 @@ operator explicitly opts out via an environment variable.
 | **Error responses** | In production (`SHODH_ENV=production`) 5xx responses return a generic message; full detail is logged server-side only. | — |
 | **API authentication** | All `/api/*` routes require an API key. Production refuses authenticated requests when no key is configured. | — |
 | **HTTP transport** | Security headers (`X-Frame-Options`, CSP, `X-Content-Type-Options`, and HSTS in production) are always set. TLS is strongly recommended for any non-localhost deployment. | — |
-| **Local IPC** | Enabled by default. Unix uses a current-user-owned `0700` parent and `0600` socket; Windows uses a protected current-user/LocalSystem DACL and a per-user pipe name. Ordinary requests authenticate before dispatch. | `SHODH_IPC_ENABLED=false` disables the listener. `SHODH_IPC_ENDPOINT` overrides the platform default; on Unix its parent must be a real directory owned by the current user. |
+| **Local IPC** | Enabled by default. Clients authenticate the server before sending HMAC-bound requests; the reusable key never crosses IPC. Unix checks peer UID and owner-only permissions. Windows uses identification-only SQOS, peer-account checks, and a protected per-user pipe. | `SHODH_IPC_ENABLED=false` disables the listener. `SHODH_IPC_REQUIRED=true` makes bind/probe failure fatal instead of allowing HTTP fallback. `SHODH_IPC_ENDPOINT` overrides the platform default. |
 
 See the configuration documentation for the full list of variables.

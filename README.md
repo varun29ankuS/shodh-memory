@@ -359,6 +359,7 @@ SHODH_PORT=3030                   # Port (default: 3030)
 SHODH_MEMORY_PATH=/var/lib/shodh  # Data directory
 # SHODH_IPC_ENABLED=false         # Local IPC is enabled by default; false disables it
 # SHODH_IPC_ENDPOINT=/private/path/shodh-memory.sock  # Optional platform-specific override
+# SHODH_IPC_REQUIRED=true         # Fail closed instead of falling back to HTTP
 SHODH_REQUEST_TIMEOUT=60          # Request timeout in seconds
 SHODH_MAX_CONCURRENT=200          # Max concurrent requests
 SHODH_ROCKSDB_BLOCK_CACHE_MB=256  # Shared RocksDB block cache (MiB)
@@ -368,7 +369,7 @@ SHODH_CORS_ORIGINS=https://app.example.com
 
 The server enables authenticated local IPC by default and keeps HTTP available.
 Native `shodh serve` prefers the platform-default IPC endpoint and falls back to
-`SHODH_API_URL`; the TypeScript MCP client uses IPC only when
+`SHODH_API_URL` unless fail-closed mode is enabled; the TypeScript MCP client uses IPC only when
 `SHODH_IPC_ENDPOINT` is set. See the [local IPC architecture](docs/architecture/07-local-ipc-transport.md)
 for platform defaults, security properties, and limitations.
 

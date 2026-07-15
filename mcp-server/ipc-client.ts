@@ -1,67 +1,31 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createConnection, type Socket } from "node:net";
 import { TextDecoder } from "node:util";
 
-export const IPC_PROTOCOL_VERSION = 1;
+export const IPC_PROTOCOL_VERSION = 2;
 export const IPC_MAX_FRAME_BYTES = 8 * 1024 * 1024;
 
-const RESPONSE_FIELDS = ["body", "id", "status", "v"];
+const RESPONSE_FIELDS = ["auth", "body", "id", "status", "v"];
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 const WINDOWS_HELPER_LIMIT = 4;
+const NONCE_BYTES = 32;
+const PROBE_RESPONSE_DOMAIN = Buffer.from("shodh-ipc-v2/server-proof", "utf8");
+const REQUEST_DOMAIN = Buffer.from("shodh-ipc-v2/request", "utf8");
+const RESPONSE_DOMAIN = Buffer.from("shodh-ipc-v2/response", "utf8");
 let activeWindowsHelpers = 0;
 const windowsHelperWaiters: Array<() => void> = [];
-const WINDOWS_PIPE_HELPER = String.raw`
-const fs = require("node:fs");
-const endpoint = process.argv[1];
-const request = fs.readFileSync(0);
-let descriptor;
-try {
-  for (;;) {
-    try {
-      descriptor = fs.openSync(endpoint, fs.constants.O_RDWR);
-      break;
-    } catch (error) {
-      if (error.code !== "EBUSY" && error.code !== "EAGAIN") throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-    }
-  }
-  let offset = 0;
-  while (offset < request.length) {
-    const written = fs.writeSync(descriptor, request, offset, request.length - offset);
-    if (written === 0) throw new Error("zero-byte write");
-    offset += written;
-  }
-  const chunks = [];
-  let total = 0;
-  for (;;) {
-    const chunk = Buffer.allocUnsafe(8192);
-    let count;
-    try {
-      count = fs.readSync(descriptor, chunk, 0, chunk.length, null);
-    } catch (error) {
-      if (error.code === "EPIPE") break;
-      throw error;
-    }
-    if (count === 0) break;
-    total += count;
-    if (total > ${IPC_MAX_FRAME_BYTES}) throw new Error("FRAME_TOO_LARGE");
-    chunks.push(chunk.subarray(0, count));
-  }
-  fs.writeFileSync(1, Buffer.concat(chunks, total));
-} catch (error) {
-  fs.writeFileSync(2, String(error && error.message ? error.message : error));
-  process.exitCode = 1;
-} finally {
-  if (descriptor !== undefined) {
-    try { fs.closeSync(descriptor); } catch {}
-  }
-}`;
+
+export interface WindowsIpcHelper {
+  command: string;
+  args: string[];
+}
 
 interface IpcRequestEnvelope {
   v: number;
   id: string;
   auth: string;
+  challenge: string;
   method: string;
   path: string;
   body: unknown;
@@ -70,6 +34,7 @@ interface IpcRequestEnvelope {
 interface IpcResponseEnvelope {
   v: number;
   id: string;
+  auth: string;
   status: number;
   body: unknown;
 }
@@ -90,8 +55,10 @@ export class IpcApiError extends Error {
 export class ShodhIpcClient {
   readonly endpoint: string;
   readonly #apiKey: string;
+  readonly #windowsHelper?: WindowsIpcHelper;
+  #serverNonce: Buffer | null = null;
 
-  constructor(endpoint: string, apiKey: string) {
+  constructor(endpoint: string, apiKey: string, windowsHelper?: WindowsIpcHelper) {
     if (!endpoint) {
       throw new Error("Shodh IPC endpoint must not be empty");
     }
@@ -105,8 +72,12 @@ export class ShodhIpcClient {
           `is ${process.platform}. Set SHODH_IPC_ENDPOINT to a Unix socket path.`,
       );
     }
+    if (process.platform === "win32" && !windowsHelper) {
+      throw new Error("Shodh IPC on Windows requires the bundled Rust pipe helper");
+    }
     this.endpoint = endpoint;
     this.#apiKey = apiKey;
+    this.#windowsHelper = windowsHelper;
   }
 
   async request<T>(
@@ -119,24 +90,209 @@ export class ShodhIpcClient {
       throw new Error("Shodh IPC timeout must be a positive number");
     }
 
+    const expiresAt = Date.now() + timeoutMs;
+    if (method === "GET" && path === "/health") {
+      return await this.#probe(expiresAt) as T;
+    }
+    const normalizedBody = normalizeBody(body ?? null);
+    const bodyJson = JSON.stringify(normalizedBody);
     const id = randomUUID();
+    const sizingNonce = this.#serverNonce ?? Buffer.alloc(NONCE_BYTES);
+    const sizingAuth = requestAuth(
+      this.#apiKey,
+      sizingNonce,
+      id,
+      method,
+      path,
+      Buffer.from(bodyJson, "utf8"),
+    );
+    encodeRequest({
+      v: IPC_PROTOCOL_VERSION,
+      id,
+      auth: sizingAuth,
+      challenge: "",
+      method,
+      path,
+      body: normalizedBody,
+    });
+    if (!this.#serverNonce) {
+      await this.#probe(expiresAt);
+    }
+
+    const auth = requestAuth(
+      this.#apiKey,
+      this.#serverNonce!,
+      id,
+      method,
+      path,
+      Buffer.from(bodyJson, "utf8"),
+    );
     const request: IpcRequestEnvelope = {
       v: IPC_PROTOCOL_VERSION,
       id,
-      auth: this.#apiKey,
+      auth,
+      challenge: "",
       method,
       path,
-      body: body ?? null,
+      body: normalizedBody,
     };
     const encoded = encodeRequest(request);
 
-    const response = await exchange(this.endpoint, encoded, timeoutMs);
+    const response = await exchange(
+      this.endpoint,
+      encoded,
+      remainingMs(expiresAt),
+      this.#windowsHelper,
+    );
     const envelope = decodeResponse(response, id);
+    verifyResponse(this.#apiKey, this.#serverNonce!, auth, envelope);
     if (envelope.status < 200 || envelope.status >= 300) {
       throw new IpcApiError(envelope.status, envelope.body);
     }
     return envelope.body as T;
   }
+
+  async #probe(expiresAt: number): Promise<unknown> {
+    const id = randomUUID();
+    const challenge = randomBytes(NONCE_BYTES).toString("hex");
+    const request: IpcRequestEnvelope = {
+      v: IPC_PROTOCOL_VERSION,
+      id,
+      auth: "",
+      challenge,
+      method: "GET",
+      path: "/health",
+      body: null,
+    };
+    const response = await exchange(
+      this.endpoint,
+      encodeRequest(request),
+      remainingMs(expiresAt),
+      this.#windowsHelper,
+    );
+    const envelope = decodeResponse(response, id);
+    this.#serverNonce = verifyProbeResponse(this.#apiKey, challenge, envelope);
+    if (envelope.status < 200 || envelope.status >= 300) {
+      throw new IpcApiError(envelope.status, envelope.body);
+    }
+    return envelope.body;
+  }
+}
+
+function normalizeBody(body: unknown): unknown {
+  try {
+    const encoded = JSON.stringify(body);
+    if (encoded === undefined) return null;
+    return JSON.parse(encoded) as unknown;
+  } catch (error) {
+    throw new Error(`Failed to encode Shodh IPC request body: ${errorMessage(error)}`);
+  }
+}
+
+function remainingMs(expiresAt: number): number {
+  const remaining = expiresAt - Date.now();
+  if (remaining <= 0) {
+    throw new Error("Shodh IPC request timed out before the exchange completed");
+  }
+  return remaining;
+}
+
+function requestAuth(
+  key: string,
+  nonce: Buffer,
+  id: string,
+  method: string,
+  path: string,
+  body: Buffer,
+): string {
+  const version = Buffer.alloc(2);
+  version.writeUInt16BE(IPC_PROTOCOL_VERSION);
+  const proof = macHex(key, REQUEST_DOMAIN, [
+    nonce,
+    version,
+    Buffer.from(id, "utf8"),
+    Buffer.from(method, "utf8"),
+    Buffer.from(path, "utf8"),
+    body,
+  ]);
+  return `request:${nonce.toString("hex")}:${proof}`;
+}
+
+function verifyProbeResponse(
+  key: string,
+  challenge: string,
+  response: IpcResponseEnvelope,
+): Buffer {
+  const [kind, nonceHex, proofs, ...trailing] = response.auth.split(":");
+  if (kind !== "probe" || !nonceHex || proofs === undefined || trailing.length > 0) {
+    throw new Error("Shodh IPC health response did not authenticate the server");
+  }
+  const nonce = decodeNonce(nonceHex, "server nonce");
+  const status = Buffer.alloc(2);
+  status.writeUInt16BE(response.status);
+  const expected = macHex(key, PROBE_RESPONSE_DOMAIN, [
+    Buffer.from(response.id, "utf8"),
+    Buffer.from(challenge, "utf8"),
+    nonce,
+    status,
+  ]);
+  if (!proofs.split(",").some((proof) => constantTimeHexEqual(proof, expected))) {
+    throw new Error("Shodh IPC health response was not signed by the configured server");
+  }
+  return nonce;
+}
+
+function verifyResponse(
+  key: string,
+  nonce: Buffer,
+  requestProof: string,
+  response: IpcResponseEnvelope,
+): void {
+  const proof = response.auth.startsWith("response:")
+    ? response.auth.slice("response:".length)
+    : "";
+  const status = Buffer.alloc(2);
+  status.writeUInt16BE(response.status);
+  const valid = verifyMac(key, RESPONSE_DOMAIN, [
+    nonce,
+    Buffer.from(requestProof, "utf8"),
+    Buffer.from(response.id, "utf8"),
+    status,
+  ], proof);
+  if (!valid) {
+    throw new Error("Shodh IPC response server proof was invalid");
+  }
+}
+
+function macHex(key: string, domain: Buffer, fields: Buffer[]): string {
+  const mac = createHmac("sha256", key);
+  updateMacField(mac, domain);
+  for (const field of fields) updateMacField(mac, field);
+  return mac.digest("hex");
+}
+
+function verifyMac(key: string, domain: Buffer, fields: Buffer[], proof: string): boolean {
+  const expected = macHex(key, domain, fields);
+  return constantTimeHexEqual(proof, expected);
+}
+
+function updateMacField(mac: ReturnType<typeof createHmac>, field: Buffer): void {
+  const length = Buffer.alloc(8);
+  length.writeBigUInt64BE(BigInt(field.byteLength));
+  mac.update(length);
+  mac.update(field);
+}
+
+function constantTimeHexEqual(actual: string, expected: string): boolean {
+  if (!/^[0-9a-f]+$/i.test(actual) || actual.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(expected, "hex"));
+}
+
+function decodeNonce(encoded: string, label: string): Buffer {
+  if (!/^[0-9a-f]+$/i.test(encoded) || encoded.length !== NONCE_BYTES * 2) {
+    throw new Error(`Shodh IPC response carried an invalid ${label}`);
+  }
+  return Buffer.from(encoded, "hex");
 }
 
 function encodeRequest(request: IpcRequestEnvelope): Buffer {
@@ -154,9 +310,14 @@ function encodeRequest(request: IpcRequestEnvelope): Buffer {
   return encoded;
 }
 
-function exchange(endpoint: string, encoded: Buffer, timeoutMs: number): Promise<Buffer> {
+function exchange(
+  endpoint: string,
+  encoded: Buffer,
+  timeoutMs: number,
+  windowsHelper?: WindowsIpcHelper,
+): Promise<Buffer> {
   return process.platform === "win32"
-    ? exchangeWindowsPipe(endpoint, encoded, timeoutMs)
+    ? exchangeWindowsPipe(endpoint, encoded, timeoutMs, windowsHelper!)
     : exchangeUnixSocket(endpoint, encoded, timeoutMs);
 }
 
@@ -164,6 +325,7 @@ function exchangeWindowsPipe(
   endpoint: string,
   encoded: Buffer,
   timeoutMs: number,
+  windowsHelper: WindowsIpcHelper,
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const expiresAt = Date.now() + timeoutMs;
@@ -209,10 +371,15 @@ function exchangeWindowsPipe(
       }
       let runningHelper: ChildProcessWithoutNullStreams;
       try {
-        // Node's named-pipe connector enters an uncancellable 30-second
-        // WaitNamedPipe. Isolating synchronous pipe I/O in a killable, bounded
-        // helper keeps the public deadline real without a native addon.
-        runningHelper = spawn(process.execPath, ["-e", WINDOWS_PIPE_HELPER, endpoint], {
+        // The bundled Rust helper opens with SECURITY_IDENTIFICATION and verifies
+        // the server account before it writes the authenticated request proof.
+        runningHelper = spawn(windowsHelper.command, [
+          ...windowsHelper.args,
+          "--ipc-endpoint",
+          endpoint,
+          "--timeout-ms",
+          String(Math.max(1, Math.ceil(expiresAt - Date.now()))),
+        ], {
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
         }) as ChildProcessWithoutNullStreams;
@@ -363,7 +530,7 @@ function decodeResponse(frame: Buffer, expectedId: string): IpcResponseEnvelope 
   const record = value as Record<string, unknown>;
   const fields = Object.keys(record).sort();
   if (fields.length !== RESPONSE_FIELDS.length || fields.some((field, index) => field !== RESPONSE_FIELDS[index])) {
-    throw new Error("Shodh IPC response fields did not match the version one envelope");
+    throw new Error("Shodh IPC response fields did not match the version two envelope");
   }
   if (record.v !== IPC_PROTOCOL_VERSION) {
     throw new Error(`Unsupported Shodh IPC response version ${String(record.v)}`);
@@ -372,8 +539,11 @@ function decodeResponse(frame: Buffer, expectedId: string): IpcResponseEnvelope 
   // parsing the request envelope — it has no correlation id to echo. Treat it as a
   // server error to surface via the status check below, NOT as an id mismatch, so
   // the real status/message reaches the caller instead of being masked.
-  if (record.id !== "" && record.id !== expectedId) {
+  if (typeof record.id !== "string" || (record.id !== "" && record.id !== expectedId)) {
     throw new Error("Shodh IPC response request ID did not match");
+  }
+  if (typeof record.auth !== "string") {
+    throw new Error("Shodh IPC response authentication proof was invalid");
   }
   if (!Number.isInteger(record.status) || (record.status as number) < 100 || (record.status as number) > 599) {
     throw new Error("Shodh IPC response status was invalid");

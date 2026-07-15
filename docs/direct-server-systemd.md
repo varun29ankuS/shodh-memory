@@ -48,6 +48,7 @@ Environment=SHODH_PORT=3030
 Environment=SHODH_MEMORY_PATH=%h/.local/share/shodh-memory
 Environment=SHODH_IPC_ENABLED=true
 Environment=SHODH_IPC_ENDPOINT=%h/.local/share/shodh/shodh-memory.sock
+Environment=SHODH_IPC_REQUIRED=true
 Environment=SHODH_DEV_API_KEY=local-dev-key
 ExecStart=%h/.cargo/bin/shodh server
 Restart=on-failure
@@ -74,9 +75,9 @@ Check the server directly:
 curl -sS http://127.0.0.1:3030/health
 ```
 
-Also check the journal for `Local IPC ready at ...`. A socket bind failure is
-non-fatal and leaves the HTTP API running, so HTTP health alone does not confirm
-that IPC is available.
+Also check the journal for `Local IPC ready at ...`. With
+`SHODH_IPC_REQUIRED=true`, a socket bind failure makes service activation fail;
+without it, the server logs the failure and continues HTTP-only.
 
 View logs:
 

@@ -46,7 +46,7 @@
         },
         {
           "name": "SHODH_USER_ID",
-          "description": "User ID for memory isolation",
+          "description": "Logical memory namespace; not an authorization tenant",
           "isRequired": false,
           "format": "string",
           "isSecret": false,

@@ -293,11 +293,8 @@ async fn async_main() -> Result<()> {
         tracing_setup::trace_propagation::propagate_trace_context,
     ));
 
-    // Local IPC is enabled by default but MUST NOT be able to take HTTP down with
-    // it: a bind failure degrades to HTTP-only rather than aborting startup
-    // (mirrors the non-fatal zenoh transport start above). This also removes the
-    // availability regression where a second instance, or a data dir not at mode
-    // 0700, refused to boot the whole daemon.
+    // Local IPC remains availability-first by default. Operators that rely on its
+    // isolation boundary can opt into fail-closed startup with IPC_REQUIRED.
     let ipc_enabled = std::env::var("SHODH_IPC_ENABLED")
         .map(|value| {
             !matches!(
@@ -306,12 +303,26 @@ async fn async_main() -> Result<()> {
             )
         })
         .unwrap_or(true);
+    let ipc_required = std::env::var("SHODH_IPC_REQUIRED")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    if ipc_required && !ipc_enabled {
+        anyhow::bail!("SHODH_IPC_REQUIRED=true conflicts with SHODH_IPC_ENABLED=false");
+    }
     let ipc_server = if ipc_enabled {
         let ipc_endpoint = std::env::var_os("SHODH_IPC_ENDPOINT")
             .map(PathBuf::from)
             .unwrap_or_else(local_ipc::default_endpoint);
         match LocalIpcServer::bind(ipc_endpoint).await {
             Ok(server) => Some(server),
+            Err(error) if ipc_required => {
+                anyhow::bail!("required local IPC endpoint could not bind: {error}")
+            }
             Err(error) => {
                 error!("Local IPC disabled: {error}. HTTP server will continue without it.");
                 None

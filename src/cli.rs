@@ -338,7 +338,7 @@ async fn main() -> Result<()> {
             eprintln!("  IPC endpoint: {}", ipc_endpoint.display());
             eprintln!("  User ID: {}", user_id);
 
-            let server = ShodhMcpServer::connect(ipc_endpoint, api_url, api_key, user_id).await;
+            let server = ShodhMcpServer::connect(ipc_endpoint, api_url, api_key, user_id).await?;
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
         }
@@ -927,21 +927,32 @@ impl std::fmt::Debug for AsyncApiClient {
 }
 
 impl AsyncApiClient {
-    /// Prefer local IPC when the endpoint answers a health probe; otherwise fall
-    /// back to HTTP at `api_url`. This keeps SHODH_API_URL working (a server on a
-    /// non-default port or a remote host) and means an MCP client never hard-fails
-    /// every tool call just because IPC is unavailable while HTTP is up.
+    /// Prefer authenticated local IPC, with an operator-selectable fail-closed mode.
     async fn connect(
         ipc_endpoint: PathBuf,
         api_url: String,
         api_key: String,
         user_id: String,
-    ) -> Self {
+    ) -> Result<Self> {
         let ipc = shodh_memory::local_ipc::IpcClient::new(ipc_endpoint, api_key.clone());
-        let reachable = ipc.get::<serde_json::Value>("/health").await.is_ok();
-        let transport = if reachable {
+        let probe = ipc.get::<serde_json::Value>("/health").await;
+        let ipc_required = std::env::var("SHODH_IPC_REQUIRED")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        let transport = if probe.is_ok() {
             eprintln!("  Transport: local IPC ({})", ipc.endpoint().display());
             AsyncTransport::Ipc(ipc)
+        } else if ipc_required {
+            anyhow::bail!(
+                "required local IPC endpoint {} was unavailable or unauthenticated: {}",
+                ipc.endpoint().display(),
+                probe.expect_err("failed probe has an error")
+            );
         } else {
             eprintln!("  Transport: HTTP {api_url} (local IPC endpoint unavailable)");
             AsyncTransport::Http {
@@ -950,7 +961,7 @@ impl AsyncApiClient {
                 api_key,
             }
         };
-        Self { transport, user_id }
+        Ok(Self { transport, user_id })
     }
 
     async fn post<T: Serialize, R: for<'de> Deserialize<'de>>(
@@ -1513,13 +1524,13 @@ impl ShodhMcpServer {
         api_url: String,
         api_key: String,
         user_id: String,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             client: Arc::new(
-                AsyncApiClient::connect(ipc_endpoint, api_url, api_key, user_id).await,
+                AsyncApiClient::connect(ipc_endpoint, api_url, api_key, user_id).await?,
             ),
             tool_router: Self::tool_router(),
-        }
+        })
     }
 
     #[tool(
