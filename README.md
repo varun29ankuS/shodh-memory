@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.varun29ankuS%2Fshodh-memory.svg)](https://mcptoplist.com/server/io.github.varun29ankuS%2Fshodh-memory)
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/varun29ankuS/shodh-memory/main/assets/logo.png" width="120" alt="Shodh-Memory">
 </p>
