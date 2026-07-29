@@ -9019,6 +9019,77 @@ mod tests {
         assert_eq!(origins[0].0, a);
     }
 
+    // ------------------------------------------------------------------
+    // record_memory_coactivation_impl: strengthen-only contract (2026-07-10,
+    // f6b730ee). The both-modes contract (mint on strengthen_only=false;
+    // strengthen-not-mint on strengthen_only=true given a prior edge; mint
+    // nothing on strengthen_only=true given no prior edge) is already
+    // pinned by the pre-existing `coactivation_strengthen_only_creates_no_new_edges`
+    // and `coactivation_strengthen_only_still_strengthens_existing` tests
+    // above/below in this module. Neither of those, however, verifies that
+    // "strengthen" actually mutates the edge — only that the impl's return
+    // count matches. That gap is what the test below fills. Together, these
+    // three are the mode-contract holder that
+    // tests/brutal_stress_tests.rs::test_brutal_dense_graph now points back
+    // to instead of asserting a specific pair count itself.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn coactivation_strengthen_only_actually_increments_activation_and_strength() {
+        // Complements `coactivation_strengthen_only_still_strengthens_existing`,
+        // which only checks the impl's returned count (3). This test checks
+        // the actual edge mutation: activation_count increments and strength
+        // increases (Hebbian `RelationshipEdge::strengthen()`), and that
+        // relationship_count does NOT grow across the strengthen-only pass
+        // (no edge minted on top of the seeded ones).
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect(); // 3 pairs
+
+        // Seed pre-existing edges via strengthen_only=false (the only way to
+        // populate the `mem_edge:` index `find_edge_between_entities` reads —
+        // see the diagnosis's "Flagged finding": nothing else writes it).
+        let minted = graph.record_memory_coactivation_impl(&ids, false).unwrap();
+        assert_eq!(minted, 3, "seed step should mint all 3 pairs");
+        let seeded_count = graph.get_stats().unwrap().relationship_count;
+        assert_eq!(seeded_count, 3);
+
+        let (a, b) = (ids[0], ids[1]);
+        let before = graph
+            .find_edge_between_entities(&a, &b)
+            .unwrap()
+            .expect("edge must exist after seeding");
+        assert_eq!(before.activation_count, 1);
+
+        // Re-run co-activation for the same pairs under the DEFAULT gate.
+        let strengthened = graph.record_memory_coactivation_impl(&ids, true).unwrap();
+
+        assert_eq!(
+            strengthened, 3,
+            "all 3 pre-existing edges should be strengthened, none skipped"
+        );
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            seeded_count,
+            "strengthen_only=true must NOT mint any new edge on top of the seeded ones"
+        );
+
+        let after = graph
+            .find_edge_between_entities(&a, &b)
+            .unwrap()
+            .expect("edge must still exist");
+        assert_eq!(
+            after.activation_count, 2,
+            "the pre-existing edge must be strengthened (activation_count incremented)"
+        );
+        assert!(
+            after.strength > before.strength,
+            "Hebbian strengthening must increase edge strength: before={}, after={}",
+            before.strength,
+            after.strength
+        );
+    }
+
     #[test]
     fn typed_neighbors_respects_relation_and_direction() {
         let temp_dir = tempfile::tempdir().unwrap();

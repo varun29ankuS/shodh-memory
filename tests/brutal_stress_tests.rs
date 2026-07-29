@@ -613,22 +613,50 @@ fn test_brutal_dense_graph() {
         ids.push(system.remember(exp, None).expect("Failed"));
     }
 
-    // Create full mesh - every pair of memories associated
-    // This creates 50*49/2 = 1225 edges
+    // Reinforce co-retrieval across all 50 memories under load. Before
+    // 2026-07-10 this unconditionally minted an all-pairs CoRetrieved edge
+    // for every co-retrieved pair (capped by MAX_COACTIVATION_SIZE=20 ->
+    // 20*19/2 = 190 edges), which this test used to assert (edge_count >=
+    // 150). `f6b730ee` (2026-07-10) flipped `SHODH_COACT_STRENGTHEN_ONLY`
+    // to default-ON: `record_memory_coactivation` now only STRENGTHENS an
+    // edge that already exists between a co-active memory pair; it no
+    // longer mints a new one ("strengthen-not-create", to stop the
+    // CoRetrieved edge explosion that was ~80% of the graph). These 50
+    // memories have no pre-existing memory-to-memory edges between them, so
+    // under the shipped default there is nothing to strengthen and
+    // reinforce_recall must mint zero NEW edges — this is the current,
+    // intentional contract, not a bug. Asserted as a delta (edge_count
+    // before vs. after) rather than an absolute total, since `edge_count`
+    // is the whole-graph relationship count (memory/mod.rs maps it from
+    // GraphMemory::get_stats().relationship_count) and this test does not
+    // control what, if anything, entity-level ingest already put in the
+    // graph for these 50 plain-content memories. The full both-modes
+    // contract (mint when strengthen_only=false, strengthen-not-mint when
+    // strengthen_only=true and a prior edge exists, mint nothing when
+    // strengthen_only=true and no prior edge exists) is pinned by the unit
+    // tests in src/graph_memory.rs: coactivation_strengthen_only_creates_no_new_edges,
+    // coactivation_strengthen_only_still_strengthens_existing, and
+    // coactivation_strengthen_only_actually_increments_activation_and_strength
+    // (the last of which verifies the strengthen path actually mutates the
+    // edge, not just that the impl's return count matches). This brutal
+    // test only needs to confirm the shipped default doesn't crash or
+    // explode edges at n=50 (> MAX_COACTIVATION_SIZE=20).
+    let edges_before = system.graph_stats().edge_count;
     system
         .reinforce_recall(&ids, RetrievalOutcome::Helpful)
         .expect("Failed");
 
-    let stats = system.graph_stats();
-    // Due to MAX_COACTIVATION_SIZE=20 cap in record_coactivation (O(n²) protection),
-    // only first 20 memories get edges: 20*19/2 = 190 edges max
-    assert!(
-        stats.edge_count >= 150,
-        "Should have many edges (capped by MAX_COACTIVATION_SIZE): {}",
-        stats.edge_count
+    let edges_after = system.graph_stats().edge_count;
+    println!("dense_graph edge_count: before={edges_before} after={edges_after}");
+    assert_eq!(
+        edges_after, edges_before,
+        "strengthen-only default (SHODH_COACT_STRENGTHEN_ONLY, default-on since f6b730ee, \
+         2026-07-10) must mint zero NEW CoRetrieved edges for co-retrieved memories with no \
+         prior edges between them: before={}, after={}",
+        edges_before, edges_after
     );
 
-    // Verify graph maintenance doesn't crash
+    // Verify graph maintenance doesn't crash even with zero coactivation edges minted
     system.graph_maintenance();
 }
 
