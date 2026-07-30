@@ -47,6 +47,16 @@ Flow is one-directional: **capture → log → {index, surfaces}**. Trace writes
 - **Time-travel:** `as_of: T` filter on retrieval — a memory is visible iff `created_at <= T` and not tombstoned at T; graph edges respect existing bi-temporal fields (`valid_at`/`invalidated_at`). Surfaced as a "view as of" control (scrubber pattern from the map PoC). Explicitly documented limitation for v1: `as_of` reconstructs *content availability*, not historical index states (embeddings/ANN graph as they were at T) — ranking at T is approximated with current indexes over T-filtered candidates; the audit answer ("could the agent have known X at T") is exact, the ordering replay is approximate. This distinction appears in the UI copy and the export.
 - **Audit export:** one call produces a session bundle — full log slice, hash chain, evidence memories (MIF for the knowledge parts), integrity verdict (chain verified / incomplete flags) — verifiable offline by a standalone checker script shipped in-repo.
 
+### 3.5 Visual grammar (ratified 2026-07-30: "traceability should be visual too")
+
+Traceability is a visual product, not an API with a viewer bolted on. Three coordinated representations of one session, sharing selection state (select an action anywhere → highlighted everywhere):
+
+1. **Transcript** (slice 2): Claude-style vertical feed — chronological, each action a collapsible card; recalls expand to query → layers → scores → evidence; attestation badges (`witnessed` solid / `reported` outlined) always visible at card level.
+2. **Trace flow** (slice 2, same pane): a compact horizontal DAG strip above the transcript — actions as time-ordered nodes left→right (`NextAction` edges), evidence fan-outs drawn downward on hover/selection. Gives the shape of the session at a glance: bursts, gaps, retrieval-heavy phases. Rendered with the existing d3/canvas machinery — no new visualization dependency.
+3. **Graph overlay** (slice 3): the touched knowledge-subgraph highlighted on the canonical canvas graph, provenance chains walkable from any evidence node.
+
+Time is a first-class visual axis throughout: the map PoC's scrubber pattern (range slider + density histogram) is the standard time control — reused for transcript filtering and, in slice 4, as the time-travel "view as of" control. Constraints: same gating/lazy-loading contract as the map pane; dark-theme consistent with the existing visual system; every visual element traceable to a log record (no decorative data).
+
 ## 4. Slices (each an independent SDD plan+build)
 
 1. **Capture + log:** choke-point middleware, oplog CF, hash chain, reported-event endpoint, hooks wired to it, trace read API (`GET /api/trace/{session}` paginated). Gate: capture-completeness test (every routed op → exactly one record); overhead < 2% on recall latency (benchmarked); LongMemEval smoke bit-neutral.
