@@ -6,7 +6,7 @@
 
 ## 1. Motivation
 
-Agents are becoming first-class colleagues (Buzz-class platforms make this explicit). Transport-level traceability (signed events: who said what) is commoditizing; **knowledge-level traceability** — what did the agent know, where did that knowledge come from, and what did it do with it — is unowned territory and sits directly on shodh's moat (provenance at edge birth, deterministic replay, lineage). This design delivers "complete traceability, like Claude renders it": an inspectable chronological session transcript per agent, backed by the graph so the trail is *traversable*, not just scrollable.
+Agents increasingly act as first-class collaborators, and their operations deserve the same auditability as any other system of record. Transport-level traceability (signed events: who said what) answers attribution; **knowledge-level traceability** — what did the agent know, where did that knowledge come from, and what did it do with it — requires a memory substrate with provenance, deterministic replay, and lineage, which shodh already provides. This design delivers an inspectable chronological session transcript per agent, backed by the graph so the trail is *traversable*, not just scrollable.
 
 ## 2. Decisions (ratified in brainstorm, 2026-07-30)
 
