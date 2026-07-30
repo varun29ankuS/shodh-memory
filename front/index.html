@@ -239,6 +239,29 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
 .ghint{position:absolute;bottom:12px;right:14px;z-index:5;font-size:9.5px;color:var(--mut);
   background:rgba(11,14,20,.7);border:1px solid var(--line);border-radius:8px;padding:6px 10px;backdrop-filter:blur(4px);}
 
+/* ── Cinematic impact-trace caption overlay ─────────────── */
+.tracecap{position:absolute;left:50%;bottom:44px;transform:translateX(-50%);z-index:8;
+  width:min(680px,86%);display:none;pointer-events:none;
+  background:linear-gradient(180deg,rgba(14,19,28,.95),rgba(9,12,18,.97));
+  border:1px solid var(--act-dim);border-left:3px solid var(--act);border-radius:10px;
+  padding:11px 16px;box-shadow:0 16px 48px rgba(0,0,0,.62);backdrop-filter:blur(6px);
+  animation:caprise .38s cubic-bezier(.2,.8,.2,1);}
+.tracecap.on{display:block;}
+@keyframes caprise{from{opacity:0;transform:translateX(-50%) translateY(12px);}to{opacity:1;transform:translateX(-50%) translateY(0);}}
+.tracecap .hop{display:flex;align-items:center;gap:9px;font-size:10px;letter-spacing:.6px;color:var(--mut);
+  text-transform:uppercase;font-family:"Cascadia Code","Cascadia Mono",Consolas,monospace;margin-bottom:6px;flex-wrap:wrap;}
+.tracecap .hop .step{color:var(--act);font-weight:700;}
+.tracecap .hop .rel{padding:1px 9px;border-radius:20px;font-weight:700;letter-spacing:.4px;font-size:9.5px;}
+.tracecap .hop .rel.causal{background:rgba(255,120,74,.16);color:#ff9a5c;border:1px solid #7a4526;}
+.tracecap .hop .rel.typed{background:rgba(120,175,214,.14);color:#82a0dc;border:1px solid #2e4a66;}
+.tracecap .hop .rel.weak{background:rgba(159,178,194,.1);color:#9fb2c2;border:1px solid var(--line2);}
+.tracecap .edge{font-size:14px;font-weight:600;color:var(--txt);margin-bottom:7px;line-height:1.4;}
+.tracecap .edge b{color:var(--act);font-weight:700;}
+.tracecap .prov{font-size:11px;color:var(--txt2);line-height:1.5;border-top:1px solid var(--line);padding-top:7px;}
+.tracecap .prov .src{color:var(--mut);font-size:9.5px;display:block;margin-top:4px;letter-spacing:.4px;text-transform:uppercase;}
+.tracecap .banner{font-size:8.5px;color:var(--gold);letter-spacing:.7px;text-transform:uppercase;margin-top:8px;line-height:1.5;
+  border-top:1px dashed var(--line2);padding-top:6px;}
+
 /* ── Right column panels ──────────────────────────────── */
 .col.right{overflow-y:auto;}
 .panel{border-bottom:1px solid var(--line);padding:12px 14px;}
@@ -384,6 +407,7 @@ main{flex:1;display:grid;grid-template-columns:380px 1fr 300px;min-height:0;}
     <div class="gloading" id="gloading">building graph…</div>
     <canvas id="graph"></canvas>
     <div id="gtip"></div>
+    <div class="tracecap" id="tracecap"></div>
     <div class="ghint">scroll to zoom · drag to pan · click a cluster to drill in</div>
     <div class="glegend">
       <div class="it"><span class="swn" style="background:#a08cc8"></span>technology</div>
@@ -519,6 +543,7 @@ let activeClusters = null;     // Set<clusterId> lit by the current recall
 let activeMembers  = null;     // Set<entityId> surfaced members (the lit core)
 let hoverNode = null;
 let pinnedNode = null;   // click-pinned node: its whole network stays lit until deselected (Esc / click empty)
+let TRACE = null;        // active cinematic impact-trace state (null = off); see traceChain()
 // the canvas pan/zoom transform (we drive d3.zoom but paint manually)
 let GT = d3.zoomIdentity;
 const gzoom = d3.zoom().scaleExtent([0.15, 6]).on("zoom", e=>{ GT = e.transform; draw(); });
@@ -985,6 +1010,308 @@ function fitView(nodes, pad, animate){
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+//  CINEMATIC CAMERA  — smooth, eased programmatic pan/zoom for the demo video.
+//  Drives the SAME d3.zoom transform (GT) the mouse uses, through d3 transitions,
+//  so on-camera zoom in/outs GLIDE instead of jumping. All return a Promise that
+//  resolves when the move finishes, so the video agent can await a sequence.
+// ════════════════════════════════════════════════════════════════════════════
+function _camTo(t, ms, ease){
+  return new Promise(res=>{
+    d3.select(cv).transition().duration(Math.max(0, ms==null?900:ms))
+      .ease(ease||d3.easeCubicInOut)
+      .call(gzoom.transform, t)
+      .on("end interrupt", ()=>res());
+  });
+}
+// resolve a name (or a node object) to a RAW graph node — exact, normalized,
+// then best "contains" match (highest degree, shortest = most specific).
+function _traceResolve(q){
+  if(!RAW) return null;
+  if(q && typeof q==="object" && q.id) return q;
+  const s=(""+(q||"")).trim().toLowerCase();
+  if(!s) return null;
+  let n=RAW.nodes.find(x=>x.name.toLowerCase()===s);
+  if(n) return n;
+  n=RAW.nodes.find(x=>nameKey(x.name)===nameKey(s));
+  if(n) return n;
+  const cand=RAW.nodes.filter(x=>x.name.toLowerCase().includes(s));
+  cand.sort((a,b)=>(b.deg-a.deg)||(a.name.length-b.name.length));
+  return cand[0]||null;
+}
+const cam = {
+  // smooth zoom+pan so `name` sits centred at `scale` (default 2.2×).
+  focus(name, scale, ms){
+    if(!RAW) return Promise.resolve();
+    const node=_traceResolve(name);
+    const {w,h}=sizeCanvas();
+    let x=null,y=null;
+    const vn=node && VIEW.byId && VIEW.byId.get(node.id);
+    if(vn && vn.x!=null){ x=vn.x; y=vn.y; }
+    else if(TRACE && TRACE.pos && node && TRACE.pos.has(node.id)){ const p=TRACE.pos.get(node.id); x=p.x; y=p.y; }
+    else if(node && node.comm!=null && VIEW.level!=="cluster" && RAW.nodes.length>SMALL_GRAPH_MAX){
+      showCluster(node.comm); const v2=VIEW.byId.get(node.id);
+      if(v2 && v2.x!=null){ x=v2.x; y=v2.y; }
+    }
+    if(x==null) return cam.fit(ms);
+    const k=Math.max(.15, Math.min(6, scale||2.2));
+    const t=d3.zoomIdentity.translate(w/2,h/2).scale(k).translate(-x,-y);
+    return _camTo(t, ms==null?950:ms);
+  },
+  // smooth zoom to frame the whole current view.
+  fit(ms){
+    const {w,h}=sizeCanvas();
+    const pts=(VIEW.nodes||[]).filter(n=>n.x!=null);
+    if(!pts.length) return Promise.resolve();
+    let a=Infinity,b=-Infinity,c=Infinity,d=-Infinity;
+    for(const p of pts){ const r=p.r||8; a=Math.min(a,p.x-r);b=Math.max(b,p.x+r);c=Math.min(c,p.y-r);d=Math.max(d,p.y+r); }
+    const pad=72, bw=Math.max(40,b-a), bh=Math.max(40,d-c);
+    const k=Math.max(.15, Math.min(3, Math.min((w-2*pad)/bw,(h-2*pad)/bh)));
+    const t=d3.zoomIdentity.translate(w/2,h/2).scale(k).translate(-(a+b)/2,-(c+d)/2);
+    return _camTo(t, ms==null?900:ms);
+  },
+  // smooth zoom to an absolute scale k, keeping the current screen centre fixed.
+  zoom(k, ms){
+    const {w,h}=sizeCanvas();
+    k=Math.max(.15, Math.min(6, k));
+    const cx=(w/2-GT.x)/GT.k, cy=(h/2-GT.y)/GT.k;
+    const t=d3.zoomIdentity.translate(w/2,h/2).scale(k).translate(-cx,-cy);
+    return _camTo(t, ms==null?800:ms);
+  },
+  // pan+zoom to an arbitrary graph point.
+  goto(x,y,k,ms){ const {w,h}=sizeCanvas(); k=Math.max(.15,Math.min(6,k||GT.k));
+    return _camTo(d3.zoomIdentity.translate(w/2,h/2).scale(k).translate(-x,-y), ms==null?900:ms); }
+};
+window.cam = cam;
+
+// ════════════════════════════════════════════════════════════════════════════
+//  IMPACT-TRACE  — the hero animation. Walks a path of entities node-by-node,
+//  lighting each hop's edge with a flowing pulse, panning the camera to follow,
+//  and captioning each hop with the REAL edge type + a source snippet.
+//
+//  HONESTY: the gdelt-bridge corpus has NO real causal backbone (census: the
+//  4 "Causes" / 48 "Triggers" typed edges are spurious co-occurrence artifacts;
+//  Dali↔bridge has no direct typed edge at all). So this is an HONEST TEMPORAL-
+//  IMPACT trace: hops are ordered by event time (26 Mar 2024) and each link is
+//  labelled by the ACTUAL stored relation — almost always "co-occurs with" or
+//  "related to". Co-occurrence is NEVER rendered or worded as causation.
+// ════════════════════════════════════════════════════════════════════════════
+// real relation between two RAW nodes, honestly typed; falls back to the
+// strongest shared-neighbour bridge if there is no direct edge.
+function _traceRel(a,b){
+  const ia=RAW.nodes.indexOf(a), ib=RAW.nodes.indexOf(b);
+  if(ia<0||ib<0) return {rel:"—",cls:"weak",direct:false,str:0};
+  const w=RAW.adj[ia].get(ib);
+  if(w!=null){
+    const key=ia<ib ? ia+"|"+ib : ib+"|"+ia;
+    const rel=RAW.relOf.get(key)||"co-occurs";
+    return {rel, cls:relClass(rel), direct:true, str:w};
+  }
+  let via=null, bw=-1;
+  for(const [j,wa] of RAW.adj[ia]){ const wb=RAW.adj[ib].get(j); if(wb!=null){ const s=Math.min(wa,wb); if(s>bw){ bw=s; via=RAW.nodes[j]; } } }
+  return {rel:"co-occurs", cls:"weak", direct:false, via, str:bw>0?bw:0};
+}
+// honest human label for a hop's real edge.
+function _relDisplay(rel,cls,direct){
+  const r=(rel||"").replace(/[\s_"()-]/g,"").toLowerCase();
+  if(!direct) return "co-occurs with (indirect)";
+  if(r==="cooccurs"||r==="coretrieved") return "co-occurs with";
+  if(r==="relatedto"||r==="associatedwith") return "related to";
+  return relName(rel).toLowerCase();
+}
+async function traceChain(names, opts){
+  if(!RAW){ console.warn("traceChain: graph not loaded yet"); return; }
+  opts=opts||{};
+  // default auto-path: the proven-connected Baltimore-bridge spine (all present
+  // in the live corpus). ship → bridge → collapse → waterway → city/port.
+  const req=(names&&names.length) ? names
+    : ["Dali","Cargo Ship","Francis Scott Key Bridge","Baltimore Bridge Collapse","Patapsco River","Baltimore"];
+  const nodes=[]; const seen=new Set();
+  for(const nm of req){ const n=_traceResolve(nm); if(n && !seen.has(n.id)){ seen.add(n.id); nodes.push(n); } }
+  if(nodes.length<2){ console.warn("traceChain: resolved <2 path nodes from", req); return; }
+  const rels=[]; for(let i=0;i<nodes.length-1;i++) rels.push(_traceRel(nodes[i],nodes[i+1]));
+  const uid=SELECTED[0];
+  // build the trace VIEW: a left→right temporal timeline in graph coords.
+  const {w}=sizeCanvas();
+  const spacing=Math.max(150, Math.min(240, (w*0.78)/Math.max(1,nodes.length-1)));
+  const baseX=-(nodes.length-1)*spacing/2;
+  const pos=new Map();
+  const vnodes=nodes.map((n,i)=>{ const p={kind:"entity", id:n.id, idx:RAW.nodes.indexOf(n), label:n.name,
+      type:n.type, sal:n.sal, ment:n.ment, deg:n.deg, color:tc(n.type),
+      r:15+7*Math.min(1,(n.deg||0)/60), x:baseX+i*spacing, y:Math.sin(i*0.9)*30};
+    pos.set(n.id,{x:p.x,y:p.y}); return p; });
+  const vbyId=new Map(vnodes.map(n=>[n.id,n]));
+  const vlinks=[]; for(let i=0;i<nodes.length-1;i++){ vlinks.push({source:vbyId.get(nodes[i].id),
+      target:vbyId.get(nodes[i+1].id), rel:rels[i].rel, cls:rels[i].cls, direct:rels[i].direct,
+      via:rels[i].via, str:rels[i].str||0.5}); }
+  if(VIEW.sim){ VIEW.sim.stop(); VIEW.sim=null; }
+  // prov[i] === undefined → still loading; null → loaded but empty; object → snippet
+  TRACE={active:true, nodes:vnodes, links:vlinks, rels, prov:new Array(nodes.length).fill(undefined),
+         step:-1, phase:0, raf:0, timers:[], pos};
+  VIEW={level:"cluster", clusterId:null, nodes:vnodes, links:vlinks, byId:vbyId, sim:null, memberTotal:vnodes.length};
+  activeMembers=null; activeClusters=null; hoverNode=null; pinnedNode=null;
+  $("gnav").style.display="none"; $("gtip").style.display="none";
+  $("activ").classList.add("on");
+  $("activ-t").textContent="⚡ impact trace — temporal sequence, real edges (co-occurrence / typed)";
+  await cam.fit(700);
+  _traceStartFlow();
+  // provenance is fetched lazily in the BACKGROUND (recall is ~4s/call) so the
+  // animation starts instantly; each caption refreshes when its snippet lands.
+  const myTrace=TRACE;
+  nodes.forEach((n,i)=>{ _traceFetchProv(uid,n.name).then(pv=>{
+    if(TRACE!==myTrace||!TRACE.active) return; TRACE.prov[i]=pv; if(TRACE.step===i) _traceCaption(i); }); });
+  const hopMs=opts.hopMs||2400;
+  for(let i=0;i<vnodes.length;i++){ TRACE.timers.push(setTimeout(()=>_traceStep(i), 350+i*hopMs)); }
+  return new Promise(res=>{ TRACE.timers.push(setTimeout(res, 350+vnodes.length*hopMs)); });
+}
+// fetch one real source passage for an entity, with an 8s abort so a slow
+// recall never stalls the trace.
+async function _traceFetchProv(uid,name){
+  try{
+    const ctrl=new AbortController(); const to=setTimeout(()=>ctrl.abort(),8000);
+    const r=await fetch(API_BASE+"/api/recall",{method:"POST",headers:POST_H,signal:ctrl.signal,
+      body:JSON.stringify({user_id:uid,query:name,limit:1,mode:"hybrid"})});
+    clearTimeout(to);
+    if(!r.ok) return null;
+    const d=await r.json(); const m=(d.memories||[])[0]; if(!m) return null;
+    const c=(m.experience&&m.experience.content)||m.content||"";
+    return {txt:trim(c,190), when:(m.created_at||"").slice(0,10)};
+  }catch(_){ return null; }
+}
+function _traceStartFlow(){
+  const tick=()=>{ if(!TRACE||!TRACE.active) return; TRACE.phase+=1; draw(); TRACE.raf=requestAnimationFrame(tick); };
+  if(TRACE) cancelAnimationFrame(TRACE.raf);
+  TRACE.raf=requestAnimationFrame(tick);
+}
+function _traceStep(i){
+  if(!TRACE||!TRACE.active) return;
+  TRACE.step=i;
+  const n=TRACE.nodes[i];
+  cam.focus(n.label, i===0?1.9:2.15, 1150);
+  _traceCaption(i);
+}
+function _traceCaption(i){
+  const cap=$("tracecap"); if(!cap||!TRACE) return;
+  const n=TRACE.nodes[i], pv=TRACE.prov[i];
+  let hopHtml, edgeHtml;
+  if(i===0){
+    hopHtml='<div class="hop"><span class="step">ORIGIN · 26 MAR 2024</span> · impact trace begins</div>';
+    edgeHtml='<div class="edge"><b>'+esc(n.label)+'</b> — the vessel at the start of the chain</div>';
+  }else{
+    const r=TRACE.rels[i-1], from=TRACE.nodes[i-1];
+    const disp=_relDisplay(r.rel,r.cls,r.direct);
+    const chipCls=r.cls==="causal"?"causal":(r.cls==="typed"||r.cls==="loc")?"typed":"weak";
+    const viaTxt=r.via?' · via '+esc(trim(r.via.name,18)):'';
+    hopHtml='<div class="hop"><span class="step">HOP '+i+'</span> · real edge <span class="rel '+chipCls+'">'+esc(disp)+'</span>'+viaTxt+'</div>';
+    edgeHtml='<div class="edge">'+esc(trim(from.label,26))+' <b>—'+esc(disp)+'→</b> '+esc(trim(n.label,26))+'</div>';
+  }
+  const provHtml = pv===undefined
+    ? '<div class="prov"><span class="src">pulling source passage…</span></div>'
+    : (pv&&pv.txt)
+      ? '<div class="prov">“'+esc(pv.txt)+'”<span class="src">source episode'+(pv.when?" · "+esc(pv.when):"")+'</span></div>'
+      : '<div class="prov"><span class="src">no source passage surfaced for this entity</span></div>';
+  cap.innerHTML=hopHtml+edgeHtml+provHtml+
+    '<div class="banner">honest temporal-impact trace — hops ordered by event time; links are the REAL graph edges (mostly co-occurrence / related-to), NOT asserted causation</div>';
+  cap.classList.add("on");
+}
+function drawTrace(){
+  const {w,h}=sizeCanvas();
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.clearRect(0,0,w,h);
+  drawGraticule(w,h);
+  ctx.save();
+  ctx.translate(GT.x,GT.y); ctx.scale(GT.k,GT.k);
+  const nodes=TRACE.nodes, links=TRACE.links, step=TRACE.step;
+  // faint timeline baseline
+  if(nodes.length>=2){
+    ctx.strokeStyle="rgba(255,154,92,.10)"; ctx.lineWidth=1.4/GT.k;
+    ctx.setLineDash([2/GT.k,7/GT.k]);
+    ctx.beginPath(); ctx.moveTo(nodes[0].x,nodes[0].y);
+    for(const n of nodes) ctx.lineTo(n.x,n.y);
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+  ctx.lineCap="round";
+  for(let i=0;i<links.length;i++){
+    const l=links[i], s=l.source, t=l.target; if(!s||!t) continue;
+    const reached = step>i+1 || (step===i+1);   // hop into target node has fired
+    const current = step===i+1;
+    const cls=l.cls;
+    const baseCol = cls==="causal"?"255,120,74": cls==="loc"?"120,200,150": (cls==="typed")?"120,175,214":"150,170,200";
+    if(!reached){
+      ctx.strokeStyle="rgba("+baseCol+",.20)"; ctx.lineWidth=1.4/GT.k;
+      ctx.beginPath(); ctx.moveTo(s.x,s.y); ctx.lineTo(t.x,t.y); ctx.stroke();
+    }else{
+      ctx.save();
+      ctx.strokeStyle = current ? "rgba(255,154,92,.95)" : "rgba(255,154,92,.5)";
+      ctx.lineWidth=(current?3.2:2)/GT.k;
+      ctx.shadowColor="rgba(255,154,92,.9)"; ctx.shadowBlur=(current?15:6)/GT.k;
+      if(current){
+        ctx.setLineDash([11/GT.k,8/GT.k]);
+        ctx.lineDashOffset=-(TRACE.phase*0.9)/GT.k;   // flow toward the target
+      }
+      ctx.beginPath(); ctx.moveTo(s.x,s.y); ctx.lineTo(t.x,t.y); ctx.stroke();
+      ctx.restore();
+      if(current){
+        // travelling signal packet
+        const p=(TRACE.phase%64)/64;
+        const px=s.x+(t.x-s.x)*p, py=s.y+(t.y-s.y)*p;
+        ctx.beginPath(); ctx.arc(px,py,4/GT.k,0,2*Math.PI);
+        ctx.fillStyle="#ffd6a8"; ctx.shadowColor="#ff9a5c"; ctx.shadowBlur=12/GT.k; ctx.fill(); ctx.shadowBlur=0;
+      }
+    }
+  }
+  // nodes
+  for(let i=0;i<nodes.length;i++){
+    const n=nodes[i];
+    const active = step>=i;
+    const current = step===i;
+    ctx.globalAlpha = active?1:0.35;
+    if(current){
+      // pulsing halo on the current node
+      const pr=n.r + (5+3*Math.sin(TRACE.phase*0.12))/GT.k*GT.k;
+      ctx.beginPath(); ctx.arc(n.x,n.y,pr+6/GT.k,0,2*Math.PI);
+      ctx.strokeStyle="rgba(255,154,92,"+(0.35+0.25*Math.sin(TRACE.phase*0.12))+")"; ctx.lineWidth=2/GT.k; ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,2*Math.PI);
+    ctx.fillStyle=n.color; ctx.fill();
+    if(active){ ctx.shadowColor="#ff9a5c"; ctx.shadowBlur=(current?18:8)/GT.k; }
+    ctx.lineWidth=(current?2.8:active?1.8:1.2)/GT.k;
+    ctx.strokeStyle=current?"#ff9a5c":active?"#ffb787":"#243043";
+    ctx.stroke(); ctx.shadowBlur=0;
+    ctx.globalAlpha=1;
+  }
+  // labels (screen-scale, dark halo)
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  for(let i=0;i<nodes.length;i++){
+    const n=nodes[i]; const active=step>=i, current=step===i;
+    ctx.globalAlpha=active?1:0.45;
+    ctx.save(); ctx.translate(n.x, n.y+n.r+4); ctx.scale(1/GT.k,1/GT.k);
+    ctx.lineJoin="round"; ctx.font=(current?"700 ":"600 ")+"11px 'Cascadia Code',Consolas,monospace";
+    const LBL=trim(n.label,22);
+    ctx.strokeStyle="rgba(5,8,13,.92)"; ctx.lineWidth=3.5; ctx.strokeText(LBL,0,6);
+    ctx.fillStyle=current?"#ffb787":active?"#dfe7f0":"#8ea0b2"; ctx.fillText(LBL,0,6);
+    // time-order index above the node
+    ctx.font="600 8.5px Inter,sans-serif";
+    ctx.strokeStyle="rgba(5,8,13,.85)"; ctx.lineWidth=3; ctx.strokeText("t"+i,0,-n.r*GT.k-12);
+    ctx.fillStyle="rgba(255,214,130,.75)"; ctx.fillText("t"+i,0,-n.r*GT.k-12);
+    ctx.restore();
+    ctx.globalAlpha=1;
+  }
+  ctx.restore();
+}
+function endTrace(){
+  if(!TRACE) return;
+  TRACE.active=false;
+  cancelAnimationFrame(TRACE.raf);
+  (TRACE.timers||[]).forEach(clearTimeout);
+  TRACE=null;
+  const cap=$("tracecap"); if(cap) cap.classList.remove("on");
+  $("activ").classList.remove("on"); $("activ-t").textContent="";
+  if(RAW) showClusters();
+}
+window.traceChain=traceChain;
+window.endTrace=endTrace;
+
+// ════════════════════════════════════════════════════════════════════════════
 //  CANVAS PAINT  — one routine for both views, driven by VIEW.level
 // ════════════════════════════════════════════════════════════════════════════
 function drawGraticule(w,h){
@@ -1002,6 +1329,7 @@ function drawGraticule(w,h){
 }
 function draw(){
   if(!RAW) return;
+  if(TRACE && TRACE.active){ drawTrace(); return; }
   const {w,h}=sizeCanvas();
   ctx.setTransform(DPR,0,0,DPR,0,0);
   ctx.clearRect(0,0,w,h);
@@ -1187,15 +1515,17 @@ let downXY=null;
 cv.addEventListener("pointerdown", e=>{ downXY=[e.offsetX,e.offsetY]; });
 cv.addEventListener("click", e=>{
   if(!RAW) return;
+  if(TRACE && TRACE.active) return;   // trace owns the canvas; Esc ends it
   if(downXY && (Math.abs(e.offsetX-downXY[0])>4 || Math.abs(e.offsetY-downXY[1])>4)) return; // was a drag
   const n = nodeAt(e.offsetX, e.offsetY);
   if(!n){ pinnedNode=null; draw(); return; }               // click empty → deselect
   if(n.kind==="cluster"){ showCluster(n.id); selectClusterDetail(n.id); }
   else { pinnedNode = (pinnedNode===n ? null : n); selectEntityDetail(n); draw(); }  // click node → pin/unpin its network
 });
-window.addEventListener("keydown", e=>{ if(e.key==="Escape" && pinnedNode){ pinnedNode=null; draw(); } });
+window.addEventListener("keydown", e=>{ if(e.key==="Escape"){ if(TRACE&&TRACE.active){ endTrace(); return; } if(pinnedNode){ pinnedNode=null; draw(); } } });
 cv.addEventListener("pointermove", e=>{
   if(!RAW){ return; }
+  if(TRACE && TRACE.active){ return; }
   const n = nodeAt(e.offsetX, e.offsetY);
   cv.style.cursor = n ? "pointer" : "grab";
   if(n!==hoverNode){ hoverNode=n; draw(); }
@@ -1392,6 +1722,7 @@ function activateFromCascade(res){
 // (recall cascade, anomaly cross-highlight) go through here so the visual
 // language stays one language.
 function lightUpMembers(core, ribbonText){
+  if(TRACE && TRACE.active) return;   // a running impact-trace owns the graph; don't let SSE recalls clobber it
   if(!core.length){ deactivate(); return; }
   activeMembers = new Set(core.map(n=>n.id));
   // which clusters do they fall in? weight clusters by core membership
