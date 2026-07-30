@@ -47,15 +47,20 @@ Flow is one-directional: **capture → log → {index, surfaces}**. Trace writes
 - **Time-travel:** `as_of: T` filter on retrieval — a memory is visible iff `created_at <= T` and not tombstoned at T; graph edges respect existing bi-temporal fields (`valid_at`/`invalidated_at`). Surfaced as a "view as of" control (scrubber pattern from the map PoC). Explicitly documented limitation for v1: `as_of` reconstructs *content availability*, not historical index states (embeddings/ANN graph as they were at T) — ranking at T is approximated with current indexes over T-filtered candidates; the audit answer ("could the agent have known X at T") is exact, the ordering replay is approximate. This distinction appears in the UI copy and the export.
 - **Audit export:** one call produces a session bundle — full log slice, hash chain, evidence memories (MIF for the knowledge parts), integrity verdict (chain verified / incomplete flags) — verifiable offline by a standalone checker script shipped in-repo.
 
-### 3.5 Visual grammar (ratified 2026-07-30: "traceability should be visual too")
+### 3.5 Visual grammar — from the human's point of view (ratified 2026-07-30; amended same day: "make sure the ui takes humans pov")
 
-Traceability is a visual product, not an API with a viewer bolted on. Three coordinated representations of one session, sharing selection state (select an action anywhere → highlighted everywhere):
+**Governing rule:** every screen is organized around plain-language questions a person brings — never around the system's data model. Schema vocabulary (attestation, provenance, DAG, hash chain) is banned from first-glance UI copy; it lives behind expansion for expert users. **Acceptance test written into every UI plan: a person unfamiliar with shodh answers the pane's stated questions unaided.**
 
-1. **Transcript** (slice 2): Claude-style vertical feed — chronological, each action a collapsible card; recalls expand to query → layers → scores → evidence; attestation badges (`witnessed` solid / `reported` outlined) always visible at card level.
-2. **Trace flow** (slice 2, same pane): a compact horizontal DAG strip above the transcript — actions as time-ordered nodes left→right (`NextAction` edges), evidence fan-outs drawn downward on hover/selection. Gives the shape of the session at a glance: bursts, gaps, retrieval-heavy phases. Rendered with the existing d3/canvas machinery — no new visualization dependency.
-3. **Graph overlay** (slice 3): the touched knowledge-subgraph highlighted on the canonical canvas graph, provenance chains walkable from any evidence node.
+The trace surface answers four human questions, in this order of prominence:
 
-Time is a first-class visual axis throughout: the map PoC's scrubber pattern (range slider + density histogram) is the standard time control — reused for transcript filtering and, in slice 4, as the time-travel "view as of" control. Constraints: same gating/lazy-loading contract as the map pane; dark-theme consistent with the existing visual system; every visual element traceable to a log record (no decorative data).
+1. **"What did this agent do?"** — the session reads as a *story*: a one-line plain-English summary per step ("Looked up 4 memories about the Key Bridge collapse", "Saved a note about the manifest mismatch", "Edited src/parser.rs — reported by Claude Code"). Claude-style feed: each line expands to detail only when asked. The engineer's view (query → layers → scores) is the *expanded* state, never the resting state.
+2. **"What was it looking at?"** — expanding a step shows the actual memories consulted as readable snippets with dates — never id lists. Trust labels in words: "Verified by the engine ✓" vs "Reported by Claude Code" (the witnessed/reported enum stays in the API, not the label).
+3. **"Where did that come from?"** — from any memory snippet, one click walks its origin as a short readable chain ("First recorded July 8 · confirmed twice since"), with the graph overlay (slice 3) lighting the same trail on the canvas for those who want the picture.
+4. **"What did it know back then?"** — slice 4's time-travel control is labeled in human terms ("Show this agent's knowledge as of July 12, 09:00") using the map PoC's scrubber; the v1 ranking approximation appears as a plain caveat ("shows what was knowable then — not exactly how it would have ranked").
+
+The *session shape* element (formerly a DAG strip) survives only in service of question 1: a slim activity sparkline over time — bursts and gaps a human reads instantly — dots colored by "looked things up / saved something / acted outside shodh". No node-edge diagram at rest; the structural view is an expansion, not a landing state.
+
+Cross-cutting: shared selection (touch a step anywhere, it highlights everywhere); tamper-evidence surfaces as "Tamper-proof record ✓" / "⚠ this session's record has gaps" (hash chains stay in the export, not the copy); same gating/lazy-load contract as the map pane; dark-theme consistent; every visual element traceable to a log record — no decorative data.
 
 ## 4. Slices (each an independent SDD plan+build)
 
