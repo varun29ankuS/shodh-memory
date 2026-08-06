@@ -68,16 +68,21 @@ jobs:
       - name: Run Clippy
         run: |
           set -o pipefail
-          # clippy runs -W: 30 pre-existing lints tracked for cleanup; flip to -D when cleared (see repo issue)
-          cargo clippy --all-targets -- -W clippy::all 2>&1 | tee clippy-output.txt
+          # Style/pedantic lints stay -W: 30 pre-existing, tracked for cleanup.
+          # clippy::correctness is -D and BLOCKING. That group is deny-by-default in
+          # clippy; a bare `-W clippy::all` silently demotes it, which is how four
+          # unfalsifiable `unsigned >= 0` assertions survived in tests/ indefinitely
+          # (absurd_extreme_comparisons is a correctness lint). A gate that reports a
+          # number but cannot fail is not a gate.
+          cargo clippy --all-targets -- -W clippy::all -D clippy::correctness 2>&1 | tee clippy-output.txt
           WARNINGS=$(grep -c "warning:" clippy-output.txt || true)
           WARNINGS=${WARNINGS:-0}
           echo "### Clippy Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
           echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Warnings | $WARNINGS |" >> $GITHUB_STEP_SUMMARY
-          echo "| Status | $WARNINGS warning(s) — non-blocking (-W mode) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Warnings (style/pedantic, non-blocking) | $WARNINGS |" >> $GITHUB_STEP_SUMMARY
+          echo "| clippy::correctness | BLOCKING — step fails on any finding |" >> $GITHUB_STEP_SUMMARY
 
   build:
     name: Build (${{ matrix.os }})

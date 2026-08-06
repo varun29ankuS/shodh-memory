@@ -677,15 +677,28 @@ fn test_brutal_graph_maintenance_cycles() {
         .expect("Failed");
 
     // Run maintenance many times - should not crash or corrupt
+    let before = system.graph_stats();
     for _ in 0..100 {
         system.graph_maintenance();
     }
 
-    // Verify graph still works
+    // `edge_count >= 0` on an unsigned count is always true, so the previous
+    // disjunct made this assertion unfalsifiable — 100 maintenance passes could
+    // have wiped the graph entirely and the test would still have passed.
+    // Assert the real property: repeated maintenance is non-destructive and
+    // leaves self-consistent counters.
     let stats = system.graph_stats();
     assert!(
-        stats.node_count > 0 || stats.edge_count >= 0,
-        "Graph should be intact"
+        stats.node_count >= before.node_count,
+        "100 maintenance passes dropped nodes: {} -> {}",
+        before.node_count,
+        stats.node_count
+    );
+    assert!(
+        stats.edge_count == 0 || stats.node_count > 0,
+        "graph reports {} edges over {} nodes after maintenance",
+        stats.edge_count,
+        stats.node_count
     );
 }
 
@@ -1298,9 +1311,17 @@ fn test_brutal_graph_consistency() {
         handle.join().expect("Thread panicked");
     }
 
-    // Verify graph is still valid
+    // Verify graph is still valid after concurrent access.
+    // `node_count >= 0` on an unsigned count was always true — this could not
+    // fail even if concurrency corrupted the graph. Assert a real invariant:
+    // counters remain self-consistent (edges cannot exist without nodes).
     let stats = system.graph_stats();
-    assert!(stats.node_count >= 0, "Graph should have valid node count");
+    assert!(
+        stats.edge_count == 0 || stats.node_count > 0,
+        "after concurrent access the graph reports {} edges over {} nodes",
+        stats.edge_count,
+        stats.node_count
+    );
 }
 
 /// Test rapid creation and deletion simulation (via importance decay)

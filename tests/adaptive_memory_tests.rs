@@ -947,8 +947,19 @@ fn test_adaptive_memory_workflow() {
         .expect("Failed");
     assert!(stats.memories_processed > 0);
 
+    // `edge_count >= 0` on an unsigned count is always true, so the previous
+    // disjunct here made the whole assertion unfalsifiable and killed the
+    // `node_count > 0` half. This system is built without a GraphMemory
+    // (`create_test_system` passes None), so node_count > 0 cannot be asserted
+    // either. What IS a real invariant in both configurations: edges cannot
+    // exist without nodes.
     let graph_stats = system.graph_stats();
-    assert!(graph_stats.node_count > 0 || graph_stats.edge_count >= 0);
+    assert!(
+        graph_stats.edge_count == 0 || graph_stats.node_count > 0,
+        "graph reports {} edges over {} nodes — edges cannot exist without nodes",
+        graph_stats.edge_count,
+        graph_stats.node_count
+    );
 
     let prefetch = AnticipatoryPrefetch::new();
     let ctx = PrefetchContext {
@@ -974,10 +985,26 @@ fn test_graph_maintenance() {
         .reinforce_recall(&[id1, id2], RetrievalOutcome::Helpful)
         .expect("Failed");
 
+    let before = system.graph_stats();
     system.graph_maintenance();
+    let after = system.graph_stats();
 
-    let stats = system.graph_stats();
-    assert!(stats.node_count >= 0);
+    // `node_count >= 0` on an unsigned count was always true — this test could
+    // not fail even if graph_maintenance() wiped the graph or corrupted its
+    // counters. Assert what the test is actually for: maintenance is
+    // non-destructive to node population, and leaves self-consistent stats.
+    assert!(
+        after.node_count >= before.node_count,
+        "graph_maintenance() dropped nodes: {} -> {}",
+        before.node_count,
+        after.node_count
+    );
+    assert!(
+        after.edge_count == 0 || after.node_count > 0,
+        "graph reports {} edges over {} nodes after maintenance",
+        after.edge_count,
+        after.node_count
+    );
 }
 
 #[test]
