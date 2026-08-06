@@ -79,7 +79,12 @@ bit-identical forever would not be fixing M3.
 ## Environment notes for whoever runs this next
 
 - `cargo` builds inside `.claude/worktrees/` hit the Windows **MAX_PATH** limit (~262 chars).
-  An external `CARGO_TARGET_DIR` is required.
+  An external `CARGO_TARGET_DIR` is required. Separately, builds in the repo tree can fail
+  with `cl.exe` exiting 1 and no diagnostic on a rocksdb artifact. A sibling agent-run
+  record originally blamed OneDrive; that was an inference from the directory name and is
+  **wrong** — no OneDrive process runs here and the folder is not a sync point. Cause
+  remains unidentified (Defender real-time scanning is on and is a candidate). Diagnose
+  before assuming.
 - `cargo clippy --all-targets` is **red on `main`**, independent of this branch: two
   `absurd_extreme_comparisons` deny-errors in `tests/brutal_stress_tests.rs` (`:687`, `:1303`)
   — vacuous `unsigned >= 0` assertions, same class as the one fixed in #426.
