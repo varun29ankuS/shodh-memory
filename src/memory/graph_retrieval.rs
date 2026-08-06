@@ -31,16 +31,18 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::constants::{
-    BIDIRECTIONAL_DENSITY_DENSE, BIDIRECTIONAL_DENSITY_SPARSE, BIDIRECTIONAL_HOPS_DENSE,
-    BIDIRECTIONAL_HOPS_MEDIUM, BIDIRECTIONAL_HOPS_SPARSE, BIDIRECTIONAL_INTERSECTION_BOOST,
-    BIDIRECTIONAL_INTERSECTION_MIN, BIDIRECTIONAL_MIN_ENTITIES, DENSITY_GRAPH_WEIGHT_MAX,
-    DENSITY_GRAPH_WEIGHT_MIN, DENSITY_LINGUISTIC_WEIGHT, DENSITY_THRESHOLD_MAX,
-    DENSITY_THRESHOLD_MIN, EDGE_TIER_TRUST_L1, EDGE_TIER_TRUST_L2, EDGE_TIER_TRUST_L3,
-    EDGE_TIER_TRUST_LTP, HYBRID_GRAPH_WEIGHT, HYBRID_LINGUISTIC_WEIGHT, HYBRID_SEMANTIC_WEIGHT,
-    IMPORTANCE_DECAY_MAX, IMPORTANCE_DECAY_MIN, MEMORY_TIER_GRAPH_MULT_ARCHIVE,
-    MEMORY_TIER_GRAPH_MULT_LONGTERM, MEMORY_TIER_GRAPH_MULT_SESSION,
-    MEMORY_TIER_GRAPH_MULT_WORKING, ONTOLOGICAL_DENSITY_THRESHOLD, ONTOLOGICAL_ENTITY_PENALTY,
-    ONTOLOGICAL_MIN_CONFIDENCE, ONTOLOGICAL_RELATION_PENALTY, SALIENCE_BOOST_FACTOR,
+    AROUSAL_BOOST_SCALE, BIDIRECTIONAL_DENSITY_DENSE, BIDIRECTIONAL_DENSITY_SPARSE,
+    BIDIRECTIONAL_HOPS_DENSE, BIDIRECTIONAL_HOPS_MEDIUM, BIDIRECTIONAL_HOPS_SPARSE,
+    BIDIRECTIONAL_INTERSECTION_BOOST, BIDIRECTIONAL_INTERSECTION_MIN, BIDIRECTIONAL_MIN_ENTITIES,
+    CREDIBILITY_BOOST_SCALE, DENSITY_GRAPH_WEIGHT_MAX, DENSITY_GRAPH_WEIGHT_MIN,
+    DENSITY_LINGUISTIC_WEIGHT, DENSITY_THRESHOLD_MAX, DENSITY_THRESHOLD_MIN, EDGE_TIER_TRUST_L1,
+    EDGE_TIER_TRUST_L2, EDGE_TIER_TRUST_L3, EDGE_TIER_TRUST_LTP, GRAPH_AROUSAL_BOOST_SCALE,
+    GRAPH_CREDIBILITY_BOOST_SCALE, GRAPH_RECENCY_BOOST_SCALE, HYBRID_GRAPH_WEIGHT,
+    HYBRID_LINGUISTIC_WEIGHT, HYBRID_SEMANTIC_WEIGHT, IMPORTANCE_DECAY_MAX, IMPORTANCE_DECAY_MIN,
+    MEMORY_TIER_GRAPH_MULT_ARCHIVE, MEMORY_TIER_GRAPH_MULT_LONGTERM,
+    MEMORY_TIER_GRAPH_MULT_SESSION, MEMORY_TIER_GRAPH_MULT_WORKING, ONTOLOGICAL_DENSITY_THRESHOLD,
+    ONTOLOGICAL_ENTITY_PENALTY, ONTOLOGICAL_MIN_CONFIDENCE, ONTOLOGICAL_RELATION_PENALTY,
+    RECENCY_BOOST_SCALE, RECENCY_DECAY_RATE, SALIENCE_BOOST_FACTOR,
     SEED_COVERAGE_BONUS, SPREADING_ACTIVATION_THRESHOLD, SPREADING_DEGREE_NORMALIZATION,
     SPREADING_EARLY_TERMINATION_CANDIDATES, SPREADING_EARLY_TERMINATION_RATIO, SPREADING_MAX_HOPS,
     SPREADING_MIN_CANDIDATES, SPREADING_MIN_HOPS, SPREADING_NORMALIZATION_FACTOR,
@@ -1060,6 +1062,22 @@ pub fn spreading_activation_retrieve_with_stats(
     let start_time = Instant::now();
     let mut stats = RetrievalStats::default();
 
+    // A/B: unify this leg's recency/arousal/credibility boosts with the semantic leg.
+    //
+    // The semantic leg applies them MULTIPLICATIVELY — `score × (1.0 + Σ factors)` with
+    // RECENCY/AROUSAL/CREDIBILITY_BOOST_SCALE. This leg applies them ADDITIVELY with the
+    // pre-migration GRAPH_* scales (see constants.rs). The multiplicative migration was
+    // completed for the semantic leg and never applied here, so the two legs emit scores
+    // on different footings before GRAPH_CANDIDATE_CAP truncation and RRF fusion.
+    //
+    // The forms are NOT comparable by magnitude (additive 0.1 on a normalized sub-1.0
+    // hybrid_score is not simply "5× smaller" than a multiplicative 0.5), so this is a
+    // measured arm rather than a swap. Default off → byte-identical to previous behavior.
+    // Arm: `+graph-boost-mult` in recall_harness::runner::analyze_ablation.
+    let boost_multiplicative = std::env::var("SHODH_GRAPH_BOOST_MULTIPLICATIVE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     // Determine weights based on density
     let (semantic_weight, graph_weight, linguistic_weight) = if let Some(density) = graph_density {
         stats.mode = "associative".to_string();
@@ -1736,34 +1754,47 @@ pub fn spreading_activation_retrieve_with_stats(
                 + graph_activation * norm_graph
                 + linguistic_score * norm_linguistic;
 
-            // Recency decay (10% contribution) - recent memories get boost
-            // λ = 0.01 means ~50% at 70 hours, ~25% at 140 hours
-            const RECENCY_DECAY_RATE: f32 = 0.01;
+            // Raw boost signals, unscaled. RECENCY_DECAY_RATE is the canonical constant
+            // (0.01, ~50% at 70h / ~25% at 140h) — previously a local const shadowing it
+            // with the same value. Scale and functional form are applied below.
             let hours_old = (now - memory.created_at).num_hours().max(0) as f32;
-            let recency_boost = (-RECENCY_DECAY_RATE * hours_old).exp() * 0.1;
-
-            // Emotional arousal boost: high arousal = more salient (5% contribution)
-            let arousal_boost = memory
+            let recency_raw = (-RECENCY_DECAY_RATE * hours_old).exp();
+            let arousal_raw = memory
                 .experience
                 .context
                 .as_ref()
-                .map(|c| c.emotional.arousal * 0.05)
+                .map(|c| c.emotional.arousal)
                 .unwrap_or(0.0);
-
-            // Source credibility boost (5% contribution)
-            let credibility_boost = memory
+            let credibility_raw = memory
                 .experience
                 .context
                 .as_ref()
-                .map(|c| (c.source.credibility - 0.5).max(0.0) * 0.1)
+                .map(|c| (c.source.credibility - 0.5).max(0.0))
                 .unwrap_or(0.0);
 
             // Type-aware activation dampening: noise types (CodeEdit, Command, etc.)
             // get reduced activation scores so intentional memories rank higher.
             // This is the read-time complement to write-time edge dampening.
             let type_dampening = memory.experience.experience_type.activation_multiplier();
-            let final_score =
-                (hybrid_score + recency_boost + arousal_boost + credibility_boost) * type_dampening;
+
+            let final_score = if boost_multiplicative {
+                // Semantic-leg form: modulate the base score rather than adding to it,
+                // using the canonical scales. Matches memory/mod.rs `(1.0 + Σ factors)`.
+                hybrid_score
+                    * (1.0
+                        + recency_raw * RECENCY_BOOST_SCALE
+                        + arousal_raw * AROUSAL_BOOST_SCALE
+                        + credibility_raw * CREDIBILITY_BOOST_SCALE)
+                    * type_dampening
+            } else {
+                // Historical graph-leg form: additive boosts with the GRAPH_* scales.
+                // Byte-identical to the pre-flag behavior (0.1 / 0.05 / 0.1).
+                (hybrid_score
+                    + recency_raw * GRAPH_RECENCY_BOOST_SCALE
+                    + arousal_raw * GRAPH_AROUSAL_BOOST_SCALE
+                    + credibility_raw * GRAPH_CREDIBILITY_BOOST_SCALE)
+                    * type_dampening
+            };
 
             scored_memories.push(ActivatedMemory {
                 memory,

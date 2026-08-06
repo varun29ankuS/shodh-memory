@@ -1340,7 +1340,6 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
         ),
         ("baseline (facts on)", vec![]),
         ("graph-off", vec![("SHODH_GRAPH_FUSION_WEIGHT", "0")]),
-        ("+spread-fix", vec![("SHODH_SPREAD_FIX", "1")]),
         ("+graph-expand(K5)", vec![("SHODH_GRAPH_EXPAND_K", "5")]),
         (
             "+graph-expand+margin",
@@ -1349,9 +1348,31 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
                 ("SHODH_GRAPH_EXPAND_MIN_STRENGTH", "0.3"),
             ],
         ),
+        // Graph-leg boost form. The semantic leg modulates score multiplicatively with
+        // the canonical scales; this leg adds the pre-migration GRAPH_* scales. Measures
+        // whether unifying the form helps the graph leg survive fusion. See
+        // constants.rs GRAPH_RECENCY_BOOST_SCALE.
         (
-            "+expand+spread-fix",
-            vec![("SHODH_GRAPH_EXPAND_K", "5"), ("SHODH_SPREAD_FIX", "1")],
+            "+graph-boost-mult",
+            vec![("SHODH_GRAPH_BOOST_MULTIPLICATIVE", "1")],
+        ),
+        (
+            "+graph-boost-mult+expand",
+            vec![
+                ("SHODH_GRAPH_BOOST_MULTIPLICATIVE", "1"),
+                ("SHODH_GRAPH_EXPAND_K", "5"),
+            ],
+        ),
+        // SHODH_SPREAD_FIX only reaches the legacy BFS spread in graph_retrieval.rs.
+        // SHODH_PPR defaults ON and its branch precedes both BFS paths, so the previous
+        // bare `+spread-fix` / `+expand+spread-fix` arms set a flag that could not execute
+        // — they silently duplicated `baseline` and `+graph-expand(K5)`. Pinning PPR off
+        // makes these rows measure the thing their name claims; the PPR-off baseline is
+        // required alongside them or the delta is unattributable.
+        ("legacy-bfs (PPR off)", vec![("SHODH_PPR", "0")]),
+        (
+            "legacy-bfs +spread-fix (PPR off)",
+            vec![("SHODH_PPR", "0"), ("SHODH_SPREAD_FIX", "1")],
         ),
     ];
 

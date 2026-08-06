@@ -1212,6 +1212,37 @@ pub const AROUSAL_BOOST_SCALE: f32 = 0.15;
 /// - Previously hardcoded as additive (credibility - 0.5) * 0.1
 pub const CREDIBILITY_BOOST_SCALE: f32 = 0.2;
 
+/// Graph-leg boost scales — the spreading-activation leg's historical ADDITIVE scales.
+///
+/// The two retrieval legs apply the same three signals in different functional forms:
+///
+/// - Semantic leg (`memory/mod.rs` `semantic_retrieve`, applied at the `(1.0 + Σ)`
+///   site): MULTIPLICATIVE — `score × (1.0 + recency + arousal + credibility + temporal)`
+///   using `RECENCY_BOOST_SCALE` / `AROUSAL_BOOST_SCALE` / `CREDIBILITY_BOOST_SCALE` above.
+/// - Graph leg (`memory/graph_retrieval.rs` `spreading_activation_retrieve_with_stats`):
+///   ADDITIVE — `(hybrid_score + recency + arousal + credibility) × type_dampening`
+///   using the three constants below.
+///
+/// The values below are exactly the pre-migration numbers the constants above were
+/// introduced to replace — see their doc comments: "previously hardcoded as additive
+/// 0.1 / 0.05 / (credibility - 0.5) * 0.1". The migration to the multiplicative form
+/// was completed for the semantic leg and never applied to the graph leg.
+///
+/// They are declared here rather than left inline so the divergence is greppable and
+/// both arms of the A/B are named. NOTE: the additive form on a normalized sub-1.0
+/// `hybrid_score` is not simply "5× smaller" than the multiplicative form — the two
+/// are not directly comparable by magnitude, which is why this needs measurement
+/// rather than a constant swap.
+///
+/// `SHODH_GRAPH_BOOST_MULTIPLICATIVE=1` switches the graph leg to the semantic leg's
+/// form and canonical constants. Default OFF pending the `+graph-boost-mult` ablation
+/// arm; do not flip the default without a measured win.
+pub const GRAPH_RECENCY_BOOST_SCALE: f32 = 0.1;
+/// See [`GRAPH_RECENCY_BOOST_SCALE`] — graph-leg additive arousal scale.
+pub const GRAPH_AROUSAL_BOOST_SCALE: f32 = 0.05;
+/// See [`GRAPH_RECENCY_BOOST_SCALE`] — graph-leg additive credibility scale.
+pub const GRAPH_CREDIBILITY_BOOST_SCALE: f32 = 0.1;
+
 /// Same-episode boost — additive score for memories sharing the current episode
 ///
 /// When the query specifies an episode_id and a candidate belongs to the same

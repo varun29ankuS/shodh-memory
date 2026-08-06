@@ -447,11 +447,28 @@ fn test_forget_low_importance() {
         .forget(shodh_memory::memory::ForgetCriteria::LowImportance(0.5))
         .expect("Failed to forget");
 
-    // Some memories should be forgotten
-    // Note: actual count depends on importance calculation
+    // The exact count depends on the importance calculation, so this does not pin a
+    // number. It pins the two invariants that must hold regardless of that calculation:
+    // forget cannot claim more removals than there were memories, and the reported
+    // count must agree with the change in stored count. The previous assertion here
+    // was `forgotten >= 0` on an unsigned count — always true, so it could not fail
+    // even if forget became a silent no-op (and it denied clippy's
+    // `absurd_extreme_comparisons`, breaking `cargo clippy --all-targets`).
     assert!(
-        forgotten >= 0,
-        "Forget operation should complete successfully"
+        forgotten <= stats_before.total_memories,
+        "forget reported {} removals but only {} memories were stored",
+        forgotten,
+        stats_before.total_memories
+    );
+
+    let stats_after = memory_system.stats();
+    assert_eq!(
+        stats_after.total_memories,
+        stats_before.total_memories - forgotten,
+        "reported forget count ({}) must match the drop in stored memories ({} -> {})",
+        forgotten,
+        stats_before.total_memories,
+        stats_after.total_memories
     );
 }
 
