@@ -3207,7 +3207,9 @@ impl GraphMemory {
     /// 1. **Audit row first** — the member's full node plus snapshots of every
     ///    edge touching it are committed to [`CF_MERGE_AUDIT`] before any
     ///    destructive write (dual-row current/audit model: the loser becomes a
-    ///    tombstone, never erased in place).
+    ///    tombstone, never erased in place). A retry after a partial failure
+    ///    UNIONS into the existing tombstone rather than overwriting it, so
+    ///    snapshots of edges the earlier attempt already consumed survive.
     /// 2. **Episode provenance re-indexed** — every episode referencing the
     ///    member has its `entity_refs` rewritten to the canonical UUID and its
     ///    `entity_episodes` inverted-index row moved, in one atomic
@@ -3297,12 +3299,39 @@ impl GraphMemory {
         }
 
         // ---- Phase 1: commit the audit row (tombstone) before any destruction.
-        let audit = EntityMergeAudit {
-            member: member_node.clone(),
-            canonical_uuid: *canonical,
-            merged_at: Utc::now(),
-            episode_uuids: episode_uuids.clone(),
-            edges: edge_snapshots,
+        // A retry after a partial failure (the 6-hourly consolidation cycle
+        // re-attempts failed merges) re-enters here with a DIMINISHED view of
+        // the member: episodes already re-indexed and edges already repointed
+        // or dropped no longer appear in the phase-0 scan. A blind overwrite
+        // would therefore destroy the only remaining snapshot of anything the
+        // earlier attempt consumed (a dropped member↔canonical self-loop
+        // survives ONLY in the audit row). Union with any existing tombstone
+        // instead: episodes and edges accumulate by UUID, and the member
+        // snapshot from the FIRST attempt — the richest, fully pre-merge
+        // view — is kept.
+        let audit = match self.get_merge_audit(member)? {
+            Some(mut prior) => {
+                for ep_uuid in &episode_uuids {
+                    if !prior.episode_uuids.contains(ep_uuid) {
+                        prior.episode_uuids.push(*ep_uuid);
+                    }
+                }
+                for edge in edge_snapshots {
+                    if !prior.edges.iter().any(|e| e.uuid == edge.uuid) {
+                        prior.edges.push(edge);
+                    }
+                }
+                prior.canonical_uuid = *canonical;
+                prior.merged_at = Utc::now();
+                prior
+            }
+            None => EntityMergeAudit {
+                member: member_node.clone(),
+                canonical_uuid: *canonical,
+                merged_at: Utc::now(),
+                episode_uuids: episode_uuids.clone(),
+                edges: edge_snapshots,
+            },
         };
         self.db.put_cf(
             self.merge_audit_cf(),
@@ -10502,6 +10531,141 @@ mod tests {
         assert_eq!(audit.edges[0].uuid, loop_edge);
         assert_eq!(audit.edges[0].provenance.len(), 1);
         assert_eq!(audit.edges[0].provenance[0].source_episode_id, ep);
+    }
+
+    #[test]
+    fn merge_retry_unions_audit_row_instead_of_overwriting() {
+        // A failed merge is retried by the next consolidation cycle. By then
+        // the first attempt may already have consumed some of the member's
+        // edges — a member↔canonical self-loop is dropped from the live graph
+        // and survives ONLY in the audit row. The retry's phase-1 write must
+        // UNION with the existing tombstone: a blind overwrite would destroy
+        // the sole remaining snapshot of the dropped edge.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let member = graph
+            .add_entity(merge_test_entity("Dundalk", vec![EntityLabel::Gpe]))
+            .unwrap();
+        let canonical = graph
+            .add_entity(merge_test_entity(
+                "Dundalk Marine Terminal",
+                vec![EntityLabel::Gpe],
+            ))
+            .unwrap();
+        let other = graph
+            .add_entity(merge_test_entity("Seagirt", vec![EntityLabel::Gpe]))
+            .unwrap();
+
+        let ep = Uuid::new_v4();
+        // Self-loop-to-be: member↔canonical, consumed by the first attempt.
+        let loop_edge = graph
+            .add_relationship(merge_test_edge(
+                member,
+                canonical,
+                RelationType::RelatedTo,
+                ep,
+            ))
+            .unwrap();
+        // Fold-to-be: member↔other, whose fold target (canonical↔other) is
+        // corrupted so the first attempt fails AFTER the self-loop is
+        // consumed. Phase 3 processes edges in lexicographic edge-UUID order
+        // (entity_edges keys are "entity:edge"), so re-roll the fold edge's
+        // random UUID until it sorts after the loop edge's.
+        let loop_key = loop_edge.to_string();
+        let mut fold_edge = graph
+            .add_relationship(merge_test_edge(member, other, RelationType::RelatedTo, ep))
+            .unwrap();
+        let mut rerolls = 0;
+        while fold_edge.to_string() < loop_key {
+            assert!(graph.delete_relationship(&fold_edge).unwrap());
+            fold_edge = graph
+                .add_relationship(merge_test_edge(member, other, RelationType::RelatedTo, ep))
+                .unwrap();
+            rerolls += 1;
+            assert!(rerolls < 256, "could not order fold edge after loop edge");
+        }
+        let canon_edge = graph
+            .add_relationship(merge_test_edge(
+                canonical,
+                other,
+                RelationType::RelatedTo,
+                ep,
+            ))
+            .unwrap();
+        let relationships_cf = graph.get_db().cf_handle(CF_RELATIONSHIPS).unwrap();
+        let canon_edge_bytes = graph
+            .get_db()
+            .get_cf(relationships_cf, canon_edge.as_bytes())
+            .unwrap()
+            .expect("fold target must exist");
+
+        // Attempt 1: corrupt the fold target so the merge fails after the
+        // self-loop has been dropped.
+        graph
+            .get_db()
+            .put_cf(relationships_cf, canon_edge.as_bytes(), [0xde, 0xad])
+            .unwrap();
+        assert!(graph.merge_entity_into(&member, &canonical).is_err());
+        assert!(
+            graph.get_relationship(&loop_edge).unwrap().is_none(),
+            "first attempt must have consumed the self-loop before failing"
+        );
+        let first_audit = graph.get_merge_audit(&member).unwrap().unwrap();
+        assert!(first_audit.edges.iter().any(|e| e.uuid == loop_edge));
+
+        // Attempt 2 (the consolidation retry): repair the fold target and
+        // re-run. The merge completes, and the audit row must still carry the
+        // self-loop snapshot only the first attempt could record.
+        graph
+            .get_db()
+            .put_cf(relationships_cf, canon_edge.as_bytes(), &canon_edge_bytes)
+            .unwrap();
+        let repointed = graph.merge_entity_into(&member, &canonical).unwrap();
+        assert_eq!(repointed, 1, "the fold still counts as a repoint");
+        assert!(graph.get_entity(&member).unwrap().is_none());
+
+        let audit = graph.get_merge_audit(&member).unwrap().unwrap();
+        assert_eq!(audit.member.name, "Dundalk");
+        assert!(
+            audit.edges.iter().any(|e| e.uuid == loop_edge),
+            "retry must union the tombstone, not overwrite the dropped self-loop snapshot"
+        );
+        assert!(
+            audit.edges.iter().any(|e| e.uuid == fold_edge),
+            "retry must record the folded edge too"
+        );
+    }
+
+    #[test]
+    fn graph_db_from_before_merge_audit_cf_opens_and_gets_cf_created() {
+        // Schema-compat regression: CF_MERGE_AUDIT is a NEW column family.
+        // A database created by a binary from before it existed must open
+        // cleanly (create_missing_column_families) and expose the CF
+        // afterwards — otherwise every pre-existing install breaks on
+        // upgrade. Simulate the old on-disk schema by creating the graph DB
+        // with every CF except entity_merge_audit, then reopen through the
+        // production constructor.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph_path = temp_dir.path().join("graph");
+        std::fs::create_dir_all(&graph_path).unwrap();
+        {
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            opts.create_missing_column_families(true);
+            let old_cfs: Vec<&str> = GRAPH_CF_NAMES
+                .iter()
+                .copied()
+                .filter(|name| *name != CF_MERGE_AUDIT)
+                .collect();
+            let db = DB::open_cf(&opts, &graph_path, &old_cfs).unwrap();
+            assert!(db.cf_handle(CF_MERGE_AUDIT).is_none());
+        }
+        let graph = GraphMemory::new(temp_dir.path(), None)
+            .expect("pre-merge-audit databases must open under the new schema");
+        // The CF must exist now and be readable (merge_audit_cf() panics if
+        // the open did not create it).
+        assert!(graph.get_merge_audit(&Uuid::new_v4()).unwrap().is_none());
     }
 
     #[test]
