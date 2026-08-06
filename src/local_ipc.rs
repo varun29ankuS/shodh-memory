@@ -751,7 +751,7 @@ async fn prepare_frame(frame: &[u8], server_auth: &ServerAuth) -> PreparedFrame 
     }
 
     let is_health_probe = request.method == "GET" && request.path == "/health";
-    let signer = if is_health_probe {
+    let (signer, identity) = if is_health_probe {
         if !request.auth.is_empty() {
             return PreparedFrame::Respond(protocol_error(
                 &id,
@@ -761,11 +761,14 @@ async fn prepare_frame(frame: &[u8], server_auth: &ServerAuth) -> PreparedFrame 
             ));
         }
         if request.challenge.is_empty() {
-            ResponseSigner::None
+            (ResponseSigner::None, None)
         } else if decode_nonce(&request.challenge).is_some() {
-            ResponseSigner::Probe {
-                challenge: request.challenge.clone(),
-            }
+            (
+                ResponseSigner::Probe {
+                    challenge: request.challenge.clone(),
+                },
+                None,
+            )
         } else {
             return PreparedFrame::Respond(protocol_error(
                 &id,
@@ -791,22 +794,29 @@ async fn prepare_frame(frame: &[u8], server_auth: &ServerAuth) -> PreparedFrame 
                 "ordinary IPC requests must not carry a health challenge",
             ));
         }
-        let keys = match auth::configured_api_keys() {
-            Ok(keys) => keys,
+        // The full key table (scoped and unscoped) is eligible for IPC, and
+        // the matched key's identity travels with the dispatched request so
+        // scope_enforcement_middleware confines scoped keys to their bound
+        // user over IPC exactly as over HTTP.
+        let table = match auth::configured_key_table() {
+            Ok(table) => table,
             Err(error) => {
                 return PreparedFrame::Respond(
                     envelope_from_response(id, error.into_response()).await,
                 )
             }
         };
-        let key = keys
+        let matched = table
             .into_iter()
-            .find(|key| verify_request_auth(key, server_auth, &request));
-        match key {
-            Some(key) => ResponseSigner::Request {
-                key,
-                request_auth: request.auth.clone(),
-            },
+            .find(|(key, _)| verify_request_auth(key, server_auth, &request));
+        match matched {
+            Some((key, identity)) => (
+                ResponseSigner::Request {
+                    key,
+                    request_auth: request.auth.clone(),
+                },
+                Some(identity),
+            ),
             None => {
                 return PreparedFrame::Respond(
                     envelope_from_response(id, AuthError::InvalidApiKey.into_response()).await,
@@ -899,7 +909,7 @@ async fn prepare_frame(frame: &[u8], server_auth: &ServerAuth) -> PreparedFrame 
         ));
     };
 
-    let internal_request = match Request::builder()
+    let mut internal_request = match Request::builder()
         .method(method)
         .uri(uri)
         .header(axum::http::header::CONTENT_TYPE, "application/json")
@@ -917,6 +927,10 @@ async fn prepare_frame(frame: &[u8], server_auth: &ServerAuth) -> PreparedFrame 
             ));
         }
     };
+
+    if let Some(identity) = identity {
+        internal_request.extensions_mut().insert(identity);
+    }
 
     PreparedFrame::Dispatch(Box::new(PreparedDispatch {
         id,

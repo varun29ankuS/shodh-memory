@@ -592,6 +592,11 @@ pub fn print_env_help() {
     println!("  SHODH_IPC_ENDPOINT     - Override the platform-default socket or named pipe");
     println!("  SHODH_IPC_REQUIRED     - Fail closed when local IPC cannot bind or authenticate");
     println!("  SHODH_API_KEYS         - Comma-separated API keys (required in production)");
+    println!("                           WARNING: these keys are UNSCOPED - each one can read and");
+    println!("                           write EVERY user's memories (single-tenant posture)");
+    println!("  SHODH_SCOPED_API_KEYS  - Comma-separated user_id:key pairs. Each key is bound to");
+    println!("                           its user_id; requests naming any other user_id are");
+    println!("                           rejected with 403 (multi-tenant posture, opt-in)");
     println!("  SHODH_DEV_API_KEY      - Development API key (required in dev if SHODH_API_KEYS not set)");
     println!("  SHODH_MAX_USERS        - Max users in memory LRU (default: 1000)");
     println!("  SHODH_RATE_LIMIT       - Requests per second (default: 4000)");

@@ -18,6 +18,7 @@ use std::convert::Infallible;
 use tokio_stream::wrappers::BroadcastStream;
 
 use super::state::MultiUserMemoryManager;
+use crate::auth::AuthIdentity;
 use crate::relevance;
 use crate::streaming;
 use crate::validation;
@@ -124,12 +125,17 @@ pub async fn memory_events_sse(
 pub async fn streaming_memory_ws(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    identity: Option<axum::Extension<AuthIdentity>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_streaming_socket(socket, state))
+    // auth_middleware always attaches an AuthIdentity on HTTP routes; None can
+    // only occur when the route is mounted without auth (test rigs), where
+    // there is no credential to scope against — treat as unscoped.
+    let identity = identity.map_or(AuthIdentity::Unscoped, |e| e.0);
+    ws.on_upgrade(move |socket| handle_streaming_socket(socket, state, identity))
 }
 
 /// Handle WebSocket connection for streaming memory ingestion
-async fn handle_streaming_socket(socket: WebSocket, state: AppState) {
+async fn handle_streaming_socket(socket: WebSocket, state: AppState, identity: AuthIdentity) {
     let (mut sender, mut receiver) = socket.split();
     let mut session_id: Option<String> = None;
 
@@ -185,6 +191,28 @@ async fn handle_streaming_socket(socket: WebSocket, state: AppState) {
                 ))
                 .await;
             return;
+        }
+
+        // Scoped keys may only stream as their bound user. The handshake is
+        // the WebSocket equivalent of a body-supplied user_id, so it is
+        // enforced against the key's identity exactly like the HTTP paths.
+        if let AuthIdentity::User(ref scoped_user) = identity {
+            if handshake.user_id != *scoped_user {
+                let error = streaming::ExtractionResult::Error {
+                    code: "API_KEY_SCOPE_FORBIDDEN".to_string(),
+                    message: "API key is not authorized for the requested user_id".to_string(),
+                    fatal: true,
+                    timestamp: chrono::Utc::now(),
+                };
+                let _ = sender
+                    .send(Message::Text(
+                        serde_json::to_string(&error)
+                            .unwrap_or_else(|_| r#"{"error":"serialization_failed"}"#.to_string())
+                            .into(),
+                    ))
+                    .await;
+                return;
+            }
         }
 
         // Validate extraction config bounds
@@ -384,12 +412,15 @@ async fn handle_streaming_socket(socket: WebSocket, state: AppState) {
 pub async fn context_monitor_ws(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    identity: Option<axum::Extension<AuthIdentity>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_context_monitor_socket(socket, state))
+    // See streaming_memory_ws for why a missing extension means unscoped.
+    let identity = identity.map_or(AuthIdentity::Unscoped, |e| e.0);
+    ws.on_upgrade(move |socket| handle_context_monitor_socket(socket, state, identity))
 }
 
 /// Handle WebSocket connection for context monitoring
-async fn handle_context_monitor_socket(socket: WebSocket, state: AppState) {
+async fn handle_context_monitor_socket(socket: WebSocket, state: AppState, identity: AuthIdentity) {
     let (mut sender, mut receiver) = socket.split();
     let mut user_id: Option<String> = None;
     let mut config = relevance::RelevanceConfig::default();
@@ -448,6 +479,27 @@ async fn handle_context_monitor_socket(socket: WebSocket, state: AppState) {
                 ))
                 .await;
             return;
+        }
+
+        // Scoped keys may only monitor context for their bound user; the
+        // handshake user_id is enforced like a body-supplied user_id.
+        if let AuthIdentity::User(ref scoped_user) = identity {
+            if handshake.user_id != *scoped_user {
+                let error = relevance::ContextMonitorResponse::Error {
+                    code: "API_KEY_SCOPE_FORBIDDEN".to_string(),
+                    message: "API key is not authorized for the requested user_id".to_string(),
+                    fatal: true,
+                    timestamp: chrono::Utc::now(),
+                };
+                let _ = sender
+                    .send(Message::Text(
+                        serde_json::to_string(&error)
+                            .unwrap_or_else(|_| r#"{"error":"serialization_failed"}"#.to_string())
+                            .into(),
+                    ))
+                    .await;
+                return;
+            }
         }
 
         user_id = Some(handshake.user_id.clone());

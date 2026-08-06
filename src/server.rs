@@ -258,7 +258,14 @@ async fn async_main() -> Result<()> {
     }
 
     let protected_routes = {
+        // Layer order (outermost last): auth_middleware authenticates the key
+        // and attaches its AuthIdentity to the request, then
+        // scope_enforcement_middleware authorizes the request's user_id
+        // against that identity (no-op for legacy unscoped keys).
         let routes = handlers::build_protected_routes(Arc::clone(&manager))
+            .layer(axum::middleware::from_fn(
+                auth::scope_enforcement_middleware,
+            ))
             .layer(axum::middleware::from_fn(auth::auth_middleware));
         if rate_limit_enabled {
             routes.layer(make_governor_layer())
@@ -336,7 +343,13 @@ async fn async_main() -> Result<()> {
     // middleware — track_metrics is layered so IPC traffic stays visible to
     // Prometheus; rate limiting, CORS, and security headers deliberately do not
     // apply (auth, bounds, and concurrency are enforced inside local_ipc).
+    // scope_enforcement_middleware IS layered: local_ipc attaches the
+    // authenticated key's AuthIdentity to each dispatched request, and scoped
+    // keys must be confined to their bound user over IPC exactly as over HTTP.
     let ipc_router = handlers::build_router(Arc::clone(&manager))
+        .layer(axum::middleware::from_fn(
+            auth::scope_enforcement_middleware,
+        ))
         .layer(axum::middleware::from_fn(middleware::track_metrics));
 
     // Start server
