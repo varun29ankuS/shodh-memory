@@ -58,11 +58,22 @@ shape. This needs an explicit note in the env-var docs.
 
 ## Environment facts (cost an agent hours; do not rediscover)
 
-- **OneDrive holds a lock on a rocksdb build artifact**
-  (`remove_emptyvalue_compactionfilter.o`), making `cl.exe` fail with exit 1 and no
-  diagnostic — deterministically, same file, 5/5 retries. All green results above
-  required `CARGO_TARGET_DIR` pointed **outside OneDrive**. This is the repo's known
-  "never build under watched dirs" constraint applied to build output.
+- **Builds inside the repo path fail deterministically**: `cl.exe` exits 1 with no
+  diagnostic while compiling the same rocksdb artifact
+  (`remove_emptyvalue_compactionfilter.o`), 5/5 retries. All green results above required
+  `CARGO_TARGET_DIR` pointed outside the repo tree.
+
+  **CAUSE NOT IDENTIFIED — do not repeat the original guess.** The verifying agent
+  attributed this to OneDrive because the repo path contains `\OneDrive\`. That was an
+  inference from a directory name, and it is **wrong**: no OneDrive process runs on this
+  machine, and the folder carries no reparse-point or cloud-file attributes — it is an
+  ordinary directory left from a previous setup.
+
+  Candidates, none confirmed: Windows Defender real-time scanning (verified ON, no visible
+  exclusions; scanning freshly-written object files is a well-known cause of exactly this
+  silent `cl.exe` failure), or contention from several agents building concurrently.
+  Whoever hits this next: identify the actual locker (e.g. Process Explorer / handle.exe)
+  before acting, rather than inheriting a guess.
 - **`cargo clippy --all-targets` is red on `origin/main`**, independent of this branch:
   `absurd_extreme_comparisons` deny-errors in `tests/brutal_stress_tests.rs:687,1303`
   (`unsigned >= 0`). Same class as the one fixed in #426 — that PR fixed one file, not
