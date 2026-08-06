@@ -79,3 +79,9 @@ pub mod python;
 
 #[cfg(feature = "zenoh")]
 pub mod zenoh_transport;
+
+// Agent-loop foundation (rig-backed ConversationMemory + Continual Harness state).
+// Gated because rig-core is not part of the edge-device default build — see
+// `src/agent/mod.rs` for the full rationale and scope.
+#[cfg(feature = "agent-harness")]
+pub mod agent;

@@ -218,6 +218,23 @@ numpy = { version = "0.24", optional = true }
 # Enables pub/sub + request/reply integration with ROS2 via rmw_zenoh or zenoh-bridge-ros2dds
 zenoh = { version = "1.1", default-features = false, features = ["transport_tcp", "transport_udp"], optional = true }
 
+# Agent loop harness (optional — conversational-seat foundation, not in the edge default build)
+# Pinned EXACTLY (= not ^): rig-core/rig-derive/rig-agent share one workspace version and the
+# crate has shipped 48 breaking-change entries across its last two releases in ~40 days under a
+# single dominant maintainer.
+#
+# DELIBERATELY `rig-core`, NOT the `rig` facade crate: `rig = "=0.41.0"` transitively pulls
+# `rig-fastembed` -> `fastembed` -> `ort` (ONNX Runtime, an ML inference runtime) at a version
+# that conflicts with this crate's own `ort` pin and would double our embedding-runtime
+# footprint even if it didn't conflict. `rig-core` alone carries none of that — confirmed via
+# `cargo tree --features agent-harness -p rig-core`: only reqwest/tokio/serde/tracing/schemars
+# plus rustls's TLS stack (rustls itself, plus its aws-lc-rs crypto *library* — not an AWS
+# cloud SDK). No candle, no tokenizers, no onnx/ort, no vector-store crate. Default features
+# only (reqwest, derive, rustls) — no provider feature flags enabled here.
+#
+# Re-run that `cargo tree` command by hand before ever bumping this pin.
+rig-core = { version = "=0.41.0", optional = true }
+
 # LLM-based query parsing (optional - heavy dependency)
 
 [dev-dependencies]
@@ -296,6 +313,12 @@ llm-parser = []
 
 # Optional: Zenoh transport for robotics/ROS2 (pure Rust, cross-platform)
 zenoh = ["dep:zenoh"]
+
+# Optional: agent loop harness (rig-backed ConversationMemory + Continual Harness state).
+# Not part of `default` — this is a conversational-seat feature, not an edge-device concern,
+# and rig is pinned exactly (see dependency comment) so it stays opt-in until that pin is
+# deliberately re-reviewed.
+agent-harness = ["dep:rig-core"]
 
 # Optional: Distributed tracing for cloud/multi-node deployments (~200 extra packages)
 telemetry = [
