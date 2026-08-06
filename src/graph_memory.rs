@@ -35,6 +35,14 @@ const CF_RELATION_STATS: &str = "relation_stats";
 /// in `find_entity_by_name` so `container ship`/`cargo ship`/`the Dali` all land
 /// on one canonical node instead of minting parallel mention nodes.
 const CF_ALIAS: &str = "entity_alias";
+/// Merge-audit rows (tombstones) written by `merge_entity_into` BEFORE any
+/// destructive step of a canonicalize-merge: key = merged (losing) entity UUID,
+/// value = postcard [`EntityMergeAudit`] — the loser's full node, the episode
+/// UUIDs re-indexed onto the canonical, and full snapshots of every edge that
+/// touched the loser. Default reads never consult this CF (audit rows are
+/// invisible to retrieval); it exists so nothing a merge rewrites can become
+/// unrecoverable. New CF: created empty on open for pre-existing DBs.
+const CF_MERGE_AUDIT: &str = "entity_merge_audit";
 
 const GRAPH_CF_NAMES: &[&str] = &[
     CF_ENTITIES,
@@ -48,6 +56,7 @@ const GRAPH_CF_NAMES: &[&str] = &[
     CF_STEMMED_INDEX,
     CF_RELATION_STATS,
     CF_ALIAS,
+    CF_MERGE_AUDIT,
 ];
 
 /// Per-(label-pair, relation) evidence counter for the learned pair table
@@ -2166,6 +2175,51 @@ pub enum EpisodeSource {
     Observation,
 }
 
+/// Audit row (tombstone) for a canonicalize-merge: the losing entity retained
+/// in recoverable form instead of being destroyed in place.
+///
+/// Written to [`CF_MERGE_AUDIT`] by `merge_entity_into` BEFORE any destructive
+/// step, so a crash at any later point can lose nothing that is not already
+/// either re-indexed under the canonical UUID or snapshotted here. Default
+/// reads (retrieval, traversal, stats) never consult audit rows — this is the
+/// "loser row" of a dual-row current/audit schema, keyed by the merged
+/// entity's UUID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityMergeAudit {
+    /// Full snapshot of the merged (losing) entity node — name, labels,
+    /// mention_count, attributes, salience, embedding — as it was pre-merge.
+    pub member: EntityNode,
+
+    /// The surviving canonical entity the member was merged into.
+    pub canonical_uuid: Uuid,
+
+    /// System time of the merge (when the audit row was committed).
+    pub merged_at: DateTime<Utc>,
+
+    /// Episodes whose `entity_refs` / `entity_episodes` rows were re-indexed
+    /// from the member onto the canonical UUID.
+    pub episode_uuids: Vec<Uuid>,
+
+    /// Full pre-merge snapshots (provenance included) of every edge that
+    /// touched the member. Repointed edges keep their UUID and live on under
+    /// the canonical; dedup-collapsed and self-loop edges survive only here.
+    pub edges: Vec<RelationshipEdge>,
+}
+
+/// Outcome of atomically re-pointing one edge during an entity merge.
+enum RepointOutcome {
+    /// Edge rewritten in place (same UUID) onto the canonical endpoint.
+    Repointed,
+    /// Edge folded into an existing same-type edge between the new endpoints;
+    /// its provenance was merged into the survivor (whose UUID is carried).
+    MergedInto(Uuid),
+    /// Edge became a self-loop after re-pointing and was removed; its full
+    /// snapshot is retained in the merge-audit row.
+    DroppedSelfLoop,
+    /// The edge record was already gone (stale index row); the row was scrubbed.
+    Missing,
+}
+
 /// Minimum dormancy (days since last activation) for an edge re-attestation
 /// to count as a [`TemporalAnomalyKind::DormantReactivation`] event.
 const DORMANT_REACTIVATION_MIN_DAYS: f32 = 7.0;
@@ -2322,6 +2376,11 @@ impl GraphMemory {
     }
     fn alias_cf(&self) -> &ColumnFamily {
         self.db.cf_handle(CF_ALIAS).expect("alias CF must exist")
+    }
+    fn merge_audit_cf(&self) -> &ColumnFamily {
+        self.db
+            .cf_handle(CF_MERGE_AUDIT)
+            .expect("entity_merge_audit CF must exist")
     }
 
     /// Create a new graph memory system.
@@ -3093,32 +3152,35 @@ impl GraphMemory {
                     continue;
                 }
                 let member = meta[i].0;
-                // Remember this surface → canonical mapping (raw name + parsed clean
-                // form) so future ingests of the merged surface resolve directly.
-                alias_pairs.push((meta[i].3.clone(), canonical));
-                if records[i].name != meta[i].3.trim().to_lowercase() {
-                    alias_pairs.push((records[i].name.clone(), canonical));
+                // Provenance-preserving merge (audit-row model): an audit
+                // tombstone is committed before any destructive step, episode
+                // provenance is re-indexed under the canonical UUID, edges are
+                // repointed atomically, and the member's mention counts /
+                // labels / attributes fold into the canonical node. On error
+                // nothing further is destroyed for this member — leave it
+                // intact for the next consolidation pass, and do NOT seed its
+                // alias, so ingest keeps resolving to the still-live node.
+                match self.merge_entity_into(&member, &canonical) {
+                    Ok(edges_repointed) => {
+                        repointed += edges_repointed;
+                        merged_nodes += 1;
+                        // Remember this surface → canonical mapping (raw name +
+                        // parsed clean form) so future ingests of the merged
+                        // surface resolve directly.
+                        alias_pairs.push((meta[i].3.clone(), canonical));
+                        if records[i].name != meta[i].3.trim().to_lowercase() {
+                            alias_pairs.push((records[i].name.clone(), canonical));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            member = %member,
+                            canonical = %canonical,
+                            error = %e,
+                            "canonicalize: merge failed; member left intact for retry"
+                        );
+                    }
                 }
-                // Re-point every edge touching the member onto the canonical node.
-                let member_edges = self.get_entity_relationships(&member)?;
-                for edge in member_edges {
-                    let mut ne = edge.clone();
-                    ne.uuid = Uuid::new_v4();
-                    if ne.from_entity == member {
-                        ne.from_entity = canonical;
-                    }
-                    if ne.to_entity == member {
-                        ne.to_entity = canonical;
-                    }
-                    let _ = self.delete_relationship(&edge.uuid);
-                    // Drop self-loops; add_relationship dedups by (from,to,type) so
-                    // duplicate edges between the same entities merge, not multiply.
-                    if ne.from_entity != ne.to_entity && self.add_relationship(ne).is_ok() {
-                        repointed += 1;
-                    }
-                }
-                let _ = self.delete_entity(&member);
-                merged_nodes += 1;
             }
         }
         // Close the ingest loop: seed the merged surfaces as aliases of their
@@ -3135,6 +3197,390 @@ impl GraphMemory {
             "canonicalize (Splink): merged duplicate mention nodes into canonical entities"
         );
         Ok((merged_nodes, repointed))
+    }
+
+    /// Merge `member` into `canonical`, preserving everything the member carried.
+    ///
+    /// This is the provenance-preserving core of the canonicalize-merge. Order
+    /// is chosen so that a crash or error at ANY point loses nothing:
+    ///
+    /// 1. **Audit row first** — the member's full node plus snapshots of every
+    ///    edge touching it are committed to [`CF_MERGE_AUDIT`] before any
+    ///    destructive write (dual-row current/audit model: the loser becomes a
+    ///    tombstone, never erased in place).
+    /// 2. **Episode provenance re-indexed** — every episode referencing the
+    ///    member has its `entity_refs` rewritten to the canonical UUID and its
+    ///    `entity_episodes` inverted-index row moved, in one atomic
+    ///    `WriteBatch`. No `entity_refs` dangle; `get_episodes_by_entity`
+    ///    keeps working across the merge.
+    /// 3. **Edges repointed atomically** — each edge moves onto the canonical
+    ///    endpoint in a single `WriteBatch` (edge record + `entity_edges` +
+    ///    `entity_pair_index` together); same-type parallel edges fold into
+    ///    the survivor with their provenance merged; member↔canonical edges
+    ///    become self-loops and are dropped (snapshot retained in the audit
+    ///    row). Every result is checked — an error aborts before the
+    ///    destructive write for that edge.
+    /// 4. **Metadata folded** — mention counts sum; labels and attributes
+    ///    union into the canonical node (existing keys win); first-seen /
+    ///    last-seen widen. Canonical salience is left untouched (ranking
+    ///    neutrality; the member's salience survives in the audit row).
+    /// 5. **Member deleted last** — only after all of the above committed.
+    ///
+    /// Returns the number of edges repointed (dedup-collapses included),
+    /// mirroring the historical `canonicalize_entities` accounting. Merging a
+    /// non-existent member is a no-op `Ok(0)`; a missing canonical is an error
+    /// (merging into a void would destroy data).
+    pub fn merge_entity_into(&self, member: &Uuid, canonical: &Uuid) -> Result<usize> {
+        if member == canonical {
+            return Ok(0);
+        }
+        let Some(member_node) = self.get_entity(member)? else {
+            return Ok(0);
+        };
+        let mut canonical_node = self.get_entity(canonical)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "merge target {canonical} does not exist; refusing to merge {member} into a void"
+            )
+        })?;
+
+        // ---- Phase 0 (read-only): collect the member's episode and edge state.
+        let ep_prefix = format!("{member}:");
+        let mut episode_uuids: Vec<Uuid> = Vec::new();
+        let iter = self
+            .db
+            .prefix_iterator_cf(self.entity_episodes_cf(), ep_prefix.as_bytes());
+        for item in iter {
+            let (key, _) = item?;
+            if !key.starts_with(ep_prefix.as_bytes()) {
+                break;
+            }
+            if let Some(ep_str) = std::str::from_utf8(&key)
+                .ok()
+                .and_then(|k| k.split(':').nth(1))
+            {
+                if let Ok(ep_uuid) = Uuid::parse_str(ep_str) {
+                    episode_uuids.push(ep_uuid);
+                }
+            }
+        }
+
+        let edge_prefix = format!("{member}:");
+        let mut edge_uuids: Vec<Uuid> = Vec::new();
+        let iter = self
+            .db
+            .prefix_iterator_cf(self.entity_edges_cf(), edge_prefix.as_bytes());
+        for item in iter {
+            let (key, _) = item?;
+            if !key.starts_with(edge_prefix.as_bytes()) {
+                break;
+            }
+            if let Some(edge_str) = std::str::from_utf8(&key)
+                .ok()
+                .and_then(|k| k.split(':').nth(1))
+            {
+                if let Ok(edge_uuid) = Uuid::parse_str(edge_str) {
+                    edge_uuids.push(edge_uuid);
+                }
+            }
+        }
+        // Snapshot the stored bytes of every member edge for the audit row. A
+        // decode failure aborts here, BEFORE anything is destroyed.
+        let mut edge_snapshots: Vec<RelationshipEdge> = Vec::with_capacity(edge_uuids.len());
+        for edge_uuid in &edge_uuids {
+            if let Some(raw) = self
+                .db
+                .get_cf(self.relationships_cf(), edge_uuid.as_bytes())?
+            {
+                let (edge, _) = decode_relationship_edge(&raw)?;
+                edge_snapshots.push(edge);
+            }
+        }
+
+        // ---- Phase 1: commit the audit row (tombstone) before any destruction.
+        let audit = EntityMergeAudit {
+            member: member_node.clone(),
+            canonical_uuid: *canonical,
+            merged_at: Utc::now(),
+            episode_uuids: episode_uuids.clone(),
+            edges: edge_snapshots,
+        };
+        self.db.put_cf(
+            self.merge_audit_cf(),
+            member.as_bytes(),
+            crate::serialization::encode(&audit)?,
+        )?;
+
+        // ---- Phase 2: re-index episode provenance under the canonical UUID.
+        // One atomic batch: the episode rewrite and both inverted-index moves
+        // commit together, so `entity_refs` and `entity_episodes` can never
+        // disagree.
+        let mut batch = WriteBatch::default();
+        for ep_uuid in &episode_uuids {
+            let old_key = format!("{member}:{ep_uuid}");
+            // A missing episode means the index row is stale: the delete
+            // below scrubs it without a rewrite.
+            if let Some(mut episode) = self.get_episode(ep_uuid)? {
+                let had_canonical = episode.entity_refs.contains(canonical);
+                episode.entity_refs.retain(|r| r != member);
+                if !had_canonical {
+                    episode.entity_refs.push(*canonical);
+                }
+                batch.put_cf(
+                    self.episodes_cf(),
+                    ep_uuid.as_bytes(),
+                    crate::serialization::encode(&episode)?,
+                );
+                batch.put_cf(
+                    self.entity_episodes_cf(),
+                    format!("{canonical}:{ep_uuid}").as_bytes(),
+                    b"1",
+                );
+            }
+            batch.delete_cf(self.entity_episodes_cf(), old_key.as_bytes());
+        }
+        self.db.write(batch)?;
+
+        // ---- Phase 3: repoint edges, one atomic WriteBatch per edge.
+        let mut repointed = 0usize;
+        for edge_uuid in &edge_uuids {
+            match self.repoint_edge_onto(edge_uuid, member, canonical)? {
+                RepointOutcome::Repointed => repointed += 1,
+                RepointOutcome::MergedInto(survivor) => {
+                    tracing::debug!(
+                        edge = %edge_uuid,
+                        survivor = %survivor,
+                        "merge: edge folded into existing same-type edge"
+                    );
+                    repointed += 1;
+                }
+                RepointOutcome::DroppedSelfLoop | RepointOutcome::Missing => {}
+            }
+        }
+        self.prune_entity_if_over_degree(canonical)?;
+
+        // ---- Phase 4: fold the member's metadata into the canonical node.
+        canonical_node.mention_count = canonical_node
+            .mention_count
+            .saturating_add(member_node.mention_count);
+        if member_node.created_at < canonical_node.created_at {
+            canonical_node.created_at = member_node.created_at;
+        }
+        if member_node.last_seen_at > canonical_node.last_seen_at {
+            canonical_node.last_seen_at = member_node.last_seen_at;
+        }
+        canonical_node.is_proper_noun |= member_node.is_proper_noun;
+        for label in &member_node.labels {
+            if !canonical_node.labels.contains(label) {
+                canonical_node.labels.push(label.clone());
+            }
+        }
+        for (k, v) in &member_node.attributes {
+            canonical_node
+                .attributes
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
+        }
+        if canonical_node.summary.is_empty() && !member_node.summary.is_empty() {
+            canonical_node.summary = member_node.summary.clone();
+        }
+        if canonical_node.fine_type.is_none() {
+            canonical_node.fine_type = member_node.fine_type.clone();
+        }
+        let adopted_embedding = if canonical_node.name_embedding.is_none() {
+            canonical_node.name_embedding = member_node.name_embedding.clone();
+            canonical_node.name_embedding.clone()
+        } else {
+            None
+        };
+        self.db.put_cf(
+            self.entities_cf(),
+            canonical.as_bytes(),
+            crate::serialization::encode(&canonical_node)?,
+        )?;
+        if let Some(emb) = adopted_embedding {
+            let mut cache = self.entity_embedding_cache.write();
+            if !cache.iter().any(|(uuid, _)| uuid == canonical) {
+                cache.push((*canonical, emb));
+            }
+        }
+
+        // ---- Phase 5: delete the member node + its name-index entries. By now
+        // it holds no episode rows and no edges; `delete_entity` errors are
+        // propagated, not swallowed.
+        self.delete_entity(member)?;
+        Ok(repointed)
+    }
+
+    /// Atomically repoint one edge from `member` onto `canonical`.
+    ///
+    /// Every mutation for a given outcome — the edge record itself, both
+    /// `entity_edges` rows, and the `entity_pair_index` row — commits in ONE
+    /// `WriteBatch`, so a crash can never leave the edge half-moved, and every
+    /// read/write result is checked: any error returns BEFORE the destructive
+    /// write, leaving the original edge fully intact.
+    ///
+    /// The edge keeps its UUID when moved. If a same-type edge already exists
+    /// between the new endpoints, the member edge folds into it (strengthen +
+    /// provenance merge, mirroring `add_relationship`'s dedup semantics —
+    /// minus the dormant-reactivation anomaly event, because a bookkeeping
+    /// merge is not an observation). A member↔canonical edge becomes a
+    /// self-loop and is removed; its snapshot lives in the audit row the
+    /// caller committed first.
+    fn repoint_edge_onto(
+        &self,
+        edge_uuid: &Uuid,
+        member: &Uuid,
+        canonical: &Uuid,
+    ) -> Result<RepointOutcome> {
+        let Some(raw) = self
+            .db
+            .get_cf(self.relationships_cf(), edge_uuid.as_bytes())?
+        else {
+            // Stale entity_edges row (edge already gone): scrub it.
+            let stale_key = format!("{member}:{edge_uuid}");
+            self.db
+                .delete_cf(self.entity_edges_cf(), stale_key.as_bytes())?;
+            return Ok(RepointOutcome::Missing);
+        };
+        let (mut edge, _) = decode_relationship_edge(&raw)?;
+        let (old_from, old_to) = (edge.from_entity, edge.to_entity);
+        if edge.from_entity == *member {
+            edge.from_entity = *canonical;
+        }
+        if edge.to_entity == *member {
+            edge.to_entity = *canonical;
+        }
+
+        let old_pair_key = Self::typed_pair_key(&old_from, &old_to, &edge.relation_type);
+        let mut batch = WriteBatch::default();
+
+        if edge.from_entity == edge.to_entity {
+            // Member↔canonical edge collapses to a self-loop: remove the edge
+            // and all its index rows together. Its full snapshot (provenance
+            // included) is already in the merge-audit row.
+            batch.delete_cf(self.relationships_cf(), edge_uuid.as_bytes());
+            batch.delete_cf(
+                self.entity_edges_cf(),
+                format!("{old_from}:{edge_uuid}").as_bytes(),
+            );
+            batch.delete_cf(
+                self.entity_edges_cf(),
+                format!("{old_to}:{edge_uuid}").as_bytes(),
+            );
+            batch.delete_cf(self.entity_pair_index_cf(), old_pair_key.as_bytes());
+            self.db.write(batch)?;
+            let _ =
+                self.relationship_count
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                        Some(c.saturating_sub(1))
+                    });
+            return Ok(RepointOutcome::DroppedSelfLoop);
+        }
+
+        // Dedup: a same-type edge may already exist between the new endpoints
+        // (add_relationship's invariant). Fold the member edge into it.
+        let existing = self
+            .find_relationship_between_typed(
+                &edge.from_entity,
+                &edge.to_entity,
+                &edge.relation_type,
+            )?
+            .filter(|e| e.uuid != *edge_uuid);
+        if let Some(mut existing) = existing {
+            let now = Utc::now();
+            let _ = existing.strengthen();
+            existing.last_activated = now;
+            if edge.context.len() > existing.context.len() {
+                existing.context = std::mem::take(&mut edge.context);
+            }
+            if edge.provenance.is_empty() {
+                if let Some(source_episode_id) = edge.source_episode_id {
+                    merge_provenance(
+                        &mut existing.provenance,
+                        ProvenanceRecord {
+                            source_episode_id,
+                            mention_count: 1,
+                            first_observed: now,
+                            last_observed: now,
+                            confidence: edge.entity_confidence,
+                            evidence_span: None,
+                            typed_by: None,
+                        },
+                    );
+                }
+            } else {
+                for record in edge.provenance.drain(..) {
+                    merge_provenance(&mut existing.provenance, record);
+                }
+            }
+            batch.put_cf(
+                self.relationships_cf(),
+                existing.uuid.as_bytes(),
+                crate::serialization::encode(&existing)?,
+            );
+            batch.delete_cf(self.relationships_cf(), edge_uuid.as_bytes());
+            batch.delete_cf(
+                self.entity_edges_cf(),
+                format!("{old_from}:{edge_uuid}").as_bytes(),
+            );
+            batch.delete_cf(
+                self.entity_edges_cf(),
+                format!("{old_to}:{edge_uuid}").as_bytes(),
+            );
+            batch.delete_cf(self.entity_pair_index_cf(), old_pair_key.as_bytes());
+            self.db.write(batch)?;
+            let survivor = existing.uuid;
+            let _ =
+                self.relationship_count
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                        Some(c.saturating_sub(1))
+                    });
+            return Ok(RepointOutcome::MergedInto(survivor));
+        }
+
+        // Plain repoint: rewrite the edge in place (same UUID) and move the
+        // member-side index rows. The far endpoint's entity_edges row keys on
+        // the edge UUID, which is unchanged.
+        let new_pair_key =
+            Self::typed_pair_key(&edge.from_entity, &edge.to_entity, &edge.relation_type);
+        batch.put_cf(
+            self.relationships_cf(),
+            edge_uuid.as_bytes(),
+            crate::serialization::encode(&edge)?,
+        );
+        batch.delete_cf(
+            self.entity_edges_cf(),
+            format!("{member}:{edge_uuid}").as_bytes(),
+        );
+        batch.put_cf(
+            self.entity_edges_cf(),
+            format!("{canonical}:{edge_uuid}").as_bytes(),
+            b"1",
+        );
+        batch.delete_cf(self.entity_pair_index_cf(), old_pair_key.as_bytes());
+        batch.put_cf(
+            self.entity_pair_index_cf(),
+            new_pair_key.as_bytes(),
+            edge_uuid.as_bytes(),
+        );
+        self.db.write(batch)?;
+        Ok(RepointOutcome::Repointed)
+    }
+
+    /// Read the audit row (tombstone) for a merged entity, if one exists.
+    ///
+    /// This is the recovery/inspection surface for canonicalize-merges: given
+    /// the UUID of an entity that no longer resolves, it returns the full
+    /// pre-merge node, the canonical UUID it was folded into, the episodes
+    /// re-indexed, and snapshots of every edge that touched it.
+    pub fn get_merge_audit(&self, member: &Uuid) -> Result<Option<EntityMergeAudit>> {
+        match self.db.get_cf(self.merge_audit_cf(), member.as_bytes())? {
+            Some(value) => {
+                let (audit, _) = crate::serialization::try_decode::<EntityMergeAudit>(&value)?;
+                Ok(Some(audit))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Load lowercase name->UUID index, or migrate from name_index if empty
@@ -9674,6 +10120,388 @@ mod tests {
                 .is_empty(),
             "entity_episodes index entries must be scrubbed when the entity is deleted"
         );
+    }
+
+    /// Build an EntityNode for merge tests (proper noun to bypass stemmed dedup).
+    fn merge_test_entity(name: &str, labels: Vec<EntityLabel>) -> EntityNode {
+        let now = Utc::now();
+        EntityNode {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            labels,
+            created_at: now,
+            last_seen_at: now,
+            mention_count: 1,
+            summary: String::new(),
+            attributes: HashMap::new(),
+            name_embedding: None,
+            salience: 0.5,
+            is_proper_noun: true,
+            selectivity: None,
+            fine_type: None,
+        }
+    }
+
+    /// Build a RelationshipEdge for merge tests, attested by `episode`.
+    fn merge_test_edge(
+        from: Uuid,
+        to: Uuid,
+        relation_type: RelationType,
+        episode: Uuid,
+    ) -> RelationshipEdge {
+        let now = Utc::now();
+        RelationshipEdge {
+            uuid: Uuid::new_v4(),
+            from_entity: from,
+            to_entity: to,
+            relation_type,
+            strength: 0.5,
+            created_at: now,
+            valid_at: now,
+            invalidated_at: None,
+            source_episode_id: Some(episode),
+            context: String::new(),
+            last_activated: now,
+            activation_count: 1,
+            ltp_status: LtpStatus::None,
+            tier: EdgeTier::L1Working,
+            activation_timestamps: None,
+            entity_confidence: None,
+            forman_curvature: None,
+            endpoint_selectivity: None,
+            provenance: vec![ProvenanceRecord {
+                source_episode_id: episode,
+                mention_count: 1,
+                first_observed: now,
+                last_observed: now,
+                confidence: None,
+                evidence_span: None,
+                typed_by: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn merge_preserves_episode_provenance_counts_labels_attributes() {
+        // M3 regression: the canonicalize-merge used to delete_entity the
+        // member, wiping its entity_episodes rows and discarding its mention
+        // counts / labels / attributes, while episodes kept dangling
+        // entity_refs. After merge_entity_into, ALL of it must live on under
+        // the canonical UUID, and the member must be recoverable via its
+        // audit row.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let mut member_node = merge_test_entity("Key Bridge", vec![EntityLabel::Gpe]);
+        member_node
+            .attributes
+            .insert("span".to_string(), "2.6km".to_string());
+        let member = graph.add_entity(member_node.clone()).unwrap();
+        // Second mention of the same surface: mention_count -> 2.
+        assert_eq!(graph.add_entity(member_node).unwrap(), member);
+
+        let canonical = graph
+            .add_entity(merge_test_entity(
+                "Francis Scott Key Bridge",
+                vec![EntityLabel::Facility],
+            ))
+            .unwrap();
+        let other = graph
+            .add_entity(merge_test_entity(
+                "Baltimore Harbor",
+                vec![EntityLabel::Gpe],
+            ))
+            .unwrap();
+
+        let now = Utc::now();
+        let episode_uuid = Uuid::new_v4();
+        graph
+            .add_episode(EpisodicNode {
+                uuid: episode_uuid,
+                name: "collision report".to_string(),
+                content: "the Key Bridge span collapsed".to_string(),
+                valid_at: now,
+                created_at: now,
+                entity_refs: vec![member, other],
+                source: EpisodeSource::Message,
+                metadata: HashMap::new(),
+            })
+            .unwrap();
+
+        let edge_uuid = graph
+            .add_relationship(merge_test_edge(
+                member,
+                other,
+                RelationType::RelatedTo,
+                episode_uuid,
+            ))
+            .unwrap();
+
+        let repointed = graph.merge_entity_into(&member, &canonical).unwrap();
+        assert_eq!(repointed, 1, "the member's single edge must be repointed");
+
+        // Member node is gone from default reads...
+        assert!(graph.get_entity(&member).unwrap().is_none());
+        assert!(graph.get_episodes_by_entity(&member).unwrap().is_empty());
+
+        // ...its episode provenance is re-indexed under the canonical UUID...
+        let episodes = graph.get_episodes_by_entity(&canonical).unwrap();
+        assert_eq!(
+            episodes.len(),
+            1,
+            "episode must be findable via the canonical entity after the merge"
+        );
+        let episode = &episodes[0];
+        assert_eq!(episode.uuid, episode_uuid);
+        assert!(
+            episode.entity_refs.contains(&canonical),
+            "entity_refs must be rewritten to the canonical UUID"
+        );
+        assert!(
+            !episode.entity_refs.contains(&member),
+            "entity_refs must not dangle on the deleted member UUID"
+        );
+        assert!(episode.entity_refs.contains(&other));
+
+        // ...its mention count / labels / attributes fold into the canonical...
+        let canon = graph.get_entity(&canonical).unwrap().unwrap();
+        assert_eq!(
+            canon.mention_count, 3,
+            "mention counts must sum (member 2 + canonical 1), not be discarded"
+        );
+        assert!(canon.labels.contains(&EntityLabel::Facility));
+        assert!(
+            canon.labels.contains(&EntityLabel::Gpe),
+            "member labels must be preserved"
+        );
+        assert_eq!(
+            canon.attributes.get("span").map(String::as_str),
+            Some("2.6km"),
+            "member attributes must be preserved"
+        );
+
+        // ...the edge keeps its UUID, endpoints, and full provenance trail...
+        let edge = graph
+            .get_relationship(&edge_uuid)
+            .unwrap()
+            .expect("repointed edge must keep its UUID");
+        assert_eq!(edge.from_entity, canonical);
+        assert_eq!(edge.to_entity, other);
+        assert_eq!(edge.provenance.len(), 1, "edge provenance must survive");
+        assert_eq!(edge.provenance[0].source_episode_id, episode_uuid);
+        assert!(
+            graph
+                .find_relationship_between_typed(&canonical, &other, &RelationType::RelatedTo)
+                .unwrap()
+                .is_some(),
+            "typed pair index must follow the repointed edge"
+        );
+        assert!(
+            graph
+                .get_entity_relationships(&canonical)
+                .unwrap()
+                .iter()
+                .any(|e| e.uuid == edge_uuid),
+            "entity_edges index must list the edge under the canonical UUID"
+        );
+
+        // ...and the member survives in recoverable form as an audit row.
+        let audit = graph
+            .get_merge_audit(&member)
+            .unwrap()
+            .expect("merge must leave an audit row, not erase the member");
+        assert_eq!(audit.member.uuid, member);
+        assert_eq!(audit.member.name, "Key Bridge");
+        assert_eq!(audit.member.mention_count, 2);
+        assert_eq!(audit.canonical_uuid, canonical);
+        assert_eq!(audit.episode_uuids, vec![episode_uuid]);
+        assert_eq!(audit.edges.len(), 1);
+    }
+
+    #[test]
+    fn merge_folds_parallel_edge_and_merges_provenance() {
+        // When a same-type edge already exists between the canonical and the
+        // far endpoint, the member's edge must fold into it with its
+        // provenance MERGED into the survivor — not silently dropped.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let member = graph
+            .add_entity(merge_test_entity("Dali", vec![EntityLabel::Facility]))
+            .unwrap();
+        let canonical = graph
+            .add_entity(merge_test_entity("MV Dali", vec![EntityLabel::Facility]))
+            .unwrap();
+        let other = graph
+            .add_entity(merge_test_entity("Patapsco River", vec![EntityLabel::Gpe]))
+            .unwrap();
+
+        let ep_a = Uuid::new_v4();
+        let ep_b = Uuid::new_v4();
+        let member_edge = graph
+            .add_relationship(merge_test_edge(
+                member,
+                other,
+                RelationType::RelatedTo,
+                ep_a,
+            ))
+            .unwrap();
+        let canonical_edge = graph
+            .add_relationship(merge_test_edge(
+                canonical,
+                other,
+                RelationType::RelatedTo,
+                ep_b,
+            ))
+            .unwrap();
+
+        let repointed = graph.merge_entity_into(&member, &canonical).unwrap();
+        assert_eq!(repointed, 1, "a dedup-collapse still counts as a repoint");
+
+        assert!(
+            graph.get_relationship(&member_edge).unwrap().is_none(),
+            "member edge must be folded into the survivor"
+        );
+        let survivor = graph
+            .get_relationship(&canonical_edge)
+            .unwrap()
+            .expect("surviving edge must remain");
+        let attesting: Vec<Uuid> = survivor
+            .provenance
+            .iter()
+            .map(|p| p.source_episode_id)
+            .collect();
+        assert!(
+            attesting.contains(&ep_a),
+            "member edge's attestation must be merged into the survivor"
+        );
+        assert!(attesting.contains(&ep_b));
+        assert_eq!(
+            graph.get_entity_relationships(&other).unwrap().len(),
+            1,
+            "far endpoint must see exactly one edge after the collapse"
+        );
+    }
+
+    #[test]
+    fn merge_repoint_failure_leaves_original_edge_intact() {
+        // M6 regression: the old repoint was `let _ = delete(...)` then
+        // `add(...)` — if the add failed the edge and its provenance were
+        // already destroyed. The atomic repoint must fail CLOSED: on any
+        // error, the original edge, its indices, and the member node are all
+        // untouched.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let member = graph
+            .add_entity(merge_test_entity("Selvic", vec![EntityLabel::Facility]))
+            .unwrap();
+        let canonical = graph
+            .add_entity(merge_test_entity("MV Selvic", vec![EntityLabel::Facility]))
+            .unwrap();
+        let other = graph
+            .add_entity(merge_test_entity("Fort McHenry", vec![EntityLabel::Gpe]))
+            .unwrap();
+
+        let ep = Uuid::new_v4();
+        let member_edge = graph
+            .add_relationship(merge_test_edge(member, other, RelationType::RelatedTo, ep))
+            .unwrap();
+        let canonical_edge = graph
+            .add_relationship(merge_test_edge(
+                canonical,
+                other,
+                RelationType::RelatedTo,
+                ep,
+            ))
+            .unwrap();
+
+        // Corrupt the stored bytes of the existing canonical↔other edge, so
+        // the dedup lookup inside the repoint fails (the "add side" of the
+        // old delete-then-add sequence).
+        let relationships_cf = graph.get_db().cf_handle(CF_RELATIONSHIPS).unwrap();
+        graph
+            .get_db()
+            .put_cf(relationships_cf, canonical_edge.as_bytes(), [0xde, 0xad])
+            .unwrap();
+
+        let err = graph.merge_entity_into(&member, &canonical);
+        assert!(err.is_err(), "merge must propagate the repoint failure");
+
+        // Nothing may be lost: member node, its edge, and every index row
+        // must be exactly as they were before the failed merge.
+        assert!(
+            graph.get_entity(&member).unwrap().is_some(),
+            "member must survive a failed merge"
+        );
+        let edge = graph
+            .get_relationship(&member_edge)
+            .unwrap()
+            .expect("edge must survive when the repoint cannot complete");
+        assert_eq!(edge.from_entity, member, "endpoints must be unchanged");
+        assert_eq!(edge.to_entity, other);
+        assert_eq!(edge.provenance.len(), 1, "provenance must be unchanged");
+        assert!(
+            graph
+                .get_entity_relationships(&member)
+                .unwrap()
+                .iter()
+                .any(|e| e.uuid == member_edge),
+            "entity_edges index must still list the edge under the member"
+        );
+        // The audit tombstone was committed BEFORE any destructive step, so
+        // even a mid-merge crash leaves the member fully recoverable.
+        assert!(graph.get_merge_audit(&member).unwrap().is_some());
+    }
+
+    #[test]
+    fn merge_drops_member_canonical_edge_but_audits_it() {
+        // An edge BETWEEN the member and the canonical becomes a self-loop
+        // after the repoint and is removed from the live graph — but its full
+        // snapshot (provenance included) must survive in the audit row.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+
+        let member = graph
+            .add_entity(merge_test_entity("Curtis Bay", vec![EntityLabel::Gpe]))
+            .unwrap();
+        let canonical = graph
+            .add_entity(merge_test_entity(
+                "Curtis Bay Terminal",
+                vec![EntityLabel::Gpe],
+            ))
+            .unwrap();
+
+        let ep = Uuid::new_v4();
+        let loop_edge = graph
+            .add_relationship(merge_test_edge(
+                member,
+                canonical,
+                RelationType::RelatedTo,
+                ep,
+            ))
+            .unwrap();
+
+        let repointed = graph.merge_entity_into(&member, &canonical).unwrap();
+        assert_eq!(repointed, 0, "a dropped self-loop is not a repoint");
+
+        assert!(
+            graph.get_relationship(&loop_edge).unwrap().is_none(),
+            "member↔canonical edge must not survive as a self-loop"
+        );
+        assert!(
+            graph
+                .get_entity_relationships(&canonical)
+                .unwrap()
+                .is_empty(),
+            "canonical must not carry a self-loop or dangling index row"
+        );
+
+        let audit = graph.get_merge_audit(&member).unwrap().unwrap();
+        assert_eq!(audit.edges.len(), 1, "dropped edge must be audited");
+        assert_eq!(audit.edges[0].uuid, loop_edge);
+        assert_eq!(audit.edges[0].provenance.len(), 1);
+        assert_eq!(audit.edges[0].provenance[0].source_episode_id, ep);
     }
 
     #[test]
