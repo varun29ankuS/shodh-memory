@@ -111,7 +111,17 @@ pub async fn get_session(
         reason: format!("Invalid UUID: {e}"),
     })?;
     let sid = SessionId(uuid);
-    let session = state.session_store.get_session(&sid);
+    // Confine the lookup to the caller's own sessions. The session store is
+    // keyed by SessionId alone, so without this filter any authenticated caller
+    // (including a user-scoped API key confined to `req.user_id` by
+    // scope_enforcement_middleware) could read another user's session by its
+    // UUID. Filtering to the required, already-validated `user_id` makes the
+    // scope guarantee hold for this route and matches the endpoint's intent
+    // ("get MY session"); a non-owned id reads as absent, leaking no existence.
+    let session = state
+        .session_store
+        .get_session(&sid)
+        .filter(|session| session.user_id == req.user_id);
 
     Ok(Json(GetSessionResponse {
         success: session.is_some(),
@@ -695,5 +705,38 @@ mod tests {
             "default limit must be unchanged for existing callers"
         );
         assert_eq!(body["total"], 105);
+    }
+
+    /// GET /api/sessions/{session_id} must only return a session to its owner.
+    /// Regression for the cross-user read: the store is keyed by SessionId
+    /// alone, so before the ownership filter a caller naming their own valid
+    /// user_id could still fetch another user's session by its UUID.
+    #[tokio::test]
+    async fn get_session_confined_to_owner() {
+        let harness = TestHarness::new();
+        // Owner starts a session; note its UUID.
+        let owner_sid = harness.manager.session_store.start_session("owner-user");
+        let sid_str = owner_sid.0.to_string();
+
+        // The owner can read it.
+        let req = test_helpers::get(&format!("/api/sessions/{sid_str}?user_id=owner-user"));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true, "owner must read their own session");
+        assert!(!body["session"].is_null());
+
+        // A different user naming the same UUID must NOT read it — the response
+        // is indistinguishable from a genuinely missing session (no oracle).
+        let req = test_helpers::get(&format!("/api/sessions/{sid_str}?user_id=other-user"));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["success"], false,
+            "a non-owner must not read another user's session by UUID"
+        );
+        assert!(
+            body["session"].is_null(),
+            "the foreign session must not be leaked in the body"
+        );
     }
 }

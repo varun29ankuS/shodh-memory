@@ -1021,6 +1021,48 @@ mod tests {
     }
 
     #[test]
+    fn same_key_bound_to_two_users_resolves_first_in_env_order() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_auth_env();
+        // The same key string bound to two different users is a config mistake.
+        // Resolution is deterministic: entries are parsed in declaration order
+        // and first match wins, so the FIRST-declared binding is authoritative.
+        env::set_var("SHODH_SCOPED_API_KEYS", "alice:shared, bob:shared");
+
+        assert_eq!(
+            resolve_api_key("shared").unwrap(),
+            AuthIdentity::User("alice".to_string()),
+            "first-declared binding must win deterministically"
+        );
+
+        clear_auth_env();
+    }
+
+    #[test]
+    fn malformed_scoped_entry_falls_back_to_unscoped_when_key_also_unscoped() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_auth_env();
+        // Compound misconfiguration: the operator tried to scope key "K" but
+        // omitted the ':' separator (so the scoped entry is dropped), AND the
+        // same key is also present in the unscoped SHODH_API_KEYS list. The key
+        // then authenticates as Unscoped (full access) — a fail-OPEN relative to
+        // the operator's intent. A malformed scoped entry only fails closed when
+        // the key is NOT independently present in an unscoped source. This test
+        // pins the actual behavior so any future change to it is deliberate.
+        env::set_var("SHODH_SCOPED_API_KEYS", "K"); // no ':' → skipped
+        env::set_var("SHODH_API_KEYS", "K"); // same key, unscoped
+
+        assert_eq!(
+            resolve_api_key("K").unwrap(),
+            AuthIdentity::Unscoped,
+            "a key present in the unscoped list resolves Unscoped even if its \
+             scoped entry was malformed and dropped"
+        );
+
+        clear_auth_env();
+    }
+
+    #[test]
     fn scoped_keys_included_in_configured_api_keys() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_auth_env();
