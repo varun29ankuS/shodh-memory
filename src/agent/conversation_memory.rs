@@ -66,7 +66,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 
-use rig_core::completion::{AssistantContent, Message, ToolResultContent, UserContent};
+use rig_core::completion::message::{ToolResultContent, UserContent};
+use rig_core::completion::{AssistantContent, Message};
 use rig_core::memory::{ConversationMemory, MemoryError};
 use rig_core::wasm_compat::WasmBoxedFuture;
 
@@ -131,7 +132,10 @@ fn render_assistant_content(item: &AssistantContent) -> String {
     match item {
         AssistantContent::Text(text) => text.text.clone(),
         AssistantContent::ToolCall(call) => {
-            format!("[tool_call {}({})]", call.function.name, call.function.arguments)
+            format!(
+                "[tool_call {}({})]",
+                call.function.name, call.function.arguments
+            )
         }
         AssistantContent::Reasoning(reasoning) => {
             format!("[reasoning]\n{}", reasoning.display_text())
@@ -264,12 +268,16 @@ impl ConversationMemory for ShodhConversationMemory {
 
                 let mut messages = Vec::with_capacity(stored.len());
                 for mem in &stored {
-                    let raw = mem.experience.metadata.get(MESSAGE_JSON_KEY).ok_or_else(|| {
-                        MemoryError::Internal(format!(
-                            "conversation memory {} is missing its {} metadata field",
-                            mem.id.0, MESSAGE_JSON_KEY
-                        ))
-                    })?;
+                    let raw = mem
+                        .experience
+                        .metadata
+                        .get(MESSAGE_JSON_KEY)
+                        .ok_or_else(|| {
+                            MemoryError::Internal(format!(
+                                "conversation memory {} is missing its {} metadata field",
+                                mem.id.0, MESSAGE_JSON_KEY
+                            ))
+                        })?;
                     let message: Message = serde_json::from_str(raw)
                         .map_err(|e| MemoryError::backend(e.to_string()))?;
                     messages.push(message);
@@ -321,10 +329,10 @@ impl ConversationMemory for ShodhConversationMemory {
                     .map_err(|e| MemoryError::backend(e.to_string()))?;
 
                 let message_count = messages.len();
-                let mut next_seq = existing.len() as u32;
+                let starting_seq = existing.len() as u32;
                 let mut preceding_memory_id = existing.last().map(|m| m.id.0.to_string());
 
-                for message in messages {
+                for (next_seq, message) in (starting_seq..).zip(messages) {
                     let role = role_of(&message);
                     let rendered = render_plain_text(&message);
                     // Content-hash dedup guard — see module docs. Prefixing with the
@@ -365,7 +373,6 @@ impl ConversationMemory for ShodhConversationMemory {
                         .map_err(|e| MemoryError::backend(e.to_string()))?;
 
                     preceding_memory_id = Some(memory_id.0.to_string());
-                    next_seq += 1;
                 }
 
                 tracing::debug!(
@@ -432,5 +439,179 @@ impl ConversationMemory for ShodhConversationMemory {
 
             result
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::{MemoryConfig, MemorySystem};
+    use rig_core::completion::message::{Text, ToolCall, ToolFunction, ToolResult};
+    use rig_core::OneOrMany;
+
+    /// Build a fresh on-disk `MemorySystem` rooted at `storage_path`. Returns the config too,
+    /// so the caller can reopen the *same* storage path after dropping the first instance —
+    /// that reopen is what makes the round-trip test below an actual restart simulation
+    /// instead of just exercising the in-process `MemorySystem` handle.
+    fn config_at(storage_path: std::path::PathBuf) -> MemoryConfig {
+        MemoryConfig {
+            storage_path,
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 1,
+            importance_threshold: 0.0,
+        }
+    }
+
+    fn open(config: &MemoryConfig) -> Arc<RwLock<MemorySystem>> {
+        Arc::new(RwLock::new(
+            MemorySystem::new(config.clone(), None).expect("open memory system"),
+        ))
+    }
+
+    /// A tool-call/tool-result pair — the case where a lossy text render and the exact stored
+    /// JSON diverge. `AssistantContent` is `#[serde(untagged)]` (rig-core message.rs), which
+    /// is the one shape where a deserialize could plausibly pick the wrong variant, so this
+    /// is worth exercising for real rather than assuming it round-trips.
+    fn tool_call_turn() -> (Message, Message) {
+        let call = Message::Assistant {
+            id: None,
+            content: OneOrMany::one(AssistantContent::ToolCall(ToolCall::new(
+                "call-1".to_string(),
+                ToolFunction {
+                    name: "get_weather".to_string(),
+                    arguments: serde_json::json!({"city": "Madrid"}),
+                },
+            ))),
+        };
+        let result = Message::User {
+            content: OneOrMany::one(UserContent::ToolResult(ToolResult {
+                id: "call-1".to_string(),
+                call_id: None,
+                content: OneOrMany::one(ToolResultContent::Text(Text::new("18C, partly cloudy"))),
+            })),
+        };
+        (call, result)
+    }
+
+    /// Without persistence, `load()` after a process restart would return nothing — the
+    /// whole point of `ShodhConversationMemory` over rig's `InMemoryConversationMemory`
+    /// default. This test fails against an in-memory-only backend and passes only if
+    /// conversation turns actually survive a dropped-and-reopened `MemorySystem` pointed at
+    /// the same on-disk path.
+    ///
+    /// Asserts full `Message` equality (rig-core derives `PartialEq` on it), not just
+    /// rendered text — the module docs promise tool calls, structured content, and
+    /// provider-specific fields round-trip through the stored JSON verbatim, and a naive
+    /// implementation that only persisted `render_plain_text()` output would pass a
+    /// text-only comparison but fail this one.
+    #[tokio::test]
+    async fn conversation_round_trips_across_a_simulated_restart() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = config_at(temp_dir.path().to_path_buf());
+
+        let (tool_call, tool_result) = tool_call_turn();
+        let expected = vec![
+            Message::user("What is the capital of France?"),
+            Message::assistant("The capital of France is Paris."),
+            Message::user("And the weather in Madrid?"),
+            tool_call,
+            tool_result,
+            Message::assistant("It's 18C and partly cloudy in Madrid."),
+        ];
+
+        // "Before restart": open storage, append every turn, then drop every handle to it.
+        // `MemorySystem`'s `Drop` impl flushes the RocksDB WAL (see mod.rs), so nothing here
+        // relies on an explicit shutdown call the real server would also not always get.
+        {
+            let memory = open(&config);
+            let conv_memory = ShodhConversationMemory::new(memory, "test-user");
+
+            let before = conv_memory.load("conv-1").await.expect("initial load");
+            assert!(before.is_empty(), "fresh conversation must start empty");
+
+            conv_memory
+                .append("conv-1", expected[0..2].to_vec())
+                .await
+                .expect("append turn 1");
+            conv_memory
+                .append("conv-1", expected[2..5].to_vec())
+                .await
+                .expect("append turn 2 (tool call + tool result)");
+            conv_memory
+                .append("conv-1", expected[5..6].to_vec())
+                .await
+                .expect("append turn 3");
+            // `memory` and `conv_memory` are dropped here, at end of scope.
+        }
+
+        // "After restart": open a brand new `MemorySystem` against the same on-disk path —
+        // nothing carries over in-process; every byte must come back off disk.
+        let reopened_config = config;
+        let memory_after_restart = open(&reopened_config);
+        let conv_memory_after_restart =
+            ShodhConversationMemory::new(memory_after_restart, "test-user");
+
+        let loaded = conv_memory_after_restart
+            .load("conv-1")
+            .await
+            .expect("load after restart");
+
+        // Compare against `expected` *after* an independent `serde_json` round-trip, not the
+        // freshly-constructed value. `rig_core::completion::message::Text::additional_params`
+        // is `#[serde(flatten)] Option<serde_json::Value>` — serde_json's flatten mechanism
+        // always deserializes an absent flattened remainder as `Some(Object {})`, never `None`
+        // (confirmed empirically: this failed on first write when compared against the
+        // freshly-constructed `expected`, before this normalization was added). That is a
+        // property of `Message`'s own serde shape, present for *any* JSON-based storage of
+        // it, not something this module introduces or is responsible for correcting. What
+        // this module owns — and what this assertion actually verifies — is that `load()`
+        // reproduces exactly what an independent `serde_json` round-trip of the original
+        // message produces: no additional loss on top of `Message`'s own serde behavior.
+        let expected_via_json: Vec<Message> = expected
+            .iter()
+            .map(|m| {
+                let json = serde_json::to_string(m).expect("serialize expected message");
+                serde_json::from_str(&json).expect("deserialize expected message")
+            })
+            .collect();
+
+        assert_eq!(
+            loaded, expected_via_json,
+            "every message, including the tool call/result pair, must round-trip through a \
+             restart exactly as it would through a bare serde_json round-trip — no additional \
+             loss from storage"
+        );
+    }
+
+    /// `clear()` must remove everything for a conversation, including the episode index rows
+    /// (verified indirectly: a `load()` immediately after `clear()` must come back empty, not
+    /// error or partially populated).
+    #[tokio::test]
+    async fn clear_removes_all_messages_for_the_conversation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = config_at(temp_dir.path().to_path_buf());
+        let memory = open(&config);
+        let conv_memory = ShodhConversationMemory::new(memory, "test-user");
+
+        conv_memory
+            .append("conv-a", vec![Message::user("hello")])
+            .await
+            .expect("append");
+        conv_memory
+            .append("conv-b", vec![Message::user("hi there")])
+            .await
+            .expect("append other conversation");
+
+        conv_memory.clear("conv-a").await.expect("clear");
+
+        assert!(conv_memory.load("conv-a").await.expect("load a").is_empty());
+        assert_eq!(
+            conv_memory.load("conv-b").await.expect("load b").len(),
+            1,
+            "clearing one conversation must not touch another"
+        );
     }
 }

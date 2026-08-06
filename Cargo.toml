@@ -227,12 +227,57 @@ zenoh = { version = "1.1", default-features = false, features = ["transport_tcp"
 # `rig-fastembed` -> `fastembed` -> `ort` (ONNX Runtime, an ML inference runtime) at a version
 # that conflicts with this crate's own `ort` pin and would double our embedding-runtime
 # footprint even if it didn't conflict. `rig-core` alone carries none of that — confirmed via
-# `cargo tree --features agent-harness -p rig-core`: only reqwest/tokio/serde/tracing/schemars
-# plus rustls's TLS stack (rustls itself, plus its aws-lc-rs crypto *library* — not an AWS
-# cloud SDK). No candle, no tokenizers, no onnx/ort, no vector-store crate. Default features
-# only (reqwest, derive, rustls) — no provider feature flags enabled here.
+# `cargo tree --features agent-harness` (see below): only reqwest/tokio/serde/tracing/schemars.
+# No candle, no tokenizers, no onnx/ort, no vector-store crate. Default features only
+# (reqwest, derive, rustls) — no provider feature flags enabled here.
 #
-# Re-run that `cargo tree` command by hand before ever bumping this pin.
+# --- aws-lc-rs / aws-lc-sys: investigated, unavoidable while `rustls` is enabled ---
+# Enabling this feature adds `aws-lc-rs` + `aws-lc-sys` to Cargo.lock. `aws-lc-sys` has a
+# non-optional `[build-dependencies.cmake]` (its own Cargo.toml) and compiles a C/assembly
+# library, which is a real build-toolchain cost on air-gapped/reproducible edge builds. This
+# was investigated, not accepted blindly:
+#   - Our own `reqwest` (0.12, above) already uses rustls — but its `rustls-tls` feature
+#     resolves to reqwest 0.12's `__rustls-ring` internal feature, i.e. the `ring` crypto
+#     provider, not aws-lc-rs. `ring` was already in this project's dependency graph before
+#     this feature existed.
+#   - `rig-core`'s `rustls` feature (part of its `default`) enables `reqwest/rustls` on ITS
+#     `reqwest = "0.13"` dependency. reqwest 0.13's `rustls` feature hardcodes
+#     `__rustls-aws-lc-rs` — confirmed by reading reqwest 0.13.4's published Cargo.toml
+#     (`grep ring` on it returns nothing at all: the `ring`-backed rustls feature that existed
+#     in reqwest 0.12 was removed entirely in the 0.13 series). There is no cargo-feature path
+#     to make rig-core's HTTP client use `ring` instead — that choice is baked into reqwest
+#     0.13 upstream, not exposed as a selectable feature.
+#   - Because our own reqwest 0.12 and rig-core's reqwest 0.13 both transitively depend on the
+#     *same* `rustls`/`rustls-webpki` crate versions, Cargo's feature unification enables BOTH
+#     `ring` and `aws-lc-rs` on that one shared `rustls` node — confirmed in
+#     `cargo tree --features agent-harness`, where a single `rustls v0.23.35` node lists both
+#     `aws-lc-rs` and `ring` as direct dependencies.
+#   - The only alternative rig-core exposes is its `native-tls` feature (OS-native TLS:
+#     SChannel/Secure Transport/OpenSSL) instead of `rustls`. Rejected: it would put a SECOND,
+#     different TLS/cert-verification stack into the binary alongside the `ring`-backed rustls
+#     stack our own `reqwest` already uses, instead of reusing it, and on this project's
+#     primary edge targets (Raspberry Pi / drone Linux-ARM, per the crate description above)
+#     `native-tls` means either dynamically linking system OpenSSL (dev headers must be
+#     preinstalled — worse for air-gapped builds than a vendored cmake build) or OpenSSL's
+#     `vendored` feature (an even larger C codebase than aws-lc, built with OpenSSL's own
+#     Configure+make, not cmake). Neither is a better trade for this project's offline/edge
+#     profile than accepting aws-lc-sys.
+#   - Conclusion: kept `rustls` (default). The cmake build-toolchain requirement is real but
+#     scoped entirely to this opt-in, non-`default` feature — it is not paid by the edge-device
+#     default build.
+#
+# --- jni / jni-sys / jni-macros / jni-sys-macros: present in Cargo.lock, NOT compiled here ---
+# These come from `rustls-platform-verifier` (pulled in by reqwest 0.13's `rustls` feature,
+# for OS-native certificate-store verification). Reading rustls-platform-verifier 0.7.0's
+# Cargo.toml shows its `jni` dependency is declared under
+# `[target.'cfg(target_os = "android")'.dependencies.jni]` — Android-only. Cargo.lock records
+# the full cross-platform dependency graph regardless of host, so these names appear there,
+# but `cargo tree --features agent-harness` (which resolves for the current host target) does
+# NOT list `jni` anywhere in the rig-core subtree on Windows, Linux, or macOS. Confirmed: zero
+# build-time or binary-size cost on every platform this project actually ships to.
+#
+# Re-run `cargo tree --features agent-harness` by hand before ever bumping this pin, and
+# re-check both investigations above if the pin moves to a new rig-core/reqwest major version.
 rig-core = { version = "=0.41.0", optional = true }
 
 # LLM-based query parsing (optional - heavy dependency)

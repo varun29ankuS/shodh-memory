@@ -393,9 +393,8 @@ impl ContinualHarnessStore {
     /// show a model.
     pub fn list_entries(&self, scope: &str, kind: HarnessKind) -> Result<Vec<HarnessEntry>> {
         let memory_guard = self.memory.read();
-        let stored = memory_guard.advanced_search(SearchCriteria::ByTags(vec![compound_tag(
-            scope, kind,
-        )]))?;
+        let stored = memory_guard
+            .advanced_search(SearchCriteria::ByTags(vec![compound_tag(scope, kind)]))?;
         let mut entries = stored
             .iter()
             .map(harness_entry_from_memory)
@@ -430,10 +429,7 @@ impl ContinualHarnessStore {
             experience_type: ExperienceType::Learning,
             content: description.to_string(),
             metadata,
-            tags: vec![
-                "shodh-harness-event".to_string(),
-                event_scope_tag(scope),
-            ],
+            tags: vec!["shodh-harness-event".to_string(), event_scope_tag(scope)],
             ..Default::default()
         };
 
@@ -454,9 +450,8 @@ impl ContinualHarnessStore {
         limit: usize,
     ) -> Result<(Vec<RefinementEvent>, usize)> {
         let memory_guard = self.memory.read();
-        let stored = memory_guard.advanced_search(SearchCriteria::ByTags(vec![event_scope_tag(
-            scope,
-        )]))?;
+        let stored =
+            memory_guard.advanced_search(SearchCriteria::ByTags(vec![event_scope_tag(scope)]))?;
 
         let mut events = stored
             .iter()
@@ -472,7 +467,7 @@ impl ContinualHarnessStore {
             .map(refinement_event_from_memory)
             .collect::<Result<Vec<_>>>()?;
 
-        events.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
         let total = events.len();
         events.truncate(limit);
         Ok((events, total))
@@ -509,8 +504,8 @@ impl ContinualHarnessStore {
 
         // Exact candidate set for (scope, kind) — the source of truth for what belongs to
         // this kind. `recall()` below is used purely for ranking, not for scoping.
-        let candidates =
-            memory_guard.advanced_search(SearchCriteria::ByTags(vec![compound_tag(scope, kind)]))?;
+        let candidates = memory_guard
+            .advanced_search(SearchCriteria::ByTags(vec![compound_tag(scope, kind)]))?;
         let total_candidates = candidates.len();
 
         if total_candidates == 0 {
@@ -591,11 +586,10 @@ fn harness_entry_from_memory(mem: &Memory) -> Result<HarnessEntry> {
         .external_id
         .clone()
         .ok_or_else(|| anyhow::anyhow!("harness memory {} is missing external_id", mem.id.0))?;
-    let kind_str = mem
-        .experience
-        .metadata
-        .get(META_KIND)
-        .ok_or_else(|| anyhow::anyhow!("harness memory {id} is missing {META_KIND} metadata"))?;
+    let kind_str =
+        mem.experience.metadata.get(META_KIND).ok_or_else(|| {
+            anyhow::anyhow!("harness memory {id} is missing {META_KIND} metadata")
+        })?;
     let kind = HarnessKind::parse(kind_str)?;
     let scope = mem
         .experience
@@ -671,4 +665,306 @@ fn refinement_event_from_memory(mem: &Memory) -> Result<RefinementEvent> {
         description: mem.experience.content.clone(),
         created_at: mem.created_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::{MemoryConfig, MemorySystem};
+
+    fn setup() -> (ContinualHarnessStore, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 1,
+            importance_threshold: 0.0,
+        };
+        let system = MemorySystem::new(config, None).expect("memory system");
+        let memory = Arc::new(RwLock::new(system));
+        (ContinualHarnessStore::new(memory, "test-user"), temp_dir)
+    }
+
+    /// `updated_at` must reflect the most recent revision, and re-upserting an existing id
+    /// must update the entry in place (same tag-index row), not create a second one. This is
+    /// the storage round-trip the module docs claim: `history`/`version` must survive
+    /// `update()` -> RocksDB serialize -> `find_by_external_id` -> hydrate, not just live in
+    /// the in-process `Memory` returned directly from `upsert()`.
+    #[test]
+    fn upsert_updates_version_and_updated_at_in_place() {
+        let (store, _temp_dir) = setup();
+
+        let (id, was_update) = store
+            .upsert_entry(HarnessEntryDraft {
+                id: None,
+                kind: HarnessKind::Skill,
+                scope: "test-scope".to_string(),
+                title: "Deploy Runbook".to_string(),
+                path: None,
+                content: "Step 1: drain traffic. Step 2: restart the service.".to_string(),
+            })
+            .expect("initial upsert");
+        assert!(!was_update, "first upsert of a fresh id must be a create");
+
+        let first = store
+            .get_entry(&id)
+            .expect("get after create")
+            .expect("entry exists after create");
+        assert_eq!(first.version, 1);
+        assert_eq!(
+            first.content,
+            "Step 1: drain traffic. Step 2: restart the service."
+        );
+
+        // Re-upsert the SAME id with new content — this must go through `update_content`'s
+        // history-push path (mod.rs), not create a second memory.
+        let (same_id, was_update) = store
+            .upsert_entry(HarnessEntryDraft {
+                id: Some(id.clone()),
+                kind: HarnessKind::Skill,
+                scope: "test-scope".to_string(),
+                title: "Deploy Runbook".to_string(),
+                path: None,
+                content: "Step 1: drain traffic. Step 2: restart the service. Step 3: verify \
+                          health checks pass."
+                    .to_string(),
+            })
+            .expect("second upsert");
+        assert_eq!(
+            same_id, id,
+            "upserting an existing id must not mint a new one"
+        );
+        assert!(was_update, "second upsert of the same id must be an update");
+
+        let second = store
+            .get_entry(&id)
+            .expect("get after update")
+            .expect("entry exists after update");
+        assert_eq!(second.version, 2, "version must increment on update");
+        assert_eq!(
+            second.content,
+            "Step 1: drain traffic. Step 2: restart the service. Step 3: verify health checks \
+             pass.",
+            "get_entry must reflect the updated content, not the original"
+        );
+        assert!(
+            second.updated_at > first.updated_at,
+            "updated_at must advance past the create timestamp (first={:?}, second={:?})",
+            first.updated_at,
+            second.updated_at
+        );
+
+        // Confirm the update happened IN PLACE: the compound tag index for this (scope, kind)
+        // must still resolve to exactly one entry, not two.
+        let entries = store
+            .list_entries("test-scope", HarnessKind::Skill)
+            .expect("list entries");
+        assert_eq!(
+            entries.len(),
+            1,
+            "re-upserting an existing id must not accumulate a second tag-index row"
+        );
+
+        let rendered = store
+            .render_for_prompt(
+                "test-scope",
+                "deploy runbook health checks",
+                RenderBudget::default(),
+            )
+            .expect("render_for_prompt");
+        let skill = rendered
+            .kinds
+            .iter()
+            .find(|k| k.kind == HarnessKind::Skill)
+            .expect("skill kind rendered");
+        assert_eq!(
+            skill.total_candidates, 1,
+            "render_for_prompt's candidate count must also see one entry, not two"
+        );
+    }
+
+    /// The core bet under test: `render_for_prompt` ranks by relevance to the query, not by
+    /// `(path, title, id)`. These three entries are constructed so alphabetical title order
+    /// (Aardvark, Midway, Zenith) is the *exact reverse* of their true relevance order to the
+    /// query — a `sort_by(|a, b| a.title.cmp(&b.title))` implementation, or prime-agent's
+    /// `localeCompare`-then-`slice(0, 6)`, would show Aardvark first. A relevance-ranked
+    /// implementation must show Zenith first.
+    #[tokio::test]
+    async fn render_for_prompt_orders_by_relevance_not_alphabetically() {
+        let (store, _temp_dir) = setup();
+
+        // Alphabetically first, semantically unrelated to the query — the trap for any
+        // sort()-based selection.
+        store
+            .upsert_entry(HarnessEntryDraft {
+                id: None,
+                kind: HarnessKind::Skill,
+                scope: "test-scope".to_string(),
+                title: "Aardvark Sourdough Bread Baking Guide".to_string(),
+                path: None,
+                content: "Sourdough bread baking requires a healthy starter culture, careful \
+                          hydration ratios, and a long slow proof in a warm kitchen before you \
+                          shape and bake the loaf."
+                    .to_string(),
+            })
+            .expect("upsert aardvark");
+
+        // Alphabetically second, loosely on-topic (shares a couple of query terms) —
+        // moderate relevance.
+        store
+            .upsert_entry(HarnessEntryDraft {
+                id: None,
+                kind: HarnessKind::Skill,
+                scope: "test-scope".to_string(),
+                title: "Midway Container Networking Overview".to_string(),
+                path: None,
+                content: "Container networking in a Kubernetes cluster relies on a CNI plugin \
+                          to assign pod IP addresses and route traffic between nodes."
+                    .to_string(),
+            })
+            .expect("upsert midway");
+
+        // Alphabetically last, directly and repeatedly on-topic — must rank first.
+        store
+            .upsert_entry(HarnessEntryDraft {
+                id: None,
+                kind: HarnessKind::Skill,
+                scope: "test-scope".to_string(),
+                title: "Zenith Kubernetes Horizontal Pod Autoscaler Deep Dive".to_string(),
+                path: None,
+                content: "Kubernetes horizontal pod autoscaler configuration lets you set a CPU \
+                          utilization threshold so the autoscaler adjusts pod replica count \
+                          automatically; tune the target CPU threshold and configuration \
+                          parameters for horizontal pod autoscaling."
+                    .to_string(),
+            })
+            .expect("upsert zenith");
+
+        let rendered = store
+            .render_for_prompt(
+                "test-scope",
+                "kubernetes horizontal pod autoscaler cpu threshold configuration",
+                RenderBudget { per_kind_limit: 3 },
+            )
+            .expect("render_for_prompt");
+
+        let skill = rendered
+            .kinds
+            .iter()
+            .find(|k| k.kind == HarnessKind::Skill)
+            .expect("skill kind rendered");
+
+        assert_eq!(skill.total_candidates, 3);
+        for entry in &skill.shown {
+            println!(
+                "relevance_score={:.4} title={:?}",
+                entry.relevance_score, entry.title
+            );
+        }
+        let shown_titles: Vec<&str> = skill.shown.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(
+            shown_titles,
+            vec![
+                "Zenith Kubernetes Horizontal Pod Autoscaler Deep Dive",
+                "Midway Container Networking Overview",
+                "Aardvark Sourdough Bread Baking Guide",
+            ],
+            "relevance order must be Zenith > Midway > Aardvark — the exact reverse of \
+             alphabetical title order (Aardvark, Midway, Zenith); a sort()-based selection \
+             would fail this assertion"
+        );
+
+        // Relevance scores must actually be monotonically decreasing in the shown order —
+        // not just an accidental id/insertion-order match.
+        assert!(
+            skill.shown[0].relevance_score >= skill.shown[1].relevance_score,
+            "Zenith's score ({}) must be >= Midway's ({})",
+            skill.shown[0].relevance_score,
+            skill.shown[1].relevance_score
+        );
+        assert!(
+            skill.shown[1].relevance_score >= skill.shown[2].relevance_score,
+            "Midway's score ({}) must be >= Aardvark's ({})",
+            skill.shown[1].relevance_score,
+            skill.shown[2].relevance_score
+        );
+    }
+
+    /// When the budget truncates, the render must say so honestly: the true total, and how
+    /// many were left out — never a silently-truncated list with no indication more exist.
+    #[tokio::test]
+    async fn render_for_prompt_reports_truncation_honestly_when_budget_is_smaller_than_corpus() {
+        let (store, _temp_dir) = setup();
+
+        for (title, content) in [
+            (
+                "Aardvark Sourdough Bread Baking Guide",
+                "Sourdough bread baking requires a healthy starter culture and a long slow \
+                 proof before you shape and bake the loaf.",
+            ),
+            (
+                "Midway Container Networking Overview",
+                "Container networking in a Kubernetes cluster relies on a CNI plugin to assign \
+                 pod IP addresses and route traffic between nodes.",
+            ),
+            (
+                "Zenith Kubernetes Horizontal Pod Autoscaler Deep Dive",
+                "Kubernetes horizontal pod autoscaler configuration lets you set a CPU \
+                 utilization threshold so the autoscaler adjusts pod replica count \
+                 automatically; tune the target CPU threshold for horizontal pod autoscaling.",
+            ),
+        ] {
+            store
+                .upsert_entry(HarnessEntryDraft {
+                    id: None,
+                    kind: HarnessKind::Skill,
+                    scope: "test-scope".to_string(),
+                    title: title.to_string(),
+                    path: None,
+                    content: content.to_string(),
+                })
+                .expect("upsert");
+        }
+
+        let rendered = store
+            .render_for_prompt(
+                "test-scope",
+                "kubernetes horizontal pod autoscaler cpu threshold configuration",
+                RenderBudget { per_kind_limit: 1 },
+            )
+            .expect("render_for_prompt");
+
+        let skill = rendered
+            .kinds
+            .iter()
+            .find(|k| k.kind == HarnessKind::Skill)
+            .expect("skill kind rendered");
+
+        assert_eq!(skill.total_candidates, 3);
+        assert_eq!(skill.shown.len(), 1);
+        assert_eq!(
+            skill.shown[0].title, "Zenith Kubernetes Horizontal Pod Autoscaler Deep Dive",
+            "the single shown entry must be the most relevant one, not the alphabetically \
+             first one"
+        );
+        assert_eq!(
+            skill.omitted_below_budget + skill.omitted_below_cutoff,
+            2,
+            "the other 2 entries must be accounted for, either as ranked-below-budget or \
+             below-retrieval-cutoff — never silently dropped"
+        );
+
+        let text = skill.to_prompt_text();
+        assert!(
+            text.contains("1 of 3 shown"),
+            "prompt text must state the true total next to the shown count: {text}"
+        );
+        assert!(
+            text.contains("2 more skill entries exist"),
+            "prompt text must honestly report how many entries were left out: {text}"
+        );
+    }
 }
