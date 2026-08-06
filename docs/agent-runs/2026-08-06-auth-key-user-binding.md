@@ -63,17 +63,21 @@ shape. This needs an explicit note in the env-var docs.
   (`remove_emptyvalue_compactionfilter.o`), 5/5 retries. All green results above required
   `CARGO_TARGET_DIR` pointed outside the repo tree.
 
-  **CAUSE NOT IDENTIFIED — do not repeat the original guess.** The verifying agent
-  attributed this to OneDrive because the repo path contains `\OneDrive\`. That was an
-  inference from a directory name, and it is **wrong**: no OneDrive process runs on this
-  machine, and the folder carries no reparse-point or cloud-file attributes — it is an
-  ordinary directory left from a previous setup.
+  **CAUSE: Windows MAX_PATH.** A third agent building in a sibling worktree captured the
+  real compiler error — `fatal error C1083`, with the `librocksdb-sys` object path
+  measuring **262 characters**, over the Windows `MAX_PATH` limit. Worktree paths
+  (`.claude/worktrees/agent-<17-char-id>/target/<profile>/build/<hash>/...`) push past the
+  limit; builds in the main repo, where the prefix is shorter, succeed — which is why the
+  same commands worked outside worktrees all day.
 
-  Candidates, none confirmed: Windows Defender real-time scanning (verified ON, no visible
-  exclusions; scanning freshly-written object files is a well-known cause of exactly this
-  silent `cl.exe` failure), or contention from several agents building concurrently.
-  Whoever hits this next: identify the actual locker (e.g. Process Explorer / handle.exe)
-  before acting, rather than inheriting a guess.
+  **Two wrong diagnoses were recorded before this, both worth remembering as failure
+  modes.** First, OneDrive was blamed because the repo path contains `\OneDrive\` — an
+  inference from a directory name. No OneDrive process runs on this machine and the folder
+  has no reparse-point or cloud-file attributes; it is an ordinary directory left from a
+  previous setup. Second, Windows Defender was floated as a candidate on the strength of
+  real-time scanning being enabled. Neither was ever observed doing anything.
+
+  Fix: set `CARGO_TARGET_DIR` to a short path outside the worktree.
 - **`cargo clippy --all-targets` is red on `origin/main`**, independent of this branch:
   `absurd_extreme_comparisons` deny-errors in `tests/brutal_stress_tests.rs:687,1303`
   (`unsigned >= 0`). Same class as the one fixed in #426 — that PR fixed one file, not
