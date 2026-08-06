@@ -16,9 +16,9 @@
 //! they were left out (ranked below the per-kind budget vs. not returned by retrieval at
 //! all for this query), not just a bare, uninterpretable count.
 //!
-//! # Scope of this module (foundation slice)
+//! # Scope of this module
 //!
-//! This module provides exactly two things:
+//! This module provides:
 //!
 //! 1. [`conversation_memory::ShodhConversationMemory`] — an implementation of
 //!    `rig_core::memory::ConversationMemory` that persists conversation turns as
@@ -27,12 +27,24 @@
 //! 2. [`harness::ContinualHarnessStore`] — CRUD, scoping, and relevance-ranked rendering
 //!    for the four Continual Harness entry kinds plus refinement events, likewise backed by
 //!    shodh-memory rather than a JSON file.
+//! 3. [`provider::AgentProviderConfig`] — env-configured, offline-capable model provider
+//!    wiring (Ollama or an arbitrary OpenAI-compatible endpoint), built directly on
+//!    `rig-core`'s low-level `CompletionModel` trait since `rig-core` 0.41.0 does not itself
+//!    ship an `Agent`/runtime type (that lives in the sibling `rig-agent` crate, which this
+//!    crate deliberately does not depend on — see `provider`'s module docs).
+//! 4. [`turn_loop::run`] — the multi-turn agent loop: model call -> tool calls -> tool
+//!    results -> repeat until the model stops calling tools, bounded by a hard turn count,
+//!    with shodh memory operations ([`tools`]) registered as first-class structured tool
+//!    calls and the Continual Harness re-injected into the system prompt every turn.
+//! 5. [`agui`] — the AG-UI (Agent-User Interaction Protocol) SSE endpoint,
+//!    `POST /api/agent/run`, that drives the turn loop and streams its activity as AG-UI
+//!    events.
 //!
-//! Deliberately **not** built here (see the crate's task tracker / PR description for the
-//! follow-on slices): the AG-UI SSE endpoint, the agent turn loop / tool dispatch / provider
-//! wiring, and any code-execution substrate. This module also does not modify
-//! `MemorySystem::recall`'s ranking behavior in any way — it is a consumer of the existing
-//! pipeline, called through its public API exactly as `src/handlers/recall.rs` calls it.
+//! Deliberately **not** built here: any code-execution substrate, and reasoning-token
+//! streaming (AG-UI's `REASONING_*` events — see `turn_loop`'s module docs for why). This
+//! module also does not modify `MemorySystem::recall`'s ranking behavior in any way — it is a
+//! consumer of the existing pipeline, called through its public API exactly as
+//! `src/handlers/recall.rs` calls it.
 //!
 //! # Feature gate
 //!
@@ -41,11 +53,17 @@
 //! breaking-change entries across its last two releases in ~40 days under a single dominant
 //! maintainer. It is not part of the edge-device `default` feature set.
 
+pub mod agui;
 pub mod conversation_memory;
 pub mod harness;
+pub mod provider;
+pub mod tools;
+pub mod turn_loop;
 
 pub use conversation_memory::ShodhConversationMemory;
 pub use harness::{
     ContinualHarnessStore, HarnessEntry, HarnessEntryDraft, HarnessKind, KindRender,
     RefinementEvent, RenderBudget, RenderedEntry, RenderedHarnessState,
 };
+pub use provider::{AgentModel, AgentProviderConfig, ProviderKind};
+pub use turn_loop::{run as run_turn_loop, LoopEvent, TurnLoopConfig};

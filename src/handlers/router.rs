@@ -16,6 +16,9 @@ use super::{
     webhooks,
 };
 
+#[cfg(feature = "agent-harness")]
+use crate::agent::agui;
+
 /// Application state type alias
 pub type AppState = Arc<MultiUserMemoryManager>;
 
@@ -461,6 +464,17 @@ pub fn build_protected_routes(state: AppState) -> Router {
         .route("/api/export/mif", post(mif::export_mif))
         .route("/api/import/mif", post(mif::import_mif))
         .route("/api/mif/adapters", get(mif::list_adapters));
+
+    // =================================================================
+    // AGENT TURN LOOP / AG-UI (feature = "agent-harness")
+    // =================================================================
+    // Behind the same auth middleware and rate limiting as every other route in this
+    // function — `build_protected_routes`'s caller (server.rs) applies both uniformly to
+    // the whole router this function returns.
+    #[cfg(feature = "agent-harness")]
+    {
+        router = router.route("/api/agent/run", post(agui::ag_ui_run));
+    }
 
     // /metrics requires authentication unless SHODH_METRICS_PUBLIC=true, in
     // which case build_public_routes serves it instead (exactly-one placement).
