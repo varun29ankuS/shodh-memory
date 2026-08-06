@@ -229,7 +229,6 @@ jobs:
           SHODH_GRAPH_RESERVE_K: ${{ github.event.inputs.graph_reserve_k }}
           SHODH_GRAPH_ACT_ADD: ${{ github.event.inputs.graph_act_add }}
           SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
-          SHODH_SPREAD_FIX: ${{ github.event.inputs.spread_fix }}
           SHODH_ACTR_NORM: ${{ github.event.inputs.actr_norm }}
           SHODH_GRAPH_RESERVE_FINAL: ${{ github.event.inputs.graph_reserve_final }}
           SHODH_GRAPH_EXPAND_K: ${{ github.event.inputs.graph_expand_k }}
@@ -312,7 +311,6 @@ jobs:
           SHODH_GRAPH_RESERVE_K: ${{ github.event.inputs.graph_reserve_k }}
           SHODH_GRAPH_ACT_ADD: ${{ github.event.inputs.graph_act_add }}
           SHODH_GRAPH_W_FLOOR: ${{ github.event.inputs.graph_w_floor }}
-          SHODH_SPREAD_FIX: ${{ github.event.inputs.spread_fix }}
           SHODH_ACTR_NORM: ${{ github.event.inputs.actr_norm }}
           SHODH_GRAPH_RESERVE_FINAL: ${{ github.event.inputs.graph_reserve_final }}
           SHODH_GRAPH_EXPAND_K: ${{ github.event.inputs.graph_expand_k }}

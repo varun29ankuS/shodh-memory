@@ -174,21 +174,24 @@ fn spread_single_direction(
     let mut activation_map: HashMap<Uuid, f32> = seeds.iter().cloned().collect();
     let mut traversed_edges: Vec<Uuid> = Vec::new();
 
-    // Audit fix #5 (flag-gated) — repair the 2-hop activation collapse. The
-    // default per-edge spread multiplies four sub-1.0 factors per hop and
-    // double-uses edge strength (it sets the decay rate AND is multiplied in),
-    // so a distal (2-hop) target collapses below `threshold` and is pruned before
-    // it can be scored. E3 proved this is the real multi-hop bottleneck (a fusion
-    // patch could not fix it without wrecking single-hop). When enabled: gentle
-    // FIXED per-hop decay (not the compounding importance-weighted rate), and edge
-    // strength / tier-trust as ADDITIVE PRIORS with a floor so a weak edge
-    // attenuates but never zeroes the path. Default off → unchanged.
-    let spread_fix = std::env::var("SHODH_SPREAD_FIX")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    // NOTE on the removed SHODH_SPREAD_FIX (deleted 2026-08-06):
+    // A flag-gated variant here used fixed per-hop decay plus additive priors with a
+    // 0.5 floor, to stop a weak edge zeroing a path. Its comment claimed "E3 proved
+    // this is the real multi-hop bottleneck". The measurements say otherwise: four E3
+    // CI runs with the flag ON gave 2-hop recall@10 of 0.0000/0.0167/0.0000/0.0167
+    // against 0.3167 for the vector leg alone, and the D1 A/B on real LoCoMo moved
+    // multi_hop by exactly +0.0000 (0.3329 -> 0.3329). E3 motivated the hypothesis; it
+    // never confirmed it. PPR then became the default spreading mechanism (SHODH_PPR,
+    // default on), and its branch precedes this one, so the flag could not execute at
+    // all. Removed as falsified and unreachable.
+    //
+    // The one idea worth keeping is NOT dead: PPR has no analogue of that 0.5 prior
+    // floor. `ppr_edge_weight` ends in `w.max(0.0)` — a clamp to zero, the opposite of
+    // a floor — and PPR's column-stochastic normalization makes edge weakness purely
+    // RELATIVE to sibling edges, so a weak edge competing with strong ones can be
+    // starved harder than a floor would ever allow. A floored `ppr_edge_weight` has
+    // never been tested. See the follow-up issue before re-deriving this from scratch.
     let dir_fix = edge_dir_fix_enabled();
-    const SPREAD_FIX_HOP_DECAY: f32 = 0.6;
-    const SPREAD_FIX_PRIOR_FLOOR: f32 = 0.5;
 
     // Lever-1 prototype: weight each hop by the edge's relation type so activation
     // flows along meaningful predicates (causal/structural) rather than mere
@@ -239,24 +242,16 @@ fn spread_single_direction(
                     }
                 };
 
+                // Importance-weighted decay. NOTE: `effective` is used twice here — it
+                // sets the decay rate AND is multiplied in. That double-use is a known
+                // characteristic of this legacy BFS path, not an oversight; the
+                // flag-gated alternative that removed it was measured and falsified
+                // (see the note at the top of this function). This path only runs when
+                // an operator sets SHODH_PPR=0; PPR is the default spreading mechanism.
                 let effective = edge.effective_strength();
-                let base_spread = if spread_fix {
-                    // Additive priors + fixed hop decay: distal targets retain
-                    // meaningful activation instead of collapsing below threshold.
-                    // effective is used ONCE (strength prior), not twice.
-                    let hop_decay = SPREAD_FIX_HOP_DECAY.powi(hop as i32);
-                    let trust_prior =
-                        SPREAD_FIX_PRIOR_FLOOR + (1.0 - SPREAD_FIX_PRIOR_FLOOR) * tier_trust;
-                    let strength_prior =
-                        SPREAD_FIX_PRIOR_FLOOR + (1.0 - SPREAD_FIX_PRIOR_FLOOR) * effective;
-                    source_activation * hop_decay * trust_prior * strength_prior * degree_norm
-                } else {
-                    // Default: importance-weighted decay (effective sets the decay
-                    // rate AND is multiplied in — the double-use the fix removes).
-                    let decay_rate = calculate_importance_weighted_decay(effective);
-                    let decay = (-decay_rate * hop as f32).exp();
-                    source_activation * decay * effective * tier_trust * degree_norm
-                };
+                let decay_rate = calculate_importance_weighted_decay(effective);
+                let decay = (-decay_rate * hop as f32).exp();
+                let base_spread = source_activation * decay * effective * tier_trust * degree_norm;
 
                 // Lever-1: scale by the relation type's intrinsic spreading weight
                 // so a real predicate (e.g. Causes 1.3) carries more activation than

@@ -1363,17 +1363,14 @@ pub fn analyze_ablation(inputs: &RunInputs) -> Result<AblationReport> {
                 ("SHODH_GRAPH_EXPAND_K", "5"),
             ],
         ),
-        // SHODH_SPREAD_FIX only reaches the legacy BFS spread in graph_retrieval.rs.
-        // SHODH_PPR defaults ON and its branch precedes both BFS paths, so the previous
-        // bare `+spread-fix` / `+expand+spread-fix` arms set a flag that could not execute
-        // — they silently duplicated `baseline` and `+graph-expand(K5)`. Pinning PPR off
-        // makes these rows measure the thing their name claims; the PPR-off baseline is
-        // required alongside them or the delta is unattributable.
-        ("legacy-bfs (PPR off)", vec![("SHODH_PPR", "0")]),
-        (
-            "legacy-bfs +spread-fix (PPR off)",
-            vec![("SHODH_PPR", "0"), ("SHODH_SPREAD_FIX", "1")],
-        ),
+        // NOTE: the former `+spread-fix` / `+expand+spread-fix` arms are gone. They set
+        // SHODH_SPREAD_FIX, which only reached the legacy BFS spread — but SHODH_PPR
+        // defaults ON and its branch precedes that path, so the flag could not execute
+        // and those two rows silently duplicated `baseline` and `+graph-expand(K5)`.
+        // The flag itself has been deleted as falsified (see graph_retrieval.rs).
+        // An arm that cannot differ from baseline is worse than no arm: it reports a
+        // number attributable to nothing. Before adding a row here, confirm the config
+        // it sets can actually reach the code path it names.
     ];
 
     let mut rows: Vec<AblationRow> = Vec::with_capacity(configs.len());
