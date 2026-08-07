@@ -18,7 +18,10 @@ import { NOTICE_MS, useActivity } from "@/stores/activity";
  * way.
  *
  * `aria-live="polite"`: a screen reader gets told, at the next pause, and is
- * never interrupted mid-sentence for something with no action attached.
+ * never interrupted mid-sentence for something with no action attached. The
+ * region itself is ALWAYS mounted, empty or not — a live region that appears in
+ * the same commit as its first child is a new node rather than a mutation, and
+ * assistive technology generally will not announce it.
  */
 export function ActivityNotices({ className }: { className?: string }) {
   const notices = useActivity((s) => s.notices);
@@ -37,8 +40,6 @@ export function ActivityNotices({ className }: { className?: string }) {
     );
     return () => timers.forEach((t) => clearTimeout(t));
   }, [notices, expireNotice]);
-
-  if (notices.length === 0) return null;
 
   return (
     <div

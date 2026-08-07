@@ -76,8 +76,13 @@ const ICONS: Record<string, { path: string; title: string }> = {
   "vercel-ai-gateway": { path: siVercel.path, title: siVercel.title },
   "cloudflare-ai-gateway": { path: siCloudflare.path, title: siCloudflare.title },
   "cloudflare-workers-ai": { path: siCloudflare.path, title: siCloudflare.title },
+  // `opencode` is OpenCode Zen, that project's own model gateway, and
+  // `siOpencode`'s source is the project's identity mark
+  // (github.com/anomalyco/opencode …/identity/mark.svg). `opencode-go` is NOT
+  // mapped: nothing available here establishes that it is the same project
+  // rather than a similarly named one, and an unverified mark is precisely
+  // what the monogram exists for.
   opencode: { path: siOpencode.path, title: siOpencode.title },
-  "opencode-go": { path: siOpencode.path, title: siOpencode.title },
   moonshotai: { path: siMoonshotai.path, title: siMoonshotai.title },
   "moonshotai-cn": { path: siMoonshotai.path, title: siMoonshotai.title },
   // Kimi is Moonshot's assistant and has its own mark; the seat lists it as a

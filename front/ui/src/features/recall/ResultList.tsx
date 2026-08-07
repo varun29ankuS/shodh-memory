@@ -69,7 +69,17 @@ function ResultRow({ memory, surfaced }: { memory: RecallMemory; surfaced: boole
           {relativeDay(memory.created_at)}
         </span>
         {memory.experience.geo_location ? (
-          <span className="text-muted-foreground mono text-[10px]" title="Has coordinates">
+          // `hidden sm:inline`: in this column at 420px the row is ~144px wide,
+          // and the raw pair took all of it — clipping to "39.22,-7…" and
+          // pushing the conversation marker off the edge entirely. Coordinates
+          // are the least useful thing here at that width; /geo is where they
+          // are the point, and the row still says "today" and how strongly it
+          // surfaced. `min-w-0 truncate` so it yields rather than overflows if
+          // a longer pair ever lands.
+          <span
+            className="text-muted-foreground mono hidden min-w-0 truncate text-[10px] sm:inline"
+            title="Has coordinates"
+          >
             {memory.experience.geo_location[0].toFixed(2)},
             {memory.experience.geo_location[1].toFixed(2)}
           </span>
