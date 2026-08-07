@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
+import { ProviderLogo } from "@/components/ui/provider-logo";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { OAuthFlow } from "./OAuthFlow";
 
@@ -34,6 +35,35 @@ function StatusDot({ configured }: { configured: boolean }) {
       )}
     />
   );
+}
+
+/**
+ * What credential is actually working, in the seat's own words.
+ *
+ * `stored` means "the seat holds a credential for this provider", not "someone
+ * pasted a key" — a browser OAuth login stores one too (ModelRegistry
+ * .listProviders reads both out of the same credential file). Keying the label
+ * off `stored` therefore described a Claude Pro sign-in as a "stored key",
+ * which is the one thing about it that was not true. `auth_type` is the field
+ * that distinguishes them, so it is the field this reads.
+ *
+ * Every branch returns something the seat sent — a plan label, pi's source
+ * string — rather than a phrase composed here.
+ */
+function authLabel(provider: ProviderInfo): string {
+  if (!provider.configured) return "not configured";
+  if (provider.auth_type === "oauth") {
+    // A flat-rate plan changes what a token means, so name it where the seat
+    // named it; otherwise pi's own source string ("OAuth") is the whole fact.
+    return provider.oauth_subscription
+      ? (provider.oauth_label ?? provider.source ?? "OAuth")
+      : (provider.source ?? "OAuth");
+  }
+  // An api_key credential in the seat's own file, versus one it found in the
+  // environment — `source` names the variable in the second case, which is the
+  // only actionable half of "where is this coming from".
+  if (provider.stored) return "stored key";
+  return provider.source ?? "configured";
 }
 
 function ProviderRow({ provider }: { provider: ProviderInfo }) {
@@ -68,35 +98,66 @@ function ProviderRow({ provider }: { provider: ProviderInfo }) {
     onSuccess: patchCache,
   });
 
+  // The one credential the seat holds for this provider is either an OAuth
+  // login or a key, never both, and three controls below phrase themselves
+  // differently depending on which. Derived once so they cannot disagree.
+  const signedIn = provider.configured && provider.auth_type === "oauth";
+  const keyStored = provider.stored && provider.auth_type === "api_key";
+  const signOutLabel = signedIn
+    ? `Sign out of ${provider.name}`
+    : `Remove stored key for ${provider.name}`;
+
   return (
     <div className="border-border border-b px-4 py-2.5">
       <div className="flex items-center gap-2.5">
         <StatusDot configured={provider.configured} />
+        {/* The mark answers "which company is this" before the name is read,
+            which is what makes a 43-row list scannable. `currentColor` at
+            14px, so it never becomes a second accent. */}
+        <ProviderLogo provider={provider.id} className="size-3.5" />
         <span className="min-w-0 flex-1 truncate text-[13px]">{provider.name}</span>
         {provider.local ? <Badge className="mono">local</Badge> : null}
-        <span className="text-muted-foreground mono hidden shrink-0 text-[10px] sm:inline">
+        {/* Fixed columns, so 43 rows read down the page instead of each one
+            placing its own metadata wherever its controls happened to end.
+            Both hide below `sm`: at 420px the row cannot carry them and the
+            provider's NAME, and the name is the row. The status dot still says
+            configured or not, and the label is one tap away in `title`. */}
+        <span className="text-muted-foreground mono hidden shrink-0 text-right text-[10px] sm:inline sm:w-[74px]">
           {provider.model_count} model{provider.model_count === 1 ? "" : "s"}
         </span>
         <span
-          className="text-muted-foreground mono max-w-[180px] shrink-0 truncate text-[10px]"
+          className="text-muted-foreground mono hidden shrink-0 truncate text-right text-[10px] sm:inline sm:w-[172px]"
           title={provider.source ?? undefined}
         >
-          {provider.configured ? (provider.stored ? "stored key" : (provider.source ?? "configured")) : "not configured"}
+          {authLabel(provider)}
         </span>
+        {/* One gutter for every row's controls, whether it has three or none.
+            Without it the metadata columns above cannot line up. */}
+        <div className="flex shrink-0 items-center justify-end gap-1 sm:w-[236px]">
         {provider.oauth_available ? (
           <Button
             size="sm"
             variant="ghost"
             onClick={() => setMode(mode === "oauth" ? "idle" : "oauth")}
             aria-expanded={mode === "oauth"}
-            aria-label={`Sign in to ${provider.name}${provider.oauth_label ? ` (${provider.oauth_label})` : ""}`}
+            // Already signed in: the same flow, but offering it as "Sign in"
+            // reads as an unfinished step and invites someone to redo work that
+            // is done. What it is actually for at that point is a login that
+            // expired or a different account.
+            aria-label={
+              signedIn
+                ? `Sign in to ${provider.name} again`
+                : `Sign in to ${provider.name}${provider.oauth_label ? ` (${provider.oauth_label})` : ""}`
+            }
             title={
-              provider.oauth_subscription
-                ? `Flat-rate plan sign-in${provider.oauth_label ? `: ${provider.oauth_label}` : ""}`
-                : undefined
+              signedIn
+                ? "Run the browser sign-in again — for an expired login or a different account"
+                : provider.oauth_subscription
+                  ? `Flat-rate plan sign-in${provider.oauth_label ? `: ${provider.oauth_label}` : ""}`
+                  : undefined
             }
           >
-            Sign in{provider.oauth_subscription ? " · plan" : ""}
+            {signedIn ? "Sign in again" : `Sign in${provider.oauth_subscription ? " · plan" : ""}`}
           </Button>
         ) : null}
         {provider.accepts_api_key ? (
@@ -105,23 +166,32 @@ function ProviderRow({ provider }: { provider: ProviderInfo }) {
             variant="ghost"
             onClick={() => setEditing(!editing)}
             aria-expanded={editing}
-            aria-label={`${provider.stored ? "Replace" : "Set"} API key for ${provider.name}`}
+            // "Replace key" only when there IS a key. With an OAuth login
+            // stored, this control sets a key for the first time — and doing so
+            // replaces the login, which is why it must not claim otherwise.
+            aria-label={`${keyStored ? "Replace" : "Set"} API key for ${provider.name}`}
+            title={keyStored ? "Replace the stored API key" : "Store an API key for this provider"}
           >
             <KeyRound />
-            {provider.stored ? "Replace key" : "Set key"}
+            {/* The glyph carries it at 420px, where the words cost the
+                provider's name. `aria-label` above is unconditional, so nothing
+                is lost to a screen reader. */}
+            <span className="hidden sm:inline">{keyStored ? "Replace key" : "Set key"}</span>
           </Button>
         ) : null}
         {provider.stored ? (
           <Button
             size="icon"
             variant="ghost"
-            aria-label={`Remove stored key for ${provider.name}`}
+            aria-label={signOutLabel}
+            title={signOutLabel}
             disabled={remove.isPending}
             onClick={() => remove.mutate()}
           >
             <Trash2 />
           </Button>
         ) : null}
+        </div>
       </div>
 
       {editing ? (
@@ -217,14 +287,21 @@ export function ProvidersView({ seat }: { seat: SeatReachability }) {
 
   return (
     <div className="flex h-full min-h-0 justify-center overflow-hidden">
-      <div className="flex h-full min-h-0 w-full max-w-[720px] flex-col">
+      {/* Wider than the 720px this started at. Once the rows gained aligned
+          metadata columns and a control gutter, 720 left the provider NAME —
+          the thing being scanned for — truncating at "Cloudflare AI Gate…".
+          The prose keeps its own narrower measure below. */}
+      <div className="flex h-full min-h-0 w-full max-w-[860px] flex-col">
         <header className="shrink-0 px-4 pt-5 pb-3">
           <h2 className="text-[15px] font-medium tracking-tight">Provider access</h2>
-          <p className="text-muted-foreground mt-1 text-[12px] leading-relaxed">
-            Which model endpoints the seat can call. Keys are held by the local
-            seat process — set here, stored in its credential file, never sent
-            to a browser. Environment variables keep working; a key stored here
-            takes precedence for that provider.
+          <p className="text-muted-foreground mt-1 max-w-[640px] text-[12px] leading-relaxed">
+            {/* "Credentials", not "keys": a browser sign-in stores one here
+                too, and calling everything a key is what made a Claude plan
+                read as a pasted secret in the rows below. */}
+            Which model endpoints the seat can call. Credentials are held by the
+            local seat process — set here, stored in its credential file, never
+            sent to a browser. Environment variables keep working; anything
+            stored here takes precedence for that provider.
           </p>
           <div className="mt-3 flex items-center gap-2">
             <Input
