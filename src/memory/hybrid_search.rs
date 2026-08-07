@@ -420,7 +420,7 @@ impl BM25Index {
         };
 
         let top_docs = searcher
-            .search(&parsed_query, &TopDocs::with_limit(limit))
+            .search(&parsed_query, &TopDocs::with_limit(limit).order_by_score())
             .context("BM25 search failed")?;
 
         let mut results = Vec::with_capacity(top_docs.len());

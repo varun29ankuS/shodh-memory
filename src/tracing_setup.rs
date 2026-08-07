@@ -16,7 +16,7 @@ use opentelemetry::{global, trace::TracerProvider as _, KeyValue};
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 #[cfg(feature = "telemetry")]
 use opentelemetry_sdk::{
-    trace::{RandomIdGenerator, Sampler, TracerProvider},
+    trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
     Resource,
 };
 #[cfg(feature = "telemetry")]
@@ -24,7 +24,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 /// Global tracer provider for shutdown
 #[cfg(feature = "telemetry")]
-static TRACER_PROVIDER: std::sync::OnceLock<TracerProvider> = std::sync::OnceLock::new();
+static TRACER_PROVIDER: std::sync::OnceLock<SdkTracerProvider> = std::sync::OnceLock::new();
 
 /// Initialize distributed tracing with OpenTelemetry
 ///
@@ -49,14 +49,15 @@ pub fn init_tracing() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     // Build resource with service metadata
-    let resource = Resource::new(vec![
-        KeyValue::new("service.name", service_name.clone()),
-        KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-    ]);
+    let resource = Resource::builder()
+        .with_service_name(service_name.clone())
+        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
+        .build();
 
     // Build tracer provider using the new builder API
-    let tracer_provider = TracerProvider::builder()
-        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+    // (0.28+ batch exporter picks the async runtime via the rt-tokio feature)
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
         .with_sampler(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)))
         .with_id_generator(RandomIdGenerator::default())
         .with_resource(resource)
@@ -144,7 +145,9 @@ pub mod trace_propagation {
 
         // Set parent context on current span
         let current_span = Span::current();
-        current_span.set_parent(parent_cx);
+        if let Err(e) = current_span.set_parent(parent_cx) {
+            tracing::debug!("failed to set parent trace context: {e}");
+        }
 
         // Continue processing
         next.run(req).await

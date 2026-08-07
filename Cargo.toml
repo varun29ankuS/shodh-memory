@@ -103,7 +103,7 @@ path = "src/bin/recall_eval.rs"
 # at runtime from SHODH_SPACY_MODEL_PATH (asset not committed, like GLiNER/MiniLM).
 spacy-rusty = { path = "crates/spacy-rusty" }
 # MCP Protocol
-rmcp = { version = "0.12", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "1.4", features = ["server", "macros", "transport-io"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 # Global allocator — replaces Windows default heap (eliminates segment doubling / commit bloat)
 mimalloc = "0.1"
@@ -159,11 +159,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 prometheus = "0.14"
 
 # Distributed Tracing (P1.6) - OPTIONAL (heavy, ~200 packages, not needed for edge)
-# NOTE: tracing-opentelemetry 0.28 requires opentelemetry 0.27
-tracing-opentelemetry = { version = "0.28", optional = true }
-opentelemetry = { version = "0.27", features = ["trace"], optional = true }
-opentelemetry-otlp = { version = "0.27", features = ["trace", "grpc-tonic"], optional = true }
-opentelemetry_sdk = { version = "0.27", features = ["trace", "rt-tokio"], optional = true }
+# NOTE: tracing-opentelemetry minor must track the opentelemetry minor + 1
+# (0.33 requires opentelemetry 0.32). opentelemetry_sdk >= 0.32.1 required
+# for CVE-2026-48504 (unbounded W3C Baggage allocation).
+tracing-opentelemetry = { version = "0.33", optional = true }
+opentelemetry = { version = "0.32", features = ["trace"], optional = true }
+opentelemetry-otlp = { version = "0.32", features = ["trace", "grpc-tonic"], optional = true }
+opentelemetry_sdk = { version = "0.32.1", features = ["trace", "rt-tokio"], optional = true }
 
 # Vector operations (lightweight)
 ordered-float = "5.0"
@@ -183,7 +185,7 @@ ndarray = "0.16"
 petgraph = "0.8"
 
 # Full-text search (BM25)
-tantivy = "0.25"
+tantivy = "0.26"
 
 # Bloom filter
 bloomfilter = "3.0"
@@ -210,9 +212,11 @@ flate2 = "1.1"
 tar = "0.4"
 
 # Python bindings (optional)
-# NOTE: pyo3 >= 0.24.1 required for RUSTSEC-2025-0020 (buffer overflow fix)
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py38"], optional = true }
-numpy = { version = "0.24", optional = true }
+# NOTE: pyo3 >= 0.29 required for RUSTSEC-2026-0176 (OOB read in PyList/PyTuple
+# iterators) and RUSTSEC-2026-0177 (missing Sync bound on new_closure);
+# >= 0.24.1 was required for RUSTSEC-2025-0020 (buffer overflow fix)
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py38"], optional = true }
+numpy = { version = "0.29", optional = true }
 
 # Zenoh transport for robotics (optional — pure Rust, zero C deps)
 # Enables pub/sub + request/reply integration with ROS2 via rmw_zenoh or zenoh-bridge-ros2dds
