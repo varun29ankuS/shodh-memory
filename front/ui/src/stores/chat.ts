@@ -1,5 +1,7 @@
+import { useMemo } from "react";
 import { create } from "zustand";
 import { streamMessage } from "@/lib/seat/client";
+import { noteSeatEvent } from "./activity";
 import type {
   ConversationDetail,
   ModelRef,
@@ -336,6 +338,10 @@ export const useChat = create<ChatState>((set, get) => ({
       });
     };
     const onEvent = (event: SeatEvent) => {
+      // Before the coalescing queue, not after: the other surfaces react to the
+      // agent acting, and that signal is worth nothing 40ms late and batched
+      // behind a text delta. The transcript still goes through the queue.
+      noteSeatEvent(event);
       queue.push(event);
       if (event.type === "text_delta" || event.type === "thinking_delta") {
         flushTimer ??= window.setTimeout(flush, 40);
@@ -412,5 +418,38 @@ export const useChat = create<ChatState>((set, get) => ({
       };
     }),
 }));
+
+/**
+ * Every memory the ACTIVE conversation has surfaced, across all its turns.
+ *
+ * Derived rather than accumulated: the ops are already the record, and a second
+ * copy maintained alongside them could disagree with the transcript it claims
+ * to summarise. Deriving also means a reopened conversation marks its results
+ * correctly — `buildTurns` replays the same ops, so "this conversation reached
+ * this memory" survives a reload, which an event-time side channel would not.
+ *
+ * Retrieval events only, and user scope only. A `memory_write` names an id that
+ * did not exist when these results were retrieved, and harness recall reads a
+ * different store under a different `user_id` — see stores/activity.ts.
+ */
+export function useSurfacedMemoryIds(): ReadonlySet<string> {
+  const turns = useChat((s) => (s.activeId ? s.conversations[s.activeId]?.turns : undefined));
+
+  return useMemo(() => {
+    const ids = new Set<string>();
+    if (!turns) return ids;
+    for (const turn of turns) {
+      for (const op of turn.ops) {
+        if (op.type === "memory_recall") {
+          if (op.scope !== "user") continue;
+          for (const memory of op.memories) ids.add(memory.id);
+        } else if (op.type === "proactive_context") {
+          for (const id of op.injected_memory_ids) ids.add(id);
+        }
+      }
+    }
+    return ids;
+  }, [turns]);
+}
 
 export { EMPTY_TOTALS };

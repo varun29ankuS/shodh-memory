@@ -17,6 +17,7 @@ import {
 } from "d3";
 import type { RecallMemory, RecallLineageEdge } from "@/lib/api";
 import { useSession } from "@/stores/session";
+import { createPulseRunner, pulsePhase, subscribePulse } from "@/stores/activity";
 import { relClass, relName, type RelationClass } from "./relation";
 
 /**
@@ -63,6 +64,15 @@ import { relClass, relName, type RelationClass } from "./relation";
  * because "why is this connected" is the question a hairball cannot answer.
  * Nothing here is invented — `relation` and `confidence` are the only two
  * fields `RecallLineageEdge` has.
+ *
+ * IT ALSO REACTS TO THE CONVERSATION. Nodes here are memory ids, which is what
+ * makes that possible at all: when the seat streams a `memory_recall` or a
+ * `proactive_context`, the ids it names can be matched against the nodes on
+ * screen and the matching ones pulse. The intersection is done in
+ * stores/activity.ts and it is allowed to be empty — a conversation that
+ * reached nothing in this result set must leave this canvas still. The entity
+ * graph on /graph cannot do this and does not try: its nodes are
+ * `UniverseStar.id`, and no payload maps an entity to a memory.
  */
 
 interface GraphNode extends SimulationNodeDatum {
@@ -237,6 +247,18 @@ export function GraphCanvas({
     // is to run it to rest off-screen and paint the result once.
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+    // The conversation's pulse. Ref-driven and repainted from its own rAF loop
+    // for the same reason the simulation is: this effect rebuilds the force
+    // layout, so a pulse that reached React state and came back through the
+    // dependency array would restart the layout every time the model recalled
+    // something.
+    const pulse = createPulseRunner(() => drawRef.current());
+    const drawn = new Set(nodes.map((n) => n.id));
+    const unsubscribePulse = subscribePulse(
+      (id) => drawn.has(id),
+      (hit) => pulse.start(hit),
+    );
+
     let width = 0;
     let height = 0;
 
@@ -315,6 +337,9 @@ export function GraphCanvas({
         ctx!.stroke();
       }
 
+      const lit = pulse.ref.current;
+      const now = lit ? performance.now() : 0;
+
       for (const n of nodes) {
         if (n.x == null || n.y == null) continue;
         const isLit = !dimmed || litIds.has(n.id);
@@ -342,6 +367,18 @@ export function GraphCanvas({
           ctx!.setLineDash([]);
         }
         ctx!.globalAlpha = 1;
+
+        // The conversation just reached this memory. Drawn last and at full
+        // alpha so it survives the focus dimming — the point of the signal is
+        // that it is visible from across the pane while reading something else.
+        if (lit && lit.ids.has(n.id)) {
+          const phase = pulsePhase(lit, now);
+          ctx!.beginPath();
+          ctx!.arc(n.x, n.y, n.r + (5 + phase * 20) / transformRef.current.k, 0, 2 * Math.PI);
+          ctx!.strokeStyle = hexA(tokens.active, 0.85 * (1 - phase));
+          ctx!.lineWidth = 2 / transformRef.current.k;
+          ctx!.stroke();
+        }
       }
 
       ctx!.restore();
@@ -408,6 +445,8 @@ export function GraphCanvas({
       observer.disconnect();
       sim.stop();
       sel.on(".zoom", null);
+      unsubscribePulse();
+      pulse.cancel();
       simRef.current = null;
     };
   }, [nodes, links]);

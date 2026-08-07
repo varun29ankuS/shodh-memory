@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import type { Reachability } from "@/lib/api";
+import { ActivityNotices } from "@/components/layout/ActivityNotices";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useSession } from "@/stores/session";
 import { useUniverse } from "./useUniverse";
@@ -209,6 +210,12 @@ export function GraphView({ reach }: { reach: Reachability }) {
           selectEntity(null);
         }}
       />
+
+      {/* A write or a reinforcement changes the corpus this graph is built
+          from, so it is reported here too. What is NOT reported here is a
+          recall: the canvas below draws entities, and a memory id cannot be
+          matched against one. See the note in EntityCanvas.tsx. */}
+      <ActivityNotices />
 
       <div className="pointer-events-none absolute inset-x-4 bottom-3 z-10 flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
         {/* The legend teaches the graph's three encodings, which is the only

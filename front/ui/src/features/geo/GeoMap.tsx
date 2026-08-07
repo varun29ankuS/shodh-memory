@@ -13,6 +13,7 @@ import { feature, mesh } from "topojson-client";
 import type { Topology, GeometryCollection } from "topojson-specification";
 import type { RecallMemory } from "@/lib/api";
 import { useSession } from "@/stores/session";
+import { createPulseRunner, pulsePhase, subscribePulse } from "@/stores/activity";
 import worldTopology from "@/assets/world-countries-110m.json";
 
 /**
@@ -39,6 +40,14 @@ import worldTopology from "@/assets/world-countries-110m.json";
  * swap happens exactly once, in `project`, so no other code in this file can
  * get it wrong — transposed coordinates do not throw, they silently plot
  * Baltimore in China.
+ *
+ * THE CAMERA ANSWERS TO THE CONVERSATION. When the seat surfaces a memory that
+ * is plotted here, the map brings it into view and the point pulses. Only
+ * plotted ids count: a memory the conversation reached that carries no
+ * coordinates, or that is not in the current recall result, moves nothing —
+ * this view is a second rendering of that result set, not a second retrieval,
+ * and it cannot show a point it was never given. `ensureVisible` also declines
+ * to move when the points are already comfortably on screen.
  */
 
 /** The vendored file's `objects` — named so the decode below is not `any`. */
@@ -97,6 +106,19 @@ function hexA(hex: string, a: number): string {
 
 const HIT_RADIUS_PX = 9;
 
+/** Keep a point this far inside the pane before calling it "on screen" — a dot
+ *  touching the frame is technically visible and practically missed. */
+const CAMERA_PAD_PX = 48;
+
+/** Ceiling on the scale the camera will choose for itself. `scaleExtent` allows
+ *  24×, but a single surfaced memory does not justify diving to street level:
+ *  the surrounding points are the context that makes a location mean something,
+ *  and they are exactly what a hard zoom throws away. */
+const CAMERA_MAX_K = 8;
+
+/** Camera glide. Long enough to read as one continuous move. */
+const CAMERA_MS = 520;
+
 export function GeoMap({ memories, types }: { memories: RecallMemory[]; types: string[] }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -151,6 +173,12 @@ export function GeoMap({ memories, types }: { memories: RecallMemory[]; types: s
     const tokens = readTokens(wrap);
     const hueFor = (t: string | null) =>
       t && types.indexOf(t) >= 0 ? tokens.chart[types.indexOf(t) % tokens.chart.length] : tokens.muted;
+
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const pulse = createPulseRunner(() => drawRef.current());
+    /** In flight camera move, so a second surfaced memory cancels the first
+     *  rather than fighting it frame by frame. */
+    let cameraRaf = 0;
 
     let width = 0;
     let height = 0;
@@ -229,6 +257,9 @@ export function GeoMap({ memories, types }: { memories: RecallMemory[]; types: s
       }
       screenRef.current = screen;
 
+      const lit = pulse.ref.current;
+      const now = lit ? performance.now() : 0;
+
       for (const { point, x, y } of screen) {
         const isSelected = point.id === sel;
         // Coordinates are DATA, so a point takes a category hue. The accent is
@@ -249,6 +280,17 @@ export function GeoMap({ memories, types }: { memories: RecallMemory[]; types: s
         ctx!.lineWidth = isSelected ? 2 : 1;
         ctx!.strokeStyle = isSelected ? tokens.active : hexA(hue, 1);
         ctx!.stroke();
+
+        // Screen space like the point itself, so the ring is the same size
+        // wherever the camera is: it marks an event, not an area.
+        if (lit && lit.ids.has(point.id)) {
+          const phase = pulsePhase(lit, now);
+          ctx!.beginPath();
+          ctx!.arc(x, y, r + 6 + phase * 24, 0, 2 * Math.PI);
+          ctx!.strokeStyle = hexA(tokens.active, 0.85 * (1 - phase));
+          ctx!.lineWidth = 2;
+          ctx!.stroke();
+        }
       }
     }
 
@@ -265,6 +307,98 @@ export function GeoMap({ memories, types }: { memories: RecallMemory[]; types: s
     const sel = select(canvas);
     sel.call(zoomBehavior);
 
+    /**
+     * Bring `hits` into view.
+     *
+     * Every move goes through `zoomBehavior.transform`, never through
+     * `transformRef` directly: d3 keeps the authoritative transform on the DOM
+     * node, so writing the ref behind its back leaves the two disagreeing and
+     * the user's next scroll or drag jumps back to where d3 still thinks the
+     * camera is.
+     *
+     * The camera is also conservative on purpose. If the points are already
+     * comfortably on screen it does not move at all — motion that changes
+     * nothing is the kind of animation that teaches people to ignore the
+     * surface — and it never zooms IN past what the person had chosen, only out
+     * far enough to fit what arrived.
+     */
+    function ensureVisible(hits: GeoPoint[]) {
+      const t = transformRef.current;
+      const base: Array<[number, number]> = [];
+      for (const p of hits) {
+        const xy = project(p);
+        if (xy) base.push(xy);
+      }
+      if (base.length === 0) return;
+
+      const onScreen = base.every(([bx, by]) => {
+        const x = bx * t.k + t.x;
+        const y = by * t.k + t.y;
+        return (
+          x >= CAMERA_PAD_PX &&
+          x <= width - CAMERA_PAD_PX &&
+          y >= CAMERA_PAD_PX &&
+          y <= height - CAMERA_PAD_PX
+        );
+      });
+      if (onScreen) return;
+
+      let x0 = Infinity;
+      let y0 = Infinity;
+      let x1 = -Infinity;
+      let y1 = -Infinity;
+      for (const [bx, by] of base) {
+        x0 = Math.min(x0, bx);
+        y0 = Math.min(y0, by);
+        x1 = Math.max(x1, bx);
+        y1 = Math.max(y1, by);
+      }
+      const boxW = Math.max(x1 - x0, 1e-6);
+      const boxH = Math.max(y1 - y0, 1e-6);
+      const fits = Math.min(
+        (width - 2 * CAMERA_PAD_PX) / boxW,
+        (height - 2 * CAMERA_PAD_PX) / boxH,
+      );
+      // Hold the current scale where it still fits, otherwise back off to the
+      // scale that does. `scaleExtent` is [1, 24]; 1 is the whole world.
+      const k = Math.min(CAMERA_MAX_K, Math.max(1, Math.min(fits, Math.max(t.k, 1))));
+      const cx = (x0 + x1) / 2;
+      const cy = (y0 + y1) / 2;
+      const target = zoomIdentity.translate(width / 2 - cx * k, height / 2 - cy * k).scale(k);
+
+      if (cameraRaf) cancelAnimationFrame(cameraRaf);
+      if (reduceMotion) {
+        // Jump. The glide is the part that causes trouble, not the destination.
+        zoomBehavior.transform(sel, target);
+        return;
+      }
+
+      const from = t;
+      const startedAt = performance.now();
+      const step = () => {
+        const u = Math.min(1, (performance.now() - startedAt) / CAMERA_MS);
+        // Cubic ease-out: leaves fast, arrives settled.
+        const e = 1 - Math.pow(1 - u, 3);
+        zoomBehavior.transform(
+          sel,
+          zoomIdentity
+            .translate(from.x + (target.x - from.x) * e, from.y + (target.y - from.y) * e)
+            .scale(from.k + (target.k - from.k) * e),
+        );
+        cameraRaf = u < 1 ? requestAnimationFrame(step) : 0;
+      };
+      cameraRaf = requestAnimationFrame(step);
+    }
+
+    const drawn = new Map(points.map((p) => [p.id, p]));
+    const unsubscribePulse = subscribePulse(
+      (id) => drawn.has(id),
+      (hit) => {
+        pulse.start(hit);
+        ensureVisible([...hit].map((id) => drawn.get(id)!));
+      },
+    );
+
     const observer = new ResizeObserver(() => {
       sizeCanvas();
       draw();
@@ -274,6 +408,9 @@ export function GeoMap({ memories, types }: { memories: RecallMemory[]; types: s
     return () => {
       observer.disconnect();
       sel.on(".zoom", null);
+      unsubscribePulse();
+      pulse.cancel();
+      if (cameraRaf) cancelAnimationFrame(cameraRaf);
     };
   }, [points, types]);
 

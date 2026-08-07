@@ -1,4 +1,5 @@
 import type { Reachability } from "@/lib/api";
+import { ActivityNotices } from "@/components/layout/ActivityNotices";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useRecall } from "@/features/recall/useRecall";
 import { useMemoryTypes } from "@/features/recall/GraphCanvas";
@@ -108,6 +109,8 @@ export function GeoView({ reach }: { reach: Reachability }) {
       <div className="text-muted-foreground pointer-events-none absolute top-3 left-4 z-10 text-[12px]">
         Where this happened
       </div>
+
+      <ActivityNotices />
 
       <div className="pointer-events-none absolute inset-x-4 bottom-3 z-10 flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">

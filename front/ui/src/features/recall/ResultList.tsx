@@ -1,6 +1,8 @@
+import { MessageSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { RecallMemory } from "@/lib/api";
 import { useSession } from "@/stores/session";
+import { useSurfacedMemoryIds } from "@/stores/chat";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -30,7 +32,7 @@ function relativeDay(iso: string): string {
   return `${Math.floor(days / 365)}y ago`;
 }
 
-function ResultRow({ memory }: { memory: RecallMemory }) {
+function ResultRow({ memory, surfaced }: { memory: RecallMemory; surfaced: boolean }) {
   const selected = useSession((s) => s.selectedMemoryId === memory.id);
   const select = useSession((s) => s.select);
 
@@ -72,17 +74,36 @@ function ResultRow({ memory }: { memory: RecallMemory }) {
             {memory.experience.geo_location[1].toFixed(2)}
           </span>
         ) : null}
+        {surfaced ? (
+          // The deterministic search and the model reached the same memory.
+          // That agreement is worth seeing — it is the whole reason recall sits
+          // beside the seat rather than behind it — but it is a note, not a
+          // state: `--muted-foreground`, never the accent, because the accent
+          // already means "selected" two lines up and a second orange here
+          // would make every marked row look chosen.
+          <span
+            className="text-muted-foreground/70 ml-auto shrink-0"
+            title="Also surfaced by the conversation"
+          >
+            <MessageSquare aria-hidden="true" className="size-3" />
+            <span className="sr-only">Also surfaced by the conversation</span>
+          </span>
+        ) : null}
       </div>
     </button>
   );
 }
 
 export function ResultList({ memories }: { memories: RecallMemory[] }) {
+  // One derivation for the whole list rather than a subscription per row: the
+  // set is rebuilt only when the active conversation's turns change.
+  const surfaced = useSurfacedMemoryIds();
+
   return (
     <ScrollArea role="list" className="min-h-0 flex-1">
       {memories.map((m) => (
         <div role="listitem" key={m.id}>
-          <ResultRow memory={m} />
+          <ResultRow memory={m} surfaced={surfaced.has(m.id)} />
         </div>
       ))}
     </ScrollArea>

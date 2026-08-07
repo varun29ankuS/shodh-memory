@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { Reachability } from "@/lib/api";
+import { ActivityNotices } from "@/components/layout/ActivityNotices";
 import { RecallDiagram } from "./RecallDiagram";
 import { GraphCanvas, useMemoryTypes } from "./GraphCanvas";
 import { useRecall } from "./useRecall";
@@ -40,6 +41,13 @@ export function GraphStage({ reach }: { reach: Reachability }) {
       {/* The floor. Same ruling the canvas is plotted against, so the
           empty state and the populated one are the same surface. */}
       <div aria-hidden="true" className="graticule pointer-events-none absolute inset-0" />
+
+      {/* Top-RIGHT: the label takes the left corner and the legend the bottom
+          strip, and the conversation overlay docks bottom-right. This is the
+          one corner of the stage that is free at every width. Mounted outside
+          the `hasGraph` branch — a write is worth reporting whether or not
+          there is a result set on screen to see it happen to. */}
+      <ActivityNotices />
 
       {hasGraph ? (
         <>

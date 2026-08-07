@@ -49,6 +49,19 @@ import {
  *
  * Both levels are the same renderer with different node sets, so there is one
  * hit-test, one zoom, one draw.
+ *
+ * IT DOES NOT PULSE WITH THE CONVERSATION, and that is the correct behaviour
+ * rather than a gap. The seat's `memory_recall` and `proactive_context` events
+ * carry MEMORY ids; every node here is a `UniverseStar.id` or a cluster index,
+ * and no payload in the product maps one to the other — the reverse index
+ * exists in the store (`get_episodes_by_entity`, src/graph_memory.rs:5003-5050)
+ * but nothing routes it, which WORKFLOWS.md already names as the graph's one
+ * gap. The available near-miss would be matching
+ * `ProactiveSurfacedMemory.matched_entities` against `UniverseStar.name`, and
+ * that is a string coincidence, not provenance: it would light the wrong
+ * entities confidently and silently. Until an entity→memory route exists, a
+ * still canvas is the honest answer. Corpus-level activity still reaches this
+ * destination as a notice (GraphView.tsx).
  */
 
 type Level = "clusters" | "entities";
