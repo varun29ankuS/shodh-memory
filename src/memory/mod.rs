@@ -19,6 +19,7 @@ pub mod injection;
 pub mod introspection;
 pub mod learning_history;
 pub mod lineage;
+pub mod oplog;
 pub mod pattern_detection;
 pub mod prospective;
 pub mod query_parser;
@@ -7225,8 +7226,28 @@ impl MemorySystem {
     /// # Warning
     /// This provides direct access to the database. Use with caution.
     /// Primarily intended for backup/restore operations.
+    ///
+    /// NEVER write `CF_OPLOG` through this handle. Raw-CF writes bypass the
+    /// oplog's entire append-only contract — session_id/user_id validation,
+    /// the per-session head cache, and hash chaining — which is exactly what
+    /// that feature exists to guarantee. Use [`Self::storage`]'s
+    /// `oplog_append`/`oplog_read`/`oplog_mark_incomplete`/`oplog_is_incomplete`
+    /// instead for anything oplog-related.
     pub fn get_db(&self) -> std::sync::Arc<rocksdb::DB> {
         self.long_term_memory.db()
+    }
+
+    /// Access the typed storage layer (oplog, advanced search, etc.).
+    ///
+    /// `long_term_memory` has no accessor otherwise (audit
+    /// `2026-07-30-traceability-slice1-audit.md` Finding G) — callers that
+    /// need `MemoryStorage::oplog_*` (e.g. the trace-capture middleware)
+    /// must go through here, NOT through [`Self::get_db`]: raw-CF writes via
+    /// the bare `Arc<DB>` bypass the oplog's append-only contract (session
+    /// head cache, hash chaining, session_id validation), which is exactly
+    /// what this feature exists to prevent.
+    pub fn storage(&self) -> &Arc<MemoryStorage> {
+        &self.long_term_memory
     }
 
     /// Advanced search using storage criteria

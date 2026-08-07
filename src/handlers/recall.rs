@@ -370,6 +370,7 @@ pub struct RecallByDateRequest {
 #[tracing::instrument(skip(state), fields(user_id = %req.user_id, query = %req.query))]
 pub async fn recall(
     State(state): State<AppState>,
+    trace: Option<axum::Extension<crate::handlers::trace::OpTrace>>,
     Json(req): Json<RecallRequest>,
 ) -> Result<Json<RecallResponse>, AppError> {
     let op_start = std::time::Instant::now();
@@ -1114,6 +1115,18 @@ pub async fn recall(
                 avg_score,
             },
         );
+    }
+
+    // Trace enrichment (witnessed-op capture): identity + the evidence set —
+    // which memories this recall actually surfaced. The middleware owns the
+    // rest of the record.
+    if let Some(axum::Extension(trace)) = &trace {
+        trace.set_identity(&req.user_id, req.session_id.as_deref());
+        trace.push_evidence(recall_memories.iter().map(|m| m.id.clone()));
+        trace.set_summary(format!(
+            "query: {}",
+            req.query.chars().take(200).collect::<String>()
+        ));
     }
 
     // Build reminder count for response
@@ -3462,11 +3475,18 @@ pub struct PaginatedRecallResponse {
 /// Useful for large memory stores where results need to be paged through.
 pub async fn paginated_recall(
     State(state): State<AppState>,
+    trace: Option<axum::Extension<crate::handlers::trace::OpTrace>>,
     Json(req): Json<RecallRequest>,
 ) -> Result<Json<PaginatedRecallResponse>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
     validation::validate_max_results(req.limit).map_validation_err("limit")?;
     validation::validate_query_text(&req.query).map_validation_err("query")?;
+    // Review C2: an unvalidated session_id would pass through to the oplog
+    // append, be rejected there, and silently suppress the witnessed record
+    // while the caller sees 200 — a caller-controlled audit-trail bypass.
+    if let Some(sid) = &req.session_id {
+        validation::validate_session_id(sid).map_validation_err("session_id")?;
+    }
 
     let retrieval_mode = parse_retrieval_mode(&req.mode);
 
@@ -3564,6 +3584,16 @@ pub async fn paginated_recall(
             }
         })
         .collect();
+
+    // Trace enrichment (witnessed-op capture): identity + surfaced page ids.
+    if let Some(axum::Extension(trace)) = &trace {
+        trace.set_identity(&req.user_id, req.session_id.as_deref());
+        trace.push_evidence(memories.iter().map(|m| m.id.clone()));
+        trace.set_summary(format!(
+            "query: {}",
+            req.query.chars().take(200).collect::<String>()
+        ));
+    }
 
     Ok(Json(PaginatedRecallResponse {
         memories,

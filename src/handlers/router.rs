@@ -469,9 +469,21 @@ pub fn build_protected_routes(state: AppState) -> Router {
     }
 
     // =================================================================
-    // STATE
+    // TRACE CAPTURE + STATE
     // =================================================================
-    router.with_state(state)
+    // Witnessed-op capture is mounted HERE — inside build_protected_routes —
+    // not at the server.rs call sites, so both transports (HTTP with auth,
+    // local IPC without an auth layer) are covered structurally (audit
+    // amendment 9). Layer order note: axum applies `.layer()` inner-first;
+    // this layer wraps only the routes above, and the caller's auth layer
+    // (HTTP path) wraps outside it — so on HTTP, capture runs strictly
+    // inside authentication.
+    router
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            super::trace::capture_middleware,
+        ))
+        .with_state(state)
 }
 
 /// Build the complete router with probe, public, and protected routes.

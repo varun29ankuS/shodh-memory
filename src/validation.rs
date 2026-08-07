@@ -552,6 +552,41 @@ pub fn validate_local_position(pos: &[f64; 3]) -> Result<()> {
     Ok(())
 }
 
+/// Maximum `session_id` length for the oplog key scheme (audit Finding F).
+pub const MAX_SESSION_ID_LENGTH: usize = 128;
+
+/// Validate `session_id` for use in the oplog's `op:{session_id}:{seq}` key
+/// scheme (audit `2026-07-30-traceability-slice1-audit.md` Step 4, Finding F).
+///
+/// `session_id` is unbounded free-form text everywhere else in the codebase
+/// (`RecallRequest.session_id` has no validator). Rejecting `:` here — not
+/// just relying on `verify_chain`'s identity check — prevents the key-prefix
+/// bleed directly: a session literally named `"x"` would otherwise have its
+/// `op:x:` prefix scan match records from a session named `"x:0000..."`.
+/// `verify_chain`'s session_id/user_id identity check is the backstop that
+/// turns any bleed that *does* occur into a detected error, not the fix.
+pub fn validate_session_id(session_id: &str) -> Result<()> {
+    if session_id.is_empty() {
+        return Err(anyhow!("session_id cannot be empty"));
+    }
+    if session_id.len() > MAX_SESSION_ID_LENGTH {
+        return Err(anyhow!(
+            "session_id too long: {} chars (max: {MAX_SESSION_ID_LENGTH})",
+            session_id.len()
+        ));
+    }
+    if !session_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err(anyhow!(
+            "session_id contains invalid characters (allowed: [A-Za-z0-9._-]); \
+             ':' is rejected because it would break the oplog's op:{{session_id}}: key prefix scan"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -953,5 +988,35 @@ mod tests {
         assert!(validate_local_position(&[12.5, -3.2, 100.0]).is_ok());
         assert!(validate_local_position(&[f64::NAN, 0.0, 0.0]).is_err());
         assert!(validate_local_position(&[0.0, f64::INFINITY, 0.0]).is_err());
+    }
+
+    #[test]
+    fn test_validate_session_id() {
+        assert!(validate_session_id("abc-123_def.456").is_ok());
+        assert!(validate_session_id(&"a".repeat(MAX_SESSION_ID_LENGTH)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_session_id_rejects_empty() {
+        assert!(validate_session_id("").is_err());
+    }
+
+    #[test]
+    fn test_validate_session_id_rejects_too_long() {
+        assert!(validate_session_id(&"a".repeat(MAX_SESSION_ID_LENGTH + 1)).is_err());
+    }
+
+    #[test]
+    fn test_validate_session_id_rejects_colon() {
+        // Audit Finding F: a colon breaks the op:{session_id}: prefix scan.
+        assert!(validate_session_id("x:0000000000000000").is_err());
+        assert!(validate_session_id("adhoc:alice").is_err());
+    }
+
+    #[test]
+    fn test_validate_session_id_rejects_other_invalid_chars() {
+        assert!(validate_session_id("bad/slash").is_err());
+        assert!(validate_session_id("bad space").is_err());
+        assert!(validate_session_id("bad\x00null").is_err());
     }
 }

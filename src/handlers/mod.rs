@@ -18,6 +18,9 @@ pub mod crud;
 pub mod recall;
 pub mod remember;
 
+// Agent traceability (witnessed-op capture)
+pub mod trace;
+
 // Advanced memory operations
 pub mod compression;
 pub mod facts;

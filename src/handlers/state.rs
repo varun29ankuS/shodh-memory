@@ -1619,6 +1619,19 @@ impl MultiUserMemoryManager {
             .collect()
     }
 
+    /// Cache-only single-user lookup: `Some` iff the user's MemorySystem is
+    /// currently loaded; NEVER creates or reopens a store on miss (unlike
+    /// `get_user_memory`, which materializes a user dir plus a full
+    /// MemorySystem with retry sleeps). The trace-capture middleware depends
+    /// on this being side-effect-free (audit amendment 11): capture must
+    /// observe, never construct.
+    pub fn cached_user_memory(
+        &self,
+        user_id: &str,
+    ) -> Option<Arc<parking_lot::RwLock<MemorySystem>>> {
+        self.user_memories.get(user_id)
+    }
+
     /// Snapshot cached user memories without creating/opening cold users.
     ///
     /// Observability paths must use this instead of `list_cached_users()` plus

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::oplog::{self, OpRecord, OpRecordDraft};
 use super::types::*;
 
 /// Helper trait to safely iterate over RocksDB results with error logging.
@@ -1079,6 +1080,51 @@ pub(crate) fn crc32_simple(data: &[u8]) -> u32 {
 /// Column family name for secondary indices (tags, types, timestamps, etc.)
 const CF_INDEX: &str = "memory_index";
 
+/// Column family for the append-only agent-traceability operation log
+/// (`memory::oplog::OpRecord`, spec `docs/superpowers/specs/2026-07-30-agent-traceability-design.md`).
+///
+/// `pub` (unlike [`CF_INDEX`]) so other openers of the live storage path —
+/// notably `migration.rs`'s hardcoded-CF-list opener — can reference the
+/// constant instead of duplicating the string literal (audit
+/// `2026-07-30-traceability-slice1-audit.md` Finding A / amendment 3).
+///
+/// Keyspace within this CF:
+/// - `op:{session_id}:{seq:016x}` — one entry per [`super::oplog::OpRecord`],
+///   `seq` zero-padded to 16 **hex** digits (`u64`) so lexicographic order
+///   equals numeric order across the *entire* `u64` range. Decimal padding
+///   would break above 10^16 (`u64::MAX` is 20 decimal digits but only 16
+///   hex digits), so hex is exact at identical cost.
+/// - `head:{session_id}` — cached `(last_seq, last_hash, last_ts)` for O(1)
+///   append without scanning the session's full history.
+/// - `incomplete:{session_id}` — integrity flag set by
+///   [`MemoryStorage::oplog_mark_incomplete`]; never touches `op:`/`head:` keys.
+///
+/// `session_id` is validated (`crate::validation::validate_session_id`) to
+/// reject `:` before it ever reaches a key, so these three prefixes cannot
+/// collide with each other or with a foreign session's `op:` keys.
+pub const CF_OPLOG: &str = "oplog";
+
+/// Key prefix for oplog records: full key is `op:{session_id}:{seq:016x}`
+/// (hex, not decimal — see [`CF_OPLOG`]'s doc comment for why).
+const OPLOG_RECORD_PREFIX: &str = "op:";
+
+/// Key prefix for the cached per-session head pointer: `head:{session_id}`.
+const OPLOG_HEAD_PREFIX: &str = "head:";
+
+/// Key prefix for the per-session integrity flag: `incomplete:{session_id}`.
+const OPLOG_INCOMPLETE_PREFIX: &str = "incomplete:";
+
+/// Cached per-session head pointer, stored under `head:{session_id}` in
+/// [`CF_OPLOG`]. `last_ts` mirrors the head record's `ts` so
+/// [`MemoryStorage::oplog_sessions`] can order sessions "newest-first by
+/// head write time" without decoding each session's full record history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OplogHead {
+    last_seq: u64,
+    last_hash: String,
+    last_ts: DateTime<Utc>,
+}
+
 /// Maximum number of failed writes to buffer for retry.
 /// Small enough to bound memory usage (~100 memories × ~2KB ≈ 200KB)
 /// but large enough to absorb transient RocksDB contention bursts.
@@ -1101,6 +1147,16 @@ pub struct MemoryStorage {
     write_retry_buffer: parking_lot::Mutex<std::collections::VecDeque<Memory>>,
     /// Counter of total write failures (for /api/health metrics)
     write_failure_count: std::sync::atomic::AtomicU64,
+    /// Serializes oplog head-read -> `WriteBatch`-write so concurrent appends
+    /// to the same session cannot race and produce duplicate `seq` values or
+    /// forked chains. Storage methods are NOT otherwise externally serialized
+    /// — handlers take `.read()` guards on `MemorySystem` (audit
+    /// `2026-07-30-traceability-slice1-audit.md` Finding G) — so this lock is
+    /// the only thing making "seq = head.last_seq + 1" atomic. Held only
+    /// across the append path (read head, build record, write batch); never
+    /// taken by reads. Capture is low-frequency relative to reads, so a
+    /// single per-storage (i.e. per-user) mutex is acceptable for v1.
+    oplog_append_lock: parking_lot::Mutex<()>,
 }
 
 impl MemoryStorage {
@@ -1109,6 +1165,11 @@ impl MemoryStorage {
         self.db
             .cf_handle(CF_INDEX)
             .expect("memory_index CF must exist")
+    }
+
+    /// CF accessor for the agent-traceability oplog column family.
+    fn oplog_cf(&self) -> &ColumnFamily {
+        self.db.cf_handle(CF_OPLOG).expect("oplog CF must exist")
     }
 
     /// Create a new memory storage.
@@ -1182,6 +1243,14 @@ impl MemoryStorage {
                     idx_opts.set_write_buffer_size(ROCKSDB_MEMORY_WRITE_BUFFER_BYTES);
                     idx_opts
                 }),
+                ColumnFamilyDescriptor::new(CF_OPLOG, {
+                    let mut oplog_opts = Options::default();
+                    oplog_opts.create_if_missing(true);
+                    oplog_opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+                    oplog_opts.set_max_write_buffer_number(2);
+                    oplog_opts.set_write_buffer_size(ROCKSDB_MEMORY_WRITE_BUFFER_BYTES);
+                    oplog_opts
+                }),
             ]
         })?);
 
@@ -1205,6 +1274,7 @@ impl MemoryStorage {
             write_mode,
             write_retry_buffer: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             write_failure_count: std::sync::atomic::AtomicU64::new(0),
+            oplog_append_lock: parking_lot::Mutex::new(()),
         })
     }
 
@@ -3126,7 +3196,7 @@ impl MemoryStorage {
     pub fn rocksdb_memory_breakdown(&self) -> (u64, u64) {
         let mut memtables = 0u64;
         let mut readers = 0u64;
-        for cf_name in ["default", CF_INDEX] {
+        for cf_name in ["default", CF_INDEX, CF_OPLOG] {
             if let Some(cf) = self.db.cf_handle(cf_name) {
                 if let Ok(Some(v)) = self
                     .db
@@ -3161,6 +3231,11 @@ impl MemoryStorage {
             .flush_cf_opt(self.index_cf(), &flush_opts)
             .map_err(|e| anyhow::anyhow!("Failed to flush index CF: {e}"))?;
 
+        // Explicitly flush the oplog CF for the same reason (audit Finding H).
+        self.db
+            .flush_cf_opt(self.oplog_cf(), &flush_opts)
+            .map_err(|e| anyhow::anyhow!("Failed to flush oplog CF: {e}"))?;
+
         Ok(())
     }
 
@@ -3170,6 +3245,230 @@ impl MemoryStorage {
     /// Facts use a different key prefix ("facts:") to avoid collisions.
     pub fn db(&self) -> Arc<DB> {
         self.db.clone()
+    }
+
+    // ========================================================================
+    // Agent-traceability oplog (spec
+    // docs/superpowers/specs/2026-07-30-agent-traceability-design.md §3.1-3.2)
+    // ========================================================================
+
+    /// Appends `draft` to its session's hash chain and persists it in
+    /// [`CF_OPLOG`], returning the sealed record (`seq`/`prev_hash`/`hash`
+    /// filled in). See [`CF_OPLOG`]'s doc comment for the key scheme.
+    ///
+    /// Atomic per session: reads the cached head, builds `seq =
+    /// head.last_seq + 1` (or `0` against [`super::oplog::genesis_hash`] if
+    /// this is the session's first record), then writes the record and the
+    /// updated head in one `WriteBatch`.
+    ///
+    /// Concurrency: guarded by `oplog_append_lock` for the whole
+    /// head-read → batch-write span. Storage methods are NOT externally
+    /// serialized — handlers take `.read()` guards on `MemorySystem`
+    /// (audit `2026-07-30-traceability-slice1-audit.md` Finding G) — so
+    /// without this lock, two concurrent appends to the same session could
+    /// both read the same head and produce duplicate `seq` values / forked
+    /// chains.
+    ///
+    /// Durability: inherits `self.write_mode` exactly like every other
+    /// storage write (audit amendment 6, resolving a constraint conflict
+    /// with Task 5's <100 µs median append gate) — appends are NOT forced
+    /// to `set_sync(true)`. See `oplog.rs`'s module docs for the resulting
+    /// crash window.
+    pub fn oplog_append(&self, draft: OpRecordDraft) -> Result<OpRecord> {
+        crate::validation::validate_session_id(&draft.session_id)
+            .context("oplog_append: invalid session_id")?;
+        // oplog.rs's DOMAIN_SEP invariant ("0x00 cannot occur in a validated
+        // session_id/user_id") covers user_id too, and user_id is
+        // self-asserted (see OpRecord::user_id's doc comment) — an
+        // unvalidated value with an embedded NUL/control char or unbounded
+        // length would land verbatim in the permanent tamper-evident record
+        // and break that guarantee.
+        crate::validation::validate_user_id(&draft.user_id)
+            .context("oplog_append: invalid user_id")?;
+
+        let OpRecordDraft {
+            ts,
+            session_id,
+            user_id,
+            op,
+            attestation,
+            payload_summary,
+            evidence_refs,
+            outcome,
+            reported_ts,
+            source,
+        } = draft;
+
+        // Guard the whole head-read -> batch-write span (see method docs).
+        let _guard = self.oplog_append_lock.lock();
+        let cf = self.oplog_cf();
+        let head_key = format!("{OPLOG_HEAD_PREFIX}{session_id}");
+
+        let (seq, prev_hash) = match self
+            .db
+            .get_cf(cf, head_key.as_bytes())
+            .context("oplog_append: reading session head")?
+        {
+            Some(bytes) => {
+                let head: OplogHead = serde_json::from_slice(&bytes)
+                    .context("oplog_append: decoding session head")?;
+                (head.last_seq + 1, head.last_hash)
+            }
+            None => (0u64, oplog::genesis_hash(&session_id, &user_id)),
+        };
+
+        let mut record = OpRecord {
+            seq,
+            ts,
+            session_id: session_id.clone(),
+            user_id,
+            op,
+            attestation,
+            payload_summary,
+            evidence_refs,
+            outcome,
+            reported_ts,
+            source,
+            prev_hash: prev_hash.clone(),
+            hash: String::new(),
+        };
+        record.hash = oplog::chain_hash(&prev_hash, &oplog::canonical_bytes(&record));
+
+        let record_key = format!("{OPLOG_RECORD_PREFIX}{session_id}:{seq:016x}");
+        // serde_json, matching oplog.rs's canonical-bytes format: the
+        // persistence round-trip invariant (oplog.rs module docs) requires
+        // any storage format to restore every field bit-exactly, and
+        // serde_json over `OpRecord` is the one already proven to do so
+        // (`serde_round_trip_preserves_verification`).
+        let record_bytes =
+            serde_json::to_vec(&record).context("oplog_append: serializing record")?;
+
+        let new_head = OplogHead {
+            last_seq: seq,
+            last_hash: record.hash.clone(),
+            last_ts: record.ts,
+        };
+        let head_bytes =
+            serde_json::to_vec(&new_head).context("oplog_append: serializing session head")?;
+
+        let mut batch = WriteBatch::default();
+        batch.put_cf(cf, record_key.as_bytes(), &record_bytes);
+        batch.put_cf(cf, head_key.as_bytes(), &head_bytes);
+
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(self.write_mode == WriteMode::Sync);
+        self.db
+            .write_opt(batch, &write_opts)
+            .context("oplog_append: writing record + head batch")?;
+
+        Ok(record)
+    }
+
+    /// Reads `session_id`'s records starting at `from_seq` (inclusive), in
+    /// ascending `seq` order, capped at `limit`.
+    pub fn oplog_read(
+        &self,
+        session_id: &str,
+        from_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<OpRecord>> {
+        crate::validation::validate_session_id(session_id)
+            .context("oplog_read: invalid session_id")?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let cf = self.oplog_cf();
+        let prefix = format!("{OPLOG_RECORD_PREFIX}{session_id}:");
+        let start_key = format!("{OPLOG_RECORD_PREFIX}{session_id}:{from_seq:016x}");
+
+        let iter = self.db.iterator_cf(
+            cf,
+            IteratorMode::From(start_key.as_bytes(), rocksdb::Direction::Forward),
+        );
+
+        let mut records = Vec::new();
+        for item in iter {
+            let (key, value) = item.context("oplog_read: iterator error")?;
+            if !key.starts_with(prefix.as_bytes()) {
+                break;
+            }
+            let record: OpRecord =
+                serde_json::from_slice(&value).context("oplog_read: decoding record")?;
+            records.push(record);
+            if records.len() >= limit {
+                break;
+            }
+        }
+        Ok(records)
+    }
+
+    /// Sets the `incomplete:{session_id}` integrity flag. NEVER touches
+    /// `op:`/`head:` keys — the flag is a separate key prefix precisely so
+    /// this can never rewrite or delete a sealed record (audit amendment 15:
+    /// this is the one intentional, out-of-band oplog write site, used by
+    /// backup restore to mark sessions whose tail was rolled back).
+    pub fn oplog_mark_incomplete(&self, session_id: &str) -> Result<()> {
+        crate::validation::validate_session_id(session_id)
+            .context("oplog_mark_incomplete: invalid session_id")?;
+        let key = format!("{OPLOG_INCOMPLETE_PREFIX}{session_id}");
+
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(self.write_mode == WriteMode::Sync);
+        self.db
+            .put_cf_opt(self.oplog_cf(), key.as_bytes(), b"1", &write_opts)
+            .context("oplog_mark_incomplete: writing flag")?;
+        Ok(())
+    }
+
+    /// Whether `session_id`'s integrity flag is set (see
+    /// [`Self::oplog_mark_incomplete`]).
+    pub fn oplog_is_incomplete(&self, session_id: &str) -> Result<bool> {
+        crate::validation::validate_session_id(session_id)
+            .context("oplog_is_incomplete: invalid session_id")?;
+        let key = format!("{OPLOG_INCOMPLETE_PREFIX}{session_id}");
+        Ok(self
+            .db
+            .get_cf(self.oplog_cf(), key.as_bytes())
+            .context("oplog_is_incomplete: reading flag")?
+            .is_some())
+    }
+
+    /// Lists distinct session ids with at least one oplog record,
+    /// newest-first by head write time (the `ts` of each session's most
+    /// recent append; `session_id` breaks ties for determinism).
+    ///
+    /// No `user_id` filter (audit amendment 7): `MemoryStorage` is already
+    /// per-user (`{base}/{user_id}/storage`), so a `user_id` parameter here
+    /// would be vestigial and would invite a false cross-user-listing
+    /// expectation.
+    pub fn oplog_sessions(&self, limit: usize, offset: usize) -> Result<Vec<String>> {
+        let cf = self.oplog_cf();
+        let iter = self.db.iterator_cf(
+            cf,
+            IteratorMode::From(OPLOG_HEAD_PREFIX.as_bytes(), rocksdb::Direction::Forward),
+        );
+
+        let mut sessions: Vec<(String, DateTime<Utc>)> = Vec::new();
+        for item in iter {
+            let (key, value) = item.context("oplog_sessions: iterator error")?;
+            if !key.starts_with(OPLOG_HEAD_PREFIX.as_bytes()) {
+                break;
+            }
+            let session_id = String::from_utf8_lossy(&key[OPLOG_HEAD_PREFIX.len()..]).to_string();
+            let head: OplogHead =
+                serde_json::from_slice(&value).context("oplog_sessions: decoding session head")?;
+            sessions.push((session_id, head.last_ts));
+        }
+
+        sessions.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+        Ok(sessions
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(id, _)| id)
+            .collect())
     }
 }
 

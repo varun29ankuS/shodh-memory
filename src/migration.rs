@@ -27,7 +27,7 @@ use crate::graph_memory::{EntityNode, EpisodicNode, RelationshipEdge};
 use crate::handlers::types::AuditEvent;
 use crate::memory::compression::SemanticFact;
 use crate::memory::lineage::{LineageBranch, LineageEdge};
-use crate::memory::storage::VectorMappingEntry;
+use crate::memory::storage::{VectorMappingEntry, CF_OPLOG};
 use crate::memory::temporal_facts::TemporalFact;
 
 /// Marker file written after successful migration.
@@ -321,9 +321,19 @@ fn migrate_memory_db(storage_dir: &Path, dry_run: bool) -> Result<MemoryDbCounts
     opts.create_if_missing(false);
     opts.create_missing_column_families(true);
 
+    // CF_OPLOG must be listed here (audit `2026-07-30-traceability-slice1-audit.md`
+    // Finding A, amendment 3): a read-write `DB::open_cf_descriptors` fails on
+    // a database that contains a CF absent from this list ("present-but-unlisted"
+    // is not covered by `create_missing_column_families`, which only covers
+    // "listed-but-absent"). Without this, `shodh migrate` would exit 1 for
+    // every user once `CF_OPLOG` exists, permanently stranding pre-postcard
+    // data. Referencing the constant (not a literal, unlike `cf_index` above,
+    // which duplicates `CF_INDEX` because that one is private) keeps this in
+    // sync if the oplog CF name ever changes.
     let cfs = vec![
         ColumnFamilyDescriptor::new("default", RocksOptions::default()),
         ColumnFamilyDescriptor::new(cf_index, RocksOptions::default()),
+        ColumnFamilyDescriptor::new(CF_OPLOG, RocksOptions::default()),
     ];
 
     let db = DB::open_cf_descriptors(&opts, storage_dir, cfs)
