@@ -953,6 +953,295 @@ pub struct Toponym {
     pub population: u32,
 }
 
+/// What [`Experience::merge_enrichment_from`] actually changed.
+///
+/// Empty means the incoming copy carried nothing the stored one lacked, which
+/// is the overwhelmingly common case on the dedup path (an MCP timeout retry
+/// re-sending a byte-identical payload). Callers use `is_empty()` to skip the
+/// persist + re-index entirely, so idempotent re-sends stay free.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EnrichmentDelta {
+    /// Entity names added to the stored memory, in the order they arrived.
+    /// These are what the knowledge graph is missing until it is rebuilt.
+    pub entities_added: Vec<String>,
+
+    /// Tag values added.
+    pub tags_added: Vec<String>,
+
+    /// Names of scalar fields that were filled in from `None`/empty, for
+    /// logging and for the caller's decision about which indices to refresh
+    /// (e.g. `geo_location` gates the geohash index).
+    pub fields_filled: Vec<&'static str>,
+}
+
+impl EnrichmentDelta {
+    /// True when the incoming copy contributed nothing.
+    pub fn is_empty(&self) -> bool {
+        self.entities_added.is_empty()
+            && self.tags_added.is_empty()
+            && self.fields_filled.is_empty()
+    }
+}
+
+impl Experience {
+    /// Fold the enrichment carried by a byte-identical duplicate into this
+    /// (already stored) experience, returning what changed.
+    ///
+    /// # Why this exists
+    ///
+    /// `remember()` dedups on a SHA-256 of `content` and used to return the
+    /// existing id immediately. Content is only one field of ~40. The incoming
+    /// copy routinely carried enrichment the stored one lacked — entities a
+    /// better extractor found this time, a `geo_location` the first caller
+    /// never supplied, tags, media, a reward signal — and all of it was dropped
+    /// because the text matched. The store's quality therefore depended on
+    /// which duplicate happened to arrive FIRST, which is arbitrary; and a
+    /// deliberate re-ingest with an upgraded extractor (exactly what a GLiNER
+    /// or spaCy-bundle upgrade is for) silently improved nothing.
+    ///
+    /// # The policy
+    ///
+    /// Every rule below is MONOTONE: a merge can only add. Nothing a caller
+    /// once asserted is ever removed or overwritten by a later duplicate. That
+    /// is the property that makes this safe to run on an arbitrary re-send —
+    /// a stale or impoverished duplicate cannot damage a rich stored record,
+    /// so ordering stops mattering.
+    ///
+    /// - **Collections are set-union**, stored entries first, incoming ones
+    ///   appended in arrival order. A bigger entity set is strictly more
+    ///   information; there is no reading under which the second extractor
+    ///   finding MORE entities should shrink the record.
+    /// - **`Option` scalars are fill-if-`None`.** A later `None` never erases a
+    ///   stored `Some` — coordinates supplied once must not be nulled by a
+    ///   caller that simply did not send them, and `None` is indistinguishable
+    ///   from "not provided" on this API. A later `Some` never overwrites a
+    ///   stored `Some` either: first assertion wins, so a merge cannot be used
+    ///   to silently relocate a memory.
+    /// - **Maps union with the STORED key winning**, same reason.
+    /// - **`bool` flags OR.** `false` is the serde default and therefore
+    ///   indistinguishable from "not supplied", so OR is the only monotone
+    ///   choice: a duplicate can report that something WAS a failure, but the
+    ///   absence of that claim cannot retract an earlier one.
+    /// - **`experience_type` is FIRST-WRITE-WINS** and is deliberately NOT
+    ///   merged. It is not a description, it is a control input:
+    ///   [`ExperienceType::edge_weight_multiplier`] scales every graph edge the
+    ///   memory births and [`ExperienceType::activation_multiplier`] scales its
+    ///   retrieval activation. Letting a late duplicate flip `Observation` to
+    ///   `Decision` would silently re-weight an existing episode's edges — that
+    ///   is mutation of something downstream systems key on, dressed up as
+    ///   enrichment.
+    /// - **`content` and `embeddings` are untouched.** Content is identical by
+    ///   construction (that is why we are here) so the embedding is too;
+    ///   re-encoding would burn an inference for a bit-identical vector.
+    ///
+    /// `id`, `created_at`, `version`, `external_id`, `parent_id` and `tier` are
+    /// not reachable from here at all — enrichment must never become a back
+    /// door to mutating identity, so the merge is scoped to the `Experience`
+    /// and cannot touch them even by mistake.
+    pub fn merge_enrichment_from(&mut self, incoming: &Experience) -> EnrichmentDelta {
+        let mut delta = EnrichmentDelta::default();
+
+        // ── Ordered set-unions ──────────────────────────────────────────────
+        for entity in &incoming.entities {
+            if !self.entities.iter().any(|e| e == entity) {
+                self.entities.push(entity.clone());
+                delta.entities_added.push(entity.clone());
+            }
+        }
+        for tag in &incoming.tags {
+            if !self.tags.iter().any(|t| t == tag) {
+                self.tags.push(tag.clone());
+                delta.tags_added.push(tag.clone());
+            }
+        }
+
+        let mut union_strings = |stored: &mut Vec<String>, other: &Vec<String>, name| {
+            let mut added = false;
+            for v in other {
+                if !stored.iter().any(|s| s == v) {
+                    stored.push(v.clone());
+                    added = true;
+                }
+            }
+            if added {
+                delta.fields_filled.push(name);
+            }
+        };
+        union_strings(
+            &mut self.temporal_refs,
+            &incoming.temporal_refs,
+            "temporal_refs",
+        );
+        union_strings(&mut self.outcomes, &incoming.outcomes, "outcomes");
+        union_strings(
+            &mut self.alternatives_considered,
+            &incoming.alternatives_considered,
+            "alternatives_considered",
+        );
+
+        // NER records: identity is the surface text plus its type, so the same
+        // span re-extracted with a better confidence does not duplicate.
+        let mut ner_added = false;
+        for record in &incoming.ner_entities {
+            let dup = self
+                .ner_entities
+                .iter()
+                .any(|r| r.text == record.text && r.entity_type == record.entity_type);
+            if !dup {
+                self.ner_entities.push(record.clone());
+                ner_added = true;
+            }
+        }
+        if ner_added {
+            delta.fields_filled.push("ner_entities");
+        }
+
+        let mut pairs_added = false;
+        for pair in &incoming.cooccurrence_pairs {
+            if !self.cooccurrence_pairs.iter().any(|p| p == pair) {
+                self.cooccurrence_pairs.push(pair.clone());
+                pairs_added = true;
+            }
+        }
+        if pairs_added {
+            delta.fields_filled.push("cooccurrence_pairs");
+        }
+
+        // Toponyms: identity is (mention, resolved name) — the same mention
+        // resolving to a different place is a genuinely different claim.
+        let mut toponyms_added = false;
+        for top in &incoming.toponyms {
+            let dup = self
+                .toponyms
+                .iter()
+                .any(|t| t.mention == top.mention && t.name == top.name);
+            if !dup {
+                self.toponyms.push(top.clone());
+                toponyms_added = true;
+            }
+        }
+        if toponyms_added {
+            delta.fields_filled.push("toponyms");
+        }
+
+        let mut media_added = false;
+        for media in &incoming.media_refs {
+            if !self.media_refs.iter().any(|m| m.uri == media.uri) {
+                self.media_refs.push(media.clone());
+                media_added = true;
+            }
+        }
+        if media_added {
+            delta.fields_filled.push("media_refs");
+        }
+
+        let mut related_added = false;
+        for id in &incoming.related_memories {
+            if !self.related_memories.contains(id) {
+                self.related_memories.push(id.clone());
+                related_added = true;
+            }
+        }
+        if related_added {
+            delta.fields_filled.push("related_memories");
+        }
+
+        let mut causal_added = false;
+        for id in &incoming.causal_chain {
+            if !self.causal_chain.contains(id) {
+                self.causal_chain.push(id.clone());
+                causal_added = true;
+            }
+        }
+        if causal_added {
+            delta.fields_filled.push("causal_chain");
+        }
+
+        // ── Fill-if-None scalars ────────────────────────────────────────────
+        macro_rules! fill_if_none {
+            ($field:ident) => {
+                if self.$field.is_none() {
+                    if let Some(ref v) = incoming.$field {
+                        self.$field = Some(v.clone());
+                        delta.fields_filled.push(stringify!($field));
+                    }
+                }
+            };
+        }
+
+        fill_if_none!(context);
+        fill_if_none!(image_embeddings);
+        fill_if_none!(audio_embeddings);
+        fill_if_none!(video_embeddings);
+        fill_if_none!(robot_id);
+        fill_if_none!(mission_id);
+        fill_if_none!(geo_location);
+        fill_if_none!(local_position);
+        fill_if_none!(heading);
+        fill_if_none!(action_type);
+        fill_if_none!(reward);
+        fill_if_none!(decision_context);
+        fill_if_none!(action_params);
+        fill_if_none!(outcome_type);
+        fill_if_none!(outcome_details);
+        fill_if_none!(confidence);
+        fill_if_none!(weather);
+        fill_if_none!(terrain_type);
+        fill_if_none!(lighting);
+        fill_if_none!(severity);
+        fill_if_none!(recovery_action);
+        fill_if_none!(root_cause);
+        fill_if_none!(pattern_id);
+        fill_if_none!(predicted_outcome);
+        fill_if_none!(prediction_accurate);
+        fill_if_none!(importance_override);
+
+        // `nearby_agents` is a Vec<HashMap> with no identity field, so a
+        // set-union would either duplicate or need an arbitrary key. Treated as
+        // an all-or-nothing observation: filled only when the stored copy has
+        // none.
+        if self.nearby_agents.is_empty() && !incoming.nearby_agents.is_empty() {
+            self.nearby_agents = incoming.nearby_agents.clone();
+            delta.fields_filled.push("nearby_agents");
+        }
+
+        // ── Maps: union, stored key wins ────────────────────────────────────
+        let mut metadata_added = false;
+        for (k, v) in &incoming.metadata {
+            if !self.metadata.contains_key(k) {
+                self.metadata.insert(k.clone(), v.clone());
+                metadata_added = true;
+            }
+        }
+        if metadata_added {
+            delta.fields_filled.push("metadata");
+        }
+
+        let mut sensor_added = false;
+        for (k, v) in &incoming.sensor_data {
+            if !self.sensor_data.contains_key(k) {
+                self.sensor_data.insert(k.clone(), *v);
+                sensor_added = true;
+            }
+        }
+        if sensor_added {
+            delta.fields_filled.push("sensor_data");
+        }
+
+        // ── Monotone booleans ───────────────────────────────────────────────
+        if incoming.is_failure && !self.is_failure {
+            self.is_failure = true;
+            delta.fields_filled.push("is_failure");
+        }
+        if incoming.is_anomaly && !self.is_anomaly {
+            self.is_anomaly = true;
+            delta.fields_filled.push("is_anomaly");
+        }
+
+        delta
+    }
+}
+
 impl Default for Experience {
     fn default() -> Self {
         Self {
@@ -4920,5 +5209,165 @@ mod tests {
         }
         assert_eq!(LayerMode::ALL.first().copied(), Some(LayerMode::VamanaOnly));
         assert_eq!(LayerMode::ALL.last().copied(), Some(LayerMode::Full));
+    }
+
+    // =========================================================================
+    // ENRICHMENT MERGE (content-dedup path)
+    // =========================================================================
+
+    /// A stored experience that already carries real enrichment: entities, a
+    /// geo fix, a decision type, metadata and a failure flag.
+    fn stored_rich() -> Experience {
+        let mut e = Experience {
+            content: "the gripper stalled on the third lift".to_string(),
+            experience_type: ExperienceType::Decision,
+            entities: vec!["gripper".to_string(), "lift".to_string()],
+            tags: vec!["robotics".to_string()],
+            geo_location: Some([39.2904, -76.6122, 3.0]),
+            severity: Some("error".to_string()),
+            is_failure: true,
+            ..Default::default()
+        };
+        e.metadata
+            .insert("source".to_string(), "telemetry".to_string());
+        e
+    }
+
+    #[test]
+    fn merge_unions_entities_and_reports_exactly_what_it_added() {
+        let mut stored = stored_rich();
+        let incoming = Experience {
+            content: stored.content.clone(),
+            // "gripper" is already known; "Baltimore Terminal" is what a better
+            // extractor found on the second pass.
+            entities: vec!["gripper".to_string(), "Baltimore Terminal".to_string()],
+            tags: vec!["robotics".to_string(), "incident".to_string()],
+            ..Default::default()
+        };
+
+        let delta = stored.merge_enrichment_from(&incoming);
+
+        assert_eq!(
+            delta.entities_added,
+            vec!["Baltimore Terminal".to_string()],
+            "the delta must name only the genuinely new entity — the caller uses \
+             it to decide whether the graph episode is stale, and a false \
+             positive triggers a full relationship scan for nothing"
+        );
+        assert_eq!(delta.tags_added, vec!["incident".to_string()]);
+        assert_eq!(
+            stored.entities,
+            vec![
+                "gripper".to_string(),
+                "lift".to_string(),
+                "Baltimore Terminal".to_string()
+            ],
+            "union preserves stored order and appends; it never reorders or drops"
+        );
+    }
+
+    #[test]
+    fn merge_never_overwrites_or_nulls_what_was_already_asserted() {
+        let mut stored = stored_rich();
+        let before_geo = stored.geo_location;
+
+        // A later duplicate that (a) supplies NO coordinates and (b) claims a
+        // different type, severity and geo fix. None of it may land.
+        let impoverished = Experience {
+            content: stored.content.clone(),
+            experience_type: ExperienceType::Observation,
+            geo_location: None,
+            severity: Some("info".to_string()),
+            is_failure: false,
+            ..Default::default()
+        };
+        stored.merge_enrichment_from(&impoverished);
+
+        assert_eq!(
+            stored.geo_location, before_geo,
+            "coordinates supplied once must not be nulled by a caller that \
+             simply did not send them — None is 'not provided', not 'nowhere'"
+        );
+        assert_eq!(
+            stored.severity.as_deref(),
+            Some("error"),
+            "first assertion wins: a later Some must not overwrite a stored Some"
+        );
+        assert!(
+            stored.is_failure,
+            "bool flags are monotone — absence of a failure claim cannot retract one"
+        );
+        assert_eq!(
+            stored.experience_type,
+            ExperienceType::Decision,
+            "experience_type is a control input (edge weights, activation \
+             multipliers), not a description; a late duplicate must never flip it"
+        );
+
+        // A relocating duplicate must not move the memory either.
+        let relocating = Experience {
+            content: stored.content.clone(),
+            geo_location: Some([0.0, 0.0, 0.0]),
+            ..Default::default()
+        };
+        stored.merge_enrichment_from(&relocating);
+        assert_eq!(
+            stored.geo_location, before_geo,
+            "enrichment is not a back door for mutating where a memory happened"
+        );
+    }
+
+    #[test]
+    fn merge_of_a_byte_identical_duplicate_writes_nothing() {
+        // This is the dedup HOT path: an MCP client re-sending after a timeout.
+        // An empty delta is what keeps it free of a RocksDB put, a BM25 commit
+        // and a relationship scan.
+        let mut stored = stored_rich();
+        let identical = stored.clone();
+        let delta = stored.merge_enrichment_from(&identical);
+        assert!(
+            delta.is_empty(),
+            "an identical re-send must produce an empty delta, got {delta:?}"
+        );
+    }
+
+    #[test]
+    fn merge_fills_absent_scalars_and_unions_maps_keeping_stored_values() {
+        let mut stored = Experience {
+            content: "survey pass complete".to_string(),
+            ..Default::default()
+        };
+        stored.metadata.insert("run".to_string(), "one".to_string());
+
+        let mut incoming = Experience {
+            content: stored.content.clone(),
+            geo_location: Some([12.5, 77.5, 0.0]),
+            robot_id: Some("drone-002".to_string()),
+            reward: Some(0.5),
+            ..Default::default()
+        };
+        incoming
+            .metadata
+            .insert("run".to_string(), "two".to_string());
+        incoming
+            .metadata
+            .insert("operator".to_string(), "kestrel".to_string());
+
+        let delta = stored.merge_enrichment_from(&incoming);
+
+        assert_eq!(stored.geo_location, Some([12.5, 77.5, 0.0]));
+        assert_eq!(stored.robot_id.as_deref(), Some("drone-002"));
+        assert_eq!(stored.reward, Some(0.5));
+        assert!(delta.fields_filled.contains(&"geo_location"));
+        assert_eq!(
+            stored.metadata.get("run").map(String::as_str),
+            Some("one"),
+            "map union keeps the STORED value for a colliding key"
+        );
+        assert_eq!(
+            stored.metadata.get("operator").map(String::as_str),
+            Some("kestrel"),
+            "new keys are added"
+        );
     }
 }

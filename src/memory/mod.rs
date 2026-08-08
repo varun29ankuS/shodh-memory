@@ -479,6 +479,82 @@ mod resolve_entity_label_tests {
     }
 }
 
+/// The result of a `remember` call, distinguishing a fresh write from a merge
+/// into an existing content-identical memory.
+///
+/// `remember()` returns only the id and cannot express the difference, which is
+/// why the enrichment merge was invisible to callers for as long as it existed.
+/// The graph episode for a merged memory is built by the HANDLER layer, not by
+/// `MemorySystem`, so the handler is the only place that can rebuild it — and
+/// it can only know to do so if the merge is reported. Hence this type.
+#[derive(Debug, Clone)]
+pub struct RememberOutcome {
+    /// The memory's id. On a merge this is the EXISTING memory's id — a merge
+    /// never mints a new one and never changes `created_at`.
+    pub id: MemoryId,
+
+    /// True when the content already existed and enrichment was merged into it
+    /// (or found to add nothing) rather than a new memory being created.
+    pub deduped: bool,
+
+    /// Entity names the merge added to the stored memory. Empty for a fresh
+    /// write and for a duplicate that contributed nothing. When non-empty the
+    /// memory's graph episode is stale: it was built from the old entity set
+    /// and does not reference these.
+    pub entities_added: Vec<String>,
+
+    /// Tag values the merge added. Tracked separately from `entities_added`
+    /// because the graph pass builds nodes from BOTH — `process_experience_into_graph`
+    /// has a tag phase on top of its NER phase — so a tags-only delta leaves
+    /// the episode just as stale as an entities-only one.
+    pub tags_added: Vec<String>,
+
+    /// The merged experience, present only when a merge actually changed
+    /// something. A caller rebuilding the graph episode MUST use this rather
+    /// than the experience it passed in — the incoming copy holds only its own
+    /// entities, so rebuilding from it would DROP everything the stored copy
+    /// contributed.
+    pub merged_experience: Option<Experience>,
+}
+
+impl RememberOutcome {
+    fn created(id: MemoryId) -> Self {
+        Self {
+            id,
+            deduped: false,
+            entities_added: Vec::new(),
+            tags_added: Vec::new(),
+            merged_experience: None,
+        }
+    }
+
+    fn deduped(
+        id: MemoryId,
+        entities_added: Vec<String>,
+        tags_added: Vec<String>,
+        merged_experience: Option<Experience>,
+    ) -> Self {
+        Self {
+            id,
+            deduped: true,
+            entities_added,
+            tags_added,
+            merged_experience,
+        }
+    }
+
+    /// True when the memory's graph episode no longer reflects the stored
+    /// entity set and must be rebuilt.
+    ///
+    /// Gating on an ACTUAL delta is what keeps the dedup hot path cheap: a
+    /// rebuild costs a full scan of the relationships column family, and the
+    /// common duplicate (a timeout retry re-sending identical bytes) must never
+    /// pay it.
+    pub fn needs_graph_rebuild(&self) -> bool {
+        self.deduped && !(self.entities_added.is_empty() && self.tags_added.is_empty())
+    }
+}
+
 impl MemorySystem {
     /// Create a new memory system.
     ///
@@ -905,24 +981,39 @@ impl MemorySystem {
     /// Store a new memory (takes ownership to avoid clones)
     /// Thread-safe: uses interior mutability for all internal state
     /// If `created_at` is None, uses current time (Utc::now())
+    ///
+    /// Content-identical duplicates are merged, not discarded — see
+    /// [`Self::remember_detailed`], which this delegates to. Callers that need
+    /// to know whether a merge happened (to rebuild the memory's graph episode
+    /// with the enriched entity set) must use that method instead.
     pub fn remember(
+        &self,
+        experience: Experience,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<MemoryId> {
+        self.remember_detailed(experience, created_at)
+            .map(|outcome| outcome.id)
+    }
+
+    /// Store a memory, reporting whether it was merged into an existing one.
+    ///
+    /// See [`RememberOutcome`] and [`Experience::merge_enrichment_from`] for
+    /// what a merge does and why it is safe to run on any re-send.
+    pub fn remember_detailed(
         &self,
         mut experience: Experience,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<MemoryId> {
+    ) -> Result<RememberOutcome> {
         // IDEMPOTENCY (issue #109): Check content hash index before creating a new memory.
-        // If identical content already exists, return the existing MemoryId instead of
-        // creating a duplicate. Catches all duplication paths: timeout retries, auto_ingest,
-        // and manual re-remembers. O(1) RocksDB index lookup.
+        // If identical content already exists, MERGE the incoming copy's
+        // enrichment into it and return the existing MemoryId instead of
+        // creating a duplicate. Catches all duplication paths: timeout retries,
+        // auto_ingest, and manual re-remembers. O(1) RocksDB index lookup.
         if let Some(existing_id) = self
             .long_term_memory
             .get_by_content_hash(&experience.content)
         {
-            tracing::debug!(
-                existing_id = %existing_id.0,
-                "Content dedup: returning existing memory (identical content already stored)"
-            );
-            return Ok(existing_id);
+            return self.merge_into_existing(existing_id, &experience);
         }
 
         let memory_id = MemoryId(Uuid::new_v4());
@@ -1307,7 +1398,148 @@ impl MemorySystem {
         self.fact_extraction_needed
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        Ok(memory_id)
+        Ok(RememberOutcome::created(memory_id))
+    }
+
+    /// Fold a content-identical duplicate's enrichment into the stored memory.
+    ///
+    /// The dedup hot path — an MCP client re-sending a byte-identical payload
+    /// after a timeout — contributes nothing, produces an empty delta, and
+    /// returns here having written NOTHING: no RocksDB put, no BM25 commit, no
+    /// tier churn. Idempotent re-sends must stay free, or the fix for issue
+    /// #109 becomes a write amplifier.
+    ///
+    /// When there IS a delta, the update mirrors the `upsert` update path
+    /// exactly, minus the parts that only apply when content changed:
+    ///
+    /// - `long_term_memory.update()` re-writes every secondary index from the
+    ///   merged experience. Because the merge is monotone (fill-if-`None`, never
+    ///   overwrite), an index key can only be GAINED, never invalidated — a
+    ///   `geo:`/`robot:`/`mission:` entry written now had no previous value to
+    ///   contradict. That is what makes a full index rewrite safe here.
+    /// - BM25 is re-indexed because its document is built from tags and
+    ///   entities, both of which the merge can extend. `BM25Index::upsert` is
+    ///   delete-term-then-add, so this replaces rather than duplicates.
+    /// - The vector index is deliberately NOT touched: content is identical, so
+    ///   the embedding is identical, and a reindex would burn an inference and
+    ///   churn the Vamana graph for a bit-identical vector.
+    /// - Working/session tiers are refreshed if they hold the memory, otherwise
+    ///   recall keeps serving the stale pre-merge copy from cache.
+    ///
+    /// `importance` is raised to the enriched value but never lowered: a
+    /// duplicate arriving with an explicit high importance is new information,
+    /// while one arriving with the default is the ABSENCE of information and
+    /// must not demote what a hook or an operator already asserted.
+    ///
+    /// Not handled, deliberately: two processes merging the same content
+    /// concurrently can lose one side's enrichment (read-modify-write without a
+    /// per-memory lock). That race predates this change — `upsert` has it too —
+    /// and closing it needs a store-level lock, not a fix here.
+    fn merge_into_existing(
+        &self,
+        existing_id: MemoryId,
+        incoming: &Experience,
+    ) -> Result<RememberOutcome> {
+        let mut existing = match self.long_term_memory.get(&existing_id) {
+            Ok(m) => m,
+            Err(e) => {
+                // The content-hash index pointed at a memory that is gone.
+                // `get_by_content_hash` already verifies existence, so this is
+                // a delete racing the merge. Report the id; there is nothing
+                // left to enrich.
+                tracing::debug!(
+                    existing_id = %existing_id.0,
+                    "Content dedup: existing memory vanished before merge ({e})"
+                );
+                return Ok(RememberOutcome::deduped(
+                    existing_id,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                ));
+            }
+        };
+
+        let delta = existing.experience.merge_enrichment_from(incoming);
+
+        if delta.is_empty() {
+            tracing::debug!(
+                existing_id = %existing_id.0,
+                "Content dedup: identical duplicate, nothing to merge"
+            );
+            return Ok(RememberOutcome::deduped(
+                existing_id,
+                Vec::new(),
+                Vec::new(),
+                None,
+            ));
+        }
+
+        // Importance can rise on enrichment, never fall. Computed from the
+        // MERGED experience so newly-merged signals (severity, failure flags,
+        // an explicit override) actually count.
+        {
+            let enriched = existing
+                .experience
+                .importance_override
+                .unwrap_or_else(|| self.calculate_importance(&existing.experience));
+            if enriched > existing.importance() {
+                existing.set_importance(enriched);
+            }
+        }
+
+        self.long_term_memory.update(&existing)?;
+
+        if !delta.entities_added.is_empty() || !delta.tags_added.is_empty() {
+            if let Err(e) = self.hybrid_search.index_memory(
+                &existing_id,
+                &existing.experience.content,
+                &existing.experience.tags,
+                &existing.experience.entities,
+            ) {
+                tracing::warn!(
+                    "Failed to reindex merged memory {} in BM25: {e}",
+                    existing_id.0
+                );
+            }
+            if let Err(e) = self.hybrid_search.commit_and_reload() {
+                tracing::warn!("Failed to commit/reload BM25 index after merge: {e}");
+            }
+        }
+
+        let shared = Arc::new(existing.clone());
+        {
+            let mut working = self.working_memory.write();
+            if working.contains(&existing_id) {
+                working.remove(&existing_id)?;
+                working.add_shared(Arc::clone(&shared))?;
+            }
+        }
+        {
+            let mut session = self.session_memory.write();
+            if session.contains(&existing_id) {
+                session.remove(&existing_id)?;
+                session.add_shared(Arc::clone(&shared))?;
+            }
+        }
+
+        // New entities mean new fact candidates on the next cycle.
+        self.fact_extraction_needed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        tracing::info!(
+            existing_id = %existing_id.0,
+            entities_added = delta.entities_added.len(),
+            fields_filled = ?delta.fields_filled,
+            "Content dedup: merged enrichment into existing memory"
+        );
+
+        Ok(RememberOutcome::deduped(
+            existing_id,
+            delta.entities_added,
+            delta.tags_added,
+            Some(existing.experience.clone()),
+        ))
     }
 
     /// Remember with agent context for multi-agent systems
@@ -1316,21 +1548,30 @@ impl MemorySystem {
     /// enabling agent-specific retrieval and hierarchical memory tracking.
     pub fn remember_with_agent(
         &self,
-        mut experience: Experience,
+        experience: Experience,
         created_at: Option<chrono::DateTime<chrono::Utc>>,
         agent_id: Option<String>,
         run_id: Option<String>,
     ) -> Result<MemoryId> {
-        // IDEMPOTENCY (issue #109): Content hash dedup (same as remember())
+        self.remember_with_agent_detailed(experience, created_at, agent_id, run_id)
+            .map(|outcome| outcome.id)
+    }
+
+    /// [`Self::remember_with_agent`], reporting whether a merge happened.
+    pub fn remember_with_agent_detailed(
+        &self,
+        mut experience: Experience,
+        created_at: Option<chrono::DateTime<chrono::Utc>>,
+        agent_id: Option<String>,
+        run_id: Option<String>,
+    ) -> Result<RememberOutcome> {
+        // IDEMPOTENCY (issue #109): Content hash dedup + enrichment merge,
+        // through the same single implementation `remember()` uses.
         if let Some(existing_id) = self
             .long_term_memory
             .get_by_content_hash(&experience.content)
         {
-            tracing::debug!(
-                existing_id = %existing_id.0,
-                "Content dedup: returning existing memory (identical content already stored)"
-            );
-            return Ok(existing_id);
+            return self.merge_into_existing(existing_id, &experience);
         }
 
         let memory_id = MemoryId(Uuid::new_v4());
@@ -1431,7 +1672,7 @@ impl MemorySystem {
         self.fact_extraction_needed
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        Ok(memory_id)
+        Ok(RememberOutcome::created(memory_id))
     }
 
     /// Search and retrieve relevant memories (zero-copy with Arc<Memory>)
@@ -9005,219 +9246,73 @@ impl MemorySystem {
                         }
                     };
 
-                    let mut truly_new: Vec<(SemanticFact, Option<Vec<f32>>)> = Vec::new();
+                    // Facts that were newly written AND are active. Collected
+                    // for the graph-connection pass; the arbitration itself
+                    // already happened inside `ingest_candidate`.
+                    let mut newly_active: Vec<SemanticFact> = Vec::new();
 
                     for (fact, embedding) in consolidation_result
                         .new_facts
                         .iter()
                         .zip(fact_embeddings.into_iter())
                     {
-                        // Hybrid dedup: embedding cosine + entity gate + polarity + Jaccard floor
-                        match self.fact_store.find_similar(
+                        // ONE arbitration policy, shared with `distill_facts`.
+                        // See `SemanticFactStore::ingest_candidate` for the
+                        // dedup → contradiction → store ladder and why recency
+                        // beats confidence.
+                        let outcome = match self.fact_store.ingest_candidate(
                             user_id,
-                            &fact.fact,
-                            &fact.related_entities,
+                            fact,
                             embedding.as_deref(),
+                            now,
                         ) {
-                            Ok(Some(mut existing)) => {
-                                // A superseded claim absorbs its own re-derivations
-                                // WITHOUT coming back to life: no support, no
-                                // confidence boost, no `last_reinforced` refresh.
-                                //
-                                // This is what makes correction stable. The wrong
-                                // claim usually stays in the corpus (the memory
-                                // saying "four crew injured" is still there), so it
-                                // is re-extracted on every heavy cycle. If it were
-                                // treated as a NEW fact it would meet the
-                                // correction in `find_contradiction` again, and
-                                // with equal support the newcomer rule would flip
-                                // the verdict — the two claims would trade places
-                                // forever. Matching it back onto its own dead row
-                                // ends that: it is recognised, ignored, and left to
-                                // decay on the base half-life.
-                                if !existing.is_active() {
-                                    tracing::debug!(
-                                        fact_id = %existing.id,
-                                        superseded_by = ?existing.invalidated_by,
-                                        "Skipping reinforcement of an invalidated fact"
-                                    );
-                                    continue;
-                                }
-
-                                // Extend source memories — track if any genuinely new
-                                let mut new_sources_added = false;
-                                for src in &fact.source_memories {
-                                    if !existing.source_memories.contains(src) {
-                                        existing.source_memories.push(src.clone());
-                                        new_sources_added = true;
-                                    }
-                                }
-
-                                // Only increment support_count when new source evidence
-                                // is contributed. Prevents same memories from inflating
-                                // the count on every maintenance cycle.
-                                if new_sources_added {
-                                    existing.support_count += 1;
-                                }
-                                existing.last_reinforced = now;
-                                let confidence_before = existing.confidence;
-                                let boost = 0.1 * (1.0 - existing.confidence);
-                                existing.confidence = (existing.confidence + boost).min(1.0);
-                                for entity in &fact.related_entities {
-                                    if !existing.related_entities.contains(entity) {
-                                        existing.related_entities.push(entity.clone());
-                                    }
-                                }
-
-                                if let Err(e) = self.fact_store.update(user_id, &existing) {
-                                    tracing::debug!("Failed to reinforce fact: {e}");
-                                } else {
-                                    // Update existing fact's embedding with latest encoding
-                                    if let Some(ref emb) = embedding {
-                                        let _ = self.fact_store.store_embedding(
-                                            user_id,
-                                            &existing.id,
-                                            emb,
-                                        );
-                                    }
-                                    facts_reinforced_count += 1;
-                                    self.record_consolidation_event_for_user(
-                                        user_id,
-                                        ConsolidationEvent::FactReinforced {
-                                            fact_id: existing.id.clone(),
-                                            fact_content: existing.fact.clone(),
-                                            confidence_before,
-                                            confidence_after: existing.confidence,
-                                            new_support_count: existing.support_count,
-                                            timestamp: now,
-                                        },
-                                    );
-                                }
+                            Ok(o) => o,
+                            Err(e) => {
+                                tracing::warn!(
+                                    fact_id = %fact.id,
+                                    "Fact ingest failed during maintenance: {e}"
+                                );
+                                continue;
                             }
-                            _ => {
-                                // No merge candidate. Before accepting this as a
-                                // brand-new fact, check whether it CONTRADICTS an
-                                // existing one — this is the case the polarity
-                                // gate in `find_similar` silently created two
-                                // unlinked rows for.
-                                //
-                                // Arbitration rule, stated explicitly because it
-                                // decides which of two conflicting claims the
-                                // system believes:
-                                //
-                                //   The NEWER fact wins unless the existing one is
-                                //   better supported, where "better supported"
-                                //   means strictly greater `support_count`.
-                                //
-                                // Recency is the default because a contradiction
-                                // arriving later is usually a CORRECTION, and the
-                                // whole point of this change is that correction
-                                // must be possible. Support overrides recency
-                                // because a single stray extraction should not
-                                // overturn a claim independently attested many
-                                // times. Confidence is deliberately NOT the tie
-                                // breaker: it is a ratchet that rises with every
-                                // re-derivation, so using it would make the older
-                                // claim progressively harder to correct — exactly
-                                // the "well-supported wrong fact is immortal"
-                                // failure being fixed. Ties go to the newcomer.
-                                //
-                                // The loser is INVALIDATED, not deleted: the
-                                // correction keeps an auditable record of what it
-                                // replaced, and `source_memories` on both rows
-                                // keeps the trust chain back to the episodes
-                                // intact.
-                                let contradiction = self
-                                    .fact_store
-                                    .find_contradiction(
-                                        user_id,
-                                        &fact.fact,
-                                        &fact.related_entities,
-                                        embedding.as_deref(),
-                                    )
-                                    .unwrap_or(None);
+                        };
 
-                                if let Some(mut existing) = contradiction {
-                                    let incoming_wins =
-                                        fact.support_count >= existing.support_count;
+                        if let Some((reinforced, confidence_before)) = outcome.reinforced_fact() {
+                            facts_reinforced_count += 1;
+                            self.record_consolidation_event_for_user(
+                                user_id,
+                                ConsolidationEvent::FactReinforced {
+                                    fact_id: reinforced.id.clone(),
+                                    fact_content: reinforced.fact.clone(),
+                                    confidence_before,
+                                    confidence_after: reinforced.confidence,
+                                    new_support_count: reinforced.support_count,
+                                    timestamp: now,
+                                },
+                            );
+                        }
 
-                                    if incoming_wins {
-                                        let mut winner = fact.clone();
-                                        winner.link_contradiction(&existing.id);
-                                        existing.invalidate(Some(&winner.id), now);
-
-                                        if let Err(e) = self.fact_store.update(user_id, &existing) {
-                                            tracing::debug!(
-                                                "Failed to invalidate contradicted fact: {e}"
-                                            );
-                                        }
-                                        tracing::info!(
-                                            superseded = %existing.id,
-                                            winner = %winner.id,
-                                            "Fact contradiction: newer claim supersedes"
-                                        );
-                                        truly_new.push((winner, embedding));
-                                    } else {
-                                        // The established claim is better attested.
-                                        // Record the link on BOTH sides and store the
-                                        // newcomer already invalidated, so the
-                                        // disagreement is visible rather than lost.
-                                        let mut loser = fact.clone();
-                                        loser.invalidate(Some(&existing.id), now);
-                                        existing.link_contradiction(&loser.id);
-
-                                        if let Err(e) = self.fact_store.update(user_id, &existing) {
-                                            tracing::debug!(
-                                                "Failed to link contradiction on winner: {e}"
-                                            );
-                                        }
-                                        tracing::info!(
-                                            rejected = %loser.id,
-                                            winner = %existing.id,
-                                            "Fact contradiction: better-supported claim holds"
-                                        );
-                                        truly_new.push((loser, embedding));
-                                    }
-                                } else {
-                                    truly_new.push((fact.clone(), embedding));
-                                }
-                            }
+                        if let Some(stored) = outcome.newly_active_fact() {
+                            facts_extracted_count += 1;
+                            self.record_consolidation_event_for_user(
+                                user_id,
+                                ConsolidationEvent::FactExtracted {
+                                    fact_id: stored.id.clone(),
+                                    fact_content: stored.fact.clone(),
+                                    confidence: stored.confidence,
+                                    fact_type: format!("{:?}", stored.fact_type),
+                                    source_memory_count: stored.source_memories.len(),
+                                    timestamp: now,
+                                },
+                            );
+                            newly_active.push(stored.clone());
                         }
                     }
 
-                    // Store new facts
-                    if !truly_new.is_empty() {
-                        let facts_only: Vec<SemanticFact> =
-                            truly_new.iter().map(|(f, _)| f.clone()).collect();
-                        match self.fact_store.store_batch(user_id, &facts_only) {
-                            Ok(stored) => {
-                                facts_extracted_count = stored;
-                                // Store embeddings for newly persisted facts
-                                for (fact, embedding) in &truly_new {
-                                    if let Some(emb) = embedding {
-                                        let _ =
-                                            self.fact_store.store_embedding(user_id, &fact.id, emb);
-                                    }
-                                    self.record_consolidation_event_for_user(
-                                        user_id,
-                                        ConsolidationEvent::FactExtracted {
-                                            fact_id: fact.id.clone(),
-                                            fact_content: fact.fact.clone(),
-                                            confidence: fact.confidence,
-                                            fact_type: format!("{:?}", fact.fact_type),
-                                            source_memory_count: fact.source_memories.len(),
-                                            timestamp: now,
-                                        },
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to store extracted facts: {e}");
-                            }
-                        }
-
-                        // Connect newly extracted facts to the knowledge graph
-                        self.connect_facts_to_graph(&facts_only);
+                    // Connect newly extracted facts to the knowledge graph.
+                    // Only ACTIVE facts: a newcomer that lost arbitration is
+                    // retained for audit and must stay unreachable by traversal.
+                    if !newly_active.is_empty() {
+                        self.connect_facts_to_graph(&newly_active);
                     }
 
                     if facts_extracted_count > 0 || facts_reinforced_count > 0 {
@@ -9723,10 +9818,32 @@ impl MemorySystem {
         // Pattern separation gate (dentate gyrus analogy): before storing new
         // facts, check if each one matches an existing engram. If so, reinforce
         // the existing trace (pattern completion) instead of creating a duplicate.
-        // This prevents within-batch duplicates that bypass the find_similar() gate
-        // because both members are stored in the same consolidation cycle.
-        let mut deduplicated_facts: Vec<SemanticFact> = Vec::new();
+        //
+        // This path used to implement its OWN version of that gate, and it
+        // differed from the timer-driven `run_maintenance` one in ways that
+        // mattered. It did not call `find_contradiction` at all, so a distilled
+        // fact that negated a stored active one was simply pushed onto the "new
+        // facts" pile — re-creating the two-unlinked-active-rows defect the
+        // invalidation increment exists to prevent, with the outcome depending
+        // on nothing more principled than whether a human hit the consolidate
+        // endpoint or a timer fired first. It also skipped the confidence boost,
+        // the related-entity merge and the embedding refresh that maintenance
+        // applied on reinforcement.
+        //
+        // Both paths now go through `SemanticFactStore::ingest_candidate`, which
+        // is the single place that decides which of two conflicting facts is
+        // active. Everything below is bookkeeping over its verdict.
+        //
+        // One behavioural consequence worth naming: `ingest_candidate` writes
+        // immediately, so facts minted in the SAME batch can now see each other.
+        // Previously new facts were all written after the loop, so two
+        // near-identical candidates from one consolidation cycle both landed as
+        // separate rows and had to be cleaned up later by `purge_duplicates`.
+        // Within-batch dedup is what the comment above always claimed this gate
+        // did; now it actually does it.
+        let mut newly_active: Vec<SemanticFact> = Vec::new();
         let mut merged_count: usize = 0;
+        let now = chrono::Utc::now();
 
         // Pre-encode all new facts to enable hybrid dedup with cosine gate
         let new_texts: Vec<&str> = result.new_facts.iter().map(|f| f.fact.as_str()).collect();
@@ -9736,54 +9853,36 @@ impl MemorySystem {
         };
 
         for (fact, embedding) in result.new_facts.iter().zip(new_embeddings.iter()) {
-            let emb_ref = embedding.as_deref();
-            match self
-                .fact_store
-                .find_similar(user_id, &fact.fact, &fact.related_entities, emb_ref)
-            {
-                Ok(Some(mut existing)) => {
-                    // An invalidated fact absorbs its own re-derivations WITHOUT
-                    // coming back to life — the same guard the maintenance path
-                    // applies. `find_similar` deliberately still MATCHES dead
-                    // rows (that is what stops a corrected claim and its
-                    // correction trading places every cycle), so without this
-                    // check the on-demand path would refresh `last_reinforced`
-                    // on a superseded claim and hand it a fresh half-life. The
-                    // wrong fact usually stays in the corpus and is re-extracted
-                    // forever, so this is not a corner case; it was simply
-                    // unreachable while the candidate extractor produced nothing.
-                    if !existing.is_active() {
-                        tracing::debug!(
-                            fact_id = %existing.id,
-                            superseded_by = ?existing.invalidated_by,
-                            "distill_facts: skipping reinforcement of an invalidated fact"
-                        );
-                        continue;
-                    }
+            let outcome = match self.fact_store.ingest_candidate(
+                user_id,
+                fact,
+                embedding.as_deref(),
+                now,
+            ) {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!(fact_id = %fact.id, "Fact ingest failed during distillation: {e}");
+                    continue;
+                }
+            };
 
-                    // Pattern completion: reinforce existing trace.
-                    // Only increment support_count when genuinely new source
-                    // memories contribute evidence. Prevents same memories
-                    // from inflating the count across consolidation cycles.
-                    let existing_sources: std::collections::HashSet<MemoryId> =
-                        existing.source_memories.iter().cloned().collect();
-                    let mut new_sources_added = false;
-                    for src in &fact.source_memories {
-                        if !existing_sources.contains(src) {
-                            existing.source_memories.push(src.clone());
-                            new_sources_added = true;
-                        }
-                    }
-                    if new_sources_added {
-                        existing.support_count += 1;
-                    }
-                    existing.last_reinforced = chrono::Utc::now();
-                    let _ = self.fact_store.update(user_id, &existing);
-                    merged_count += 1;
-                }
-                _ => {
-                    deduplicated_facts.push(fact.clone());
-                }
+            if outcome.reinforced_fact().is_some() {
+                merged_count += 1;
+            }
+
+            if let Some(stored) = outcome.newly_active_fact() {
+                self.record_consolidation_event_for_user(
+                    user_id,
+                    ConsolidationEvent::FactExtracted {
+                        fact_id: stored.id.clone(),
+                        fact_content: stored.fact.clone(),
+                        confidence: stored.confidence,
+                        fact_type: format!("{:?}", stored.fact_type),
+                        source_memory_count: stored.source_memories.len(),
+                        timestamp: now,
+                    },
+                );
+                newly_active.push(stored.clone());
             }
         }
 
@@ -9795,47 +9894,22 @@ impl MemorySystem {
             );
         }
 
-        // Store genuinely new facts (passed pattern separation gate)
-        if !deduplicated_facts.is_empty() {
-            let stored = self.fact_store.store_batch(user_id, &deduplicated_facts)?;
+        if !newly_active.is_empty() {
             tracing::info!(
                 user_id = %user_id,
                 facts_extracted = result.facts_extracted,
-                facts_stored = stored,
+                facts_stored = newly_active.len(),
                 facts_merged = merged_count,
                 "Semantic distillation complete"
             );
-
-            // Store embeddings for the genuinely new facts
-            for fact in &deduplicated_facts {
-                // Find the matching embedding from the pre-encoded batch
-                if let Some(pos) = result.new_facts.iter().position(|f| f.id == fact.id) {
-                    if let Some(Some(emb)) = new_embeddings.get(pos) {
-                        let _ = self.fact_store.store_embedding(user_id, &fact.id, emb);
-                    }
-                }
-            }
-
-            // Record consolidation event for each stored fact
-            for fact in &deduplicated_facts {
-                self.record_consolidation_event_for_user(
-                    user_id,
-                    ConsolidationEvent::FactExtracted {
-                        fact_id: fact.id.clone(),
-                        fact_content: fact.fact.clone(),
-                        confidence: fact.confidence,
-                        fact_type: format!("{:?}", fact.fact_type),
-                        source_memory_count: fact.source_memories.len(),
-                        timestamp: chrono::Utc::now(),
-                    },
-                );
-            }
 
             // Connect newly extracted facts to the knowledge graph — the
             // timer-driven run_maintenance() path does this, but the on-demand
             // distillation path used to leave facts orphaned (never wired into
             // EntityNodes/edges), so graph-augmented recall couldn't reach them.
-            self.connect_facts_to_graph(&deduplicated_facts);
+            // Only ACTIVE facts: a newcomer that lost arbitration is retained
+            // for audit and must stay unreachable by traversal.
+            self.connect_facts_to_graph(&newly_active);
         }
 
         // Advance watermark to the LAST memory's created_at, NOT now(): using now()

@@ -2598,6 +2598,68 @@ impl MultiUserMemoryManager {
         backed_up
     }
 
+    /// Rebuild a memory's graph episode from scratch, for the case where the
+    /// memory's ENTITY SET changed but its episode already exists.
+    ///
+    /// [`Self::process_experience_into_graph`] is idempotent by design: if an
+    /// episode already exists for this memory id it returns early, which stops
+    /// an MCP retry from inflating `mention_count` and birthing duplicate
+    /// edges. That guard is correct for a replay and wrong for a genuine
+    /// change, so a changed memory has to demolish its episode first. Two
+    /// callers need exactly that:
+    ///
+    /// - `upsert`, when it rewrites an existing memory's content, and
+    /// - `remember`, when a content-identical duplicate merged in entities the
+    ///   stored copy did not have.
+    ///
+    /// They used to be one inline block and one missing block respectively —
+    /// the merge case simply never reached the graph, so an enriched entity set
+    /// sat in RocksDB and BM25 while traversal still saw the old one.
+    ///
+    /// The alternative — teaching the idempotency guard to admit only the
+    /// entity delta — was rejected. The edge-construction pass downstream of it
+    /// is several hundred lines of policy (PMI gating, hub caps, fragment
+    /// masks, predicate typing, reward modulation, surprise accounting) and a
+    /// second entry point into it would be a second copy of that policy waiting
+    /// to diverge. Demolish-and-rebuild reuses it verbatim.
+    ///
+    /// `delete_episode` is not as destructive as it looks: it scrubs this
+    /// episode from every edge's attestation trail and deletes only edges left
+    /// with NO remaining attestation, so edges corroborated by other episodes
+    /// keep their accumulated Hebbian weight. What is lost is the strengthening
+    /// this one episode accrued on edges only it attested — which, for an
+    /// episode being rebuilt because its entity set was wrong, is not a loss
+    /// worth protecting.
+    ///
+    /// It does cost a full scan of the relationships column family, so it is
+    /// gated on there being an actual delta at both call sites. A duplicate
+    /// that adds nothing never gets here.
+    pub fn rebuild_experience_graph(
+        &self,
+        user_id: &str,
+        experience: &Experience,
+        memory_id: &MemoryId,
+        entity_name_embeddings: Option<&HashMap<String, Vec<f32>>>,
+    ) -> Result<Option<crate::memory::types::SurpriseComponents>> {
+        if let Ok(graph) = self.get_user_graph(user_id) {
+            let graph_guard = graph.read();
+            match graph_guard.delete_episode(&memory_id.0) {
+                Ok(true) => tracing::debug!(
+                    "Cleaned up old episode {} before graph rebuild",
+                    &memory_id.0.to_string()[..8]
+                ),
+                Ok(false) => {} // No prior episode existed
+                Err(e) => tracing::debug!(
+                    "Old episode cleanup failed for {} (non-fatal): {}",
+                    &memory_id.0.to_string()[..8],
+                    e
+                ),
+            }
+        }
+
+        self.process_experience_into_graph(user_id, experience, memory_id, entity_name_embeddings)
+    }
+
     /// Process an experience and extract entities/relationships into the graph
     ///
     /// SHO-102: Improved graph building with:

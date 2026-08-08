@@ -542,6 +542,159 @@ fn a_corrected_report_supersedes_the_initial_claim_end_to_end() {
     );
 }
 
+/// The ON-DEMAND distillation path must arbitrate contradictions exactly as the
+/// timer-driven maintenance path does.
+///
+/// It did not. `distill_facts` called `find_similar` and, on a miss, pushed the
+/// fact straight onto the "genuinely new" pile — `find_contradiction` was never
+/// reached. So a correction distilled on demand did not supersede the claim it
+/// corrected: both rows stayed ACTIVE and unlinked, each ratcheting its own
+/// confidence and extending its own half-life, which is precisely the state the
+/// invalidation increment exists to prevent. Whether the system ended up
+/// believing one thing or two contradictory things depended on nothing more
+/// principled than whether a human hit the consolidate endpoint or a timer fired
+/// first.
+///
+/// This is the maintenance-path correction test (`a_corrected_report_supersedes_
+/// the_initial_claim_end_to_end`) re-run through `distill_facts`, and it must
+/// reach the same verdict. Both now route through
+/// `SemanticFactStore::ingest_candidate`.
+///
+/// Non-vacuity is asserted first: if extraction is silent, every arbitration
+/// assertion below is trivially satisfied — the exact way the original version
+/// of the maintenance test shipped green while testing nothing.
+#[test]
+fn on_demand_distillation_arbitrates_a_contradiction_like_maintenance_does() {
+    let (system, _dir) = setup_memory_system();
+    let user = "e2e-distill-correction";
+
+    let claim_at = days_ago_ms(40);
+    let correction_at = days_ago_ms(20);
+
+    const CLAIM: &str =
+        "Initial reports said four crew members were injured in the bridge collapse";
+    const CLAIM_ECHO: &str =
+        "Early reports said four crew members were injured in the bridge collapse";
+    const CORRECTION: &str =
+        "Corrected reports confirm no crew members were injured in the bridge collapse";
+    const CORRECTION_ECHO: &str =
+        "Later reports confirm no crew members were injured in the bridge collapse";
+
+    // ── Cycle 1: the claim ──────────────────────────────────────────────────
+    system
+        .remember(declarative_memory(&format!("{CLAIM}."), 0.9), Some(claim_at))
+        .expect("remember claim");
+    system
+        .remember(
+            declarative_memory(&format!("{CLAIM_ECHO}."), 0.8),
+            Some(claim_at),
+        )
+        .expect("remember claim echo");
+
+    system.distill_facts(user, 2, 7).expect("distill claim");
+
+    let after_claim = system.get_facts(user, 100).expect("facts");
+    assert!(
+        !after_claim.is_empty(),
+        "on-demand distillation produced no facts — every assertion below is vacuous"
+    );
+    let claim_fact = after_claim
+        .iter()
+        .find(|f| f.fact.contains("crew members were injured"))
+        .unwrap_or_else(|| panic!("expected the claim to be extracted, got {after_claim:?}"))
+        .clone();
+    assert!(claim_fact.is_active(), "a fresh fact must be active");
+
+    // ── Cycle 2: the correction ─────────────────────────────────────────────
+    system
+        .remember(
+            declarative_memory(&format!("{CORRECTION}."), 0.9),
+            Some(correction_at),
+        )
+        .expect("remember correction");
+    system
+        .remember(
+            declarative_memory(&format!("{CORRECTION_ECHO}."), 0.8),
+            Some(correction_at),
+        )
+        .expect("remember correction echo");
+
+    system.distill_facts(user, 2, 7).expect("distill correction");
+
+    let store = system.fact_store();
+    let all = store.list(user, 100).expect("list");
+    let correction_fact = all
+        .iter()
+        .find(|f| f.fact.contains("no crew members were injured"))
+        .unwrap_or_else(|| panic!("the correction was never extracted, got {all:?}"))
+        .clone();
+
+    // ── Arbitration ─────────────────────────────────────────────────────────
+    let active: Vec<_> = all.iter().filter(|f| f.is_active()).collect();
+    assert_eq!(
+        active.len(),
+        1,
+        "a claim and its negation must not both be believed. Active: {active:?}"
+    );
+    assert_eq!(
+        active[0].id, correction_fact.id,
+        "the NEWER claim wins on equal support — recency is the documented default \
+         because a contradiction arriving later is usually a correction"
+    );
+
+    let settled_claim = store
+        .get(user, &claim_fact.id)
+        .expect("read claim")
+        .expect("claim still stored — invalidation retains, never deletes");
+    assert!(!settled_claim.is_active());
+    assert_eq!(
+        settled_claim.invalidated_by.as_deref(),
+        Some(correction_fact.id.as_str()),
+        "the superseded claim must name its victor"
+    );
+    assert!(
+        settled_claim.contradicts.contains(&correction_fact.id),
+        "the link must be recorded on the superseded side"
+    );
+    assert!(
+        !settled_claim.source_memories.is_empty(),
+        "invalidation must not break the trust chain back to the episodes"
+    );
+
+    let settled_correction = store
+        .get(user, &correction_fact.id)
+        .expect("read correction")
+        .expect("correction stored");
+    assert!(
+        settled_correction.contradicts.contains(&claim_fact.id),
+        "the winner must remember what it displaced"
+    );
+
+    // ── Stability: re-distilling must not oscillate ─────────────────────────
+    // The wrong claim is still in the corpus, so it is re-extracted forever.
+    // Repeated distillation must keep landing it on its own dead row.
+    for round in 0..3 {
+        system
+            .distill_facts(user, 2, 7)
+            .unwrap_or_else(|e| panic!("round {round}: distill failed: {e}"));
+        let now_active: Vec<_> = store
+            .list(user, 100)
+            .expect("list")
+            .into_iter()
+            .filter(|f| f.is_active())
+            .collect();
+        assert_eq!(
+            now_active.len(),
+            1,
+            "round {round}: exactly one fact may be active. Got {now_active:?}"
+        );
+        assert_eq!(
+            now_active[0].id, correction_fact.id,
+            "round {round}: the verdict must not flip-flop"
+        );
+    }
+}
+
 /// A superseded fact must not be resurrected by the ON-DEMAND distillation path.
 ///
 /// `find_similar` deliberately still MATCHES invalidated rows — that is what

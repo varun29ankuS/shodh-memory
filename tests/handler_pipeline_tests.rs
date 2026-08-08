@@ -2062,3 +2062,245 @@ mod backup_tests {
         assert!(body["backups"].is_array());
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// CONTENT-DEDUP ENRICHMENT MERGE
+//
+// `remember` dedups on a SHA-256 of content alone. Everything else a caller
+// sends — entities, tags, coordinates, media, severity — used to be dropped on
+// the floor when the text matched, so the store's quality depended on which
+// duplicate happened to arrive FIRST, and a deliberate re-ingest with a better
+// extractor improved nothing.
+//
+// These tests drive the real HTTP path (NER, YAKE, graph task, the lot) so they
+// fail if any layer of the merge is missing, not just the RocksDB write.
+// ═══════════════════════════════════════════════════════════════════════
+
+mod dedup_enrichment_tests {
+    use super::*;
+    use shodh_memory::memory::MemoryId;
+
+    const DUP_CONTENT: &str =
+        "The mooring line parted during the night watch and the tender drifted free.";
+
+    /// Post a memory and return its id. Explicit `tags` are what the handler
+    /// folds into the entity set, so they are the controllable half of "a
+    /// better extractor found more this time".
+    async fn remember_with(h: &Harness, user: &str, body: Value) -> String {
+        let (status, resp) = json_of(h.app(), authed_post("/api/remember", body)).await;
+        assert_eq!(status, StatusCode::OK, "remember failed: {resp}");
+        resp["id"].as_str().expect("id in response").to_string()
+    }
+
+    /// Drain the fire-and-forget post-processing (graph build, temporal facts,
+    /// lineage) so graph assertions are deterministic rather than racing it.
+    async fn drain_background(h: &Harness) {
+        h.mgr.task_tracker.close();
+        h.mgr.task_tracker.wait().await;
+    }
+
+    fn stored_memory(h: &Harness, user: &str, id: &str) -> shodh_memory::memory::Memory {
+        let uuid = uuid::Uuid::parse_str(id).expect("valid uuid");
+        let system = h.mgr.get_user_memory(user).expect("user memory");
+        let guard = system.read();
+        guard.get_memory(&MemoryId(uuid)).expect("memory stored")
+    }
+
+    #[tokio::test]
+    async fn dedup_merge_keeps_identity_and_unions_the_entity_set() {
+        let h = Harness::new();
+        let user = "merge-identity";
+
+        let first = remember_with(
+            &h,
+            user,
+            json!({
+                "user_id": user,
+                "content": DUP_CONTENT,
+                "tags": ["mooring"],
+            }),
+        )
+        .await;
+
+        let before = stored_memory(&h, user, &first);
+        let created_at_before = before.created_at;
+        assert!(
+            before.experience.entities.iter().any(|e| e == "mooring"),
+            "precondition: the first write must carry its own tag, got {:?}",
+            before.experience.entities
+        );
+        assert!(
+            !before.experience.entities.iter().any(|e| e == "kestrel"),
+            "precondition: the first write must NOT already know the second \
+             extractor's entity, or the merge below proves nothing"
+        );
+
+        // Same bytes, richer enrichment — the re-ingest-with-a-better-extractor case.
+        let second = remember_with(
+            &h,
+            user,
+            json!({
+                "user_id": user,
+                "content": DUP_CONTENT,
+                "tags": ["mooring", "kestrel"],
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            first, second,
+            "a merge must return the EXISTING id — enrichment is not a back door \
+             to minting a new memory"
+        );
+
+        let after = stored_memory(&h, user, &first);
+        assert_eq!(
+            after.created_at, created_at_before,
+            "created_at is identity: downstream systems (watermarks, decay, \
+             temporal ranking) key on it and a merge must never move it"
+        );
+        assert_eq!(after.version, before.version, "a merge is not a revision");
+        assert!(
+            after.experience.entities.iter().any(|e| e == "kestrel"),
+            "the second copy's entity was dropped on the floor — got {:?}",
+            after.experience.entities
+        );
+        assert!(
+            after.experience.entities.iter().any(|e| e == "mooring"),
+            "the merge must be a UNION; the first copy's entities cannot be lost"
+        );
+
+        // Exactly one memory, still.
+        let (_, list) = json_of(h.app(), authed_get(&format!("/api/list/{user}"))).await;
+        assert_eq!(
+            list["memories"].as_array().unwrap().len(),
+            1,
+            "dedup must still dedup"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_merge_puts_the_new_entities_into_the_graph() {
+        // A merged entity set that reaches RocksDB and BM25 but never the graph
+        // is a half-fix that LOOKS done: multi-hop traversal keeps using the
+        // stale set. `process_experience_into_graph` returns early when the
+        // episode already exists, so the merge path has to demolish and rebuild.
+        let h = Harness::new();
+        let user = "merge-graph";
+
+        remember_with(
+            &h,
+            user,
+            json!({
+                "user_id": user,
+                "content": DUP_CONTENT,
+                "tags": ["mooring"],
+            }),
+        )
+        .await;
+
+        let id = remember_with(
+            &h,
+            user,
+            json!({
+                "user_id": user,
+                "content": DUP_CONTENT,
+                "tags": ["mooring", "kestrel"],
+            }),
+        )
+        .await;
+
+        drain_background(&h).await;
+
+        let graph = h.mgr.get_user_graph(user).expect("user graph");
+        let guard = graph.read();
+
+        let entity = guard
+            .find_entity_by_name("kestrel")
+            .expect("entity lookup")
+            .unwrap_or_else(|| {
+                panic!("the merged entity never reached the graph — traversal still sees the pre-merge set")
+            });
+
+        let uuid = uuid::Uuid::parse_str(&id).expect("valid uuid");
+        let episode = guard
+            .get_episode(&uuid)
+            .expect("episode lookup")
+            .expect("the memory must still have an episode after the rebuild");
+        assert!(
+            episode.entity_refs.contains(&entity.uuid),
+            "the rebuilt episode must REFERENCE the merged entity, not merely \
+             leave it floating in the graph — entity_refs is what traversal walks"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_merge_fills_absent_coordinates_and_never_nulls_them() {
+        let h = Harness::new();
+        let user = "merge-geo";
+        let content = "Recovered the drifting tender two cables off the north mole.";
+
+        // First caller has no GPS.
+        let id = remember_with(
+            &h,
+            user,
+            json!({ "user_id": user, "content": content, "tags": ["tender"] }),
+        )
+        .await;
+        assert!(
+            stored_memory(&h, user, &id).experience.geo_location.is_none(),
+            "precondition: the first write carries no coordinates"
+        );
+
+        // Second caller supplies them.
+        remember_with(
+            &h,
+            user,
+            json!({
+                "user_id": user,
+                "content": content,
+                "tags": ["tender"],
+                "geo_location": [39.2904, -76.6122, 0.0],
+            }),
+        )
+        .await;
+        let with_geo = stored_memory(&h, user, &id).experience.geo_location;
+        assert_eq!(
+            with_geo,
+            Some([39.2904, -76.6122, 0.0]),
+            "a geo fix supplied by a later duplicate must be adopted, not discarded"
+        );
+
+        // Third caller supplies none. `None` means "not provided", not "nowhere".
+        remember_with(
+            &h,
+            user,
+            json!({ "user_id": user, "content": content, "tags": ["tender"] }),
+        )
+        .await;
+        assert_eq!(
+            stored_memory(&h, user, &id).experience.geo_location,
+            with_geo,
+            "a later duplicate that omits coordinates must NOT null the stored fix"
+        );
+
+        // Fourth caller claims a different place. First assertion wins — a merge
+        // must never be able to relocate a memory.
+        remember_with(
+            &h,
+            user,
+            json!({
+                "user_id": user,
+                "content": content,
+                "tags": ["tender"],
+                "geo_location": [0.0, 0.0, 0.0],
+            }),
+        )
+        .await;
+        assert_eq!(
+            stored_memory(&h, user, &id).experience.geo_location,
+            with_geo,
+            "enrichment must not overwrite an already-asserted location"
+        );
+    }
+}
