@@ -423,6 +423,76 @@ mod roundtrip_tests {
         );
     }
 
+    /// Every recalled memory states its consolidation tier, spelled the way the
+    /// UI reads it.
+    ///
+    /// This pins a wire contract that now has a VISUAL consumer. The analyst
+    /// workbench draws `tier` on each memory node as how present the node is —
+    /// a faint outline for working memory through to a filled, firmly-ringed
+    /// long-term one (front/ui/src/features/recall/tier.ts). That encoding is
+    /// only readable while the three strings on the wire stay exactly these
+    /// three, so the assertion is on the literal values rather than on mere
+    /// presence.
+    ///
+    /// The values are Debug renderings of `MemoryTier` (src/memory/types.rs),
+    /// produced by `format!("{:?}", m.tier)` at every `RecallMemory` site
+    /// (src/handlers/recall.rs). Renaming a variant, or switching the field to a
+    /// serde `rename_all`, would silently retune every node on that canvas to the
+    /// least-consolidated step, because the client falls back that way for
+    /// strings it does not recognise. That is a safe failure but an invisible
+    /// one, which is exactly why it needs a test rather than a reviewer.
+    ///
+    /// `Archive` is excluded deliberately: src/memory/types.rs documents it as
+    /// retired, with nothing assigning it. If it ever appears here, the ladder
+    /// grew an arrow it is not supposed to fire and the workbench legend is
+    /// short a step.
+    #[tokio::test]
+    async fn recall_memories_carry_consolidation_tier() {
+        const LIVE_TIERS: [&str; 3] = ["Working", "Session", "LongTerm"];
+
+        let h = Harness::new();
+        for i in 0..3 {
+            store_memory(
+                &h,
+                "test-user",
+                &format!("Consolidation ladder note {i} about tier promotion thresholds"),
+            )
+            .await;
+        }
+        wait_for_indexing().await;
+
+        let (status, body) = recall(&h, "test-user", "consolidation ladder tier promotion").await;
+        assert_eq!(status, StatusCode::OK, "recall failed: {body}");
+
+        let memories = body["memories"].as_array().expect("memories array");
+        assert!(
+            !memories.is_empty(),
+            "seeded memories should be recallable: {body}"
+        );
+
+        for m in memories {
+            let tier = m["tier"]
+                .as_str()
+                .unwrap_or_else(|| panic!("recalled memory has no string `tier` field: {m}"));
+            assert!(
+                LIVE_TIERS.contains(&tier),
+                "tier {tier:?} is not one of the three live tiers {LIVE_TIERS:?}; \
+                 the workbench node encoding and its legend are built on exactly these"
+            );
+        }
+
+        // Freshly written memories have not aged or been reinforced, so they are
+        // still at the bottom of the ladder. Asserting the START of the ladder —
+        // rather than only that the value parses — is what shows the field is
+        // read from the record rather than defaulted somewhere downstream.
+        assert!(
+            memories
+                .iter()
+                .all(|m| m["tier"].as_str() == Some("Working")),
+            "newly written memories should still be Working: {body}"
+        );
+    }
+
     #[tokio::test]
     async fn recall_memory_type_preserved() {
         let h = Harness::new();

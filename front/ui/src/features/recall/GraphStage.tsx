@@ -1,8 +1,16 @@
+import { useMemo } from "react";
 import { cn } from "@/lib/utils";
 import type { Reachability } from "@/lib/api";
 import { RecallDiagram } from "./RecallDiagram";
 import { GraphCanvas, useMemoryTypes } from "./GraphCanvas";
 import { useRecall } from "./useRecall";
+import {
+  memoryTier,
+  MEMORY_TIER_LABEL,
+  MEMORY_TIER_ORDER,
+  memoryTierSwatch,
+  type MemoryTier,
+} from "./tier";
 
 /**
  * The graph stage.
@@ -29,6 +37,15 @@ export function GraphStage({ reach }: { reach: Reachability }) {
   const hasGraph = memories.length > 0;
 
   const edgeCount = lineage.length;
+
+  /** Tier populations over the memories actually drawn. Counted here from the
+   *  same `memoryTier` normaliser the canvas uses, so the key and the picture
+   *  cannot disagree about which step a node is on. */
+  const tierCounts = useMemo(() => {
+    const counts: Record<MemoryTier, number> = { Working: 0, Session: 0, LongTerm: 0 };
+    for (const m of memories) counts[memoryTier(m.tier)] += 1;
+    return counts;
+  }, [memories]);
 
   return (
     // `min-w-0`: a flex item's default min-width is its content's intrinsic
@@ -77,25 +94,65 @@ export function GraphStage({ reach }: { reach: Reachability }) {
           )}
           style={{ paddingRight: "var(--overlay-dock-inset, 0px)" }}
         >
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-            {/* The legend is the memory types actually present, in the order
-                the canvas assigns hues in. The server's set is closed — 14
-                Debug-rendered enum variants — but a fixed legend would name
-                eleven categories this result set does not contain, and 14
-                categories cannot map onto 5 chart hues without arbitrary
-                collisions. Listing what is present keeps the key honest. */}
-            {types.map((t, i) => (
-              <span
-                key={t}
-                className="text-muted-foreground flex items-center gap-1.5 text-[11px]"
-              >
+          {/* Two encodings, two rows. Node HUE is memory type; node PRESENCE —
+              fill and ring weight — is consolidation tier. They are kept on
+              separate palettes on purpose: categorical colour belongs to the
+              type, and the tier is a progression, so it climbs in weight rather
+              than changing hue. The same split governs the entity graph
+              (features/graph/GraphView.tsx:215-219). */}
+          <div className="flex flex-col gap-1.5">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+              {/* The legend is the memory types actually present, in the order
+                  the canvas assigns hues in. The server's set is closed — 14
+                  Debug-rendered enum variants — but a fixed legend would name
+                  eleven categories this result set does not contain, and 14
+                  categories cannot map onto 5 chart hues without arbitrary
+                  collisions. Listing what is present keeps the key honest. */}
+              {types.map((t, i) => (
                 <span
-                  className="size-2 rounded-full"
-                  style={{ background: `var(--chart-${(i % 5) + 1})` }}
-                />
-                {t}
-              </span>
-            ))}
+                  key={t}
+                  className="text-muted-foreground flex items-center gap-1.5 text-[11px]"
+                >
+                  <span
+                    className="size-2 rounded-full"
+                    style={{ background: `var(--chart-${(i % 5) + 1})` }}
+                  />
+                  {t}
+                </span>
+              ))}
+            </div>
+
+            {/* All three tiers, always, counts included — unlike the memory-type
+                row above. There are only three and they are a fixed ladder, so
+                a zero beside "Long-term" is a finding about this result set
+                (nothing here has consolidated yet) rather than a category the
+                legend had no business naming. */}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+              {/* This row is named and the one above is not, because the one
+                  above needs no name: coloured dots beside a graph read as
+                  categories on sight. Three rings labelled Working / Session /
+                  Long-term do not say what dimension they are three steps OF
+                  until someone is told, and a legend that has to be puzzled out
+                  has already failed. */}
+              <span className="text-muted-foreground/50 text-[11px]">Consolidation</span>
+              {MEMORY_TIER_ORDER.map((t) => (
+                <span
+                  key={t}
+                  className="text-muted-foreground flex items-center gap-1.5 text-[11px]"
+                >
+                  {/* A ring, not a bar: these describe nodes, and matching the
+                      mark to what it describes is what makes the key readable
+                      beside the type dots above. Neutral, because tier is not a
+                      hue on this canvas — it is how filled-in a node is. 12px
+                      rather than the type dots' 8px, because this swatch encodes
+                      ring WEIGHT and a 2.2px ring on an 8px circle leaves too
+                      little middle for the fill step to read. */}
+                  <span className="size-3 rounded-full" style={memoryTierSwatch(t)} />
+                  {MEMORY_TIER_LABEL[t]}
+                  <span className="text-muted-foreground/60">{tierCounts[t]}</span>
+                </span>
+              ))}
+            </div>
           </div>
           <span className="text-muted-foreground/70 text-[11px]">
             {/* Say what the edges ARE, not just how to move the camera. Zero

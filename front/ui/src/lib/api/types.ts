@@ -58,6 +58,17 @@ export interface RecallMemory {
   importance: number;
   created_at: string;
   score: number;
+  /** Consolidation tier. `format!("{:?}", m.tier)` — the Debug rendering of
+   *  `MemoryTier` (src/memory/types.rs:1047-1076), so the values are `Working`,
+   *  `Session` and `LongTerm`, plus the retired-but-undeletable `Archive`.
+   *  Populated at every `RecallMemory` construction site (src/handlers/recall.rs:830,
+   *  :3172, :3581) and carries no `skip_serializing_if` (src/handlers/types.rs:249),
+   *  so it is always present.
+   *
+   *  Typed as `string` rather than a union for the same reason `memory_type` is:
+   *  the wire type is a `String`, and a union here would turn a server-side enum
+   *  addition into a client compile error. `memoryTier()` in
+   *  features/recall/tier.ts narrows it. */
   tier: string;
   score_attribution?: ScoreAttribution;
 }

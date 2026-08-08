@@ -5,6 +5,7 @@ import { ScoreBreakdown } from "./ScoreBreakdown";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { relName } from "@/features/recall/relation";
+import { memoryTier, MEMORY_TIER_LABEL, MEMORY_TIER_MEANING } from "@/features/recall/tier";
 import { recallKey } from "@/features/recall/useRecall";
 import { EntityDetail } from "./EntityDetail";
 
@@ -138,8 +139,20 @@ export function Inspector() {
                 </Field>
               ) : null}
 
-              <Field label="Tier">
-                <p className="mono text-[11px]">{memory.tier}</p>
+              {/* The same consolidation step the graph canvas encodes as node
+                  presence, named here in words. `memory.tier` is a Rust Debug
+                  rendering — `LongTerm` — and putting an identifier on screen
+                  asks the reader to know the enum. This is the one surface with
+                  room to say what the step MEANS, and it costs nothing here
+                  because it is shown for one selected memory rather than on
+                  every hover. */}
+              <Field label="Consolidation">
+                <p className="mono text-[11px]">
+                  {MEMORY_TIER_LABEL[memoryTier(memory.tier)]}
+                </p>
+                <p className="text-muted-foreground/70 mt-0.5 text-[11px]">
+                  {MEMORY_TIER_MEANING[memoryTier(memory.tier)]}
+                </p>
               </Field>
             </div>
 

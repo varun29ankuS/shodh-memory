@@ -18,6 +18,14 @@ import {
 import type { RecallMemory, RecallLineageEdge } from "@/lib/api";
 import { useSession } from "@/stores/session";
 import { relClass, relName, type RelationClass } from "./relation";
+import {
+  memoryTier,
+  MEMORY_TIER_LABEL,
+  MEMORY_TIER_MARK,
+  MEMORY_TIER_SELECTED_FILL,
+  MEMORY_TIER_SELECTED_RING,
+  type MemoryTier,
+} from "./tier";
 
 /**
  * The knowledge-graph canvas.
@@ -58,6 +66,14 @@ import { relClass, relName, type RelationClass } from "./relation";
  * sizing (:894-899), squared-distance hit-testing (:1552-1559) and the
  * drag-vs-click threshold (:1568).
  *
+ * CONSOLIDATION is drawn, not just listed. Every node carries `RecallMemory.tier`
+ * (src/handlers/types.rs:249, `format!("{:?}", m.tier)` at src/handlers/recall.rs:830),
+ * and until now that reached the screen only as a text field in the Inspector —
+ * one memory at a time, which is the one form in which it answers nothing. The
+ * useful question is comparative ("is this cluster settled knowledge or this
+ * morning's context?"), so it is encoded on the mark itself as how PRESENT the
+ * node is drawn. ./tier.ts holds the ramp and the argument for that channel.
+ *
  * PROVENANCE is the point. An edge is never just a line: hovering or selecting
  * surfaces the relation type and the confidence the server actually returned,
  * because "why is this connected" is the question a hairball cannot answer.
@@ -74,6 +90,9 @@ interface GraphNode extends SimulationNodeDatum {
   r: number;
   color: string;
   degree: number;
+  /** Consolidation tier, normalised from `RecallMemory.tier`. Encoded as how
+   *  PRESENT the node is drawn — see ./tier.ts for why it is not a hue. */
+  tier: MemoryTier;
 }
 
 interface GraphLink extends SimulationLinkDatum<GraphNode> {
@@ -201,6 +220,7 @@ export function GraphCanvas({
         r: 6 + Math.sqrt(Math.max(0, m.score)) * 7,
         color: typeIndex >= 0 ? `chart:${typeIndex}` : "muted",
         degree: deg,
+        tier: memoryTier(m.tier),
       };
     });
 
@@ -321,12 +341,25 @@ export function GraphCanvas({
         const isSelected = n.id === sel;
         ctx!.globalAlpha = isLit ? 1 : 0.1;
 
+        // Consolidation tier, as presence. A working memory is a faint outline
+        // and a long-term one is filled and firmly ringed, so "how settled is
+        // this?" is answerable without reading the legend. Selection ADDS to
+        // the tier's step rather than overwriting it — the accent stroke is
+        // what makes a selection unmistakable, so the tier survives being
+        // clicked. Rationale and the ramp itself live in ./tier.ts.
+        const mark = MEMORY_TIER_MARK[n.tier];
+
         ctx!.beginPath();
         ctx!.arc(n.x, n.y, n.r, 0, 2 * Math.PI);
-        ctx!.fillStyle = hexA(hue(n), isSelected ? 0.5 : 0.28);
+        ctx!.fillStyle = hexA(
+          hue(n),
+          isSelected ? Math.min(1, mark.fill + MEMORY_TIER_SELECTED_FILL) : mark.fill,
+        );
         ctx!.fill();
-        ctx!.lineWidth = (isSelected ? 2.4 : 1.3) / transformRef.current.k;
-        ctx!.strokeStyle = isSelected ? tokens.active : hexA(hue(n), 0.95);
+        ctx!.lineWidth =
+          (isSelected ? mark.ring + MEMORY_TIER_SELECTED_RING : mark.ring) /
+          transformRef.current.k;
+        ctx!.strokeStyle = isSelected ? tokens.active : hexA(hue(n), mark.ringAlpha);
         ctx!.stroke();
 
         // An isolated memory is a real finding, not a rendering gap: it means
@@ -518,7 +551,11 @@ function GraphTooltip({ hover, links }: { hover: Hover; links: GraphLink[] }) {
     >
       <p className="line-clamp-3 text-[12px] leading-relaxed">{node.label}</p>
       <p className="text-muted-foreground mono mt-1.5 text-[10px]">
-        {node.type ?? "untyped"} · score {node.score.toFixed(3)}
+        {/* The tier is named as well as drawn. The ramp answers "is this
+            settled?" at a glance across the whole canvas; a reader who has
+            singled one node out wants the step by name, not by comparison. */}
+        {node.type ?? "untyped"} · {MEMORY_TIER_LABEL[node.tier]} · score{" "}
+        {node.score.toFixed(3)}
       </p>
 
       {shown.length > 0 ? (
