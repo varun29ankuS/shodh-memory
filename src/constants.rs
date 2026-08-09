@@ -3009,6 +3009,43 @@ pub const LINEAGE_CONFIDENCE_RELATED_TO: f32 = 0.5;
 /// neuron selectivity: orientation specificity and binocular interaction"
 pub const LINEAGE_MIN_STORE_CONFIDENCE: f32 = 0.20;
 
+/// Confidence for a lineage edge minted from a full causal-language HANDSHAKE:
+/// memory A's text asserts a causal link whose EFFECT event is the CAUSE event
+/// of a causal link asserted by memory B's text (normalized event lemmas, e.g.
+/// A: "breaker tripped → lost propulsion", B: "the loss of propulsion led to
+/// drifting"). Both texts independently assert causation through the same
+/// event — the strongest evidence the system has short of a user-added edge.
+///
+/// Evidence hierarchy this sits in (each tier separated from the next):
+///   1.0   Explicit        — user/agent added the edge by hand
+///   0.80  LANG_HANDSHAKE  — both sides assert causation through a shared event
+///   0.70  LANG_CONTINUATION — one side asserts, the other narrates the event
+///   ≤0.40 type-pair prior × semantic overlap × temporal (measured corpus
+///         distribution: mean 0.24, max 0.375 on the 71-memory demo corpus)
+///
+/// Deliberately NOT scaled by entity/embedding overlap: the shared asserted
+/// event IS the semantic evidence, and the exact case this exists for — causal
+/// continuation across a lexical topic shift ("drifting vessel struck a pier"
+/// shares no entities with "loss of propulsion led to drifting") — is where
+/// overlap signals go to zero while the causal link is near-certain.
+pub const LINEAGE_CONFIDENCE_LANG_HANDSHAKE: f32 = 0.80;
+
+/// Confidence for a one-sided causal-language CONTINUATION: one memory asserts
+/// a causal link whose effect event the other memory narrates as an event
+/// trigger (or symmetrically, one memory asserts a cause event the other
+/// narrates). E.g. "loss of propulsion led to the Dali DRIFTING" → "the
+/// DRIFTING vessel struck a support pier". Only one side asserts causation, so
+/// it sits a tier below the handshake — but a within-window explicit causal
+/// assertion handing off to a narrated continuation of the same event is still
+/// categorically stronger evidence than any type-pair prior.
+///
+/// Pinned at LINEAGE_EXPANSION_MIN_CONFIDENCE by design: language-derived
+/// edges are exactly the edges recall's lineage candidate expansion exists to
+/// deliver (a memory reachable only through a causal edge is by construction
+/// the one retrieval cannot surface). A unit test asserts this ordering so the
+/// intent survives any future re-gating.
+pub const LINEAGE_CONFIDENCE_LANG_CONTINUATION: f32 = 0.70;
+
 /// Scale factor for propagating lineage confidence into graph edge weights.
 ///
 /// When a causal lineage edge is inferred between two memories with confidence C,

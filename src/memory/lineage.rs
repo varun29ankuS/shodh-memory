@@ -700,6 +700,93 @@ impl LineageGraph {
         Some((relation, confidence))
     }
 
+    /// Causal-LANGUAGE inference between two memories' text profiles — the
+    /// cross-memory join the type-pair table cannot make.
+    ///
+    /// `infer_relation` scores a pair by type priors × semantic overlap ×
+    /// temporal proximity, which structurally cannot recover causal
+    /// continuation across a lexical topic shift: "the loss of propulsion led
+    /// to the Dali drifting" and "the drifting vessel struck a support pier"
+    /// share no entities and little vocabulary, so the load-bearing link of
+    /// the narrative chain scores at exactly zero. But the texts SAY the link:
+    /// A asserts a causal effect (`drift`) that B narrates onward. CATENA
+    /// already extracts those assertions per-sentence into the knowledge
+    /// graph; this joins them ACROSS memories into the lineage graph that
+    /// `trace`, `find_root_cause`, and recall's lineage payload actually walk.
+    ///
+    /// Tiers (normalized event lemmas, see `catena::CausalProfile`):
+    /// - **Handshake** — A's asserted EFFECT is B's asserted CAUSE: both texts
+    ///   assert causation through the same event → `LANG_HANDSHAKE` (0.80).
+    /// - **Continuation** — A's asserted effect appears among B's narrated
+    ///   event triggers, or B's asserted cause among A's triggers: one side
+    ///   asserts, the other narrates → `LANG_CONTINUATION` (0.70).
+    ///
+    /// `Precedes` links never reach the profiles (temporal sequence is not
+    /// causation), and a pair with no causal assertion on either side returns
+    /// `None` — narration alone can never mint an edge, which is what keeps
+    /// signal-free routine memories (the measured flood risk) out of the
+    /// lineage graph.
+    ///
+    /// Temporal order/gap are enforced by the caller (`infer_relation_with_profiles`).
+    pub fn infer_language_relation(
+        from_profile: &crate::catena::CausalProfile,
+        to_profile: &crate::catena::CausalProfile,
+    ) -> Option<(CausalRelation, f32)> {
+        use crate::constants::{
+            LINEAGE_CONFIDENCE_LANG_CONTINUATION, LINEAGE_CONFIDENCE_LANG_HANDSHAKE,
+        };
+        // Handshake: A asserts X→e, B asserts e→Y.
+        if from_profile
+            .asserted_effects
+            .iter()
+            .any(|e| to_profile.asserted_causes.contains(e))
+        {
+            return Some((CausalRelation::Caused, LINEAGE_CONFIDENCE_LANG_HANDSHAKE));
+        }
+        // Continuation: A asserts X→e, B narrates e …
+        if from_profile
+            .asserted_effects
+            .iter()
+            .any(|e| to_profile.triggers.contains(e))
+            // … or B asserts e→Y, A narrates e.
+            || to_profile
+                .asserted_causes
+                .iter()
+                .any(|e| from_profile.triggers.contains(e))
+        {
+            return Some((CausalRelation::Caused, LINEAGE_CONFIDENCE_LANG_CONTINUATION));
+        }
+        None
+    }
+
+    /// `infer_relation`, upgraded with the causal-language handshake when text
+    /// profiles are available. Language wins over the type-pair table wherever
+    /// it fires — an explicit textual assertion outranks a type prior — and
+    /// the temporal constraints (order + max gap) are identical for both
+    /// paths. Profiles are `Option` because the dependency parser may be
+    /// unavailable; `None` degrades to plain `infer_relation`.
+    pub fn infer_relation_with_profiles(
+        &self,
+        from: &Memory,
+        to: &Memory,
+        from_profile: Option<&crate::catena::CausalProfile>,
+        to_profile: Option<&crate::catena::CausalProfile>,
+    ) -> Option<(CausalRelation, f32)> {
+        if from.created_at >= to.created_at {
+            return None;
+        }
+        let gap = to.created_at.signed_duration_since(from.created_at);
+        if gap.num_days() > self.config.max_temporal_gap_days {
+            return None;
+        }
+        if let (Some(fp), Some(tp)) = (from_profile, to_profile) {
+            if let Some(hit) = Self::infer_language_relation(fp, tp) {
+                return Some(hit);
+            }
+        }
+        self.infer_relation(from, to)
+    }
+
     /// Cosine similarity between two embedding vectors.
     /// Delegates to the SIMD-optimized implementation in similarity.rs.
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -1621,6 +1708,148 @@ mod tests {
         assert_eq!(
             format!("learning {} decision", relation.description()),
             "learning informed decision"
+        );
+    }
+
+    fn profile(causes: &[&str], effects: &[&str], triggers: &[&str]) -> crate::catena::CausalProfile {
+        crate::catena::CausalProfile {
+            asserted_causes: causes.iter().map(|s| s.to_string()).collect(),
+            asserted_effects: effects.iter().map(|s| s.to_string()).collect(),
+            triggers: triggers.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Both sides assert causation through the shared event → handshake tier.
+    /// The demo-chain shape: m0 "breaker tripped → lost propulsion" feeding
+    /// m1 "the loss of propulsion led to drifting" (`loss` normalizes to
+    /// `lose` upstream, so both profiles carry `lose`).
+    #[test]
+    fn language_handshake_outranks_continuation() {
+        let m0 = profile(&["trip"], &["lose"], &["trip", "lose"]);
+        let m1 = profile(&["lose"], &["drift"], &["lose", "lead", "drift"]);
+        let (relation, confidence) =
+            LineageGraph::infer_language_relation(&m0, &m1).expect("handshake");
+        assert_eq!(relation, CausalRelation::Caused);
+        assert_eq!(
+            confidence,
+            crate::constants::LINEAGE_CONFIDENCE_LANG_HANDSHAKE
+        );
+    }
+
+    /// One side asserts, the other narrates → continuation tier. The
+    /// load-bearing demo edge: m1 asserts `… → drift`, m2 narrates `drift`
+    /// ("the drifting vessel struck a support pier") without asserting it.
+    #[test]
+    fn language_continuation_via_narrated_effect() {
+        let m1 = profile(&["lose"], &["drift"], &["lose", "lead", "drift"]);
+        let m2 = profile(&["strike"], &["collapse"], &["drift", "strike", "collapse"]);
+        let (relation, confidence) =
+            LineageGraph::infer_language_relation(&m1, &m2).expect("continuation");
+        assert_eq!(relation, CausalRelation::Caused);
+        assert_eq!(
+            confidence,
+            crate::constants::LINEAGE_CONFIDENCE_LANG_CONTINUATION
+        );
+    }
+
+    /// Symmetric continuation: the LATER memory asserts its cause, the earlier
+    /// one narrates it ("the outage began at 3am" → "systems went down because
+    /// of the outage").
+    #[test]
+    fn language_continuation_via_narrated_cause() {
+        let earlier = profile(&[], &[], &["outage", "begin"]);
+        let later = profile(&["outage"], &["fail"], &["outage", "fail"]);
+        let (relation, confidence) =
+            LineageGraph::infer_language_relation(&earlier, &later).expect("anchor");
+        assert_eq!(relation, CausalRelation::Caused);
+        assert_eq!(
+            confidence,
+            crate::constants::LINEAGE_CONFIDENCE_LANG_CONTINUATION
+        );
+    }
+
+    /// Narration alone must NEVER mint an edge — two signal-free memories that
+    /// merely mention the same event (the haystack flood shape) return None.
+    #[test]
+    fn language_requires_an_assertion_not_shared_narration() {
+        let a = profile(&[], &[], &["delay", "berth"]);
+        let b = profile(&[], &[], &["delay", "crane"]);
+        assert!(LineageGraph::infer_language_relation(&a, &b).is_none());
+        // Disjoint events likewise.
+        let c = profile(&["fog"], &["delay"], &["fog", "delay"]);
+        let d = profile(&["strike"], &["collapse"], &["strike", "collapse"]);
+        assert!(LineageGraph::infer_language_relation(&c, &d).is_none());
+    }
+
+    /// The delivery contract the confidence calibration exists for: a
+    /// continuation-tier edge must clear recall's lineage candidate-expansion
+    /// gate (a memory reachable only through a causal edge is by construction
+    /// the one retrieval cannot surface), the handshake tier must sit strictly
+    /// above it, and explicit user edges above both. If a future re-gating
+    /// breaks this ordering, language edges silently stop being deliverable —
+    /// this test is the tripwire.
+    #[test]
+    fn language_confidence_tiers_clear_the_expansion_gate() {
+        use crate::constants::*;
+        assert!(LINEAGE_CONFIDENCE_LANG_CONTINUATION >= LINEAGE_EXPANSION_MIN_CONFIDENCE);
+        assert!(LINEAGE_CONFIDENCE_LANG_HANDSHAKE > LINEAGE_CONFIDENCE_LANG_CONTINUATION);
+        assert!(LINEAGE_CONFIDENCE_LANG_HANDSHAKE < 1.0); // Explicit stays supreme
+        assert!(LINEAGE_CONFIDENCE_LANG_CONTINUATION >= LINEAGE_RETRIEVAL_MIN_CONFIDENCE);
+    }
+
+    /// `infer_relation_with_profiles` enforces the same temporal constraints
+    /// as the type-pair path, prefers language where it fires, and degrades to
+    /// `infer_relation` when profiles are absent or silent.
+    #[test]
+    fn with_profiles_enforces_time_and_degrades_cleanly() {
+        let (graph, _dir) = create_test_graph();
+
+        let mut a = create_test_memory(ExperienceType::Observation, vec!["dali", "propulsion"]);
+        let mut b = create_test_memory(ExperienceType::Observation, vec!["bridge", "pier"]);
+        b.created_at = a.created_at + Duration::days(1);
+        let pa = profile(&["lose"], &["drift"], &["lose", "drift"]);
+        let pb = profile(&["strike"], &["collapse"], &["drift", "strike", "collapse"]);
+
+        // Language fires despite ZERO entity overlap — the exact case the
+        // type-pair path scores at zero.
+        let (relation, confidence) = graph
+            .infer_relation_with_profiles(&a, &b, Some(&pa), Some(&pb))
+            .expect("language edge");
+        assert_eq!(relation, CausalRelation::Caused);
+        assert_eq!(
+            confidence,
+            crate::constants::LINEAGE_CONFIDENCE_LANG_CONTINUATION
+        );
+
+        // Wrong temporal order → None, language evidence notwithstanding.
+        assert!(graph
+            .infer_relation_with_profiles(&b, &a, Some(&pb), Some(&pa))
+            .is_none());
+
+        // Beyond the temporal gap → None.
+        b.created_at = a.created_at + Duration::days(365);
+        assert!(graph
+            .infer_relation_with_profiles(&a, &b, Some(&pa), Some(&pb))
+            .is_none());
+        b.created_at = a.created_at + Duration::days(1);
+
+        // No profiles → identical to plain infer_relation (same-entity pair so
+        // the type-pair path fires for both calls).
+        a.experience.entities = vec!["auth".into(), "login".into()];
+        b.experience.entities = vec!["auth".into(), "login".into()];
+        let plain = graph.infer_relation(&a, &b);
+        let degraded = graph.infer_relation_with_profiles(&a, &b, None, None);
+        assert_eq!(
+            plain.map(|(r, c)| (r, (c * 1000.0) as i32)),
+            degraded.map(|(r, c)| (r, (c * 1000.0) as i32))
+        );
+
+        // Silent profiles (no assertions) also degrade to the type path.
+        let inert = profile(&[], &[], &["berth", "crane"]);
+        let degraded2 = graph.infer_relation_with_profiles(&a, &b, Some(&inert), Some(&inert));
+        assert_eq!(
+            plain.map(|(r, c)| (r, (c * 1000.0) as i32)),
+            degraded2.map(|(r, c)| (r, (c * 1000.0) as i32))
         );
     }
 

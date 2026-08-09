@@ -10259,11 +10259,21 @@ impl MemorySystem {
         // never appear here and cannot stale this cache.)
         let mut new_memory_edges = self.lineage_graph.get_edges_from(user_id, &new_memory.id)?;
 
+        // Causal-language profile of the new memory, parsed ONCE (each
+        // candidate is parsed once inside the loop). `None` when the
+        // dependency parser is unavailable — inference degrades to the
+        // type-pair table exactly as before.
+        let new_profile = crate::catena::causal_profile(&new_memory.experience.content);
+
         for candidate in candidate_memories {
+            let candidate_profile = crate::catena::causal_profile(&candidate.experience.content);
             // Backward pass: candidate → new_memory (what caused this memory?)
-            if let Some((relation, confidence)) =
-                self.lineage_graph.infer_relation(candidate, new_memory)
-            {
+            if let Some((relation, confidence)) = self.lineage_graph.infer_relation_with_profiles(
+                candidate,
+                new_memory,
+                candidate_profile.as_ref(),
+                new_profile.as_ref(),
+            ) {
                 // BCM LTP threshold: sub-threshold stimulation produces LTD, not LTP.
                 // Weak inferences below the confidence floor are noise that would
                 // drown out genuine causal structure if persisted.
@@ -10301,9 +10311,12 @@ impl MemorySystem {
             // after a later one (out-of-order ingestion), or when a new memory's
             // type makes it a cause of existing memories (e.g., Learning stored
             // before the Decision it informed).
-            if let Some((relation, confidence)) =
-                self.lineage_graph.infer_relation(new_memory, candidate)
-            {
+            if let Some((relation, confidence)) = self.lineage_graph.infer_relation_with_profiles(
+                new_memory,
+                candidate,
+                new_profile.as_ref(),
+                candidate_profile.as_ref(),
+            ) {
                 // BCM LTP threshold (forward pass)
                 if confidence < crate::constants::LINEAGE_MIN_STORE_CONFIDENCE {
                     continue;

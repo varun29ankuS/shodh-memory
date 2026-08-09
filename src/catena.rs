@@ -179,6 +179,67 @@ pub fn extract_event_links(text: &str) -> Option<Vec<EventLink>> {
     Some(links_from_tokens(&tokens))
 }
 
+/// What a memory's text ASSERTS about causation, in normalized event lemmas —
+/// the per-memory summary the cross-memory causal-language handshake compares.
+///
+/// All lemmas are passed through [`causal_vocab::normalize_event_lemma`] so the
+/// nominal and verbal mention of one event (`loss`/`lose`) compare equal.
+/// `Precedes` links contribute nothing to `asserted_*`: temporal sequence is
+/// not causation and must never mint a causal lineage edge.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CausalProfile {
+    /// Cause-side lemmas of the text's own `Causes` links ("X caused …").
+    pub asserted_causes: Vec<String>,
+    /// Effect-side lemmas of the text's own `Causes` links ("… led to Y").
+    pub asserted_effects: Vec<String>,
+    /// Every event trigger in the text (verbs + deverbal nominals), whether or
+    /// not a signal linked it — the surface a later assertion can hand off to.
+    pub triggers: Vec<String>,
+}
+
+impl CausalProfile {
+    /// A profile with no causal assertions can neither open nor receive a
+    /// handshake.
+    pub fn is_inert(&self) -> bool {
+        self.asserted_causes.is_empty() && self.asserted_effects.is_empty()
+    }
+}
+
+/// Build a [`CausalProfile`] from an already-parsed token list. Pure — no model.
+pub fn profile_from_tokens(tokens: &[ParsedToken]) -> CausalProfile {
+    let mut profile = CausalProfile::default();
+    let norm = |lemma: &str| causal_vocab::normalize_event_lemma(lemma).to_string();
+    for sent in sentences(tokens) {
+        for trigger in event_triggers(sent) {
+            let lemma = norm(&trigger.lemma);
+            if !profile.triggers.contains(&lemma) {
+                profile.triggers.push(lemma);
+            }
+        }
+        for link in link_events_in_sentence(sent) {
+            if link.relation != LinkRelation::Causes {
+                continue;
+            }
+            let cause = norm(&link.source);
+            let effect = norm(&link.target);
+            if !profile.asserted_causes.contains(&cause) {
+                profile.asserted_causes.push(cause);
+            }
+            if !profile.asserted_effects.contains(&effect) {
+                profile.asserted_effects.push(effect);
+            }
+        }
+    }
+    profile
+}
+
+/// [`CausalProfile`] of raw text via the shared parser. `None` when the parser
+/// model is unavailable (callers degrade to type-pair inference).
+pub fn causal_profile(text: &str) -> Option<CausalProfile> {
+    let tokens = dep_parser::parse(text)?;
+    Some(profile_from_tokens(&tokens))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +361,82 @@ mod tests {
             tk(5, ".", "PUNCT", "."),
         ];
         assert_eq!(sentences(&toks).len(), 2);
+    }
+
+    #[test]
+    fn profile_normalizes_and_separates_causes_effects_triggers() {
+        // m0-shaped: "lost propulsion because an electrical breaker tripped"
+        // Backward signal `because` → trip causes lose. The effect lemma is the
+        // VERB form `lose`; the m1-shaped nominal `loss` must normalize to it.
+        let m0 = vec![
+            tk(0, "ship", "NOUN", "ship"),
+            tk(1, "lost", "VERB", "lose"),
+            tk(2, "propulsion", "NOUN", "propulsion"),
+            tk(3, "because", "ADP", "because"),
+            tk(4, "breaker", "NOUN", "breaker"),
+            tk(5, "tripped", "VERB", "trip"),
+        ];
+        let p0 = profile_from_tokens(&m0);
+        assert!(p0.asserted_causes.contains(&"trip".to_string()), "{p0:?}");
+        assert!(p0.asserted_effects.contains(&"lose".to_string()), "{p0:?}");
+
+        // m1-shaped: "the loss led to the ship drifting" — nominal `loss`
+        // normalizes to `lose`, so m0's asserted effect and m1's asserted
+        // cause meet (the cross-memory handshake).
+        let m1 = vec![
+            tk(0, "loss", "NOUN", "loss"),
+            tk(1, "led", "VERB", "lead"),
+            tk(2, "to", "ADP", "to"),
+            tk(3, "ship", "NOUN", "ship"),
+            tk(4, "drifting", "VERB", "drift"),
+        ];
+        let p1 = profile_from_tokens(&m1);
+        assert!(p1.asserted_causes.contains(&"lose".to_string()), "{p1:?}");
+        assert!(p1.asserted_effects.contains(&"drift".to_string()), "{p1:?}");
+        assert!(p1.triggers.contains(&"lose".to_string()));
+
+        // m2-shaped: "drifting vessel struck pier, which triggered collapse" —
+        // narrates `drift` as a bare trigger (no signal binds it) while
+        // asserting strike→collapse.
+        let m2 = vec![
+            tk(0, "drifting", "VERB", "drift"),
+            tk(1, "vessel", "NOUN", "vessel"),
+            tk(2, "struck", "VERB", "strike"),
+            tk(3, "pier", "NOUN", "pier"),
+            tk(4, "which", "PRON", "which"),
+            tk(5, "triggered", "VERB", "trigger"),
+            tk(6, "collapse", "NOUN", "collapse"),
+        ];
+        let p2 = profile_from_tokens(&m2);
+        assert!(p2.triggers.contains(&"drift".to_string()), "{p2:?}");
+        assert!(p2.asserted_causes.contains(&"strike".to_string()), "{p2:?}");
+        assert!(p2.asserted_effects.contains(&"collapse".to_string()));
+        // `drift` is narrated, NOT asserted as cause or effect by m2 itself.
+        assert!(!p2.asserted_causes.contains(&"drift".to_string()));
+        assert!(!p2.asserted_effects.contains(&"drift".to_string()));
+    }
+
+    #[test]
+    fn profile_ignores_temporal_signals_and_signal_free_text() {
+        // "rescue after collapse" — Precedes only; nothing may be asserted.
+        let temporal = vec![
+            tk(0, "rescue", "NOUN", "rescue"),
+            tk(1, "after", "ADP", "after"),
+            tk(2, "collapse", "NOUN", "collapse"),
+        ];
+        let pt = profile_from_tokens(&temporal);
+        assert!(pt.is_inert(), "temporal sequence is not causation: {pt:?}");
+
+        // Signal-free routine narration (the haystack shape): events but no
+        // assertions — such memories can never open a handshake.
+        let routine = vec![
+            tk(0, "crane", "NOUN", "crane"),
+            tk(1, "completed", "VERB", "complete"),
+            tk(2, "maintenance", "NOUN", "maintenance"),
+        ];
+        let pr = profile_from_tokens(&routine);
+        assert!(pr.is_inert(), "{pr:?}");
+        assert!(!pr.triggers.is_empty());
     }
 
     #[test]

@@ -367,6 +367,41 @@ pub fn is_nominal_event(lemma: &str) -> bool {
     NOMINAL_EVENTS.contains(&lemma)
 }
 
+/// Normalize a deverbal noun to the verb lemma of the SAME event, so the two
+/// surface forms of one event unify: "the **loss** of propulsion" (nominal) and
+/// "**lost** propulsion" (verb, lemma `lose`) are the same event, but their
+/// lemmas differ. Cross-memory event matching (the causal-language handshake in
+/// lineage inference) needs them to compare equal; without this map the
+/// `loss`/`lose` mismatch silently breaks every chain whose adjacent memories
+/// alternate between nominal and verbal mention.
+///
+/// Identity for verbs and for nominals whose noun and verb lemma coincide
+/// (`collapse`, `crash`, `halt`). Only nominals from [`NOMINAL_EVENTS`] whose
+/// verb lemma DIFFERS need an entry. This is a NEW lookup used only by the
+/// handshake path — it does not alter [`is_nominal_event`], [`signals`], or any
+/// extraction consumed by the knowledge-graph spine, whose outputs must stay
+/// byte-identical (the hermetic recall gate pins that behaviour).
+pub fn normalize_event_lemma(lemma: &str) -> &str {
+    match lemma {
+        "loss" => "lose",
+        "collision" => "collide",
+        "allision" => "allide",
+        "closure" => "close",
+        "failure" => "fail",
+        "disruption" => "disrupt",
+        "evacuation" => "evacuate",
+        "investigation" => "investigate",
+        "destruction" => "destroy",
+        "grounding" => "ground",
+        "explosion" => "explode",
+        "flooding" => "flood",
+        "suspension" => "suspend",
+        "reopening" => "reopen",
+        "blockage" => "block",
+        other => other,
+    }
+}
+
 /// Whether `lemma` is a semantically-light verb to skip as a predicate head.
 pub fn is_light_verb(lemma: &str) -> bool {
     LIGHT_VERBS.contains(&lemma)
@@ -414,6 +449,23 @@ mod tests {
         // Unknown-but-causal → generic Causes; non-causal → RelatedTo.
         assert_eq!(canonical_relation("trigger"), "Causes");
         assert_eq!(canonical_relation("announce"), "RelatedTo");
+    }
+
+    #[test]
+    fn normalize_unifies_nominal_and_verbal_event_mentions() {
+        // The load-bearing pair: "loss of propulsion" (nominal) vs "lost
+        // propulsion" (verb lemma `lose`) are one event.
+        assert_eq!(normalize_event_lemma("loss"), "lose");
+        assert_eq!(normalize_event_lemma("collision"), "collide");
+        assert_eq!(normalize_event_lemma("suspension"), "suspend");
+        assert_eq!(normalize_event_lemma("closure"), "close");
+        // Noun and verb lemma coincide → identity.
+        assert_eq!(normalize_event_lemma("collapse"), "collapse");
+        assert_eq!(normalize_event_lemma("crash"), "crash");
+        // Verbs and unknown lemmas pass through untouched.
+        assert_eq!(normalize_event_lemma("strike"), "strike");
+        assert_eq!(normalize_event_lemma("drift"), "drift");
+        assert_eq!(normalize_event_lemma("bridge"), "bridge");
     }
 
     #[test]
