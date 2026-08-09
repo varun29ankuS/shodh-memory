@@ -581,23 +581,19 @@ export class Conversation {
 			this.emit({ type: "turn_start", turn: this.turn });
 
 			await this.applyNegativeFollowupPenalty(text);
+			// R1: runProactivePass fences the auto-surfaced memory DATA (the
+			// content lines — the auto-ingest / external-laundering vector, §4.A)
+			// while leaving the seat's own trusted meta (heading + "this is a
+			// partial sample, search recall_memory for more") OUTSIDE the fence.
+			// Fencing the whole block would drop the seat's own recall guidance
+			// into the region its own rule tells the model to ignore. Only the
+			// proactive block is fenced; the harness operating-notes block is
+			// seat-authored self-guidance, not externally-ingested data.
 			const proactiveBlock = await this.runProactivePass(text);
-			// R1: fence the auto-surfaced block off from the instruction region.
-			// The block stays in the system prompt (it must be replaced wholesale
-			// each turn — the surfaced set is per-turn ephemeral state, not
-			// transcript), but it is wrapped in the untrusted-memory boundary the
-			// base-prompt rule governs. Only the proactive block is fenced: it is
-			// the auto-ingest / external-laundering vector (§4.A). The harness
-			// operating-notes block is seat-authored self-guidance, not
-			// externally-ingested data, and is left as-is.
-			const fencedProactive =
-				proactiveBlock && this.mechanisms.untrustedMemoryFraming
-					? `${UNTRUSTED_MEMORY_OPEN}\n${proactiveBlock}\n${UNTRUSTED_MEMORY_CLOSE}`
-					: proactiveBlock;
 			const harnessBlock = this.harnessLearning
 				? await this.buildHarnessLearningsBlock(text)
 				: undefined;
-			this.agent.state.systemPrompt = [this.baseSystemPrompt, fencedProactive, harnessBlock]
+			this.agent.state.systemPrompt = [this.baseSystemPrompt, proactiveBlock, harnessBlock]
 				.filter((block): block is string => Boolean(block))
 				.join("\n\n");
 
@@ -734,6 +730,14 @@ export class Conversation {
 				(memory) =>
 					`- [mem:${memoryShortId(memory.id)}] (${memory.memory_type}) ${renderContent(memory.content)}`,
 			);
+			// R1: fence only the memory DATA lines. The seat's own heading and
+			// sample-framing guidance stay OUTSIDE the fence (trusted meta about
+			// the data), so R1's "ignore directives inside the region" rule never
+			// suppresses the seat's own "search recall_memory" instruction.
+			const linesBlock = lines.join("\n");
+			const fencedLines = this.mechanisms.untrustedMemoryFraming
+				? `${UNTRUSTED_MEMORY_OPEN}\n${linesBlock}\n${UNTRUSTED_MEMORY_CLOSE}`
+				: linesBlock;
 			let block: string | undefined;
 			if (response.memories.length > 0) {
 				block = this.mechanisms.proactiveFraming
@@ -743,8 +747,8 @@ export class Conversation {
 						`## Memory sample (auto-surfaced — cite [mem:id] if used)\n` +
 						`These are only the ${response.memories.length} closest matches to the current message; the persistent store holds far more, and details relevant to the question may not be shown here. ` +
 						`Search it with recall_memory before concluding anything is missing, and before answering questions whose evidence these lines do not fully cover.\n` +
-						lines.join("\n")
-					: `## Possibly relevant memories (auto-surfaced — cite [mem:id] if used)\n${lines.join("\n")}`;
+						fencedLines
+					: `## Possibly relevant memories (auto-surfaced — cite [mem:id] if used)\n${fencedLines}`;
 			}
 
 			this.emit({
