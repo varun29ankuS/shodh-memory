@@ -75,6 +75,7 @@ interface CreateConversationBody {
 		recall_lineage?: boolean;
 		verify_loop?: boolean;
 		mcp_memory_tool_filter?: boolean;
+		untrusted_memory_framing?: boolean;
 	};
 }
 
@@ -91,6 +92,7 @@ function parseMechanisms(body: CreateConversationBody): Partial<MemoryMechanisms
 	if (typeof wire.recall_lineage === "boolean") overrides.recallLineage = wire.recall_lineage;
 	if (typeof wire.verify_loop === "boolean") overrides.verifyLoop = wire.verify_loop;
 	if (typeof wire.mcp_memory_tool_filter === "boolean") overrides.mcpMemoryToolFilter = wire.mcp_memory_tool_filter;
+	if (typeof wire.untrusted_memory_framing === "boolean") overrides.untrustedMemoryFraming = wire.untrusted_memory_framing;
 	return Object.keys(overrides).length > 0 ? overrides : undefined;
 }
 
