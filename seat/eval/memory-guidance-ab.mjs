@@ -747,10 +747,20 @@ async function launchSeat(runName, runUser, scratch, fixturePort) {
 
   const base = `http://127.0.0.1:${seatPort}`;
   if (!(await waitFor(`${base}/healthz`))) throw new Error(`seat ${runName} never came up`);
-  const health = await (await fetch(`${base}/healthz`)).json();
-  const bridged = (health.mcp_servers ?? []).find((server) => server.name === "shodh-memory");
-  if (!bridged || bridged.tool_count === 0) {
-    throw new Error(`seat ${runName}: shodh-memory MCP server not bridged (${JSON.stringify(health.mcp_servers)})`);
+  // The MCP bridge connects asynchronously AFTER /healthz first goes green, so
+  // the server can briefly report status "connecting"/tool_count 0. Poll for
+  // the bridge to finish rather than sampling it once (a single check races the
+  // spawn under machine load). Test-infra robustness only — no bearing on arms.
+  let bridged;
+  const bridgeDeadline = Date.now() + 60_000;
+  for (;;) {
+    const health = await (await fetch(`${base}/healthz`)).json();
+    bridged = (health.mcp_servers ?? []).find((server) => server.name === "shodh-memory");
+    if (bridged && bridged.tool_count > 0) break;
+    if (Date.now() > bridgeDeadline) {
+      throw new Error(`seat ${runName}: shodh-memory MCP server not bridged (${JSON.stringify(health.mcp_servers)})`);
+    }
+    await sleep(500);
   }
   return { child, base, toolCount: bridged.tool_count };
 }
