@@ -103,8 +103,10 @@ pub struct StageTimingReport {
     /// `stage_sum_mean_ms`.
     pub stages: Vec<StageRow>,
     /// Sub-stages carved out of the rows above. These OVERLAP `stages` and must
-    /// not be added to it: `onnx_forward` ⊂ `embedding`, `bm25` ⊂ `fusion`,
-    /// `fetch` ⊂ `scoring`, and `storage_read`/`storage_decode` ⊂ `fetch`.
+    /// not be added to it: `tokenize`/`onnx_forward` ⊂ `embedding`, `bm25` ⊂
+    /// `fusion`, `fetch` ⊂ `scoring`. `storage_read`/`storage_decode` are
+    /// recall-wide — `MemoryStorage::get` is called from the graph traversal as
+    /// well as Layer 5, and measurement put nearly all of it in the former.
     pub substages: Vec<StageRow>,
     /// Mean ONNX forward passes per query. 0 = query-cache hit; 2 = the
     /// polarity-sensitive path also embedded the negated form.

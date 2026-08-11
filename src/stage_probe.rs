@@ -92,13 +92,18 @@ pub struct Probe {
     pub forwards: u32,
     /// BM25/tantivy search, carved out of `fusion`.
     pub bm25: Duration,
-    /// Memory fetch (working → session → RocksDB), carved out of `scoring`.
+    /// Layer-5 cold-path memory fetch, carved out of `scoring`.
     pub fetch: Duration,
-    /// RocksDB `get` only, excluding deserialization. Subset of `fetch`.
+    /// RocksDB `get` only, excluding deserialization. RECALL-WIDE, not a subset
+    /// of `fetch`: measurement showed ~675 `MemoryStorage::get` calls per query
+    /// against ~0.1ms of Layer-5 cold fetch, so almost all of them are issued by
+    /// the graph traversal, not by the Layer-5 cascade. Attribute this to the
+    /// whole of `recall()`; the top-level stage rows say which stage pays.
     pub storage_read: Duration,
-    /// Deserialization of fetched memories. Subset of `fetch`.
+    /// Deserialization of fetched memories. Recall-wide, same caveat as
+    /// `storage_read`.
     pub storage_decode: Duration,
-    /// Number of cold RocksDB fetches (cache misses in the Layer-5 cascade).
+    /// Number of `MemoryStorage::get` calls in the armed region, from any stage.
     pub storage_reads: u32,
 }
 

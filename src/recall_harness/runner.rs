@@ -563,14 +563,21 @@ const SUB_STAGES: [StageGetter; 6] = [
     ("storage_decode", |p| p.storage_decode),
 ];
 
-/// Which top-level stage each sub-stage is contained in, for the stderr table.
+/// Which region each sub-stage is contained in, for the stderr table.
+///
+/// `storage_read`/`storage_decode` are labelled `recall` rather than `fetch`
+/// deliberately: `MemoryStorage::get` is called from the graph traversal as well
+/// as the Layer-5 cascade, and measurement showed ~675 calls per query against
+/// ~0.1ms of Layer-5 cold fetch — i.e. nearly all of that cost is paid inside
+/// `graph_expansion`. Labelling them as subsets of `fetch` would have implied
+/// the opposite.
 const SUB_STAGE_PARENT: [(&str, &str); 6] = [
     ("tokenize", "embedding"),
     ("onnx_forward", "embedding"),
     ("bm25", "fusion"),
     ("fetch", "scoring"),
-    ("storage_read", "fetch"),
-    ("storage_decode", "fetch"),
+    ("storage_read", "recall"),
+    ("storage_decode", "recall"),
 ];
 
 /// Build one `StageRow` from per-case medians (already median-across-repeats).
