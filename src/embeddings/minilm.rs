@@ -745,10 +745,12 @@ impl MiniLMEmbedder {
         tracing::debug!("ONNX: session lock acquired, tokenizing...");
 
         // Tokenize input text
+        let t_tokenize = crate::stage_probe::start();
         let encoding = model
             .tokenizer
             .encode(text, true)
             .map_err(|e| anyhow::anyhow!("Tokenization failed: {e}"))?;
+        crate::stage_probe::record(t_tokenize, |p, d| p.tokenize += d);
 
         let tokens = encoding.get_ids();
         let attention_mask = encoding.get_attention_mask();
@@ -780,8 +782,11 @@ impl MiniLMEmbedder {
             .iter()
             .any(|i| i.name() == "token_type_ids");
 
-        // Run inference
+        // Run inference. Timed in isolation: `session.run` is the only part of
+        // this function that hardware acceleration could move, so it must be
+        // separable from tokenization, tensor construction, and mean pooling.
         tracing::debug!("ONNX: running inference...");
+        let t_forward = crate::stage_probe::start();
         let outputs = if wants_token_type {
             session.run(ort::inputs![
                 "input_ids" => &input_ids_value,
@@ -794,6 +799,10 @@ impl MiniLMEmbedder {
                 "attention_mask" => &attention_mask_value,
             ])?
         };
+        crate::stage_probe::record(t_forward, |p, d| {
+            p.onnx_forward += d;
+            p.forwards += 1;
+        });
         tracing::debug!("ONNX: inference complete");
 
         // Extract embeddings
