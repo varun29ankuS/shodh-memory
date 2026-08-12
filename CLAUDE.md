@@ -4,6 +4,8 @@
 - MUST NOT run `cargo build` or `cargo run` unless the user explicitly asks. Only `cargo check`, `cargo clippy`, and `cargo test` are allowed by default.
 - MUST NOT add "Co-Authored-By" or "Generated with Claude Code" to commits. Clean commit messages only.
 - MUST NOT comment on GitHub issues/PRs without showing user a draft first.
+- MUST NOT create git worktrees outside the project folder. All worktrees go in `<repo>/.claude/worktrees/<name>`. Never `C:/smt`, never `~/.claude/worktrees`, never a sibling directory. A worktree outside `kalki-v2/` misses the parent `.cargo/config.toml`, builds to a different artifact path, and silently forks `target/` into two complete trees.
+- MUST remove a worktree once its branch is merged or abandoned. Before removing one, run `git status --porcelain` in it and confirm any untracked files exist in git — untracked content is the only thing `git worktree remove` cannot recover, since branch refs survive removal.
 
 ## Code Standards
 - IMPORTANT: Production grade code only. No TODOs, no placeholders, no mocks, no stubs.
