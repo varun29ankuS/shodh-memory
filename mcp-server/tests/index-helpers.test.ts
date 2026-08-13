@@ -6,6 +6,7 @@ import {
   formatTokenStatusText,
   normalizeLimit,
   shouldAppendProactiveContext,
+  describeUserId,
 } from "../index-helpers";
 
 describe("buildProgressBar", () => {
@@ -111,5 +112,47 @@ describe("extractStringContextFromArgs", () => {
   it("returns empty string for non-object args", () => {
     expect(extractStringContextFromArgs(null)).toBe("");
     expect(extractStringContextFromArgs("text")).toBe("");
+  });
+});
+
+describe("describeUserId", () => {
+  const EMAIL = "alice@example.com";
+
+  it("passes the default through unchanged — it is not sensitive", () => {
+    expect(describeUserId("claude-code")).toBe("claude-code");
+  });
+
+  // The regression this pins: the banner is written to stderr, which clients
+  // persist. An operator who puts an email in SHODH_USER_ID must not find it
+  // there, and no substring of it either — a prefix leaks the local-part.
+  it("never emits the raw id or any substring of it", () => {
+    const out = describeUserId(EMAIL);
+    expect(out).not.toContain(EMAIL);
+    expect(out).not.toContain("alice");
+    expect(out).not.toContain("example.com");
+    expect(out).not.toContain("@");
+  });
+
+  // Only the hash may be derived from userId. .length is not a sanitiser and
+  // reintroduced a js/clear-text-logging finding when it was included.
+  it("emits the digest and nothing else derived from the id", () => {
+    expect(describeUserId(EMAIL)).toBe("custom (sha256:ff8d9819)");
+    expect(describeUserId(EMAIL)).not.toMatch(/len|length|\d+ chars/);
+  });
+
+  it("is reproducible, so an operator can confirm which id is live", () => {
+    expect(describeUserId(EMAIL)).toBe(describeUserId(EMAIL));
+    expect(describeUserId("prod-team")).not.toBe(describeUserId(EMAIL));
+  });
+
+  // Trailing whitespace from a shell export is the common misconfiguration.
+  // The digest alone distinguishes it, which is why the length was redundant.
+  it("distinguishes a trailing newline without reporting the length", () => {
+    expect(describeUserId(EMAIL + "\n")).not.toBe(describeUserId(EMAIL));
+  });
+
+  it("handles the empty string without emitting it", () => {
+    const out = describeUserId("");
+    expect(out).toMatch(/^custom \(sha256:[0-9a-f]{8}\)$/);
   });
 });

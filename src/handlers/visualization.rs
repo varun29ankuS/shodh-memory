@@ -5,7 +5,7 @@
 
 use axum::{
     extract::{Path, State},
-    response::{Html, Json},
+    response::{Html, IntoResponse, Json},
 };
 use serde::{Deserialize, Serialize};
 
@@ -318,14 +318,19 @@ const MOVED_HTML: &str = r#"<!doctype html>
 </html>
 "#;
 
+/// CSP for the retired-surface page: it carries only an inline <style>, which the
+/// middleware's default-src 'none' fallback would strip; everything else stays 'none'.
+const MOVED_CSP: &str =
+    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'";
+
 /// GET /graph/view - retired; the canonical graph UI is the shodh-front crate.
-pub async fn graph_view() -> Html<&'static str> {
-    Html(MOVED_HTML)
+pub async fn graph_view() -> impl IntoResponse {
+    ([("Content-Security-Policy", MOVED_CSP)], Html(MOVED_HTML))
 }
 
 /// GET /dashboard - retired; the canonical web dashboard is the shodh-front crate.
-pub async fn dashboard() -> Html<&'static str> {
-    Html(MOVED_HTML)
+pub async fn dashboard() -> impl IntoResponse {
+    ([("Content-Security-Policy", MOVED_CSP)], Html(MOVED_HTML))
 }
 
 /// GET /api/graph/data/{user_id} - Get graph data as JSON for d3.js

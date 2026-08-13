@@ -1,8 +1,8 @@
-import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { MessageSquarePlus } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { createConversation } from "@/lib/seat/client";
+import { createConversation, listModels } from "@/lib/seat/client";
 import type { SeatModelInfo } from "@/lib/seat/types";
 import { useSession } from "@/stores/session";
 import { Button } from "@/components/ui/button";
@@ -49,6 +49,34 @@ export function NewConversation({
   const setProfile = useSession((s) => s.setProfile);
   const [model, setModel] = useState<SeatModelInfo | null>(null);
   const [newProfile, setNewProfile] = useState("");
+
+  // Preselect a model so the page opens ready to converse. Starting at `null`
+  // left "Start conversation" disabled with no visible reason — the control
+  // reads "Choose model" and the button is simply dead until you find it,
+  // which is a dead end rather than a choice.
+  //
+  // The pick is still the user's: this only fills the first frame, and the
+  // ModelPicker below (and the swap control mid-conversation) override it
+  // freely. Preference order is the most capable configured Anthropic model,
+  // then any configured model at all, so a seat with only a local runtime
+  // still lands on something real rather than nothing.
+  const { data: catalog } = useQuery({
+    queryKey: ["seat-models", "default-pick"],
+    queryFn: ({ signal }) => listModels(false, signal),
+    staleTime: 60_000,
+  });
+  useEffect(() => {
+    if (model !== null) return;
+    const all = catalog?.models ?? [];
+    if (all.length === 0) return;
+    const anthropic = all.filter((m) => m.provider === "anthropic");
+    const preferred =
+      anthropic.find((m) => m.id === "claude-opus-4-5") ??
+      anthropic.find((m) => m.id.startsWith("claude-opus")) ??
+      anthropic[0] ??
+      all[0];
+    if (preferred) setModel(preferred);
+  }, [catalog, model]);
 
   const fresh = profiles.length === 0;
   const effectiveProfile = fresh ? newProfile.trim() : profile;

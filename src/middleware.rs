@@ -101,7 +101,8 @@ pub async fn request_id(mut req: Request, next: Next) -> Response {
 /// Adds:
 /// - X-Content-Type-Options: nosniff (prevent MIME-type sniffing)
 /// - X-Frame-Options: DENY (prevent clickjacking)
-/// - Content-Security-Policy: default-src 'none' (restrict resource loading)
+/// - Content-Security-Policy: default-src 'none' (fallback — kept only when the
+///   handler did not declare its own policy, as the retired HTML routes do)
 /// - Cache-Control: no-store (prevent caching of API responses)
 /// - Strict-Transport-Security (HSTS) in production mode only
 pub async fn security_headers(req: Request, next: Next) -> Response {
@@ -113,10 +114,14 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
         HeaderValue::from_static("nosniff"),
     );
     headers.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
-    headers.insert(
-        "Content-Security-Policy",
-        HeaderValue::from_static("default-src 'none'"),
-    );
+    // Fallback only: overwriting here would strip the per-page policy a
+    // browser-facing route declares for its own inline styling.
+    if !headers.contains_key("Content-Security-Policy") {
+        headers.insert(
+            "Content-Security-Policy",
+            HeaderValue::from_static("default-src 'none'"),
+        );
+    }
     headers.insert("Cache-Control", HeaderValue::from_static("no-store"));
 
     // HSTS in production only (requires HTTPS to be meaningful)
@@ -459,5 +464,42 @@ mod tests {
         assert!(hsts.contains("max-age="));
 
         std::env::remove_var("SHODH_ENV");
+    }
+
+    #[tokio::test]
+    async fn security_headers_keep_handler_declared_csp() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use axum::middleware::from_fn;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        std::env::remove_var("SHODH_ENV");
+
+        let app = Router::new()
+            .route(
+                "/page",
+                get(|| async { ([("Content-Security-Policy", "default-src 'self'")], "ok") }),
+            )
+            .layer(from_fn(security_headers));
+
+        let req = HttpRequest::builder()
+            .uri("/page")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(
+            resp.headers().get("Content-Security-Policy").unwrap(),
+            "default-src 'self'",
+            "middleware must not clobber a handler-declared CSP"
+        );
+        // The other headers still apply to handler-declared-CSP responses.
+        assert_eq!(
+            resp.headers().get("X-Content-Type-Options").unwrap(),
+            "nosniff"
+        );
     }
 }

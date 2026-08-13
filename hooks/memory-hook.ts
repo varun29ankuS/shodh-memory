@@ -36,6 +36,33 @@ interface ResolvedApiKey {
   file?: string;
 }
 
+/**
+ * Where the key came from, for the auth-failure report.
+ *
+ * Derived from the discriminant alone. The resolved path lives on
+ * RESOLVED_API_KEY.file and is deliberately not read here: printing it puts the
+ * operator's home directory into stderr and into the user-visible
+ * systemMessage, and the fix lines below name the remedy without it.
+ */
+export function describeKeyOrigin(source: ResolvedApiKey["source"]): string {
+  switch (source) {
+    case "env":
+      return "the SHODH_API_KEY environment variable";
+    case "shared-key-file":
+      return "the shared key file in the shodh-memory data directory";
+    case "legacy-dev-fallback":
+      return "the legacy dev key (no SHODH_API_KEY set and no shared key file found)";
+    default: {
+      // Unreachable for the declared union — adding a variant without a case
+      // above fails this assignment at compile time. The return keeps the
+      // message sane if a value ever arrives from outside the type system.
+      const unhandled: never = source;
+      void unhandled;
+      return "an unrecognised key source";
+    }
+  }
+}
+
 function resolveApiKey(): ResolvedApiKey {
   if (process.env.SHODH_API_KEY) {
     return { key: process.env.SHODH_API_KEY, source: "env" };
@@ -369,13 +396,8 @@ async function verifyServerAuth(): Promise<AuthProbeResult> {
 }
 
 /** Loud, actionable SessionStart failure: stderr block + user-visible systemMessage. */
-function reportAuthFailure(httpStatus: number): void {
-  const keyOrigin =
-    RESOLVED_API_KEY.source === "env"
-      ? "the SHODH_API_KEY environment variable"
-      : RESOLVED_API_KEY.source === "shared-key-file"
-        ? `the shared key file ${RESOLVED_API_KEY.file}`
-        : "the legacy dev key (no SHODH_API_KEY set and no shared key file found)";
+export function reportAuthFailure(httpStatus: number): void {
+  const keyOrigin = describeKeyOrigin(RESOLVED_API_KEY.source);
 
   const fixLines =
     RESOLVED_API_KEY.source === "legacy-dev-fallback"
@@ -623,7 +645,7 @@ export function formatMemoriesForContext(memories: SurfacedMemory[]): SurfaceRes
 
 const ERROR_PATTERNS = [
   /\berror\[E\d+\]/i,         // Rust compiler errors
-  /\bError:/,                   // Generic "Error:" at word boundary
+  /\bError:/i,                  // "Error:" / "error:" — cargo, npm and tsc all emit lowercase
   /\bFAILED\b/,                // Test/build failures
   /\bexit code [1-9]\d*/,      // Non-zero exit codes
   /\bpanic(?:ked)?\b/i,        // Rust panics

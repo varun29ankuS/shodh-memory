@@ -1,3 +1,5 @@
+import * as crypto from "crypto";
+
 export interface TokenStatusShape {
   tokens: number;
   budget: number;
@@ -86,4 +88,31 @@ export function extractStringContextFromArgs(
   }
 
   return contextParts.join(" ").slice(0, maxLen);
+}
+
+/**
+ * How the configured user id is named in the startup banner.
+ *
+ * Operators put email addresses in SHODH_USER_ID, so the raw value must not be
+ * persisted into client logs. A prefix would leak the local-part — the very
+ * thing at issue — so this reports a digest instead. The digest is
+ * reproducible, so an operator can confirm which id is live:
+ *
+ *   echo -n "$SHODH_USER_ID" | shasum -a 256 | cut -c1-8
+ *
+ * NOTHING derived from userId other than the hash may appear in the return
+ * value. An earlier revision included userId.length to make a trailing newline
+ * visible; hashing is a taint sanitiser and .length is not, so that single
+ * expression reintroduced a js/clear-text-logging finding (caught by
+ * differential scan). The digest already changes on a trailing newline, so the
+ * length bought nothing.
+ *
+ * This is obfuscation, not anonymisation: against a low-entropy input a reader
+ * holding a candidate list can confirm a guess. It defeats incidental
+ * disclosure in a shared log, which is the threat being addressed.
+ */
+export function describeUserId(userId: string): string {
+  if (userId === "claude-code") return "claude-code";
+  const digest = crypto.createHash("sha256").update(userId).digest("hex").slice(0, 8);
+  return `custom (sha256:${digest})`;
 }

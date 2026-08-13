@@ -187,15 +187,166 @@ export interface ProactiveContextResponse {
 	ingested_memory_id?: string;
 }
 
+/**
+ * Why a backend call failed, as a closed set of compile-time constants.
+ *
+ * The distinction this preserves cannot be recovered downstream: `request()`
+ * flattens the original error into a message, and for every transport failure
+ * except a timeout that message is exactly "fetch failed" — the code lives on
+ * `.cause`, which the flattening discards. Classification therefore happens at
+ * the throw site or not at all.
+ *
+ * Every member being a constant is what makes a value of this type safe to
+ * publish from the UNAUTHENTICATED /healthz route (server.ts `route`); the
+ * underlying message is not, because it quotes the backend's host and port.
+ */
+export type BackendFailureKind =
+	| "timeout"
+	| "refused"
+	| "dns"
+	| "tls"
+	| "reset"
+	| "unreachable"
+	| "protocol"
+	| "http"
+	| "other";
+
+/**
+ * What /healthz may publish for a failed probe. Widening this to a bare string
+ * is what would let a hostname or URL back into an unauthenticated response, so
+ * the HTTP case is pinned to a status number rather than left interpolatable.
+ */
+export type HealthDetail = BackendFailureKind | `http-${number}` | "http-client-error";
+
+/**
+ * How an HTTP failure is named on the unauthenticated health route.
+ *
+ * 5xx is published with its status: "the backend is up and broken" is what an
+ * operator needs, and a server-error code says nothing about this deployment's
+ * secrets. 4xx is collapsed. A bare `http-401` would tell an anonymous caller
+ * that the seat's own backend credential is being rejected, which is a fact
+ * about our configuration rather than about the backend's liveness, and this
+ * route answers before authorize().
+ */
+export function healthDetailForHttp(status: number): HealthDetail {
+	return status >= 400 && status < 500 ? "http-client-error" : `http-${status}`;
+}
+
+/** TLS failures report cert codes that carry no ERR_TLS_/ERR_SSL_ prefix. */
+const TLS_CERT_CODES: ReadonlySet<string> = new Set([
+	"DEPTH_ZERO_SELF_SIGNED_CERT",
+	"SELF_SIGNED_CERT_IN_CHAIN",
+	"CERT_HAS_EXPIRED",
+	"CERT_NOT_YET_VALID",
+	"UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+	"ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+
+/**
+ * Walk an error and everything underneath it, outermost first.
+ *
+ * `fetch` wraps transport failures in `TypeError: fetch failed` and hangs the
+ * real error off `.cause`; a dual-stack host (localhost resolving to both ::1
+ * and 127.0.0.1) nests an AggregateError in that position with one entry per
+ * address. The `seen` set guards against a self-referential `cause`.
+ */
+function* walkCauses(error: unknown): Generator<unknown> {
+	const seen = new Set<unknown>();
+	const queue: unknown[] = [error];
+	while (queue.length > 0) {
+		const current = queue.shift();
+		if (current === null || current === undefined || seen.has(current)) continue;
+		seen.add(current);
+		yield current;
+		if (current instanceof AggregateError) queue.push(...current.errors);
+		if (current instanceof Error && current.cause !== undefined) queue.push(current.cause);
+	}
+}
+
+/**
+ * Classify a transport failure from the original error object.
+ *
+ * Verified against Node 26 in eval/backend-classify.test.mjs. Note the `code`
+ * type guard: a timeout arrives as a DOMException whose `code` is the numeric
+ * legacy value 23, not a string, so comparing it against the errno names would
+ * silently match nothing.
+ */
+export function classifyTransportError(error: unknown): BackendFailureKind {
+	for (const node of walkCauses(error)) {
+		const candidate = node as { name?: unknown; code?: unknown };
+		const name = typeof candidate.name === "string" ? candidate.name : "";
+		const code = typeof candidate.code === "string" ? candidate.code : "";
+
+		if (name === "TimeoutError" || name === "AbortError") return "timeout";
+		if (TLS_CERT_CODES.has(code) || code.startsWith("ERR_TLS_") || code.startsWith("ERR_SSL_")) {
+			return "tls";
+		}
+
+		switch (code) {
+			case "ECONNREFUSED":
+				return "refused";
+			// Resolver behaviour differs by platform and by CI runner: a
+			// sandboxed runner can report EAI_AGAIN or EAI_NONAME where a
+			// desktop reports ENOTFOUND. They are one failure to an operator.
+			case "ENOTFOUND":
+			case "EAI_AGAIN":
+			case "EAI_NONAME":
+			case "EAI_FAIL":
+			case "EAI_NODATA":
+			case "ENODATA":
+				return "dns";
+			case "ECONNRESET":
+			case "EPIPE":
+			case "UND_ERR_SOCKET":
+				return "reset";
+			case "ETIMEDOUT":
+			case "UND_ERR_CONNECT_TIMEOUT":
+			case "UND_ERR_HEADERS_TIMEOUT":
+			case "UND_ERR_BODY_TIMEOUT":
+				return "timeout";
+			case "EHOSTUNREACH":
+			case "ENETUNREACH":
+				return "unreachable";
+		}
+	}
+	return "other";
+}
+
 export class ShodhBackendError extends Error {
 	readonly status: number;
 	readonly body: string;
+	/**
+	 * Why the call failed. Not settable directly — see the factories below.
+	 *
+	 * A required constructor parameter forces a throw site to make a CHOICE,
+	 * but not a correct one: passing "other" satisfies the type checker while
+	 * discarding the diagnosis. The factories remove the choice instead, so the
+	 * only way to get a transport kind is to hand over the original error and
+	 * let it be classified.
+	 */
+	readonly kind: BackendFailureKind;
 
-	constructor(message: string, status: number, body: string) {
+	private constructor(message: string, status: number, body: string, kind: BackendFailureKind) {
 		super(message);
 		this.name = "ShodhBackendError";
 		this.status = status;
 		this.body = body;
+		this.kind = kind;
+	}
+
+	/** The request never produced a response. The cause decides the kind. */
+	static transport(message: string, cause: unknown): ShodhBackendError {
+		return new ShodhBackendError(message, 0, "", classifyTransportError(cause));
+	}
+
+	/** The backend answered with a non-2xx status: reachable, and erroring. */
+	static http(message: string, status: number, body: string): ShodhBackendError {
+		return new ShodhBackendError(message, status, body, "http");
+	}
+
+	/** The backend answered, but not with JSON — a live endpoint, wrong protocol. */
+	static protocol(message: string, status: number, body: string): ShodhBackendError {
+		return new ShodhBackendError(message, status, body, "protocol");
 	}
 }
 
@@ -261,17 +412,31 @@ export class ShodhBackend {
 			});
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);
-			throw new ShodhBackendError(`Backend unreachable (${method} ${pathname}): ${reason}`, 0, "");
+			throw ShodhBackendError.transport(
+				`Backend unreachable (${method} ${pathname}): ${reason}`,
+				error,
+			);
 		}
 		const text = await response.text();
 		if (!response.ok) {
-			throw new ShodhBackendError(
+			throw ShodhBackendError.http(
 				`Backend error ${response.status} on ${method} ${pathname}`,
 				response.status,
 				text.slice(0, 2000),
 			);
 		}
-		return JSON.parse(text) as T;
+		try {
+			return JSON.parse(text) as T;
+		} catch {
+			// A proxy's HTML error page lands here. The backend answered, so this
+			// is not an unreachable one — it is a live endpoint speaking the wrong
+			// protocol, and conflating the two sends operators to the wrong place.
+			throw ShodhBackendError.protocol(
+				`Backend returned non-JSON on ${method} ${pathname}`,
+				response.status,
+				text.slice(0, 2000),
+			);
+		}
 	}
 
 	/** POST /api/recall — src/handlers/recall.rs `recall`, request shape src/handlers/types.rs `RecallRequest`. */

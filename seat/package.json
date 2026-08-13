@@ -11,7 +11,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "node --test eval/*.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^0.84.1",

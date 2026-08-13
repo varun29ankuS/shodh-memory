@@ -210,7 +210,10 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0a0f; colo
 
 <script>
 // ── Config ──────────────────────────────────────────────────────────────────────
-let API_KEY = localStorage.getItem('shodh_api_key') || '';
+// The API key is deliberately kept in memory only — never in web storage, where it
+// would persist in clear text. Purge any key a previous version of this page stored.
+localStorage.removeItem('shodh_api_key');
+let API_KEY = '';
 let HOST = localStorage.getItem('shodh_host') || 'http://localhost:3030';
 
 const MISSIONS = {
@@ -344,17 +347,13 @@ const LINEAGE_EDGES = {
 const RUN_TOKEN = Date.now().toString(36);
 
 // ── Setup ───────────────────────────────────────────────────────────────────────
-if (API_KEY) {
-  document.getElementById('inpHost').value = HOST;
-  document.getElementById('inpKey').value = API_KEY;
-}
+document.getElementById('inpHost').value = HOST;
 
 function connect() {
   HOST = document.getElementById('inpHost').value.trim() || 'http://localhost:3030';
   API_KEY = document.getElementById('inpKey').value.trim();
   if (!API_KEY) return;
   localStorage.setItem('shodh_host', HOST);
-  localStorage.setItem('shodh_api_key', API_KEY);
   document.getElementById('setup').style.display = 'none';
   loadAll();
 }

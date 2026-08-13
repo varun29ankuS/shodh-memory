@@ -218,12 +218,20 @@ impl AppError {
     ///
     /// 4xx errors are returned verbatim — they are client-actionable and carry
     /// no internal detail. 5xx errors may embed internal specifics (database
-    /// paths, `anyhow` chains, lock state); in production those are replaced
-    /// with a generic message, and the full detail is logged server-side
-    /// (see the `IntoResponse` impl). In development the full message is kept
-    /// to aid debugging.
+    /// paths, `anyhow` chains, lock state, and the user id — see
+    /// `handlers::state`, which formats it into an initialisation failure), so
+    /// they are ALWAYS replaced with a generic message.
+    ///
+    /// This used to be gated on `is_production_mode()`, which defaults to
+    /// false: outside production the full message was returned in the response
+    /// body, and a client that logs failures then persists whatever the server
+    /// put there. That is a real path — the MCP shim embeds the response body
+    /// in its retry log — and no static analysis can see it, because the value
+    /// leaves the process and comes back over the network. Nothing is lost by
+    /// sanitising unconditionally: `IntoResponse` logs the full detail
+    /// server-side at `error!` first, which is where a developer should read it.
     pub fn client_message(&self) -> String {
-        if self.status_code().is_server_error() && crate::auth::is_production_mode() {
+        if self.status_code().is_server_error() {
             "An internal server error occurred; details have been logged server-side.".to_string()
         } else {
             self.message()
@@ -343,5 +351,38 @@ mod tests {
 
         assert_eq!(response.code, "INVALID_USER_ID");
         assert!(response.message.contains("test123"));
+    }
+
+    /// 5xx bodies must never carry internal detail, regardless of environment.
+    /// The gate used to be `is_production_mode()`, which is false by default,
+    /// so a dev server handed the user id to any client that asked.
+    #[test]
+    fn server_errors_are_sanitised_outside_production_too() {
+        std::env::remove_var("SHODH_ENV");
+
+        let leaky = AppError::Internal(anyhow::anyhow!(
+            "Failed to initialize memory system for user 'alice@example.com' at /Users/alice/data"
+        ));
+        let message = leaky.client_message();
+
+        assert!(
+            !message.contains("alice@example.com"),
+            "user id reached the client body"
+        );
+        assert!(
+            !message.contains("/Users/alice"),
+            "filesystem path reached the client body"
+        );
+        assert!(message.contains("logged server-side"));
+
+        // The detail still exists for the operator — it is what IntoResponse logs.
+        assert!(leaky.message().contains("alice@example.com"));
+    }
+
+    /// 4xx stays verbatim: it is client-actionable and carries no internals.
+    #[test]
+    fn client_errors_keep_their_message() {
+        let err = AppError::InvalidUserId("bad-id".to_string());
+        assert!(err.client_message().contains("bad-id"));
     }
 }

@@ -54,7 +54,7 @@ env:
   # PR runs are always the gated `full`/5; only a manual dispatch can widen to
   # per-stage diagnosis (`all`) or a fast single repeat.
   LAYER: ${{ github.event.inputs.layer || 'full' }}
-  REPEATS: ${{ github.event.inputs.repeats || '1' }}
+  REPEATS: ${{ github.event.inputs.repeats || '5' }}
 
 jobs:
   smoke:

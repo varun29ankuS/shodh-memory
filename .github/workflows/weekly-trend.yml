@@ -123,6 +123,9 @@ jobs:
           def text(f):
               try: return open(f, errors='ignore').read()
               except FileNotFoundError: return ''
+          import os
+          failed = False
+          run_url = f"{os.environ.get('GITHUB_SERVER_URL','https://github.com')}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
           t = text('stdout.log') + text('run.log')
           m = re.search(r'LongMemEval-S:\s*(\d+)\s*questions\s*\(NER=(\w+)\).*?recall@10\s*=\s*([0-9.]+)', t)
           p1 = re.search(r'p@1\s*=\s*([0-9.]+)', t)
@@ -132,14 +135,30 @@ jobs:
           if m:
               print(f"- **recall@10 = {float(m.group(3)):.4f}** ({m.group(1)} questions, NER={m.group(2)})" + (f" · p@1 = {float(p1.group(1)):.4f}" if p1 else ""))
           else:
-              print("- ⚠ could not parse overall recall — see workflow logs")
+              # Loud, not decorative. A blank trend table posted every Monday reads
+              # like a report and hides the fact that the eval never finished: this
+              # job was CANCELLED by its own 330-minute timeout on 07-20, 07-27,
+              # 08-03 and 08-10 while step "Run LongMemEval-100" was still running,
+              # and each time this comment went out looking like a result.
+              print("- 🔴 **TREND UNAVAILABLE — the eval did not produce a parseable result.**")
+              print(f"- Most likely the run hit the job timeout before finishing. [Workflow run]({run_url})")
+              print("- This is a FAILURE, not a zero. Do not read the table below as a measurement.")
+              failed = True
           print("\n| category | recall@10 |\n| --- | --- |")
           for cat, n, r in re.findall(r'^\s+(\w+)\s+n=(\d+)\s+recall@10\s*=\s*([0-9.]+)', t, re.M):
               flag = ' ⭐' if cat == 'multi_hop' else ''
               print(f"| {cat}{flag} | {float(r):.4f} (n={n}) |")
+              open('PARSE_FAILED','w').close()
           PY
           cat comment.md
           gh issue comment "$TREND_ISSUE" --repo "$GITHUB_REPOSITORY" --body-file comment.md
+          # Fail the workflow when there was no measurement. Previously this step
+          # succeeded regardless, so four consecutive timed-out runs showed green
+          # in the Actions list while posting empty tables to the trend issue.
+          if [ -f PARSE_FAILED ]; then
+            echo "::error::Weekly trend produced no parseable recall figure — the eval did not complete."
+            exit 1
+          fi
 
       - name: Upload logs
         if: always()
