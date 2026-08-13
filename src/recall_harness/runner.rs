@@ -403,8 +403,8 @@ pub fn run_smoke_suite_with_ranks(inputs: &RunInputs) -> Result<ReportWithRanks>
     // from the same passes the headline aggregates use, so the `e2e_*` fields in
     // it are the same numbers as `layers[highest].latency_*` by construction —
     // which is what makes the reconciliation line meaningful.
-    let stage_timing_report =
-        aggregate_stage_timing(highest_mode, &passes, cases.len(), repeats).inspect(|st| {
+    let stage_timing_report = aggregate_stage_timing(highest_mode, &passes, cases.len(), repeats)
+        .inspect(|st| {
             print_stage_timing(st);
         });
 
@@ -618,7 +618,10 @@ fn aggregate_stage_timing(
     case_count: usize,
     repeats: usize,
 ) -> Option<StageTimingReport> {
-    let per_mode: Vec<&ModePassResult> = passes.iter().filter_map(|p| p.per_mode.get(&mode)).collect();
+    let per_mode: Vec<&ModePassResult> = passes
+        .iter()
+        .filter_map(|p| p.per_mode.get(&mode))
+        .collect();
     if per_mode.is_empty() || per_mode.iter().any(|m| m.stage_probes.len() != case_count) {
         return None;
     }
