@@ -99,6 +99,50 @@ work and it is the clearest statement of the product's claim; it is not a
 resting state. Shown on request, dismissed on read, and — per revision 1 — it
 already degrades correctly under `prefers-reduced-motion`.
 
+## 3.5 Briefing, then workbench
+
+The product is **not a dashboard**, and the word is barred from this spec
+because of what it makes people build. A dashboard is pre-composed, glanceable
+and monitored — a grid of tiles each with a fixed job. Twelve tiles in a grid is
+exactly the even interface with no dynamics that §1 exists to fix. An analyst
+does not monitor a memory; they interrogate it.
+
+**You land on a briefing. It becomes a workbench.**
+
+The briefing is three things, not twelve:
+
+1. **What is in here** — the corpus described (§2), in plain words and honest counts.
+2. **What changed since you left** — new memories, new links, what was reinforced.
+3. **What looks wrong** — the anomalies.
+
+Each is a **door, not a tile.** Selecting one does not open a panel beside it;
+it converts the screen into the workbench focused on that thing, and the
+briefing compresses to a strip that is the way back.
+
+### 3.5.1 What the workbench holds
+
+The answer (under whichever lens, §3.3), the conversation, the detail of a
+selected object, and the trail. It is expected to hold more over time — saved
+cues, a report being drafted, notes.
+
+**That expectation is the risk.** "The workbench can also hold X" is the exact
+path back to a partitioned dashboard, arrived at one reasonable addition at a
+time. One rule prevents it, and it is not negotiable:
+
+> **Exactly one primary at a time.** Everything else on the stage is compressed
+> to its smallest legible form. Promoting anything demotes the current primary.
+> There are never two co-equal panels.
+
+Compressed does not mean hidden — a compressed conversation still shows that it
+is streaming and its last line; a compressed briefing still shows the corpus in
+one sentence. Compressed means *it has surrendered the width and kept its
+meaning*.
+
+This is checkable, which is the point of writing it down: if a screenshot of any
+state shows two things competing for attention, the rule is broken and the
+addition that broke it comes out. Adding a new kind of thing to the workbench
+requires saying what it looks like compressed, in the same commit.
+
 ## 4. Fluid space
 
 The rule, stated so it can be checked: **no surface holds width it is not
