@@ -6143,6 +6143,30 @@ impl GraphMemory {
         self.record_memory_coactivation_impl(memory_ids, strengthen_only)
     }
 
+    /// OUTCOME-gated Hebbian update: mint and strengthen edges across memories
+    /// that were confirmed useful, not merely co-retrieved.
+    ///
+    /// The distinction is the whole point. `record_memory_coactivation` fires on
+    /// every recall over the full retrieved set, which is association without a
+    /// reward signal — frequently co-retrieved hubs strengthen fastest and climb
+    /// the ranking regardless of whether they helped. Measured, that cost 6.7pp
+    /// of p@1 (0.4100 -> 0.4767 with the L5 boost disabled) while recall@10 stayed
+    /// bit-identical: it was not finding worse memories, it was ordering them
+    /// worse. Rich-get-richer, unsupervised by usefulness.
+    ///
+    /// This entry point is called only with a set the caller has evidence for —
+    /// memories an answer actually cited. Minting is safe here for the same
+    /// reason it was unsafe there: an answer cites a handful of memories, so
+    /// all-pairs over a citation set is single-digit edges, where all-pairs over
+    /// a top-50 retrieval is ~1,225 per query. That unbounded minting was ~80%
+    /// of the graph and the OOM driver, which is why the retrieval path is
+    /// strengthen-only and this one is not.
+    ///
+    /// Returns the number of edges created or strengthened.
+    pub fn record_memory_coactivation_outcome(&self, memory_ids: &[Uuid]) -> Result<usize> {
+        self.record_memory_coactivation_impl(memory_ids, false)
+    }
+
     /// Co-retrieval Hebbian update. `strengthen_only = true`: reinforce edges that
     /// ALREADY exist between co-active memories; do NOT mint a new CoRetrieved edge
     /// for every co-retrieved pair. Un-gated all-pairs creation is the recall-time
@@ -9970,6 +9994,67 @@ mod tests {
         assert_eq!(raw.connections.len(), 2, "both edges render unfiltered");
         assert_eq!(raw.filter.hidden_redundant_generic, 0);
         assert_eq!(raw.filter.hidden_weak_generic, 0);
+    }
+
+    #[test]
+    fn outcome_gated_coactivation_mints_where_the_retrieval_path_does_not() {
+        // The contract that makes the outcome-gated path worth having: SAME
+        // inputs, SAME empty starting graph, opposite result. The retrieval
+        // entry point is strengthen-only, so on a graph with no `mem_edge:`
+        // entries it has nothing to strengthen and mints nothing — which is
+        // precisely why the mem<->mem layer has been inert since f6b730ee.
+        // The outcome entry point mints, because the caller has evidence the
+        // set was useful.
+        //
+        // This test fails if someone "simplifies" the two entry points into
+        // one, which would either re-open the all-pairs flood or re-kill the
+        // layer.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(temp_dir.path(), None).unwrap();
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect(); // 3 pairs
+
+        // Retrieval path on a cold graph: nothing exists, so nothing happens.
+        let retrieval = graph.record_memory_coactivation(&ids).unwrap();
+        assert_eq!(
+            retrieval, 0,
+            "retrieval-gated coactivation must mint nothing on a cold graph"
+        );
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            0,
+            "retrieval path must leave the graph empty"
+        );
+
+        // Outcome path on the same cold graph: all pairs are minted.
+        let minted = graph.record_memory_coactivation_outcome(&ids).unwrap();
+        assert_eq!(
+            minted, 3,
+            "outcome-gated coactivation must mint all 3 pairs"
+        );
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            3,
+            "outcome path must persist the minted edges"
+        );
+
+        // And a second confirmation strengthens rather than duplicating — the
+        // Hebbian part. Repeated evidence must not inflate edge count.
+        let again = graph.record_memory_coactivation_outcome(&ids).unwrap();
+        assert_eq!(again, 3, "second pass touches the same 3 pairs");
+        assert_eq!(
+            graph.get_stats().unwrap().relationship_count,
+            3,
+            "repeated confirmation must strengthen, never duplicate"
+        );
+        let edge = graph
+            .find_edge_between_entities(&ids[0], &ids[1])
+            .unwrap()
+            .expect("edge exists after minting");
+        assert!(
+            edge.activation_count >= 2,
+            "repeated confirmation must increment activation, got {}",
+            edge.activation_count
+        );
     }
 
     #[test]
