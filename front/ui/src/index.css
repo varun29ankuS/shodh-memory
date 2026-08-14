@@ -173,6 +173,128 @@
   --live: #4cb782;
 }
 
+/* ===========================================================================
+   PAPER.
+
+   Decided 2026-08-14, and it supersedes the near-black ground above rather
+   than sitting beside it as an option. This product is read, not monitored:
+   an analyst is looking at documents, provenance and prose, and paper is what
+   that has always been. The console look made every screen an instrument
+   panel, which is a claim about the work that is not true.
+
+   The dark set is left in place immediately above so the derivation is not
+   lost, and because every value here is a considered answer to one of those
+   — delete this block and the console returns intact.
+
+   Two rules inherited from the dark direction survive verbatim, because they
+   were never about darkness:
+
+     - Exactly ONE accent. It marks focus, the primary action and active nav.
+     - The accent must never also mean "anomaly". On paper both want to be a
+       red, so they are separated by hue rather than by luminance: the accent
+       is orange-red, the alarm is crimson. If those converge the alarm stops
+       reading as one, which is the failure mode worth guarding.
+
+   Three things genuinely invert, and getting them backwards is what makes a
+   naive light theme look broken:
+
+     - DEPTH. On near-black, "more present" means brighter. On paper it means
+       DARKER. Every ramp below runs the other way.
+     - INK IS NOT BLACK. #000 on paper is harsh and reads as a rendering
+       fault; real ink sits around #17150f.
+     - THE DATA HUES CANNOT SURVIVE. The dark palette's hues are tuned for
+       legibility on #08090a and go chalky on a light ground, so each is
+       replaced by a darker, more saturated sibling at the same hue angle —
+       the categories keep their identities, the values do not carry over.
+   =========================================================================== */
+:root {
+  /* Warm, uncoated stock rather than #fff. Pure white is a screen, not a page,
+     and it makes the ink ring. */
+  --background: #efece4;
+  --foreground: #17150f;
+
+  /* Depth runs the other way now: a raised sheet is LIGHTER than the desk. */
+  --card: #f7f5ef;
+  --card-foreground: #17150f;
+  --popover: #fffefa;
+  --popover-foreground: #17150f;
+
+  /* The mark's red end, darkened until it holds as small text on paper.
+     #f4622e from the dark theme measures ~3.0:1 here and fails AA outright. */
+  --primary: #c8391a;
+  --primary-foreground: #fffefa;
+
+  --secondary: #e5e1d6;
+  --secondary-foreground: #17150f;
+
+  --muted: #e5e1d6;
+  /* Carries nearly all label copy, so it is the one value that must not be
+     chosen by eye — this is a legible mid-ink, not a grey suggestion. */
+  --muted-foreground: #5f5a4e;
+
+  /* shadcn's `accent` is the hover/active SURFACE, not the brand colour. */
+  --accent: #e3ded1;
+  --accent-foreground: #17150f;
+
+  /* Crimson, deliberately NOT the accent's orange-red. See the hue rule above. */
+  --destructive: #a4123a;
+  --destructive-foreground: #fffefa;
+
+  /* Ochre. The middle rung between accent and destructive — "worth a look"
+     as distinct from "wrong". */
+  --warn: #8a5a06;
+
+  --border: #d5d0c2;
+  --input: #c4bfae;
+  --ring: #c8391a;
+
+  /* Data hues, re-derived rather than converted. Same hue angles as the dark
+     set so a category keeps its identity, darker and more saturated so it
+     reads as a mark on a page instead of a highlighter. Still nothing in the
+     accent's 10–40° band. */
+  --chart-1: #5b4bc4; /* technology */
+  --chart-2: #1f6aa8; /* org        */
+  --chart-3: #2c7a4b; /* location   */
+  --chart-4: #b03a6e; /* person     */
+  --chart-5: #17706a;
+
+  --sidebar: #e8e4da;
+  --sidebar-foreground: #17150f;
+  --sidebar-primary: #c8391a;
+  --sidebar-primary-foreground: #fffefa;
+  --sidebar-accent: #e3ded1;
+  --sidebar-accent-foreground: #17150f;
+  --sidebar-border: #d5d0c2;
+  --sidebar-ring: #c8391a;
+}
+
+/* Graph tokens on paper. d3 reads these through getComputedStyle, which is
+   why re-tokening reaches the canvas with no canvas code changed. */
+:root {
+  --node-technology: #5b4bc4;
+  --node-org: #1f6aa8;
+  --node-location: #2c7a4b;
+  --node-person: #b03a6e;
+  --node-active: #c8391a;
+  --node-anomalous: #a4123a;
+
+  /* Edge weight, as value with no hue, so edges never compete with the
+     categorical node colours. Heavier edge = darker line. */
+  --edge-strong: #8b8576;
+  --edge-medium: #aca695;
+  --edge-weak: #c9c3b2;
+
+  /* Consolidation L1 → L2 → L3, still one ordinal slate family and still not
+     three categories. On paper the ramp DARKENS with consolidation: settled
+     knowledge is the most present thing among the edges, and on a light
+     ground presence is weight, not brightness. */
+  --edge-l1: #a9b1bd;
+  --edge-l2: #6d7a8b;
+  --edge-l3: #39465a;
+
+  --live: #2c7a4b;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
