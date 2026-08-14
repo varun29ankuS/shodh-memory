@@ -1,6 +1,7 @@
 import { HashRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { Providers } from "./providers";
+import { useSession } from "@/stores/session";
 import { useReachability } from "./useReachability";
 import { useSeatHealth } from "./useSeatHealth";
 import { Sidebar, DESTINATIONS } from "@/components/layout/Sidebar";
@@ -61,7 +62,13 @@ function Shell({ reach }: { reach: Reachability }) {
   const { pathname } = useLocation();
   const seat = useSeatHealth();
   const destination = DESTINATIONS.find((d) => d.path === pathname);
-  const showInspector = ROUTES_WITH_INSPECTOR.includes(pathname) && reach.state === "online";
+  // The Inspector costs 280px of a 1600px stage — a fifth of the width — and
+  // with nothing selected it spent that on the sentence "Select a memory or an
+  // entity", which is an instruction, not a detail view. It now appears when
+  // there is something to inspect and the canvas keeps the width until then.
+  const hasSelection = useSession((s) => s.selectedMemoryId !== null || s.selectedEntityId !== null);
+  const showInspector =
+    ROUTES_WITH_INSPECTOR.includes(pathname) && reach.state === "online" && hasSelection;
 
   return (
     <div className="relative h-svh min-h-0 overflow-hidden">
