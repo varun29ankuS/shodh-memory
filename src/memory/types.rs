@@ -3487,6 +3487,7 @@ pub struct RetrievalStats {
 ///
 /// Covers the full retrieval pipeline from query analysis through final scoring.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StageTiming {
     /// Layers 0.4-0.7: temporal analysis, attribute detection, fact lookups
     pub query_analysis_us: u64,
@@ -3500,6 +3501,11 @@ pub struct StageTiming {
     pub fusion_us: u64,
     /// Layer 5: memory fetch + unified scoring + quality gate
     pub scoring_us: u64,
+    /// Post-Layer-5: linguistic, competition, coactivation, hierarchy.
+    ///
+    /// Previously unreported: `total_us` minus the six stages above landed here
+    /// and looked like unexplained time. It is a real stage; name it.
+    pub post_us: u64,
     /// Total end-to-end retrieval time
     pub total_us: u64,
 }

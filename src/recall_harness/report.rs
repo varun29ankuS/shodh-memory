@@ -44,6 +44,78 @@ pub struct Report {
     pub repeats: usize,
     /// Cases or metrics that failed validation or regression.
     pub failures: Vec<Failure>,
+    /// Per-stage latency breakdown. `None` unless `SHODH_STAGE_TIMING=1`.
+    ///
+    /// Omitted from the JSON entirely when absent, so committed baselines
+    /// written without it stay byte-identical and still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_timing: Option<StageTimingReport>,
+}
+
+/// One pipeline stage's latency distribution across the suite.
+///
+/// Percentiles are computed the same way the headline latency is: per case, take
+/// the median across repeats; then take percentiles across cases. That makes a
+/// stage row directly comparable to `latency_p50_ms` and immune to a single
+/// noisy repeat.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StageRow {
+    /// Stage name, in pipeline order.
+    pub stage: String,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    /// Arithmetic mean across cases.
+    pub mean_ms: f64,
+    /// `mean_ms` as a percentage of the mean end-to-end latency.
+    ///
+    /// Shares are computed from MEANS, not percentiles, because means are
+    /// additive and percentiles are not: the per-stage p50s have no obligation
+    /// to sum to the end-to-end p50, but the per-stage means do sum to the mean
+    /// stage total. Use `p50_ms` for "how long does this stage take", and
+    /// `mean_share_pct` for "how much of the budget does it own".
+    pub mean_share_pct: f64,
+}
+
+/// Per-stage latency breakdown for one `LayerMode`.
+///
+/// Emitted only under `SHODH_STAGE_TIMING=1`. The reconciliation fields exist so
+/// a reader can check the breakdown against the wall clock instead of trusting
+/// it: `unattributed_mean_ms` is end-to-end minus the sum of the seven stages,
+/// and a large value means a boundary is in the wrong place.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StageTimingReport {
+    /// Which `LayerMode` these timings came from.
+    pub mode: String,
+    pub case_count: usize,
+    pub repeats: usize,
+    /// End-to-end wall clock as measured by the harness around `recall()`.
+    /// Identical in construction to the report's `latency_p50_ms`.
+    pub e2e_p50_ms: f64,
+    pub e2e_p95_ms: f64,
+    pub e2e_mean_ms: f64,
+    /// Mean of (sum of the seven top-level stages).
+    pub stage_sum_mean_ms: f64,
+    /// `e2e_mean_ms - stage_sum_mean_ms`: time inside `recall()` but outside any
+    /// instrumented stage (the wrapper, lock acquisition, probe overhead).
+    pub unattributed_mean_ms: f64,
+    /// The seven top-level stages, in pipeline order. These partition
+    /// `stage_sum_mean_ms`.
+    pub stages: Vec<StageRow>,
+    /// Sub-stages carved out of the rows above. These OVERLAP `stages` and must
+    /// not be added to it: `tokenize`/`onnx_forward` ⊂ `embedding`, `bm25` ⊂
+    /// `fusion`, `fetch` ⊂ `scoring`. `storage_read`/`storage_decode` are
+    /// recall-wide — `MemoryStorage::get` is called from the graph traversal as
+    /// well as Layer 5, and measurement put nearly all of it in the former.
+    pub substages: Vec<StageRow>,
+    /// Mean ONNX forward passes per query. 0 = query-cache hit; 2 = the
+    /// polarity-sensitive path also embedded the negated form.
+    pub mean_forwards: f64,
+    /// Mean `recall_inner` invocations per `recall()`. > 1 means the companion
+    /// re-rank fired and issued a nested deep recall.
+    pub mean_inner_recalls: f64,
+    /// Mean cold RocksDB reads per query (Layer-5 cache misses).
+    pub mean_storage_reads: f64,
 }
 
 fn default_repeats() -> usize {
@@ -789,6 +861,7 @@ mod tests {
             case_count: 30,
             repeats: 1,
             failures: vec![],
+            stage_timing: None,
         }
     }
 
