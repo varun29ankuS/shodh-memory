@@ -15,6 +15,7 @@ import {
   type SimulationNodeDatum,
   type ZoomTransform,
 } from "d3";
+import { coreExtentOf, fitTransform } from "@/lib/view/fit";
 import { useSession } from "@/stores/session";
 import {
   cooccurFloor,
@@ -50,6 +51,21 @@ import {
  * Both levels are the same renderer with different node sets, so there is one
  * hit-test, one zoom, one draw.
  */
+
+/** Zoom limits, shared by the gesture handler and the auto-frame so the frame
+ *  can never ask for a scale d3 would silently clamp. */
+const SCALE_EXTENT: [number, number] = [0.15, 6];
+
+/** Margin left around the framed corpus, in screen pixels. Entity labels are
+ *  drawn outside the node radius, so a tight frame clips the words rather than
+ *  the dots. */
+const FRAME_PADDING = 56;
+
+/** Fraction trimmed from each end of each axis before framing. A force layout
+ *  strands weakly-connected nodes far from the mass; without this, twenty
+ *  degree-0 entities set the camera for all 136 and the real corpus becomes an
+ *  illegible knot. Trimmed nodes are still drawn, just outside the opening view. */
+const FRAME_TRIM = 0.06;
 
 type Level = "clusters" | "entities";
 
@@ -424,23 +440,60 @@ export function EntityCanvas({
     sim.stop();
     for (let i = 0; i < 60; i++) sim.tick();
 
-    if (reduceMotion) {
-      for (let i = 0; i < 240; i++) sim.tick();
-      draw();
-    } else {
-      sim.alphaDecay(0.015).velocityDecay(0.3).alpha(0.9).restart();
-      sim.on("tick", draw);
-    }
-    draw();
-
+    // `event.sourceEvent` is null for a transform we set ourselves and non-null
+    // for a real wheel/drag. That is what separates "the view framed itself"
+    // from "the user aimed it", and once the user has aimed it we stop moving
+    // the camera under their hand.
+    let userAimed = false;
     const zoomBehavior = zoom<HTMLCanvasElement, unknown>()
-      .scaleExtent([0.15, 6])
+      .scaleExtent(SCALE_EXTENT)
       .on("zoom", (event) => {
+        if (event.sourceEvent) userAimed = true;
         transformRef.current = event.transform;
         draw();
       });
     const sel = select(canvas);
     sel.call(zoomBehavior);
+
+    /**
+     * Frame every node, rather than opening at the identity transform.
+     *
+     * This MUST go through `zoomBehavior.transform` and not by assigning
+     * `transformRef.current`. d3-zoom keeps its own copy of the current
+     * transform on the selection's `__zoom` property; writing only the ref
+     * leaves the two disagreeing, and the first pan gesture snaps back to
+     * wherever d3 still believed the camera was.
+     *
+     * Applying the transform fires the zoom handler above, which repaints —
+     * so callers must not also call `draw()`.
+     */
+    const frameNow = (): void => {
+      const extent = coreExtentOf(nodes, FRAME_TRIM);
+      if (!extent) return;
+      const fit = fitTransform(extent, { width, height }, {
+        padding: FRAME_PADDING,
+        scaleExtent: SCALE_EXTENT,
+      });
+      sel.call(zoomBehavior.transform, zoomIdentity.translate(fit.x, fit.y).scale(fit.k));
+    };
+
+    if (reduceMotion) {
+      for (let i = 0; i < 240; i++) sim.tick();
+    } else {
+      sim.alphaDecay(0.015).velocityDecay(0.3).alpha(0.9).restart();
+      // Re-framing every tick keeps the whole corpus in view while the layout
+      // spreads, instead of letting it grow off-screen and snapping at the end.
+      // It costs one O(n) extent pass per tick against a full canvas repaint,
+      // and it stops the moment the user takes the camera.
+      sim.on("tick", () => {
+        if (userAimed) draw();
+        else frameNow();
+      });
+    }
+    frameNow();
+    // frameNow returns early on an empty extent, in which case nothing has
+    // painted yet.
+    if (nodes.length === 0) draw();
 
     const observer = new ResizeObserver(() => {
       sizeCanvas();

@@ -16,6 +16,7 @@ import {
   type ZoomTransform,
 } from "d3";
 import type { RecallMemory, RecallLineageEdge } from "@/lib/api";
+import { coreExtentOf, fitTransform } from "@/lib/view/fit";
 import { useSession } from "@/stores/session";
 import { relClass, relName, type RelationClass } from "./relation";
 import {
@@ -80,6 +81,19 @@ import {
  * Nothing here is invented — `relation` and `confidence` are the only two
  * fields `RecallLineageEdge` has.
  */
+
+/** Zoom limits, shared by the gesture handler and the auto-frame so the frame
+ *  can never ask for a scale d3 would silently clamp. */
+const SCALE_EXTENT: [number, number] = [0.2, 6];
+
+/** Margin left around the framed corpus, in screen pixels. Enough that node
+ *  labels, which are drawn outside the node radius, are not cut by the edge. */
+const FRAME_PADDING = 48;
+
+/** Fraction trimmed from each end of each axis before framing, so a few
+ *  stranded nodes cannot set the camera for the whole result set. Trimmed
+ *  nodes are still drawn, just outside the opening view. */
+const FRAME_TRIM = 0.06;
 
 interface GraphNode extends SimulationNodeDatum {
   id: string;
@@ -404,28 +418,67 @@ export function GraphCanvas({
 
     simRef.current = sim;
 
+    // Zoom drives the transform; the paint is manual. d3 only supplies the
+    // gesture handling and the transform algebra.
+    //
+    // `event.sourceEvent` is null for a transform we set ourselves and non-null
+    // for a real wheel/drag. That is what separates "the view framed itself"
+    // from "the user aimed it", and once the user has aimed it we stop moving
+    // the camera under their hand.
+    let userAimed = false;
+    const zoomBehavior = zoom<HTMLCanvasElement, unknown>()
+      .scaleExtent(SCALE_EXTENT)
+      .on("zoom", (event) => {
+        if (event.sourceEvent) userAimed = true;
+        transformRef.current = event.transform;
+        draw();
+      });
+    const sel = select(canvas);
+    sel.call(zoomBehavior);
+
+    /**
+     * Frame every node, rather than opening at the identity transform.
+     *
+     * This MUST go through `zoomBehavior.transform` and not by assigning
+     * `transformRef.current`. d3-zoom keeps its own copy of the current
+     * transform on the selection's `__zoom` property; writing only the ref
+     * leaves the two disagreeing, and the first pan gesture snaps back to
+     * wherever d3 still believed the camera was.
+     *
+     * Applying the transform fires the zoom handler above, which repaints —
+     * so callers must not also call `draw()`.
+     */
+    const frameNow = (): void => {
+      const extent = coreExtentOf(nodes, FRAME_TRIM);
+      if (!extent) return;
+      const fit = fitTransform(extent, { width, height }, {
+        padding: FRAME_PADDING,
+        scaleExtent: SCALE_EXTENT,
+      });
+      sel.call(zoomBehavior.transform, zoomIdentity.translate(fit.x, fit.y).scale(fit.k));
+    };
+
     if (reduceMotion) {
       sim.stop();
       // 300 ticks is d3's own default run length to convergence at the default
       // alpha decay; running them synchronously yields the settled layout with
       // no animation frames at all.
       for (let i = 0; i < 300; i++) sim.tick();
-      draw();
+      frameNow();
+      // frameNow returns early on an empty extent, in which case nothing has
+      // painted yet.
+      if (nodes.length === 0) draw();
     } else {
       sim.alphaDecay(0.015).velocityDecay(0.32).alpha(1).restart();
-      sim.on("tick", draw);
-    }
-
-    // Zoom drives the transform; the paint is manual. d3 only supplies the
-    // gesture handling and the transform algebra.
-    const zoomBehavior = zoom<HTMLCanvasElement, unknown>()
-      .scaleExtent([0.2, 6])
-      .on("zoom", (event) => {
-        transformRef.current = event.transform;
-        draw();
+      // Re-framing every tick keeps the whole corpus in view while the layout
+      // spreads, instead of letting it grow off-screen and snapping at the end.
+      // It costs one O(n) extent pass per tick against a full canvas repaint,
+      // and it stops the moment the user takes the camera.
+      sim.on("tick", () => {
+        if (userAimed) draw();
+        else frameNow();
       });
-    const sel = select(canvas);
-    sel.call(zoomBehavior);
+    }
 
     const observer = new ResizeObserver(() => {
       sizeCanvas();
