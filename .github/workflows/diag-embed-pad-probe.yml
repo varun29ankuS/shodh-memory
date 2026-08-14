@@ -1,0 +1,79 @@
+# Padded-vs-dynamic sequence-length equivalence probe for the MiniLM embed pass.
+#
+# generate_embedding_onnx pads every input to max_length (256). Padded positions
+# carry attention_mask = 0 and the Rust-side mean-pool skips them — so IF the
+# exported ONNX graph masks correctly AND its kernels are shape-independent,
+# shortening the sequence must produce BIT-IDENTICAL embeddings. That is an
+# assumption about the export, not a fact, and it gates any dynamic-padding
+# change.
+#
+# tests/embed_pad_equivalence.rs is #[ignore]d because it needs local model
+# files, which means nothing runs it by default. This workflow is the runner —
+# without it the probe is 368 lines that never execute, which is how a test
+# stops being evidence.
+#
+# CI CAVEAT, stated rather than hidden: the probe compares TWO model files when
+# both exist locally — the repo-adjacent export and the auto-download cache,
+# which differ on a dev machine (one is mislabeled fp32, the other the real
+# quint8_avx2). A runner has only the downloaded one, so the second comparison
+# is skipped here. CI settles the padding question; the two-model divergence
+# stays a local observation.
+name: diag — embed pad equivalence (Linux)
+on:
+  workflow_dispatch:
+  push:
+    branches: [test/embed-pad-equivalence-probe]
+    paths:
+      - '.github/workflows/diag-embed-pad-probe.yml'
+      - 'tests/embed_pad_equivalence.rs'
+      - 'src/embeddings/minilm.rs'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recall-eval
+
+      - name: Install LLVM (ONNX runtime build dep)
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev clang
+
+      - name: Cache MiniLM embedder
+        uses: actions/cache@v6
+        with:
+          path: models/minilm-l6
+          key: shodh-models-minilm-probe-c9745ed1
+
+      # The probe asserts config.model_path.exists() and fails loudly if it
+      # does not, so fetch before running rather than discovering it mid-test.
+      - name: Pre-fetch MiniLM embedder
+        run: |
+          dl() { curl -fL --retry 20 --retry-all-errors --retry-delay 15 --connect-timeout 30 -o "$1" "$2"; }
+          M="models/minilm-l6"; mkdir -p "$M"
+          PIN=c9745ed1d9f207416be6d2e6f8de32d1f16199bf
+          B="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/$PIN"
+          [ -s "$M/model_quantized.onnx" ] || dl "$M/model_quantized.onnx" "$B/onnx/model_quint8_avx2.onnx"
+          [ -s "$M/tokenizer.json" ]       || dl "$M/tokenizer.json" "$B/tokenizer.json"
+          ls -la "$M"
+
+      - name: Run probe
+        run: |
+          set -o pipefail
+          cargo test --test embed_pad_equivalence -- --ignored --nocapture 2>&1 | tee probe.log
+
+      - name: Publish verdict
+        if: always()
+        run: |
+          echo "## Padded-vs-dynamic embed equivalence — Linux (ubuntu runner)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/=== VERDICT/,$p' probe.log >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "_Determinism control runs first: same input, same shape, twice. If that is not bit-stable, every cross-shape comparison below it is unattributable noise._" >> "$GITHUB_STEP_SUMMARY"
