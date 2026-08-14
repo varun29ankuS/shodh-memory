@@ -14,6 +14,10 @@ import type { Topology, GeometryCollection } from "topojson-specification";
 import type { RecallMemory } from "@/lib/api";
 import { useSession } from "@/stores/session";
 import worldTopology from "@/assets/world-countries-110m.json";
+// India's national boundary from the Local Government Directory, via
+// bharatlas.com — see india-boundary-LICENSE.txt beside it for provenance,
+// the licence, and the extent check performed before adopting it.
+import indiaBoundary from "@/assets/india-boundary-lgd.json";
 
 /**
  * The world basemap and the plotted points.
@@ -55,6 +59,7 @@ const LAND = feature(world, world.objects.land) as unknown as GeoPermissibleObje
 /** Interior borders only — `(a, b) => a !== b` drops the coastline, which LAND
  *  already draws. Drawing both would double-stroke every shore. */
 const BORDERS = mesh(world, world.objects.countries, (a, b) => a !== b) as GeoPermissibleObjects;
+const INDIA = indiaBoundary as unknown as GeoPermissibleObjects;
 const GRATICULE = geoGraticule10() as unknown as GeoPermissibleObjects;
 
 interface GeoPoint {
@@ -271,10 +276,38 @@ export function GeoMap({
       ctx!.lineWidth = 0.6 / t.k;
       ctx!.stroke();
 
+      // National borders, with India's interior clipped out.
+      //
+      // Natural Earth draws boundaries on lines of DE-FACTO CONTROL. For India
+      // that splits Jammu & Kashmir, puts Aksai Chin outside the country and
+      // treats Arunachal Pradesh as disputed — so the mesh cannot be drawn
+      // as-is. It is still correct for every other country, so rather than
+      // replace it, the claimed area is excluded from it and India's own
+      // boundary is stroked over the gap.
+      //
+      // The clip is a full-plane rectangle plus the India path under the
+      // even-odd rule, which leaves everything EXCEPT India's interior
+      // paintable. The rectangle is deliberately enormous: this runs inside
+      // the zoom transform, so it must still cover the plane at k = 24.
+      ctx!.save();
+      ctx!.beginPath();
+      ctx!.rect(-1e6, -1e6, 2e6, 2e6);
+      path(INDIA);
+      ctx!.clip("evenodd");
       ctx!.beginPath();
       path(BORDERS);
       ctx!.strokeStyle = hexA(tokens.muted, 0.2);
       ctx!.lineWidth = 0.5 / t.k;
+      ctx!.stroke();
+      ctx!.restore();
+
+      // India, from LGD. Drawn at the landmass's weight rather than the border
+      // weight: it is the same kind of line as a coastline here, not a fainter
+      // internal division.
+      ctx!.beginPath();
+      path(INDIA);
+      ctx!.strokeStyle = hexA(tokens.muted, 0.32);
+      ctx!.lineWidth = 0.6 / t.k;
       ctx!.stroke();
 
       ctx!.restore();
