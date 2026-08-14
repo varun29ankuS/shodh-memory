@@ -1,65 +1,111 @@
-//! Text Chunking for Long-Content Embeddings
+//! Token-aware, structure-aware text chunking for embeddings.
 //!
-//! MiniLM has a 256 token limit. Content beyond this is silently dropped,
-//! making long memories unsearchable by their later content.
+//! # Why token-aware
 //!
-//! This module implements two chunking strategies:
+//! The embedding window is enforced by the TOKENIZER, not by this module: the
+//! shipped MiniLM tokenizer.json truncates every sequence to
+//! [`MODEL_TOKEN_WINDOW`] (128) tokens including `[CLS]`/`[SEP]`. The previous
+//! chunker measured CHARACTERS and targeted ~800 chars ("~200 tokens"), so
+//! every full-size chunk exceeded the real window and silently lost its last
+//! ~35% of tokens before the model ever saw them. Chunk budgets are therefore
+//! expressed in REAL tokens, counted by the same tokenizer that feeds the
+//! model (`Embedder::count_tokens`), never by a chars/4 heuristic.
 //!
-//! ## 1. Fixed-Size Overlapping Chunking (`chunk_text`)
-//! - Split text into ~200 token chunks (leaving room for special tokens)
-//! - 50 token overlap between chunks for context continuity
-//! - Good for general prose and documents
+//! # Strategy: structural segmentation + token-budget packing
 //!
-//! ## 2. Semantic Chunking (`semantic_chunk_text`)
-//! - Splits on natural boundaries (paragraphs, dialogue turns, sections)
-//! - Preserves conversational context - never splits mid-turn
-//! - Better for dialogue, structured text, logs, and multi-speaker content
+//! 1. Segment on structure — dialogue turns (never split mid-turn), then
+//!    paragraphs, then sentences/lines. Splitting mid-sentence measurably
+//!    degrades sentence-embedding quality; boundaries follow the text's own
+//!    units.
+//! 2. Greedily pack segments into chunks whose full sequence length
+//!    (content + special tokens) fits `ChunkConfig::max_tokens`.
+//! 3. Overlap is a single trailing sentence, carried only across SOFT
+//!    (sentence) boundaries and only when it is at most
+//!    `ChunkConfig::overlap_tokens`. Rationale: with sentence-aligned
+//!    boundaries no fact is severed mid-clause, so the only residual boundary
+//!    loss is anaphora ("it", "she") whose antecedent is the previous
+//!    sentence. One sentence of carry-over restores that context; the old
+//!    fixed 25% char overlap inflated vector count without a measured recall
+//!    gain. Hard boundaries (paragraph / dialogue turn) carry no overlap —
+//!    those units are self-contained by construction.
+//! 4. A verification pass re-counts every emitted chunk with the real counter
+//!    and hard-splits any that still exceed the budget (defence against
+//!    non-additive tokenization edge cases), so no emitted chunk can exceed
+//!    the window.
 //!
-//! # Example (Fixed-Size)
+//! # Rejected alternatives (surveyed 2026-08)
 //!
-//! A 1000-token memory becomes ~6 chunks:
-//! ```text
-//! [0-200] [150-350] [300-500] [450-650] [600-800] [750-1000]
-//! ```
-//!
-//! # Example (Semantic)
-//!
-//! A dialogue becomes natural chunks preserving speaker turns:
-//! ```text
-//! [Alice: Hi / Bob: Hello] [Alice: How are you? / Bob: Great!]
-//! ```
+//! - **Late chunking** (embed long context once, pool per chunk): requires a
+//!   long-context token-embedding model; degenerate at a 128-token window.
+//! - **Embedding-distance semantic breakpoints**: needs per-sentence
+//!   embeddings at ingest (~Nx embed cost). At this window a memory yields
+//!   1–3 chunks and a breakpoint can move a boundary by at most a sentence —
+//!   the cost is not earned. Revisit only with an ingest-side ablation.
+//! - **Long-context embedder swap**: out of scope; our own bake-off found the
+//!   embedder is not the lever (one comparison bit-identical).
+//! - **Parent-document retrieval**: already present — chunk vectors map to the
+//!   parent memory id (`IdMapping::insert_chunks`), and retrieval returns the
+//!   whole memory.
 
 use regex::Regex;
 use std::sync::LazyLock;
+
+/// The real encoder sequence window, in tokens, INCLUDING the `[CLS]`/`[SEP]`
+/// special tokens. This is the single source of truth that the chunk budget,
+/// the tokenizer truncation (enforced at model load), and the ONNX tensor
+/// length are all validated against at startup
+/// (`MiniLMEmbedder::validate_sequence_contract`). The shipped MiniLM
+/// tokenizer.json truncates at exactly this length; content past it never
+/// reaches the model.
+pub const MODEL_TOKEN_WINDOW: usize = 128;
+
+/// Tokens consumed by `[CLS]` + `[SEP]` in a single-sequence BERT encode.
+pub const SPECIAL_TOKEN_OVERHEAD: usize = 2;
+
+/// Token counter contract: returns the FULL encoded sequence length of `text`
+/// as the model would see it — including special tokens, WITHOUT truncation.
+/// `MiniLMEmbedder` implements this with the real tokenizer; the default
+/// trait fallback uses the calibrated heuristic in `token_estimation`.
+pub type TokenCounter<'a> = dyn Fn(&str) -> usize + 'a;
 
 /// Pattern to detect dialogue turns (e.g., "Alice:", "User:", "Speaker 1:")
 static DIALOGUE_TURN_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^([A-Z][a-zA-Z0-9_\- ]{0,30})\s*:").unwrap());
 
-/// Pattern to detect section headers or timestamps
-static SECTION_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)^(?:\[.*?\]|#{1,3}\s+\w|Session \d+|---+)").unwrap());
+/// Sentence terminator followed by whitespace (or end): `.`, `!`, `?` runs,
+/// optionally closed by quotes/brackets.
+static SENTENCE_END_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"[.!?]+["')\]]*(?:\s+|$)"#).unwrap());
 
-/// Chunk configuration for fixed-size chunking
+/// Chunk configuration, in REAL tokens (full sequence, including special
+/// tokens — the same unit the encoder window is measured in).
 pub struct ChunkConfig {
-    /// Target chunk size in characters (approximate tokens * 4)
-    pub chunk_size: usize,
-    /// Overlap between chunks in characters
-    pub overlap: usize,
-    /// Minimum chunk size (don't create tiny trailing chunks)
-    pub min_chunk_size: usize,
+    /// Maximum full-sequence tokens per chunk (content + special tokens).
+    /// MUST be ≤ the tokenizer truncation window or content is silently lost;
+    /// this invariant is asserted at embedder construction.
+    pub max_tokens: usize,
+    /// Maximum CONTENT tokens the trailing sentence of a chunk may have to be
+    /// carried into the next chunk as overlap.
+    pub overlap_tokens: usize,
 }
 
 impl Default for ChunkConfig {
     fn default() -> Self {
         Self {
-            // ~200 tokens * 4 chars/token = 800 chars
-            // Leave headroom for tokenizer differences
-            chunk_size: 800,
-            // ~50 tokens overlap for context continuity
-            overlap: 200,
-            // Don't create chunks smaller than ~50 tokens
-            min_chunk_size: 200,
+            max_tokens: MODEL_TOKEN_WINDOW,
+            overlap_tokens: 24,
+        }
+    }
+}
+
+impl ChunkConfig {
+    /// Config for an embedder-specific budget (e.g. reduced by an asymmetric
+    /// document instruction prefix). Clamped to a sane floor so a
+    /// misconfigured prefix can never produce degenerate one-word chunks.
+    pub fn for_budget(budget_tokens: usize) -> Self {
+        Self {
+            max_tokens: budget_tokens.max(32),
+            ..Self::default()
         }
     }
 }
@@ -69,251 +115,42 @@ impl Default for ChunkConfig {
 pub struct ChunkResult {
     /// The chunked text segments
     pub chunks: Vec<String>,
-    /// Original text length
+    /// Original text length in chars
     pub original_length: usize,
-    /// Whether chunking was needed (content exceeded single chunk)
+    /// Whether the text was split into more than one chunk
     pub was_chunked: bool,
 }
 
-impl ChunkResult {
-    /// Calculate content coverage ratio (1.0 = all content in single chunk)
-    pub fn coverage_ratio(&self) -> f32 {
-        if self.chunks.is_empty() {
-            return 0.0;
-        }
-        // With chunking, we cover everything
-        // Without chunking, we might truncate
-        1.0
-    }
+/// How a segment attaches to the segment before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Boundary {
+    /// Paragraph or dialogue-turn start: self-contained unit, no overlap
+    /// carried across it, joined with a newline inside a chunk.
+    Hard,
+    /// Sentence/line continuation: overlap may be carried, joined with a
+    /// space inside a chunk.
+    Soft,
 }
 
-/// Find the nearest valid char boundary at or before the given byte index
-#[inline]
-fn floor_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    // Walk backwards to find a valid char boundary
-    let mut i = index;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-/// Find the nearest valid char boundary at or after the given byte index
-#[inline]
-fn ceil_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    // Walk forwards to find a valid char boundary
-    let mut i = index;
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
-}
-
-/// Chunk text into overlapping segments for embedding
-///
-/// Uses sentence-aware splitting to avoid breaking mid-sentence when possible.
-pub fn chunk_text(text: &str, config: &ChunkConfig) -> ChunkResult {
-    let text = text.trim();
-    let original_length = text.len();
-
-    // If text fits in a single chunk, no need to split
-    if original_length <= config.chunk_size {
-        return ChunkResult {
-            chunks: vec![text.to_string()],
-            original_length,
-            was_chunked: false,
-        };
-    }
-
-    let mut chunks = Vec::new();
-    let mut start = 0;
-
-    while start < original_length {
-        // Calculate end position for this chunk, ensuring valid char boundary
-        let mut end = floor_char_boundary(text, (start + config.chunk_size).min(original_length));
-
-        // If we're not at the end, try to break at a sentence boundary
-        if end < original_length {
-            end = find_break_point(text, start, end, config.min_chunk_size);
-            // Ensure the break point is on a valid char boundary
-            end = floor_char_boundary(text, end);
-        }
-
-        // Ensure start is on a valid char boundary
-        start = ceil_char_boundary(text, start);
-
-        // Safety check: ensure we don't have start >= end
-        if start >= end {
-            break;
-        }
-
-        // Extract chunk (now safe - both start and end are valid char boundaries)
-        let chunk = text[start..end].trim();
-        if chunk.len() >= config.min_chunk_size || chunks.is_empty() {
-            chunks.push(chunk.to_string());
-        } else if let Some(last) = chunks.last_mut() {
-            // Append tiny trailing chunk to previous
-            last.push(' ');
-            last.push_str(chunk);
-        }
-
-        // Move start position, accounting for overlap
-        if end >= original_length {
-            break;
-        }
-        // Ensure new start is on a valid char boundary
-        start = ceil_char_boundary(text, end.saturating_sub(config.overlap));
-
-        // Ensure we make progress
-        if start <= chunks.len().saturating_sub(1) * (config.chunk_size - config.overlap) {
-            start = ceil_char_boundary(text, end);
-        }
-    }
-
-    ChunkResult {
-        chunks,
-        original_length,
-        was_chunked: true,
-    }
-}
-
-/// Find a good break point for chunking (sentence or word boundary)
-fn find_break_point(text: &str, start: usize, ideal_end: usize, min_size: usize) -> usize {
-    let chunk = &text[start..ideal_end];
-
-    // Try to find sentence boundary (. ! ?) followed by space or end
-    let sentence_boundaries: Vec<usize> = chunk
-        .char_indices()
-        .filter_map(|(byte_offset, c)| {
-            if (c == '.' || c == '!' || c == '?') && byte_offset >= min_size {
-                // Check if followed by space or end of chunk
-                let after = byte_offset + c.len_utf8();
-                let next_char = chunk[after..].chars().next();
-                if next_char.is_none_or(|nc| nc.is_whitespace()) {
-                    return Some(start + after);
-                }
-            }
-            None
-        })
-        .collect();
-
-    // Use the last sentence boundary if available
-    if let Some(&boundary) = sentence_boundaries.last() {
-        return boundary;
-    }
-
-    // Fall back to word boundary
-    let word_boundaries: Vec<usize> = chunk
-        .char_indices()
-        .filter_map(|(i, c)| {
-            if c.is_whitespace() && i >= min_size {
-                Some(start + i)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if let Some(&boundary) = word_boundaries.last() {
-        return boundary;
-    }
-
-    // No good boundary found, use ideal_end
-    ideal_end
-}
-
-/// Estimate token count for text (improved approximation)
-///
-/// Uses word-based estimation with adjustment for BPE subword tokenization.
-/// More accurate than simple character division for mixed content (prose, code, numbers).
-///
-/// Accuracy: ~85-90% for English prose, ~75-85% for code/mixed content.
-/// For exact counts, use a proper tokenizer like tiktoken.
-pub fn estimate_tokens(text: &str) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
-
-    let words = text.split_whitespace().count();
-    if words == 0 {
-        // Text with no whitespace (e.g., single long token or CJK)
-        // Fall back to character-based estimate
-        return text.chars().count().div_ceil(4);
-    }
-
-    // BPE tokenization typically splits words into ~1.3 subword tokens on average
-    // Code and technical content have more splits (camelCase, snake_case, etc.)
-    let base_tokens = (words as f64 * 1.3).ceil() as usize;
-
-    // Add tokens for punctuation and special characters not attached to words
-    // These often become separate tokens
-    let special_chars = text
-        .chars()
-        .filter(|c| c.is_ascii_punctuation() || *c == '\n')
-        .count();
-    let punct_tokens = special_chars / 3; // ~3 punct chars per token on average
-
-    base_tokens + punct_tokens
-}
-
-/// Configuration for semantic chunking
-pub struct SemanticChunkConfig {
-    /// Target chunk size in characters
-    pub target_size: usize,
-    /// Maximum chunk size (hard limit)
-    pub max_size: usize,
-    /// Minimum chunk size (merge smaller segments)
-    pub min_size: usize,
-    /// Whether to preserve dialogue turns intact
-    pub preserve_dialogue_turns: bool,
-    /// Whether to split on paragraph boundaries
-    pub split_on_paragraphs: bool,
-}
-
-impl Default for SemanticChunkConfig {
-    fn default() -> Self {
-        Self {
-            target_size: 800,
-            max_size: 1200,
-            min_size: 100,
-            preserve_dialogue_turns: true,
-            split_on_paragraphs: true,
-        }
-    }
-}
-
-/// A semantic segment with metadata
-#[derive(Debug, Clone)]
-struct SemanticSegment {
+/// A structural unit with its pre-counted CONTENT token length.
+struct Unit {
     text: String,
-    #[allow(dead_code)]
-    segment_type: SegmentType,
+    boundary: Boundary,
+    /// Content tokens (full count minus special-token overhead).
+    tokens: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum SegmentType {
-    DialogueTurn,
-    Paragraph,
-    Section,
-    Text,
-}
-
-/// Semantic chunking: splits text on natural boundaries (dialogue turns, paragraphs, sections)
-/// and groups related content together.
+/// Chunk `text` into segments that each fit the token budget.
 ///
-/// This is better for conversational content, logs, and structured text than fixed-size chunking.
-pub fn semantic_chunk_text(text: &str, config: &SemanticChunkConfig) -> ChunkResult {
+/// `counter` must implement the [`TokenCounter`] contract (full sequence
+/// length including specials, no truncation). Every returned chunk satisfies
+/// `counter(chunk) <= config.max_tokens`.
+pub fn chunk_text(text: &str, config: &ChunkConfig, counter: &TokenCounter) -> ChunkResult {
     let text = text.trim();
     let original_length = text.len();
 
-    // If text fits in a single chunk, no need to split
-    if original_length <= config.target_size {
+    // Fast path: the whole text fits the window.
+    if counter(text) <= config.max_tokens {
         return ChunkResult {
             chunks: vec![text.to_string()],
             original_length,
@@ -321,198 +158,29 @@ pub fn semantic_chunk_text(text: &str, config: &SemanticChunkConfig) -> ChunkRes
         };
     }
 
-    // Step 1: Split into semantic segments
-    let segments = split_into_segments(text, config);
+    let content_budget = config.max_tokens.saturating_sub(SPECIAL_TOKEN_OVERHEAD);
+    let units = split_units(text, content_budget, counter);
+    let mut chunks = pack_units(units, config, content_budget);
 
-    // Step 2: Group segments into chunks respecting size constraints
-    let chunks = group_segments_into_chunks(segments, config);
-
-    ChunkResult {
-        chunks,
-        original_length,
-        was_chunked: true,
-    }
-}
-
-/// Split text into semantic segments based on structure
-fn split_into_segments(text: &str, config: &SemanticChunkConfig) -> Vec<SemanticSegment> {
-    let mut segments = Vec::new();
-
-    // Check if this looks like dialogue (has speaker patterns)
-    let is_dialogue = config.preserve_dialogue_turns && DIALOGUE_TURN_PATTERN.is_match(text);
-
-    if is_dialogue {
-        // Split by dialogue turns
-        let turn_starts: Vec<usize> = DIALOGUE_TURN_PATTERN
-            .find_iter(text)
-            .map(|m| m.start())
-            .collect();
-
-        // Add any text before the first turn
-        if !turn_starts.is_empty() && turn_starts[0] > 0 {
-            let pre_text = text[..turn_starts[0]].trim();
-            if !pre_text.is_empty() {
-                segments.push(SemanticSegment {
-                    text: pre_text.to_string(),
-                    segment_type: SegmentType::Text,
-                });
-            }
-        }
-
-        for (i, &start) in turn_starts.iter().enumerate() {
-            let end = if i + 1 < turn_starts.len() {
-                turn_starts[i + 1]
-            } else {
-                text.len()
-            };
-
-            let turn_text = text[start..end].trim();
-            if !turn_text.is_empty() {
-                segments.push(SemanticSegment {
-                    text: turn_text.to_string(),
-                    segment_type: SegmentType::DialogueTurn,
-                });
-            }
-        }
-    } else if config.split_on_paragraphs {
-        // Split by paragraphs (double newlines) or section markers
-        let paragraph_pattern = Regex::new(r"\n\s*\n").unwrap();
-        let mut last_end = 0;
-
-        for mat in paragraph_pattern.find_iter(text) {
-            if mat.start() > last_end {
-                let para_text = text[last_end..mat.start()].trim();
-                if !para_text.is_empty() {
-                    let seg_type = if SECTION_PATTERN.is_match(para_text) {
-                        SegmentType::Section
-                    } else {
-                        SegmentType::Paragraph
-                    };
-                    segments.push(SemanticSegment {
-                        text: para_text.to_string(),
-                        segment_type: seg_type,
-                    });
-                }
-            }
-            last_end = mat.end();
-        }
-
-        // Add remaining text
-        if last_end < text.len() {
-            let remaining = text[last_end..].trim();
-            if !remaining.is_empty() {
-                segments.push(SemanticSegment {
-                    text: remaining.to_string(),
-                    segment_type: SegmentType::Paragraph,
-                });
-            }
-        }
-    } else {
-        // Fall back to sentence-based splitting
-        segments = split_by_sentences(text);
-    }
-
-    // If no segments found, treat entire text as one segment
-    if segments.is_empty() {
-        segments.push(SemanticSegment {
-            text: text.to_string(),
-            segment_type: SegmentType::Text,
-        });
-    }
-
-    segments
-}
-
-/// Split text by sentences for fallback
-fn split_by_sentences(text: &str) -> Vec<SemanticSegment> {
-    let sentence_pattern = Regex::new(r"[.!?]+\s+").unwrap();
-    let mut segments = Vec::new();
-    let mut last_end = 0;
-
-    for mat in sentence_pattern.find_iter(text) {
-        let sentence = text[last_end..mat.end()].trim();
-        if !sentence.is_empty() {
-            segments.push(SemanticSegment {
-                text: sentence.to_string(),
-                segment_type: SegmentType::Text,
-            });
-        }
-        last_end = mat.end();
-    }
-
-    // Add remaining text
-    if last_end < text.len() {
-        let remaining = text[last_end..].trim();
-        if !remaining.is_empty() {
-            segments.push(SemanticSegment {
-                text: remaining.to_string(),
-                segment_type: SegmentType::Text,
-            });
-        }
-    }
-
-    segments
-}
-
-/// Group segments into chunks respecting size constraints
-fn group_segments_into_chunks(
-    segments: Vec<SemanticSegment>,
-    config: &SemanticChunkConfig,
-) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current_chunk = String::new();
-
-    for segment in segments {
-        let segment_len = segment.text.len();
-
-        // If segment alone exceeds max size, we need to split it
-        if segment_len > config.max_size {
-            // Flush current chunk first
-            if !current_chunk.is_empty() {
-                chunks.push(current_chunk.trim().to_string());
-                current_chunk = String::new();
-            }
-
-            // Split the large segment using fixed-size chunking
-            let fixed_config = ChunkConfig {
-                chunk_size: config.target_size,
-                overlap: config.min_size / 2,
-                min_chunk_size: config.min_size,
-            };
-            let sub_chunks = chunk_text(&segment.text, &fixed_config);
-            chunks.extend(sub_chunks.chunks);
-            continue;
-        }
-
-        // Check if adding this segment would exceed target
-        let new_len = current_chunk.len() + segment_len + 1; // +1 for newline
-
-        if new_len > config.target_size && !current_chunk.is_empty() {
-            // Flush current chunk
-            chunks.push(current_chunk.trim().to_string());
-            current_chunk = String::new();
-        }
-
-        // Add segment to current chunk
-        if !current_chunk.is_empty() {
-            current_chunk.push('\n');
-        }
-        current_chunk.push_str(&segment.text);
-    }
-
-    // Flush remaining chunk
-    if !current_chunk.is_empty() {
-        let trimmed = current_chunk.trim().to_string();
-        // Merge tiny trailing chunk with previous if too small
-        if trimmed.len() < config.min_size && !chunks.is_empty() {
-            let last = chunks.pop().unwrap_or_default();
-            chunks.push(format!("{last}\n{trimmed}"));
+    // Verification pass: re-count each emitted chunk with the REAL counter.
+    // Wordpiece token counts are additive across whitespace joins for BERT
+    // tokenizers, but this module must hold its guarantee for ANY counter, so
+    // any chunk that still exceeds the budget is hard-split here.
+    let mut verified = Vec::with_capacity(chunks.len());
+    for chunk in chunks.drain(..) {
+        if counter(&chunk) > config.max_tokens {
+            verified.extend(hard_split(&chunk, content_budget, counter));
         } else {
-            chunks.push(trimmed);
+            verified.push(chunk);
         }
     }
 
-    chunks
+    let was_chunked = verified.len() > 1;
+    ChunkResult {
+        chunks: verified,
+        original_length,
+        was_chunked,
+    }
 }
 
 /// Detect if text appears to be dialogue/conversation format
@@ -520,252 +188,484 @@ pub fn is_dialogue_format(text: &str) -> bool {
     DIALOGUE_TURN_PATTERN.is_match(text)
 }
 
-/// Auto-select the best chunking strategy based on content
-pub fn auto_chunk_text(text: &str) -> ChunkResult {
-    if is_dialogue_format(text) {
-        semantic_chunk_text(text, &SemanticChunkConfig::default())
+/// Split text into structural units: dialogue turns > paragraphs > sentences.
+/// Any single unit larger than `content_budget` is word-split so every unit
+/// fits the budget on its own.
+fn split_units(text: &str, content_budget: usize, counter: &TokenCounter) -> Vec<Unit> {
+    let mut units = Vec::new();
+
+    // Top-level spans: dialogue turns when the text is a conversation,
+    // otherwise paragraphs (blank-line separated).
+    let spans: Vec<&str> = if is_dialogue_format(text) {
+        let starts: Vec<usize> = DIALOGUE_TURN_PATTERN
+            .find_iter(text)
+            .map(|m| m.start())
+            .collect();
+        let mut spans = Vec::with_capacity(starts.len() + 1);
+        if let Some(&first) = starts.first() {
+            if first > 0 {
+                spans.push(&text[..first]);
+            }
+        }
+        for (i, &start) in starts.iter().enumerate() {
+            let end = starts.get(i + 1).copied().unwrap_or(text.len());
+            spans.push(&text[start..end]);
+        }
+        if spans.is_empty() {
+            spans.push(text);
+        }
+        spans
     } else {
-        chunk_text(text, &ChunkConfig::default())
+        static PARAGRAPH_PATTERN: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\n\s*\n").unwrap());
+        let mut spans = Vec::new();
+        let mut last = 0;
+        for m in PARAGRAPH_PATTERN.find_iter(text) {
+            if m.start() > last {
+                spans.push(&text[last..m.start()]);
+            }
+            last = m.end();
+        }
+        if last < text.len() {
+            spans.push(&text[last..]);
+        }
+        if spans.is_empty() {
+            spans.push(text);
+        }
+        spans
+    };
+
+    for span in spans {
+        let span = span.trim();
+        if span.is_empty() {
+            continue;
+        }
+        let mut first_in_span = true;
+        for sentence in split_sentences(span) {
+            let sentence = sentence.trim();
+            if sentence.is_empty() {
+                continue;
+            }
+            let boundary = if first_in_span {
+                Boundary::Hard
+            } else {
+                Boundary::Soft
+            };
+            first_in_span = false;
+
+            let tokens = counter(sentence).saturating_sub(SPECIAL_TOKEN_OVERHEAD);
+            if tokens > content_budget {
+                // Oversized single sentence (rare: log lines, minified blobs).
+                for (i, piece) in hard_split(sentence, content_budget, counter)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let tokens = counter(&piece).saturating_sub(SPECIAL_TOKEN_OVERHEAD);
+                    units.push(Unit {
+                        text: piece,
+                        boundary: if i == 0 { boundary } else { Boundary::Soft },
+                        tokens,
+                    });
+                }
+            } else {
+                units.push(Unit {
+                    text: sentence.to_string(),
+                    boundary,
+                    tokens,
+                });
+            }
+        }
     }
+
+    units
+}
+
+/// Split a span into sentences; single newlines also terminate a unit so
+/// logs / lists / code lines segment on their natural lines.
+fn split_sentences(span: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for line in span.split('\n') {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut last = 0;
+        for m in SENTENCE_END_PATTERN.find_iter(line) {
+            out.push(&line[last..m.end()]);
+            last = m.end();
+        }
+        if last < line.len() {
+            out.push(&line[last..]);
+        }
+    }
+    out
+}
+
+/// Greedily pack units into chunks that fit the content budget, carrying a
+/// single small trailing sentence as overlap across soft boundaries.
+fn pack_units(units: Vec<Unit>, config: &ChunkConfig, content_budget: usize) -> Vec<String> {
+    let mut chunks: Vec<(String, usize)> = Vec::new();
+    let mut current = String::new();
+    let mut current_tokens = 0usize;
+    // Trailing unit of `current`, kept for overlap carry-over.
+    let mut last_unit: Option<(String, usize)> = None;
+
+    for unit in units {
+        let fits = current.is_empty() || current_tokens + unit.tokens <= content_budget;
+        if !fits {
+            // Close the current chunk and start the next one. The carried
+            // sentence must leave room for the unit that forced the split:
+            // without this check a 24-token overlap in front of a
+            // budget-sized unit overflows the window, and the verification
+            // pass would have to rescue it with a WORD-level hard split —
+            // destroying exactly the sentence boundaries this module exists
+            // to preserve. When it does not fit, correctness wins: drop the
+            // overlap, keep the boundary.
+            let overlap = if unit.boundary == Boundary::Soft {
+                last_unit.take().filter(|(_, t)| {
+                    *t <= config.overlap_tokens && *t + unit.tokens <= content_budget
+                })
+            } else {
+                None
+            };
+            chunks.push((std::mem::take(&mut current), current_tokens));
+            current_tokens = 0;
+            if let Some((text, tokens)) = overlap {
+                current.push_str(&text);
+                current_tokens = tokens;
+            }
+        }
+
+        if !current.is_empty() {
+            current.push(if unit.boundary == Boundary::Hard {
+                '\n'
+            } else {
+                ' '
+            });
+        }
+        current.push_str(&unit.text);
+        current_tokens += unit.tokens;
+        last_unit = Some((unit.text, unit.tokens));
+    }
+
+    if !current.is_empty() {
+        // NOTE: no minimum-size merge. Greedy packing guarantees a trailing
+        // fragment only becomes its own chunk when the previous chunk had no
+        // room for it — so any merge would overflow the budget and lose
+        // tokens. A small final chunk is correct; an overflowing one is not.
+        chunks.push((current, current_tokens));
+    }
+
+    chunks.into_iter().map(|(text, _)| text).collect()
+}
+
+/// Split text that exceeds the content budget at word boundaries, greedily
+/// packing words up to the budget. A single word larger than the budget
+/// (pathological: base64/minified blobs) is bisected at char boundaries.
+fn hard_split(text: &str, content_budget: usize, counter: &TokenCounter) -> Vec<String> {
+    let budget = content_budget.max(1);
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut current_tokens = 0usize;
+
+    let mut queue: std::collections::VecDeque<String> =
+        text.split_whitespace().map(str::to_string).collect();
+
+    while let Some(word) = queue.pop_front() {
+        let word_tokens = counter(&word).saturating_sub(SPECIAL_TOKEN_OVERHEAD);
+        if word_tokens > budget {
+            // Bisect the oversized word at a char boundary and re-queue.
+            let mid = word.len() / 2;
+            let mut split_at = mid;
+            while split_at > 0 && !word.is_char_boundary(split_at) {
+                split_at -= 1;
+            }
+            if split_at == 0 || split_at == word.len() {
+                // Cannot split further; emit as-is (tokenizer truncation is
+                // the final backstop for a single indivisible token run).
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                    current_tokens = 0;
+                }
+                out.push(word);
+                continue;
+            }
+            let (a, b) = word.split_at(split_at);
+            queue.push_front(b.to_string());
+            queue.push_front(a.to_string());
+            continue;
+        }
+
+        if !current.is_empty() && current_tokens + word_tokens > budget {
+            out.push(std::mem::take(&mut current));
+            current_tokens = 0;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(&word);
+        current_tokens += word_tokens;
+    }
+
+    if !current.is_empty() {
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(text.to_string());
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_short_text_no_chunking() {
-        let config = ChunkConfig::default();
-        let result = chunk_text("This is a short text.", &config);
+    /// Heuristic counter matching the `Embedder::count_tokens` default:
+    /// whitespace-word based, plus special-token overhead. Deterministic and
+    /// additive across whitespace joins, like real wordpiece counts.
+    fn word_counter(text: &str) -> usize {
+        text.split_whitespace().count() + SPECIAL_TOKEN_OVERHEAD
+    }
 
+    fn cfg(max_tokens: usize, overlap: usize) -> ChunkConfig {
+        ChunkConfig {
+            max_tokens,
+            overlap_tokens: overlap,
+        }
+    }
+
+    #[test]
+    fn chunk_budget_never_exceeds_model_window() {
+        // The invariant the startup validation enforces; pinned here so a
+        // config drift fails the unit suite too, not only server startup.
+        assert!(ChunkConfig::default().max_tokens <= MODEL_TOKEN_WINDOW);
+    }
+
+    #[test]
+    fn short_text_single_chunk() {
+        let result = chunk_text(
+            "This is a short text.",
+            &ChunkConfig::default(),
+            &word_counter,
+        );
         assert_eq!(result.chunks.len(), 1);
         assert!(!result.was_chunked);
         assert_eq!(result.chunks[0], "This is a short text.");
     }
 
+    /// Regression: a small trailing sentence carried as overlap must never be
+    /// prepended to a unit that already fills the budget. Before the fits
+    /// check in `pack_units`, `overlap + unit` overflowed the window and the
+    /// verification pass rescued it with a WORD-level `hard_split`, cutting
+    /// mid-sentence — the one thing structural chunking must not do.
     #[test]
-    fn test_long_text_chunking() {
-        let config = ChunkConfig {
-            chunk_size: 100,
-            overlap: 20,
-            min_chunk_size: 30,
-        };
+    fn overlap_never_overflows_and_never_forces_a_word_split() {
+        // max_tokens 22 => content budget 20; overlap allowance 8.
+        let config = cfg(22, 8);
+        // Three sentences: 12-token filler, a 4-token carry candidate, then a
+        // sentence that alone exactly fills the 20-token content budget.
+        // Carrying the 4-token sentence in front of it would need 24.
+        let filler = (1..=12)
+            .map(|i| format!("f{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let small = "Alpha beta gamma delta.";
+        let big = (1..=20)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = format!("{filler}. {small} {big}.");
+        let result = chunk_text(&text, &config, &word_counter);
 
-        // Create text longer than chunk_size
-        let text = "This is sentence one. This is sentence two. This is sentence three. \
-                   This is sentence four. This is sentence five. This is sentence six. \
-                   This is sentence seven. This is sentence eight.";
-
-        let result = chunk_text(text, &config);
-
-        assert!(result.was_chunked);
-        assert!(result.chunks.len() > 1);
-
-        // Verify each chunk has meaningful content
         for chunk in &result.chunks {
             assert!(
-                chunk.len() >= config.min_chunk_size,
-                "Chunk too small: '{}' (len={})",
-                chunk,
-                chunk.len()
+                word_counter(chunk) <= config.max_tokens,
+                "chunk exceeds budget: {} tokens: {chunk:?}",
+                word_counter(chunk)
             );
         }
-
-        // Verify total chunked content is at least as long as original (with overlaps)
-        let total_len: usize = result.chunks.iter().map(|c| c.len()).sum();
+        // The oversized sentence must survive intact in ONE chunk — proof no
+        // word-level hard split was needed to rescue an overlap overflow.
         assert!(
-            total_len >= result.original_length,
-            "Total chunk length {} < original {}",
-            total_len,
-            result.original_length
+            result
+                .chunks
+                .iter()
+                .any(|c| c.contains("w1 ") && c.contains("w20")),
+            "the budget-filling sentence was split apart: {:?}",
+            result.chunks
         );
     }
 
     #[test]
-    fn test_sentence_boundary_respected() {
-        let config = ChunkConfig {
-            chunk_size: 50,
-            overlap: 10,
-            min_chunk_size: 20,
-        };
-
-        let text = "First sentence here. Second sentence follows. Third sentence ends.";
-        let result = chunk_text(text, &config);
-
-        // Chunks should end at sentence boundaries when possible
-        for chunk in &result.chunks {
-            let trimmed = chunk.trim();
-            if !trimmed.is_empty() && result.chunks.len() > 1 {
-                // Most chunks should end with sentence-ending punctuation
-                let last_char = trimmed.chars().last().unwrap();
-                // Allow some flexibility - not all chunks will end at sentence boundary
-                assert!(
-                    last_char == '.'
-                        || last_char == '!'
-                        || last_char == '?'
-                        || chunk == result.chunks.last().unwrap(),
-                    "Chunk '{chunk}' doesn't end at sentence boundary"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_overlap_exists() {
-        let config = ChunkConfig {
-            chunk_size: 60,
-            overlap: 20,
-            min_chunk_size: 20,
-        };
-
-        let text = "AAAA BBBB CCCC DDDD EEEE FFFF GGGG HHHH IIII JJJJ KKKK LLLL MMMM";
-        let result = chunk_text(text, &config);
-
-        if result.chunks.len() >= 2 {
-            // Check that consecutive chunks have overlapping content
-            for i in 0..result.chunks.len() - 1 {
-                let chunk1 = &result.chunks[i];
-                let chunk2 = &result.chunks[i + 1];
-
-                // Find common words
-                let words1: std::collections::HashSet<_> = chunk1.split_whitespace().collect();
-                let words2: std::collections::HashSet<_> = chunk2.split_whitespace().collect();
-                let common: Vec<_> = words1.intersection(&words2).collect();
-
-                // Should have some overlap
-                assert!(
-                    !common.is_empty() || chunk1.len() < config.overlap,
-                    "No overlap between chunks {} and {}",
-                    i,
-                    i + 1
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_token_estimation() {
-        // Empty string
-        assert_eq!(estimate_tokens(""), 0);
-
-        // Single word: 1 * 1.3 = 2 (ceil)
-        assert_eq!(estimate_tokens("test"), 2);
-
-        // Two words: 2 * 1.3 = 3 (ceil)
-        assert_eq!(estimate_tokens("hello world"), 3);
-
-        // Sentence with punctuation: 5 words * 1.3 = 7 (ceil) + 1 punct token (3 punct chars / 3)
-        assert_eq!(estimate_tokens("Hello, world! How are you?"), 8);
-
-        // Code-like content with more punctuation
-        let code = "fn main() { println!(\"hello\"); }";
-        let tokens = estimate_tokens(code);
-        assert!(tokens >= 5 && tokens <= 15, "Code tokens: {}", tokens);
-
-        // No whitespace (falls back to char-based)
-        assert_eq!(estimate_tokens("abcdefgh"), 2); // 8 chars / 4 = 2
-    }
-
-    #[test]
-    fn test_very_long_content() {
-        let config = ChunkConfig::default();
-
-        // Create 10KB of content
-        let long_text = "This is a test sentence. ".repeat(400);
-        let result = chunk_text(&long_text, &config);
-
+    fn every_chunk_fits_token_budget() {
+        let config = cfg(30, 8);
+        let text = (1..=40)
+            .map(|i| format!("Sentence number {i} contains unique information."))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let result = chunk_text(&text, &config, &word_counter);
         assert!(result.was_chunked);
-        assert!(result.chunks.len() > 10); // Should have many chunks
-        assert_eq!(result.coverage_ratio(), 1.0);
-
-        // Verify no chunk exceeds config size significantly
         for chunk in &result.chunks {
             assert!(
-                chunk.len() <= config.chunk_size + 100,
-                "Chunk too large: {} chars",
-                chunk.len()
+                word_counter(chunk) <= config.max_tokens,
+                "chunk exceeds token budget: {} tokens: {chunk:?}",
+                word_counter(chunk)
             );
         }
     }
 
     #[test]
-    fn test_chunking_quality_unique_content_searchable() {
-        let config = ChunkConfig::default();
+    fn coverage_no_content_lost() {
+        let config = cfg(30, 8);
+        let text = (1..=40)
+            .map(|i| format!("Sentence number {i} contains unique information."))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let result = chunk_text(&text, &config, &word_counter);
+        for i in 1..=40 {
+            let marker = format!("number {i} ");
+            let marker_end = format!("number {i} contains");
+            let found = result
+                .chunks
+                .iter()
+                .any(|c| c.contains(&marker) || c.contains(&marker_end));
+            assert!(found, "sentence {i} missing from all chunks");
+        }
+    }
 
-        // Create content with UNIQUE markers at beginning, middle, and end
-        // These markers should each appear in at least one chunk
+    #[test]
+    fn unique_markers_beginning_middle_end_searchable() {
+        let config = cfg(40, 8);
         let beginning = "ALPHA_BEGINNING_MARKER is a unique identifier at the start.";
-        let middle_padding = "This is filler content to push things apart. ".repeat(30);
+        let filler_a = "This is filler content to push things apart. ".repeat(20);
         let middle = "BETA_MIDDLE_MARKER represents content in the center of the document.";
-        let end_padding = "More filler content for separation between sections. ".repeat(30);
+        let filler_b = "More filler content for separation between sections. ".repeat(20);
         let end = "GAMMA_END_MARKER signifies the conclusion of this memory content.";
+        let text = format!("{beginning} {filler_a} {middle} {filler_b} {end}");
 
-        let full_text = format!("{beginning} {middle_padding} {middle} {end_padding} {end}");
+        let result = chunk_text(&text, &config, &word_counter);
+        assert!(result.was_chunked);
+        assert!(result.chunks.iter().any(|c| c.contains("ALPHA_BEGINNING")));
+        assert!(result.chunks.iter().any(|c| c.contains("BETA_MIDDLE")));
+        assert!(result.chunks.iter().any(|c| c.contains("GAMMA_END")));
+    }
 
-        let result = chunk_text(&full_text, &config);
-
-        // Content should be chunked
-        assert!(result.was_chunked, "Content should require chunking");
-        assert!(result.chunks.len() >= 3, "Should have multiple chunks");
-
-        // Verify each unique marker appears in at least one chunk
-        let has_alpha = result.chunks.iter().any(|c| c.contains("ALPHA_BEGINNING"));
-        let has_beta = result.chunks.iter().any(|c| c.contains("BETA_MIDDLE"));
-        let has_gamma = result.chunks.iter().any(|c| c.contains("GAMMA_END"));
-
-        assert!(has_alpha, "ALPHA marker (beginning) not found in any chunk");
-        assert!(has_beta, "BETA marker (middle) not found in any chunk");
-        assert!(has_gamma, "GAMMA marker (end) not found in any chunk");
-
-        // Log chunk info for debugging
-        println!("Total chunks: {}", result.chunks.len());
-        println!("Original length: {} chars", result.original_length);
-        for (i, chunk) in result.chunks.iter().enumerate() {
-            let markers: Vec<&str> = vec![
-                if chunk.contains("ALPHA") { "ALPHA" } else { "" },
-                if chunk.contains("BETA") { "BETA" } else { "" },
-                if chunk.contains("GAMMA") { "GAMMA" } else { "" },
-            ]
-            .into_iter()
-            .filter(|m| !m.is_empty())
-            .collect();
-            println!(
-                "  Chunk {}: {} chars {}",
-                i,
-                chunk.len(),
-                if markers.is_empty() {
-                    String::new()
-                } else {
-                    format!("[contains: {}]", markers.join(", "))
-                }
+    #[test]
+    fn sentence_boundaries_respected() {
+        let config = cfg(12, 2);
+        let text = "First sentence here. Second sentence follows on. Third sentence ends it. \
+                    Fourth sentence too. Fifth sentence closes.";
+        let result = chunk_text(&text, &config, &word_counter);
+        assert!(result.chunks.len() > 1);
+        for chunk in &result.chunks[..result.chunks.len() - 1] {
+            let last = chunk.trim_end().chars().last().unwrap();
+            assert!(
+                last == '.' || last == '!' || last == '?',
+                "chunk does not end at a sentence boundary: {chunk:?}"
             );
         }
     }
 
     #[test]
-    fn test_chunking_coverage_no_content_lost() {
-        let config = ChunkConfig {
-            chunk_size: 200,
-            overlap: 50,
-            min_chunk_size: 50,
-        };
-
-        // Create text with numbered sentences for easy tracking
-        let sentences: Vec<String> = (1..=20)
-            .map(|i| format!("Sentence number {i} contains unique information. "))
-            .collect();
-        let text = sentences.join("");
-
-        let result = chunk_text(&text, &config);
-
-        // Every sentence number should appear in at least one chunk
-        for i in 1..=20 {
-            let marker = format!("number {i}");
-            let found = result.chunks.iter().any(|c| c.contains(&marker));
+    fn overlap_carries_small_trailing_sentence() {
+        let config = cfg(20, 10);
+        // Sentences of 8 words each: two fit per 18-content-token chunk; the
+        // trailing sentence (8 tokens ≤ overlap 10) must be carried over.
+        let text = (1..=6)
+            .map(|i| format!("Overlap test sentence {i} has exactly eight words."))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let result = chunk_text(&text, &config, &word_counter);
+        assert!(result.chunks.len() >= 2);
+        for w in result.chunks.windows(2) {
+            let last_sentence = w[0].split(". ").last().unwrap_or("").trim();
             assert!(
-                found,
-                "Sentence {i} not found in any chunk! Coverage gap detected."
+                w[1].contains(last_sentence.trim_end_matches('.')),
+                "no overlap between consecutive chunks:\n prev: {:?}\n next: {:?}",
+                w[0],
+                w[1]
             );
         }
+    }
+
+    #[test]
+    fn dialogue_turns_not_split_when_they_fit() {
+        let config = cfg(25, 4);
+        let text = "Alice: I went to the market this morning and bought fresh vegetables.\n\
+                    Bob: That sounds great, did you find good tomatoes there?\n\
+                    Alice: Yes, and I also picked up some basil for the sauce.\n\
+                    Bob: Perfect, let us cook dinner together tonight then.";
+        let result = chunk_text(text, &config, &word_counter);
+        // Every turn is <= budget, so no chunk may contain a partial turn:
+        // each speaker prefix in a chunk starts at a line boundary.
+        for chunk in &result.chunks {
+            for (i, _) in chunk
+                .match_indices("Alice:")
+                .chain(chunk.match_indices("Bob:"))
+            {
+                assert!(
+                    i == 0 || chunk.as_bytes()[i - 1] == b'\n',
+                    "turn split mid-chunk: {chunk:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_single_sentence_is_word_split() {
+        let config = cfg(12, 2);
+        let text = "word ".repeat(100); // one 100-word "sentence", no terminator
+        let result = chunk_text(text.trim(), &config, &word_counter);
+        assert!(result.chunks.len() >= 10);
+        for chunk in &result.chunks {
+            assert!(word_counter(chunk) <= config.max_tokens);
+        }
+        let total_words: usize = result
+            .chunks
+            .iter()
+            .map(|c| c.split_whitespace().count())
+            .sum();
+        assert_eq!(total_words, 100, "hard split lost words");
+    }
+
+    #[test]
+    fn pathological_single_token_run_is_bisected() {
+        let config = cfg(10, 2);
+        // Counter that charges 1 token per 4 chars — a 400-char unbroken blob.
+        let char_counter = |t: &str| t.chars().count().div_ceil(4) + SPECIAL_TOKEN_OVERHEAD;
+        let blob = "x".repeat(400);
+        let result = chunk_text(&blob, &config, &char_counter);
+        for chunk in &result.chunks {
+            assert!(char_counter(chunk) <= config.max_tokens);
+        }
+        let total: usize = result.chunks.iter().map(|c| c.len()).sum();
+        assert_eq!(total, 400, "bisection lost characters");
+    }
+
+    #[test]
+    fn trailing_fragment_never_lost_and_never_overflows() {
+        let config = cfg(20, 4);
+        // Two 9-word sentences fill a chunk to its 18-content-token budget;
+        // the 3-word tail cannot merge without overflowing, so it must stand
+        // alone rather than be dropped or force a lossy merge.
+        let text = "This first sentence is exactly nine words long okay.                     This second sentence is also exactly nine words long. Tiny tail here";
+        let result = chunk_text(text, &config, &word_counter);
+        assert!(
+            result.chunks.iter().any(|c| c.contains("Tiny tail here")),
+            "trailing fragment lost"
+        );
+        for chunk in &result.chunks {
+            assert!(
+                word_counter(chunk) <= config.max_tokens,
+                "chunk exceeds budget: {chunk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_text_single_empty_chunk() {
+        let result = chunk_text("", &ChunkConfig::default(), &word_counter);
+        assert_eq!(result.chunks.len(), 1);
+        assert!(!result.was_chunked);
     }
 }

@@ -22,7 +22,9 @@ pub mod minilm;
 pub mod ner;
 
 // Re-export chunking types
-pub use chunking::{chunk_text, ChunkConfig, ChunkResult};
+pub use chunking::{
+    chunk_text, ChunkConfig, ChunkResult, MODEL_TOKEN_WINDOW, SPECIAL_TOKEN_OVERHEAD,
+};
 
 use anyhow::Result;
 
@@ -65,5 +67,22 @@ pub trait Embedder: Send + Sync {
     /// Batch encode multiple texts (default: sequential)
     fn encode_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         texts.iter().map(|text| self.encode(text)).collect()
+    }
+
+    /// Count the FULL encoded sequence length of `text` — including special
+    /// tokens, WITHOUT truncation — i.e. the number of tokens the model would
+    /// have to fit in its window to see all of `text`. Chunking budgets are
+    /// enforced against this count, so implementations backed by a real
+    /// tokenizer MUST override the heuristic default (`MiniLMEmbedder` does).
+    fn count_tokens(&self, text: &str) -> usize {
+        crate::token_estimation::estimate_tokens(text) + chunking::SPECIAL_TOKEN_OVERHEAD
+    }
+
+    /// Maximum full-sequence tokens a DOCUMENT chunk may use so that, after
+    /// any document instruction prefix is prepended at encode time, the
+    /// sequence still fits the tokenizer's truncation window. Symmetric
+    /// models (MiniLM): the whole window.
+    fn chunk_budget_tokens(&self) -> usize {
+        chunking::MODEL_TOKEN_WINDOW
     }
 }

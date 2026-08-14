@@ -639,16 +639,30 @@ impl RetrievalEngine {
     /// ATOMIC ARCHITECTURE: This method stores the vector mapping atomically
     /// in RocksDB alongside the memory data, ensuring no orphaned memories.
     ///
-    /// For long content, this chunks the text and creates multiple embeddings
-    /// to ensure ALL content is searchable, not just the first 256 tokens.
+    /// For long content, this chunks the text (in REAL tokenizer tokens, so
+    /// every chunk fits the model's sequence window) and creates multiple
+    /// embeddings to ensure ALL content is searchable — not just the tokens
+    /// that survive truncation.
     pub fn index_memory(&self, memory: &Memory) -> Result<()> {
         use crate::embeddings::chunking::{chunk_text, ChunkConfig};
 
         let text = Self::extract_searchable_text(memory);
-        let chunk_config = ChunkConfig::default();
-        let chunk_result = chunk_text(&text, &chunk_config);
+        // Budget in real tokens from the embedder's own tokenizer; counting
+        // with anything else is how content silently vanished past the
+        // truncation window before.
+        let chunk_config = ChunkConfig::for_budget(self.embedder.chunk_budget_tokens());
+        let counter = |t: &str| self.embedder.count_tokens(t);
+        let chunk_result = chunk_text(&text, &chunk_config, &counter);
 
         let vector_ids = if chunk_result.was_chunked {
+            tracing::debug!(
+                "Memory {} exceeds the {}-token embedding window; split into {} chunks \
+                 ({} chars total)",
+                memory.id.0,
+                chunk_config.max_tokens,
+                chunk_result.chunks.len(),
+                chunk_result.original_length
+            );
             // Long content: embed each chunk separately
             // Pre-compute all embeddings OUTSIDE the write lock to avoid blocking searches
             let embeddings: Vec<Vec<f32>> = chunk_result

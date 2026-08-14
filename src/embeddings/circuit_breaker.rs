@@ -304,6 +304,17 @@ impl Embedder for ResilientEmbedder {
         self.inner.dimension()
     }
 
+    /// Token counting is a pure tokenizer operation — no inference, no
+    /// circuit involved. Always forward to the inner embedder so chunk
+    /// budgets stay in real-tokenizer units even when the circuit is open.
+    fn count_tokens(&self, text: &str) -> usize {
+        self.inner.count_tokens(text)
+    }
+
+    fn chunk_budget_tokens(&self) -> usize {
+        self.inner.chunk_budget_tokens()
+    }
+
     fn encode_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         // For batch operations, check circuit once and apply consistently
         if !self.should_allow_request() {
