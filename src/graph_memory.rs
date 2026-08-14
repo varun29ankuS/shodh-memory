@@ -3143,17 +3143,54 @@ impl GraphMemory {
                 .map(|(_, u)| *u)
         };
 
+        // Drop attribution for the OpenIE arm. Three filters sit between an
+        // extracted triple and a minted edge, and until now only the survivors
+        // were counted — so the recall ceiling was unmeasured. In particular
+        // `match_entity` requires BOTH arguments to resolve to an entity that
+        // already exists, which silently discards a well-formed causal triple
+        // about anything not yet promoted to an entity. On a corpus where the
+        // causal backbone looks thin, this tells you whether extraction is weak
+        // or whether the arguments simply are not entities yet.
+        let mut oie_total = 0usize;
+        let mut oie_dropped_not_causal = 0usize;
+        let mut oie_dropped_low_precision = 0usize;
+        // Per-TRIPLE, mutually exclusive — these sum with the others to oie_total.
+        let mut oie_dropped_unmatched = 0usize;
+        let mut oie_dropped_self_loop = 0usize;
+        let mut oie_dropped_write_failed = 0usize;
+        // Per-ARGUMENT diagnostics — a triple with both ends unmatched increments
+        // BOTH, so these deliberately do NOT reconcile against oie_total. They
+        // separate the two fixes: subject misses point at entity coverage,
+        // object misses at argument-span quality.
+        let mut oie_unmatched_subject_arg = 0usize;
+        let mut oie_unmatched_object_arg = 0usize;
+
         // OpenIE — entity→entity typed causal edges (grammar supplies the predicate).
         if let Some(triples) = crate::openie::extract_triples(content) {
             for tr in triples {
-                if !tr.causal || tr.low_precision {
+                oie_total += 1;
+                if !tr.causal {
+                    oie_dropped_not_causal += 1;
                     continue;
                 }
-                let (Some(from), Some(to)) = (match_entity(&tr.subject), match_entity(&tr.object))
-                else {
+                if tr.low_precision {
+                    oie_dropped_low_precision += 1;
+                    continue;
+                }
+                let subj = match_entity(&tr.subject);
+                let obj = match_entity(&tr.object);
+                if subj.is_none() {
+                    oie_unmatched_subject_arg += 1;
+                }
+                if obj.is_none() {
+                    oie_unmatched_object_arg += 1;
+                }
+                let (Some(from), Some(to)) = (subj, obj) else {
+                    oie_dropped_unmatched += 1;
                     continue;
                 };
                 if from == to {
+                    oie_dropped_self_loop += 1;
                     continue;
                 }
                 let rt = Self::relation_type_from_label(tr.relation);
@@ -3168,6 +3205,8 @@ impl GraphMemory {
                 );
                 if self.add_relationship(edge).is_ok() {
                     minted += 1;
+                } else {
+                    oie_dropped_write_failed += 1;
                 }
             }
         }
@@ -3175,15 +3214,26 @@ impl GraphMemory {
         // CATENA — event→event edges (the inchoative pivots no entity arm sees):
         // causal signals mint `Causes`, temporal signals mint `Precedes` — sequence
         // is never reported as causation.
+        let mut cat_total = 0usize;
+        let mut cat_dropped_event_create_failed = 0usize;
+        let mut cat_dropped_self_loop = 0usize;
+
         if let Some(links) = crate::catena::extract_event_links(content) {
             for link in links {
+                cat_total += 1;
                 let (Some(from), Some(to)) = (
                     self.get_or_create_event(&link.source, now),
                     self.get_or_create_event(&link.target, now),
                 ) else {
+                    // CATENA mints its own event nodes rather than requiring a
+                    // pre-existing entity, so unlike the OpenIE arm this should
+                    // be rare — a non-zero count here means node creation is
+                    // failing, not that the corpus lacks entities.
+                    cat_dropped_event_create_failed += 1;
                     continue;
                 };
                 if from == to {
+                    cat_dropped_self_loop += 1;
                     continue;
                 }
                 let rt = Self::relation_type_from_link(link.relation);
@@ -3202,8 +3252,34 @@ impl GraphMemory {
             }
         }
 
-        if minted > 0 {
-            tracing::info!(edges = minted, "causal spine: minted OpenIE + CATENA edges");
+        // Emit whenever either arm EXTRACTED something, not only when an edge
+        // survived. A run that extracts 40 triples and mints 0 is the finding;
+        // logging only on success is what let that state look like "the corpus
+        // has no causal structure" instead of "every triple was filtered".
+        // Greppable as `causal_spine_attribution` and aggregable across an
+        // ingest: sum the fields to get the corpus-level recall ceiling.
+        if oie_total > 0 || cat_total > 0 {
+            tracing::info!(
+                target: "causal_spine_attribution",
+                minted,
+                oie_total,
+                // These five are per-triple and mutually exclusive, so
+                // minted_openie + the five = oie_total. If they do not, the
+                // attribution has a bug and the numbers should not be trusted.
+                oie_dropped_not_causal,
+                oie_dropped_low_precision,
+                oie_dropped_unmatched,
+                oie_dropped_self_loop,
+                oie_dropped_write_failed,
+                // Per-argument diagnostics — intentionally do NOT reconcile.
+                oie_unmatched_subject_arg,
+                oie_unmatched_object_arg,
+                cat_total,
+                cat_dropped_event_create_failed,
+                cat_dropped_self_loop,
+                entities_available = entity_uuids.len(),
+                "causal spine attribution"
+            );
         }
         minted
     }
