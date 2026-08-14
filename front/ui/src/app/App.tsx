@@ -12,6 +12,7 @@ import { GeoView } from "@/features/geo/GeoView";
 import { GraphView } from "@/features/graph/GraphView";
 import { Inspector } from "@/features/inspector/Inspector";
 import { TasksView } from "@/features/tasks/TasksView";
+import { BriefingView } from "@/features/briefing/BriefingView";
 import { ChatView } from "@/features/chat/ChatView";
 import { ConversationOverlay } from "@/features/chat/ConversationOverlay";
 import { ProvidersView } from "@/features/providers/ProvidersView";
@@ -80,8 +81,10 @@ function Shell({ reach }: { reach: Reachability }) {
 
       <main className={cn("h-full pt-12", RAIL_OFFSET, showInspector && INSPECTOR_OFFSET)}>
         <Routes>
-          {/* The seat is the product's primary surface, so it is home. */}
-          <Route path="/" element={<Navigate to="/chat" replace />} />
+          {/* You land on the briefing: what is in here, and a way in. The
+              conversation is reachable from everywhere, so it does not need to
+              be the thing you arrive at. */}
+          <Route path="/" element={<BriefingView reach={reach} />} />
           <Route path="/chat" element={<ChatView reach={reach} seat={seat} />} />
           <Route path="/recall" element={<RecallView reach={reach} />} />
           <Route path="/geo" element={<GeoView reach={reach} />} />
@@ -91,7 +94,7 @@ function Shell({ reach }: { reach: Reachability }) {
           <Route path="/providers" element={<ProvidersView seat={seat} />} />
           {/* A hash the app does not know is a typo or a stale link, not an
               error worth a page — send it home rather than showing a dead end. */}
-          <Route path="*" element={<Navigate to="/chat" replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
 

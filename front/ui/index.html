@@ -1,9 +1,16 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <!-- Paper is the ground this product is read on (see index.css). The
+         document therefore ships stamped for paper and src/lib/ground.ts
+         restamps it before the first paint if the reader has asked for night;
+         declaring the wrong one here paints a dark page for one frame on the
+         way to a light one. `dark` is a CLASS rather than an attribute because
+         Tailwind's `dark:` variant reads the class — ground.ts keeps the two
+         in step, which is why neither is hardcoded here any more. -->
+    <meta name="color-scheme" content="light dark" />
     <title>shodh — Associative Memory</title>
   </head>
   <body>

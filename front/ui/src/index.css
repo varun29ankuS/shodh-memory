@@ -26,10 +26,18 @@
 }
 
 /* Watermelon components ship with shadcn's `dark:` variants, so the variant
-   has to resolve. The product is dark-only — <html class="dark"> is set in
-   index.html and the token values below are the dark values. There is no
-   second theme to keep in sync. */
+   has to resolve. `<html class="dark">` starts in index.html and is now
+   mirrored onto the resolved ground by lib/ground.ts, so the variant and the
+   token set can never disagree. */
 @custom-variant dark (&:is(.dark *));
+
+/* Ground-independent. `--radius` is the one token the paper set below does not
+   restate, so it is hoisted out of the night block rather than duplicated into
+   both — scoping the night block without this would leave every radius in the
+   product undefined on paper. Value unchanged. */
+:root {
+  --radius: 0.5rem;
+}
 
 /*
   The token layer IS the design.
@@ -52,8 +60,15 @@
       nothing else. A second accent makes both mean nothing.
     - Saturated colour is reserved for data (the graph), never for chrome.
     - Small radii (4–8px), hairline borders, no gradients on surfaces.
+
+  SCOPED TO `[data-theme="dark"]`, and that is the only edit this block has
+  taken. It used to sit on a bare `:root` and was then overridden wholesale by
+  the paper block further down, which meant these values were dead: the
+  derivation was preserved but nothing could reach it. The briefing's ground
+  switch needs a second ground that actually resolves, so the selector — not a
+  single value — was tightened. `lib/ground.ts` stamps the attribute.
 */
-:root {
+:root[data-theme="dark"] {
   --background: #08090a;
   --foreground: #f7f8f8;
 
@@ -104,8 +119,6 @@
   --input: #26282c;
   --ring: #f4622e;
 
-  --radius: 0.5rem;
-
   /* Data hues. Used by the knowledge graph and the readouts, never by chrome.
      Chosen to stay legible on #08090a without competing with the accent.
 
@@ -138,8 +151,10 @@
    reached this" — that is focus, so it takes the accent. Anomalous means "this
    deviates from baseline" — that is an alarm, so it takes --destructive, which
    is deliberately pink-red rather than orange-red. If those two ever converge,
-   the alarm stops reading as one, which is the failure mode worth guarding. */
-:root {
+   the alarm stops reading as one, which is the failure mode worth guarding.
+
+   Scoped to the night ground with the block above, for the same reason. */
+:root[data-theme="dark"] {
   --node-technology: #a599ff;
   --node-org: #4ea7fc;
   --node-location: #4cb782;
@@ -176,15 +191,19 @@
 /* ===========================================================================
    PAPER.
 
-   Decided 2026-08-14, and it supersedes the near-black ground above rather
-   than sitting beside it as an option. This product is read, not monitored:
-   an analyst is looking at documents, provenance and prose, and paper is what
-   that has always been. The console look made every screen an instrument
-   panel, which is a claim about the work that is not true.
+   Decided 2026-08-14. Paper is the DEFAULT ground — it is what the product is
+   read on unless someone asks for the other one. This product is read, not
+   monitored: an analyst is looking at documents, provenance and prose, and
+   paper is what that has always been. The console look made every screen an
+   instrument panel, which is a claim about the work that is not true.
 
-   The dark set is left in place immediately above so the derivation is not
-   lost, and because every value here is a considered answer to one of those
-   — delete this block and the console returns intact.
+   The near-black set above is the same desk at night, not a competing
+   direction, and every value here is a considered answer to one of those. It
+   is reached only by ASKING for it — never by `prefers-color-scheme`, which
+   would hand the product's default appearance to the reader's operating
+   system and undo the decision this block records. lib/ground.ts is the only
+   thing that stamps `data-theme`, and paper is what an unstamped document
+   renders.
 
    Two rules inherited from the dark direction survive verbatim, because they
    were never about darkness:

@@ -9,15 +9,11 @@ import {
   type GeoPermissibleObjects,
   type ZoomTransform,
 } from "d3";
-import { feature, mesh } from "topojson-client";
-import type { Topology, GeometryCollection } from "topojson-specification";
 import type { RecallMemory } from "@/lib/api";
 import { useSession } from "@/stores/session";
-import worldTopology from "@/assets/world-countries-110m.json";
-// India's national boundary from the Local Government Directory, via
-// bharatlas.com — see india-boundary-LICENSE.txt beside it for provenance,
-// the licence, and the extent check performed before adopting it.
-import indiaBoundary from "@/assets/india-boundary-lgd.json";
+// Decoded once for the whole product — see lib/atlas.ts for the provenance of
+// both files and for why India is never drawn from Natural Earth.
+import { LAND, BORDERS, INDIA } from "@/lib/atlas";
 
 /**
  * The world basemap and the plotted points.
@@ -45,21 +41,6 @@ import indiaBoundary from "@/assets/india-boundary-lgd.json";
  * Baltimore in China.
  */
 
-/** The vendored file's `objects` — named so the decode below is not `any`. */
-type WorldTopology = Topology<{
-  countries: GeometryCollection<{ name: string }>;
-  land: GeometryCollection;
-}>;
-
-const world = worldTopology as unknown as WorldTopology;
-
-/** Decoded once at module scope: the topology is a constant, and re-deriving
- *  it per mount would re-walk 177 country geometries on every navigation. */
-const LAND = feature(world, world.objects.land) as unknown as GeoPermissibleObjects;
-/** Interior borders only — `(a, b) => a !== b` drops the coastline, which LAND
- *  already draws. Drawing both would double-stroke every shore. */
-const BORDERS = mesh(world, world.objects.countries, (a, b) => a !== b) as GeoPermissibleObjects;
-const INDIA = indiaBoundary as unknown as GeoPermissibleObjects;
 const GRATICULE = geoGraticule10() as unknown as GeoPermissibleObjects;
 
 interface GeoPoint {
