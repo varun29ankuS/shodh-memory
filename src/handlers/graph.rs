@@ -435,6 +435,15 @@ pub struct RebuildGraphParams {
     /// Setting this drops the cache for the duration of the rebuild so entities
     /// are re-derived from `content`. It costs a full NER pass over the corpus,
     /// which is why it is opt-in.
+    ///
+    /// OPERATIONAL NOTE: the rebuild runs synchronously inside the request, and
+    /// the server applies a `TimeoutLayer` of `SHODH_REQUEST_TIMEOUT` seconds
+    /// (default 60). A fresh-NER pass over a corpus of any size will exceed
+    /// that, and a timed-out request drops the connection, which cancels the
+    /// handler and leaves the graph *partially* rebuilt — indistinguishable, from
+    /// the outside, from a rebuild that finished. Raise `SHODH_REQUEST_TIMEOUT`
+    /// to cover the whole pass before using this on a real corpus, and treat a
+    /// 408 as "the graph is now in an unknown state", not as "try again later".
     #[serde(default)]
     pub fresh_ner: bool,
 }
