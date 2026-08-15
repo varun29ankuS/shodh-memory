@@ -513,6 +513,51 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
     EntityLabel::Concept
 }
 
+/// Move the label implied by `fine_type` to the front of `labels`.
+///
+/// Position 0 of `labels` is the entity's type everywhere it is rendered — the
+/// graph payload, the universe view, the MIF export and the UI legend all read
+/// `labels.first()`. But the merge in [`GraphMemory::add_entity`] orders labels
+/// by *recency*: the incoming mention's labels lead and the stored node's are
+/// appended behind them. Recency is not authority.
+///
+/// The consequence was a graph that rendered the weakest guess it held. An
+/// entity GLiNER had typed from the sentence it appeared in — `"Baltimore"`,
+/// fine type `city`, coarse `Gpe` — would be re-mentioned by a later phase that
+/// only pattern-matches a bare string (the tag phase, fact consolidation, an
+/// integration sync). That phase contributes a label of its own, it lands at
+/// position 0 because it was written last, and every surface downstream reports
+/// it as the entity's type. The typed answer survived in the vector, one
+/// position out of sight. Whole corpora rendered as a single class this way,
+/// and the histogram of `labels[0]` looked exactly like a typer that had
+/// collapsed — while the typer had in fact been right.
+///
+/// `fine_type` is the discriminator, because it is set only by the schema-driven
+/// typer (`crate::entity_type`) and never by a keyword rule. When it is present,
+/// its coarse rollup is by construction the typed answer for this entity, so it
+/// leads. When it is absent nothing here claims to know better, and the existing
+/// order stands.
+///
+/// Idempotent: re-applying it to an already-ordered vector is a no-op, so it is
+/// safe to run on every write.
+fn lead_with_fine_typed_label(entity: &mut EntityNode) {
+    let Some(fine) = entity.fine_type.as_deref() else {
+        return;
+    };
+    // An off-schema fine type has no defensible rollup — abstain rather than
+    // inventing `Other(..)` and promoting it over a real observed label.
+    let Some(coarse_id) = crate::entity_type::coarse_of(fine) else {
+        return;
+    };
+    let authoritative = EntityLabel::from_coarse_id(coarse_id);
+
+    if entity.labels.first() == Some(&authoritative) {
+        return;
+    }
+    entity.labels.retain(|label| label != &authoritative);
+    entity.labels.insert(0, authoritative);
+}
+
 /// Memory tier for edge consolidation
 ///
 /// Based on hippocampal-cortical memory consolidation research:
@@ -3735,6 +3780,11 @@ impl GraphMemory {
             entity.mention_count = 1;
             is_new_entity = true;
         }
+
+        // Order the merged labels by authority before anything reads them.
+        // MUST run before the `kb::stamp` call below, which is a function of
+        // `labels` and therefore of which label leads.
+        lead_with_fine_typed_label(&mut entity);
 
         // Stamp the real-world identity. Free of extra I/O — the node is about to
         // be written anyway — and a pure function of (name, labels), so a
@@ -9846,6 +9896,145 @@ mod tests {
             fine_type: None,
             kb_id: None,
         }
+    }
+
+    /// A named entity node carrying an explicit label set and fine type — the
+    /// shape the label-authority tests need.
+    fn typed_entity(name: &str, labels: Vec<EntityLabel>, fine_type: Option<&str>) -> EntityNode {
+        EntityNode {
+            labels,
+            fine_type: fine_type.map(str::to_string),
+            is_proper_noun: true,
+            ..universe_entity(name)
+        }
+    }
+
+    /// REGRESSION — the entity-typing collapse.
+    ///
+    /// A corpus of 1,008 defence entities rendered 831 of them as `Technology`
+    /// on a graph whose typer cannot emit that label at all: `Technology` is not
+    /// one of the 18 coarse classes `from_coarse_id` maps to. The typed answer
+    /// was present the whole time, one position behind a label contributed by a
+    /// later, weaker phase — and `labels.first()` is what every renderer reads.
+    ///
+    /// This is that sequence: GLiNER types "Baltimore" as a city, then a tag /
+    /// consolidation re-mention of the same surface arrives carrying a guess.
+    /// The guess must not become the entity's type.
+    #[test]
+    fn fine_typed_label_leads_after_an_untyped_re_mention() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        graph
+            .add_entity(typed_entity(
+                "Baltimore",
+                vec![EntityLabel::Gpe],
+                Some("city"),
+            ))
+            .unwrap();
+
+        // The re-mention: same surface, no fine type, a keyword-matched guess.
+        graph
+            .add_entity(typed_entity(
+                "Baltimore",
+                vec![EntityLabel::Technology],
+                None,
+            ))
+            .unwrap();
+
+        let stored = graph
+            .find_entity_by_name("Baltimore")
+            .unwrap()
+            .expect("Baltimore must exist after two mentions");
+
+        assert_eq!(
+            stored.fine_type.as_deref(),
+            Some("city"),
+            "the re-mention carried no fine type and must not have wiped one"
+        );
+        assert_eq!(
+            stored.labels.first(),
+            Some(&EntityLabel::Gpe),
+            "the fine-typed answer must lead the label vector; got {:?}",
+            stored.labels
+        );
+        assert!(
+            stored.labels.contains(&EntityLabel::Technology),
+            "ordering must not discard observed labels, only rank them: {:?}",
+            stored.labels
+        );
+    }
+
+    /// The promotion must not duplicate a label that is already present, and
+    /// must be stable under repeated writes — `add_entity` runs on every single
+    /// mention, so a non-idempotent rewrite would grow the vector without bound.
+    #[test]
+    fn label_authority_is_idempotent_across_re_mentions() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        for _ in 0..5 {
+            graph
+                .add_entity(typed_entity(
+                    "Bangalore",
+                    vec![EntityLabel::Technology],
+                    Some("city"),
+                ))
+                .unwrap();
+        }
+
+        let stored = graph
+            .find_entity_by_name("Bangalore")
+            .unwrap()
+            .expect("Bangalore must exist");
+
+        assert_eq!(stored.labels.first(), Some(&EntityLabel::Gpe));
+        assert_eq!(
+            stored.labels.len(),
+            2,
+            "five mentions must yield {{Gpe, Technology}}, not a growing vector: {:?}",
+            stored.labels
+        );
+        assert_eq!(
+            stored
+                .labels
+                .iter()
+                .filter(|l| **l == EntityLabel::Gpe)
+                .count(),
+            1,
+            "the promoted label must appear exactly once: {:?}",
+            stored.labels
+        );
+    }
+
+    /// An entity with no fine type carries no authority signal, so the helper
+    /// must leave its labels exactly as the merge produced them. Without this,
+    /// "order by authority" would quietly become "reorder everything".
+    #[test]
+    fn label_order_is_untouched_without_a_fine_type() {
+        let mut entity = typed_entity(
+            "unclassified thing",
+            vec![EntityLabel::Concept, EntityLabel::Technology],
+            None,
+        );
+        let before = entity.labels.clone();
+        lead_with_fine_typed_label(&mut entity);
+        assert_eq!(entity.labels, before);
+    }
+
+    /// A fine type that is not in the schema has no defensible coarse rollup.
+    /// Abstaining is the honest answer; promoting `Other("...")` over a real
+    /// observed label would be the same class of error this fix removes.
+    #[test]
+    fn off_schema_fine_type_does_not_reorder_labels() {
+        let mut entity = typed_entity(
+            "mystery",
+            vec![EntityLabel::Concept, EntityLabel::Person],
+            Some("not-a-real-schema-label"),
+        );
+        let before = entity.labels.clone();
+        lead_with_fine_typed_label(&mut entity);
+        assert_eq!(entity.labels, before);
     }
 
     /// Build a graph with two entities joined by a generic edge of the given

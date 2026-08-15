@@ -412,10 +412,38 @@ pub async fn canonicalize_user_graph(
     })))
 }
 
+/// Query parameters for the graph rebuild.
+#[derive(Debug, Default, Deserialize)]
+pub struct RebuildGraphParams {
+    /// Discard each memory's cached entity extraction and re-run NER over its
+    /// content (`?fresh_ner=true`). Defaults to false.
+    ///
+    /// A rebuild replays every stored memory through the graph pipeline, which
+    /// reads `experience.entities` / `experience.ner_entities` first and only
+    /// falls through to the neural typer when both are empty. That ordering is
+    /// right for a normal rebuild — it is what makes the operation cheap and
+    /// reproducible — but it means a rebuild reconstructs the typing decisions
+    /// that were cached at ingest, not the ones the current typer would make.
+    ///
+    /// So a corpus ingested before a typer improvement cannot be re-typed at
+    /// all. It replays its own history forever, and every entity keeps the class
+    /// (and the absent `fine_type`) it was given by whatever ran the day it was
+    /// written. On a corpus whose cached `entities` are really keyphrase tags,
+    /// that also means the graph is rebuilt out of tags rather than out of the
+    /// text — filenames and fragments included.
+    ///
+    /// Setting this drops the cache for the duration of the rebuild so entities
+    /// are re-derived from `content`. It costs a full NER pass over the corpus,
+    /// which is why it is opt-in.
+    #[serde(default)]
+    pub fresh_ner: bool,
+}
+
 /// POST /api/graph/{user_id}/rebuild - Rebuild graph from all existing memories
 pub async fn rebuild_user_graph(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
+    Query(params): Query<RebuildGraphParams>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validation::validate_user_id(&user_id).map_validation_err("user_id")?;
 
@@ -446,9 +474,18 @@ pub async fn rebuild_user_graph(
 
     let total_memories = memories.len();
     let mut processed = 0;
+    let fresh_ner = params.fresh_ner;
 
     // Re-process each memory through entity extraction
-    for (memory_id, experience) in memories {
+    for (memory_id, mut experience) in memories {
+        if fresh_ner {
+            // Drop the cached extraction so the pipeline re-derives entities from
+            // `content`. See `RebuildGraphParams::fresh_ner` — without this the
+            // rebuild cannot change any entity's type, however much the typer has
+            // improved since the memory was written.
+            experience.entities.clear();
+            experience.ner_entities.clear();
+        }
         if let Err(e) = state.process_experience_into_graph(&user_id, &experience, &memory_id, None)
         {
             tracing::debug!("Failed to process memory {}: {}", memory_id.0, e);
