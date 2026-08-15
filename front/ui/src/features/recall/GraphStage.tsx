@@ -31,7 +31,7 @@ import {
  * remedy with it.
  */
 
-export function GraphStage({ reach }: { reach: Reachability }) {
+export function GraphStage({ reach, explain = false }: { reach: Reachability; explain?: boolean }) {
   const { data } = useRecall(reach);
   const memories = data?.memories ?? [];
   const lineage = data?.lineage ?? [];
@@ -67,8 +67,20 @@ export function GraphStage({ reach }: { reach: Reachability }) {
             How this connects
           </div>
         </>
-      ) : (
-        /* `hidden md:flex`, not always-mounted: below ~768px viewport width
+      ) : explain ? (
+        /* The explainer is now ASKED FOR, not assumed.
+
+           It used to fill this stage whenever a recall had not run — which is
+           the resting state of the screen, so on a profile holding 245 real
+           memories roughly 60% of the surface was a cartoon of a search box
+           and three fake result bars, while the memories themselves were in a
+           340px column truncating mid-word. An explainer is read once; it had
+           permanent tenancy on the largest surface in the product.
+
+           It is good work and it states the product's claim more clearly than
+           anything else here, so it is one control away rather than deleted.
+
+           `hidden md:flex`, not always-mounted: below ~768px viewport width
            the Inspector and result column's reserved widths (see
            RecallView.tsx / Inspector.tsx) leave this stage under ~135px wide.
            The diagram's own "Docked" explanation text has no minimum-width
@@ -80,7 +92,7 @@ export function GraphStage({ reach }: { reach: Reachability }) {
         <div className="absolute inset-0 hidden flex-col items-center justify-center px-8 md:flex">
           <RecallDiagram />
         </div>
-      )}
+      ) : null}
 
       {/* The legend decodes the canvas, so it renders only when there is a
           canvas to decode — a colour key over an empty stage explains nothing.

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ApiError, NetworkError, type Reachability } from "@/lib/api";
@@ -302,9 +302,22 @@ function ResultPane({ reach }: { reach: Reachability }) {
 }
 
 export function RecallView({ reach }: { reach: Reachability }) {
+  const { data: recallData } = useRecall(reach);
+  const hasGraph = (recallData?.memories.length ?? 0) > 0;
+  const [explain, setExplain] = useState(false);
+  // A stage is only worth reserving when something will be drawn on it.
+  const stageInUse = hasGraph || explain;
+
   return (
-    <div className="flex h-full min-h-0">
-      {/* `min(340px,42vw)`, not a bare 340px: `main`'s content box is the
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex min-h-0 flex-1">
+        {/* THE LIST TAKES THE STAGE WHEN NOTHING ELSE IS USING IT.
+            With no recall run, the graph has nothing to plot, and the column
+            below was holding 340px of a 1600px surface while the rest carried
+            an explainer. The memories are the content; when they are the only
+            content they get the width, and the reading measure is capped so a
+            full-bleed line does not run to 200 characters. */}
+        {/* `min(340px,42vw)`, not a bare 340px: `main`'s content box is the
           viewport minus the 56px rail and the Inspector's reserved width
           (see INSPECTOR_OFFSET in App.tsx). Below ~676px a fixed 340px
           column no longer fits next to a fixed-width Inspector — it was
@@ -314,10 +327,38 @@ export function RecallView({ reach }: { reach: Reachability }) {
           collapse. The vw cap is a no-op at desktop widths (340px is
           untouched above ~810px) and shrinks the column smoothly below that
           instead of letting it overflow. */}
-      <div className="border-border flex w-[min(340px,42vw)] shrink-0 flex-col border-r">
-        <ResultPane reach={reach} />
+        <div
+          className={cn(
+            "border-border flex min-h-0 flex-col",
+            stageInUse
+              ? "w-[min(340px,42vw)] shrink-0 border-r"
+              : "mx-auto w-full max-w-[900px] flex-1",
+          )}
+        >
+          <ResultPane reach={reach} />
+        </div>
+        {stageInUse ? <GraphStage reach={reach} explain={explain} /> : null}
       </div>
-      <GraphStage reach={reach} />
+
+      {/* The explainer, one control away rather than occupying the stage.
+          Kept out of the scroll so it is reachable from anywhere in a long
+          corpus, and stated as a question because that is what it answers. */}
+      <div className="border-border flex shrink-0 items-center justify-end border-t px-4 py-1.5">
+        <button
+          type="button"
+          onClick={() => setExplain((v) => !v)}
+          aria-pressed={explain}
+          aria-label="How recall works"
+          className={cn(
+            "mono focus-visible:ring-ring cursor-pointer rounded px-2 py-1 text-[10px]",
+            "tracking-[0.12em] uppercase transition-colors focus-visible:ring-2",
+            "focus-visible:outline-none",
+            explain ? "text-primary" : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {explain ? "Hide how recall works" : "How recall works"}
+        </button>
+      </div>
     </div>
   );
 }
