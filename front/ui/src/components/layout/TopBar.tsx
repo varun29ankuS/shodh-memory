@@ -4,18 +4,12 @@ import { cn } from "@/lib/utils";
 import type { Reachability } from "@/lib/api";
 import { StatusStrip } from "./StatusStrip";
 import { DESTINATIONS } from "./Sidebar";
+import { RAIL_OFFSET } from "./destinations";
 
-/** The rail's width, as the offset every fixed element beside it reserves.
- *  The rail no longer expands on hover (Sidebar.tsx), so this is its only
- *  width and it is reserved outright — there is no second, wider state that
- *  reserving would have turned into a shove.
- *
- *  WRITTEN OUT RATHER THAN INTERPOLATED FROM `RAIL_WIDTH_PX`. Tailwind v4
- *  generates utilities by scanning source text for complete class names, so
- *  `pl-[${n}px]` produces a class that is never emitted and an offset of zero
- *  — a failure that only shows up in the built product. `Sidebar.tsx` asserts
- *  the two agree. */
-export const RAIL_OFFSET = "pl-[244px]";
+/** The rail's width as a padding utility, re-exported so every existing
+ *  importer keeps its one import. It is defined next to the number it has to
+ *  agree with — see `destinations.ts`. */
+export { RAIL_OFFSET };
 
 /**
  * The header — and the one place every destination says what it is.

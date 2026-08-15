@@ -17,6 +17,7 @@ import { ChatView } from "@/features/chat/ChatView";
 import { ConversationOverlay } from "@/features/chat/ConversationOverlay";
 import { ProvidersView } from "@/features/providers/ProvidersView";
 import { AnomaliesView } from "@/features/anomalies/AnomaliesView";
+import { Workbench } from "@/features/workbench/Workbench";
 import type { Reachability } from "@/lib/api";
 
 /**
@@ -80,22 +81,31 @@ function Shell({ reach }: { reach: Reachability }) {
       </TopBar>
 
       <main className={cn("h-full pt-12", RAIL_OFFSET, showInspector && INSPECTOR_OFFSET)}>
-        <Routes>
-          {/* You land on the briefing: what is in here, and a way in. The
-              conversation is reachable from everywhere, so it does not need to
-              be the thing you arrive at. */}
-          <Route path="/" element={<BriefingView reach={reach} />} />
-          <Route path="/chat" element={<ChatView reach={reach} seat={seat} />} />
-          <Route path="/recall" element={<RecallView reach={reach} />} />
-          <Route path="/geo" element={<GeoView reach={reach} />} />
-          <Route path="/graph" element={<GraphView reach={reach} />} />
-          <Route path="/anomalies" element={<AnomaliesView reach={reach} />} />
-          <Route path="/tasks" element={<TasksView reach={reach} />} />
-          <Route path="/providers" element={<ProvidersView seat={seat} />} />
-          {/* A hash the app does not know is a typo or a stale link, not an
-              error worth a page — send it home rather than showing a dead end. */}
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        {/* The stage is a STACK, not a slot. `<Routes>` still renders exactly
+            one view — the trail's primary — and the Workbench draws every pane
+            it was opened from as a 40px spine beside it. That is what turns
+            "clicking a door replaces the screen" into "clicking a door
+            promotes its content and compresses the briefing", and it is why
+            nothing below had to learn about the trail: a bare navigate is read
+            as an opening-from-here. */}
+        <Workbench>
+          <Routes>
+            {/* You land on the briefing: what is in here, and a way in. The
+                conversation is reachable from everywhere, so it does not need to
+                be the thing you arrive at. */}
+            <Route path="/" element={<BriefingView reach={reach} />} />
+            <Route path="/chat" element={<ChatView reach={reach} seat={seat} />} />
+            <Route path="/recall" element={<RecallView reach={reach} />} />
+            <Route path="/geo" element={<GeoView reach={reach} />} />
+            <Route path="/graph" element={<GraphView reach={reach} />} />
+            <Route path="/anomalies" element={<AnomaliesView reach={reach} />} />
+            <Route path="/tasks" element={<TasksView reach={reach} />} />
+            <Route path="/providers" element={<ProvidersView seat={seat} />} />
+            {/* A hash the app does not know is a typo or a stale link, not an
+                error worth a page — send it home rather than showing a dead end. */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Workbench>
       </main>
 
       {showInspector ? <Inspector /> : null}

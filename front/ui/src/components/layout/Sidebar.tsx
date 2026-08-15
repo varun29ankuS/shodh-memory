@@ -1,19 +1,16 @@
 import { NavLink } from "react-router-dom";
-import {
-  Search,
-  TriangleAlert,
-  ListChecks,
-  ChevronDown,
-  MessageSquare,
-  KeyRound,
-  Globe,
-  Share2,
-  House,
-} from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isHumanProfile, type Reachability } from "@/lib/api";
 import { useSession } from "@/stores/session";
 import shodhMark from "@/assets/shodh-mark.png";
+import { railHref } from "@/features/workbench/trail";
+import { DESTINATIONS, RAIL_WIDTH_PX } from "./destinations";
+
+/** Re-exported so the header keeps its one import for the table it reads. The
+ *  table itself lives in `destinations.ts`, which has no React in it. */
+export { DESTINATIONS, RAIL_WIDTH_PX };
+export type { DestinationId } from "./destinations";
 
 /**
  * Primary navigation — a permanently labelled column.
@@ -48,114 +45,17 @@ import shodhMark from "@/assets/shodh-mark.png";
  */
 
 /**
- * The destinations, and the one line each of them is.
+ * BRIEFING IS THE FIRST ROW, AND IT IS A REAL ROW.
  *
- * A caption is not a tooltip and not a tagline. It is what someone needs in
- * order to know what they are looking at the moment they arrive, so it says
- * what the DATA on that screen is, in the words a person would use. Four rules
- * it is held to, all of them learned from copy that failed them:
+ * It used to be reachable only by landing on it: nothing in the rail pointed
+ * at `/`, and the wordmark was an inert image, so once you left the front page
+ * the only way back was to edit the URL. A labelled row is the fix rather than
+ * a logo link, because a row states its destination in a word while a
+ * clickable logo is a convention you have to already know — and the logo is a
+ * link now too, which costs nothing and pays out to the people who do know it.
  *
- *  - No subsystem words. "corpus", "session store", "spreading activation" name
- *    parts of this program, not things a reader has.
- *  - True of the screen as it opens, not of the screen after work. Geo used to
- *    promise "the current results" and then opened onto the whole map, which
- *    reads as the wrong screen rather than as a fuller one.
- *  - It labels; it does not sell. No adjective that the screen cannot be
- *    checked against.
- *  - A NOUN PHRASE, NOT A SENTENCE, AND UNDER SIX WORDS. These were clauses —
- *    "Search this memory, and see what connects to what" — sitting permanently
- *    beside a one-word title in a 48px bar, on every screen, on every visit.
- *    The caption has to survive being read at a glance by someone who has read
- *    it forty times before, and a clause does not: it gets skipped, which makes
- *    it cost its space and pay nothing. Naming the data in three words is read
- *    every time.
- *
- * Deliberately NOT moved behind an info affordance, and this is the one place
- * in the density pass where that was the wrong tool. The documented failure
- * this caption was added to fix is people arriving somewhere and not knowing
- * what the data means — and by definition those people do not know there is
- * anything to ask about, so an icon pays out to nobody. It gets shorter; it
- * does not get hidden.
- *
- * Read in three places — the rail itself, the header next to the title
- * (TopBar.tsx), and the trail that stacks them (features/workbench/trail.ts).
- * All three read it from here so the app cannot describe one destination two
- * ways, and so a pane's spine cannot be titled differently from its rail row.
- *
- * BRIEFING IS FIRST AND IT IS A REAL ROW. It used to be reachable only by
- * landing on it: nothing in the rail pointed at `/`, and the wordmark was an
- * image, so once you left the front page the only way back was to edit the
- * URL. A labelled row is the fix rather than a logo link because a row states
- * its destination in a word, while a clickable logo is a convention you have to
- * already know — and the logo is a link now too, which costs nothing and helps
- * the people who do know it.
+ * The table itself is `destinations.ts`.
  */
-export const DESTINATIONS = [
-  {
-    id: "briefing",
-    path: "/",
-    label: "Briefing",
-    icon: House,
-    caption: "What is in here, and what changed",
-  },
-  {
-    id: "chat",
-    path: "/chat",
-    label: "Conversations",
-    icon: MessageSquare,
-    caption: "A model that can read this memory",
-  },
-  {
-    id: "recall",
-    path: "/recall",
-    label: "Recall",
-    icon: Search,
-    caption: "Search memory and its connections",
-  },
-  {
-    id: "graph",
-    path: "/graph",
-    label: "Graph",
-    icon: Share2,
-    caption: "Entities, and how they relate",
-  },
-  {
-    id: "geo",
-    path: "/geo",
-    label: "Geo",
-    icon: Globe,
-    caption: "Where memory happened",
-  },
-  {
-    id: "anomalies",
-    path: "/anomalies",
-    label: "Anomalies",
-    icon: TriangleAlert,
-    caption: "What deviates from this profile's normal",
-  },
-  {
-    id: "tasks",
-    path: "/tasks",
-    label: "Tasks",
-    icon: ListChecks,
-    caption: "Open work found in memory",
-  },
-  {
-    id: "providers",
-    path: "/providers",
-    label: "Providers",
-    icon: KeyRound,
-    caption: "Where models run, and their keys",
-  },
-] as const;
-
-export type DestinationId = (typeof DESTINATIONS)[number]["id"];
-
-/** The rail's width, and the offset every fixed element beside it reserves.
- *  One number, exported, because the header and the stage both have to agree
- *  with it exactly — a rail 4px wider than the space reserved for it either
- *  clips the stage or shows a seam of the wrong surface. */
-export const RAIL_WIDTH_PX = 244;
 
 /**
  * Which profile's memory is on screen.
@@ -245,7 +145,13 @@ export function Sidebar({ reach }: { reach: Reachability }) {
           return (
             <NavLink
               key={d.id}
-              to={d.path}
+              // `railHref`, not the bare path. The rail is a JUMP to a place,
+              // not an opening-from-here, so its links state an empty ancestry
+              // and reset the trail to `[briefing, destination]`. A bare path
+              // means the opposite — see `features/workbench/trail.ts`.
+              // `NavLink` matches on pathname alone, so the active row is
+              // unaffected by the parameter.
+              to={railHref(d.path)}
               // `/` is a prefix of every path, so without `end` the briefing
               // row would read as active on every screen in the product.
               end={d.path === "/"}
