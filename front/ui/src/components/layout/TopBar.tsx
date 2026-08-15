@@ -5,10 +5,17 @@ import type { Reachability } from "@/lib/api";
 import { StatusStrip } from "./StatusStrip";
 import { DESTINATIONS } from "./Sidebar";
 
-/** Collapsed rail width, as the offset every fixed element reserves. The rail's
- *  *expanded* width is deliberately never reserved: doing so would make the
- *  expansion push content, which is the one thing it must not do. */
-export const RAIL_OFFSET = "pl-14";
+/** The rail's width, as the offset every fixed element beside it reserves.
+ *  The rail no longer expands on hover (Sidebar.tsx), so this is its only
+ *  width and it is reserved outright — there is no second, wider state that
+ *  reserving would have turned into a shove.
+ *
+ *  WRITTEN OUT RATHER THAN INTERPOLATED FROM `RAIL_WIDTH_PX`. Tailwind v4
+ *  generates utilities by scanning source text for complete class names, so
+ *  `pl-[${n}px]` produces a class that is never emitted and an offset of zero
+ *  — a failure that only shows up in the built product. `Sidebar.tsx` asserts
+ *  the two agree. */
+export const RAIL_OFFSET = "pl-[244px]";
 
 /**
  * The header — and the one place every destination says what it is.
@@ -51,14 +58,13 @@ export function TopBar({
         RAIL_OFFSET,
       )}
     >
-      {/* Everything but the title sits right. The rail expands over this bar
-          from the left, so anything in its first 224px gets occluded on hover
-          — and a status strip sliced mid-word reads as a rendering fault. The
-          title is the one thing that can afford to go: while the rail is open
-          it is showing its own header, which names the product anyway. The
-          caption travels with the title for the same reason, and is the first
-          thing to give up width because the title alone still identifies the
-          screen. */}
+      {/* Everything but the title sits right. This used to be a defence
+          against the rail expanding over the bar's first 224px on hover; the
+          rail no longer expands, so nothing is occluded and the arrangement
+          survives on its own merit — the title identifies the screen and reads
+          left, the status of the system reads right, and the caption is the
+          first thing to give up width because the title alone still says where
+          you are. */}
       <div className="flex min-w-0 items-baseline gap-2.5">
         <h1 className="shrink-0 text-[13px] font-medium tracking-tight">{title}</h1>
         {caption ? (

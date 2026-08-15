@@ -48,7 +48,23 @@ Judged from the live preview, not from a description:
 
 1. **Smaller icons** in the rail. Gridline's are oversized for the density this
    product needs.
-2. **Hover expands the rail** into a labelled column. Icon-only navigation fails
+2. ~~**Hover expands the rail** into a labelled column.~~ **SUPERSEDED
+   2026-08-15 — the rail is permanently labelled and does not expand.** The
+   diagnosis below still holds and is why the rail carries labels at all; the
+   *mechanism* was wrong. In use the column animated on every accidental
+   pointer pass, so it moved when nobody asked it to, and no decision could be
+   made until the labels had finished arriving — it broke "nothing ever jumps"
+   and "hover reveals, never reflows" simultaneously, which is worse than the
+   memory game it was fixing. The rail is now 244px, permanently labelled, at
+   Linear's shipped density (28×220px rows, inset 12px, 8px radius, 13px text
+   at weight 450, no rules between rows). ~190px of width buys an instant,
+   motionless decision. The overlay/close-delay/focus-mirrors-hover
+   requirements below existed only to serve the expansion and are retired with
+   it; `aria-label` on every control and honouring `prefers-reduced-motion`
+   survive, because neither was about expanding. See
+   `src/components/layout/Sidebar.tsx`. Original text, kept for the reasoning:
+
+   Icon-only navigation fails
    the unaided-decipherability test — seven unlabelled glyphs is a memory game.
    Requirements:
    - Expand must **overlay**, not push content. Reflowing a map or a graph on
