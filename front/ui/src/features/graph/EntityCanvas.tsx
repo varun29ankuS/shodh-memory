@@ -165,7 +165,16 @@ export function EntityCanvas({
   onDrillIn: (clusterId: number) => void;
   /** Reports what this level actually drew, so the footer states the same
    *  numbers the canvas used rather than recomputing them and drifting. */
-  onStats?: (stats: { hiddenEdges: number; floor: number; budget: string | null }) => void;
+  onStats?: (stats: {
+    hiddenEdges: number;
+    floor: number;
+    budget: string | null;
+    /** Consolidation tiers over the edges THIS CANVAS DREW, or null at cluster
+     *  level where a drawn line is an aggregate of many edges across many
+     *  tiers and has no tier of its own. Reported from here because this is
+     *  the only place that knows what survived the floor AND the budget. */
+    tierCounts: Record<string, number> | null;
+  }) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -183,7 +192,7 @@ export function EntityCanvas({
   const floor = useMemo(() => cooccurFloor(model), [model]);
 
   /** The node/link set for the current level. */
-  const { nodes, links, budgetDropped } = useMemo(() => {
+  const { nodes, links, budgetDropped, tierCounts } = useMemo(() => {
     if (level === "clusters") {
       const maxSize = Math.max(1, ...model.clusters.map((c) => c.size));
       const nodes: CanvasNode[] = model.clusters.map((c) => ({
@@ -212,7 +221,7 @@ export function EntityCanvas({
         tier: "L1Working",
         width: 0.5 + 3.5 * Math.sqrt(l.weight / maxW),
       }));
-      return { nodes, links, budgetDropped: 0 };
+      return { nodes, links, budgetDropped: 0, tierCounts: null };
     }
 
     // Entity level: either one drilled cluster's members, or — on a small
@@ -259,7 +268,10 @@ export function EntityCanvas({
         tier: e.tier,
         width: 0,
       }));
-    return { nodes, links, budgetDropped: budget.dropped };
+    const tierCounts: Record<string, number> = {};
+    for (const l of budget.kept) tierCounts[l.tier] = (tierCounts[l.tier] ?? 0) + 1;
+
+    return { nodes, links, budgetDropped: budget.dropped, tierCounts };
   }, [model, level, clusterId, floor]);
 
   /** What the floor hid at this level, reported upward so the footer can say
@@ -280,8 +292,9 @@ export function EntityCanvas({
       hiddenEdges,
       floor,
       budget: describeEdgeBudget(budgetDropped, EDGES_PER_NODE),
+      tierCounts,
     });
-  }, [hiddenEdges, floor, budgetDropped, onStats]);
+  }, [hiddenEdges, floor, budgetDropped, tierCounts, onStats]);
 
   useEffect(() => {
     selectedRef.current = selectedEntityId;

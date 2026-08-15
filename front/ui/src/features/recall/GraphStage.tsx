@@ -60,38 +60,38 @@ export function GraphStage({ reach, explain = false }: { reach: Reachability; ex
           empty state and the populated one are the same surface. */}
       <div aria-hidden="true" className="graticule pointer-events-none absolute inset-0" />
 
-      {hasGraph ? (
+      {/* EXPLAIN WINS THE STAGE. It used to be checked only after `hasGraph`,
+          so with results on screen the control flipped `aria-pressed` to true
+          and nothing changed -- an accessible state asserting something the
+          screen did not show, and "the diagram is one control away" being
+          false the moment a query had run. Asking how recall works is a
+          reasonable thing to do WHILE looking at a result; it is arguably the
+          moment you most want to. */}
+      {explain ? (
+        <>
+          {/* Below ~768px the stage is too narrow for the diagram to render
+              into (see the width note below), so the same control gets a
+              sentence instead of an empty column. A toggle that mounts
+              nothing is worse than one that is absent. */}
+          <div className="text-muted-foreground absolute inset-0 flex flex-col justify-center px-6 text-[13px] leading-relaxed md:hidden">
+            <p className="max-w-[40ch]">
+              A cue activates memories by meaning, wording and the links between
+              them at once. What surfaced is ranked by how strongly it
+              activated, and every result traces back to the session that
+              recorded it.
+            </p>
+          </div>
+          <div className="absolute inset-0 hidden flex-col items-center justify-center px-8 md:flex">
+            <RecallDiagram />
+          </div>
+        </>
+      ) : hasGraph ? (
         <>
           <GraphCanvas memories={memories} lineage={lineage} />
           <div className="text-muted-foreground pointer-events-none absolute top-3 left-4 z-10 text-[12px]">
             How this connects
           </div>
         </>
-      ) : explain ? (
-        /* The explainer is now ASKED FOR, not assumed.
-
-           It used to fill this stage whenever a recall had not run — which is
-           the resting state of the screen, so on a profile holding 245 real
-           memories roughly 60% of the surface was a cartoon of a search box
-           and three fake result bars, while the memories themselves were in a
-           340px column truncating mid-word. An explainer is read once; it had
-           permanent tenancy on the largest surface in the product.
-
-           It is good work and it states the product's claim more clearly than
-           anything else here, so it is one control away rather than deleted.
-
-           `hidden md:flex`, not always-mounted: below ~768px viewport width
-           the Inspector and result column's reserved widths (see
-           RecallView.tsx / Inspector.tsx) leave this stage under ~135px wide.
-           The diagram's own "Docked" explanation text has no minimum-width
-           floor, so at that width it wraps character-by-character and its
-           vertical overflow escapes past the 92px box it's docked to (the
-           ancestor `overflow-hidden` bounds the whole section, not that box).
-           RecallDiagram.tsx is explicitly not to be restructured, so the fix
-           is here: don't hand it a width it cannot render into. */
-        <div className="absolute inset-0 hidden flex-col items-center justify-center px-8 md:flex">
-          <RecallDiagram />
-        </div>
       ) : null}
 
       {/* The legend decodes the canvas, so it renders only when there is a

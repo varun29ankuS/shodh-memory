@@ -8,9 +8,7 @@ import { useSession } from "@/stores/session";
 import { useUniverse } from "./useUniverse";
 import { EntityCanvas, levelFor, type Level } from "./EntityCanvas";
 import {
-  cooccurFloor,
   entityTypeToken,
-  isEdgeRendered,
   NAMED_ENTITY_TYPES,
   TIER_LABEL,
   TIER_ORDER,
@@ -79,10 +77,12 @@ export function GraphView({ reach }: { reach: Reachability }) {
      *  dropped half its edges while looking complete is the thing the footer
      *  exists to prevent. */
     budget: string | null;
+    tierCounts: Record<string, number> | null;
   }>({
     hiddenEdges: 0,
     floor: 0,
     budget: null,
+    tierCounts: null,
   });
 
   // A new corpus invalidates a drill path taken through the old one.
@@ -122,14 +122,15 @@ export function GraphView({ reach }: { reach: Reachability }) {
    * (src/handlers/visualization.rs:378-392, :458-459). Counting what this
    * canvas drew means the legend and the picture can never disagree.
    */
-  const tierCounts = useMemo(() => {
-    const counts = { L1Working: 0, L2Episodic: 0, L3Semantic: 0 } as Record<string, number>;
-    if (!model) return counts;
-    const floor = cooccurFloor(model);
-    for (const e of model.edges)
-      if (isEdgeRendered(e, floor)) counts[e.tier] = (counts[e.tier] ?? 0) + 1;
-    return counts;
-  }, [model]);
+  /* COUNTED BY THE CANVAS, NOT RECOMPUTED HERE.
+     This used to walk model.edges and count everything that passed the
+     co-occurrence floor. That was correct until the per-node edge budget
+     landed, at which point the key claimed 411 L3 edges over a picture drawing
+     220 — the legend un-stating the cut the footer beside it had just stated.
+     The canvas is the only thing that knows what survived BOTH filters, so it
+     reports, and this reads. Null at cluster level, where a drawn line is an
+     aggregate across many tiers and has no tier to count. */
+  const tierCounts = stats.tierCounts;
 
   if (reach.state !== "online") {
     return (
@@ -254,7 +255,7 @@ export function GraphView({ reach }: { reach: Reachability }) {
               size = mentions
             </span>
           </div>
-          {level === "entities" ? (
+          {level === "entities" && tierCounts ? (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
               {TIER_ORDER.map((t) => (
                 <span

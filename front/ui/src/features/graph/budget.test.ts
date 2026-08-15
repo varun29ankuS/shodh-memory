@@ -73,20 +73,33 @@ describe("capEdgesPerNode", () => {
   });
 
   it("breaks ties deterministically rather than on array order", () => {
-    const edges = [e("h", "z", 1), e("h", "a", 1), e("h", "m", 1), e("z", "a", 1), e("z", "m", 1)];
-    const first = capEdgesPerNode(edges, 1).kept.map((x) => `${x.source}|${x.target}`);
-    const second = capEdgesPerNode(edges, 1).kept.map((x) => `${x.source}|${x.target}`);
-    expect(first).toEqual(second);
-    // "h a" sorts before "h m" and "h z", so the hub's single claim is h-a.
-    expect(first).toContain("h|a");
+    // A clique at k=1 with EVERY strength equal: each node claims exactly one
+    // edge and no endpoint has spare capacity to rescue another's discard, so
+    // the tie-break is the only thing deciding the picture. Calling the
+    // function twice on the same array would pass with the comparator deleted;
+    // reversing the input is what makes this able to fail.
+    const flat = clique(6).map((x) => ({ ...x, strength: 1 }));
+    const forward = capEdgesPerNode(flat, 1).kept.map((x) => `${x.source}|${x.target}`);
+    const reversed = capEdgesPerNode(flat.slice().reverse(), 1).kept.map(
+      (x) => `${x.source}|${x.target}`,
+    );
+    expect(new Set(forward)).toEqual(new Set(reversed));
+    expect(forward.length).toBeGreaterThan(0);
   });
 
-  it("counts a self-loop once, as one node's edge rather than two", () => {
-    const kept = capEdgesPerNode([e("a", "a", 1), e("a", "b", 0.9), e("a", "c", 0.8)], 2).kept;
-    // a claims its top two; b and c each claim their only edge, so all survive.
-    // The guarantee under test is that the self-loop did not consume two of a's
-    // slots on its own.
-    expect(kept).toHaveLength(3);
+  it("counts a self-loop once, so it cannot eat two of a node's slots", () => {
+    // The other endpoints are deliberately SATURATED, so nothing can rescue an
+    // edge `a` fails to claim. If the self-loop were added to a's list twice it
+    // would occupy both of a's slots and a-b would vanish.
+    const edges = [
+      e("a", "a", 1),
+      e("a", "b", 0.9),
+      e("b", "x", 0.95),
+      e("b", "y", 0.94),
+      e("x", "y", 0.93),
+    ];
+    const kept = capEdgesPerNode(edges, 2).kept.map((v) => `${v.source}|${v.target}`);
+    expect(kept).toContain("a|b");
   });
 
   it("drops everything at k of zero, and reports it", () => {
