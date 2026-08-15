@@ -17,6 +17,7 @@ import {
 } from "d3";
 import { coreExtentOf, fitTransform } from "@/lib/view/fit";
 import { useSession } from "@/stores/session";
+import { capEdgesPerNode, describeEdgeBudget } from "./budget";
 import {
   cooccurFloor,
   entityTypeToken,
@@ -66,6 +67,22 @@ const FRAME_PADDING = 56;
  *  degree-0 entities set the camera for all 136 and the real corpus becomes an
  *  illegible knot. Trimmed nodes are still drawn, just outside the opening view. */
 const FRAME_TRIM = 0.06;
+
+/** The strongest edges each entity keeps.
+ *
+ *  Measured on gdelt-bridge (138 entities, 1,283 relations): a cap of 6 drops
+ *  56% of the raw lines, 4 drops 68%, 3 drops 75%.
+ *
+ *  Those figures are against the RAW connection set. The co-occurrence floor
+ *  (cooccurFloor) has already removed 691 of them by the time this runs, so
+ *  the cap's marginal cut is much smaller than the table suggests -- at 6 it
+ *  removed a further 91. Three is chosen against what is actually left rather
+ *  than against the raw measurement.
+ *
+ *  The unreadability was never the 138 dots; it was the crossings between a
+ *  handful of hubs. A per-node cap takes those off without ever isolating a
+ *  node, because a leaf's only edge is trivially within its own top k. */
+const EDGES_PER_NODE = 3;
 
 type Level = "clusters" | "entities";
 
@@ -148,7 +165,7 @@ export function EntityCanvas({
   onDrillIn: (clusterId: number) => void;
   /** Reports what this level actually drew, so the footer states the same
    *  numbers the canvas used rather than recomputing them and drifting. */
-  onStats?: (stats: { hiddenEdges: number; floor: number }) => void;
+  onStats?: (stats: { hiddenEdges: number; floor: number; budget: string | null }) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -166,7 +183,7 @@ export function EntityCanvas({
   const floor = useMemo(() => cooccurFloor(model), [model]);
 
   /** The node/link set for the current level. */
-  const { nodes, links } = useMemo(() => {
+  const { nodes, links, budgetDropped } = useMemo(() => {
     if (level === "clusters") {
       const maxSize = Math.max(1, ...model.clusters.map((c) => c.size));
       const nodes: CanvasNode[] = model.clusters.map((c) => ({
@@ -195,7 +212,7 @@ export function EntityCanvas({
         tier: "L1Working",
         width: 0.5 + 3.5 * Math.sqrt(l.weight / maxW),
       }));
-      return { nodes, links };
+      return { nodes, links, budgetDropped: 0 };
     }
 
     // Entity level: either one drilled cluster's members, or — on a small
@@ -228,8 +245,11 @@ export function EntityCanvas({
         longTail: false,
       };
     });
-    const links: CanvasLink[] = model.edges
-      .filter((e) => keep.has(e.source) && keep.has(e.target) && isEdgeRendered(e, floor))
+    const budget = capEdgesPerNode(
+      model.edges.filter((e) => keep.has(e.source) && keep.has(e.target) && isEdgeRendered(e, floor)),
+      EDGES_PER_NODE,
+    );
+    const links: CanvasLink[] = budget.kept
       .map((e) => ({
         source: e.source,
         target: e.target,
@@ -239,7 +259,7 @@ export function EntityCanvas({
         tier: e.tier,
         width: 0,
       }));
-    return { nodes, links };
+    return { nodes, links, budgetDropped: budget.dropped };
   }, [model, level, clusterId, floor]);
 
   /** What the floor hid at this level, reported upward so the footer can say
@@ -256,8 +276,12 @@ export function EntityCanvas({
   }, [model, level, clusterId, floor]);
 
   useEffect(() => {
-    onStats?.({ hiddenEdges, floor });
-  }, [hiddenEdges, floor, onStats]);
+    onStats?.({
+      hiddenEdges,
+      floor,
+      budget: describeEdgeBudget(budgetDropped, EDGES_PER_NODE),
+    });
+  }, [hiddenEdges, floor, budgetDropped, onStats]);
 
   useEffect(() => {
     selectedRef.current = selectedEntityId;

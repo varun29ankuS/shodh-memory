@@ -72,9 +72,17 @@ export function GraphView({ reach }: { reach: Reachability }) {
   // canvas are two views of it, and the canvas is remounted per level.
   const [clusterId, setClusterId] = useState<number | null>(null);
   /** Reported by the canvas so the footer states what was actually drawn. */
-  const [stats, setStats] = useState<{ hiddenEdges: number; floor: number }>({
+  const [stats, setStats] = useState<{
+    hiddenEdges: number;
+    floor: number;
+    /** Set when the per-node edge budget cut lines. A picture that quietly
+     *  dropped half its edges while looking complete is the thing the footer
+     *  exists to prevent. */
+    budget: string | null;
+  }>({
     hiddenEdges: 0,
     floor: 0,
+    budget: null,
   });
 
   // A new corpus invalidates a drill path taken through the old one.
@@ -287,6 +295,7 @@ export function GraphView({ reach }: { reach: Reachability }) {
           {model.edgesDropped > 0 ? (
             <Stat value={model.edgesDropped} label="dropped to budget" />
           ) : null}
+          {stats.budget ? <span>{stats.budget}</span> : null}
           {stats.hiddenEdges > 0 ? (
             <Stat value={stats.hiddenEdges} label="weak edges hidden" />
           ) : null}
