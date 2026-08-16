@@ -323,12 +323,23 @@ export interface ConversationDetail extends ConversationSummary {
   events: StoredEvent[];
 }
 
+/**
+ * seat/src/ledger.ts `LedgerActor` — WHO caused an entry, as opposed to
+ * `MemoryScope`, which says which namespace was touched. Both spell "user" and
+ * they mean different things: an `actor: "agent"`, `scope: "user"` entry is the
+ * model writing into the human's memory.
+ */
+export type LedgerActor = "user" | "agent" | "system";
+
 /** seat/src/ledger.ts `LedgerEntry` / `LedgerEntryView` — fields the UI shows. */
 export interface LedgerEntryView {
   entry: {
     id: string;
     ts: string;
-    kind: "memory_write" | "reinforce" | "revert";
+    /** Absent on entries written before the field existed; render as unknown,
+     *  never as a default actor. */
+    actor?: LedgerActor;
+    kind: "memory_write" | "reinforce" | "implicit_feedback" | "revert";
     scope: MemoryScope;
     user_id: string;
     conversation_id: string;

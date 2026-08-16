@@ -259,19 +259,21 @@ export function createMemoryTools(context: MemoryToolContext): AgentTool<any>[] 
 				memoryType,
 				tags: params.tags ?? [],
 			});
-			const ledgerEntry = await context.ledger.append(
-				"memory_write",
-				"user",
-				context.userId,
-				context.conversationId,
-				context.getTurn(),
-				{
+			const ledgerEntry = await context.ledger.append({
+				kind: "memory_write",
+				// The model emitted this tool call; the write is its decision.
+				actor: "agent",
+				scope: "user",
+				userId: context.userId,
+				conversationId: context.conversationId,
+				turn: context.getTurn(),
+				data: {
 					memory_id: response.id,
 					memory_type: memoryType,
 					content_preview: params.content.slice(0, 200),
 					trigger: "model_tool_call",
 				},
-			);
+			});
 			context.emit({
 				type: "memory_write",
 				scope: "user",
@@ -300,19 +302,21 @@ export function createMemoryTools(context: MemoryToolContext): AgentTool<any>[] 
 				memoryType,
 				tags: ["seat-harness", ...(params.tags ?? [])],
 			});
-			const ledgerEntry = await context.ledger.append(
-				"memory_write",
-				"harness",
-				context.harnessUserId,
-				context.conversationId,
-				context.getTurn(),
-				{
+			const ledgerEntry = await context.ledger.append({
+				kind: "memory_write",
+				// The model emitted this tool call; the write is its decision.
+				actor: "agent",
+				scope: "harness",
+				userId: context.harnessUserId,
+				conversationId: context.conversationId,
+				turn: context.getTurn(),
+				data: {
 					memory_id: response.id,
 					memory_type: memoryType,
 					content_preview: params.learning.slice(0, 200),
 					trigger: "model_tool_call",
 				},
-			);
+			});
 			context.emit({
 				type: "memory_write",
 				scope: "harness",

@@ -646,10 +646,20 @@ export class Conversation {
 			// ledger would stay empty. Found by the lessons A/B eval.
 			const fb = response.feedback_processed;
 			if (fb && (fb.reinforced.length > 0 || fb.weakened.length > 0)) {
-				await this.deps.ledger.append("implicit_feedback", "user", this.userId, this.id, this.turn, {
-					memories_evaluated: fb.memories_evaluated,
-					reinforced: fb.reinforced,
-					weakened: fb.weakened,
+				await this.deps.ledger.append({
+					kind: "implicit_feedback",
+					// The backend's momentum pass: neither the human nor the model
+					// asked for it, it runs on every proactive round-trip.
+					actor: "system",
+					scope: "user",
+					userId: this.userId,
+					conversationId: this.id,
+					turn: this.turn,
+					data: {
+						memories_evaluated: fb.memories_evaluated,
+						reinforced: fb.reinforced,
+						weakened: fb.weakened,
+					},
 				});
 			}
 
@@ -868,11 +878,17 @@ export class Conversation {
 		const scopeUserId = scope === "user" ? this.userId : this.harnessUserId;
 		try {
 			const stats = await this.deps.backend.reinforce(scopeUserId, memoryIds, outcome);
-			const ledgerEntry = await this.deps.ledger.append("reinforce", scope, scopeUserId, this.id, this.turn, {
-				outcome,
-				memory_ids: memoryIds,
-				trigger,
-				stats,
+			const ledgerEntry = await this.deps.ledger.append({
+				kind: "reinforce",
+				// Every trigger that reaches here (citation, response_overlap,
+				// negative_followup, revert) is computed by the seat's own
+				// deterministic loop, not requested by the model or the human.
+				actor: "system",
+				scope,
+				userId: scopeUserId,
+				conversationId: this.id,
+				turn: this.turn,
+				data: { outcome, memory_ids: memoryIds, trigger, stats },
 			});
 			this.emit({
 				type: "memory_reinforce",
@@ -987,19 +1003,22 @@ export class Conversation {
 				memoryType,
 				tags,
 			});
-			const ledgerEntry = await this.deps.ledger.append(
-				"memory_write",
-				"harness",
-				this.harnessUserId,
-				this.id,
-				this.turn,
-				{
+			const ledgerEntry = await this.deps.ledger.append({
+				kind: "memory_write",
+				// Deterministic capture rule (empty recall / tool error) fired by
+				// the seat itself — the model never chose to write this.
+				actor: "system",
+				scope: "harness",
+				userId: this.harnessUserId,
+				conversationId: this.id,
+				turn: this.turn,
+				data: {
 					memory_id: response.id,
 					memory_type: memoryType,
 					content_preview: content.slice(0, 200),
 					trigger,
 				},
-			);
+			});
 			this.emit({
 				type: "memory_write",
 				scope: "harness",

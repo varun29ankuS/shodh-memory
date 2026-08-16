@@ -64,6 +64,36 @@ export interface StoredEvent {
 	event: SeatEvent;
 }
 
+/**
+ * A durable event carrying the conversation and user it belongs to, for reads
+ * that span conversations. `listEvents` can omit both because the caller
+ * already named the conversation; an audit read cannot.
+ */
+export interface StoredEventRow extends StoredEvent {
+	conversation_id: string;
+	user_id: string;
+}
+
+/**
+ * Filter for {@link SeatStore.queryEvents}. Every field narrows; omitting all
+ * of them reads the whole store, which is why `limit` has a default.
+ */
+export interface EventQuery {
+	/** Backend user namespace, as recorded on the conversation. */
+	userId?: string;
+	conversationId?: string;
+	/** SeatEvent `type` values to include. Empty or omitted means every type. */
+	types?: readonly SeatEvent["type"][];
+	/** ISO-8601 UTC, inclusive lower bound on the event timestamp. */
+	since?: string;
+	/** ISO-8601 UTC, exclusive upper bound on the event timestamp. */
+	until?: string;
+	limit?: number;
+}
+
+/** Default read ceiling for {@link SeatStore.queryEvents}. */
+export const DEFAULT_EVENT_QUERY_LIMIT = 5000;
+
 /** Event types that are NOT persisted: their content is transient (deltas are
  *  superseded by the transcript's final text). Everything else is durable. */
 const TRANSIENT_EVENT_TYPES = new Set<SeatEvent["type"]>(["text_delta", "thinking_delta"]);
@@ -194,6 +224,12 @@ export class SeatStore {
 			);
 			CREATE INDEX IF NOT EXISTS idx_events_conversation
 				ON events (conversation_id, id);
+			-- Audit reads scan by type and by time ACROSS conversations, which the
+			-- conversation-keyed index above cannot serve.
+			CREATE INDEX IF NOT EXISTS idx_events_type_ts
+				ON events (type, ts);
+			CREATE INDEX IF NOT EXISTS idx_events_ts
+				ON events (ts);
 		`);
 	}
 
@@ -277,6 +313,82 @@ export class SeatStore {
 			.prepare(`SELECT turn, ts, payload FROM events WHERE conversation_id = ? ORDER BY id`)
 			.all(conversationId) as unknown as { turn: number; ts: string; payload: string }[];
 		return rows.map((row) => ({
+			turn: row.turn,
+			ts: row.ts,
+			event: JSON.parse(row.payload) as SeatEvent,
+		}));
+	}
+
+	/**
+	 * Durable events across conversations, oldest first.
+	 *
+	 * `listEvents` answers "what happened in this conversation"; this answers
+	 * "what happened, full stop" — the question an audit read asks and the one
+	 * the conversation-keyed path could not answer at all. The join onto
+	 * `conversations` supplies the user namespace, which the events table does
+	 * not carry (it is a property of the conversation, not of each event).
+	 *
+	 * Ordering is `ts, id`: event timestamps are `Date.toISOString()`, so UTC
+	 * with a fixed-width millisecond field, and lexicographic order over those
+	 * is chronological order. `id` breaks same-millisecond ties by insertion,
+	 * making the sequence total and the read repeatable.
+	 *
+	 * `limit` keeps the MOST RECENT matches (selected descending, returned
+	 * ascending). Keeping the oldest instead would truncate a window at its
+	 * newest edge, which for tool calls means retaining a `tool_call_start`
+	 * while cutting its `tool_call_end` — rendering a call that completed as
+	 * one that never returned. A dropped call is a visible gap; a fabricated
+	 * hang is a false statement.
+	 */
+	queryEvents(query: EventQuery = {}): StoredEventRow[] {
+		const conditions: string[] = [];
+		const params: (string | number)[] = [];
+		if (query.userId !== undefined) {
+			conditions.push("c.user_id = ?");
+			params.push(query.userId);
+		}
+		if (query.conversationId !== undefined) {
+			conditions.push("e.conversation_id = ?");
+			params.push(query.conversationId);
+		}
+		if (query.types !== undefined && query.types.length > 0) {
+			conditions.push(`e.type IN (${query.types.map(() => "?").join(", ")})`);
+			params.push(...query.types);
+		}
+		if (query.since !== undefined) {
+			conditions.push("e.ts >= ?");
+			params.push(query.since);
+		}
+		if (query.until !== undefined) {
+			conditions.push("e.ts < ?");
+			params.push(query.until);
+		}
+		const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+		params.push(query.limit ?? DEFAULT_EVENT_QUERY_LIMIT);
+
+		const rows = this.db
+			.prepare(
+				`SELECT * FROM (
+					 SELECT e.id AS event_id, e.conversation_id, c.user_id, e.turn, e.ts, e.payload
+					 FROM events e
+					 JOIN conversations c ON c.conversation_id = e.conversation_id
+					 ${where}
+					 ORDER BY e.ts DESC, e.id DESC
+					 LIMIT ?
+				 )
+				 ORDER BY ts, event_id`,
+			)
+			.all(...params) as unknown as {
+			conversation_id: string;
+			user_id: string;
+			turn: number;
+			ts: string;
+			payload: string;
+		}[];
+
+		return rows.map((row) => ({
+			conversation_id: row.conversation_id,
+			user_id: row.user_id,
 			turn: row.turn,
 			ts: row.ts,
 			event: JSON.parse(row.payload) as SeatEvent,

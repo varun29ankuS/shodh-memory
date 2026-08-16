@@ -43,6 +43,13 @@ import {
 	type MemoryMechanisms,
 	UnknownModelError,
 } from "./conversation.js";
+import {
+	AUDIT_EVENT_TYPES,
+	buildAuditRows,
+	pairToolCalls,
+	toCsv,
+	toJsonl,
+} from "./audit.js";
 import type { SeatEvent } from "./events.js";
 import { LedgerError, type LearningLedger } from "./ledger.js";
 import { type McpHost, UnknownMcpServerError } from "./mcp.js";
@@ -63,6 +70,14 @@ import {
 
 const MAX_BODY_BYTES = 1_048_576;
 const SSE_HEARTBEAT_MS = 15_000;
+/**
+ * Event ceiling for one audit export. The whole body is built in memory before
+ * the first byte is written (Content-Length is required for the browser to show
+ * a download with a size), so this bounds peak memory. A window that hits the
+ * ceiling is narrowed with `since`/`until`, and the `X-Audit-Rows` header lets
+ * a caller see that it did.
+ */
+const MAX_AUDIT_EXPORT_EVENTS = 50_000;
 
 interface CreateConversationBody {
 	user_id?: string;
@@ -420,6 +435,14 @@ export class SeatServer {
 		}
 		if (method === "POST" && url.pathname === "/v1/learning/revert") {
 			await this.handleRevert(request, response);
+			return;
+		}
+		if (method === "GET" && url.pathname === "/v1/audit/tool-calls") {
+			this.handleToolCalls(url, response);
+			return;
+		}
+		if (method === "GET" && url.pathname === "/v1/audit/export") {
+			await this.handleAuditExport(url, response);
 			return;
 		}
 
@@ -832,11 +855,95 @@ export class SeatServer {
 		}
 	}
 
+	/**
+	 * Shared query parsing for the audit routes. Rejects a malformed timestamp
+	 * rather than coercing it: `since=yesterday` silently becoming "no lower
+	 * bound" would hand a reviewer a wider window than they asked for while
+	 * looking like it worked.
+	 */
+	private auditWindow(url: URL): { userId?: string; conversationId?: string; since?: string; until?: string } {
+		const window: { userId?: string; conversationId?: string; since?: string; until?: string } = {};
+		const userId = url.searchParams.get("user_id");
+		if (userId) window.userId = userId;
+		const conversationId = url.searchParams.get("conversation_id");
+		if (conversationId) window.conversationId = conversationId;
+		for (const bound of ["since", "until"] as const) {
+			const raw = url.searchParams.get(bound);
+			if (!raw) continue;
+			const parsed = new Date(raw);
+			if (Number.isNaN(parsed.getTime())) {
+				throw new HttpError(400, `${bound} must be an ISO-8601 timestamp, got "${raw}"`);
+			}
+			window[bound] = parsed.toISOString();
+		}
+		return window;
+	}
+
+	/**
+	 * Tool calls across every conversation, newest window first — the read the
+	 * event store could not previously serve, because `listEvents` requires a
+	 * conversation id and a reviewer asking "when was this tool used" does not
+	 * have one.
+	 */
+	private handleToolCalls(url: URL, response: http.ServerResponse): void {
+		const window = this.auditWindow(url);
+		const limitParam = url.searchParams.get("limit");
+		const limit = limitParam ? Number.parseInt(limitParam, 10) : 500;
+		if (!Number.isFinite(limit) || limit <= 0 || limit > 10000) {
+			throw new HttpError(400, "limit must be an integer in [1, 10000]");
+		}
+		const toolName = url.searchParams.get("tool_name") ?? undefined;
+		// Two event rows per call, so the row budget is doubled to keep `limit`
+		// meaning "calls" rather than "half as many calls as you asked for".
+		const events = this.deps.store.queryEvents({
+			...window,
+			types: ["tool_call_start", "tool_call_end"],
+			limit: limit * 2,
+		});
+		const all = pairToolCalls(events);
+		const calls = toolName ? all.filter((call) => call.tool_name === toolName) : all;
+		sendJson(response, 200, { tool_calls: calls.slice(0, limit) });
+	}
+
+	/**
+	 * The audit trail as a file: ledger + tool calls + retrievals, one sorted
+	 * stream, JSONL or CSV.
+	 *
+	 * Served as an attachment because the artefact is the point — this is what
+	 * gets handed to a reviewer, and a trail that can only be read inside the
+	 * UI that produced it is not evidence.
+	 */
+	private async handleAuditExport(url: URL, response: http.ServerResponse): Promise<void> {
+		const format = url.searchParams.get("format") ?? "jsonl";
+		if (format !== "jsonl" && format !== "csv") {
+			throw new HttpError(400, `format must be "jsonl" or "csv", got "${format}"`);
+		}
+		const window = this.auditWindow(url);
+		const [entries, events] = [
+			await this.deps.ledger.query(window),
+			this.deps.store.queryEvents({ ...window, types: AUDIT_EVENT_TYPES, limit: MAX_AUDIT_EXPORT_EVENTS }),
+		];
+		const rows = buildAuditRows({ entries, events });
+		const body = format === "csv" ? toCsv(rows) : toJsonl(rows);
+		const stamp = new Date().toISOString().replaceAll(":", "-").slice(0, 19);
+		response.writeHead(200, {
+			"Content-Type": format === "csv" ? "text/csv; charset=utf-8" : "application/x-ndjson; charset=utf-8",
+			"Content-Length": Buffer.byteLength(body),
+			"Content-Disposition": `attachment; filename="shodh-audit-${stamp}.${format}"`,
+			// The count is in a header so a caller can detect the ceiling below
+			// without parsing the body.
+			"X-Audit-Rows": String(rows.length),
+		});
+		response.end(body);
+	}
+
 	private async handleRevert(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
 		const body = parseJson<{ event_id?: string }>(await readBody(request));
 		if (!body.event_id || typeof body.event_id !== "string") throw new HttpError(400, "event_id is required");
 		try {
-			const revertEntry = await this.deps.ledger.revert(body.event_id, this.deps.backend);
+			// This route is only reachable by a human driving the seat's HTTP
+			// surface (the UI's Revert control); no seat loop calls it.
+			const revertEntry = await this.deps.ledger.revert(body.event_id, this.deps.backend, "user");
 			sendJson(response, 200, { revert: revertEntry });
 		} catch (error) {
 			if (error instanceof LedgerError) throw new HttpError(409, error.message);

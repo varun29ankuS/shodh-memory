@@ -130,6 +130,50 @@ Revert semantics are honest about what the backend supports:
   so;
 - neutral reinforcements record access only; nothing to compensate.
 
+Every entry carries an `actor` — `agent` (the model emitted the tool call),
+`system` (an automatic seat loop: citation/overlap/negative-followup
+reinforcement, the backend's implicit-feedback pass, a deterministic harness
+capture) or `user` (a human acting through the HTTP surface, today only
+`POST /v1/learning/revert`). This is orthogonal to `scope`, which names the
+memory namespace touched, not the initiator; an `actor: "agent"`,
+`scope: "user"` entry is the model writing into the human's memory.
+
+Entries appended before `actor` existed have no such field and are **not**
+backfilled — inferring an actor after the fact and recording it as fact is the
+kind of invention an audit log exists to prevent. The read path reports them
+as `unknown`.
+
+## Audit trail
+
+The ledger records *changes to memory state*. Two other things a reviewer needs
+are recorded elsewhere and were previously readable only one conversation at a
+time: which tool ran when (`tool_call_start`/`tool_call_end`) and what was
+retrieved with what scores (`memory_recall`, `proactive_context`). Both live in
+the `events` table of `<data-dir>/seat.db`, persisted atomically at the end of
+each turn — so an aborted process loses at most the turn in flight.
+
+`GET /v1/audit/export` merges all three into one trail, sorted by
+`(ts, source, ref)`. That is a total order, so exporting the same window twice
+is byte-identical and two exports can be diffed. Row shape:
+
+| column | meaning |
+|---|---|
+| `ts` | ISO-8601 UTC |
+| `source` | `ledger`, `tool_call` or `retrieval` |
+| `actor` | `user` / `agent` / `system` / `unknown` |
+| `kind` | ledger kind, tool name, or event type |
+| `user_id`, `conversation_id`, `turn` | where it happened |
+| `ref` | ledger entry id, tool call id, or memory-operation identity |
+| `detail` | JSON: tool arguments and duration, or the scored result set |
+
+A tool call that never returned is kept with `ended_at`, `duration_ms` and
+`is_error` all null — an invoked-and-never-returned tool is exactly what a
+reviewer is looking for, and `is_error: false` would assert a success that
+never happened.
+
+Recorded tool-call `detail` holds the arguments, not the result: results are
+forwarded to the backend's feedback pass and are not persisted seat-side.
+
 ## HTTP API
 
 | Method | Path | Body / notes |
@@ -152,6 +196,8 @@ Revert semantics are honest about what the backend supports:
 | PATCH | `/v1/conversations/{id}/model` | `{provider, model}` — swap model mid-conversation; transcript and retrieved evidence unchanged |
 | GET | `/v1/learning/events?limit&conversation_id` | ledger review |
 | POST | `/v1/learning/revert` | `{event_id}` |
+| GET | `/v1/audit/tool-calls?user_id&conversation_id&tool_name&since&until&limit` | tool invocations across every conversation, start/end joined into one record with a duration |
+| GET | `/v1/audit/export?format=jsonl\|csv&user_id&conversation_id&since&until` | the merged audit trail as a downloadable file; `X-Audit-Rows` carries the row count |
 
 SSE event types: `turn_start`, `text_delta`, `thinking_delta`,
 `tool_call_start`, `tool_call_end`, `memory_recall`, `proactive_context`,

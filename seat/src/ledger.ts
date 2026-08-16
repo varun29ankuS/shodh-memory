@@ -68,6 +68,40 @@ export interface ImplicitFeedbackData {
 	weakened: string[];
 }
 
+/**
+ * Who caused this entry to exist. Distinct from `scope`, which says WHICH
+ * memory namespace was touched — the two are orthogonal and both spell "user",
+ * so they are never passed positionally (see `LedgerAppendInput`).
+ *
+ * - `agent`  — the model chose it: a tool call it emitted (remember_memory,
+ *              record_seat_learning). Attributable to the model's decision.
+ * - `system` — an automatic seat loop with no decision by either party: the
+ *              citation/overlap/negative-followup reinforcements, the backend's
+ *              implicit-feedback pass, the deterministic harness captures.
+ * - `user`   — a human acted through the seat's HTTP surface, which today means
+ *              POST /v1/learning/revert.
+ *
+ * "Who did what" is unanswerable without this, and it cannot be recovered after
+ * the fact: `trigger` is a good proxy for some kinds and absent on others.
+ */
+export type LedgerActor = "user" | "agent" | "system";
+
+/**
+ * Read-side actor, widened for entries written before `actor` existed. Those
+ * are NOT backfilled — inferring an actor for a historical entry and writing it
+ * down as fact is exactly the kind of invention an audit log exists to prevent.
+ * They report "unknown" and a reviewer can see the gap.
+ */
+export type LedgerActorView = LedgerActor | "unknown";
+
+const KNOWN_ACTORS: ReadonlySet<string> = new Set<LedgerActor>(["user", "agent", "system"]);
+
+/** The entry's actor, or "unknown" for a legacy or corrupt value. */
+export function entryActor(entry: LedgerEntry): LedgerActorView {
+	const actor = (entry as { actor?: unknown }).actor;
+	return typeof actor === "string" && KNOWN_ACTORS.has(actor) ? (actor as LedgerActor) : "unknown";
+}
+
 export type LedgerEntry =
 	| LedgerEntryBase<"memory_write", MemoryWriteData>
 	| LedgerEntryBase<"reinforce", ReinforceData>
@@ -78,6 +112,8 @@ interface LedgerEntryBase<K extends string, D> {
 	id: string;
 	ts: string;
 	kind: K;
+	/** Who initiated this update. Absent on entries written before it existed. */
+	actor: LedgerActor;
 	scope: MemoryScope;
 	/** The actual backend user_id the operation ran against (harness scope uses the derived namespace). */
 	user_id: string;
@@ -86,9 +122,36 @@ interface LedgerEntryBase<K extends string, D> {
 	data: D;
 }
 
+/**
+ * One append. An object rather than positional arguments because `actor` and
+ * `scope` are adjacent, both string enums, and both admit the literal "user" —
+ * positionally they are silently swappable, and a swapped audit attribution is
+ * worse than no audit attribution.
+ */
+export interface LedgerAppendInput<K extends LedgerEntry["kind"]> {
+	kind: K;
+	actor: LedgerActor;
+	scope: MemoryScope;
+	userId: string;
+	conversationId: string;
+	turn: number;
+	data: Extract<LedgerEntry, { kind: K }>["data"];
+}
+
 export interface LedgerEntryView {
 	entry: LedgerEntry;
 	reverted_by?: string;
+}
+
+/** Filter for {@link LearningLedger.query}. Every field narrows. */
+export interface LedgerQuery {
+	/** The backend namespace the entry ran against (`user_id`, not the actor). */
+	userId?: string;
+	conversationId?: string;
+	/** ISO-8601 UTC, inclusive lower bound on `ts`. */
+	since?: string;
+	/** ISO-8601 UTC, exclusive upper bound on `ts`. */
+	until?: string;
 }
 
 export class LedgerError extends Error {
@@ -112,23 +175,17 @@ export class LearningLedger {
 		return this.filePath;
 	}
 
-	async append<K extends LedgerEntry["kind"]>(
-		kind: K,
-		scope: MemoryScope,
-		userId: string,
-		conversationId: string,
-		turn: number,
-		data: Extract<LedgerEntry, { kind: K }>["data"],
-	): Promise<LedgerEntry> {
+	async append<K extends LedgerEntry["kind"]>(input: LedgerAppendInput<K>): Promise<LedgerEntry> {
 		const entry = {
 			id: crypto.randomUUID(),
 			ts: new Date().toISOString(),
-			kind,
-			scope,
-			user_id: userId,
-			conversation_id: conversationId,
-			turn,
-			data,
+			kind: input.kind,
+			actor: input.actor,
+			scope: input.scope,
+			user_id: input.userId,
+			conversation_id: input.conversationId,
+			turn: input.turn,
+			data: input.data,
 		} as LedgerEntry;
 
 		const write = this.writeChain.then(() => fsp.appendFile(this.filePath, `${JSON.stringify(entry)}\n`, "utf8"));
@@ -179,6 +236,28 @@ export class LearningLedger {
 			}));
 	}
 
+	/**
+	 * Entries matching a filter, oldest first — the read the audit export needs.
+	 *
+	 * Distinct from {@link list}, which is the UI's review feed: newest-first,
+	 * limit-capped, and annotated with `reverted_by`. An export wants the raw
+	 * append order over a time window, unannotated and uncapped, because a
+	 * silently truncated audit trail is worse than none.
+	 *
+	 * `since` is inclusive and `until` exclusive, compared as strings: `ts` is
+	 * `Date.toISOString()`, so lexicographic order is chronological order.
+	 */
+	async query(options: LedgerQuery = {}): Promise<LedgerEntry[]> {
+		const entries = await this.readAll();
+		return entries.filter((entry) => {
+			if (options.userId !== undefined && entry.user_id !== options.userId) return false;
+			if (options.conversationId !== undefined && entry.conversation_id !== options.conversationId) return false;
+			if (options.since !== undefined && entry.ts < options.since) return false;
+			if (options.until !== undefined && entry.ts >= options.until) return false;
+			return true;
+		});
+	}
+
 	async get(id: string): Promise<LedgerEntryView | undefined> {
 		const entries = await this.readAll();
 		const entry = entries.find((candidate) => candidate.id === id);
@@ -192,8 +271,12 @@ export class LearningLedger {
 	/**
 	 * Revert a learning event by applying its compensating action through the
 	 * backend, then recording the revert as a new ledger event.
+	 *
+	 * `actor` is required rather than defaulted: the revert entry attributes a
+	 * deliberate corrective action, and the only caller that knows whether a
+	 * human or an automated policy asked for it is the one making the call.
 	 */
-	async revert(id: string, backend: ShodhBackend): Promise<LedgerEntry> {
+	async revert(id: string, backend: ShodhBackend, actor: LedgerActor): Promise<LedgerEntry> {
 		const view = await this.get(id);
 		if (!view) throw new LedgerError(`Unknown ledger event: ${id}`);
 		if (view.reverted_by) throw new LedgerError(`Event ${id} was already reverted by ${view.reverted_by}`);
@@ -256,10 +339,14 @@ export class LearningLedger {
 			}
 		}
 
-		return this.append("revert", original.scope, original.user_id, original.conversation_id, original.turn, {
-			of: original.id,
-			compensation,
-			note,
+		return this.append({
+			kind: "revert",
+			actor,
+			scope: original.scope,
+			userId: original.user_id,
+			conversationId: original.conversation_id,
+			turn: original.turn,
+			data: { of: original.id, compensation, note },
 		});
 	}
 }
