@@ -1,7 +1,7 @@
 import { feature, mesh } from "topojson-client";
 import type { Topology, GeometryCollection } from "topojson-specification";
 import { geoContains, type GeoPermissibleObjects } from "d3";
-import worldTopology from "@/assets/world-countries-110m.json";
+import worldTopology from "@/assets/world-countries-50m.json";
 // India's national boundary from the Local Government Directory, via
 // bharatlas.com — see india-boundary-LICENSE.txt beside it for provenance, the
 // licence, and the extent check performed before adopting it.

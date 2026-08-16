@@ -24,9 +24,20 @@ import { LAND, BORDERS, INDIA } from "@/lib/atlas";
  * reason vite.config.ts inlines every asset; a map that fetched tiles would
  * break that guarantee the first time it ran somewhere without egress, and
  * quietly leak the fact that someone is looking at a place. The basemap is
- * therefore vendored: src/assets/world-countries-110m.json, Natural Earth
- * 1:110m via world-atlas (its licence sits beside it), 107.7 kB of quantised
+ * therefore vendored: src/assets/world-countries-50m.json, Natural Earth
+ * 1:50m via world-atlas (its licence sits beside it), 756 kB of quantised
  * TopoJSON decoded in-process.
+ *
+ * 1:50m, not 1:110m, and not 1:10m. The map is fitted to the CORPUS, so a
+ * regional view is the normal case, and 110m is a world dataset -- 8,246
+ * points for the whole planet, which renders Sri Lanka and the Gujarat coast
+ * as visible facets at India zoom. 50m carries 80,617 points, ten times the
+ * detail for seven times the bytes.
+ *
+ * 10m exists (477,295 points, 3.66 MB) and was rejected on render cost rather
+ * than size: this canvas repaints the entire basemap on every pan and zoom
+ * frame, and half a million points per frame drops frames on the one surface
+ * most likely to be driven live in front of someone.
  *
  * Equal Earth, not Mercator. This is an analyst surface where the question is
  * "where did this happen and what else is near it"; Mercator inflates high
@@ -177,6 +188,18 @@ export function GeoMap({
      */
     const MIN_SPAN_DEGREES = 4;
 
+    /** How far out the zoom may go, recomputed on every fit.
+     *
+     *  The projection is fitted to the DATA, so k=1 is the corpus, not the
+     *  planet — with a floor of 1 there was simply nothing below the opening
+     *  view and the world was unreachable. A corpus spanning 30 degrees needs
+     *  to shrink about twelvefold before Asia is on screen, so the floor is
+     *  derived from the span rather than guessed: k = span/360 puts the whole
+     *  world in the frame. A corpus that already spans the globe gets a floor
+     *  of 1, because it is showing the world at rest and there is nothing
+     *  further out to see. */
+    const minScaleRef = { current: 1 };
+
     /** The longitude to put under the central meridian.
      *
      *  Read off the same object that is about to be fitted, so the centring
@@ -275,6 +298,16 @@ export function GeoMap({
          projected result and a later rotate would invalidate it. */
       const centre = fitTarget();
       projection.rotate([-fitCentreLon(centre), 0]);
+
+      {
+        const [[west, south], [east, north]] = geoBounds(centre as never);
+        const lonSpan = east < west ? east + 360 - west : east - west;
+        // Latitude counts too: a tall, narrow corpus is just as far from a
+        // world view as a wide one, and the binding axis is whichever fills
+        // the frame first.
+        const span = Math.max(lonSpan || 360, (north - south) * 2 || 360);
+        minScaleRef.current = Math.min(1, Math.max(0.01, span / 360));
+      }
       projection.fitExtent(
         [
           [12, 12],
@@ -397,7 +430,7 @@ export function GeoMap({
     draw();
 
     const zoomBehavior = zoom<HTMLCanvasElement, unknown>()
-      .scaleExtent([1, 24])
+      .scaleExtent([minScaleRef.current, 24])
       .on("zoom", (event) => {
         transformRef.current = event.transform;
         draw();
@@ -407,6 +440,7 @@ export function GeoMap({
 
     const observer = new ResizeObserver(() => {
       sizeCanvas();
+      zoomBehavior.scaleExtent([minScaleRef.current, 24]);
       draw();
     });
     observer.observe(wrap);

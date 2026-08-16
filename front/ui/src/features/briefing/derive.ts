@@ -305,7 +305,22 @@ export interface Places {
  * fine, so it is dropped from every figure including the located count.
  */
 export function places(memories: CorpusMemory[]): Places {
-  const bucket = new Map<string, { lon: number; lat: number; count: number }>();
+  /* The quantised position is for GROUPING DOTS. It must never decide which
+     country a memory is in.
+
+     Rounding to a site grid moves a coastal point by up to half a cell, which
+     is enough to push San Francisco into the Pacific — so the lookup returned
+     open water and the memory vanished from the country tally. It survived
+     only because the 1:110m basemap's coastline was blocky enough to still
+     contain the moved point; the 1:50m coastline is accurate and correctly
+     says that spot is sea. A latent bug that a better basemap exposed.
+
+     So each bucket keeps a REPRESENTATIVE TRUE COORDINATE — the first real one
+     that landed in it — and every geometric question is asked of that. */
+  const bucket = new Map<
+    string,
+    { lon: number; lat: number; count: number; trueLon: number; trueLat: number }
+  >();
   let located = 0;
 
   for (const m of memories) {
@@ -320,7 +335,7 @@ export function places(memories: CorpusMemory[]): Places {
     const key = `${qlat.toFixed(2)},${qlon.toFixed(2)}`;
     const at = bucket.get(key);
     if (at) at.count += 1;
-    else bucket.set(key, { lon: qlon, lat: qlat, count: 1 });
+    else bucket.set(key, { lon: qlon, lat: qlat, count: 1, trueLon: lon, trueLat: lat });
   }
 
   const sites = [...bucket.values()].sort((a, b) => b.count - a.count);
@@ -329,11 +344,11 @@ export function places(memories: CorpusMemory[]): Places {
   const indiaSites: DotMapPoint[] = [];
   let inIndia = 0;
   for (const s of sites) {
-    if (isInIndia(s.lon, s.lat)) {
+    if (isInIndia(s.trueLon, s.trueLat)) {
       indiaSites.push(s);
       inIndia += s.count;
     }
-    const name = countryAt(s.lon, s.lat);
+    const name = countryAt(s.trueLon, s.trueLat);
     if (name) byCountry.set(name, (byCountry.get(name) ?? 0) + s.count);
   }
 
