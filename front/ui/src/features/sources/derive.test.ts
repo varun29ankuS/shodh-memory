@@ -188,7 +188,13 @@ describe("formatRecorded", () => {
 
   it("gives whole minutes below an hour", () => {
     expect(formatRecorded(1800)).toBe("30m");
-    expect(formatRecorded(3599)).toBe("60m");
+    expect(formatRecorded(3540)).toBe("59m");
+  });
+
+  it("crosses into hours on the minute it rounds to, not on the second", () => {
+    // 3599s rounds to 60 minutes, and "60m" is an hour written as a
+    // non-hour. The branch is taken on the number the reader is shown.
+    expect(formatRecorded(3599)).toBe("1.0h");
   });
 
   it("never rounds a real total down to zero minutes", () => {
@@ -225,6 +231,15 @@ describe("formatSessionLength", () => {
 
   it("drops the minutes when there are none", () => {
     expect(formatSessionLength(7200)).toBe("2h");
+  });
+
+  it("never prints sixty minutes past an hour", () => {
+    // 7170s is 1h 59m 30s. Splitting the raw seconds and rounding the
+    // remainder gives Math.round(3570 / 60) = 60, and the row reads "1h 60m" —
+    // a duration no clock shows, sitting in a list whose whole job is to be
+    // checkable against when someone remembers working.
+    expect(formatSessionLength(7170)).toBe("2h");
+    expect(formatSessionLength(7169)).toBe("1h 59m");
   });
 });
 

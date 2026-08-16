@@ -157,7 +157,22 @@ export function readSessions(
  * WORDS AND FIGURES
  * ------------------------------------------------------------------ */
 
+const MINUTE_SECS = 60;
 const HOUR_SECS = 3600;
+
+/**
+ * Whole minutes, and the reason both formatters below start here.
+ *
+ * ROUNDING BEFORE SPLITTING, NOT AFTER. Deciding "is this under an hour" on the
+ * raw seconds and rounding inside each branch puts a seam at every boundary: a
+ * 1h59m30s session split first gives `Math.round(3570 / 60)` = 60 and prints
+ * "1h 60m", and a 3599-second total prints "60m" rather than an hour. Rounding
+ * once, up front, means the branch below is taken on the same number the reader
+ * is shown.
+ */
+function wholeMinutes(seconds: number): number {
+  return Math.round(seconds / MINUTE_SECS);
+}
 
 /**
  * A span of recorded session time, or null when nothing reported one.
@@ -173,7 +188,8 @@ const HOUR_SECS = 3600;
  */
 export function formatRecorded(seconds: number): string | null {
   if (!Number.isFinite(seconds) || seconds <= 0) return null;
-  if (seconds < HOUR_SECS) return `${Math.max(1, Math.round(seconds / 60))}m`;
+  const minutes = wholeMinutes(seconds);
+  if (minutes < 60) return `${Math.max(1, minutes)}m`;
   return `${(seconds / HOUR_SECS).toFixed(1)}h`;
 }
 
@@ -188,10 +204,11 @@ export function formatRecorded(seconds: number): string | null {
  */
 export function formatSessionLength(seconds: number | null): string | null {
   if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return null;
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  if (seconds < HOUR_SECS) return `${Math.round(seconds / 60)}m`;
-  const hours = Math.floor(seconds / HOUR_SECS);
-  const minutes = Math.round((seconds % HOUR_SECS) / 60);
+  if (seconds < MINUTE_SECS) return `${Math.round(seconds)}s`;
+  const total = wholeMinutes(seconds);
+  if (total < 60) return `${total}m`;
+  const hours = Math.floor(total / 60);
+  const minutes = total % 60;
   return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
 }
 

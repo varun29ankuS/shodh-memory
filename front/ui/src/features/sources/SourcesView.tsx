@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { FileInput, Terminal, type LucideIcon } from "lucide-react";
 import { ApiError, NetworkError, type Reachability } from "@/lib/api";
 import { useSession } from "@/stores/session";
-import { longAgo } from "@/features/briefing/derive";
+import { longAgo, shortAgo } from "@/features/briefing/derive";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InfoHint } from "@/components/ui/info-hint";
 import { Meta, Stat } from "@/components/ui/meta";
@@ -164,12 +164,19 @@ function RecentSessions({ entries, now }: { entries: readonly SessionHistoryEntr
             key={index}
             className="flex items-baseline gap-2.5"
           >
+            {/* `shortAgo`, not `longAgo`, and the column width is why: this is
+                the right-hand-gutter position that form was written for
+                (features/briefing/derive.ts). A profile last worked on in April
+                gives "137 days ago", which wraps a fixed gutter on every row of
+                a stale profile — the one case where these rows matter most. The
+                exact instant stays on `title`, and the sentence above the list,
+                which has a whole line, keeps the spelled-out form. */}
             <time
               dateTime={entry.created_at}
               title={entry.created_at}
-              className="text-muted-foreground mono w-[76px] shrink-0 text-[11px]"
+              className="text-muted-foreground mono w-[42px] shrink-0 text-[11px]"
             >
-              {longAgo(entry.created_at, now) ?? entry.created_at}
+              {shortAgo(entry.created_at, now) ?? "—"}
             </time>
             <Meta className="min-w-0 flex-1">
               {length ? <Stat value={length} label="session" /> : null}

@@ -31,8 +31,11 @@ import { api } from "@/lib/api";
  *     itself (src/handlers/sessions.rs) — so a 20-row read of `source:hook`
  *     against the live server returned nothing newer than June for a profile
  *     written to that morning. And it serialises the full internal `Memory`,
- *     embeddings included: those 20 rows were 273KB, which puts an honest
- *     answer at roughly 250MB over the wire.
+ *     embeddings included: those 20 rows were 273KB — 13.7KB each — so reading
+ *     enough of an 18,032-memory profile to find its true newest row is a
+ *     hundred megabytes and up, depending on what share of it the hook wrote.
+ *     That share was never counted, which is itself the point: there is no
+ *     endpoint that would count it without the same download.
  *
  *   - `GET /api/list/{user}?query=...`. `query` is a case-insensitive substring
  *     over content AND tags (src/handlers/crud.rs), and a session summary's
