@@ -32,7 +32,7 @@ use crate::validation;
 ///
 /// Same validation and cap as the merged list, so a caller cannot use this field
 /// to smuggle in oversized or malformed names.
-fn declared_entities_from(tags: &[String]) -> Vec<String> {
+pub(crate) fn declared_entities_from(tags: &[String]) -> Vec<String> {
     let mut declared: Vec<String> = Vec::with_capacity(tags.len());
     let mut seen: HashSet<String> = HashSet::with_capacity(tags.len());
     for tag in tags {
