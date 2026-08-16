@@ -43,21 +43,69 @@ function stageFor(memories: readonly { experience: { geo_location?: unknown } }[
   return memories.some((m) => m.experience.geo_location) ? "/geo" : "/graph";
 }
 
-/** Case-folded, de-duplicated, order-preserving. Retrieval order is relevance
- *  order, so the cap keeps the front of the list rather than a sorted slice. */
-function entityTerms(facts: readonly { related_entities: string[] }[]): string[] {
+/**
+ * Words that name nothing.
+ *
+ * Function words and question scaffolding only — deliberately NOT domain nouns.
+ * A stop list that starts removing "aircraft" or "programme" because they match
+ * a lot is a list that decides what the corpus is about, and it will be wrong
+ * on the next corpus. Terms under three characters are dropped by the matcher
+ * itself, so nothing here needs to repeat "of", "to", "in" or "is".
+ */
+const STOP_WORDS = new Set([
+  "the", "and", "for", "any", "all", "are", "was", "were", "been", "being",
+  "what", "when", "where", "which", "who", "whom", "whose", "how", "why",
+  "did", "does", "done", "has", "have", "had", "can", "could", "should",
+  "would", "will", "shall", "may", "might", "must", "about", "with", "from",
+  "into", "over", "under", "between", "this", "that", "these", "those",
+  "their", "them", "they", "there", "here", "its", "our", "your", "more",
+  "most", "than", "then", "some", "such", "know", "tell", "show", "find",
+]);
+
+/**
+ * The terms a cue matches on.
+ *
+ * TWO SOURCES, AND THE SECOND IS NOT A FALLBACK — it is the one that works.
+ * `RecallFact.related_entities` is the better signal when it exists, but facts
+ * are minted by consolidation and a corpus can answer a dozen recalls without
+ * producing one; measured on `defence-live`, a two-recall turn returned eight
+ * and nine memories and zero facts.
+ *
+ * So the model's own query is tokenised. It has to be: a query is a PHRASE the
+ * model composed — "Hindustan Aeronautics Limited HAL" — and testing it whole
+ * against entity names matches nothing, because no entity is named that. The
+ * typed cue keeps its whole-string test (a person watching themselves type
+ * expects a prefix to behave like a prefix); a phrase nobody typed does not get
+ * that courtesy, and splitting it is what makes the narrowing real rather than
+ * a claim in a chip over an unchanged picture.
+ *
+ * Case-folded, de-duplicated, order-preserving: retrieval order is relevance
+ * order, so the cap keeps the front of the list rather than a sorted slice.
+ */
+function cueTerms(query: string, facts: readonly { related_entities: string[] }[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
+
+  const take = (raw: string): boolean => {
+    const term = raw.trim();
+    if (term.length === 0) return true;
+    const key = term.toLowerCase();
+    if (seen.has(key)) return true;
+    seen.add(key);
+    out.push(term);
+    return out.length < ENTITY_LIMIT;
+  };
+
   for (const fact of facts) {
-    for (const raw of fact.related_entities) {
-      const term = raw.trim();
-      if (term.length === 0) continue;
-      const key = term.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(term);
-      if (out.length >= ENTITY_LIMIT) return out;
-    }
+    for (const entity of fact.related_entities) if (!take(entity)) return out;
+  }
+  // Split on everything that is not a letter, a digit or an internal hyphen:
+  // entity names in this corpus carry hyphens ("MiG-21", "Su-30MKI") and
+  // splitting them produces two terms that match far more than the one did.
+  for (const word of query.split(/[^\p{L}\p{N}-]+/u)) {
+    const token = word.replace(/^-+|-+$/g, "");
+    if (STOP_WORDS.has(token.toLowerCase())) continue;
+    if (!take(token)) return out;
   }
   return out;
 }
@@ -86,17 +134,15 @@ export function commandsFromOp(op: SeatEvent, path: string): ViewCommand[] {
   const text = op.query.trim();
   if (text.length === 0) return [];
 
-  const commands: ViewCommand[] = [{ dimension: "cue", text, entities: entityTerms(op.facts) }];
+  const entities = cueTerms(text, op.facts);
+  const commands: ViewCommand[] = [{ dimension: "cue", text, entities }];
 
   const found = op.memories.length + op.facts.length;
   if (found === 0) return commands;
 
-  // Framing needs something to frame ON. The keyword lists behind
-  // `related_entities` are extracted per fact and are routinely empty, so this
-  // is a common case rather than an edge one — and a frame command with no
-  // subject would either do nothing or, worse, reset the camera to the whole
-  // corpus while claiming to have narrowed it.
-  const entities = entityTerms(op.facts);
+  // Framing needs something to frame ON. A frame command with no subject would
+  // either do nothing or, worse, reset the camera to the whole corpus while
+  // claiming to have narrowed it.
   if (entities.length > 0) commands.push({ dimension: "frame", entities });
 
   const stage = stageFor(op.memories);
@@ -122,7 +168,7 @@ const DESTINATION_NOUN: Record<string, string> = {
 export function describeCommands(commands: readonly ViewCommand[]): string {
   const parts: string[] = [];
   for (const command of commands) {
-    if (command.dimension === "cue") parts.push(`show what it recalled for “${command.text}”`);
+    if (command.dimension === "cue") parts.push(`follow its cue “${command.text}”`);
     else if (command.dimension === "frame") parts.push("frame those entities");
     else parts.push(`open ${DESTINATION_NOUN[command.path] ?? command.path}`);
   }

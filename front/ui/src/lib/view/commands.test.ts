@@ -45,16 +45,56 @@ function recall(over: Partial<Extract<SeatEvent, { type: "memory_recall" }>>): S
 }
 
 describe("commandsFromOp", () => {
-  it("turns a recall into a cue carrying the query and the entities behind it", () => {
+  it("turns a recall into a cue carrying the query, the entities behind it, and its own words", () => {
     const commands = commandsFromOp(
       recall({ memories: [memory("m1")], facts: [fact("f1", ["Maersk", "Patapsco"])] }),
       "/graph",
     );
 
+    // Facts first — they are the better signal where they exist. The query's
+    // own words follow, because they are the signal that always exists.
     expect(commands).toEqual([
-      { dimension: "cue", text: "baltimore port", entities: ["Maersk", "Patapsco"] },
-      { dimension: "frame", entities: ["Maersk", "Patapsco"] },
+      {
+        dimension: "cue",
+        text: "baltimore port",
+        entities: ["Maersk", "Patapsco", "baltimore", "port"],
+      },
+      { dimension: "frame", entities: ["Maersk", "Patapsco", "baltimore", "port"] },
     ]);
+  });
+
+  it("splits the model's query, because a phrase is a substring of no entity name", () => {
+    // Measured on defence-live: this exact query returned nine memories, zero
+    // facts, and matched nothing whole — the narrowing was a claim in a chip
+    // over an unchanged picture until the phrase was split.
+    const commands = commandsFromOp(
+      recall({ query: "Hindustan Aeronautics Limited HAL", memories: [memory("m1")] }),
+      "/graph",
+    );
+    expect(commands[0]).toEqual({
+      dimension: "cue",
+      text: "Hindustan Aeronautics Limited HAL",
+      entities: ["Hindustan", "Aeronautics", "Limited", "HAL"],
+    });
+  });
+
+  it("drops function words but never domain nouns", () => {
+    const commands = commandsFromOp(
+      recall({ query: "what do we know about the Tejas programme", memories: [memory("m1")] }),
+      "/graph",
+    );
+    const cue = commands[0] as { entities: string[] };
+    // "do" and "we" fall to the matcher's own length floor; the rest are named.
+    expect(cue.entities).toEqual(["do", "we", "Tejas", "programme"]);
+  });
+
+  it("keeps hyphenated designations whole — MiG-21 is one name, not two", () => {
+    const commands = commandsFromOp(
+      recall({ query: "MiG-21 and Su-30MKI fleet", memories: [memory("m1")] }),
+      "/graph",
+    );
+    const cue = commands[0] as { entities: string[] };
+    expect(cue.entities).toEqual(["MiG-21", "Su-30MKI", "fleet"]);
   });
 
   it("ignores harness-scope recalls — the seat's own bookkeeping is not a question the user asked", () => {
@@ -77,22 +117,20 @@ describe("commandsFromOp", () => {
 
   it("changes the cue but never the frame or the destination when a recall returned nothing", () => {
     // "A recall that returned nothing must NOT blank the view." The cue moves
-    // so the interface states what was asked; the corpus stays framed.
+    // so the interface states what was asked; the corpus stays framed and the
+    // stage stays put.
     const commands = commandsFromOp(recall({ memories: [], facts: [] }), "/");
 
-    expect(commands).toEqual([{ dimension: "cue", text: "baltimore port", entities: [] }]);
     expect(dimensionsOf(commands)).toEqual(["cue"]);
   });
 
-  it("emits no frame when the facts carry no entity terms, rather than framing on nothing", () => {
+  it("emits no frame when the query is all function words, rather than framing on nothing", () => {
     const commands = commandsFromOp(
-      recall({ memories: [memory("m1")], facts: [fact("f1", [])] }),
+      recall({ query: "what about them", memories: [memory("m1")], facts: [fact("f1", [])] }),
       "/graph",
     );
 
-    // The cue survives on the query text alone — that channel costs nothing and
-    // is the one that works on a corpus whose fact extraction is thin.
-    expect(commands).toEqual([{ dimension: "cue", text: "baltimore port", entities: [] }]);
+    expect(commands).toEqual([{ dimension: "cue", text: "what about them", entities: [] }]);
   });
 
   it("opens the map when the answer is located, and the graph when it is not", () => {
@@ -108,16 +146,17 @@ describe("commandsFromOp", () => {
 
   it("does not ask to open the destination it is already on", () => {
     const commands = commandsFromOp(recall({ memories: [memory("m1")] }), "/graph");
-    expect(dimensionsOf(commands)).toEqual(["cue"]);
+    expect(dimensionsOf(commands)).toEqual(["cue", "frame"]);
   });
 
   it("drops a blank query — there is nothing to state and nothing to match", () => {
     expect(commandsFromOp(recall({ query: "   ", memories: [memory("m1")] }), "/")).toEqual([]);
   });
 
-  it("de-duplicates entity terms case-insensitively and keeps retrieval order", () => {
+  it("de-duplicates terms case-insensitively and keeps retrieval order", () => {
     const commands = commandsFromOp(
       recall({
+        query: "Dali",
         memories: [memory("m1")],
         facts: [fact("f1", ["Maersk", "maersk", " Patapsco "]), fact("f2", ["MAERSK", "Dali"])],
       }),
@@ -125,12 +164,12 @@ describe("commandsFromOp", () => {
     );
     expect(commands[0]).toEqual({
       dimension: "cue",
-      text: "baltimore port",
+      text: "Dali",
       entities: ["Maersk", "Patapsco", "Dali"],
     });
   });
 
-  it("caps the entity list, so a cue narrows instead of lighting the whole graph", () => {
+  it("caps the term list, so a cue narrows instead of lighting the whole graph", () => {
     const many = Array.from({ length: ENTITY_LIMIT + 15 }, (_, i) => `entity-${i}`);
     const commands = commandsFromOp(
       recall({ memories: [memory("m1")], facts: [fact("f1", many)] }),
@@ -149,7 +188,7 @@ describe("describeCommands", () => {
         { dimension: "cue", text: "baltimore port", entities: [] },
         { dimension: "destination", path: "/geo" },
       ]),
-    ).toBe("show what it recalled for “baltimore port” and open the map");
+    ).toBe("follow its cue “baltimore port” and open the map");
   });
 
   it("is empty for no commands, so the offer cannot render a bare frame", () => {

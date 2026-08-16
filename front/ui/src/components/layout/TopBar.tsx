@@ -3,7 +3,7 @@ import { useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import type { Reachability } from "@/lib/api";
 import { StatusStrip } from "./StatusStrip";
-import { FollowOffer } from "./FollowOffer";
+import { FollowOffer, useHasViewNotice } from "./FollowOffer";
 import { DESTINATIONS } from "./Sidebar";
 import { RAIL_OFFSET } from "./destinations";
 
@@ -44,6 +44,9 @@ export function TopBar({
 }) {
   const { pathname } = useLocation();
   const caption = DESTINATIONS.find((d) => d.path === pathname)?.caption;
+  // The caption yields its place to the conversation's notice rather than
+  // sharing the bar with it — see `useHasViewNotice`.
+  const notice = useHasViewNotice();
 
   return (
     <header
@@ -66,7 +69,7 @@ export function TopBar({
           both are single-line at the same size. */}
       <div className="flex min-w-0 items-center gap-2.5">
         <h1 className="shrink-0 text-[13px] font-medium tracking-tight">{title}</h1>
-        {caption ? (
+        {caption && !notice ? (
           <p className="text-muted-foreground hidden min-w-0 truncate text-[12px] md:block">
             {caption}
           </p>

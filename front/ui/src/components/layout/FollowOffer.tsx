@@ -31,6 +31,21 @@ import { useView } from "@/stores/view";
  * changes position. It is real buttons in the header's own tab order, so it is
  * reachable by keyboard from the top of the page rather than after a canvas.
  */
+/**
+ * Whether this component will render anything.
+ *
+ * Exists so the header can give the offer the CAPTION'S place rather than a
+ * place of its own. The caption says what the screen is; while the conversation
+ * is doing something to that screen, or asking to, that is the more useful of
+ * the two and the caption is a sentence the reader has seen on every visit.
+ * Trading them keeps the bar's width constant — otherwise the offer grows the
+ * title group and the search field snaps 200px narrower under a hand that may
+ * be on its way to it, which is the shift the craft bar forbids.
+ */
+export function useHasViewNotice(): boolean {
+  return useView((s) => Object.keys(s.offers).length > 0 || s.cue !== null);
+}
+
 export function FollowOffer() {
   const offers = useView((s) => s.offers);
   const cue = useView((s) => s.cue);
@@ -46,6 +61,9 @@ export function FollowOffer() {
       <div
         className={cn(
           "border-primary/40 bg-primary/10 flex min-w-0 shrink items-center gap-2",
+          // Capped so a model that composed a long query cannot push the search
+          // field off its own edge; the query itself truncates inside.
+          "max-w-[560px]",
           "rounded-md border py-0.5 pr-0.5 pl-2",
           // Motion is the only thing that says this arrived rather than having
           // always been here. index.css collapses it under reduced motion.
@@ -82,14 +100,22 @@ export function FollowOffer() {
   return (
     <div
       role="status"
-      className="border-border bg-muted/60 flex min-w-0 shrink items-center gap-2 rounded-md border py-0.5 pr-0.5 pl-2"
+      className="border-border bg-muted/60 flex min-w-0 max-w-[560px] shrink items-center gap-2 rounded-md border py-0.5 pr-0.5 pl-2"
     >
       <Sparkle aria-hidden="true" className="text-primary size-3 shrink-0" strokeWidth={2} />
       <p className="text-muted-foreground min-w-0 truncate text-[12px]">
-        {/* The query, not a count: it is the one thing that lets a reader check
-            the narrowing against the answer they are reading. */}
-        Showing what the conversation recalled for{" "}
-        <span className="text-foreground">“{cue.text}”</span>
+        {/* "FOLLOWING", NOT "SHOWING", and the difference is honesty rather than
+            tone. This line is on every surface, and the cue only visibly
+            narrows the graph — and only when its terms name something this
+            corpus knows. "Showing what the conversation recalled" over an
+            unchanged picture is exactly the invisible claim the Follow
+            mechanism exists to prevent, made by the mechanism itself.
+            "Following" states what the view bus is doing, which is true on
+            every surface and whether or not anything matched.
+
+            The query, not a count: it is the one thing that lets a reader check
+            the view against the answer they are reading. */}
+        Following the conversation — <span className="text-foreground">“{cue.text}”</span>
       </p>
       <button
         type="button"

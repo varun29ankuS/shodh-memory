@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { commandsFromOp } from "@/lib/view/commands";
+import { EMPTY_CURSOR, advance, type TurnCursor } from "@/lib/view/cursor";
 import { useChat } from "@/stores/chat";
 import { useSession } from "@/stores/session";
 import { useView } from "@/stores/view";
@@ -24,61 +25,62 @@ import { useView } from "@/stores/view";
  * reports it directly at the one place it already detects a real wheel or drag.
  */
 
-/** Where the cursor is in the live turn's op list, so an op is translated once. */
-interface Cursor {
-  key: string;
-  consumed: number;
-}
-
 export function useAgentView(): void {
   const { pathname } = useLocation();
   const navigate = useNavigate();
 
-  /** The path as of this render, for effects that must not re-run on a move. */
+  /** The path as of this render, for listeners that must not re-run on a move. */
   const pathRef = useRef(pathname);
   pathRef.current = pathname;
 
-  const convo = useChat((s) => (s.activeId ? (s.conversations[s.activeId] ?? null) : null));
-  const activeId = useChat((s) => s.activeId);
-  const cursor = useRef<Cursor>({ key: "", consumed: 0 });
+  /**
+   * The conversation, watched THROUGH THE STORE rather than through a render.
+   *
+   * This was a `useEffect` on the live turn, and the ordering was wrong in a way
+   * that only shows up under a real hand. `send` appends the pending turn inside
+   * a `set`, but an effect does not run until React has committed — so anything
+   * the person did in that window (typing into the cue field as they hit enter)
+   * was seen FIRST, and `beginTurn` then wiped the claim they had just made.
+   * Observed live: `touch(cue)` at t, `beginTurn` at t+119ms, and the model went
+   * on to take a dimension the user was holding.
+   *
+   * A store subscriber runs synchronously inside that same `set`, so the turn
+   * boundary lands before any consequence of the send can be acted on. The
+   * cursor arithmetic is in `lib/view/cursor.ts`, where it is testable.
+   */
+  const cursor = useRef<TurnCursor>(EMPTY_CURSOR);
+  useEffect(
+    () =>
+      useChat.subscribe((state) => {
+        const id = state.activeId;
+        if (!id) return;
+        const convo = state.conversations[id];
+        if (!convo) return;
+        // KEYED ON POSITION, NOT ON THE TURN NUMBER. `send` numbers a turn by
+        // array length and the seat's `turn_start` then overwrites it with its
+        // own count (stores/chat.ts). Keying on the number makes those two
+        // values look like two different turns, which would reopen the
+        // authority window mid-answer and discard a touch made in between.
+        const index = convo.turns.length - 1;
+        const live = convo.turns[index];
+        if (!live) return;
 
-  useEffect(() => {
-    if (!activeId || !convo) return;
-    // KEYED ON POSITION, NOT ON THE TURN NUMBER. `send` appends a turn numbered
-    // by array length and the seat's `turn_start` then overwrites it with its
-    // own count (stores/chat.ts). Keying on the number makes those two values
-    // look like two different turns, which would re-open the authority window
-    // mid-answer and throw away a touch the user made in between.
-    const index = convo.turns.length - 1;
-    const live = convo.turns[index];
-    if (!live) return;
-    const key = `${activeId}#${index}`;
+        const step = advance(cursor.current, {
+          key: `${id}#${index}`,
+          pending: live.pending,
+          ops: live.ops,
+        });
+        cursor.current = step.cursor;
 
-    if (cursor.current.key !== key) {
-      cursor.current = { key, consumed: live.pending ? 0 : live.ops.length };
-      // A NEW QUESTION HANDS THE WHEEL BACK. Only a live turn does: `pending`
-      // is false for everything `adoptDetail` rebuilt from the transcript, so
-      // reopening a conversation from the session list replays its recalls
-      // without moving the view. A history click that lurched the graph would
-      // make the interface untrustworthy in exactly the place it is meant to
-      // become trustworthy.
-      if (live.pending) useView.getState().beginTurn(pathRef.current);
-    }
-
-    if (!live.pending) {
-      cursor.current.consumed = live.ops.length;
-      return;
-    }
-    if (live.ops.length <= cursor.current.consumed) return;
-
-    const fresh = live.ops.slice(cursor.current.consumed);
-    cursor.current.consumed = live.ops.length;
-    for (const op of fresh) {
-      for (const command of commandsFromOp(op, pathRef.current)) {
-        useView.getState().dispatch(command, "agent");
-      }
-    }
-  }, [activeId, convo]);
+        if (step.beginTurn) useView.getState().beginTurn(pathRef.current);
+        for (const op of step.fresh) {
+          for (const command of commandsFromOp(op, pathRef.current)) {
+            useView.getState().dispatch(command, "agent");
+          }
+        }
+      }),
+    [],
+  );
 
   /**
    * The cue, and who wrote it.
