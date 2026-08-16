@@ -133,12 +133,18 @@ describe("commandsFromOp", () => {
     expect(commands).toEqual([{ dimension: "cue", text: "what about them", entities: [] }]);
   });
 
-  it("opens the map when the answer is located, and the graph when it is not", () => {
+  it("opens the graph, and never the map — even for a located answer", () => {
+    // The map raises points by the COMMITTED query (features/geo/GeoView.tsx)
+    // and has no cue channel, so arriving there from a recall would show the
+    // whole corpus, unmoved, under a chip claiming the view is following the
+    // conversation. Refusing to offer it is the honest option until the map
+    // consumes the cue. This test is the thing that must be changed then.
     const located = commandsFromOp(
       recall({ memories: [memory("m1", [39.26, -76.57, 0])] }),
-      "/graph",
+      "/",
     );
-    expect(located).toContainEqual({ dimension: "destination", path: "/geo" });
+    expect(located).toContainEqual({ dimension: "destination", path: "/graph" });
+    expect(located.every((c) => c.dimension !== "destination" || c.path !== "/geo")).toBe(true);
 
     const plain = commandsFromOp(recall({ memories: [memory("m1")] }), "/");
     expect(plain).toContainEqual({ dimension: "destination", path: "/graph" });
@@ -186,9 +192,9 @@ describe("describeCommands", () => {
     expect(
       describeCommands([
         { dimension: "cue", text: "baltimore port", entities: [] },
-        { dimension: "destination", path: "/geo" },
+        { dimension: "destination", path: "/graph" },
       ]),
-    ).toBe("follow its cue “baltimore port” and open the map");
+    ).toBe("follow its cue “baltimore port” and open the graph");
   });
 
   it("is empty for no commands, so the offer cannot render a bare frame", () => {

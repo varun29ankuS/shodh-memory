@@ -33,15 +33,26 @@ export type ViewCommand =
 export const ENTITY_LIMIT = 24;
 
 /**
- * Where an answer of this shape is best looked at.
+ * Where an answer is looked at: the graph, and only the graph.
  *
- * The same rule the spec states for lenses (§3.3): geotagged results open on
- * the map, everything else on the graph, because an empty map and a broken map
- * look identical. There is no lens control yet, so the destination IS the lens.
+ * THE MAP IS NOT A DESTINATION THIS MAY CHOOSE, and the reason is the same rule
+ * the whole Follow mechanism exists to enforce. §3.3's lens rule says geotagged
+ * results open on the map — but `GeoView` raises points by matching them
+ * against `activeQuery`, the COMMITTED search (features/geo/GeoView.tsx), and a
+ * cue is deliberately not that: committing a query would fire a full retrieval
+ * nobody asked for. `GeoMap` reads the session only for the selected memory; it
+ * has no cue channel at all.
+ *
+ * So sending someone to `/geo` would land them on the entire corpus, unraised
+ * and unmoved, under a chip saying the view is following the conversation —
+ * a claim the map cannot keep. That is worse than not offering the map, and it
+ * would fire on exactly the corpora that carry coordinates.
+ *
+ * The graph responds to the cue on every answer, so it is the honest
+ * destination for all of them. The map rejoins this function the moment it
+ * consumes the cue, and not before.
  */
-function stageFor(memories: readonly { experience: { geo_location?: unknown } }[]): string {
-  return memories.some((m) => m.experience.geo_location) ? "/geo" : "/graph";
-}
+const STAGE = "/graph";
 
 /**
  * Words that name nothing.
@@ -145,18 +156,15 @@ export function commandsFromOp(op: SeatEvent, path: string): ViewCommand[] {
   // claiming to have narrowed it.
   if (entities.length > 0) commands.push({ dimension: "frame", entities });
 
-  const stage = stageFor(op.memories);
-  if (stage !== path) commands.push({ dimension: "destination", path: stage });
+  if (STAGE !== path) commands.push({ dimension: "destination", path: STAGE });
 
   return commands;
 }
 
-/** Where a command would take you, for the Follow offer's own label. */
-const DESTINATION_NOUN: Record<string, string> = {
-  "/geo": "the map",
-  "/graph": "the graph",
-  "/recall": "the results",
-};
+/** Where a command would take you, for the Follow offer's own label. One entry,
+ *  because `STAGE` produces one destination; the path itself is the fallback so
+ *  a new stage reads as a path rather than as nothing. */
+const DESTINATION_NOUN: Record<string, string> = { "/graph": "the graph" };
 
 /**
  * The offer, in the words a person would use.
