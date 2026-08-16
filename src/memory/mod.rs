@@ -128,8 +128,9 @@ pub(crate) fn recall_is_readonly(query: &Query) -> bool {
     recall_readonly_env() || query.read_only
 }
 
-/// Process-global lock for tests that manipulate recall-affecting environment
-/// variables (`SHODH_RECALL_READONLY`, `SHODH_COACT_STRENGTHEN_ONLY`).
+/// Process-global lock for tests that manipulate `SHODH_RECALL_READONLY`,
+/// including the harness tests whose `pin_harness_threads` call sets it
+/// process-wide.
 ///
 /// `env::set_var`/`remove_var` are not thread-safe against concurrent readers on
 /// other test threads, and `recall_is_readonly` re-reads the env on every call
@@ -139,6 +140,46 @@ pub(crate) fn recall_is_readonly(query: &Query) -> bool {
 /// module setting it.
 #[cfg(test)]
 pub(crate) static RECALL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Holds [`RECALL_ENV_LOCK`] and pins `SHODH_RECALL_READONLY` to an EXPLICIT
+/// value for the duration of a test, restoring the previous value on drop.
+///
+/// Pinning `"0"` rather than removing the variable is what makes a test immune
+/// to the harness pin. `pin_harness_threads` sets the variable only when it is
+/// unset — "a caller that explicitly chose a different value keeps their
+/// override" — so an explicit `"0"` cannot be clobbered by a harness test that
+/// slips past the lock, while a removed variable can. `recall_readonly_env`
+/// treats unset and `"0"` identically, so this changes nothing about what is
+/// being tested; it only removes a way for the test to be wrong for reasons
+/// that have nothing to do with the code under test.
+#[cfg(test)]
+pub(crate) struct RecallEnvPin {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl RecallEnvPin {
+    pub(crate) fn pin(value: &str) -> Self {
+        let lock = RECALL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("SHODH_RECALL_READONLY");
+        std::env::set_var("SHODH_RECALL_READONLY", value);
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RecallEnvPin {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(v) => std::env::set_var("SHODH_RECALL_READONLY", v),
+            None => std::env::remove_var("SHODH_RECALL_READONLY"),
+        }
+    }
+}
 
 use crate::constants::{
     DEFAULT_COMPRESSION_AGE_DAYS, DEFAULT_IMPORTANCE_THRESHOLD, DEFAULT_MAX_HEAP_PER_USER_MB,
@@ -11406,15 +11447,17 @@ mod readonly_recall_tests {
         // half is not vacuous. Co-activation is strengthen-only by default —
         // it reinforces edges that already exist and never mints all-pairs
         // `CoRetrieved` — so with no seeded edge the graph stays empty and
-        // "edge weights unchanged" would hold for the wrong reason. This uses
-        // the real minting path (`SHODH_COACT_STRENGTHEN_ONLY=0`), and every
-        // caller of this fixture holds `RECALL_ENV_LOCK`.
-        std::env::set_var("SHODH_COACT_STRENGTHEN_ONLY", "0");
+        // "edge weights unchanged" would hold for the wrong reason.
+        //
+        // Calls the impl with `strengthen_only = false` rather than setting
+        // `SHODH_COACT_STRENGTHEN_ONLY=0`: the env var is read process-wide by
+        // every concurrent test, so mutating it here would make an unrelated
+        // recall mint edges — the same race class as the harness pin, pointed
+        // the other way. Passing the parameter is why the impl takes one.
         let minted = graph
             .read()
-            .record_memory_coactivation(&[ids[0].0, ids[1].0])
+            .record_memory_coactivation_impl(&[ids[0].0, ids[1].0], false)
             .expect("seed co-retrieval edge");
-        std::env::remove_var("SHODH_COACT_STRENGTHEN_ONLY");
         assert_eq!(minted, 1, "fixture must seed exactly one co-retrieval edge");
 
         (system, graph, ids, temp_dir)
@@ -11435,11 +11478,11 @@ mod readonly_recall_tests {
     /// is what makes the first two assertions mean something.
     #[test]
     fn read_only_recall_leaves_persisted_usage_state_byte_identical() {
-        // The process-wide pin must be UNSET: the claim is that the per-request
-        // flag alone suppresses the writes. With the pin set, the read-only half
-        // would pass for the wrong reason and the default half would fail.
-        let _env_guard = RECALL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("SHODH_RECALL_READONLY");
+        // The process-wide pin is explicitly OFF: the claim is that the
+        // per-request flag ALONE suppresses the writes. With the pin on, the
+        // read-only half would pass for the wrong reason and the default half
+        // would fail.
+        let _env = RecallEnvPin::pin("0");
 
         let (system, graph, ids, _dir) = seeded_system();
 
@@ -11491,6 +11534,17 @@ mod readonly_recall_tests {
 
         // Non-vacuity: same pipeline, same fixture, flag off, DOES learn.
         // Without this the test would pass against a flag nobody reads.
+        //
+        // Checked immediately before the call: if some other test has pinned the
+        // process-wide variable behind our back, say THAT rather than blaming
+        // the flag. This exact failure — "the default path must still count the
+        // retrieval (0 -> 0)" — was the harness smoke-suite test leaking its
+        // pin, twice, before `HarnessEnvGuard` and this explicit "0" pin.
+        assert_eq!(
+            std::env::var("SHODH_RECALL_READONLY").as_deref(),
+            Ok("0"),
+            "another test clobbered the process-wide read-only pin; the              assertion below would fail for that reason, not because              read_only=false stopped reinforcing"
+        );
         system.recall(&navy_query(false)).expect("default recall");
         let after_default = snapshot(&system, &graph.read(), &ids);
         assert_ne!(
@@ -11507,12 +11561,16 @@ mod readonly_recall_tests {
     /// counter still advances.
     #[test]
     fn default_recall_still_reinforces_what_it_read() {
-        let _env_guard = RECALL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("SHODH_RECALL_READONLY");
+        let _env = RecallEnvPin::pin("0");
 
         let (system, graph, ids, _dir) = seeded_system();
 
         let before = snapshot(&system, &graph.read(), &ids);
+        assert_eq!(
+            std::env::var("SHODH_RECALL_READONLY").as_deref(),
+            Ok("0"),
+            "another test clobbered the process-wide read-only pin; the              assertions below would fail for that reason, not because the              default path stopped reinforcing"
+        );
         let results = system.recall(&navy_query(false)).expect("default recall");
         assert!(
             results.len() >= 2,

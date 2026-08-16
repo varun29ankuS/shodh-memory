@@ -2833,12 +2833,6 @@ mod tests {
         assert!(min_threshold < 1.0);
     }
 
-    /// Process-global lock for tests that manipulate `SHODH_RECALL_READONLY`.
-    /// Lives in `crate::memory` so it is ONE lock crate-wide: a module-local
-    /// mutex here would not exclude a test in a sibling module that sets the
-    /// same variable, which is precisely the race it is meant to prevent.
-    use crate::memory::RECALL_ENV_LOCK as RECALL_READONLY_ENV_LOCK;
-
     /// Regression test for the measurement-integrity bug: spreading activation's
     /// Hebbian reinforcement (`graph.batch_strengthen_synapses` on the traversed
     /// edges) ran unconditionally, never checking `SHODH_RECALL_READONLY`. Every
@@ -2859,13 +2853,9 @@ mod tests {
         };
         use chrono::Utc;
 
-        let _env_guard = RECALL_READONLY_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // Defensive reset (matches auth.rs's `clear_auth_env` idiom): don't
-        // trust a prior test's cleanup, since `recall_readonly()` re-reads the
-        // env on every call rather than caching it.
-        std::env::remove_var("SHODH_RECALL_READONLY");
+        // Holds the crate-wide lock and restores the previous value on drop, so
+        // this test cannot leak its own pin the way the harness tests did.
+        let _env = crate::memory::RecallEnvPin::pin("0");
 
         struct StubEmbedder;
         impl crate::embeddings::Embedder for StubEmbedder {
@@ -2988,8 +2978,8 @@ mod tests {
              after recall #2 (got {strength_ro_1} -> {strength_ro_2})"
         );
 
-        // --- production default (flag unset): strengthening still happens ---
-        std::env::remove_var("SHODH_RECALL_READONLY");
+        // --- production default (pin off): strengthening still happens ---
+        std::env::set_var("SHODH_RECALL_READONLY", "0");
 
         let strength_prod_0 = strength_of(&graph);
         run_recall().expect("recall #3 (production default)");
@@ -3000,8 +2990,6 @@ mod tests {
             "flag unset (production default) must still strengthen the \
              traversed edge (Hebbian learning), got {strength_prod_0} -> {strength_prod_1}"
         );
-
-        std::env::remove_var("SHODH_RECALL_READONLY");
     }
 
     /// The same graph-leg gate, reached through the PER-REQUEST flag rather than
@@ -3023,13 +3011,12 @@ mod tests {
         };
         use chrono::Utc;
 
-        let _env_guard = RECALL_READONLY_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // The pin stays UNSET for this whole test: the claim under test is that
-        // the per-request flag alone suppresses the write. If the pin were set,
-        // the read-only half would pass for the wrong reason.
-        std::env::remove_var("SHODH_RECALL_READONLY");
+        // The pin is explicitly OFF for this whole test: the claim under test is
+        // that the per-request flag ALONE suppresses the write. An explicit "0"
+        // rather than an unset variable, so a harness test that slips past the
+        // lock cannot turn it on — `pin_harness_threads` only sets the variable
+        // when it is unset.
+        let _env = crate::memory::RecallEnvPin::pin("0");
 
         struct StubEmbedder;
         impl crate::embeddings::Embedder for StubEmbedder {

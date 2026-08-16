@@ -2605,6 +2605,7 @@ mod tests {
     #[test]
     #[ignore = "training-data export — run explicitly"]
     fn export_fusion_training_data() {
+        let _env = HarnessEnvGuard::acquire();
         let dir = unique_storage_dir("fusion-export");
         let out = dir.join("fusion_features.jsonl");
         // SAFETY: process-wide env; run as a single explicit --ignored test.
@@ -2711,6 +2712,7 @@ mod tests {
     /// root, ranked first.
     #[test]
     fn lineage_fragment_bridges_never_form() {
+        let _env = HarnessEnvGuard::acquire();
         let dir = unique_storage_dir("lineage-flood-diag");
         let manager = build_manager(&dir).expect("manager");
         let chains = crate::recall_harness::multihop::DEFAULT_CHAINS;
@@ -2873,6 +2875,7 @@ mod tests {
 
     #[test]
     fn lineage_walk_survives_harness_scale() {
+        let _env = HarnessEnvGuard::acquire();
         let dir = unique_storage_dir("lineage-scale");
         let manager = build_manager(&dir).expect("manager");
         let chains = crate::recall_harness::multihop::DEFAULT_CHAINS;
@@ -2983,6 +2986,7 @@ mod tests {
     /// sequence or in the CI environment.
     #[test]
     fn lineage_harness_end_to_end_reproduces_ci() {
+        let _env = HarnessEnvGuard::acquire();
         let dir = unique_storage_dir("lineage-harness-e2e");
         let inputs = RunInputs {
             storage_path: dir.clone(),

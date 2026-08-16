@@ -6149,7 +6149,7 @@ impl GraphMemory {
     /// flood (measured ~80% of graph edges, bypassing the ingest gates, unbounded
     /// with query volume — the OOM driver). Mirrors schema-gated consolidation:
     /// usage strengthens existing structure, it does not wire every co-activation.
-    fn record_memory_coactivation_impl(
+    pub(crate) fn record_memory_coactivation_impl(
         &self,
         memory_ids: &[Uuid],
         strengthen_only: bool,
