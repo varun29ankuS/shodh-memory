@@ -12,6 +12,9 @@ pub mod types;
 pub mod health;
 pub mod utils;
 
+// Audit trail (read API over the `audit` column family)
+pub mod audit;
+
 // Memory core operations
 pub mod anomalies;
 pub mod crud;

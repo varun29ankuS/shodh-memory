@@ -5,7 +5,8 @@ import type { RecallMemory } from "./types";
 import { useSession } from "@/stores/session";
 
 /**
- * The corpus listing — every memory in the active profile, newest first.
+ * The corpus listing — the newest `CORPUS_LIMIT` memories in the active
+ * profile, newest first.
  *
  * Two surfaces want a view of the store BEFORE any query exists: Geo plots
  * every located memory as ambient context, and Recall shows the newest
@@ -15,6 +16,22 @@ import { useSession } from "@/stores/session";
  * `GET /api/list/{user_id}` returns previews (content capped at 500 chars),
  * which is exactly right here: these rows are orientation, and selecting one
  * routes through the Inspector, which fetches the full record.
+ *
+ * # Order and coverage
+ *
+ * The endpoint sorts by `created_at` descending before it paginates
+ * (`list_memories_inner`, src/handlers/crud.rs), so this really is the newest
+ * page and not merely a page that happens to arrive sorted. That distinction
+ * is the whole point: the endpoint used to return tier-then-storage order,
+ * which made this an arbitrary sample — on the 18k-memory `claude-code`
+ * profile the "newest 500" spanned four and a half months and omitted most of
+ * the recent ones. A client-side sort cannot repair that, because the rows it
+ * needs were never in the page.
+ *
+ * This is still a page, not the corpus. When `total > CORPUS_LIMIT` — which is
+ * the normal case on a real profile — Geo is plotting the newest
+ * `CORPUS_LIMIT` located memories, not every located memory, and any surface
+ * that presents these rows as complete is overstating them.
  */
 
 /** `ListMemoryItem` — src/handlers/crud.rs */
