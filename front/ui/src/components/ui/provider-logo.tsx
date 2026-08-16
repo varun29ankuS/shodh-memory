@@ -52,20 +52,39 @@ const ICONS: Record<string, { path: string; title: string }> = {
 
 export function ProviderLogo({
   provider,
+  /** A human name for the provider, used only when this mark is NOT decorative.
+   *  Falls back to the pi id, which is the machine form and a poor thing to
+   *  read aloud — pass the display name whenever one is to hand. */
+  label: labelProp,
+  /** Default true: every current call site renders the readable name beside
+   *  this. Set false only where the mark stands alone. */
+  decorative = true,
   className,
 }: {
   provider: string;
+  label?: string;
+  decorative?: boolean;
   className?: string;
 }) {
   const icon = ICONS[provider];
+  const label = labelProp ?? provider;
   const size = cn("size-4 shrink-0", className);
 
+  /* DECORATIVE, BECAUSE THE NAME IS ALWAYS BESIDE IT.
+     Every call site renders this mark next to the provider's readable name, so
+     labelling the mark as an image announced each provider twice — and the
+     monogram branch announced it in machine form, reading "azure-openai-
+     responses" and "qwen-token-plan-cn" aloud after the human name. A mark that
+     duplicates its neighbour is noise to a screen reader, so it is hidden from
+     the tree and the name carries the meaning. `decorative={false}` is there
+     for a caller that genuinely renders the mark alone. */
   if (icon) {
     return (
       <svg
         viewBox="0 0 24 24"
-        role="img"
-        aria-label={icon.title}
+        role={decorative ? undefined : "img"}
+        aria-hidden={decorative || undefined}
+        aria-label={decorative ? undefined : icon.title}
         // `currentColor`, so a mark never fights the one-accent rule and always
         // reads against whatever surface it lands on.
         fill="currentColor"
@@ -80,8 +99,9 @@ export function ProviderLogo({
   // image, never another provider's logo.
   return (
     <span
-      aria-label={provider}
-      role="img"
+      role={decorative ? undefined : "img"}
+      aria-hidden={decorative || undefined}
+      aria-label={decorative ? undefined : label}
       className={cn(
         "bg-muted text-muted-foreground flex items-center justify-center rounded-[3px] text-[9px] font-semibold uppercase",
         size,

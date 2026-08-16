@@ -175,8 +175,14 @@ export const useSession = create<SessionState>((set) => ({
       // previous profile's corpus, and an id from one store means nothing in
       // another.
       if (profiles.length === 0) {
+        // AN EMPTY LIST IS NOT A DECISION. It is what arrives before the
+        // profile query resolves, and what arrives when the read fails. The
+        // in-memory profile still clears -- there is nothing to search against
+        // -- but the REMEMBERED one must survive, or the first render forgets
+        // the choice before the server has had a chance to confirm it. That
+        // was the bug: persistence was added, and then erased by the load it
+        // was meant to survive.
         if (s.profile === null) return s;
-        storeProfile(null);
         return { profile: null, selectedMemoryId: null, selectedEntityId: null };
       }
       storeProfile(profiles[0]);
