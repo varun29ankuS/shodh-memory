@@ -392,43 +392,64 @@ impl EntityLabel {
     }
 }
 
-/// Classify a tag string into a richer `EntityLabel`.
+/// The ontological class a curated identifier rule recognises in `tag`, or
+/// `None` when no rule fires.
 ///
-/// Tags are short, user-supplied descriptors (e.g. "production", "rocksdb",
-/// "config.toml"). This maps them onto the ontology so they participate in
-/// type-aware spreading activation and hierarchy matching during retrieval.
-/// Shared by every ingest path so a tag receives the same label whether it
-/// arrives via `remember`, an integration sync, or an `upsert`.
-pub fn classify_tag_label(tag: &str) -> EntityLabel {
+/// Tags are short descriptors that arrive with a memory (`"rocksdb"`,
+/// `"config.toml"`, `"auth-service"`). The rules below are a *curated identifier
+/// table*: each one recognises a naming convention that denotes a specific
+/// artifact — a named product, a file, a service. When one fires, the tag names
+/// a thing and the caller may treat it as an entity.
+///
+/// `None` is the honest answer for everything else, and it is load-bearing:
+/// [`crate::handlers::state::AppState::process_experience_into_graph`] admits a
+/// tag to the knowledge graph only when a rule here recognises it. A tag no rule
+/// recognises is a *keyword* — it describes the memory without naming anything —
+/// and keywords stay in `experience.tags` for search and `recall_by_tags`
+/// instead of becoming graph nodes.
+///
+/// Every rule matches on a whole tag or a whole trailing token, never on a bare
+/// substring. A substring rule silently reclassifies ordinary prose: `contains(
+/// "config")` turned the phrase "stobar configuration" into a `Configuration`
+/// entity on a corpus of aircraft-carrier documents, which is how a keyword
+/// matcher for developer tags ends up asserting an ontology over text it knows
+/// nothing about.
+pub fn recognised_tag_label(tag: &str) -> Option<EntityLabel> {
     let lower = tag.to_lowercase();
 
-    // Deployment / environment indicators
+    /// Whether `lower` is exactly `word`, or ends with `word` after a `-`, `_`
+    /// or space separator ("deploy-workflow" → "workflow", but "workflows" and
+    /// "workflow engine notes" → no match).
+    fn is_trailing_token(lower: &str, word: &str) -> bool {
+        if lower == word {
+            return true;
+        }
+        lower
+            .strip_suffix(word)
+            .is_some_and(|prefix| prefix.ends_with(['-', '_', ' ']))
+    }
+
+    // Named platforms and cloud providers. Deliberately excludes the deployment
+    // *lifecycle* words this list used to carry — "production", "staging",
+    // "dev", "development", "ci", "cd", "container". Those are English common
+    // nouns for a phase of work, not names of things: on a deployment log they
+    // read as environments, but on any other corpus they are ordinary prose, and
+    // classifying them assigns an ontological class to a word that denotes no
+    // referent at all. They fall through to `None` and stay keywords.
     if matches!(
         lower.as_str(),
-        "production"
-            | "staging"
-            | "dev"
-            | "development"
-            | "ci"
-            | "cd"
-            | "kubernetes"
-            | "k8s"
-            | "docker"
-            | "container"
-            | "aws"
-            | "gcp"
-            | "azure"
+        "kubernetes" | "k8s" | "docker" | "aws" | "gcp" | "azure"
     ) {
-        return EntityLabel::Environment;
+        return Some(EntityLabel::Environment);
     }
 
     // Pipeline / workflow indicators
-    if lower.contains("pipeline")
-        || lower.contains("workflow")
-        || lower.contains("ci-cd")
-        || lower.contains("cicd")
+    if is_trailing_token(&lower, "pipeline")
+        || is_trailing_token(&lower, "workflow")
+        || lower == "ci-cd"
+        || lower == "cicd"
     {
-        return EntityLabel::Pipeline;
+        return Some(EntityLabel::Pipeline);
     }
 
     // Database / storage indicators
@@ -449,7 +470,7 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         || lower.ends_with("-db")
         || lower.ends_with("_db")
     {
-        return EntityLabel::Database;
+        return Some(EntityLabel::Database);
     }
 
     // Service / API indicators (suffix-only to avoid "my-api-docs" false positives)
@@ -461,17 +482,17 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         || lower.ends_with("_server")
         || lower.ends_with("-daemon")
     {
-        return EntityLabel::Service;
+        return Some(EntityLabel::Service);
     }
 
     // Documentation indicators (check before module — README.md is a doc, not a module)
     if lower.ends_with(".md")
-        || lower.contains("readme")
-        || lower.contains("runbook")
+        || is_trailing_token(&lower, "readme")
+        || is_trailing_token(&lower, "runbook")
         || lower.ends_with("-rfc")
         || lower.ends_with("-spec")
     {
-        return EntityLabel::Document;
+        return Some(EntityLabel::Document);
     }
 
     // Configuration indicators
@@ -480,9 +501,9 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         || lower.ends_with(".yml")
         || lower.ends_with(".env")
         || lower.ends_with(".json")
-        || lower.contains("config")
+        || is_trailing_token(&lower, "config")
     {
-        return EntityLabel::Configuration;
+        return Some(EntityLabel::Configuration);
     }
 
     // Module / library indicators
@@ -493,24 +514,25 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         || lower.ends_with("-lib")
         || lower.ends_with("_lib")
     {
-        return EntityLabel::Module;
+        return Some(EntityLabel::Module);
     }
 
-    // Default: Concept — an honest "we did not recognise this".
+    // Nothing recognised the tag.
     //
-    // This used to fall through to `Technology`, which is a CLAIM, not a
-    // default: every unrecognised tag asserted a specific ontological class.
-    // The rules above are a dev-ops keyword matcher (kubernetes, postgres,
-    // ci-cd, …), so on any corpus that is not about infrastructure almost
-    // everything reaches this line — and the graph renders a uniform wall of
-    // "Technology" nodes under a legend that promises an ontology. A visibly
-    // wrong type is worse than a visibly absent one: it is indistinguishable
-    // from a confident correct answer.
+    // This used to fall through to a label — first `Technology`, then `Concept`
+    // — and either way the caller wrote a graph node for it. A label is a CLAIM,
+    // and the rules above are a curated table of developer naming conventions,
+    // so on any corpus that is not about infrastructure almost every tag reaches
+    // this line. `Technology` made the graph assert a class it could not
+    // support; `Concept` was honest about the type but still asserted that the
+    // string *is an entity*, which is the larger claim and the wrong one — YAKE
+    // keyphrases ("empty weight", "control system"), source filenames and
+    // taxonomy codes all arrive here.
     //
-    // `Concept` is the same label the NER path already uses for entities whose
-    // class it could not resolve (`NerEntityType::Misc`), so unrecognised
-    // surfaces from both paths now agree instead of disagreeing.
-    EntityLabel::Concept
+    // Returning `None` moves the decision to the caller, which declines to
+    // create a node at all. See the tag phase in
+    // `process_experience_into_graph`.
+    None
 }
 
 /// Move the label implied by `fine_type` to the front of `labels`.
@@ -3088,7 +3110,18 @@ impl GraphMemory {
             last_seen_at: now,
             mention_count: 1,
             summary: String::new(),
-            attributes: HashMap::new(),
+            // Provenance, matching the phases in `process_experience_into_graph`
+            // (`ner`, `tag-declared`, `tag-identifier`, `acronym`, `issue-id`).
+            // These nodes are lemmas by design — the spine reuses one node per
+            // event type so repeated events collapse — so from the outside they
+            // look exactly like the keyphrase nodes the ingest now refuses, and
+            // without this marker an entity-quality audit cannot tell a
+            // deliberate event node from a leak.
+            attributes: {
+                let mut a = HashMap::new();
+                a.insert("source".to_string(), "causal-spine".to_string());
+                a
+            },
             name_embedding: None,
             salience: EntityExtractor::calculate_base_salience(&EntityLabel::Event, false),
             is_proper_noun: false,
@@ -10550,26 +10583,60 @@ mod tests {
     }
 
     #[test]
-    fn classify_tag_label_maps_known_categories() {
-        assert_eq!(classify_tag_label("production"), EntityLabel::Environment);
-        assert_eq!(classify_tag_label("rocksdb"), EntityLabel::Database);
-        assert_eq!(classify_tag_label("metrics-service"), EntityLabel::Service);
-        assert_eq!(classify_tag_label("README"), EntityLabel::Document);
+    fn recognised_tag_label_maps_known_categories() {
         assert_eq!(
-            classify_tag_label("config.toml"),
-            EntityLabel::Configuration
+            recognised_tag_label("rocksdb"),
+            Some(EntityLabel::Database),
+            "a named database product is an artifact"
         );
-        assert_eq!(classify_tag_label("router.rs"), EntityLabel::Module);
-        assert_eq!(classify_tag_label("ci-cd"), EntityLabel::Pipeline);
-        // Unknown → Technology fallback
-        // CHANGED: the fallthrough was `Technology`; it is now `Concept`.
-        // "widgetron" matches none of the rules above, and labelling an
-        // unrecognised surface `Technology` is an assertion the matcher cannot
-        // support — it made every unrecognised tag indistinguishable from a
-        // confidently-classified one, and rendered the graph as a flat wall of
-        // "Technology". `Concept` is what the NER path already emits for
-        // unresolved classes, so the two agree.
-        assert_eq!(classify_tag_label("widgetron"), EntityLabel::Concept);
+        assert_eq!(
+            recognised_tag_label("metrics-service"),
+            Some(EntityLabel::Service)
+        );
+        assert_eq!(recognised_tag_label("README"), Some(EntityLabel::Document));
+        assert_eq!(
+            recognised_tag_label("config.toml"),
+            Some(EntityLabel::Configuration)
+        );
+        assert_eq!(recognised_tag_label("router.rs"), Some(EntityLabel::Module));
+        assert_eq!(recognised_tag_label("ci-cd"), Some(EntityLabel::Pipeline));
+        assert_eq!(
+            recognised_tag_label("kubernetes"),
+            Some(EntityLabel::Environment)
+        );
+    }
+
+    #[test]
+    fn recognised_tag_label_abstains_on_prose() {
+        // CHANGED, deliberately: these used to be classified.
+        //
+        // "production" and "development" were in the Environment list. They are
+        // English common nouns for a phase of work — on a deployment log they
+        // read as environments, but the matcher cannot tell a deployment log
+        // from an aircraft-carrier document, and on the latter it was asserting
+        // that the word "development" names a thing. Same for the substring
+        // rules: `contains("config")` matched the prose phrase "stobar
+        // configuration" and `contains("readme")` matches any sentence about a
+        // readme.
+        for prose in [
+            "production",
+            "development",
+            "staging",
+            "container",
+            "stobar configuration",
+            "vls configurations",
+            "empty weight",
+            "control system",
+            "submarine",
+            "widgetron",
+            "62-kalyani-group.txt",
+        ] {
+            assert_eq!(
+                recognised_tag_label(prose),
+                None,
+                "no curated rule names {prose:?}, so it must not become an entity"
+            );
+        }
     }
 
     #[test]

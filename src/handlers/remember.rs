@@ -20,6 +20,34 @@ use crate::memory::{
 use crate::metrics;
 use crate::validation;
 
+/// The caller's own entity assertions, kept apart from everything this server
+/// infers.
+///
+/// `entities` and `tags` on the stored `Experience` are one merged vector —
+/// caller tags, NER surfaces and YAKE keyphrases concatenated — and that merge
+/// is lossy in the one dimension the knowledge graph needs: it cannot afterwards
+/// tell an asserted name from a statistical keyphrase. The graph admits nodes by
+/// authority, and "a human (or an integration) said this names a thing" is one
+/// of its authorities, so the assertion has to survive the write.
+///
+/// Same validation and cap as the merged list, so a caller cannot use this field
+/// to smuggle in oversized or malformed names.
+fn declared_entities_from(tags: &[String]) -> Vec<String> {
+    let mut declared: Vec<String> = Vec::with_capacity(tags.len());
+    let mut seen: HashSet<String> = HashSet::with_capacity(tags.len());
+    for tag in tags {
+        let trimmed = tag.trim();
+        if trimmed.is_empty() || validation::validate_entity(trimmed).is_err() {
+            continue;
+        }
+        if seen.insert(trimmed.to_lowercase()) {
+            declared.push(trimmed.to_string());
+        }
+    }
+    declared.truncate(validation::MAX_ENTITIES_PER_MEMORY);
+    declared
+}
+
 // =============================================================================
 // REQUEST/RESPONSE TYPES
 // =============================================================================
@@ -640,11 +668,14 @@ pub async fn remember(
     // radius index, while these are places the content merely talks about.
     let toponyms = crate::gazetteer::resolve_ner_locations(&ner_entities);
 
+    let declared_entities = declared_entities_from(&req.tags);
+
     let experience = Experience {
         content: req.content.clone(),
         experience_type,
         entities: merged_entities.clone(),
         tags: merged_entities,
+        declared_entities,
         context,
         ner_entities,
         toponyms,
@@ -1074,12 +1105,14 @@ pub async fn batch_remember(
         );
 
         let toponyms = crate::gazetteer::resolve_ner_locations(&ner_records);
+        let declared_entities = declared_entities_from(&item.tags);
 
         let experience = Experience {
             content: item.content,
             experience_type,
             entities: merged_entities.clone(),
             tags: merged_entities,
+            declared_entities,
             context,
             ner_entities: ner_records,
             toponyms,
@@ -1266,12 +1299,14 @@ pub async fn upsert_memory(
     }
 
     let toponyms = crate::gazetteer::resolve_ner_locations(&ner_entities);
+    let declared_entities = declared_entities_from(&req.tags);
 
     let experience = Experience {
         content: req.content.clone(),
         experience_type,
         entities: merged_entities.clone(),
         tags: merged_entities,
+        declared_entities,
         ner_entities,
         toponyms,
         importance_override: req.importance.map(|v| v.clamp(0.0, 1.0)),

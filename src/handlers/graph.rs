@@ -419,8 +419,8 @@ pub struct RebuildGraphParams {
     /// content (`?fresh_ner=true`). Defaults to false.
     ///
     /// A rebuild replays every stored memory through the graph pipeline, which
-    /// reads `experience.entities` / `experience.ner_entities` first and only
-    /// falls through to the neural typer when both are empty. That ordering is
+    /// reads the cached `experience.ner_entities` when it has them and only
+    /// falls through to the neural typer when it does not. That ordering is
     /// right for a normal rebuild — it is what makes the operation cheap and
     /// reproducible — but it means a rebuild reconstructs the typing decisions
     /// that were cached at ingest, not the ones the current typer would make.
@@ -428,13 +428,17 @@ pub struct RebuildGraphParams {
     /// So a corpus ingested before a typer improvement cannot be re-typed at
     /// all. It replays its own history forever, and every entity keeps the class
     /// (and the absent `fine_type`) it was given by whatever ran the day it was
-    /// written. On a corpus whose cached `entities` are really keyphrase tags,
-    /// that also means the graph is rebuilt out of tags rather than out of the
-    /// text — filenames and fragments included.
+    /// written.
     ///
     /// Setting this drops the cache for the duration of the rebuild so entities
     /// are re-derived from `content`. It costs a full NER pass over the corpus,
     /// which is why it is opt-in.
+    ///
+    /// It does NOT drop `experience.declared_entities`: those are the names the
+    /// caller asserted, not a cached inference, and re-running the typer is no
+    /// reason to discard what a person said. A corpus written before that field
+    /// existed simply has none, and rebuilds to whatever the typer and the
+    /// curated identifier table can support on their own.
     ///
     /// OPERATIONAL NOTE: the rebuild runs synchronously inside the request, and
     /// the server applies a `TimeoutLayer` of `SHODH_REQUEST_TIMEOUT` seconds
@@ -492,6 +496,11 @@ pub async fn rebuild_user_graph(
             // `content`. See `RebuildGraphParams::fresh_ner` — without this the
             // rebuild cannot change any entity's type, however much the typer has
             // improved since the memory was written.
+            //
+            // `entities` is cleared alongside `ner_entities` because the two were
+            // written as one merged list and a half-dropped cache is worse than
+            // either state: it would leave the pipeline reading a list that has
+            // the old extraction's surfaces but not its types.
             experience.entities.clear();
             experience.ner_entities.clear();
         }

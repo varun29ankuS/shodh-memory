@@ -546,6 +546,11 @@ impl LegacyExperienceV1 {
             // remember time, and silently minting coordinates during a legacy
             // decode would make old records look like they always had them.
             toponyms: Vec::new(),
+            // Same reasoning: a v0.1.0 record has no record of which of its
+            // `entities` the caller asserted, and inventing that provenance on
+            // read would let a legacy keyphrase enter the graph as a caller
+            // claim.
+            declared_entities: Vec::new(),
         }
     }
 }
@@ -703,7 +708,8 @@ impl LegacyMemoryV2 {
 /// was in a legacy format and should be re-written for future performance.
 /// Postcard defaults for every trailing `MemoryFlat` field added after the
 /// postcard cutover (#192), in field order: `toponyms: Vec<Toponym>` (empty =
-/// varint `0x00`).
+/// varint `0x00`), then `declared_entities: Vec<String>` (empty = varint
+/// `0x00`).
 ///
 /// `parent_id` is NOT listed: it was added in January, before the April
 /// postcard cutover, so every postcard-era record already carries it.
@@ -716,7 +722,7 @@ impl LegacyMemoryV2 {
 /// to silently wrong values rather than failing; that is why
 /// `Experience::toponyms` is `#[serde(skip)]` and carried at the `MemoryFlat`
 /// tail.
-const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00];
+const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00];
 
 fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
     use crate::serialization::{SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};
