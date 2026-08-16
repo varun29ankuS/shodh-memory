@@ -5,6 +5,7 @@ import {
   MessageSquare,
   KeyRound,
   Globe,
+  History,
   Share2,
   House,
 } from "lucide-react";
@@ -113,6 +114,22 @@ export const DESTINATIONS = [
     // does not have is the same class of error as a legend that disagrees with
     // its picture, and it sat on the rail on every screen.
     caption: "Work recorded against this profile",
+  },
+  {
+    id: "history",
+    path: "/history",
+    label: "History",
+    icon: History,
+    // NOT "everything that happened", and not "audit log". Two of the four
+    // rules bite here. The screen shows the conversation SEAT's trail — the
+    // memory server keeps its own, in RocksDB's CF_AUDIT, which is not served
+    // over HTTP and rotates on a retention timer — so any caption spanning the
+    // whole system would credit the product with completeness it does not
+    // have, the same failure the Tasks caption above was corrected for. And
+    // "audit log" names a genre rather than the data: the three things on that
+    // screen are tool calls, changes to memory, and retrievals, which is what
+    // a reader is looking for and what they will recognise on arrival.
+    caption: "Tool calls, changes, retrievals",
   },
   {
     id: "providers",

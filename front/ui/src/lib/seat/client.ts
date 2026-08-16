@@ -153,6 +153,82 @@ export function revertLedgerEvent(eventId: string) {
 }
 
 /**
+ * The audit trail as the seat serves it: the raw JSONL/CSV body of
+ * `GET /v1/audit/export`.
+ *
+ * NOT `api.get`, and this is the whole reason it is written out. That helper
+ * ends in `res.json()`, which throws on the second line of an NDJSON body —
+ * the response here is a FILE, not a JSON document, and the point of reading it
+ * as text is that the History screen renders exactly the bytes the download
+ * hands a reviewer (features/history/derive.ts states why at length).
+ *
+ * Error handling mirrors `client.ts`'s `request` so this call is
+ * indistinguishable from every other one at the call site: a 4xx/5xx is an
+ * `ApiError` carrying the seat's own message, an unreachable seat is a
+ * `NetworkError`, and an abort is rethrown untouched so react-query reads it as
+ * a cancellation.
+ */
+export async function fetchAuditTrail(path: string, signal?: AbortSignal): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch(path, { method: "GET", signal });
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
+    throw new NetworkError(cause);
+  }
+  if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => ""));
+  return res.text();
+}
+
+/**
+ * The filename the seat put on the response, or null when it did not reach us.
+ *
+ * IT USUALLY DOES NOT. The seat sends
+ * `Content-Disposition: attachment; filename="shodh-audit-….jsonl"`, but the
+ * shodh-front proxy forwards exactly two response headers — `content-type` and
+ * `cache-control` (front/src/main.rs `forward`) — so in the shipped binary this
+ * header is dropped. It survives the vite dev proxy, which forwards everything.
+ * Preferring it where it exists keeps the saved name the SERVER'S name in the
+ * one mode where the server can state it.
+ *
+ * Any value carrying a path separator is refused rather than sanitised: a
+ * filename this client cannot vouch for should not be handed to the browser's
+ * download path at all, and the caller has a name of its own to fall back to.
+ */
+function filenameFromDisposition(header: string | null): string | null {
+  if (!header) return null;
+  const match = /filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;]+)/i.exec(header);
+  const raw = (match?.[1] ?? match?.[2] ?? "").trim();
+  if (!raw || raw.includes("/") || raw.includes("\\")) return null;
+  return raw;
+}
+
+/**
+ * Download one audit export, as the file itself.
+ *
+ * The body is returned as an untouched `Blob`. Nothing on this side re-encodes
+ * it: the export's defining property is that two exports of the same window are
+ * byte-identical and therefore diffable, and a client that rebuilt the file
+ * from parsed rows would be a second, drifting definition of the artefact.
+ */
+export async function fetchAuditFile(
+  path: string,
+  fallbackFilename: string,
+): Promise<{ blob: Blob; filename: string }> {
+  let res: Response;
+  try {
+    res = await fetch(path, { method: "GET" });
+  } catch (cause) {
+    throw new NetworkError(cause);
+  }
+  if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => ""));
+  return {
+    blob: await res.blob(),
+    filename: filenameFromDisposition(res.headers.get("Content-Disposition")) ?? fallbackFilename,
+  };
+}
+
+/**
  * SSE over fetch, by hand: frames separated by a blank line, `event:`/`data:`
  * fields, comments (`: ping` heartbeats) and `retry:` ignored — the exact
  * grammar seat/src/server.ts emits. ~30 lines beats a dependency, and

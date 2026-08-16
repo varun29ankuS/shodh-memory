@@ -331,6 +331,82 @@ export interface ConversationDetail extends ConversationSummary {
  */
 export type LedgerActor = "user" | "agent" | "system";
 
+/**
+ * seat/src/ledger.ts `LedgerActorView` — the READ-side actor, widened by one
+ * value the write side cannot produce.
+ *
+ * Entries written before `actor` existed report "unknown" and are deliberately
+ * NOT backfilled: inferring an actor for a historical entry and writing it down
+ * as fact is exactly what an audit log exists to prevent. Every surface that
+ * renders this must render the gap, never a default.
+ */
+export type LedgerActorView = LedgerActor | "unknown";
+
+/** seat/src/audit.ts `AuditSource` — which store a row came from. */
+export type AuditSource = "ledger" | "tool_call" | "retrieval";
+
+/**
+ * seat/src/audit.ts `AuditRow` — one line of the audit trail, flat and uniform
+ * across all three sources so it survives a spreadsheet and `jq` alike.
+ *
+ * This is the row shape of `GET /v1/audit/export`, in the order
+ * `buildAuditRows` sorts it: the total order (ts, source, ref). That order is
+ * the artefact's citability — two exports of the same window are byte-identical
+ * — so nothing on this side may re-sort a parsed trail.
+ */
+export interface AuditRow {
+  /** ISO-8601 UTC. */
+  ts: string;
+  source: AuditSource;
+  actor: LedgerActorView;
+  /** Ledger kind, tool name, or event type. */
+  kind: string;
+  user_id: string;
+  conversation_id: string;
+  turn: number;
+  /** Ledger entry id, tool call id, or memory-operation identity. */
+  ref: string;
+  /** Source-specific payload, JSON-encoded so one column holds every shape. */
+  detail: string;
+}
+
+/**
+ * seat/src/audit.ts `AUDIT_COLUMNS`, verbatim and in order.
+ *
+ * Transcribed rather than derived from `keyof AuditRow`: the seat's list is
+ * FIXED because an export whose columns move is not citable, and a list derived
+ * from a TypeScript interface would silently follow a field rename here. This
+ * copy exists so `parseAuditJsonl` can check that what arrived is what the
+ * seat's writer emits.
+ */
+export const AUDIT_COLUMNS = [
+  "ts",
+  "source",
+  "actor",
+  "kind",
+  "user_id",
+  "conversation_id",
+  "turn",
+  "ref",
+  "detail",
+] as const satisfies readonly (keyof AuditRow)[];
+
+/**
+ * seat/src/audit.ts `ToolCallRecord`'s tail, as it is encoded into
+ * `AuditRow.detail` by `toolCallRow`.
+ *
+ * THE NULLS ARE LOAD-BEARING AND ARE NOT OPTIONAL FIELDS. A call whose turn
+ * ended before it returned (abort, crash, kill) keeps `ended_at`, `duration_ms`
+ * and `is_error` at null — `is_error: false` would assert a success that never
+ * happened, and those rows are the most audit-relevant ones in the set.
+ */
+export interface ToolCallDetail {
+  args: unknown;
+  ended_at: string | null;
+  duration_ms: number | null;
+  is_error: boolean | null;
+}
+
 /** seat/src/ledger.ts `LedgerEntry` / `LedgerEntryView` — fields the UI shows. */
 export interface LedgerEntryView {
   entry: {

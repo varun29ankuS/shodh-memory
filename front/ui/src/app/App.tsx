@@ -13,6 +13,7 @@ import { GeoView } from "@/features/geo/GeoView";
 import { GraphView } from "@/features/graph/GraphView";
 import { Inspector } from "@/features/inspector/Inspector";
 import { TasksView } from "@/features/tasks/TasksView";
+import { HistoryView } from "@/features/history/HistoryView";
 import { BriefingView } from "@/features/briefing/BriefingView";
 import { ChatView } from "@/features/chat/ChatView";
 import { ConversationOverlay } from "@/features/chat/ConversationOverlay";
@@ -37,10 +38,17 @@ import type { Reachability } from "@/lib/api";
  * one embedded `index.html` inside the Rust binary, where a hash is the only
  * routing that survives being opened from anywhere.
  *
- * Two things from Gridline are deliberately absent. Its theme switch and the
- * MutationObserver behind it: this product is dark-only, so the control would
- * toggle nothing. Its version strip: there is no version feed behind it, and
- * chrome that displays invented data is worse than chrome that is absent.
+ * One thing from Gridline is deliberately absent: its version strip. There is
+ * no version feed behind it, and chrome that displays invented data is worse
+ * than chrome that is absent.
+ *
+ * Its theme switch and the MutationObserver behind it are absent for a
+ * different reason, and the note that used to stand here ("this product is
+ * dark-only, so the control would toggle nothing") is no longer true of it.
+ * The product has two grounds — paper is the default and the near-black set is
+ * reached by asking — and the switch lives on the briefing, stamping
+ * `data-theme` through `lib/ground.ts`. No observer is needed because that
+ * module is the single writer.
  */
 
 // Kept in lockstep with the Inspector's own width (Inspector.tsx) — must
@@ -109,6 +117,11 @@ function Shell({ reach }: { reach: Reachability }) {
             <Route path="/graph" element={<GraphView reach={reach} />} />
             <Route path="/anomalies" element={<AnomaliesView reach={reach} />} />
             <Route path="/tasks" element={<TasksView reach={reach} />} />
+            {/* Takes `seat` and not `reach`: the audit trail is the SEAT's
+                record of its own runs, read from its export route. The memory
+                server being down does not empty this screen, and the seat being
+                down does — so it must be the seat's reachability that gates it. */}
+            <Route path="/history" element={<HistoryView seat={seat} />} />
             <Route path="/providers" element={<ProvidersView seat={seat} />} />
             {/* A hash the app does not know is a typo or a stale link, not an
                 error worth a page — send it home rather than showing a dead end. */}
