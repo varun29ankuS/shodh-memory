@@ -241,8 +241,8 @@ function ResultPane({ reach }: { reach: Reachability }) {
     if (recent.length === 0) {
       return (
         <EmptyState
-          title="Nothing remembered yet"
-          body="The newest entries appear here as soon as this profile holds any."
+          title="Recall searches everything this profile holds"
+          body="It holds nothing yet. The newest entries land here as soon as anything is written — a conversation, the API, or an import."
         />
       );
     }

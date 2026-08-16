@@ -464,8 +464,8 @@ export function AnomaliesView({ reach }: { reach: Reachability }) {
     return (
       <EmptyState
         size="page"
-        title="Nothing remembered yet"
-        body="Nothing to compare against."
+        title="Anomalies show what deviates from this profile's normal"
+        body="Normal is learned from the memories themselves, so this fills once there are enough of them to have a shape."
         more="Every measure here compares a memory with the others in the same profile, so a baseline needs memories to be built from. These appear as soon as anything is stored."
       />
     );

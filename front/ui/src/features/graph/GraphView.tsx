@@ -181,8 +181,8 @@ export function GraphView({ reach }: { reach: Reachability }) {
     return (
       <EmptyState
         size="page"
-        title="No entities yet"
-        body="Nothing has been extracted for this profile yet."
+        title="The graph shows what this memory knows about"
+        body="Entities and their links appear here as memories are written and the extraction pipeline types what is in them."
         more="Entities appear as memories are written and the extraction pipeline types what is in them, so the graph fills in behind the corpus rather than being built separately."
       />
     );

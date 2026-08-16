@@ -55,20 +55,61 @@ interface SessionState {
   reconcileProfiles: (profiles: string[]) => void;
 }
 
+/**
+ * The active profile, remembered across reloads.
+ *
+ * A refresh used to drop you back onto whichever profile the server listed
+ * first — usually an empty one — so a reload mid-demo silently swapped the
+ * corpus under you and every screen went blank for no stated reason.
+ *
+ * SAFE BECAUSE RECONCILIATION STILL DECIDES. A restored name is a suggestion,
+ * not an authority: it is written back unpinned, so `reconcileProfiles` keeps
+ * it only while the server still lists it and otherwise falls back. That
+ * preserves the rule this store exists to enforce — a profile is only ever one
+ * the server named, because an invented one silently provisions an empty store
+ * instead of failing.
+ *
+ * Only the profile persists. The selections do not: they name objects inside a
+ * corpus, and restoring an id whose memory may have been rewritten since would
+ * open the Inspector on something that no longer means what it did.
+ */
+const PROFILE_KEY = "shodh.profile";
+
+function readStoredProfile(): string | null {
+  try {
+    return window.localStorage.getItem(PROFILE_KEY);
+  } catch {
+    // Storage can throw outright in private modes and hardened embeddings.
+    // Forgetting the profile is a far smaller failure than not loading.
+    return null;
+  }
+}
+
+function storeProfile(profile: string | null): void {
+  try {
+    if (profile === null) window.localStorage.removeItem(PROFILE_KEY);
+    else window.localStorage.setItem(PROFILE_KEY, profile);
+  } catch {
+    /* see readStoredProfile */
+  }
+}
+
 export const useSession = create<SessionState>((set) => ({
-  profile: null,
+  profile: readStoredProfile(),
   profilePinned: false,
   selectedMemoryId: null,
   selectedEntityId: null,
   activeQuery: "",
 
-  setProfile: (profile) =>
-    set({
+  setProfile: (profile) => {
+    storeProfile(profile);
+    return set({
       profile,
       profilePinned: profile !== null,
       selectedMemoryId: null,
       selectedEntityId: null,
-    }),
+    });
+  },
   select: (selectedMemoryId) => set({ selectedMemoryId, selectedEntityId: null }),
   selectEntity: (selectedEntityId) => set({ selectedEntityId, selectedMemoryId: null }),
   // Committing a query starts a new answer, and the selected object belonged to
@@ -88,10 +129,11 @@ export const useSession = create<SessionState>((set) => ({
       // previous profile's corpus, and an id from one store means nothing in
       // another.
       if (profiles.length === 0) {
-        return s.profile === null
-          ? s
-          : { profile: null, selectedMemoryId: null, selectedEntityId: null };
+        if (s.profile === null) return s;
+        storeProfile(null);
+        return { profile: null, selectedMemoryId: null, selectedEntityId: null };
       }
+      storeProfile(profiles[0]);
       return {
         profile: profiles[0],
         profilePinned: false,

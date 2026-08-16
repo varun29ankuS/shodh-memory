@@ -81,8 +81,8 @@ export function GeoView({ reach }: { reach: Reachability }) {
       // Factual, not apologetic: the reason is a property of the data.
       <EmptyState
         size="page"
-        title="No coordinates in this corpus"
-        body="Nothing stored here carries a position."
+        title="Geo plots the memories that carry a place"
+        body="None in this profile does yet. One appears here the moment a memory is written with coordinates — no search needed."
         more="A memory only carries coordinates when whatever wrote it supplied them — imported corpora like GDELT do, session captures do not. The first one that does appears here without any search."
       />
     );
