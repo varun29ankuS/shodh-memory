@@ -93,6 +93,11 @@ pub fn prepare_memories(
             metadata,
             embeddings,
             tags: mem.tags.clone(),
+            // The origin of the IMPORT, not of whatever wrote the memory before
+            // it was exported. MIF carries no origin field, so a round trip
+            // through export/import genuinely loses the earlier value rather
+            // than us pretending to know it.
+            origin: crate::memory::types::MemoryOrigin::MifImport,
             ..Default::default()
         };
 

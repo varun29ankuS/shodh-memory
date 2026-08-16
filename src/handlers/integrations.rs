@@ -114,6 +114,8 @@ pub async fn linear_webhook(
         content: content.clone(),
         experience_type: ExperienceType::Task,
         entities: tags.clone(),
+        // Linear pushed this issue event; the server composed the content.
+        origin: crate::memory::types::MemoryOrigin::LinearConnector,
         ..Default::default()
     };
 
@@ -208,6 +210,8 @@ pub async fn linear_sync(
             content,
             experience_type: ExperienceType::Task,
             entities: tags,
+            // Operator-initiated bulk pull from Linear.
+            origin: crate::memory::types::MemoryOrigin::LinearConnector,
             ..Default::default()
         };
 
@@ -352,6 +356,8 @@ pub async fn github_webhook(
         content: content.clone(),
         experience_type: ExperienceType::Task,
         entities: tags.clone(),
+        // GitHub pushed this issue/PR event; the server composed the content.
+        origin: crate::memory::types::MemoryOrigin::GithubConnector,
         ..Default::default()
     };
 
@@ -447,6 +453,8 @@ pub async fn github_sync(
                 content,
                 experience_type: ExperienceType::Task,
                 entities: tags,
+                // Operator-initiated bulk pull from GitHub.
+                origin: crate::memory::types::MemoryOrigin::GithubConnector,
                 ..Default::default()
             };
 
@@ -505,6 +513,8 @@ pub async fn github_sync(
                 content,
                 experience_type: ExperienceType::Task,
                 entities: tags,
+                // Operator-initiated bulk pull from GitHub.
+                origin: crate::memory::types::MemoryOrigin::GithubConnector,
                 ..Default::default()
             };
 

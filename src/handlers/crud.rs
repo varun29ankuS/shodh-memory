@@ -14,7 +14,7 @@ use tracing::info;
 use super::state::MultiUserMemoryManager;
 use super::types::MemoryEvent;
 use crate::errors::{AppError, ValidationErrorExt};
-use crate::memory::{self, ExperienceType, Memory};
+use crate::memory::{self, types::MemoryOrigin, ExperienceType, Memory};
 use crate::validation;
 
 /// Application state type alias
@@ -64,6 +64,10 @@ pub struct ListQuery {
     pub memory_type: Option<String>,
     /// Text search query - filters by content or tags (case-insensitive)
     pub query: Option<String>,
+    /// Restrict results to memories stamped with this write path, e.g.
+    /// `origin=todo_lifecycle`. See [`MemoryOrigin`] for the value set;
+    /// `unknown` selects records written before origins were recorded.
+    pub origin: Option<String>,
 }
 
 /// List response - simplified memory list
@@ -87,6 +91,8 @@ pub struct ListMemoriesRequest {
     #[serde(rename = "type")]
     pub memory_type: Option<String>,
     pub query: Option<String>,
+    /// See [`ListQuery::origin`].
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,6 +117,13 @@ pub struct ListMemoryItem {
     /// Lets map surfaces plot the corpus without a per-memory fetch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub geo_location: Option<[f64; 3]>,
+    /// Which write path stored this memory, as a stable wire name.
+    ///
+    /// Always emitted, including the `"unknown"` of a record written before
+    /// origins were recorded — skipping it when unknown would leave a client
+    /// unable to tell "this record has no origin" from "this server is too old
+    /// to report one", which are very different facts.
+    pub origin: String,
 }
 
 /// Hard ceiling on the content preview returned by the memory-listing endpoints
@@ -279,6 +292,31 @@ pub async fn get_memory(
 // LIST MEMORIES HANDLER
 // =============================================================================
 
+/// Resolve the `origin` query parameter into a filter over [`MemoryOrigin`].
+///
+/// `None` and the empty string both mean "no filter". Anything else must name a
+/// real origin: an unrecognised value is rejected rather than silently matching
+/// nothing, because a typo that returns an empty list looks exactly like a
+/// store that genuinely has no memories from that source.
+fn parse_origin_filter(raw: Option<&str>) -> Result<Option<MemoryOrigin>, AppError> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    MemoryOrigin::parse(raw)
+        .map(Some)
+        .ok_or_else(|| AppError::InvalidInput {
+            field: "origin".to_string(),
+            reason: format!(
+                "Unknown origin '{raw}'. Valid values: {}",
+                MemoryOrigin::ALL
+                    .iter()
+                    .map(|o| o.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        })
+}
+
 /// GET /api/list/{user_id} - List all memories for a user
 /// Query params: ?limit=100&offset=0&type=Decision
 /// `limit` defaults to 100 and is clamped to [`MAX_LIST_LIMIT`]; `offset` defaults
@@ -316,6 +354,12 @@ pub async fn list_memories(
     } else {
         all_memories
     };
+
+    // Filter by write path if specified. This rides the scan
+    // `get_all_memories()` already performed — no index, no extra read.
+    if let Some(want) = parse_origin_filter(query.origin.as_deref())? {
+        filtered.retain(|m| m.experience.origin == want);
+    }
 
     // Filter by text query if specified (search in content and tags)
     if let Some(ref text_query) = query.query {
@@ -362,6 +406,7 @@ pub async fn list_memories(
                 created_at: m.created_at.to_rfc3339(),
                 tier: format!("{:?}", m.tier),
                 geo_location: m.experience.geo_location,
+                origin: m.experience.origin.as_str().to_string(),
             }
         })
         .collect();
@@ -390,6 +435,8 @@ pub struct ListMemoriesQuery {
     #[serde(rename = "type")]
     pub memory_type: Option<String>,
     pub query: Option<String>,
+    /// See [`ListQuery::origin`].
+    pub origin: Option<String>,
 }
 
 /// GET /api/memories?user_id=...&limit=...&offset=... - List memories via query params
@@ -405,6 +452,7 @@ pub async fn list_memories_get(
         offset: params.offset,
         memory_type: params.memory_type,
         query: params.query,
+        origin: params.origin,
     };
     list_memories_inner(state, req).await
 }
@@ -441,6 +489,12 @@ async fn list_memories_inner(
     } else {
         all_memories
     };
+
+    // Filter by write path if specified. This rides the scan
+    // `get_all_memories()` already performed — no index, no extra read.
+    if let Some(want) = parse_origin_filter(req.origin.as_deref())? {
+        filtered.retain(|m| m.experience.origin == want);
+    }
 
     // Filter by text query if specified (search in content and tags)
     if let Some(ref text_query) = req.query {
@@ -487,6 +541,7 @@ async fn list_memories_inner(
                 created_at: m.created_at.to_rfc3339(),
                 tier: format!("{:?}", m.tier),
                 geo_location: m.experience.geo_location,
+                origin: m.experience.origin.as_str().to_string(),
             }
         })
         .collect();
@@ -1205,5 +1260,119 @@ mod tests {
             .expect("expected one non-truncated item");
         assert_eq!(short_item["content_length"], 42u64);
         assert_eq!(short_item["content"], short_content);
+    }
+    /// `POST /api/remember` must stamp `api`, and the list endpoints must
+    /// report it and be able to filter on it. This is the end-to-end shape a
+    /// client sees: without it, the enum could be perfectly serialized and
+    /// still never reach a caller.
+    #[tokio::test]
+    async fn remember_stamps_api_origin_and_list_can_filter_on_it() {
+        let harness = TestHarness::new();
+        let user_id = "origin-filter-user";
+
+        let req = test_helpers::post_json(
+            "/api/remember",
+            &serde_json::json!({
+                "user_id": user_id,
+                "content": "The gripper stalled at 40 percent travel on the third attempt",
+            }),
+        );
+        let (status, _) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // A memory written straight into the store, bypassing every handler —
+        // the stand-in for a record whose write path was never recorded.
+        {
+            let memory = harness.manager.get_user_memory(user_id).unwrap();
+            let guard = memory.read();
+            guard
+                .remember(
+                    Experience {
+                        content: "A memory with no recorded origin".to_string(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+
+        let req = test_helpers::get(&format!("/api/list/{user_id}?limit=10"));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        let memories = body["memories"].as_array().unwrap();
+        assert_eq!(memories.len(), 2, "precondition: both memories are listed");
+        let mut origins: Vec<&str> = memories
+            .iter()
+            .map(|m| {
+                m["origin"]
+                    .as_str()
+                    .expect("every list item must report an origin")
+            })
+            .collect();
+        origins.sort_unstable();
+        assert_eq!(origins, vec!["api", "unknown"]);
+
+        // Filtering narrows to the stamped one...
+        let req = test_helpers::get(&format!("/api/list/{user_id}?limit=10&origin=api"));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], 1, "`total` must reflect the origin filter");
+        assert_eq!(body["memories"].as_array().unwrap().len(), 1);
+        assert_eq!(body["memories"][0]["origin"], "api");
+
+        // ...and `unknown` is a first-class filter value, not a hole.
+        let req = test_helpers::get(&format!("/api/list/{user_id}?limit=10&origin=unknown"));
+        let (_, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["memories"][0]["origin"], "unknown");
+
+        // A real origin with no matching memories is an empty result, not an error.
+        let req = test_helpers::get(&format!("/api/list/{user_id}?limit=10&origin=mif_import"));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], 0);
+
+        // A typo must be rejected: an empty list would be indistinguishable
+        // from a store that genuinely holds nothing from that source.
+        let req = test_helpers::get(&format!("/api/list/{user_id}?limit=10&origin=hook"));
+        let (status, _) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // The POST alias shares the implementation and must behave identically.
+        let req = test_helpers::post_json(
+            "/api/memories",
+            &serde_json::json!({ "user_id": user_id, "origin": "api" }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["memories"][0]["origin"], "api");
+    }
+
+    /// `POST /api/remember/batch` is a separate handler with its own
+    /// `Experience` construction, so it needs its own proof that it stamps the
+    /// batch origin rather than copying the single-write one.
+    #[tokio::test]
+    async fn batch_remember_stamps_batch_api_origin() {
+        let harness = TestHarness::new();
+        let user_id = "origin-batch-user";
+
+        let req = test_helpers::post_json(
+            "/api/remember/batch",
+            &serde_json::json!({
+                "user_id": user_id,
+                "memories": [
+                    { "content": "First item of the batch, long enough to be stored" },
+                    { "content": "Second item of the batch, also long enough to store" },
+                ],
+            }),
+        );
+        let (status, _) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let req = test_helpers::get(&format!("/api/list/{user_id}?limit=10&origin=batch_api"));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], 2);
     }
 }

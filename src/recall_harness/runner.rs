@@ -1014,6 +1014,9 @@ pub fn ingest_corpus(
             entities: merged.clone(),
             tags: merged,
             ner_entities,
+            // Benchmark corpus, not a user's memory. Stamped so an eval store
+            // is distinguishable from a real one.
+            origin: crate::memory::types::MemoryOrigin::RecallHarness,
             ..Default::default()
         };
 

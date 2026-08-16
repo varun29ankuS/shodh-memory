@@ -546,6 +546,12 @@ impl LegacyExperienceV1 {
             // remember time, and silently minting coordinates during a legacy
             // decode would make old records look like they always had them.
             toponyms: Vec::new(),
+            // A v1 bincode record was written years before any write path
+            // stamped an origin, so there is nothing to recover. `Unknown` is
+            // the truth; guessing "this looks like it came from the API" and
+            // persisting that on the migration rewrite would mint provenance
+            // that never existed.
+            origin: crate::memory::types::MemoryOrigin::Unknown,
         }
     }
 }
@@ -703,6 +709,7 @@ impl LegacyMemoryV2 {
 /// was in a legacy format and should be re-written for future performance.
 /// Postcard defaults for every trailing `MemoryFlat` field added after the
 /// postcard cutover (#192), in field order: `toponyms: Vec<Toponym>` (empty =
+/// varint `0x00`), then `origin: MemoryOrigin` (`Unknown` = variant index
 /// varint `0x00`).
 ///
 /// `parent_id` is NOT listed: it was added in January, before the April
@@ -716,7 +723,7 @@ impl LegacyMemoryV2 {
 /// to silently wrong values rather than failing; that is why
 /// `Experience::toponyms` is `#[serde(skip)]` and carried at the `MemoryFlat`
 /// tail.
-const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00];
+const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00];
 
 fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
     use crate::serialization::{SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};

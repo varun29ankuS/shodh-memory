@@ -824,6 +824,7 @@ pub async fn recall(
                     tags: m.experience.entities.clone(),
                     geo_location: m.experience.geo_location,
                     toponyms: m.experience.toponyms.clone(),
+                    origin: m.experience.origin.as_str().to_string(),
                 },
                 importance: m.importance(),
                 created_at: m.created_at.to_rfc3339(),
@@ -2530,6 +2531,10 @@ pub async fn proactive_context(
                                     None,
                                     None,
                                 ),
+                                // Nobody asked for this to be stored: it is the
+                                // previous assistant turn, captured because
+                                // `auto_ingest` defaults to true.
+                                origin: crate::memory::types::MemoryOrigin::AutoIngest,
                                 ..Default::default()
                             };
                             let _ = memory_guard.remember(experience, None);
@@ -2603,6 +2608,7 @@ pub async fn proactive_context(
                             None,
                             None,
                         ),
+                        origin: crate::memory::types::MemoryOrigin::AutoIngest,
                         ..Default::default()
                     };
                     if let Ok(id) = memory_guard.remember(experience, None) {
@@ -3178,6 +3184,7 @@ pub async fn recall_tracked(
                     tags: m.experience.entities.clone(),
                     geo_location: m.experience.geo_location,
                     toponyms: m.experience.toponyms.clone(),
+                    origin: m.experience.origin.as_str().to_string(),
                 },
                 importance: m.importance(),
                 created_at: m.created_at.to_rfc3339(),
@@ -3594,6 +3601,7 @@ pub async fn paginated_recall(
                     tags: m.experience.entities.clone(),
                     geo_location: m.experience.geo_location,
                     toponyms: m.experience.toponyms.clone(),
+                    origin: m.experience.origin.as_str().to_string(),
                 },
                 importance: m.importance(),
                 created_at: m.created_at.to_rfc3339(),
