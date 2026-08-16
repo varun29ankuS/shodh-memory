@@ -55,12 +55,32 @@ interface SessionState {
    * happen as you type. One field, two costs, two cadences.
    */
   cueDraft: string;
+  /**
+   * Extra terms the cue matches on, beyond `cueDraft` itself.
+   *
+   * The second producer of a cue is the conversation: a `memory_recall` carries
+   * the query the model asked AND the keyword lists of the facts it got back
+   * (`RecallFact.related_entities`), and those terms name entities the query
+   * string does not contain. One field could not carry both — a cue is one
+   * string typed by a person, and joining a dozen keywords into it would make
+   * the substring match test a sentence that appears nowhere.
+   *
+   * Same channel, not a second visual language: the canvas unions these into
+   * the set it already rings in the accent, so an agent-driven narrowing and a
+   * typed one look identical, which is the point. Cleared by any typed cue —
+   * the person's own cue supersedes the model's rather than compounding with it.
+   */
+  cueEntities: string[];
 
   setProfile: (profile: string | null) => void;
   select: (memoryId: string | null) => void;
   selectEntity: (entityId: string | null) => void;
   setActiveQuery: (query: string) => void;
   setCueDraft: (cue: string) => void;
+  /** Set both halves of the cue at once — the only way `cueEntities` becomes
+   *  non-empty. Called by the view bus when an agent cue command applies; never
+   *  from a keystroke, which has no entity list. */
+  setCue: (cue: string, entities: string[]) => void;
   /** Adopt the server's list: keep the current profile if it is still offered
    *  (or pinned, see above), otherwise fall back to the first. Prevents a
    *  stale auto-adopted selection surviving a backend restart that dropped it. */
@@ -113,6 +133,7 @@ export const useSession = create<SessionState>((set) => ({
   selectedEntityId: null,
   activeQuery: "",
   cueDraft: "",
+  cueEntities: [],
 
   setProfile: (profile) => {
     storeProfile(profile);
@@ -123,7 +144,8 @@ export const useSession = create<SessionState>((set) => ({
       selectedEntityId: null,
     });
   },
-  setCueDraft: (cueDraft) => set({ cueDraft }),
+  setCueDraft: (cueDraft) => set({ cueDraft, cueEntities: [] }),
+  setCue: (cueDraft, cueEntities) => set({ cueDraft, cueEntities }),
 
   select: (selectedMemoryId) => set({ selectedMemoryId, selectedEntityId: null }),
   selectEntity: (selectedEntityId) => set({ selectedEntityId, selectedMemoryId: null }),
@@ -135,7 +157,16 @@ export const useSession = create<SessionState>((set) => ({
   // rather than as a deliberate carry-over. Clearing both is the same rule
   // `setProfile` and `reconcileProfiles` already follow for the same reason.
   setActiveQuery: (activeQuery) =>
-    set({ activeQuery, cueDraft: activeQuery, selectedMemoryId: null, selectedEntityId: null }),
+    set({
+      activeQuery,
+      cueDraft: activeQuery,
+      // A committed search is the person taking the cue back; the model's
+      // entity terms would otherwise keep lighting nodes the new query never
+      // mentioned, under a heading that names the new query.
+      cueEntities: [],
+      selectedMemoryId: null,
+      selectedEntityId: null,
+    }),
 
   reconcileProfiles: (profiles) =>
     set((s) => {

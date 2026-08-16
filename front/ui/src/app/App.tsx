@@ -4,6 +4,7 @@ import { Providers } from "./providers";
 import { useSession } from "@/stores/session";
 import { useReachability } from "./useReachability";
 import { useSeatHealth } from "./useSeatHealth";
+import { useAgentView } from "./useAgentView";
 import { Sidebar, DESTINATIONS } from "@/components/layout/Sidebar";
 import { TopBar, RAIL_OFFSET } from "@/components/layout/TopBar";
 import { SearchField } from "@/components/layout/SearchField";
@@ -66,6 +67,11 @@ const ROUTES_WITH_SEARCH = ["/recall", "/geo", "/graph"];
 function Shell({ reach }: { reach: Reachability }) {
   const { pathname } = useLocation();
   const seat = useSeatHealth();
+  // MOUNTED HERE AND NOWHERE ELSE. The conversation's memory operations already
+  // stream to the browser; this is what turns them into view state, and it must
+  // be one instance — the shell is the only thing that outlives every route, so
+  // a model that moves the view cannot depend on which surface is open.
+  useAgentView();
   const destination = DESTINATIONS.find((d) => d.path === pathname);
   // The Inspector costs 280px of a 1600px stage — a fifth of the width — and
   // with nothing selected it spent that on the sentence "Select a memory or an

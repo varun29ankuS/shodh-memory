@@ -3,6 +3,7 @@ import { useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import type { Reachability } from "@/lib/api";
 import { StatusStrip } from "./StatusStrip";
+import { FollowOffer } from "./FollowOffer";
 import { DESTINATIONS } from "./Sidebar";
 import { RAIL_OFFSET } from "./destinations";
 
@@ -59,13 +60,21 @@ export function TopBar({
           left, the status of the system reads right, and the caption is the
           first thing to give up width because the title alone still says where
           you are. */}
-      <div className="flex min-w-0 items-baseline gap-2.5">
+      {/* `items-center`, not `items-baseline`: the offer is a bordered control
+          rather than a line of text, and on a baseline it hangs low enough to
+          crowd the bar's underline. The title and caption are unaffected —
+          both are single-line at the same size. */}
+      <div className="flex min-w-0 items-center gap-2.5">
         <h1 className="shrink-0 text-[13px] font-medium tracking-tight">{title}</h1>
         {caption ? (
           <p className="text-muted-foreground hidden min-w-0 truncate text-[12px] md:block">
             {caption}
           </p>
         ) : null}
+        {/* What the conversation did to this view, and what it is still asking
+            to do. It sits with the title because it describes the screen, not
+            the system — the status strip on the right is about the server. */}
+        <FollowOffer />
       </div>
       <div className="ml-auto flex min-w-0 flex-1 items-center justify-end gap-3 pl-3">
         <StatusStrip reach={reach} />

@@ -418,6 +418,33 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The conversation's offer, arriving.
+
+   It appears in a bar the eye is already resting on, part-way through reading
+   an answer, so it has to announce itself as NEW rather than as something that
+   was always there and went unnoticed. A short fade with a two-pixel settle is
+   the whole of it: no travel, because travel in a 48px header reads as a thing
+   sliding across the title.
+
+   As with the activation flow below, the global prefers-reduced-motion rule in
+   @layer base forces every animation to one iteration at 0.01ms, which lands
+   this at its `to` state instantly — the correct fallback, and it needs no
+   branch in the component. */
+@keyframes shodh-offer-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@utility offer-in {
+  animation: shodh-offer-in 300ms cubic-bezier(0.2, 0, 0, 1);
+}
+
 /* The graticule the Gridline direction is named for. A measured surface rather
    than a flat void: it gives the stage a sense of extent, and it is the same
    ruling the graph canvas will be plotted against once it lands, so the empty

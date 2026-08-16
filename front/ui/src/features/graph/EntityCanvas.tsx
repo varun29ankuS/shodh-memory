@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  easeCubicOut,
   forceCenter,
   forceCollide,
   forceLink,
@@ -17,7 +18,9 @@ import {
 } from "d3";
 import { coreExtentOf, fitTransform } from "@/lib/view/fit";
 import { useSession } from "@/stores/session";
+import { useView } from "@/stores/view";
 import { capEdgesPerNode, describeEdgeBudget } from "./budget";
+import { cueMatches } from "./cue";
 import {
   cooccurFloor,
   entityTypeToken,
@@ -83,6 +86,21 @@ const FRAME_TRIM = 0.06;
  *  handful of hubs. A per-node cap takes those off without ever isolating a
  *  node, because a leaf's only edge is trivially within its own top k. */
 const EDGES_PER_NODE = 3;
+
+/** How long the camera takes to reach a frame it was asked to move to, and the
+ *  easing it settles with. Long enough to be followed by eye, short enough that
+ *  it is over before the sentence that caused it has finished streaming.
+ *  Collapsed to an instant state change under `prefers-reduced-motion` — d3
+ *  transitions are not CSS and index.css's global rule does not reach them. */
+const FRAME_MS = 300;
+
+/** The tightest a framed SUBSET is allowed to zoom.
+ *
+ *  Framing two matched entities with the ordinary limits fits them to the
+ *  padding and lands at maximum scale, which fills the stage with two dots and
+ *  a lot of empty ground — the surrounding graph is what makes a match mean
+ *  anything, and at 6x none of it is on screen. */
+const SUBSET_MAX_SCALE = 1.8;
 
 type Level = "clusters" | "entities";
 
@@ -183,7 +201,15 @@ export function EntityCanvas({
   // keystroke. setActiveQuery writes both, so arriving with a committed cue
   // still lights the graph.
   const activeQuery = useSession((s) => s.cueDraft);
+  /** The cue's second half — terms the conversation supplied. Same channel,
+   *  same accent ring; the canvas cannot tell which producer wrote it, which is
+   *  the point. */
+  const cueEntities = useSession((s) => s.cueEntities);
   const selectEntity = useSession((s) => s.selectEntity);
+  /** A frame command the view bus applied. Read as STATE rather than pushed in,
+   *  so arriving on this canvas after accepting a Follow lands already framed
+   *  instead of framing the whole corpus and then correcting itself. */
+  const frameRequest = useView((s) => s.frame);
   const [hover, setHover] = useState<Hover | null>(null);
 
   const transformRef = useRef<ZoomTransform>(zoomIdentity);
@@ -193,6 +219,10 @@ export function EntityCanvas({
    *  re-deriving the node set and restarting the simulation under the
    *  pointer. */
   const queryRef = useRef<string>(activeQuery);
+  const entitiesRef = useRef<string[]>(cueEntities);
+  /** Set by the draw effect; called by the frame effect below. The camera lives
+   *  inside d3's zoom behaviour, which only exists in that closure. */
+  const frameOnRef = useRef<(entities: string[]) => void>(() => {});
   /** 0 = nothing searched, 1 = the cue fully applied. Eased so the unmatched
    *  recede instead of blinking out; the eye keeps its place because the
    *  layout never moves, only presence changes. */
@@ -316,7 +346,8 @@ export function EntityCanvas({
 
   useEffect(() => {
     queryRef.current = activeQuery;
-    const target = activeQuery.trim() ? 1 : 0;
+    entitiesRef.current = cueEntities;
+    const target = activeQuery.trim() || cueEntities.length > 0 ? 1 : 0;
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (reduce) {
       matchMixRef.current = target;
@@ -337,7 +368,7 @@ export function EntityCanvas({
     };
     matchRafRef.current = requestAnimationFrame(step);
     return () => cancelAnimationFrame(matchRafRef.current);
-  }, [activeQuery]);
+  }, [activeQuery, cueEntities]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -390,12 +421,18 @@ export function EntityCanvas({
          louder at 2.4px, so a chosen node is still distinguishable from the
          set it was chosen out of. */
       const cue = queryRef.current.trim().toLowerCase();
+      const terms = entitiesRef.current;
       const mix = matchMixRef.current;
       const matched = new Set<string>();
-      if (cue) {
-        for (const n of nodes) if (n.label.toLowerCase().includes(cue)) matched.add(n.id);
+      if (cue || terms.length > 0) {
+        for (const n of nodes) if (cueMatches(n.label, cue, terms)) matched.add(n.id);
       }
-      const searching = cue.length > 0 && matched.size > 0 && mix > 0.001;
+      /* A CUE THAT MATCHES NOTHING CHANGES NOTHING. `matched.size > 0` is what
+         keeps a recall that returned nothing — or one whose terms name no
+         entity in this corpus — from receding the entire graph to 9% and
+         presenting an empty field as an answer. The cue is still stated in the
+         chip; the corpus stays framed and readable underneath it. */
+      const searching = (cue.length > 0 || terms.length > 0) && matched.size > 0 && mix > 0.001;
 
       const lit = new Set<string>();
       if (focus) {
@@ -559,7 +596,15 @@ export function EntityCanvas({
     const zoomBehavior = zoom<HTMLCanvasElement, unknown>()
       .scaleExtent(SCALE_EXTENT)
       .on("zoom", (event) => {
-        if (event.sourceEvent) userAimed = true;
+        if (event.sourceEvent) {
+          // THE HAND CLAIMS THE CAMERA, once. `userAimed` was already the
+          // canvas's own "stop re-framing under them" flag; reporting the
+          // false→true edge to the bus is what makes the same gesture mean the
+          // same thing to the authority rule, without a second listener and
+          // without dispatching on every frame of a drag.
+          if (!userAimed) useView.getState().touch("frame");
+          userAimed = true;
+        }
         transformRef.current = event.transform;
         draw();
       });
@@ -567,7 +612,17 @@ export function EntityCanvas({
     sel.call(zoomBehavior);
 
     /**
-     * Frame every node, rather than opening at the identity transform.
+     * The nodes the camera is currently holding, or null for the whole corpus.
+     *
+     * Resolved once when a frame command arrives rather than inside `frameNow`,
+     * because `frameNow` runs on every simulation tick: matching a thousand
+     * names against two dozen terms sixty times a second, to reach the same
+     * answer every time, is work the settle cannot afford.
+     */
+    let framedSubject: CanvasNode[] | null = null;
+
+    /**
+     * Frame the subject — every node, or the ones a command named.
      *
      * This MUST go through `zoomBehavior.transform` and not by assigning
      * `transformRef.current`. d3-zoom keeps its own copy of the current
@@ -578,14 +633,53 @@ export function EntityCanvas({
      * Applying the transform fires the zoom handler above, which repaints —
      * so callers must not also call `draw()`.
      */
-    const frameNow = (): void => {
-      const extent = coreExtentOf(nodes, FRAME_TRIM);
+    const frameNow = (animate = false): void => {
+      // A subset is framed WHOLE — no trim. The trim exists to stop a handful
+      // of stranded degree-0 nodes dictating the camera for a corpus; on a
+      // named set of a dozen entities every one of them is the subject, and
+      // cutting the outermost 6% would leave the answer half off-screen.
+      //
+      // An empty subject means this corpus does not know the entities the
+      // conversation named. Framing the whole graph is the honest fallback:
+      // zooming into nothing and an empty corpus look identical.
+      const holding = framedSubject !== null && framedSubject.length > 0;
+      const extent = holding
+        ? coreExtentOf(framedSubject!, 0)
+        : coreExtentOf(nodes, FRAME_TRIM);
       if (!extent) return;
       const fit = fitTransform(extent, { width, height }, {
         padding: FRAME_PADDING,
-        scaleExtent: SCALE_EXTENT,
+        scaleExtent: holding ? [SCALE_EXTENT[0], SUBSET_MAX_SCALE] : SCALE_EXTENT,
       });
-      sel.call(zoomBehavior.transform, zoomIdentity.translate(fit.x, fit.y).scale(fit.k));
+      const next = zoomIdentity.translate(fit.x, fit.y).scale(fit.k);
+      if (animate && !reduceMotion) {
+        // d3-zoom interrupts an in-flight transition on pointerdown, so this
+        // cannot be yanked out from under a hand mid-gesture: the gesture wins
+        // and takes the camera with it.
+        sel.transition().duration(FRAME_MS).ease(easeCubicOut).call(zoomBehavior.transform, next);
+      } else {
+        sel.call(zoomBehavior.transform, next);
+      }
+    };
+
+    /**
+     * A frame command, arriving from the bus.
+     *
+     * Deliberately does NOT consult `userAimed`. That flag stops the settling
+     * layout re-framing under someone who took the camera; whether the model is
+     * allowed to move it is the authority rule's question, and the bus has
+     * already answered it — a command that reaches here was applied, which
+     * means the hand was not on this dimension when the turn began.
+     */
+    frameOnRef.current = (entities: string[]) => {
+      framedSubject =
+        entities.length > 0 ? nodes.filter((n) => cueMatches(n.label, "", entities)) : null;
+      // While the layout is still settling the tick handler is already
+      // re-framing every tick, and a transition running against that fights it
+      // — two writers on one camera, visible as jitter. Settled is the ordinary
+      // case anyway: the graph has been sitting there and an answer arrives.
+      const settling = !reduceMotion && !userAimed && sim.alpha() > sim.alphaMin();
+      frameNow(!settling);
     };
 
     if (reduceMotion) {
@@ -618,9 +712,28 @@ export function EntityCanvas({
       observer.disconnect();
       sim.stop();
       sel.on(".zoom", null);
+      frameOnRef.current = () => {};
       simRef.current = null;
     };
   }, [nodes, links]);
+
+  /**
+   * Move the camera when the bus says to.
+   *
+   * DECLARED AFTER THE DRAW EFFECT, which is load-bearing rather than tidy:
+   * effects run in declaration order, so this is the arrangement in which
+   * `frameOnRef` is already assigned when this runs on mount. That is what
+   * makes accepting a Follow and then arriving on the graph land framed on the
+   * answer, instead of framing the whole corpus and correcting itself.
+   *
+   * Keyed on the record's identity, so two answers naming the same entities
+   * still re-frame: the bus decided that was a change worth making and the
+   * canvas is not where that is second-guessed.
+   */
+  useEffect(() => {
+    if (!frameRequest) return;
+    frameOnRef.current(frameRequest.entities);
+  }, [frameRequest]);
 
   const nodeAt = useCallback(
     (sx: number, sy: number): CanvasNode | null => {
@@ -654,6 +767,16 @@ export function EntityCanvas({
     [nodes, level],
   );
 
+  /** How many entities the cue holds, for the canvas's own label. A narrowing
+   *  that is only visible as ink is invisible to a screen reader, and the cue
+   *  is now something the conversation can set — so the one control that
+   *  describes this picture has to say it changed. */
+  const matchedCount = useMemo(() => {
+    const text = activeQuery.trim().toLowerCase();
+    if (text.length === 0 && cueEntities.length === 0) return null;
+    return nodes.filter((n) => cueMatches(n.label, text, cueEntities)).length;
+  }, [nodes, activeQuery, cueEntities]);
+
   const step = useCallback(
     (delta: number) => {
       if (ordered.length === 0) return;
@@ -672,9 +795,14 @@ export function EntityCanvas({
         className="focus-visible:ring-ring size-full focus-visible:ring-2 focus-visible:outline-none"
         role="application"
         aria-label={
-          level === "clusters"
+          (level === "clusters"
             ? `Knowledge graph overview, ${nodes.length} clusters. Click a cluster to drill into its entities.`
-            : `Knowledge graph, ${nodes.length} entities. Use the left and right arrow keys to move between them.`
+            : `Knowledge graph, ${nodes.length} entities. Use the left and right arrow keys to move between them.`) +
+          (matchedCount === null
+            ? ""
+            : matchedCount === 0
+              ? " The current cue matches nothing here, so the whole graph is shown."
+              : ` Narrowed to ${matchedCount} matching the current cue.`)
         }
         tabIndex={0}
         onKeyDown={(e) => {
