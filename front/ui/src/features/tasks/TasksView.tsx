@@ -374,8 +374,12 @@ function TaskRow({
         aria-expanded={open}
         aria-label={`${shortId(todo)} — ${todo.content}`}
         className={cn(
+          // `prefers-reduced-motion` needs no branch here: the global rule in
+          // index.css:404-412 collapses every transition-duration with
+          // !important, which a local `motion-reduce:` utility would only
+          // restate.
           "hover:bg-accent/60 flex w-full items-center gap-2.5 px-4 py-1.5 text-left",
-          "transition-colors duration-100 motion-reduce:transition-none",
+          "transition-colors duration-100",
           "focus-visible:ring-ring focus-visible:-outline-offset-2 focus-visible:ring-2 focus-visible:outline-none",
         )}
       >
@@ -538,7 +542,7 @@ function SettledSection({ profile }: { profile: string }) {
         aria-label="Settled work — done and dismissed tasks"
         className={cn(
           "hover:bg-accent/60 flex w-full items-center gap-2 border-b px-4 py-1.5 text-left",
-          "border-border transition-colors duration-100 motion-reduce:transition-none",
+          "border-border transition-colors duration-100",
           "focus-visible:ring-ring focus-visible:-outline-offset-2 focus-visible:ring-2 focus-visible:outline-none",
         )}
       >
