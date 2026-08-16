@@ -161,8 +161,13 @@ export type TodoPriority = "urgent" | "high" | "medium" | "low" | "none";
 
 /**
  * `Todo` — src/memory/types.rs:3646. Only the fields this UI renders; the
- * struct also carries `recurrence`, `embedding`, `comments` and
- * `related_memory_ids`, none of which the list view needs.
+ * struct also carries `recurrence`, `comments` and `related_memory_ids`, none
+ * of which the list view needs.
+ *
+ * The struct's 384-float `embedding` is deliberately absent from the wire: the
+ * todo response types strip it (src/handlers/todos.rs, `todo_wire`), which cut
+ * a 50-todo list from 287KB to 52KB. It is still persisted on the stored
+ * record, so do not expect it in any API response.
  *
  * `id` is `#[serde(transparent)]` over a `Uuid` (types.rs:3358-3361), so it
  * serialises as a bare string. There is no `short_id` field on the wire —

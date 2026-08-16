@@ -7668,6 +7668,58 @@ impl MemorySystem {
         Ok(())
     }
 
+    /// Record that `todo_id` references this memory (the memory→todo half of
+    /// the todo↔memory link).
+    ///
+    /// `Todo::related_memory_ids` was always written while this side stayed
+    /// empty, so a memory looked unconnected to the work that cited it.
+    pub fn link_related_todo(&self, memory_id: &MemoryId, todo_id: TodoId) -> Result<()> {
+        self.mutate_related_todos(memory_id, move |memory| memory.add_related_todo(todo_id))
+    }
+
+    /// Drop `todo_id` from this memory's back-links — used when a todo stops
+    /// referencing it or is deleted, so no dangling todo ids survive.
+    pub fn unlink_related_todo(&self, memory_id: &MemoryId, todo_id: &TodoId) -> Result<()> {
+        self.mutate_related_todos(memory_id, |memory| memory.remove_related_todo(todo_id))
+    }
+
+    /// Apply a back-link edit and persist it.
+    ///
+    /// Deliberately does NOT go through [`Self::update_memory`]: the edit
+    /// touches only `related_todo_ids`, leaving content, tags and entities
+    /// untouched, so re-embedding the vector index and committing+reloading the
+    /// BM25 index would be pure cost. This mirrors [`Self::set_memory_parent`],
+    /// the existing precedent for a structural-field update.
+    fn mutate_related_todos(
+        &self,
+        memory_id: &MemoryId,
+        edit: impl FnOnce(&mut Memory),
+    ) -> Result<()> {
+        let mut memory = self.long_term_memory.get(memory_id)?;
+        edit(&mut memory);
+        self.long_term_memory.update(&memory)?;
+
+        // Keep the in-memory tier copies in step so reads reflect the link
+        // immediately rather than waiting for tier promotion.
+        let updated = Arc::new(memory);
+        {
+            let mut wm = self.working_memory.write();
+            if wm.contains(memory_id) {
+                let _ = wm.remove(memory_id);
+                let _ = wm.add_shared(Arc::clone(&updated));
+            }
+        }
+        {
+            let mut sm = self.session_memory.write();
+            if sm.contains(memory_id) {
+                let _ = sm.remove(memory_id);
+                let _ = sm.add_shared(Arc::clone(&updated));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Get children of a memory
     pub fn get_memory_children(&self, parent_id: &MemoryId) -> Result<Vec<Memory>> {
         self.long_term_memory.get_children(parent_id)
