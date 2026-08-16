@@ -4258,7 +4258,9 @@ pub(crate) fn is_structural_non_entity(name: &str) -> bool {
     // separator alone is left alone because it is also ordinary notation
     // ("TCP/IP", "A/B test", "I/O").
     if lower.matches(['/', '\\']).count() >= 2
-        || (lower.len() >= 3 && lower.as_bytes()[1] == b':' && matches!(lower.as_bytes()[2], b'/' | b'\\'))
+        || (lower.len() >= 3
+            && lower.as_bytes()[1] == b':'
+            && matches!(lower.as_bytes()[2], b'/' | b'\\'))
     {
         return true;
     }
@@ -4524,7 +4526,10 @@ mod tests {
             recognised_tag_label("app-config"),
             Some(EntityLabel::Configuration)
         );
-        assert_eq!(recognised_tag_label(".env"), Some(EntityLabel::Configuration));
+        assert_eq!(
+            recognised_tag_label(".env"),
+            Some(EntityLabel::Configuration)
+        );
         // CHANGED: `contains("config")` used to fire here. "stobar
         // configuration" is a carrier-deck launch method, not a config file.
         assert_eq!(recognised_tag_label("stobar configuration"), None);

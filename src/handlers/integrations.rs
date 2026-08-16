@@ -462,11 +462,11 @@ pub async fn github_sync(
                 content,
                 experience_type: ExperienceType::Task,
                 // The webhook's tags ARE its entity assertions — repository,
-            // issue number, labels, assignee, milestone. Declaring them is
-            // what puts them in the knowledge graph: `entities` alone is a
-            // storage/search list, and the graph admits nodes by authority.
-            declared_entities: tags.clone(),
-            entities: tags,
+                // issue number, labels, assignee, milestone. Declaring them is
+                // what puts them in the knowledge graph: `entities` alone is a
+                // storage/search list, and the graph admits nodes by authority.
+                declared_entities: tags.clone(),
+                entities: tags,
                 ..Default::default()
             };
 
@@ -525,11 +525,11 @@ pub async fn github_sync(
                 content,
                 experience_type: ExperienceType::Task,
                 // The webhook's tags ARE its entity assertions — repository,
-            // issue number, labels, assignee, milestone. Declaring them is
-            // what puts them in the knowledge graph: `entities` alone is a
-            // storage/search list, and the graph admits nodes by authority.
-            declared_entities: tags.clone(),
-            entities: tags,
+                // issue number, labels, assignee, milestone. Declaring them is
+                // what puts them in the knowledge graph: `entities` alone is a
+                // storage/search list, and the graph admits nodes by authority.
+                declared_entities: tags.clone(),
+                entities: tags,
                 ..Default::default()
             };
 

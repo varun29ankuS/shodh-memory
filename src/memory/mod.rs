@@ -4220,8 +4220,7 @@ impl MemorySystem {
                         &mut by_vec,
                         |a, b| {
                             a.1.to_bits() == b.1.to_bits()
-                                && other_leg(a.0, true).to_bits()
-                                    == other_leg(b.0, true).to_bits()
+                                && other_leg(a.0, true).to_bits() == other_leg(b.0, true).to_bits()
                         },
                         |x| (*x.0).clone(),
                         &get_content,
