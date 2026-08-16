@@ -149,6 +149,23 @@ pub struct RecallRequest {
     /// to attribute quality and latency deltas to specific stages.
     #[serde(default)]
     pub layers: Option<String>,
+    /// Request a NON-MUTATING recall. Default `false` — reinforcement on read
+    /// stays on, which is the product's "behaves like a brain" design and is
+    /// unchanged by this flag's existence.
+    ///
+    /// Set it to `true` and this recall persists nothing it learned: no access
+    /// counts, no co-retrieval/coactivation edges, no Hebbian strengthening
+    /// (graph leg included), no interference records, no stale-vector cleanup.
+    /// Run the same query twice with it and the corpus underneath is
+    /// byte-identical both times, which is what "reproducible" requires — on
+    /// the default path the second answer comes from a corpus the first query
+    /// altered.
+    ///
+    /// Do not trust this field to know what happened: read
+    /// `reinforcement_applied` on the response, which is derived from the gate
+    /// the mutation sites actually consulted.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 pub fn default_recall_limit() -> usize {
@@ -192,6 +209,16 @@ pub struct RecallResponse {
     /// Number of lineage edges found
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lineage_count: Option<usize>,
+    /// Whether this recall reinforced what it read: access counts, Hebbian
+    /// edges, coactivation, interference records.
+    ///
+    /// Always present, and derived from `crate::memory::recall_is_readonly` —
+    /// the same gate every mutation site consulted — never echoed back from the
+    /// request. So it reports `false` when the server runs under the
+    /// process-wide `SHODH_RECALL_READONLY` pin even though the caller sent no
+    /// flag. A caller can therefore PROVE which mode it got from the response
+    /// instead of trusting the flag it sent.
+    pub reinforcement_applied: bool,
 }
 
 /// Causal lineage edge returned in recall results
@@ -926,10 +953,41 @@ mod tests {
             reminder_count: None,
             lineage: vec![],
             lineage_count: None,
+            reinforcement_applied: true,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("memories"));
         assert!(json.contains("count"));
+        assert!(
+            json.contains("\"reinforcement_applied\":true"),
+            "the mode a recall ran in must always be on the wire — a caller \
+             proves which one it got from the response, not from the flag it \
+             sent; got {json}"
+        );
+    }
+
+    /// `read_only` must default to `false` when absent, or every existing
+    /// caller silently loses reinforcement on read.
+    #[test]
+    fn recall_request_read_only_defaults_off_and_parses() {
+        let minimal: RecallRequest = serde_json::from_value(json!({
+            "user_id": "test-user",
+            "query": "search query"
+        }))
+        .unwrap();
+        assert!(
+            !minimal.read_only,
+            "omitting read_only must leave reinforcement-on-read ON — that is \
+             the product default and this flag does not change it"
+        );
+
+        let explicit: RecallRequest = serde_json::from_value(json!({
+            "user_id": "test-user",
+            "query": "search query",
+            "read_only": true
+        }))
+        .unwrap();
+        assert!(explicit.read_only);
     }
 
     #[test]

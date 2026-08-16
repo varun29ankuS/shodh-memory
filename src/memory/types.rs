@@ -2517,6 +2517,28 @@ pub struct Query {
     /// recall harness sets lower modes to attribute quality deltas to
     /// specific stages. See `LayerMode` docs.
     pub layers: LayerMode,
+
+    // === Read-Only Recall ===
+    /// Per-query request for a NON-MUTATING recall: no access-count
+    /// persistence, no co-retrieval/coactivation edges, no Hebbian edge
+    /// strengthening (graph leg included), no interference records, and no
+    /// stale-vector cleanup. Default `false` — reinforcement-on-read stays on,
+    /// unchanged.
+    ///
+    /// This is the per-request sibling of the process-wide
+    /// `SHODH_RECALL_READONLY` pin the eval harness sets. The pin is a process
+    /// property and cannot express "this one request must not learn" inside a
+    /// server serving concurrent callers, which is what a reviewer needs to run
+    /// the same query twice and compare: on the default path the second answer
+    /// comes from a corpus the first query altered.
+    ///
+    /// Carrying it on `Query` rather than plumbing a parameter means every
+    /// entry point that already takes a `Query` — `recall`,
+    /// `recall_with_diagnostics`, `paginated_recall`, the graph leg — honours it
+    /// for free, and the compiler audits each mutation site that must consult
+    /// it. Read it through `crate::memory::recall_is_readonly`, never directly:
+    /// that function is the single gate, and it ORs this flag with the env pin.
+    pub read_only: bool,
 }
 
 /// Paginated search results with metadata for "load more" patterns (SHO-69)
@@ -2600,6 +2622,7 @@ impl Default for Query {
             retrieval_mode: RetrievalMode::Hybrid,
             offset: 0,
             layers: LayerMode::Full,
+            read_only: false,
         }
     }
 }
@@ -2864,6 +2887,12 @@ impl QueryBuilder {
 
     pub fn retrieval_mode(mut self, mode: RetrievalMode) -> Self {
         self.query.retrieval_mode = mode;
+        self
+    }
+
+    /// Request a non-mutating recall — see [`Query::read_only`].
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.query.read_only = read_only;
         self
     }
 
