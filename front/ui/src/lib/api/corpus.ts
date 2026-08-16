@@ -8,10 +8,11 @@ import { useSession } from "@/stores/session";
  * The corpus listing — the newest `CORPUS_LIMIT` memories in the active
  * profile, newest first.
  *
- * Two surfaces want a view of the store BEFORE any query exists: Geo plots
- * every located memory as ambient context, and Recall shows the newest
- * memories so the destination opens onto the corpus rather than onto an
- * instruction. Both read this one cache entry.
+ * Three surfaces want a view of the store BEFORE any query exists: Geo plots
+ * the located memories as ambient context, Recall shows the newest memories so
+ * the destination opens onto the corpus rather than onto an instruction, and
+ * Anomalies computes its measures over the same rows. All three read this one
+ * cache entry, so the ordering below is the ordering all three inherit.
  *
  * `GET /api/list/{user_id}` returns previews (content capped at 500 chars),
  * which is exactly right here: these rows are orientation, and selecting one
