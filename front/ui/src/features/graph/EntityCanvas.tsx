@@ -179,12 +179,22 @@ export function EntityCanvas({
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const selectedEntityId = useSession((s) => s.selectedEntityId);
+  const activeQuery = useSession((s) => s.activeQuery);
   const selectEntity = useSession((s) => s.selectEntity);
   const [hover, setHover] = useState<Hover | null>(null);
 
   const transformRef = useRef<ZoomTransform>(zoomIdentity);
   const hoverRef = useRef<CanvasNode | null>(null);
   const selectedRef = useRef<string | null>(selectedEntityId);
+  /** The live cue, held in a ref so a keystroke repaints rather than
+   *  re-deriving the node set and restarting the simulation under the
+   *  pointer. */
+  const queryRef = useRef<string>(activeQuery);
+  /** 0 = nothing searched, 1 = the cue fully applied. Eased so the unmatched
+   *  recede instead of blinking out; the eye keeps its place because the
+   *  layout never moves, only presence changes. */
+  const matchMixRef = useRef(0);
+  const matchRafRef = useRef(0);
   const drawRef = useRef<() => void>(() => {});
   const simRef = useRef<Simulation<CanvasNode, CanvasLink> | null>(null);
 
@@ -302,6 +312,31 @@ export function EntityCanvas({
   }, [selectedEntityId]);
 
   useEffect(() => {
+    queryRef.current = activeQuery;
+    const target = activeQuery.trim() ? 1 : 0;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduce) {
+      matchMixRef.current = target;
+      drawRef.current();
+      return;
+    }
+    cancelAnimationFrame(matchRafRef.current);
+    const step = () => {
+      const diff = target - matchMixRef.current;
+      if (Math.abs(diff) < 0.004) {
+        matchMixRef.current = target;
+        drawRef.current();
+        return;
+      }
+      matchMixRef.current += diff * 0.16;
+      drawRef.current();
+      matchRafRef.current = requestAnimationFrame(step);
+    };
+    matchRafRef.current = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(matchRafRef.current);
+  }, [activeQuery]);
+
+  useEffect(() => {
     const wrap = wrapRef.current;
     const canvas = canvasRef.current;
     if (!wrap || !canvas) return;
@@ -344,6 +379,21 @@ export function EntityCanvas({
         nodes.length <= LABEL_ALWAYS_MAX
           ? 0
           : Math.max(2, Math.round(nodes.reduce((a, n) => a + n.degree, 0) / nodes.length));
+      /* THE CUE IS A FOCUS, SO IT TAKES THE ACCENT.
+         A search that changes nothing on the canvas leaves the graph a
+         decoration beside the answer. Matching entities keep full presence and
+         are ringed in the accent -- the token that already means "the current
+         selection reached this" -- while the rest recede. Selection stays
+         louder at 2.4px, so a chosen node is still distinguishable from the
+         set it was chosen out of. */
+      const cue = queryRef.current.trim().toLowerCase();
+      const mix = matchMixRef.current;
+      const matched = new Set<string>();
+      if (cue) {
+        for (const n of nodes) if (n.label.toLowerCase().includes(cue)) matched.add(n.id);
+      }
+      const searching = cue.length > 0 && matched.size > 0 && mix > 0.001;
+
       const lit = new Set<string>();
       if (focus) {
         lit.add(focus.id);
@@ -362,6 +412,20 @@ export function EntityCanvas({
         const g = l.target as CanvasNode;
         if (s.x == null || g.x == null) continue;
         const on = !dimmed || (lit.has(s.id) && lit.has(g.id));
+
+        /* EDGES RECEDE WITH THEIR NODES. Dimming the unmatched nodes and
+           leaving every line at full strength inverted the picture: the web
+           became the loudest thing on screen and the two matches sat behind
+           it. An edge is only part of the answer when BOTH ends are, so it
+           fades unless it joins two matches -- and a line into a ghost fades
+           furthest, because it leads somewhere the cue excluded. */
+        let cueEdge = 1;
+        if (searching) {
+          const both = matched.has(s.id) && matched.has(g.id);
+          const either = matched.has(s.id) || matched.has(g.id);
+          cueEdge = both ? 1 : (either ? 1 - 0.75 * mix : 1 - 0.94 * mix);
+        }
+        ctx!.globalAlpha = cueEdge;
 
         if (dimmed && on) {
           // The ONE place the accent appears on an edge: the selected node's
@@ -399,19 +463,26 @@ export function EntityCanvas({
         ctx!.stroke();
       }
 
+      ctx!.globalAlpha = 1;
+
       for (const n of nodes) {
         if (n.x == null || n.y == null) continue;
         const isLit = !dimmed || lit.has(n.id);
         const isSelected = n.id === sel;
-        ctx!.globalAlpha = isLit ? 1 : 0.09;
+        const isMatch = searching && matched.has(n.id);
+        // Hover dimming and cue dimming compose: a node recedes if either says
+        // it is not part of what is being looked at.
+        const cueAlpha = searching ? (isMatch ? 1 : 1 - 0.88 * mix) : 1;
+        ctx!.globalAlpha = (isLit ? 1 : 0.09) * cueAlpha;
         const hue = n.longTail ? tokens.muted : hueOf(n);
 
         ctx!.beginPath();
         ctx!.arc(n.x, n.y, n.r, 0, 2 * Math.PI);
         ctx!.fillStyle = hexA(hue, n.kind === "cluster" ? 0.2 : 0.3);
         ctx!.fill();
-        ctx!.lineWidth = (isSelected ? 2.4 : 1.3) / t.k;
-        ctx!.strokeStyle = isSelected ? tokens.active : hexA(hue, 0.95);
+        ctx!.lineWidth = (isSelected ? 2.4 : isMatch ? 1.9 : 1.3) / t.k;
+        ctx!.strokeStyle =
+          isSelected || isMatch ? tokens.active : hexA(hue, 0.95);
         ctx!.stroke();
 
         // Cluster labels are the whole point of the overview — an unlabelled

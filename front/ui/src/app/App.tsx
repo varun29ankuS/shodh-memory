@@ -55,10 +55,13 @@ const INSPECTOR_OFFSET = "pr-[min(280px,36vw)]";
  *  an explanation of itself, so it stays off those. */
 const ROUTES_WITH_INSPECTOR = ["/recall", "/geo", "/graph", "/anomalies"];
 
-/** Destinations that render a recall result and therefore need the cue that
- *  produced it. Without the field, Geo would depend on the user having visited
- *  Recall first and would look empty for no stated reason. */
-const ROUTES_WITH_SEARCH = ["/recall", "/geo"];
+/** Destinations where the cue is visible, because on each of them it changes
+ *  what is on screen. Recall lists the result, Geo plots its located part, and
+ *  the graph now rings matching entities in the accent and recedes the rest —
+ *  before that, searching from the graph was impossible and arriving at it
+ *  from a search showed no trace of the search. A field that is present on two
+ *  of three surfaces that answer to it is friction, not restraint. */
+const ROUTES_WITH_SEARCH = ["/recall", "/geo", "/graph"];
 
 function Shell({ reach }: { reach: Reachability }) {
   const { pathname } = useLocation();
