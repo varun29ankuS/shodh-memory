@@ -1021,7 +1021,21 @@ fn reachable_inject(
     // Bound the injected set to the strongest-path reachable entities.
     if best.len() > REACH_MAX_ENTITIES {
         let mut items: Vec<(Uuid, f32)> = best.into_iter().collect();
-        items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        // `best` is a HashMap, so this Vec arrives in RANDOMISED order, and an
+        // unstable sort on score alone gives ties no defined order at all. The
+        // very next line TRUNCATES, so two entities on equal path strength meant
+        // the injected set — and every rank derived from it — was decided by
+        // hash iteration order rather than by the graph. It shows up as a
+        // retrieval result that changes between two identical queries against
+        // one unchanged store, which is what the harness's repeat-determinism
+        // guard exists to catch.
+        //
+        // Uuid makes the order total and is stable for the lifetime of a store,
+        // which is the scope the guard compares over. It is NOT stable across
+        // two ingests of the same corpus (entity uuids are v4); a cross-ingest
+        // order would have to key on the entity name, and that costs a graph
+        // lookup per candidate inside the hot walk.
+        items.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         items.truncate(REACH_MAX_ENTITIES);
         return Ok(items.into_iter().collect());
     }
@@ -1098,7 +1112,15 @@ fn traverse_beam(
         if next.is_empty() {
             break;
         }
-        next.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
+        // Same hazard as the reach cut above: an unstable sort on score alone,
+        // truncated immediately. Paths tie on score routinely here because
+        // `ppr_edge_weight` is a product of a few quantised factors, so which
+        // path survives the beam was undefined. Endpoint makes it total.
+        next.sort_unstable_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.endpoint.cmp(&b.endpoint))
+        });
         next.truncate(BEAM);
         for p in &next {
             let e = reached.entry(p.endpoint).or_insert(0.0);

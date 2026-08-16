@@ -911,6 +911,32 @@ pub struct Experience {
     /// records written before it existed.
     #[serde(skip)]
     pub toponyms: Vec<Toponym>,
+
+    // =========================================================================
+    // DECLARED ENTITIES (names the CALLER asserted, not names anything inferred)
+    // =========================================================================
+    /// Entity names supplied by whoever wrote the memory — `tags` on the
+    /// `remember` request, the names an integration hands over with a record.
+    ///
+    /// Kept separate from [`entities`](Self::entities) and [`tags`](Self::tags)
+    /// because those two are *merged* lists: `remember` concatenates the
+    /// caller's tags, the NER surfaces and the YAKE keyphrases into one vector
+    /// and writes it to both. After that merge nothing downstream can tell "the
+    /// user told us this is an entity" from "a statistical keyphrase extractor
+    /// produced this string", and the knowledge graph was admitting both on the
+    /// same authority — which is how filenames and phrases like "empty weight"
+    /// became entities. This field is the provenance that merge destroys.
+    ///
+    /// It is deliberately NOT part of the search surface: `tags` still carries
+    /// everything, so BM25, the tag index and `recall_by_tags` are unaffected.
+    /// The only consumer is graph admission, where an assertion by the caller is
+    /// one of the three authorities that can put a node in the graph (the other
+    /// two being a committed typer span and the curated identifier table).
+    ///
+    /// `#[serde(skip)]` for the same reason as [`toponyms`](Self::toponyms) —
+    /// see that field's note. It is carried at the tail of `MemoryFlat`.
+    #[serde(skip)]
+    pub declared_entities: Vec<String>,
 }
 
 /// A place mentioned in a memory's content, resolved to coordinates.
@@ -1067,6 +1093,14 @@ impl Experience {
                 delta.fields_filled.push(name);
             }
         };
+        // A duplicate write's tags are a second caller asserting the same names.
+        // Unioned like every other additive field: the second write can add an
+        // assertion but its silence cannot retract the first one's.
+        union_strings(
+            &mut self.declared_entities,
+            &incoming.declared_entities,
+            "declared_entities",
+        );
         union_strings(
             &mut self.temporal_refs,
             &incoming.temporal_refs,
@@ -1290,6 +1324,7 @@ impl Default for Experience {
             cooccurrence_pairs: Vec::new(),
             importance_override: None,
             toponyms: Vec::new(),
+            declared_entities: Vec::new(),
         }
     }
 }
@@ -2081,11 +2116,16 @@ struct MemoryFlat {
     /// to a wire format without shifting every field written after it. See
     /// [`Experience::toponyms`] for the full reasoning, and
     /// `MEMORY_DEFAULT_SUFFIX` in `storage.rs` for the decoder side.
-    ///
-    /// MUST remain the last field. Anything appended after it has to extend the
-    /// default suffix too.
     #[serde(default)]
     toponyms: Vec<Toponym>,
+    /// Entity names the caller asserted. Logically part of `Experience` and
+    /// exposed there; carried here for the same positional-format reason as
+    /// `toponyms`.
+    ///
+    /// MUST remain the last field. Anything appended after it has to extend
+    /// `MEMORY_DEFAULT_SUFFIX` too.
+    #[serde(default)]
+    declared_entities: Vec<String>,
 }
 
 impl Serialize for Memory {
@@ -2126,6 +2166,7 @@ impl Serialize for Memory {
             // format; `Experience::toponyms` is `#[serde(skip)]` precisely so it
             // is carried here exactly once.
             toponyms: self.experience.toponyms.clone(),
+            declared_entities: self.experience.declared_entities.clone(),
         };
         flat.serialize(serializer)
     }
@@ -2141,6 +2182,7 @@ impl<'de> Deserialize<'de> for Memory {
         // Put the tail-carried toponyms back where they belong on the domain
         // type. Records written before the field existed decode as empty.
         flat.experience.toponyms = flat.toponyms;
+        flat.experience.declared_entities = flat.declared_entities;
         Ok(Memory {
             id: flat.id,
             experience: flat.experience,

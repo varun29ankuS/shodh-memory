@@ -416,10 +416,25 @@ impl PyMemorySystem {
             }
         };
 
+        // A caller reaching this binding named these entities on purpose, and
+        // that assertion is one of the three authorities the knowledge graph
+        // admits a node on. It has to be captured HERE, because `entities` on
+        // the stored Experience becomes a merged vector -- caller names, NER
+        // surfaces and YAKE keyphrases concatenated -- and the merge cannot
+        // afterwards tell an asserted name from a statistical keyphrase.
+        //
+        // Shares `declared_entities_from` with the HTTP path rather than
+        // repeating the rule, so a name admitted through the bindings and one
+        // admitted through /api/remember are validated, deduplicated and capped
+        // identically. A second copy of that rule is a second thing to drift.
+        let declared_entities =
+            crate::handlers::remember::declared_entities_from(entities.as_deref().unwrap_or(&[]));
+
         let experience = Experience {
             experience_type: exp_type,
             content,
             context: None,
+            declared_entities,
             entities: entities.unwrap_or_default(),
             metadata: metadata.unwrap_or_default(),
             embeddings: None,

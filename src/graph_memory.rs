@@ -392,43 +392,64 @@ impl EntityLabel {
     }
 }
 
-/// Classify a tag string into a richer `EntityLabel`.
+/// The ontological class a curated identifier rule recognises in `tag`, or
+/// `None` when no rule fires.
 ///
-/// Tags are short, user-supplied descriptors (e.g. "production", "rocksdb",
-/// "config.toml"). This maps them onto the ontology so they participate in
-/// type-aware spreading activation and hierarchy matching during retrieval.
-/// Shared by every ingest path so a tag receives the same label whether it
-/// arrives via `remember`, an integration sync, or an `upsert`.
-pub fn classify_tag_label(tag: &str) -> EntityLabel {
+/// Tags are short descriptors that arrive with a memory (`"rocksdb"`,
+/// `"config.toml"`, `"auth-service"`). The rules below are a *curated identifier
+/// table*: each one recognises a naming convention that denotes a specific
+/// artifact — a named product, a file, a service. When one fires, the tag names
+/// a thing and the caller may treat it as an entity.
+///
+/// `None` is the honest answer for everything else, and it is load-bearing:
+/// [`crate::handlers::state::AppState::process_experience_into_graph`] admits a
+/// tag to the knowledge graph only when a rule here recognises it. A tag no rule
+/// recognises is a *keyword* — it describes the memory without naming anything —
+/// and keywords stay in `experience.tags` for search and `recall_by_tags`
+/// instead of becoming graph nodes.
+///
+/// Every rule matches on a whole tag or a whole trailing token, never on a bare
+/// substring. A substring rule silently reclassifies ordinary prose: `contains(
+/// "config")` turned the phrase "stobar configuration" into a `Configuration`
+/// entity on a corpus of aircraft-carrier documents, which is how a keyword
+/// matcher for developer tags ends up asserting an ontology over text it knows
+/// nothing about.
+pub fn recognised_tag_label(tag: &str) -> Option<EntityLabel> {
     let lower = tag.to_lowercase();
 
-    // Deployment / environment indicators
+    /// Whether `lower` is exactly `word`, or ends with `word` after a `-`, `_`
+    /// or space separator ("deploy-workflow" → "workflow", but "workflows" and
+    /// "workflow engine notes" → no match).
+    fn is_trailing_token(lower: &str, word: &str) -> bool {
+        if lower == word {
+            return true;
+        }
+        lower
+            .strip_suffix(word)
+            .is_some_and(|prefix| prefix.ends_with(['-', '_', ' ']))
+    }
+
+    // Named platforms and cloud providers. Deliberately excludes the deployment
+    // *lifecycle* words this list used to carry — "production", "staging",
+    // "dev", "development", "ci", "cd", "container". Those are English common
+    // nouns for a phase of work, not names of things: on a deployment log they
+    // read as environments, but on any other corpus they are ordinary prose, and
+    // classifying them assigns an ontological class to a word that denotes no
+    // referent at all. They fall through to `None` and stay keywords.
     if matches!(
         lower.as_str(),
-        "production"
-            | "staging"
-            | "dev"
-            | "development"
-            | "ci"
-            | "cd"
-            | "kubernetes"
-            | "k8s"
-            | "docker"
-            | "container"
-            | "aws"
-            | "gcp"
-            | "azure"
+        "kubernetes" | "k8s" | "docker" | "aws" | "gcp" | "azure"
     ) {
-        return EntityLabel::Environment;
+        return Some(EntityLabel::Environment);
     }
 
     // Pipeline / workflow indicators
-    if lower.contains("pipeline")
-        || lower.contains("workflow")
-        || lower.contains("ci-cd")
-        || lower.contains("cicd")
+    if is_trailing_token(&lower, "pipeline")
+        || is_trailing_token(&lower, "workflow")
+        || lower == "ci-cd"
+        || lower == "cicd"
     {
-        return EntityLabel::Pipeline;
+        return Some(EntityLabel::Pipeline);
     }
 
     // Database / storage indicators
@@ -449,7 +470,7 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         || lower.ends_with("-db")
         || lower.ends_with("_db")
     {
-        return EntityLabel::Database;
+        return Some(EntityLabel::Database);
     }
 
     // Service / API indicators (suffix-only to avoid "my-api-docs" false positives)
@@ -461,17 +482,17 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         || lower.ends_with("_server")
         || lower.ends_with("-daemon")
     {
-        return EntityLabel::Service;
+        return Some(EntityLabel::Service);
     }
 
     // Documentation indicators (check before module — README.md is a doc, not a module)
     if lower.ends_with(".md")
-        || lower.contains("readme")
-        || lower.contains("runbook")
+        || is_trailing_token(&lower, "readme")
+        || is_trailing_token(&lower, "runbook")
         || lower.ends_with("-rfc")
         || lower.ends_with("-spec")
     {
-        return EntityLabel::Document;
+        return Some(EntityLabel::Document);
     }
 
     // Configuration indicators
@@ -480,9 +501,9 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         || lower.ends_with(".yml")
         || lower.ends_with(".env")
         || lower.ends_with(".json")
-        || lower.contains("config")
+        || is_trailing_token(&lower, "config")
     {
-        return EntityLabel::Configuration;
+        return Some(EntityLabel::Configuration);
     }
 
     // Module / library indicators
@@ -493,24 +514,70 @@ pub fn classify_tag_label(tag: &str) -> EntityLabel {
         || lower.ends_with("-lib")
         || lower.ends_with("_lib")
     {
-        return EntityLabel::Module;
+        return Some(EntityLabel::Module);
     }
 
-    // Default: Concept — an honest "we did not recognise this".
+    // Nothing recognised the tag.
     //
-    // This used to fall through to `Technology`, which is a CLAIM, not a
-    // default: every unrecognised tag asserted a specific ontological class.
-    // The rules above are a dev-ops keyword matcher (kubernetes, postgres,
-    // ci-cd, …), so on any corpus that is not about infrastructure almost
-    // everything reaches this line — and the graph renders a uniform wall of
-    // "Technology" nodes under a legend that promises an ontology. A visibly
-    // wrong type is worse than a visibly absent one: it is indistinguishable
-    // from a confident correct answer.
+    // This used to fall through to a label — first `Technology`, then `Concept`
+    // — and either way the caller wrote a graph node for it. A label is a CLAIM,
+    // and the rules above are a curated table of developer naming conventions,
+    // so on any corpus that is not about infrastructure almost every tag reaches
+    // this line. `Technology` made the graph assert a class it could not
+    // support; `Concept` was honest about the type but still asserted that the
+    // string *is an entity*, which is the larger claim and the wrong one — YAKE
+    // keyphrases ("empty weight", "control system"), source filenames and
+    // taxonomy codes all arrive here.
     //
-    // `Concept` is the same label the NER path already uses for entities whose
-    // class it could not resolve (`NerEntityType::Misc`), so unrecognised
-    // surfaces from both paths now agree instead of disagreeing.
-    EntityLabel::Concept
+    // Returning `None` moves the decision to the caller, which declines to
+    // create a node at all. See the tag phase in
+    // `process_experience_into_graph`.
+    None
+}
+
+/// Move the label implied by `fine_type` to the front of `labels`.
+///
+/// Position 0 of `labels` is the entity's type everywhere it is rendered — the
+/// graph payload, the universe view, the MIF export and the UI legend all read
+/// `labels.first()`. But the merge in [`GraphMemory::add_entity`] orders labels
+/// by *recency*: the incoming mention's labels lead and the stored node's are
+/// appended behind them. Recency is not authority.
+///
+/// The consequence was a graph that rendered the weakest guess it held. An
+/// entity GLiNER had typed from the sentence it appeared in — `"Baltimore"`,
+/// fine type `city`, coarse `Gpe` — would be re-mentioned by a later phase that
+/// only pattern-matches a bare string (the tag phase, fact consolidation, an
+/// integration sync). That phase contributes a label of its own, it lands at
+/// position 0 because it was written last, and every surface downstream reports
+/// it as the entity's type. The typed answer survived in the vector, one
+/// position out of sight. Whole corpora rendered as a single class this way,
+/// and the histogram of `labels[0]` looked exactly like a typer that had
+/// collapsed — while the typer had in fact been right.
+///
+/// `fine_type` is the discriminator, because it is set only by the schema-driven
+/// typer (`crate::entity_type`) and never by a keyword rule. When it is present,
+/// its coarse rollup is by construction the typed answer for this entity, so it
+/// leads. When it is absent nothing here claims to know better, and the existing
+/// order stands.
+///
+/// Idempotent: re-applying it to an already-ordered vector is a no-op, so it is
+/// safe to run on every write.
+fn lead_with_fine_typed_label(entity: &mut EntityNode) {
+    let Some(fine) = entity.fine_type.as_deref() else {
+        return;
+    };
+    // An off-schema fine type has no defensible rollup — abstain rather than
+    // inventing `Other(..)` and promoting it over a real observed label.
+    let Some(coarse_id) = crate::entity_type::coarse_of(fine) else {
+        return;
+    };
+    let authoritative = EntityLabel::from_coarse_id(coarse_id);
+
+    if entity.labels.first() == Some(&authoritative) {
+        return;
+    }
+    entity.labels.retain(|label| label != &authoritative);
+    entity.labels.insert(0, authoritative);
 }
 
 /// Memory tier for edge consolidation
@@ -3043,7 +3110,18 @@ impl GraphMemory {
             last_seen_at: now,
             mention_count: 1,
             summary: String::new(),
-            attributes: HashMap::new(),
+            // Provenance, matching the phases in `process_experience_into_graph`
+            // (`ner`, `tag-declared`, `tag-identifier`, `acronym`, `issue-id`).
+            // These nodes are lemmas by design — the spine reuses one node per
+            // event type so repeated events collapse — so from the outside they
+            // look exactly like the keyphrase nodes the ingest now refuses, and
+            // without this marker an entity-quality audit cannot tell a
+            // deliberate event node from a leak.
+            attributes: {
+                let mut a = HashMap::new();
+                a.insert("source".to_string(), "causal-spine".to_string());
+                a
+            },
             name_embedding: None,
             salience: EntityExtractor::calculate_base_salience(&EntityLabel::Event, false),
             is_proper_noun: false,
@@ -3735,6 +3813,11 @@ impl GraphMemory {
             entity.mention_count = 1;
             is_new_entity = true;
         }
+
+        // Order the merged labels by authority before anything reads them.
+        // MUST run before the `kb::stamp` call below, which is a function of
+        // `labels` and therefore of which label leads.
+        lead_with_fine_typed_label(&mut entity);
 
         // Stamp the real-world identity. Free of extra I/O — the node is about to
         // be written anyway — and a pure function of (name, labels), so a
@@ -7112,7 +7195,7 @@ impl GraphMemory {
         let mut orphaned_entity_ids = Vec::new();
         for entity_uuid in &orphan_candidates {
             let remaining = self.get_entity_relationships(entity_uuid)?;
-            if remaining.is_empty() {
+            if remaining.is_empty() && !self.is_typer_committed(entity_uuid) {
                 orphaned_entity_ids.push(entity_uuid.to_string());
                 if let Err(e) = self.delete_entity(entity_uuid) {
                     tracing::warn!("Failed to delete orphaned entity {}: {}", entity_uuid, e);
@@ -7344,6 +7427,34 @@ impl GraphMemory {
         Ok(stats)
     }
 
+    /// Whether the schema-driven typer committed a span for this entity.
+    ///
+    /// Used by the orphan sweeps to decide whether an edgeless entity should be
+    /// deleted. Losing every edge is not evidence that the entity does not
+    /// exist: an edge is a claim about a RELATIONSHIP and decays on its own
+    /// schedule, while the entity is a claim that the corpus names a thing —
+    /// and the typer made that claim from a committed span. Deleting the node
+    /// discards the extraction. The text still says "the Indian Navy
+    /// commissioned INS Vikrant"; after the sweep the graph no longer knows the
+    /// Indian Navy exists.
+    ///
+    /// This was invisible while the ingest admitted keyphrases as entities:
+    /// every real entity co-occurred with a crowd of tag nodes, so it always
+    /// kept an edge and never reached the orphan branch. Admitting only what an
+    /// authority vouches for makes the graph sparser, and on `defence-live` the
+    /// first maintenance cycle after a rebuild took it from 1,061 entities to
+    /// 774 — with the Indian Navy, Pinaka, Mazagon Dock and the Indian Ocean
+    /// among the losses.
+    ///
+    /// `fine_type` is the discriminator, the same one the label-authority fix
+    /// uses: it is set only by `crate::entity_type`'s schema, never by a keyword
+    /// rule and never by a caller. Entities without one — acronyms, causal-spine
+    /// event lemmas, caller-declared tags — stay collectable, so this narrows
+    /// the sweep rather than switching it off.
+    fn is_typer_committed(&self, uuid: &Uuid) -> bool {
+        matches!(self.get_entity(uuid), Ok(Some(e)) if e.fine_type.is_some())
+    }
+
     /// Flush pending maintenance from opportunistic pruning queues.
     ///
     /// Called every maintenance cycle (5 min). Instead of scanning all 34k+ edges,
@@ -7376,7 +7487,7 @@ impl GraphMemory {
         let mut orphaned_entity_ids = Vec::new();
         for entity_uuid in &orphan_candidates {
             let remaining = self.get_entity_relationships(entity_uuid)?;
-            if remaining.is_empty() {
+            if remaining.is_empty() && !self.is_typer_committed(entity_uuid) {
                 orphaned_entity_ids.push(entity_uuid.to_string());
                 if let Err(e) = self.delete_entity(entity_uuid) {
                     tracing::warn!("Failed to delete orphaned entity {}: {}", entity_uuid, e);
@@ -9848,6 +9959,145 @@ mod tests {
         }
     }
 
+    /// A named entity node carrying an explicit label set and fine type — the
+    /// shape the label-authority tests need.
+    fn typed_entity(name: &str, labels: Vec<EntityLabel>, fine_type: Option<&str>) -> EntityNode {
+        EntityNode {
+            labels,
+            fine_type: fine_type.map(str::to_string),
+            is_proper_noun: true,
+            ..universe_entity(name)
+        }
+    }
+
+    /// REGRESSION — the entity-typing collapse.
+    ///
+    /// A corpus of 1,008 defence entities rendered 831 of them as `Technology`
+    /// on a graph whose typer cannot emit that label at all: `Technology` is not
+    /// one of the 18 coarse classes `from_coarse_id` maps to. The typed answer
+    /// was present the whole time, one position behind a label contributed by a
+    /// later, weaker phase — and `labels.first()` is what every renderer reads.
+    ///
+    /// This is that sequence: GLiNER types "Baltimore" as a city, then a tag /
+    /// consolidation re-mention of the same surface arrives carrying a guess.
+    /// The guess must not become the entity's type.
+    #[test]
+    fn fine_typed_label_leads_after_an_untyped_re_mention() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        graph
+            .add_entity(typed_entity(
+                "Baltimore",
+                vec![EntityLabel::Gpe],
+                Some("city"),
+            ))
+            .unwrap();
+
+        // The re-mention: same surface, no fine type, a keyword-matched guess.
+        graph
+            .add_entity(typed_entity(
+                "Baltimore",
+                vec![EntityLabel::Technology],
+                None,
+            ))
+            .unwrap();
+
+        let stored = graph
+            .find_entity_by_name("Baltimore")
+            .unwrap()
+            .expect("Baltimore must exist after two mentions");
+
+        assert_eq!(
+            stored.fine_type.as_deref(),
+            Some("city"),
+            "the re-mention carried no fine type and must not have wiped one"
+        );
+        assert_eq!(
+            stored.labels.first(),
+            Some(&EntityLabel::Gpe),
+            "the fine-typed answer must lead the label vector; got {:?}",
+            stored.labels
+        );
+        assert!(
+            stored.labels.contains(&EntityLabel::Technology),
+            "ordering must not discard observed labels, only rank them: {:?}",
+            stored.labels
+        );
+    }
+
+    /// The promotion must not duplicate a label that is already present, and
+    /// must be stable under repeated writes — `add_entity` runs on every single
+    /// mention, so a non-idempotent rewrite would grow the vector without bound.
+    #[test]
+    fn label_authority_is_idempotent_across_re_mentions() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphMemory::new(dir.path(), None).unwrap();
+
+        for _ in 0..5 {
+            graph
+                .add_entity(typed_entity(
+                    "Bangalore",
+                    vec![EntityLabel::Technology],
+                    Some("city"),
+                ))
+                .unwrap();
+        }
+
+        let stored = graph
+            .find_entity_by_name("Bangalore")
+            .unwrap()
+            .expect("Bangalore must exist");
+
+        assert_eq!(stored.labels.first(), Some(&EntityLabel::Gpe));
+        assert_eq!(
+            stored.labels.len(),
+            2,
+            "five mentions must yield {{Gpe, Technology}}, not a growing vector: {:?}",
+            stored.labels
+        );
+        assert_eq!(
+            stored
+                .labels
+                .iter()
+                .filter(|l| **l == EntityLabel::Gpe)
+                .count(),
+            1,
+            "the promoted label must appear exactly once: {:?}",
+            stored.labels
+        );
+    }
+
+    /// An entity with no fine type carries no authority signal, so the helper
+    /// must leave its labels exactly as the merge produced them. Without this,
+    /// "order by authority" would quietly become "reorder everything".
+    #[test]
+    fn label_order_is_untouched_without_a_fine_type() {
+        let mut entity = typed_entity(
+            "unclassified thing",
+            vec![EntityLabel::Concept, EntityLabel::Technology],
+            None,
+        );
+        let before = entity.labels.clone();
+        lead_with_fine_typed_label(&mut entity);
+        assert_eq!(entity.labels, before);
+    }
+
+    /// A fine type that is not in the schema has no defensible coarse rollup.
+    /// Abstaining is the honest answer; promoting `Other("...")` over a real
+    /// observed label would be the same class of error this fix removes.
+    #[test]
+    fn off_schema_fine_type_does_not_reorder_labels() {
+        let mut entity = typed_entity(
+            "mystery",
+            vec![EntityLabel::Concept, EntityLabel::Person],
+            Some("not-a-real-schema-label"),
+        );
+        let before = entity.labels.clone();
+        lead_with_fine_typed_label(&mut entity);
+        assert_eq!(entity.labels, before);
+    }
+
     /// Build a graph with two entities joined by a generic edge of the given
     /// strength, plus a typed edge over the same pair when `also_typed`.
     fn universe_fixture(
@@ -10361,26 +10611,60 @@ mod tests {
     }
 
     #[test]
-    fn classify_tag_label_maps_known_categories() {
-        assert_eq!(classify_tag_label("production"), EntityLabel::Environment);
-        assert_eq!(classify_tag_label("rocksdb"), EntityLabel::Database);
-        assert_eq!(classify_tag_label("metrics-service"), EntityLabel::Service);
-        assert_eq!(classify_tag_label("README"), EntityLabel::Document);
+    fn recognised_tag_label_maps_known_categories() {
         assert_eq!(
-            classify_tag_label("config.toml"),
-            EntityLabel::Configuration
+            recognised_tag_label("rocksdb"),
+            Some(EntityLabel::Database),
+            "a named database product is an artifact"
         );
-        assert_eq!(classify_tag_label("router.rs"), EntityLabel::Module);
-        assert_eq!(classify_tag_label("ci-cd"), EntityLabel::Pipeline);
-        // Unknown → Technology fallback
-        // CHANGED: the fallthrough was `Technology`; it is now `Concept`.
-        // "widgetron" matches none of the rules above, and labelling an
-        // unrecognised surface `Technology` is an assertion the matcher cannot
-        // support — it made every unrecognised tag indistinguishable from a
-        // confidently-classified one, and rendered the graph as a flat wall of
-        // "Technology". `Concept` is what the NER path already emits for
-        // unresolved classes, so the two agree.
-        assert_eq!(classify_tag_label("widgetron"), EntityLabel::Concept);
+        assert_eq!(
+            recognised_tag_label("metrics-service"),
+            Some(EntityLabel::Service)
+        );
+        assert_eq!(recognised_tag_label("README"), Some(EntityLabel::Document));
+        assert_eq!(
+            recognised_tag_label("config.toml"),
+            Some(EntityLabel::Configuration)
+        );
+        assert_eq!(recognised_tag_label("router.rs"), Some(EntityLabel::Module));
+        assert_eq!(recognised_tag_label("ci-cd"), Some(EntityLabel::Pipeline));
+        assert_eq!(
+            recognised_tag_label("kubernetes"),
+            Some(EntityLabel::Environment)
+        );
+    }
+
+    #[test]
+    fn recognised_tag_label_abstains_on_prose() {
+        // CHANGED, deliberately: these used to be classified.
+        //
+        // "production" and "development" were in the Environment list. They are
+        // English common nouns for a phase of work — on a deployment log they
+        // read as environments, but the matcher cannot tell a deployment log
+        // from an aircraft-carrier document, and on the latter it was asserting
+        // that the word "development" names a thing. Same for the substring
+        // rules: `contains("config")` matched the prose phrase "stobar
+        // configuration" and `contains("readme")` matches any sentence about a
+        // readme.
+        for prose in [
+            "production",
+            "development",
+            "staging",
+            "container",
+            "stobar configuration",
+            "vls configurations",
+            "empty weight",
+            "control system",
+            "submarine",
+            "widgetron",
+            "62-kalyani-group.txt",
+        ] {
+            assert_eq!(
+                recognised_tag_label(prose),
+                None,
+                "no curated rule names {prose:?}, so it must not become an entity"
+            );
+        }
     }
 
     #[test]
