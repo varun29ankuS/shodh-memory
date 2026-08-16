@@ -7195,7 +7195,7 @@ impl GraphMemory {
         let mut orphaned_entity_ids = Vec::new();
         for entity_uuid in &orphan_candidates {
             let remaining = self.get_entity_relationships(entity_uuid)?;
-            if remaining.is_empty() {
+            if remaining.is_empty() && !self.is_typer_committed(entity_uuid) {
                 orphaned_entity_ids.push(entity_uuid.to_string());
                 if let Err(e) = self.delete_entity(entity_uuid) {
                     tracing::warn!("Failed to delete orphaned entity {}: {}", entity_uuid, e);
@@ -7427,6 +7427,34 @@ impl GraphMemory {
         Ok(stats)
     }
 
+    /// Whether the schema-driven typer committed a span for this entity.
+    ///
+    /// Used by the orphan sweeps to decide whether an edgeless entity should be
+    /// deleted. Losing every edge is not evidence that the entity does not
+    /// exist: an edge is a claim about a RELATIONSHIP and decays on its own
+    /// schedule, while the entity is a claim that the corpus names a thing —
+    /// and the typer made that claim from a committed span. Deleting the node
+    /// discards the extraction. The text still says "the Indian Navy
+    /// commissioned INS Vikrant"; after the sweep the graph no longer knows the
+    /// Indian Navy exists.
+    ///
+    /// This was invisible while the ingest admitted keyphrases as entities:
+    /// every real entity co-occurred with a crowd of tag nodes, so it always
+    /// kept an edge and never reached the orphan branch. Admitting only what an
+    /// authority vouches for makes the graph sparser, and on `defence-live` the
+    /// first maintenance cycle after a rebuild took it from 1,061 entities to
+    /// 774 — with the Indian Navy, Pinaka, Mazagon Dock and the Indian Ocean
+    /// among the losses.
+    ///
+    /// `fine_type` is the discriminator, the same one the label-authority fix
+    /// uses: it is set only by `crate::entity_type`'s schema, never by a keyword
+    /// rule and never by a caller. Entities without one — acronyms, causal-spine
+    /// event lemmas, caller-declared tags — stay collectable, so this narrows
+    /// the sweep rather than switching it off.
+    fn is_typer_committed(&self, uuid: &Uuid) -> bool {
+        matches!(self.get_entity(uuid), Ok(Some(e)) if e.fine_type.is_some())
+    }
+
     /// Flush pending maintenance from opportunistic pruning queues.
     ///
     /// Called every maintenance cycle (5 min). Instead of scanning all 34k+ edges,
@@ -7459,7 +7487,7 @@ impl GraphMemory {
         let mut orphaned_entity_ids = Vec::new();
         for entity_uuid in &orphan_candidates {
             let remaining = self.get_entity_relationships(entity_uuid)?;
-            if remaining.is_empty() {
+            if remaining.is_empty() && !self.is_typer_committed(entity_uuid) {
                 orphaned_entity_ids.push(entity_uuid.to_string());
                 if let Err(e) = self.delete_entity(entity_uuid) {
                     tracing::warn!("Failed to delete orphaned entity {}: {}", entity_uuid, e);
