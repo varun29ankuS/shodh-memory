@@ -23,7 +23,9 @@ import {
   type AuditWindowId,
   actorLabel,
   auditExportPath,
+  clock,
   conversationsIn,
+  dayLabel,
   exportFilename,
   formatDuration,
   groupByDay,
@@ -117,20 +119,6 @@ const SOURCE_META: Record<AuditSource, { label: string; hint: string }> = {
 };
 
 const SOURCE_ORDER: AuditSource[] = ["tool_call", "ledger", "retrieval"];
-
-/** Time of day, to the second. The date is the group header above it — repeating
- *  it on ninety consecutive rows spends the width and is read once. */
-function clock(ts: string): string {
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) return ts;
-  return date.toLocaleTimeString(undefined, { hour12: false });
-}
-
-function dayLabel(day: string, rows: readonly AuditRow[]): string {
-  const date = new Date(rows[0].ts);
-  if (Number.isNaN(date.getTime())) return day;
-  return date.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
-}
 
 /** A labelled line inside an opened row. Same shape as the Tasks detail: these
  *  are read, not scanned, so they are lines rather than more chips. */
@@ -691,8 +679,14 @@ export function HistoryView({ seat }: { seat: SeatReachability }) {
 
           <div className="flex flex-col items-end gap-1">
             <ExportControls
+              // The PATH is built from the frozen mount instant, so the file
+              // covers the window the rows on screen came from. The NAME is
+              // stamped when the button is pressed, which is what the seat
+              // itself does — two exports of the same window taken an hour
+              // apart are different artefacts and must not arrive under one
+              // filename for the browser to disambiguate with "(1)".
               path={(format) => auditExportPath(query, format, now)}
-              filenameFor={(format) => exportFilename(format, now)}
+              filenameFor={(format) => exportFilename(format, Date.now())}
               disabled={summary.rows === 0}
             />
             {/* THE ONE SENTENCE THAT KEEPS THE DOWNLOAD HONEST. */}
@@ -752,7 +746,7 @@ export function HistoryView({ seat }: { seat: SeatReachability }) {
                   <section key={group.day}>
                     <div className="border-border bg-muted/50 sticky top-0 z-10 flex items-center gap-2 border-b px-4 py-1.5 backdrop-blur-sm">
                       <span className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
-                        {dayLabel(group.day, group.rows)}
+                        {dayLabel(group.day)}
                       </span>
                       <span className="text-muted-foreground/60 mono text-[10px]">
                         {group.rows.length}

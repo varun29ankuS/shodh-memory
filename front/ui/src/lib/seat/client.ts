@@ -194,11 +194,21 @@ export async function fetchAuditTrail(path: string, signal?: AbortSignal): Promi
  * Any value carrying a path separator is refused rather than sanitised: a
  * filename this client cannot vouch for should not be handed to the browser's
  * download path at all, and the caller has a name of its own to fall back to.
+ *
+ * Only the plain `filename=` parameter is read. RFC 5987's `filename*=` form
+ * carries a charset and percent-encoding this would have to decode correctly to
+ * use safely, the seat never emits it (server.ts writes an ASCII stamp), and
+ * falling back to the caller's own name is the right answer for a form we do
+ * not fully parse — so it is deliberately left to return null rather than
+ * half-decoded.
+ *
+ * Exported for its test. It is a parser over a header this client does not
+ * control, which is the shape of thing that fails silently and plausibly.
  */
-function filenameFromDisposition(header: string | null): string | null {
+export function filenameFromDisposition(header: string | null): string | null {
   if (!header) return null;
-  const match = /filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;]+)/i.exec(header);
-  const raw = (match?.[1] ?? match?.[2] ?? "").trim();
+  const match = /(^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;]*))/i.exec(header);
+  const raw = (match?.[2] ?? match?.[3] ?? "").trim();
   if (!raw || raw.includes("/") || raw.includes("\\")) return null;
   return raw;
 }

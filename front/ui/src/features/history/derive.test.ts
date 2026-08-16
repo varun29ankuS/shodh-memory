@@ -3,7 +3,9 @@ import type { AuditRow, AuditSource, LedgerActorView } from "@/lib/seat/types";
 import {
   actorLabel,
   auditExportPath,
+  clock,
   conversationsIn,
+  dayLabel,
   exportFilename,
   formatDuration,
   groupByDay,
@@ -399,6 +401,44 @@ describe("kindLabel", () => {
 
   it("shows a kind it does not recognise rather than hiding it", () => {
     expect(kindLabel(row({ kind: "consolidation_sweep" }))).toBe("consolidation_sweep");
+  });
+});
+
+describe("clock", () => {
+  it("returns an unreadable timestamp verbatim rather than 'Invalid Date'", () => {
+    // Every formatter prints that string for a malformed date, and on an audit
+    // row it reads as a rendering bug. The raw value is also the only thing
+    // that would let anyone find the row in the exported file.
+    expect(clock("2026-08-16 fifteen o'clock")).toBe("2026-08-16 fifteen o'clock");
+  });
+
+  it("formats a real timestamp to something other than its input", () => {
+    const formatted = clock("2026-08-16T15:57:30.000Z");
+    expect(formatted).not.toBe("2026-08-16T15:57:30.000Z");
+    expect(formatted).not.toContain("Invalid");
+  });
+});
+
+describe("dayLabel", () => {
+  it("names the LOCAL calendar day the group key stands for", () => {
+    // The key came from local date components (see groupByDay), so the label
+    // has to be parsed back as local midnight. Appending "Z" — the obvious
+    // way to write this — names the day before, for every reader west of
+    // Greenwich.
+    expect(dayLabel("2026-08-16")).toBe(
+      new Date(2026, 7, 16).toLocaleDateString(undefined, {
+        weekday: "short",
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      }),
+    );
+  });
+
+  it("passes an unparseable key straight through", () => {
+    // groupByDay uses the raw `ts` as the key when it cannot read it, and that
+    // value has to survive to the screen intact.
+    expect(dayLabel("not a day")).toBe("not a day");
   });
 });
 

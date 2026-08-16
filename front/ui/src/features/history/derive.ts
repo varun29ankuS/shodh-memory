@@ -118,8 +118,13 @@ export function auditExportPath(query: AuditQuery, format: AuditFormat, now: num
  * back to this — see `client.ts` `fetchAuditFile`.
  *
  * The format mirrors seat/src/server.ts handleAuditExport exactly
- * (`shodh-audit-<ISO with ':' replaced, to seconds>.<format>`) so the two names
- * agree; only the clock differs, and by the round trip.
+ * (`shodh-audit-<ISO with ':' replaced, to seconds>.<format>`).
+ *
+ * `now` is the instant the DOWNLOAD is taken, not the instant the window was
+ * chosen — the seat stamps its own name when it answers, and two exports of the
+ * same window taken an hour apart are two artefacts. Passing the screen's
+ * frozen mount instant here would give them one name and leave the browser to
+ * disambiguate them with "(1)".
  */
 export function exportFilename(format: AuditFormat, now: number): string {
   const stamp = new Date(now).toISOString().replaceAll(":", "-").slice(0, 19);
@@ -539,4 +544,43 @@ export function actorLabel(actor: LedgerActorView): string {
  *  row's detail, because a truncated id cannot be looked up anywhere. */
 export function shortRef(id: string): string {
   return id.length <= 12 ? id : `${id.slice(0, 12)}…`;
+}
+
+/**
+ * Time of day, to the second. The date is the group header above the row —
+ * repeating it on ninety consecutive lines spends the width and is read once.
+ *
+ * A timestamp the platform cannot parse is returned VERBATIM. `new Date(x)`
+ * yields an Invalid Date for anything malformed and every formatter then prints
+ * the string "Invalid Date", which on an audit row reads as a rendering bug
+ * rather than as a value worth looking at — and the raw string is the only
+ * thing that would let anyone find the row in the exported file.
+ */
+export function clock(ts: string): string {
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return ts;
+  return date.toLocaleTimeString(undefined, { hour12: false });
+}
+
+/**
+ * A day-group heading, from the `YYYY-MM-DD` key `groupByDay` produced.
+ *
+ * Parsed WITHOUT a zone suffix, which JavaScript reads as local midnight —
+ * matching the local-day boundary the grouping itself used. Appending "Z" here
+ * would name the group after a different day than the one it holds, for every
+ * reader west of Greenwich.
+ *
+ * Falls back to the key for the same reason `clock` falls back to its input:
+ * `groupByDay` puts an unparseable `ts` through as its own key, and that value
+ * has to survive to the screen intact.
+ */
+export function dayLabel(day: string): string {
+  const date = new Date(`${day}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return day;
+  return date.toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
 }
