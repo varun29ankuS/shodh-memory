@@ -3218,7 +3218,22 @@ impl MemorySystem {
                             }
                         }
                     }
-                    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    // Strength alone is not a TOTAL order, and this sort
+                    // TRUNCATES: when two neighbours tie on edge strength and
+                    // only one fits in `graph_expand_k`, a stable sort keeps
+                    // whichever the edge walk happened to reach first, so the
+                    // bridge set — and with it the BM25 expansion and the final
+                    // rank list — depends on traversal order rather than on the
+                    // graph's content. Ties are not rare: edges are born at a
+                    // fixed tier weight, so a young graph has many at exactly
+                    // the same strength.
+                    //
+                    // Name breaks the tie because it is unique among the
+                    // candidates (`seen` dedups on the lowercased name) and is a
+                    // property of the graph rather than of how it was walked.
+                    // Same reasoning as the `all_entities` sort in
+                    // `process_experience_into_graph`.
+                    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                     graph_bridges = scored
                         .into_iter()
                         .take(graph_expand_k)
