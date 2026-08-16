@@ -6,6 +6,7 @@ import {
   KeyRound,
   Globe,
   History,
+  Inbox,
   Share2,
   House,
 } from "lucide-react";
@@ -130,6 +131,23 @@ export const DESTINATIONS = [
     // screen are tool calls, changes to memory, and retrievals, which is what
     // a reader is looking for and what they will recognise on arrival.
     caption: "Tool calls, changes, retrievals",
+  },
+  {
+    id: "sources",
+    path: "/sources",
+    label: "Sources",
+    icon: Inbox,
+    // NOT "What feeds this profile", and the difference is the whole screen.
+    // Two things write into a profile and only one of them leaves anything
+    // readable behind: the Claude Code hook records a summary when a session
+    // ends, while MIF import writes memories under their original timestamps
+    // with no marker at all and logs its run only to the server's internal
+    // audit trail, which no HTTP route serves. A caption spanning every source
+    // would promise a completeness that cannot exist, because a stored memory
+    // has no origin field to read (src/memory/types.rs) — the same class of
+    // error as Tasks' "found in memory". Naming the restriction in the caption
+    // is what keeps it true of the screen as it opens.
+    caption: "Sources that leave a record",
   },
   {
     id: "providers",

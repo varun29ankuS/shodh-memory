@@ -14,6 +14,7 @@ import { GraphView } from "@/features/graph/GraphView";
 import { Inspector } from "@/features/inspector/Inspector";
 import { TasksView } from "@/features/tasks/TasksView";
 import { HistoryView } from "@/features/history/HistoryView";
+import { SourcesView } from "@/features/sources/SourcesView";
 import { BriefingView } from "@/features/briefing/BriefingView";
 import { ChatView } from "@/features/chat/ChatView";
 import { ConversationOverlay } from "@/features/chat/ConversationOverlay";
@@ -122,6 +123,11 @@ function Shell({ reach }: { reach: Reachability }) {
                 server being down does not empty this screen, and the seat being
                 down does — so it must be the seat's reachability that gates it. */}
             <Route path="/history" element={<HistoryView seat={seat} />} />
+            {/* Takes `reach` and not `seat`: what has written into a profile is
+                the MEMORY server's record — its session history and its import
+                adapter registry. The seat has no part in it, and a session
+                recorded here may predate the seat existing at all. */}
+            <Route path="/sources" element={<SourcesView reach={reach} />} />
             <Route path="/providers" element={<ProvidersView seat={seat} />} />
             {/* A hash the app does not know is a typo or a stale link, not an
                 error worth a page — send it home rather than showing a dead end. */}
