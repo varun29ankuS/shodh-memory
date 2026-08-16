@@ -179,7 +179,10 @@ export function EntityCanvas({
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const selectedEntityId = useSession((s) => s.selectedEntityId);
-  const activeQuery = useSession((s) => s.activeQuery);
+  // The live draft, not the committed query: the ring should follow the
+  // keystroke. setActiveQuery writes both, so arriving with a committed cue
+  // still lights the graph.
+  const activeQuery = useSession((s) => s.cueDraft);
   const selectEntity = useSession((s) => s.selectEntity);
   const [hover, setHover] = useState<Hover | null>(null);
 

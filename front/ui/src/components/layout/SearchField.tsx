@@ -50,6 +50,7 @@ export function SearchField({ reach }: { reach: Reachability }) {
   const profile = useSession((s) => s.profile);
   const activeQuery = useSession((s) => s.activeQuery);
   const setActiveQuery = useSession((s) => s.setActiveQuery);
+  const setCueDraft = useSession((s) => s.setCueDraft);
   const [draft, setDraft] = useState(activeQuery);
   const [focused, setFocused] = useState(false);
   const input = useRef<HTMLInputElement>(null);
@@ -117,7 +118,13 @@ export function SearchField({ reach }: { reach: Reachability }) {
           type="search"
           name="q"
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            // Published live: the graph rings matches as you type. The
+            // committed query, and the retrieval it triggers, still waits
+            // for Enter.
+            setCueDraft(e.target.value);
+          }}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           onKeyDown={(e) => {

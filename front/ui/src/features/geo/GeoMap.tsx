@@ -179,16 +179,38 @@ export function GeoMap({
     function fitTarget(): GeoPermissibleObjects {
       if (points.length === 0) return LAND;
 
-      let minLon = Infinity;
-      let maxLon = -Infinity;
-      let minLat = Infinity;
-      let maxLat = -Infinity;
-      for (const p of points) {
-        if (p.lon < minLon) minLon = p.lon;
-        if (p.lon > maxLon) maxLon = p.lon;
-        if (p.lat < minLat) minLat = p.lat;
-        if (p.lat > maxLat) maxLat = p.lat;
-      }
+      /* FIT THE MASS, NOT THE OUTLIERS.
+         The raw extent is set by whichever two points are furthest apart, so a
+         corpus of 24 memories around Bangalore plus one in Washington spans
+         170 degrees of longitude and opens on the Atlantic with the actual
+         subject squeezed against the edge, half off-screen. Measured on
+         geo-demo, which is exactly that shape.
+
+         Each axis is trimmed independently, so a point extreme in longitude
+         but ordinary in latitude only forfeits its longitude. Trimmed points
+         are still DRAWN -- they simply start outside the opening frame, one
+         zoom-out away, and the footer states the count either way.
+
+         Below the threshold no trim is applied: on a handful of points a
+         percentile is not a distribution, and discarding one of six is a
+         bigger distortion than the spread it corrects. */
+      const TRIM_MIN_POINTS = 8;
+      // 0.08 was not enough on the shape this is for: 28 points, 24 of them
+      // in India, cut two per side and Tel Aviv still anchored the west edge
+      // so Arabia filled the frame. 0.15 clears the whole international tail
+      // and opens on the subject. A genuinely global corpus still shows its
+      // bulk -- 70% of a spread is a view of it; the extremes are one
+      // zoom-out away and counted in the footer regardless.
+      const TRIM_Q = 0.15;
+
+      const axis = (values: number[]): [number, number] => {
+        const sorted = values.slice().sort((a, b) => a - b);
+        const cut = sorted.length < TRIM_MIN_POINTS ? 0 : Math.floor(sorted.length * TRIM_Q);
+        return [sorted[cut], sorted[sorted.length - 1 - cut]];
+      };
+
+      const [minLon, maxLon] = axis(points.map((p) => p.lon));
+      const [minLat, maxLat] = axis(points.map((p) => p.lat));
 
       // Grow whichever axis is under the minimum span around its own centre,
       // then clamp to the coordinate domain so padding cannot push the box off

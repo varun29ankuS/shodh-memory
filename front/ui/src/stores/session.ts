@@ -44,11 +44,23 @@ interface SessionState {
   selectedEntityId: string | null;
   /** The query the results on screen came from, for the Inspector's header. */
   activeQuery: string;
+  /**
+   * What is being typed RIGHT NOW, before it is committed.
+   *
+   * Deliberately separate from `activeQuery`. Recall is a multi-leg retrieval
+   * -- vector, BM25 and graph, then fusion and re-rank -- so it stays
+   * submit-driven; firing it per keystroke would spend all of that answering
+   * prefixes nobody asked about. But highlighting the graph is a local string
+   * match over names already in memory, and it costs nothing, so it should
+   * happen as you type. One field, two costs, two cadences.
+   */
+  cueDraft: string;
 
   setProfile: (profile: string | null) => void;
   select: (memoryId: string | null) => void;
   selectEntity: (entityId: string | null) => void;
   setActiveQuery: (query: string) => void;
+  setCueDraft: (cue: string) => void;
   /** Adopt the server's list: keep the current profile if it is still offered
    *  (or pinned, see above), otherwise fall back to the first. Prevents a
    *  stale auto-adopted selection surviving a backend restart that dropped it. */
@@ -100,6 +112,7 @@ export const useSession = create<SessionState>((set) => ({
   selectedMemoryId: null,
   selectedEntityId: null,
   activeQuery: "",
+  cueDraft: "",
 
   setProfile: (profile) => {
     storeProfile(profile);
@@ -110,6 +123,8 @@ export const useSession = create<SessionState>((set) => ({
       selectedEntityId: null,
     });
   },
+  setCueDraft: (cueDraft) => set({ cueDraft }),
+
   select: (selectedMemoryId) => set({ selectedMemoryId, selectedEntityId: null }),
   selectEntity: (selectedEntityId) => set({ selectedEntityId, selectedMemoryId: null }),
   // Committing a query starts a new answer, and the selected object belonged to
@@ -120,7 +135,7 @@ export const useSession = create<SessionState>((set) => ({
   // rather than as a deliberate carry-over. Clearing both is the same rule
   // `setProfile` and `reconcileProfiles` already follow for the same reason.
   setActiveQuery: (activeQuery) =>
-    set({ activeQuery, selectedMemoryId: null, selectedEntityId: null }),
+    set({ activeQuery, cueDraft: activeQuery, selectedMemoryId: null, selectedEntityId: null }),
 
   reconcileProfiles: (profiles) =>
     set((s) => {
