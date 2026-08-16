@@ -10,6 +10,7 @@ import {
   settledReason,
   shortId,
   summarise,
+  truncation,
 } from "./derive";
 
 /**
@@ -318,5 +319,24 @@ describe("settledReason", () => {
 
   it("returns null when the server sent no comments array at all", () => {
     expect(settledReason(triage())).toBeNull();
+  });
+});
+
+describe("truncation", () => {
+  it("reports a slice when the server's total exceeds the rows it sent", () => {
+    expect(truncation(200, 431)).toEqual({ total: 431, truncated: true });
+  });
+
+  it("reports no slice when everything came back", () => {
+    expect(truncation(12, 12)).toEqual({ total: 12, truncated: false });
+  });
+
+  it("clamps a total smaller than the rows sent rather than saying 'showing 50 of 12'", () => {
+    // A server disagreeing with itself must not produce a nonsense notice.
+    expect(truncation(50, 12)).toEqual({ total: 50, truncated: false });
+  });
+
+  it("says nothing about an empty list", () => {
+    expect(truncation(0, 0)).toEqual({ total: 0, truncated: false });
   });
 });

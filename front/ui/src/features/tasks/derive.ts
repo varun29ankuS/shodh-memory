@@ -261,6 +261,23 @@ export function settledReason(todo: TriageTodo): string | null {
   return null;
 }
 
+/**
+ * Is this list a slice, and of what?
+ *
+ * `TodoListResponse.count` is the total BEFORE the server truncates
+ * (src/handlers/todos.rs:1421), so it is the only way any list on this screen
+ * learns it is showing part of one. Both lists here are capped, so both need
+ * this — a Settled section that renders 200 of 300 dismissals under a heading
+ * reading "200" is the same unmarked reduction the open list refuses to make.
+ *
+ * A server reporting a smaller total than the rows it sent would make
+ * `truncated` nonsense, so the total is clamped rather than rendered as
+ * "showing 50 of 12".
+ */
+export function truncation(shown: number, total: number): { total: number; truncated: boolean } {
+  return { total: Math.max(total, shown), truncated: total > shown };
+}
+
 export function summarise(todos: Todo[], total: number, now: number): TaskSummary {
   const prefixes = new Set<string>();
   let urgent = 0;
@@ -274,10 +291,7 @@ export function summarise(todos: Todo[], total: number, now: number): TaskSummar
   }
   return {
     shown: todos.length,
-    // A server that reported a smaller total than it sent rows for would make
-    // `truncated` nonsense; clamp rather than render "showing 50 of 12".
-    total: Math.max(total, todos.length),
-    truncated: total > todos.length,
+    ...truncation(todos.length, total),
     urgent,
     high,
     overdue,

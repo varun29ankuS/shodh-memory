@@ -37,6 +37,7 @@ import {
   settledReason,
   shortId,
   summarise,
+  truncation,
 } from "./derive";
 
 /**
@@ -570,6 +571,16 @@ function SettledSection({ profile }: { profile: string }) {
               done or dismissed, and a dismissal keeps the reason it was dismissed for.
             </p>
           ) : null}
+          {/* This list is capped exactly like the open one, so it states the
+              same reduction. A settled section is the list most likely to
+              outgrow a cap — it only ever grows. */}
+          {data && truncation(data.todos.length, data.count).truncated ? (
+            <p className="border-warn/40 text-muted-foreground/80 mb-1.5 border-l pl-2.5 text-[11px] leading-relaxed">
+              Showing the most recent {data.todos.length} of{" "}
+              {truncation(data.todos.length, data.count).total} settled tasks — the rest are past
+              this screen's limit of {TASK_LIMIT}.
+            </p>
+          ) : null}
           {data?.todos.map((todo) => {
             const reason = settledReason(todo);
             const dismissed = todo.status === "cancelled";
@@ -698,16 +709,28 @@ export function TasksView({ reach }: { reach: Reachability }) {
   const summary = summarise(data.todos, data.count, Date.now());
 
   if (data.todos.length === 0) {
+    // SCROLLED, AND THE EMPTY STATE DOES NOT EAT THE VIEWPORT. `EmptyState` is
+    // `grid h-full place-items-center`, so as the only child of an `h-full`
+    // box it takes the whole height and pushes Settled past the fold with no
+    // scroll container to reach it. That is the one state where Settled can
+    // hold everything the profile has — a profile whose every task has been
+    // dismissed reads zero open and nonzero settled — so it must be
+    // reachable. Bounded padding instead of full height, inside the same
+    // scroller the populated branch uses.
     return (
-      <div className="mx-auto h-full w-full max-w-4xl">
-        <EmptyState
-          size="page"
-          title="Tasks is where work recorded elsewhere gets decided on"
-          body="Nothing is open in this profile. A task appears the moment a session records one — through the MCP tools or an agent's session hook — and this is where it is marked done, deferred or dismissed."
-          more="Nothing is authored on this screen; every task arrived from somewhere else. Completed and dismissed work is not in this list — it is under Settled, which keeps the reason each one was dismissed for."
-        />
-        <SettledSection profile={profile} />
-      </div>
+      <ScrollArea className="h-full">
+        <div className="mx-auto max-w-4xl pb-16">
+          <div className="py-20">
+            <EmptyState
+              size="page"
+              title="Tasks is where work recorded elsewhere gets decided on"
+              body="Nothing is open in this profile. A task appears the moment a session records one — through the MCP tools or an agent's session hook — and this is where it is marked done, deferred or dismissed."
+              more="Nothing is authored on this screen; every task arrived from somewhere else. Completed and dismissed work is not in this list — it is under Settled, which keeps the reason each one was dismissed for."
+            />
+          </div>
+          <SettledSection profile={profile} />
+        </div>
+      </ScrollArea>
     );
   }
 
