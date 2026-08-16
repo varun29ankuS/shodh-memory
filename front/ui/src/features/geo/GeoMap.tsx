@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  geoBounds,
   geoEqualEarth,
   geoPath,
   geoGraticule10,
@@ -176,6 +177,22 @@ export function GeoMap({
      */
     const MIN_SPAN_DEGREES = 4;
 
+    /** The longitude to put under the central meridian.
+     *
+     *  Read off the same object that is about to be fitted, so the centring
+     *  and the framing can never disagree. `geoBounds` returns
+     *  [[west, south], [east, north]] and handles the antimeridian, which a
+     *  mean of raw longitudes does not. */
+    function fitCentreLon(target: GeoPermissibleObjects): number {
+      const [[west], [east]] = geoBounds(target as never);
+      if (!Number.isFinite(west) || !Number.isFinite(east)) return 0;
+      // geoBounds already normalises a box that crosses the antimeridian into
+      // east < west; the midpoint of that wrapped span is still the centre.
+      const span = east < west ? east + 360 - west : east - west;
+      const mid = west + span / 2;
+      return ((mid + 180) % 360) - 180;
+    }
+
     function fitTarget(): GeoPermissibleObjects {
       if (points.length === 0) return LAND;
 
@@ -240,14 +257,30 @@ export function GeoMap({
       height = rect.height;
       canvas!.width = Math.round(width * dpr);
       canvas!.height = Math.round(height * dpr);
-      // Refit rather than rescale: fitExtent recomputes both scale and centre,
-      // so the map fills a resized pane instead of drifting off one edge.
+      /* CENTRE THE PROJECTION ON THE DATA BEFORE FITTING IT.
+         Equal Earth is pseudocylindrical: its meridians curve away from the
+         central meridian, which defaults to 0 degrees. A corpus sitting at
+         68-97E is therefore drawn 80 degrees off-centre, where that curvature
+         is at its worst, and the whole region arrives visibly sheared -- the
+         map looked tilted because it was.
+
+         Rotating the central meridian onto the data removes the shear for
+         whatever is being looked at, and costs nothing: the projection stays
+         equal-area, so the property the file chose it for -- density on screen
+         is density in the world -- is untouched. Longitude only; Equal Earth
+         has no oblique form, and rotating latitude would tilt the graticule
+         instead of straightening it.
+
+         Rotation must precede fitExtent, because fitting measures the
+         projected result and a later rotate would invalidate it. */
+      const centre = fitTarget();
+      projection.rotate([-fitCentreLon(centre), 0]);
       projection.fitExtent(
         [
           [12, 12],
           [Math.max(24, width - 12), Math.max(24, height - 12)],
         ],
-        fitTarget(),
+        centre,
       );
       return dpr;
     }
