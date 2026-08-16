@@ -5,6 +5,8 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { InfoHint } from "@/components/ui/info-hint";
 import { Meta, Stat } from "@/components/ui/meta";
 import { useRecall } from "@/features/recall/useRecall";
+import { useView } from "@/stores/view";
+import { useSession } from "@/stores/session";
 import { useMemoryTypes } from "@/features/recall/GraphCanvas";
 import { GeoMap } from "./GeoMap";
 
@@ -31,22 +33,51 @@ export function GeoView({ reach }: { reach: Reachability }) {
 
   // The plotted set: recall results first (they carry scores and therefore
   // size), then every located corpus memory that is not already a result.
+  /* THE MAP CONSUMES A CUE, so "show me where this is" has an answer here.
+     Two producers, same channel as the graph: the model's recall arrives as
+     cue terms on the view bus, and the human's typing arrives as cueDraft.
+     Whichever is live raises the points whose memory mentions a term and
+     recedes the rest — and GeoMap re-fits to what was raised, so the map
+     MOVES to the answer instead of dimming in place. A map that highlights
+     without travelling still makes you hunt for the highlight. */
+  const agentCue = useView((s) => s.cue);
+  const typedCue = useSession((s) => s.cueDraft);
+
+  const cueTerms = useMemo(() => {
+    if (agentCue?.entities.length) return agentCue.entities.map((t) => t.toLowerCase());
+    const typed = typedCue.trim().toLowerCase();
+    return typed ? [typed] : [];
+  }, [agentCue, typedCue]);
+
   const { plotted, dimmed } = useMemo(() => {
     const resultIds = new Set(results.map((m) => m.id));
     const context = (corpus.data?.memories ?? [])
       .filter((m) => m.geo_location)
       .filter((m) => !resultIds.has(m.id))
       .map(corpusToRecallMemory);
+
+    const all = hasQuery && results.length > 0 ? [...results, ...context] : context;
+
+    if (cueTerms.length > 0) {
+      const hit = (m: (typeof all)[number]) => {
+        const text = m.experience.content.toLowerCase();
+        return cueTerms.some((t) => text.includes(t));
+      };
+      const missed = new Set(all.filter((m) => !hit(m)).map((m) => m.id));
+      // Every point missing means the cue named nothing on this map. Dimming
+      // all of them would blank it and read as data loss, so the corpus stays
+      // as it was and the caption still says what was searched.
+      if (missed.size < all.length) return { plotted: all, dimmed: missed };
+      return { plotted: all, dimmed: undefined };
+    }
+
     if (!hasQuery || results.length === 0) {
       // No active answer: the corpus IS the map. Nothing is dimmed — these
       // points are not losing to anything.
       return { plotted: context, dimmed: undefined };
     }
-    return {
-      plotted: [...results, ...context],
-      dimmed: new Set(context.map((m) => m.id)),
-    };
-  }, [corpus.data, results, hasQuery]);
+    return { plotted: all, dimmed: new Set(context.map((m) => m.id)) };
+  }, [corpus.data, results, hasQuery, cueTerms]);
 
   const types = useMemoryTypes(plotted);
   const located = plotted.filter((m) => m.experience.geo_location);

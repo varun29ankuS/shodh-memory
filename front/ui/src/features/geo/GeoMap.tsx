@@ -163,7 +163,43 @@ export function GeoMap({
     let width = 0;
     let height = 0;
     const projection = geoEqualEarth();
-    const path = geoPath(projection, ctx);
+    /* The basemap is re-tessellated ONCE PER FIT, not once per frame.
+
+       Zoom and pan are applied as a canvas transform, so the projected
+       geometry does not change while you drag -- yet every frame was calling
+       geoPath and re-projecting the whole world. At 1:110m that was 8,246
+       points and got away with it; at 1:50m it is 80,617, five times over
+       (graticule, land, borders, the India clip and India's own outline), and
+       the map went sluggish under the hand.
+
+       geoPath without a context returns an SVG path string, which Path2D
+       accepts. Building them at fit time and replaying them per frame removes
+       the projection from the hot path entirely. They are rebuilt whenever the
+       projection changes -- which is a resize or a new fit, never a gesture. */
+    const pathString = geoPath(projection);
+    let basemap: {
+      graticule: Path2D;
+      land: Path2D;
+      borders: Path2D;
+      india: Path2D;
+      /** Full plane minus India's interior, for the de-facto border clip. */
+      outsideIndia: Path2D;
+    } | null = null;
+
+    function buildBasemap() {
+      const p2 = (o: GeoPermissibleObjects) => new Path2D(pathString(o) ?? "");
+      const india = p2(INDIA);
+      const outsideIndia = new Path2D();
+      outsideIndia.rect(-1e6, -1e6, 2e6, 2e6);
+      outsideIndia.addPath(india);
+      basemap = {
+        graticule: p2(GRATICULE),
+        land: p2(LAND),
+        borders: p2(BORDERS),
+        india,
+        outsideIndia,
+      };
+    }
 
     /** The one place [lat, lon] becomes [lon, lat]. */
     const project = (p: GeoPoint) => projection([p.lon, p.lat]);
@@ -219,6 +255,14 @@ export function GeoMap({
     function fitTarget(): GeoPermissibleObjects {
       if (points.length === 0) return LAND;
 
+      /* FIT WHAT WAS RAISED. When a cue is live, `dimmed` names everything the
+         cue did not reach, so the complement is the answer — and the map
+         should travel to it rather than dim in place and leave the reader
+         hunting for the highlight. Falls back to the whole set when nothing is
+         dimmed, which is the resting case. */
+      const raised = dimmed ? points.filter((p) => !dimmed.has(p.id)) : points;
+      const subject = raised.length > 0 ? raised : points;
+
       /* FIT THE MASS, NOT THE OUTLIERS.
          The raw extent is set by whichever two points are furthest apart, so a
          corpus of 24 memories around Bangalore plus one in Washington spans
@@ -249,8 +293,8 @@ export function GeoMap({
         return [sorted[cut], sorted[sorted.length - 1 - cut]];
       };
 
-      const [minLon, maxLon] = axis(points.map((p) => p.lon));
-      const [minLat, maxLat] = axis(points.map((p) => p.lat));
+      const [minLon, maxLon] = axis(subject.map((p) => p.lon));
+      const [minLat, maxLat] = axis(subject.map((p) => p.lat));
 
       // Grow whichever axis is under the minimum span around its own centre,
       // then clamp to the coordinate domain so padding cannot push the box off
@@ -315,6 +359,7 @@ export function GeoMap({
         ],
         centre,
       );
+      buildBasemap();
       return dpr;
     }
 
@@ -329,18 +374,17 @@ export function GeoMap({
 
       // Graticule first, faintest: it is a reading aid for latitude, not a
       // feature of the world.
-      ctx!.beginPath();
-      path(GRATICULE);
+      if (!basemap) buildBasemap();
+      const bm = basemap!;
+
       ctx!.strokeStyle = hexA(tokens.muted, 0.09);
       ctx!.lineWidth = 0.5 / t.k;
-      ctx!.stroke();
+      ctx!.stroke(bm.graticule);
 
       // Landmass as a quiet ground. The map is a backdrop for the points; if
       // it competes with them it is doing the wrong job.
-      ctx!.beginPath();
-      path(LAND);
       ctx!.fillStyle = hexA(tokens.muted, 0.1);
-      ctx!.fill();
+      ctx!.fill(bm.land);
       ctx!.strokeStyle = hexA(tokens.muted, 0.32);
       ctx!.lineWidth = 0.6 / t.k;
       ctx!.stroke();
@@ -359,25 +403,18 @@ export function GeoMap({
       // paintable. The rectangle is deliberately enormous: this runs inside
       // the zoom transform, so it must still cover the plane at k = 24.
       ctx!.save();
-      ctx!.beginPath();
-      ctx!.rect(-1e6, -1e6, 2e6, 2e6);
-      path(INDIA);
-      ctx!.clip("evenodd");
-      ctx!.beginPath();
-      path(BORDERS);
+      ctx!.clip(bm.outsideIndia, "evenodd");
       ctx!.strokeStyle = hexA(tokens.muted, 0.2);
       ctx!.lineWidth = 0.5 / t.k;
-      ctx!.stroke();
+      ctx!.stroke(bm.borders);
       ctx!.restore();
 
       // India, from LGD. Drawn at the landmass's weight rather than the border
       // weight: it is the same kind of line as a coastline here, not a fainter
       // internal division.
-      ctx!.beginPath();
-      path(INDIA);
       ctx!.strokeStyle = hexA(tokens.muted, 0.32);
       ctx!.lineWidth = 0.6 / t.k;
-      ctx!.stroke();
+      ctx!.stroke(bm.india);
 
       ctx!.restore();
 
