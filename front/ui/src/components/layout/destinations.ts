@@ -105,7 +105,14 @@ export const DESTINATIONS = [
     path: "/tasks",
     label: "Tasks",
     icon: ListChecks,
-    caption: "Open work found in memory",
+    // NOT "found in memory". That implied extraction, and there is none:
+    // store_todo has three callers -- the create handler, MIF import and
+    // recurrence rollover (src/handlers/todos.rs, src/memory/types.rs) -- and
+    // nothing anywhere turns memory text into a task. Todos are RECORDED by
+    // explicit calls. A caption that credits the product with a capability it
+    // does not have is the same class of error as a legend that disagrees with
+    // its picture, and it sat on the rail on every screen.
+    caption: "Work recorded against this profile",
   },
   {
     id: "providers",
