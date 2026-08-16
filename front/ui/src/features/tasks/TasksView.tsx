@@ -1,57 +1,79 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Check,
   Circle,
   CircleDashed,
   CircleDot,
   CircleSlash,
+  Inbox,
+  RotateCcw,
+  X,
   type LucideIcon,
 } from "lucide-react";
-import { listTodos, ApiError, NetworkError, type Reachability, type Todo, type TodoStatus } from "@/lib/api";
+import { ApiError, NetworkError, type Reachability, type TodoStatus } from "@/lib/api";
 import { useSession } from "@/stores/session";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InfoHint } from "@/components/ui/info-hint";
 import { Meta, Stat } from "@/components/ui/meta";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { TASK_LIMIT, dueMeta, priorityLabel, shortId, summarise } from "./derive";
+import {
+  addTodoComment,
+  getMemory,
+  listTriageTodos,
+  updateTodoStatus,
+  type TriageTodo,
+} from "./api";
+import {
+  TASK_LIMIT,
+  dueMeta,
+  originOf,
+  priorityLabel,
+  provenanceOf,
+  settledReason,
+  shortId,
+  summarise,
+} from "./derive";
 
 /**
- * Tasks — GTD todos captured from sessions, against the real
- * `POST /api/todos` (src/handlers/todos.rs:1160).
+ * Tasks — triage for work that arrived from somewhere else.
  *
- * WORKFLOWS.md's Chain 4 reads "Tasks → task → the session that captured it
- * → Chain 2", handing off into the Inspector like every other list. That
- * hand-off is not built here, deliberately: `Todo` (src/memory/types.rs:3646)
- * carries no session reference — only `related_memory_ids`, a link to
- * memories, not to the session that created them — and the Inspector reads
- * its data out of the `["recall", profile, query]` react-query cache, which
- * a todo was never part of. Wiring a `select()` call here would open the
- * Inspector on a stale or absent cache entry.
+ * WHAT THIS SCREEN IS. Nothing here is typed on this screen. Every item was
+ * written by an API call — a person through the MCP tools, or an agent's
+ * session hook mirroring a Claude Code task event
+ * (hooks/memory-hook.ts:976-1006). So this is not a place to author work, and
+ * a to-do list is the wrong shape for it. The reference class is triage: work
+ * arrives, and a person decides whether it is real, whether it is theirs, and
+ * when. The three actions on every row are that decision.
  *
- * WHAT A ROW LEADS TO INSTEAD. It was leading nowhere at all: fifty inert
- * two-line blocks, each clamped at `line-clamp-2` with no way to see the rest
- * of a title that ran past it, and no sight of the notes, tags, contexts or
- * blocking relation the server had already sent down the same wire. A row is
- * now a disclosure: one dense line, and its whole record underneath on click.
- * That is the same one-level disclosure the rest of the product uses, and it
- * makes truncation recoverable rather than final — which is the only reason a
- * single-line row is allowed here.
+ * THE CLAIM ON THE CAPTION IS NOT ONE THIS BACKEND CAN MAKE, AND IS NOT MADE
+ * HERE. "Open work found in memory" implies extraction. There is none:
+ * `store_todo` has exactly three callers — the create handler, MIF import, and
+ * recurrence rollover (src/handlers/todos.rs:987, src/handlers/mif.rs:252,
+ * src/memory/types.rs:4256-4272) — and no NLP or regex anywhere turns memory
+ * text into a todo. Nothing was "found". The screen says "recorded", which is
+ * what actually happened, and states in the open that the product does not
+ * record who or what recorded it.
  *
- * ORDER IS THE SERVER'S AND IS NOT TOUCHED. `list_todos`
- * (src/memory/todos.rs:1008-1026) sorts by `sort_order` — a MANUAL position
- * someone set — then priority, then due date. Re-sorting here by priority
- * would look tidier and would silently discard the one ordering a human
- * actually chose. Priority is made visible on every row instead, which was the
- * real complaint: it was rendered for `high` and `urgent` only, so a corpus of
- * medium and low todos showed a column of blanks and no way to tell them apart.
+ * WHY THERE IS NO "NEEDS A DECISION" BUCKET. A triage queue wants an
+ * unconfirmed state to accept out of. `TodoStatus` (src/memory/types.rs:3827)
+ * has six variants and none of them is "proposed" or "unconfirmed", and the
+ * struct carries no origin, confidence or extraction flag of any kind
+ * (types.rs:4067-4162). Dividing these rows into "unconfirmed" and "committed"
+ * would have meant inventing a distinction the server cannot store and cannot
+ * tell the TUI or the MCP tools about — a filter that looks like state. Two of
+ * the three triage verbs DO map onto real, shared, persisted status: defer is
+ * `backlog` (the enum's own "someday/maybe"), dismiss is `cancelled`. Accept
+ * has nothing to map to, so it is not offered and its absence is explained on
+ * screen rather than papered over.
  *
- * WHAT IS NOT ON THIS SCREEN IS STATED ON IT. `include_completed` defaults to
- * false server-side (todos.rs:1224), and the request is capped at
- * `TASK_LIMIT`. Both are reductions, and an unmarked reduction is how "nothing
- * outstanding" comes to mean "nothing in the first two hundred".
+ * ROW ORDER IS THE SERVER'S AND IS STILL NOT TOUCHED — see derive.ts. The
+ * server sorts by a MANUAL `sort_order` first; re-sorting here would discard
+ * the one ordering a person actually set.
  */
 
 const STATUS_ORDER: TodoStatus[] = ["in_progress", "blocked", "todo", "backlog"];
@@ -63,8 +85,8 @@ const STATUS_META: Record<TodoStatus, { label: string; icon: LucideIcon; iconCla
   blocked: { label: "Blocked", icon: CircleSlash, iconClass: "text-warn" },
   todo: { label: "Todo", icon: Circle, iconClass: "text-muted-foreground" },
   backlog: { label: "Backlog", icon: CircleDashed, iconClass: "text-muted-foreground/60" },
-  done: { label: "Done", icon: Circle, iconClass: "text-muted-foreground" },
-  cancelled: { label: "Cancelled", icon: Circle, iconClass: "text-muted-foreground" },
+  done: { label: "Done", icon: Check, iconClass: "text-muted-foreground" },
+  cancelled: { label: "Dismissed", icon: X, iconClass: "text-muted-foreground" },
 };
 
 /** A field of the record that only some todos carry. Rendered as a labelled
@@ -79,24 +101,270 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 /**
- * One todo: a single ~28px line, with its full record one click below.
+ * Where a task came from — the one question this surface can answer and no
+ * other screen can.
+ *
+ * FETCHED ON OPEN, NOT WITH THE LIST. `list_todos` sends `related_memory_ids`
+ * but not the memories themselves, and resolving one costs a
+ * `GET /api/memory/{id}` whose response carries a 384-float embedding and the
+ * entire robotics block. Fifty rows' worth on arrival would be megabytes for
+ * text almost nobody opens. That is a reduction, so the closed row says only
+ * that links exist — never how many are sources, which is not knowable until
+ * they are fetched and classified.
+ *
+ * THE ECHOES ARE THE POINT. Most links are the task's own lifecycle restating
+ * itself (see derive.ts). They are counted, named, and kept out of the source
+ * list, because a row that answers "where did this come from" with "[SHO-1]
+ * Todo created: <this row's title>" is worse than a row that admits it has no
+ * source.
+ */
+function SourceTrail({ todo, profile }: { todo: TriageTodo; profile: string }) {
+  const ids = todo.related_memory_ids ?? [];
+
+  const { data, error, isFetching } = useQuery({
+    queryKey: ["todo-sources", profile, todo.id, ids.join(",")],
+    queryFn: async ({ signal }) =>
+      Promise.all(ids.map((id) => getMemory(id, profile, signal))),
+    enabled: ids.length > 0,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  if (ids.length === 0) {
+    return (
+      <p className="text-muted-foreground/80 text-[11px] leading-relaxed">
+        No memory is linked to this task, so there is nothing to trace it back to. A link is only
+        recorded when whoever created the task passed one.
+      </p>
+    );
+  }
+
+  if (isFetching && !data) {
+    return <Skeleton className="h-3 w-48" />;
+  }
+
+  if (error) {
+    return (
+      <p className="text-muted-foreground/80 text-[11px] leading-relaxed">
+        {ids.length === 1 ? "The linked memory" : `All ${ids.length} linked memories`} could not be
+        read
+        {error instanceof ApiError ? ` — the server answered ${error.status}.` : "."}
+      </p>
+    );
+  }
+
+  if (!data) return null;
+
+  const { sources, echoes } = provenanceOf(data);
+
+  return (
+    <div className="space-y-1.5">
+      {sources.map((memory) => (
+        <figure key={memory.id} className="border-primary/40 border-l pl-2.5">
+          <blockquote className="text-[12px] leading-relaxed">
+            {memory.experience.content}
+          </blockquote>
+          <figcaption className="mt-0.5">
+            <Meta>
+              <span>{memory.experience.experience_type}</span>
+              <span>{new Date(memory.created_at).toLocaleDateString()}</span>
+              <span className="mono">{memory.id.slice(0, 8)}</span>
+            </Meta>
+          </figcaption>
+        </figure>
+      ))}
+
+      {sources.length === 0 ? (
+        <p className="text-muted-foreground/80 text-[11px] leading-relaxed">
+          No source memory. {echoes === 1 ? "The one link" : `All ${echoes} links`} on this task
+          {echoes === 1 ? " is" : " are"} its own history — records this server wrote when the task
+          was created or changed, which restate the task rather than explain it.
+        </p>
+      ) : echoes > 0 ? (
+        <p className="text-muted-foreground/70 text-[11px]">
+          {echoes} further {echoes === 1 ? "link is" : "links are"} this task's own history, not a
+          source.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The three triage decisions, on real persisted status.
+ *
+ * Dismissal takes two steps AND a reason. The reason is not ceremony: a
+ * dismissed task is the only evidence anyone has that something was recorded
+ * which should not have been, and a `cancelled` row with a blank beside it
+ * carries none of that. It is written as a `resolution` comment
+ * (src/memory/types.rs:4061) so the TUI and the MCP tools read it as data
+ * rather than as a convention private to this screen.
+ *
+ * Nothing here deletes. `DELETE /api/todos/{id}` exists and is not called:
+ * dismissing is a judgement that can be wrong, and Settled offers every one of
+ * them a way back.
+ */
+function TriageActions({ todo, profile }: { todo: TriageTodo; profile: string }) {
+  const queryClient = useQueryClient();
+  const [confirming, setConfirming] = useState(false);
+  const [reason, setReason] = useState("");
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ["todos", profile] });
+    void queryClient.invalidateQueries({ queryKey: ["todos-settled", profile] });
+  };
+
+  const move = useMutation({
+    mutationFn: (status: "backlog" | "done") => updateTodoStatus(todo.id, profile, status),
+    onSuccess: refresh,
+  });
+
+  const dismiss = useMutation({
+    mutationFn: async (why: string) => {
+      // Reason first. If the comment fails the task stays open and visible,
+      // which is recoverable; cancelling first and failing to record why
+      // would produce exactly the unexplained dismissal this is meant to
+      // prevent.
+      await addTodoComment(todo.id, profile, why, "resolution");
+      return updateTodoStatus(todo.id, profile, "cancelled");
+    },
+    onSuccess: () => {
+      setConfirming(false);
+      setReason("");
+      refresh();
+    },
+  });
+
+  const busy = move.isPending || dismiss.isPending;
+  const failure = move.error ?? dismiss.error;
+
+  if (confirming) {
+    return (
+      <div className="border-destructive/40 space-y-1.5 border-l pl-2.5">
+        <label htmlFor={`reason-${todo.id}`} className="block text-[12px]">
+          Why is this not real work?
+        </label>
+        <input
+          id={`reason-${todo.id}`}
+          value={reason}
+          autoFocus
+          onChange={(e) => setReason(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setConfirming(false);
+            if (e.key === "Enter" && reason.trim()) dismiss.mutate(reason.trim());
+          }}
+          placeholder="Already done elsewhere / not mine / never was a task"
+          aria-label={`Reason for dismissing ${shortId(todo)}`}
+          className={cn(
+            "border-input bg-background h-7 w-full rounded-md border px-2 text-[12px]",
+            "focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none",
+          )}
+        />
+        <div className="flex items-center gap-1.5">
+          <Button
+            size="sm"
+            variant="destructive"
+            disabled={reason.trim().length === 0 || busy}
+            onClick={() => dismiss.mutate(reason.trim())}
+            aria-label={`Confirm dismissal of ${shortId(todo)}`}
+          >
+            {dismiss.isPending ? "Dismissing…" : "Dismiss"}
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() => setConfirming(false)}
+            aria-label="Keep this task open"
+          >
+            Keep
+          </Button>
+          <span className="text-muted-foreground/70 text-[11px]">
+            Moves to Settled with this reason. Reversible from there.
+          </span>
+        </div>
+        {dismiss.error ? (
+          <p className="text-destructive text-[11px]">
+            Not dismissed — {dismiss.error instanceof ApiError
+              ? `the server answered ${dismiss.error.status}.`
+              : "the server did not respond."}{" "}
+            The task is unchanged.
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={() => move.mutate("done")}
+          aria-label={`Mark ${shortId(todo)} done`}
+        >
+          <Check aria-hidden="true" />
+          Done
+        </Button>
+        {todo.status !== "backlog" ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() => move.mutate("backlog")}
+            aria-label={`Defer ${shortId(todo)} to backlog`}
+          >
+            Defer
+          </Button>
+        ) : null}
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={busy}
+          onClick={() => setConfirming(true)}
+          aria-label={`Dismiss ${shortId(todo)}`}
+        >
+          Dismiss…
+        </Button>
+      </div>
+      {failure ? (
+        <p className="text-destructive text-[11px]">
+          Not changed —{" "}
+          {failure instanceof ApiError
+            ? `the server answered ${failure.status}.`
+            : "the server did not respond."}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * One task: a single ~28px line, with its record, its origin and its decision
+ * one click below.
  *
  * The title truncates rather than wrapping, and the metadata is right-aligned
- * where the eye finishes the row — the same arrangement that makes a dense
- * table scannable without reading every cell. Both only work because the click
- * target exists: a truncated line with nothing behind it loses information for
- * good, which is what the two-line clamp this replaces was doing.
+ * where the eye finishes the row. Both only work because the click target
+ * exists: a truncated line with nothing behind it loses information for good.
  */
-function TaskRow({ todo, showProject }: { todo: Todo; showProject: boolean }) {
+function TaskRow({
+  todo,
+  profile,
+  showProject,
+}: {
+  todo: TriageTodo;
+  profile: string;
+  showProject: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const meta = STATUS_META[todo.status];
   const Icon = meta.icon;
   const due = dueMeta(todo, Date.now());
   const priority = priorityLabel(todo.priority);
-  const detail =
-    todo.notes || todo.blocked_on || todo.tags.length > 0 || todo.contexts.length > 0;
+  const origin = originOf(todo);
+  const linked = (todo.related_memory_ids ?? []).length;
   const captured = new Date(todo.created_at).toLocaleDateString();
-  const updated = new Date(todo.updated_at).toLocaleDateString();
 
   return (
     <div className="border-border border-b">
@@ -106,14 +374,13 @@ function TaskRow({ todo, showProject }: { todo: Todo; showProject: boolean }) {
         aria-expanded={open}
         aria-label={`${shortId(todo)} — ${todo.content}`}
         className={cn(
-          "hover:bg-accent/60 flex w-full items-center gap-2.5 px-4 py-1.5 text-left transition-colors duration-100",
+          "hover:bg-accent/60 flex w-full items-center gap-2.5 px-4 py-1.5 text-left",
+          "transition-colors duration-100 motion-reduce:transition-none",
           "focus-visible:ring-ring focus-visible:-outline-offset-2 focus-visible:ring-2 focus-visible:outline-none",
         )}
       >
         <Icon aria-hidden="true" className={cn("size-3.5 shrink-0", meta.iconClass)} strokeWidth={1.8} />
-        <span
-          className={cn("min-w-0 flex-1 text-[13px]", open ? "whitespace-normal" : "truncate")}
-        >
+        <span className={cn("min-w-0 flex-1 text-[13px]", open ? "whitespace-normal" : "truncate")}>
           {todo.content}
         </span>
         <Meta className="shrink-0 flex-nowrap">
@@ -121,10 +388,13 @@ function TaskRow({ todo, showProject }: { todo: Todo; showProject: boolean }) {
           {showProject && todo.project_prefix ? (
             <span className="mono text-[10px]">{todo.project_prefix}</span>
           ) : null}
-          {/* Priority on EVERY row that has one. Urgent and high earn a chip
-              because they are a call to act; medium and low are muted text,
-              which distinguishes them from each other and from a blank
-              without adding two more colours to the screen. */}
+          {/* Links exist, count unqualified: how many are SOURCES is not
+              knowable until they are fetched and classified on open. */}
+          {linked > 0 ? (
+            <span className="text-muted-foreground/70 text-[11px]">
+              {linked} linked
+            </span>
+          ) : null}
           {todo.priority === "urgent" ? <Badge variant="destructive">urgent</Badge> : null}
           {todo.priority === "high" ? <Badge variant="warn">high</Badge> : null}
           {priority && todo.priority !== "urgent" && todo.priority !== "high" ? (
@@ -143,7 +413,7 @@ function TaskRow({ todo, showProject }: { todo: Todo; showProject: boolean }) {
       </button>
 
       {open ? (
-        <div className="space-y-1.5 px-4 pt-0.5 pb-2.5 pl-[26px]">
+        <div className="space-y-2.5 px-4 pt-1 pb-3 pl-[26px]">
           {todo.notes ? <Field label="Notes">{todo.notes}</Field> : null}
           {todo.blocked_on ? (
             <Field label="Blocked on">
@@ -168,17 +438,21 @@ function TaskRow({ todo, showProject }: { todo: Todo; showProject: boolean }) {
               </span>
             </Field>
           ) : null}
-          <Meta>
-            <Stat value={captured} label="captured" />
-            {/* Compared as RENDERED dates, not as timestamps. The server writes
-                `updated_at` milliseconds after `created_at` on every capture,
-                so a raw string comparison prints the same date twice on every
-                todo that has never actually been touched. */}
-            {updated !== captured ? <Stat value={updated} label="updated" /> : null}
-            {/* An expanded row with nothing under it is a dead end unless it
-                says why. The record genuinely holds no more than the title. */}
-            {!detail ? <span>no notes, tags or contexts recorded</span> : null}
-          </Meta>
+
+          <div className="space-y-1">
+            <p className="text-muted-foreground/70 text-[11px] font-medium tracking-wide uppercase">
+              Where this came from
+            </p>
+            <SourceTrail todo={todo} profile={profile} />
+            <Meta>
+              <span>recorded {captured}</span>
+              {/* Only stated when the backend actually stamped it. Silence
+                  here means unrecorded, and the header says so. */}
+              {origin.kind !== "unrecorded" ? <span>{origin.label}</span> : null}
+            </Meta>
+          </div>
+
+          <TriageActions todo={todo} profile={profile} />
         </div>
       ) : null}
     </div>
@@ -188,10 +462,12 @@ function TaskRow({ todo, showProject }: { todo: Todo; showProject: boolean }) {
 function StatusGroup({
   status,
   todos,
+  profile,
   showProject,
 }: {
   status: TodoStatus;
-  todos: Todo[];
+  todos: TriageTodo[];
+  profile: string;
   showProject: boolean;
 }) {
   if (todos.length === 0) return null;
@@ -207,8 +483,142 @@ function StatusGroup({
         <span className="text-muted-foreground/60 mono text-[10px]">{todos.length}</span>
       </div>
       {todos.map((t) => (
-        <TaskRow key={t.id} todo={t} showProject={showProject} />
+        <TaskRow key={t.id} todo={t} profile={profile} showProject={showProject} />
       ))}
+    </section>
+  );
+}
+
+/**
+ * Settled — done and dismissed, with the reason.
+ *
+ * A separate request (`status: ["done","cancelled"]`, `include_completed:
+ * true`), fired only when this is opened, because the point of the main list
+ * is what is still outstanding and this would otherwise grow without bound.
+ *
+ * The reason is the whole reason this section exists. A dismissal is a
+ * judgement that something was recorded which should not have been, and that
+ * is the only feedback anyone gets about whatever is writing these tasks.
+ * Anything settled outside this screen has no reason recorded, and that says
+ * so explicitly rather than leaving a blank that reads like one.
+ */
+function SettledSection({ profile }: { profile: string }) {
+  const [open, setOpen] = useState(false);
+  const queryClient = useQueryClient();
+
+  const { data, error, isFetching } = useQuery({
+    queryKey: ["todos-settled", profile],
+    queryFn: ({ signal }) =>
+      listTriageTodos(
+        {
+          user_id: profile,
+          status: ["done", "cancelled"],
+          include_completed: true,
+          limit: TASK_LIMIT,
+        },
+        signal,
+      ),
+    enabled: open,
+  });
+
+  const reopen = useMutation({
+    mutationFn: (id: string) => updateTodoStatus(id, profile, "todo"),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["todos", profile] });
+      void queryClient.invalidateQueries({ queryKey: ["todos-settled", profile] });
+    },
+  });
+
+  return (
+    <section>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label="Settled work — done and dismissed tasks"
+        className={cn(
+          "hover:bg-accent/60 flex w-full items-center gap-2 border-b px-4 py-1.5 text-left",
+          "border-border transition-colors duration-100 motion-reduce:transition-none",
+          "focus-visible:ring-ring focus-visible:-outline-offset-2 focus-visible:ring-2 focus-visible:outline-none",
+        )}
+      >
+        <Inbox aria-hidden="true" className="text-muted-foreground/60 size-3" strokeWidth={1.8} />
+        <span className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
+          Settled
+        </span>
+        <span className="text-muted-foreground/60 text-[11px]">
+          {open ? (data ? `${data.todos.length}` : "…") : "done and dismissed, with the reason"}
+        </span>
+      </button>
+
+      {open ? (
+        <div className="px-4 py-2">
+          {isFetching && !data ? <Skeleton className="h-3 w-40" /> : null}
+          {error ? (
+            <p className="text-muted-foreground/80 text-[11px]">
+              Settled work could not be loaded
+              {error instanceof ApiError ? ` — the server answered ${error.status}.` : "."}
+            </p>
+          ) : null}
+          {data && data.todos.length === 0 ? (
+            <p className="text-muted-foreground/80 text-[11px] leading-relaxed">
+              Nothing has been settled in this profile yet. Tasks land here once they are marked
+              done or dismissed, and a dismissal keeps the reason it was dismissed for.
+            </p>
+          ) : null}
+          {data?.todos.map((todo) => {
+            const reason = settledReason(todo);
+            const dismissed = todo.status === "cancelled";
+            return (
+              <div key={todo.id} className="border-border/60 flex items-start gap-2.5 border-b py-1.5 last:border-b-0">
+                {dismissed ? (
+                  <X aria-hidden="true" className="text-muted-foreground/60 mt-0.5 size-3 shrink-0" strokeWidth={1.8} />
+                ) : (
+                  <Check aria-hidden="true" className="text-muted-foreground/60 mt-0.5 size-3 shrink-0" strokeWidth={1.8} />
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="text-muted-foreground text-[12px] leading-snug">{todo.content}</p>
+                  {dismissed ? (
+                    reason ? (
+                      <p className="text-[11px] leading-relaxed">
+                        <span className="text-muted-foreground/70">dismissed — </span>
+                        {reason}
+                      </p>
+                    ) : (
+                      <p className="text-muted-foreground/60 text-[11px]">
+                        dismissed, no reason recorded
+                      </p>
+                    )
+                  ) : reason ? (
+                    <p className="text-[11px] leading-relaxed">
+                      <span className="text-muted-foreground/70">done — </span>
+                      {reason}
+                    </p>
+                  ) : null}
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={reopen.isPending}
+                  onClick={() => reopen.mutate(todo.id)}
+                  aria-label={`Reopen ${shortId(todo)}`}
+                >
+                  <RotateCcw aria-hidden="true" />
+                  Reopen
+                </Button>
+              </div>
+            );
+          })}
+          {reopen.error ? (
+            <p className="text-destructive text-[11px]">
+              Not reopened —{" "}
+              {reopen.error instanceof ApiError
+                ? `the server answered ${reopen.error.status}.`
+                : "the server did not respond."}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -229,7 +639,8 @@ export function TasksView({ reach }: { reach: Reachability }) {
 
   const { data, error, isFetching } = useQuery({
     queryKey: ["todos", profile],
-    queryFn: ({ signal }) => listTodos({ user_id: profile!, limit: TASK_LIMIT }, signal),
+    queryFn: ({ signal }) =>
+      listTriageTodos({ user_id: profile!, limit: TASK_LIMIT }, signal),
     enabled,
   });
 
@@ -266,9 +677,6 @@ export function TasksView({ reach }: { reach: Reachability }) {
   }
 
   if (isFetching && !data) {
-    // Skeleton rows carry the shape they are standing in for — one dense line
-    // with a right-hand token — so the arrival of data does not restructure
-    // the list under someone already reading it.
     return (
       <div className="mx-auto h-full w-full max-w-4xl">
         <div className="border-border border-b px-4 py-2.5">
@@ -281,29 +689,26 @@ export function TasksView({ reach }: { reach: Reachability }) {
     );
   }
 
-  if (data && data.todos.length === 0) {
-    return (
-      // What the destination is FOR, then what fills it. Not an apology, and
-      // not "nothing outstanding" — the server was never asked about completed
-      // or cancelled work, so this screen cannot claim there is none.
-      <EmptyState
-        size="page"
-        title="Tasks lists the open work recorded in this profile's memory"
-        body="Nothing is open here yet. One appears the moment a session records a todo against this profile."
-        more="Tasks are picked up from what was written during a session — yours or an agent's — rather than entered on this screen. Completed and cancelled work is not listed: this screen asks the server for open items only."
-      />
-    );
-  }
-
   if (!data) return null;
 
   const summary = summarise(data.todos, data.count, Date.now());
 
+  if (data.todos.length === 0) {
+    return (
+      <div className="mx-auto h-full w-full max-w-4xl">
+        <EmptyState
+          size="page"
+          title="Tasks is where work recorded elsewhere gets decided on"
+          body="Nothing is open in this profile. A task appears the moment a session records one — through the MCP tools or an agent's session hook — and this is where it is marked done, deferred or dismissed."
+          more="Nothing is authored on this screen; every task arrived from somewhere else. Completed and dismissed work is not in this list — it is under Settled, which keeps the reason each one was dismissed for."
+        />
+        <SettledSection profile={profile} />
+      </div>
+    );
+  }
+
   return (
     <ScrollArea className="h-full">
-      {/* A measured column, widened from the previous `max-w-2xl`: a row is now
-          one line whose title runs to the metadata, so the extra 224px is
-          fewer truncated titles rather than more whitespace. */}
       <div className="mx-auto max-w-4xl pb-16">
         <header className="border-border flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b px-4 py-2.5">
           <Meta className="text-[12px]">
@@ -315,21 +720,23 @@ export function TasksView({ reach }: { reach: Reachability }) {
             {summary.high > 0 ? <Stat value={summary.high} label="high" /> : null}
             {summary.projects > 1 ? <Stat value={summary.projects} label="projects" /> : null}
           </Meta>
-          {/* Both reductions, on screen rather than behind the affordance: what
-              is excluded changes how the count above should be read, and the
-              published finding on info tips is that most people never open
-              them. */}
           <span className="text-muted-foreground/70 ml-auto flex items-center gap-1.5 text-[11px]">
-            completed not listed
+            arrived from elsewhere
             <InfoHint label="what this list contains" align="right">
-              This screen asks the server for open work only — done and cancelled todos are never
-              requested, so a count here is a count of what is outstanding and not of everything
-              ever captured.
+              Nothing here was typed on this screen. Every task was written by an API call — a
+              person through the memory tools, or an agent's session hook mirroring a task event.
+              Each row asks the same three questions: is it real, is it yours, and when.
               <br />
               <br />
-              Rows keep the server's order: a manual position first, then priority, then due date.
-              Sorting them by priority on arrival would have discarded the one ordering a person
-              actually set.
+              The server records no origin flag, so this screen cannot tell you which of those
+              wrote a given task unless the writer stamped it, and it does not guess. There is also
+              no "unconfirmed" state to accept work out of — the six statuses are backlog, todo, in
+              progress, blocked, done and cancelled — so deferring and dismissing are offered and
+              accepting is not.
+              <br />
+              <br />
+              This list asks for open work only; done and dismissed tasks are under Settled. Rows
+              keep the server's order: a manual position first, then priority, then due date.
             </InfoHint>
           </span>
           {summary.truncated ? (
@@ -344,10 +751,13 @@ export function TasksView({ reach }: { reach: Reachability }) {
           <StatusGroup
             key={status}
             status={status}
+            profile={profile}
             showProject={summary.projects > 1}
             todos={data.todos.filter((t) => t.status === status)}
           />
         ))}
+
+        <SettledSection profile={profile} />
       </div>
     </ScrollArea>
   );

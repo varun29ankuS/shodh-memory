@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { Todo } from "@/lib/api";
-import { dueMeta, priorityLabel, shortId, summarise } from "./derive";
+import type { LinkedMemory, TodoComment, TriageTodo } from "./api";
+import {
+  classifyLink,
+  dueMeta,
+  originOf,
+  priorityLabel,
+  provenanceOf,
+  settledReason,
+  shortId,
+  summarise,
+} from "./derive";
 
 /**
  * The Tasks screen states figures about real work. The ones worth pinning are
@@ -149,5 +159,164 @@ describe("summarise", () => {
       todo({ id: "c", project_prefix: null }),
     ];
     expect(summarise(rows, 3, NOW).projects).toBe(1);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Triage: provenance, origin, and the reason a task was settled.
+ *
+ * These three decide what a row CLAIMS about where work came from, and every
+ * one of them fails silently in the direction of claiming too much. A
+ * misclassified echo renders as a source sentence — a quoted blockquote under
+ * "Where this came from" that is really the task restating itself. An origin
+ * guessed from a missing field renders as a confident provenance label. A
+ * missed resolution comment renders a dismissal as unexplained.
+ * ------------------------------------------------------------------ */
+
+const memory = (tags: string[], content = "some memory"): LinkedMemory => ({
+  id: "m1",
+  experience: { content, experience_type: "Observation", tags },
+  created_at: "2026-08-01T00:00:00Z",
+});
+
+const triage = (extra: Partial<TriageTodo> = {}): TriageTodo => ({
+  ...todo(),
+  ...extra,
+});
+
+describe("classifyLink", () => {
+  it("calls a memory with no lifecycle tag a source", () => {
+    expect(classifyLink(memory(["logistics", "contract"]))).toBe("source");
+  });
+
+  it.each(["todo-created", "todo-updated", "todo-completed"])(
+    "calls a %s memory an echo — the server wrote it about the task",
+    (tag) => {
+      expect(classifyLink(memory(["todo:SHO-1", tag]))).toBe("echo");
+    },
+  );
+
+  it("treats todo-comment: as a prefix, since the comment type is appended", () => {
+    expect(classifyLink(memory(["todo:SHO-1", "todo-comment:resolution"]))).toBe("echo");
+    expect(classifyLink(memory(["todo:SHO-1", "todo-comment:progress"]))).toBe("echo");
+  });
+
+  it("does not judge on experience_type: a Task-typed memory with no lifecycle tag is a source", () => {
+    // The create and complete echoes are Task-typed but the update echo is
+    // Context-typed, so type is not the signature and using it would both
+    // miss echoes and swallow genuine Task-typed sources.
+    const m: LinkedMemory = {
+      id: "m2",
+      experience: { content: "Sprint planning", experience_type: "Task", tags: ["planning"] },
+      created_at: "2026-08-01T00:00:00Z",
+    };
+    expect(classifyLink(m)).toBe("source");
+  });
+
+  it("does not mistake an unrelated tag that merely starts with todo", () => {
+    expect(classifyLink(memory(["todo:SHO-1"]))).toBe("source");
+    expect(classifyLink(memory(["todoist-sync"]))).toBe("source");
+  });
+
+  it("survives a memory whose tags are absent rather than empty", () => {
+    const m = { id: "m3", experience: { content: "x", experience_type: "Observation" }, created_at: "2026-08-01T00:00:00Z" } as unknown as LinkedMemory;
+    expect(classifyLink(m)).toBe("source");
+  });
+});
+
+describe("provenanceOf", () => {
+  it("separates a real source from the creation echo that always accompanies it", () => {
+    const result = provenanceOf([
+      memory(["contract"], "Meridian need the signed addendum before the 30th."),
+      memory(["todo:SHO-1", "todo-created"], "[SHO-1] Todo created: Send signed addendum"),
+    ]);
+    expect(result.sources.map((m) => m.experience.content)).toEqual([
+      "Meridian need the signed addendum before the 30th.",
+    ]);
+    expect(result.echoes).toBe(1);
+  });
+
+  it("reports zero sources when every link is the task's own history", () => {
+    const result = provenanceOf([
+      memory(["todo:SHO-2", "todo-created"]),
+      memory(["todo:SHO-2", "todo-updated"]),
+    ]);
+    expect(result.sources).toEqual([]);
+    expect(result.echoes).toBe(2);
+  });
+
+  it("counts nothing for an empty link list", () => {
+    expect(provenanceOf([])).toEqual({ sources: [], echoes: 0 });
+  });
+});
+
+describe("originOf", () => {
+  it("reports the session hook from its external_id stamp", () => {
+    expect(originOf(triage({ external_id: "claude-task:abc123" })).kind).toBe("session-hook");
+  });
+
+  it("reports the session hook from its tag when external_id is absent", () => {
+    expect(originOf(triage({ tags: ["source:hook", "claude-task"] })).kind).toBe("session-hook");
+  });
+
+  it("names the system of record for an external sync key", () => {
+    const origin = originOf(triage({ external_id: "linear:SHO-39" }));
+    expect(origin.kind).toBe("external");
+    expect(origin).toHaveProperty("label", "synced from linear");
+  });
+
+  it("says UNRECORDED rather than guessing when nothing was stamped", () => {
+    // The backend has no origin field. An unstamped todo is not "typed by a
+    // human" — it is unknown, and the screen must not render a label for it.
+    expect(originOf(triage()).kind).toBe("unrecorded");
+  });
+});
+
+describe("settledReason", () => {
+  const comment = (
+    comment_type: TodoComment["comment_type"],
+    content: string,
+  ): TodoComment => ({
+    id: `c-${content}`,
+    todo_id: "t",
+    author: "someone",
+    content,
+    comment_type,
+    created_at: "2026-08-01T00:00:00Z",
+    updated_at: null,
+  });
+
+  it("reads the resolution comment past the system activity ones around it", () => {
+    // A real dismissal ships exactly this shape: system "Created", the
+    // reason, then system "Updated: status -> Cancelled".
+    const t = triage({
+      comments: [
+        comment("activity", "Created"),
+        comment("resolution", "Not ours — Meridian accept an e-signature."),
+        comment("activity", "Updated: status → Cancelled"),
+      ],
+    });
+    expect(settledReason(t)).toBe("Not ours — Meridian accept an e-signature.");
+  });
+
+  it("takes the LAST resolution, which is why it is settled now", () => {
+    const t = triage({
+      comments: [comment("resolution", "first call"), comment("resolution", "after reopening")],
+    });
+    expect(settledReason(t)).toBe("after reopening");
+  });
+
+  it("returns null when only system activity was recorded", () => {
+    const t = triage({ comments: [comment("activity", "Created")] });
+    expect(settledReason(t)).toBeNull();
+  });
+
+  it("returns null for a whitespace-only reason rather than rendering a blank", () => {
+    const t = triage({ comments: [comment("resolution", "   ")] });
+    expect(settledReason(t)).toBeNull();
+  });
+
+  it("returns null when the server sent no comments array at all", () => {
+    expect(settledReason(triage())).toBeNull();
   });
 });

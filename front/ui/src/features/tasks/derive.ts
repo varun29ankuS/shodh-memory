@@ -1,4 +1,5 @@
 import type { Todo, TodoPriority } from "@/lib/api";
+import type { LinkedMemory, TriageTodo } from "./api";
 
 /**
  * The arithmetic behind the Tasks screen, kept out of the component so it can
@@ -117,6 +118,147 @@ export interface TaskSummary {
   /** Distinct project prefixes present among the rows. One project means the
    *  chip repeats the same three letters down fifty rows and is dropped. */
   projects: number;
+}
+
+/* ------------------------------------------------------------------ *
+ * PROVENANCE
+ *
+ * A todo's `related_memory_ids` is documented server-side as "the 'why does
+ * this task exist' link" (src/handlers/todos.rs:195-196). It is not only that,
+ * and the difference is the whole reason this classifier exists.
+ *
+ * Two things write that list, and nothing on the wire tells them apart:
+ *
+ *   1. A CALLER passing memory ids at create or update time
+ *      (src/handlers/todos.rs:1078-1079, 1632-1633). This is a real source.
+ *      It is also entirely optional, and no first-party client sends it — the
+ *      session hook that creates todos from Claude Code task events
+ *      (hooks/memory-hook.ts:976-1006) passes none.
+ *
+ *   2. The SERVER, on every create, update, complete and comment, which
+ *      writes a new memory RESTATING the todo and links it back
+ *      (src/handlers/todos.rs:1174-1180, 1773-1777, 1912-1916, 2304-2307).
+ *      The content of one reads "[SHO-1] Todo created: <the todo's title>".
+ *
+ * So the default state of a task created through this product is a memory link
+ * that leads to a restatement of itself. Rendering that under "where did this
+ * come from" would answer the question with the question. These are separated
+ * by the tags the four echo writers set (todos.rs:1132-1138, 1728-1737,
+ * 1867-1876, 2267-2275) — the only signature they leave.
+ * ------------------------------------------------------------------ */
+
+/** Exact lifecycle markers written by the four echo sites. `todo-comment:` is
+ *  a prefix (`todo-comment:resolution` and friends), the rest are literal. */
+const ECHO_TAGS = ["todo-created", "todo-updated", "todo-completed"];
+const ECHO_TAG_PREFIX = "todo-comment:";
+
+export type LinkKind =
+  /** A memory this task's own lifecycle wrote. Not provenance. */
+  | "echo"
+  /** Not written by any todo lifecycle: a memory that existed independently. */
+  | "source";
+
+/**
+ * Classify one linked memory.
+ *
+ * Judged on the lifecycle tags alone, NOT on `experience_type`: the create and
+ * complete echoes are `Task`-typed but the update echo is `Context`-typed
+ * (todos.rs:1741, 1879), and a genuine source memory is free to be any of
+ * them. Type is not the signature; the tags are.
+ */
+export function classifyLink(memory: LinkedMemory): LinkKind {
+  const tags = memory.experience?.tags ?? [];
+  for (const tag of tags) {
+    if (ECHO_TAGS.includes(tag)) return "echo";
+    if (tag.startsWith(ECHO_TAG_PREFIX)) return "echo";
+  }
+  return "source";
+}
+
+export interface Provenance {
+  /** Memories that existed independently of this task. The answer to "where
+   *  did this come from", when there is one. */
+  sources: LinkedMemory[];
+  /** Links that are this task's own lifecycle restating itself. Counted so the
+   *  screen can say what the other links were, rather than hiding them and
+   *  leaving a "3 linked" chip unaccounted for. */
+  echoes: number;
+}
+
+export function provenanceOf(memories: LinkedMemory[]): Provenance {
+  const sources: LinkedMemory[] = [];
+  let echoes = 0;
+  for (const memory of memories) {
+    if (classifyLink(memory) === "echo") echoes += 1;
+    else sources.push(memory);
+  }
+  return { sources, echoes };
+}
+
+/* ------------------------------------------------------------------ *
+ * ORIGIN
+ *
+ * There is NO field recording whether a todo was typed by a person or written
+ * by an agent. The `Todo` struct (src/memory/types.rs:4067-4162) has no
+ * `origin`, `source`, `confidence` or span of any kind, and nothing in the
+ * backend extracts a todo from memory text — every todo is created by an
+ * explicit call.
+ *
+ * One partial signal does exist, and only for one writer: the session hook
+ * stamps `external_id: "claude-task:{id}"` and tags `source:hook`
+ * (hooks/memory-hook.ts:1004-1005). That is reported where present and nothing
+ * is inferred where it is absent — an unstamped todo is unknown, not "typed by
+ * a human".
+ * ------------------------------------------------------------------ */
+
+export type Origin =
+  | { kind: "session-hook"; label: string }
+  | { kind: "external"; label: string }
+  | { kind: "unrecorded" };
+
+export function originOf(todo: TriageTodo): Origin {
+  const external = todo.external_id;
+  if (external && external.startsWith("claude-task:")) {
+    return { kind: "session-hook", label: "recorded by a session hook" };
+  }
+  if (todo.tags.includes("source:hook")) {
+    return { kind: "session-hook", label: "recorded by a session hook" };
+  }
+  if (external) {
+    // "todoist:123", "linear:SHO-39" — the scheme is the system of record.
+    const scheme = external.slice(0, external.indexOf(":"));
+    return { kind: "external", label: `synced from ${scheme || external}` };
+  }
+  return { kind: "unrecorded" };
+}
+
+/* ------------------------------------------------------------------ *
+ * SETTLED WORK
+ * ------------------------------------------------------------------ */
+
+/**
+ * The reason a task was settled, if one was recorded.
+ *
+ * Written as a `resolution` comment (src/memory/types.rs:4061-4062) and read
+ * back off the `comments` array that ships inline on every listed todo
+ * (types.rs:4143), so no extra request is needed to show it.
+ *
+ * The LAST resolution wins: a task dismissed, reopened and dismissed again has
+ * two, and the current one is the reason it is settled now. Returns null when
+ * none was recorded — which is the normal case for anything cancelled outside
+ * this screen, and must read as "no reason recorded" rather than as a blank
+ * that implies one.
+ */
+export function settledReason(todo: TriageTodo): string | null {
+  const comments = todo.comments ?? [];
+  for (let i = comments.length - 1; i >= 0; i -= 1) {
+    const comment = comments[i];
+    if (comment.comment_type === "resolution") {
+      const text = comment.content.trim();
+      if (text.length > 0) return text;
+    }
+  }
+  return null;
 }
 
 export function summarise(todos: Todo[], total: number, now: number): TaskSummary {
