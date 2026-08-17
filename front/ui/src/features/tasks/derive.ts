@@ -425,7 +425,8 @@ export interface Lifeline {
    *  created directly as `in_progress`, whose start leaves no entry. */
   started: number | null;
   /** When it reached `done` or `cancelled`: `completed_at` when the server set
-   *  one, else the last settling transition in the log. Null while open. */
+   *  one, else the last settling transition in the log. Null while open —
+   *  INCLUDING for a task that was completed once and reopened, see below. */
   settled: number | null;
   /** True when `settled` came only from the log because no `completed_at` was
    *  ever written. 43 of 82 settled todos on the live profile. */
@@ -439,14 +440,32 @@ export function lifelineOf(todo: TriageTodo): Lifeline | null {
   const changes = statusChanges(todo);
   const started = changes.find((c) => c.to === "in_progress")?.at ?? null;
 
-  const stamped = parseTime(todo.completed_at);
-  let settled = stamped;
+  /*
+   * THE CURRENT STATUS GATES BOTH SOURCES, AND `completed_at` ESPECIALLY.
+   *
+   * `completed_at` is set by `Todo::complete()` and is never CLEARED by
+   * anything: there is no assignment to it anywhere in src/handlers/todos.rs,
+   * and the only two `completed_at = None` sites in the tree are a recurrence
+   * rollover building a fresh todo (types.rs:4266) and a Project (todos.rs:1361).
+   *
+   * So a task completed through the complete endpoint and then reopened keeps
+   * its old stamp for good — and reopening is a button on this very screen,
+   * which routes through the update handler. Reading the stamp without checking
+   * the status would put "took 2d" on a task sitting in To do, and would let
+   * `laneCurve` count it as settled while the status-based meter beside it did
+   * not. The curve and the number would disagree about the same project.
+   */
+  const isSettled = todo.status === "done" || todo.status === "cancelled";
+  let settled: number | null = null;
   let settledFromLog = false;
-  if (settled === null && (todo.status === "done" || todo.status === "cancelled")) {
-    for (const change of changes) {
-      if (change.to === "done" || change.to === "cancelled") {
-        settled = change.at;
-        settledFromLog = true;
+  if (isSettled) {
+    settled = parseTime(todo.completed_at);
+    if (settled === null) {
+      for (const change of changes) {
+        if (change.to === "done" || change.to === "cancelled") {
+          settled = change.at;
+          settledFromLog = true;
+        }
       }
     }
   }

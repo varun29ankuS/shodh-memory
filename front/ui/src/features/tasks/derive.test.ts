@@ -487,6 +487,22 @@ describe("lifelineOf", () => {
     expect(line?.settledFromLog).toBe(true);
   });
 
+  it("DROPS A STALE completed_at ON A REOPENED TASK", () => {
+    // Nothing ever clears completed_at: there is no assignment to it in
+    // handlers/todos.rs, and the only two `= None` sites in the tree are a
+    // recurrence rollover and a Project. Reopening is a button on this screen
+    // and routes through the update handler, so a task completed once and
+    // reopened keeps its stamp for good. Reading it without checking status
+    // puts "took 2d" on a task sitting in To do, and lets the curve count it as
+    // settled while the meter beside it does not.
+    const t = triage({
+      status: "todo",
+      completed_at: at(6),
+      comments: [sysActivity("Marked complete after 5.0 days", at(6))],
+    });
+    expect(lifelineOf(t)?.settled).toBeNull();
+  });
+
   it("leaves an open task unsettled even if it once passed through done", () => {
     const t = triage({
       status: "todo",
