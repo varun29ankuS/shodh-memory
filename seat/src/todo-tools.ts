@@ -221,11 +221,121 @@ export function composeEmptyListingReport(applied: readonly string[]): string {
 	);
 }
 
+/**
+ * A `[mem:xxxxxxxx]` citation, reduced to the eight characters that identify it.
+ *
+ * THE MODEL ONLY EVER HAS SHORT IDS. Every surface that shows it a memory —
+ * recall results, the auto-surfaced block, its own writes — prints the first
+ * eight hex characters of the uuid, because that is the citation contract. The
+ * backend's todo-to-memory link, by contrast, verifies FULL uuids and rejects
+ * anything else. So a `create_todo` that took memory ids as typed would reject
+ * every id the model is capable of producing.
+ *
+ * Both spellings are accepted because both are things the model has seen: the
+ * bracketed citation is what it writes into prose, the bare eight characters are
+ * what it reads out of a listing.
+ */
+export function memoryCitationKey(raw: string): string | null {
+	const trimmed = raw.trim();
+	const bracketed = /^\[mem:([0-9a-fA-F]{8})\]$/.exec(trimmed);
+	if (bracketed) return bracketed[1]!.toLowerCase();
+	return /^[0-9a-fA-F]{8}$/.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
+/** One requested memory link, resolved or refused. */
+export interface MemoryLinkOutcome {
+	/** Full uuids, ready for the backend's verification. */
+	ids: string[];
+	/** What the model typed that this seat could not turn into a memory. */
+	unknown: string[];
+}
+
+/**
+ * Turn the model's citations into memory uuids, refusing anything it has not
+ * been shown.
+ *
+ * THE RESTRICTION IS THE FEATURE. `known` holds only the memories surfaced in
+ * THIS run — recalled, auto-surfaced, or written by the model itself — which is
+ * exactly the set the citation contract already polices in an answer. A todo
+ * linked to a memory the model never read is a "why does this task exist" chain
+ * whose first link is a guess, and the backend cannot catch it: it verifies that
+ * the uuid exists, not that anybody looked at it.
+ */
+export function resolveMemoryLinks(
+	raw: readonly string[],
+	known: (shortId: string) => string | null,
+): MemoryLinkOutcome {
+	const ids: string[] = [];
+	const unknown: string[] = [];
+	const seen = new Set<string>();
+	for (const value of raw) {
+		const key = memoryCitationKey(value);
+		const full = key === null ? null : known(key);
+		if (full === null) {
+			unknown.push(value.trim());
+			continue;
+		}
+		if (seen.has(full)) continue;
+		seen.add(full);
+		ids.push(full);
+	}
+	return { ids, unknown };
+}
+
+/**
+ * What the model is told a creation achieved.
+ *
+ * THE SHORT ID IS THE POINT. It is the handle every other todo tool takes, and a
+ * creation that did not return one would force a `list_todos` round trip before
+ * the model could do anything with the thing it just made. The signature is
+ * reported separately for the same reason a claim's is: creation and signing are
+ * two calls, and a todo created with nobody recorded as having created it is
+ * indistinguishable from one the person typed.
+ */
+export function composeCreateReport(input: {
+	shortId: string;
+	linked: number;
+	unknownLinks: readonly string[];
+	commentError: string | null;
+	author: string;
+}): string {
+	const lines = [`Created [${input.shortId}].`];
+	if (input.linked > 0) {
+		lines.push(
+			`Linked to ${input.linked} ${input.linked === 1 ? "memory" : "memories"}, so the todo records why it exists.`,
+		);
+	}
+	if (input.unknownLinks.length > 0) {
+		lines.push(
+			`NOT linked: ${input.unknownLinks.join(", ")} — these are not memories you have been shown in this ` +
+				"conversation. Link only ids from a recall result, the surfaced-memory block, or your own writes; " +
+				"recall the memory first if you want the link.",
+		);
+	}
+	lines.push(
+		input.commentError === null
+			? `Recorded on the todo as ${input.author}.`
+			: `WARNING: the todo exists but the note saying you created it FAILED (${input.commentError}). ` +
+					`Nothing on [${input.shortId}] distinguishes it from a todo the user typed. Retry ` +
+					"comment_on_todo, or tell the user it is unattributed.",
+	);
+	return lines.join("\n");
+}
+
 export interface TodoToolContext {
 	backend: ShodhBackend;
 	userId: string;
 	/** Read at call time: the conversation's model can change mid-session. */
 	getModel(): ModelRef;
+	/**
+	 * The full uuid for an 8-character citation the model has actually been
+	 * shown this run, or null.
+	 *
+	 * Supplied by the conversation rather than looked up, because "has the model
+	 * seen this" is not a question the backend can answer — it knows which
+	 * memories exist, not which ones were put in front of anybody.
+	 */
+	resolveMemoryCitation(shortId: string): string | null;
 }
 
 const TODO_ID_DESCRIPTION =
@@ -247,6 +357,52 @@ const listParameters = Type.Object({
 	),
 	query: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "Free-text filter over content." })),
 	limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Maximum todos (default 20)." })),
+});
+
+const TODO_PRIORITIES = ["urgent", "high", "medium", "low", "none"] as const;
+
+const createParameters = Type.Object({
+	content: Type.String({
+		minLength: 3,
+		maxLength: 500,
+		description:
+			"The work, as one actionable line. A GTD context written inline (\"@computer\", \"@phone\") is extracted " +
+			"automatically, so write it the way the user would say it.",
+	}),
+	why: Type.String({
+		minLength: 10,
+		maxLength: 1000,
+		description:
+			"Why this task exists, in your own words. Recorded on the todo under your model identity — it is the only " +
+			"thing that distinguishes a todo you created from one the user typed.",
+	}),
+	priority: Type.Optional(
+		Type.Union(TODO_PRIORITIES.map((priority) => Type.Literal(priority)), {
+			description: "Default medium. Judge it from what the user said, not from your own sense of urgency.",
+		}),
+	),
+	project: Type.Optional(
+		Type.String({
+			minLength: 1,
+			maxLength: 100,
+			description: "Project name. An unknown name CREATES that project, so take it from a list_todos result.",
+		}),
+	),
+	due_date: Type.Optional(
+		Type.String({
+			minLength: 3,
+			maxLength: 60,
+			description: 'When it is due — "2026-09-01", "tomorrow", "next friday". Only when the user gave one.',
+		}),
+	),
+	because_of: Type.Optional(
+		Type.Array(Type.String({ minLength: 8, maxLength: 20 }), {
+			maxItems: 8,
+			description:
+				"Memory ids that motivated this task, as [mem:<id>] or the bare 8 characters. Only ids surfaced to you " +
+				"in this conversation are accepted; anything else is reported back unlinked rather than guessed at.",
+		}),
+	),
 });
 
 const claimParameters = Type.Object({
@@ -356,6 +512,86 @@ export function createTodoTools(context: TodoToolContext): AgentTool<any>[] {
 			const lines = [`${response.todos.length} todo(s):`];
 			for (const todo of response.todos) lines.push(`- ${formatTodoLine(todo)}`);
 			return textResult(lines.join("\n"), { count: response.todos.length });
+		},
+	};
+
+	/**
+	 * The verb the surface was missing.
+	 *
+	 * WHY ITS ABSENCE WAS NOT NEUTRAL. The model could already create todos — the
+	 * bridged MCP `add_todo` was left unfiltered precisely because there was "no
+	 * native equivalent" (conversation.ts) — and that path writes no attribution
+	 * at all. So creation was the one mutation on this surface that arrived
+	 * anonymous, on a surface whose entire argument is that every mutation carries
+	 * the model's identity. A native verb that signs its work closes that, and
+	 * `add_todo` joins the filtered list.
+	 */
+	const createTool: AgentTool<typeof createParameters> = {
+		name: "create_todo",
+		label: "Create a todo",
+		description: composeToolDescription("create_todo", {
+			does:
+				"Records a new piece of work against this profile and signs it with your model identity, optionally " +
+				"linking the memories that motivated it.",
+			useWhen:
+				"Use it when the conversation surfaces work that should outlive it — something the user said they need " +
+				"to do, or a follow-up your own findings imply and they agreed to. Say why in `why`: it is the only " +
+				"record that this todo came from you rather than from their own hand.",
+			notFor:
+				"Do not create work the user did not ask for and has not agreed to; a board filling with an " +
+				"assistant's suggestions is worse than an empty one. Check list_todos first — nothing here detects a " +
+				"duplicate, so calling twice makes two todos. And do not use it to store a FACT or a decision, which " +
+				"is remember_memory's job; a todo is something to be done.",
+			returns:
+				"The new short id, which the other todo tools take immediately. `because_of` accepts only memory ids " +
+				"you have actually been shown in this conversation — anything else comes back named and unlinked — and " +
+				"the backend rejects the whole call if a linked memory or an unknown project reference does not " +
+				"resolve. The todo is created open and unclaimed: claim_todo is a separate act.",
+		}),
+		parameters: createParameters,
+		execute: async (_toolCallId, params) => {
+			const author = agentAuthor(context.getModel());
+			const { ids, unknown } = resolveMemoryLinks(params.because_of ?? [], context.resolveMemoryCitation);
+
+			const response = await context.backend.createTodo({
+				userId: context.userId,
+				content: params.content,
+				priority: params.priority,
+				project: params.project,
+				dueDate: params.due_date,
+				// Omitted entirely when empty rather than sent as [], so the
+				// handler's own default path runs.
+				relatedMemoryIds: ids.length > 0 ? ids : undefined,
+			});
+			if (!response.todo) {
+				throw new Error(
+					"The backend accepted the request and returned no todo, so nothing was created and there is no id " +
+						"to work with. Retry once; if it fails again, tell the user the task was not recorded rather " +
+						"than assuming it was.",
+				);
+			}
+			const shortId = shortIdOf(response.todo);
+
+			// The todo exists. A signing failure must not throw — that would tell
+			// the model nothing was created while the board says otherwise, which
+			// is the same defect claim_todo avoids for the same reason.
+			let commentError: string | null = null;
+			try {
+				await context.backend.addTodoComment({
+					userId: context.userId,
+					todoId: response.todo.id,
+					content: `Created by ${author}. Why: ${params.why}`,
+					author,
+					commentType: "activity",
+				});
+			} catch (error) {
+				commentError = error instanceof Error ? error.message : String(error);
+			}
+
+			return textResult(
+				composeCreateReport({ shortId, linked: ids.length, unknownLinks: unknown, commentError, author }),
+				{ todo_id: shortId, linked_memory_ids: ids, unlinked: unknown, signed: commentError === null },
+			);
 		},
 	};
 
@@ -572,5 +808,8 @@ export function createTodoTools(context: TodoToolContext): AgentTool<any>[] {
 		},
 	};
 
-	return [listTool, claimTool, updateTool, commentTool];
+	// Read, then create, then take, then change, then annotate — the order work
+	// actually moves in. Stable, because a tool list that reorders itself between
+	// turns costs a prompt-cache hit on every one of them.
+	return [listTool, createTool, claimTool, updateTool, commentTool];
 }

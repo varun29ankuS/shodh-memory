@@ -122,14 +122,14 @@ export const DEFAULT_MEMORY_MECHANISMS: MemoryMechanisms = {
 /**
  * MCP tool base names (suffix after mcp__<server>__) that duplicate a native
  * seat tool. Everything else — graph/lineage/entity/fact tools, and the todo
- * verbs with no native equivalent (add_todo, delete_todo, list_subtasks,
- * reorder) — stays bridged.
+ * verbs with still no native equivalent (delete_todo, list_subtasks, reorder) —
+ * stays bridged.
  *
  * The memory four are here because the duplicates measurably misbehave:
  * relevance-percentage output the citation contract cannot parse, writes that
  * bypass the ledger, recalls that bypass reinforcement, and auto-ingest.
  *
- * The todo four are here for a different and simpler reason: the native
+ * The todo five are here for a different and simpler reason: the native
  * versions (todo-tools.ts) write the model's identity onto every mutation as a
  * comment author, because `Todo` has no assignee field and that comment is the
  * ONLY record of who moved the work. mcp-server/index.ts `update_todo`,
@@ -137,6 +137,13 @@ export const DEFAULT_MEMORY_MECHANISMS: MemoryMechanisms = {
  * both means half the mutations are anonymous, chosen at random by whichever
  * tool the model reaches for — and an audit trail with a hole in it chosen at
  * random is worse than one with a known shape.
+ *
+ * `add_todo` JOINED THEM WHEN `create_todo` LANDED, and its previous exemption
+ * is the clearest evidence for the rule. It was left bridged for want of a
+ * native equivalent, so CREATION — the one act that brings a todo into
+ * existence — was the single mutation on this surface that arrived unsigned. A
+ * board cannot say which of its rows an assistant put there if the verb that
+ * puts them there is anonymous.
  */
 const REDUNDANT_MCP_MEMORY_TOOLS = new Set([
 	"recall",
@@ -144,6 +151,7 @@ const REDUNDANT_MCP_MEMORY_TOOLS = new Set([
 	"proactive_context",
 	"remember",
 	"list_todos",
+	"add_todo",
 	"update_todo",
 	"complete_todo",
 	"add_todo_comment",
@@ -221,7 +229,7 @@ The workbench:
 - Never re-issue a request to get around a refusal. An offer is the person's to accept, and asking twice is the same as not asking.
 - inspect_view is free and read-only: use it when you want to know where the person is before moving them, or whether they are already there.
 - An offer the person answers after your turn ended is reported to you at the start of the next one, under "Since your last turn, the workbench answered you". Read it before describing the view: it is how you learn that something you were told was WAITING has since been accepted, refused, or left to lapse. A refusal there is a decision already made, not a request to make again.
-- Recorded work: list_todos to see it, claim_todo before doing any of it, comment_on_todo to leave findings, update_todo to change status. Your model identity is written onto every one of those, so they are the record of what you did.`;
+- Recorded work: list_todos to see it, create_todo to record work the user has agreed to, claim_todo before doing any of it, comment_on_todo to leave findings, update_todo to change status. Your model identity is written onto every one of those, so they are the record of what you did — and never create work the user did not ask for.`;
 
 export class ConversationBusyError extends Error {
 	constructor() {
@@ -451,6 +459,12 @@ export class Conversation {
 			// signed with the model that opened the conversation rather than the
 			// one that moved the work is a wrong signature, not a stale one.
 			getModel: () => this.model,
+			// The SAME set the verification pass polices citations against, and
+			// deliberately so: a todo linked to a memory the model never read is
+			// the citation defect wearing different clothes, and the backend
+			// cannot catch it — it verifies that a uuid exists, not that anyone
+			// was shown it.
+			resolveMemoryCitation: (shortId) => this.shownMemoryIds().get(shortId) ?? null,
 		});
 
 		this.nativeTools = [...memoryTools, ...viewTools, ...todoTools];
@@ -851,6 +865,27 @@ export class Conversation {
 				`Reply with the corrected, complete answer.`;
 			await this.agent.prompt(nudge);
 		}
+	}
+
+	/**
+	 * Every memory this run has put in front of the model, short id → full uuid.
+	 *
+	 * ONE DEFINITION OF "SHOWN", used by both consumers. The verification pass
+	 * asks whether a citation names something the model was given; `create_todo`
+	 * asks whether a memory link does. They are the same question, and two
+	 * implementations of it would drift into two different answers — one of which
+	 * would then be wrong about what the model had read.
+	 *
+	 * Written ids map to their own uuid with no content: the model may cite a
+	 * memory it just wrote, and it may link a todo to it, but there is nothing to
+	 * check its wording against.
+	 */
+	private shownMemoryIds(): Map<string, string> {
+		const shown = new Map<string, string>();
+		for (const memoryId of this.surfaced.keys()) shown.set(memoryShortId(memoryId), memoryId);
+		for (const memoryId of this.proactiveContents.keys()) shown.set(memoryShortId(memoryId), memoryId);
+		for (const memoryId of this.writtenIds) shown.set(memoryShortId(memoryId), memoryId);
+		return shown;
 	}
 
 	/** Pure checks over this run's draft answer and memory events. */

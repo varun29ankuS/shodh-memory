@@ -120,3 +120,84 @@ test("four required parts put every description over the three-to-four sentence 
 	const sentences = composeToolDescription("t", whole).match(/[.!?]["')\]]?(\s|$)/g) ?? [];
 	assert.ok(sentences.length >= 4, `composed only ${sentences.length} sentences`);
 });
+
+// ── The surface itself ──────────────────────────────────────────────────────
+//
+// Anthropic's tool-search guidance puts the degradation threshold at 30-50
+// available tools and its own trigger for progressive disclosure at 10. This
+// seat sits under both, and that is a property worth being unable to lose by
+// accident: a tool added without anyone deciding to add one is exactly how a
+// surface drifts past the point where the model can choose reliably.
+//
+// Mutations: add an eleventh name to EXPECTED and watch it go red; change one
+// name's spelling; remove the name-shape assertion and rename a tool with a
+// space in it.
+
+import { createTodoTools } from "../dist/todo-tools.js";
+import { createViewTools } from "../dist/view-tools.js";
+import { createMemoryTools } from "../dist/memory-tools.js";
+
+/** Construction touches none of these — every one is used inside `execute`. */
+const INERT = {
+	backend: null,
+	userId: "u",
+	harnessUserId: "u.seat-harness",
+	conversationId: "c",
+	viewLink: null,
+	ledger: null,
+	renderLineage: true,
+	getTurn: () => 1,
+	emit: () => {},
+	onSurfaced: () => {},
+	onWeakRecall: () => {},
+	getModel: () => ({ provider: "p", id: "m", name: "M" }),
+	resolveMemoryCitation: () => null,
+};
+
+const NATIVE = [...createMemoryTools(INERT), ...createViewTools(INERT), ...createTodoTools(INERT)];
+
+const EXPECTED = [
+	"recall_memory",
+	"remember_memory",
+	"record_seat_learning",
+	"direct_view",
+	"inspect_view",
+	"list_todos",
+	"create_todo",
+	"claim_todo",
+	"update_todo",
+	"comment_on_todo",
+];
+
+test("the native surface is exactly these ten tools", () => {
+	assert.deepEqual(NATIVE.map((tool) => tool.name), EXPECTED);
+});
+
+test("the surface stays well under the count at which tool selection degrades", () => {
+	assert.ok(NATIVE.length < 30, `${NATIVE.length} native tools`);
+});
+
+test("no two tools share a name", () => {
+	assert.equal(new Set(NATIVE.map((tool) => tool.name)).size, NATIVE.length);
+});
+
+test("every name matches the documented tool-name grammar", () => {
+	// platform.claude.com define-tools: "Must match the regex ^[a-zA-Z0-9_-]{1,64}$".
+	for (const tool of NATIVE) assert.match(tool.name, /^[a-zA-Z0-9_-]{1,64}$/);
+});
+
+test("every tool carries a description built through the four-part composer", () => {
+	// The composer throws on a missing part at construction, so reaching this
+	// line at all proves the four parts exist. What is asserted here is that no
+	// tool bypassed it with a raw string: four parts cannot fit in one sentence.
+	for (const tool of NATIVE) {
+		const sentences = tool.description.match(/[.!?]["')\]]?(\s|$)/g) ?? [];
+		assert.ok(sentences.length >= 4, `${tool.name} has only ${sentences.length} sentences`);
+	}
+});
+
+test("every tool has a human label distinct from its wire name", () => {
+	for (const tool of NATIVE) {
+		assert.ok(tool.label && tool.label !== tool.name, `${tool.name} has no label`);
+	}
+});

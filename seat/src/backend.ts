@@ -652,6 +652,40 @@ export class ShodhBackend {
 		});
 	}
 
+	/**
+	 * POST /api/todos/add — src/handlers/todos.rs `create_todo` / `CreateTodoRequest`.
+	 *
+	 * `/api/todos/add` IS THE CREATE ROUTE, not `/api/todos`, which is registered
+	 * to `list_todos` (router.rs:298). The naming is inverted from REST and there
+	 * is no second candidate, so the wrong guess here is a listing that silently
+	 * returns todos instead of making one.
+	 *
+	 * `contexts` is deliberately not sent. The handler extracts GTD contexts from
+	 * the content when the field is absent (`todo_formatter::extract_contexts`)
+	 * and takes the caller's list verbatim when it is present — so passing an
+	 * empty array would SUPPRESS the extraction rather than accept it, and a todo
+	 * written as "call the vendor @phone" would land with no context at all.
+	 */
+	createTodo(params: {
+		userId: string;
+		content: string;
+		priority?: string;
+		project?: string;
+		dueDate?: string;
+		/** Full memory uuids. The handler verifies each exists and rejects the
+		 *  whole request naming the first that does not. */
+		relatedMemoryIds?: string[];
+	}): Promise<TodoResponse> {
+		return this.request<TodoResponse>("POST", "/api/todos/add", {
+			user_id: params.userId,
+			content: params.content,
+			priority: params.priority,
+			project: params.project,
+			due_date: params.dueDate,
+			related_memory_ids: params.relatedMemoryIds,
+		});
+	}
+
 	/** GET /api/todos/{id}?user_id=… — `get_todo` (Path + Query extractors). */
 	getTodo(userId: string, todoId: string): Promise<TodoResponse> {
 		return this.request<TodoResponse>(
