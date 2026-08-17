@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { SeatEvent } from "@/lib/seat/types";
 import type { RecallFact, RecallMemory } from "@/lib/api/types";
-import { ENTITY_LIMIT, commandsFromOp, describeCommands, dimensionsOf, reasonOf } from "./commands";
+import {
+  ENTITY_LIMIT,
+  commandsFromOp,
+  describeCommands,
+  dimensionsOf,
+  isAlreadyThere,
+  reasonOf,
+} from "./commands";
 
 /**
  * The event→command translation is the contract between the conversation and
@@ -293,6 +300,56 @@ describe("commandsFromOp — view_command", () => {
 
   it("does nothing at all when there is neither a destination nor an entity", () => {
     expect(commandsFromOp(request({ destination: null, entities: [] }), "/chat")).toEqual([]);
+  });
+
+  it("carries the seat's tool call id, so a verdict has somewhere to go", () => {
+    // Without this the browser can decide and never say whose question it
+    // answered — which is the whole open loop. It has to ride on the COMMAND,
+    // because a declined one is held as an offer and may be accepted minutes
+    // later, when whatever dispatched it is long gone.
+    for (const command of commandsFromOp(request(), "/chat")) {
+      expect(command.origin).toBe("call-1");
+    }
+  });
+
+  it("gives a recall-derived command no origin, because nobody asked for it", () => {
+    for (const command of commandsFromOp(recall({ memories: [memory("m1")] }), "/")) {
+      expect(command.origin).toBeUndefined();
+    }
+  });
+
+  it("opens one entity in the inspector when the request named one", () => {
+    const commands = commandsFromOp(
+      request({ destination: null, entities: [], focus: { id: "uuid-9", name: "Dali" } }),
+      "/graph",
+    );
+    expect(commands).toEqual([
+      { dimension: "focus", id: "uuid-9", name: "Dali", reason: expect.any(String), origin: "call-1" },
+    ]);
+  });
+
+  it("sends the focus even when the destination did not move", () => {
+    // The inspector is part of the shell, so an entity opened from the map is
+    // open on the map. Gating it on a navigation would drop it precisely when
+    // the person was already where the model wanted them.
+    const commands = commandsFromOp(
+      request({ destination: "/geo", entities: [], focus: { id: "uuid-9", name: "Dali" } }),
+      "/geo",
+    );
+    expect(dimensionsOf(commands)).toEqual(["focus"]);
+  });
+
+  it("names the entity in the offer, not its uuid", () => {
+    expect(describeCommands([{ dimension: "focus", id: "uuid-9", name: "Dali" }])).toBe("open Dali");
+  });
+
+  it("isAlreadyThere is true only for the surface the person is standing on", () => {
+    // The same predicate the navigation guard uses. Two copies of the condition
+    // would eventually disagree, and the disagreement would be a command
+    // silently dropped while the seat was told it applied.
+    expect(isAlreadyThere(request({ destination: "/geo" }) as never, "/geo")).toBe(true);
+    expect(isAlreadyThere(request({ destination: "/geo" }) as never, "/graph")).toBe(false);
+    expect(isAlreadyThere(request({ destination: null }) as never, "/geo")).toBe(false);
   });
 
   it("refuses a command that gives no account of itself", () => {

@@ -36,6 +36,8 @@ import {
   summarise,
   toggle,
   toolCallDetail,
+  viewDimensionLabel,
+  viewOutcomeDetail,
   toolCensus,
 } from "./derive";
 
@@ -116,7 +118,7 @@ const SOURCE_META: Record<AuditSource, { label: string; hint: string }> = {
   tool_call: { label: "Tool calls", hint: "A tool the model invoked, with how long it took" },
   ledger: { label: "Memory changes", hint: "Something written to or adjusted in memory" },
   retrieval: { label: "Retrievals", hint: "What was searched for, and what came back" },
-  view: { label: "View changes", hint: "Where the model asked to take you, and why" },
+  view: { label: "View changes", hint: "Where the model asked to take you and why — and what your workbench did about it" },
 };
 
 const SOURCE_ORDER: AuditSource[] = ["tool_call", "ledger", "retrieval", "view"];
@@ -212,6 +214,7 @@ function TrailRow({ row, showConversation }: { row: AuditRow; showConversation: 
   const ActorIcon = actor.icon;
   const outcome = outcomeOf(row);
   const detail = toolCallDetail(row);
+  const viewOutcome = viewOutcomeDetail(row);
   const duration = formatDuration(detail?.duration_ms ?? null);
 
   // Pretty-printed for reading; the raw string is kept verbatim if it cannot be
@@ -265,6 +268,14 @@ function TrailRow({ row, showConversation }: { row: AuditRow; showConversation: 
           )}
         >
           {kindLabel(row)}
+          {/* WHICH AXIS, beside what happened to it. One direct_view produces
+              several outcome rows in the same second and they differ only in
+              this — a list showing four consecutive "Held it as an offer" with
+              nothing to tell them apart reads as a repeated row rather than as
+              four facts about four parts of the view. */}
+          {viewOutcome ? (
+            <span className="text-muted-foreground/60"> · {viewDimensionLabel(viewOutcome.dimension)}</span>
+          ) : null}
         </span>
         <Meta className="shrink-0 flex-nowrap">
           {outcome === "unterminated" ? (

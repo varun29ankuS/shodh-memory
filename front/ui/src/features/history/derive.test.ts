@@ -17,6 +17,8 @@ import {
   toggle,
   toolCensus,
   toolCallDetail,
+  viewDimensionLabel,
+  viewOutcomeDetail,
   windowSince,
 } from "./derive";
 
@@ -401,6 +403,83 @@ describe("kindLabel", () => {
 
   it("shows a kind it does not recognise rather than hiding it", () => {
     expect(kindLabel(row({ kind: "consolidation_sweep" }))).toBe("consolidation_sweep");
+  });
+
+  it("still says a view command was ASKED, never that the view moved", () => {
+    // Outcomes exist now, but only on the rows that have one. Relabelling the
+    // ask because verdicts are recorded somewhere would assert, on every
+    // request, a fact that is recorded for only some of them.
+    expect(kindLabel(row({ source: "view", kind: "view_command" }))).toBe("Asked to move the view");
+  });
+});
+
+/* -------------------------------------------------------------------------- *
+ * WHAT THE WORKBENCH DID ABOUT IT
+ * -------------------------------------------------------------------------- */
+
+const outcome = (state: string, dimension = "destination"): AuditRow =>
+  row({
+    source: "view",
+    kind: "view_outcome",
+    actor: "user",
+    detail: JSON.stringify({ dimension, state, at: "/chat" }),
+  });
+
+describe("view outcome rows", () => {
+  it("gives every state its own words", () => {
+    expect(kindLabel(outcome("applied"))).toBe("Moved the view");
+    expect(kindLabel(outcome("already"))).toBe("The view was already there");
+    expect(kindLabel(outcome("offered"))).toBe("Held it as an offer");
+    expect(kindLabel(outcome("followed"))).toBe("You accepted the offer");
+    expect(kindLabel(outcome("superseded"))).toBe("Replaced by a later request");
+  });
+
+  it("never lets a refusal and a lapse share a label", () => {
+    // The distinction the whole return path exists to preserve: the person
+    // saying no, and the person never seeing the offer at all.
+    const declined = kindLabel(outcome("declined"));
+    const expired = kindLabel(outcome("expired"));
+    expect(declined).toBe("You declined the offer");
+    expect(expired).toBe("The offer lapsed unanswered");
+    expect(declined).not.toBe(expired);
+  });
+
+  it("shows a state this build does not know rather than guessing at one", () => {
+    expect(kindLabel(outcome("teleported"))).toBe("view_outcome");
+  });
+
+  it("reads the dimension, the state and where the decision was made", () => {
+    expect(viewOutcomeDetail(outcome("offered", "cue"))).toEqual({
+      dimension: "cue",
+      state: "offered",
+      at: "/chat",
+    });
+  });
+
+  it("returns null for rows that are not outcomes, and for payloads it cannot read", () => {
+    expect(viewOutcomeDetail(row({ source: "view", kind: "view_command" }))).toBeNull();
+    expect(viewOutcomeDetail(call({ name: "direct_view" }))).toBeNull();
+    expect(
+      viewOutcomeDetail(row({ source: "view", kind: "view_outcome", detail: "{not json" })),
+    ).toBeNull();
+    expect(
+      viewOutcomeDetail(row({ source: "view", kind: "view_outcome", detail: '{"state":"applied"}' })),
+    ).toBeNull();
+  });
+
+  it("names each axis, and passes an unknown one through", () => {
+    expect(viewDimensionLabel("cue")).toBe("the narrowing");
+    expect(viewDimensionLabel("frame")).toBe("the camera");
+    expect(viewDimensionLabel("destination")).toBe("the destination");
+    expect(viewDimensionLabel("focus")).toBe("the opened entity");
+    expect(viewDimensionLabel("lens")).toBe("lens");
+  });
+
+  it("has no success/failure axis — that belongs to tool calls alone", () => {
+    // `outcomeOf` counts errors and hangs. An outcome row is a decision, not an
+    // attempt, and letting it register there would let a reader count failures
+    // that were never measured.
+    expect(outcomeOf(outcome("declined"))).toBeNull();
   });
 });
 

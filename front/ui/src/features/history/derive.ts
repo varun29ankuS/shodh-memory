@@ -515,15 +515,104 @@ export function kindLabel(row: AuditRow): string {
       return "Searched memory";
     case "proactive_context":
       return "Surfaced context unasked";
-    // NOT "Moved the view". The seat records the request and never learns the
-    // verdict — the authority ledger that decides whether a command applied or
-    // waited as a Follow lives in this browser and reports to nobody. A label
-    // asserting the view moved would be the trail claiming an outcome it has no
-    // evidence for, on the one screen whose entire value is that it does not.
+    // STILL "Asked", and that has not changed. The browser now reports the
+    // verdict back (seat/src/view-link.ts), but it reports it as a SEPARATE
+    // `view_outcome` row — this row is the request, and a request that was never
+    // answered must keep reading as one. Relabelling it "Moved the view" because
+    // outcomes exist somewhere would assert, on every ask, a fact that is
+    // recorded only on some of them.
     case "view_command":
       return "Asked to move the view";
+    case "view_outcome":
+      return viewOutcomeLabel(row);
     default:
       return row.kind;
+  }
+}
+
+/**
+ * What the workbench did about a request.
+ *
+ * ONE LABEL PER STATE, never a shared one. The two pairs this keeps apart are
+ * the whole reason the return path was built: "the person refused" against "the
+ * person never saw it", and "it moved" against "it was already there". Flattened
+ * to "Handled the view request" the screen would be back to saying less than it
+ * knows, which is the failure the ask-only label was an honest admission of.
+ *
+ * An unreadable payload or a state this build does not know falls through to the
+ * raw kind, matching what {@link kindLabel} does everywhere else: an audit
+ * surface must not hide a row it cannot fully read.
+ */
+function viewOutcomeLabel(row: AuditRow): string {
+  const state = viewOutcomeDetail(row)?.state;
+  switch (state) {
+    case "applied":
+      return "Moved the view";
+    case "already":
+      return "The view was already there";
+    case "offered":
+      return "Held it as an offer";
+    case "followed":
+      return "You accepted the offer";
+    case "declined":
+      return "You declined the offer";
+    case "expired":
+      return "The offer lapsed unanswered";
+    case "superseded":
+      return "Replaced by a later request";
+    default:
+      return row.kind;
+  }
+}
+
+/** seat/src/audit.ts `viewOutcomeRow`'s `detail`, or null when it cannot be read. */
+export interface ViewOutcomeDetail {
+  dimension: string;
+  state: string;
+  /** The path the browser was on when it decided. */
+  at: string;
+}
+
+export function viewOutcomeDetail(row: AuditRow): ViewOutcomeDetail | null {
+  if (row.source !== "view" || row.kind !== "view_outcome") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.detail);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const record = parsed as Record<string, unknown>;
+  if (
+    typeof record.dimension !== "string" ||
+    typeof record.state !== "string" ||
+    typeof record.at !== "string"
+  ) {
+    return null;
+  }
+  return { dimension: record.dimension, state: record.state, at: record.at };
+}
+
+/**
+ * Which axis an outcome row is about, in a person's words.
+ *
+ * Separate from the label because they answer different questions — "what
+ * happened" and "to what" — and a row that ran them together would read as one
+ * claim. The raw dimension survives an unknown value for the same reason
+ * everything else here does.
+ */
+export function viewDimensionLabel(dimension: string): string {
+  switch (dimension) {
+    case "cue":
+      return "the narrowing";
+    case "frame":
+      return "the camera";
+    case "destination":
+      return "the destination";
+    case "focus":
+      return "the opened entity";
+    default:
+      return dimension;
   }
 }
 
