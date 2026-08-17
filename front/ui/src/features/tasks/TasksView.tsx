@@ -834,6 +834,26 @@ function TaskRow({
  * interaction: the curves answer "which project is moving", and the list
  * answers "what exactly is in it", and clicking joins the two. Selection is a
  * real pressed state with a surface change, never colour alone.
+ *
+ * THE NAME AND ITS FIGURES ARE ONE OBJECT AND ARE LAID OUT AS ONE. This row
+ * previously spread three fragments across the whole stage — name at x=668,
+ * a strip slot from x=830, the ratio at x=1835 — which was measured on a
+ * 1920px window and is the shape that got WORSE when the screen stopped
+ * centring an 896px column. `shodh-redb`, `not yet moved` and `0/50 settled`
+ * are one sentence about one project, and a thousand pixels of nothing between
+ * the second and third of them is a gap the eye has to cross twice per row.
+ *
+ * So the name and every figure about it sit in a single cluster at the left,
+ * and the strip — the only element here with a real appetite for width, being
+ * a drawing — takes whatever is left. The name keeps a fixed measure so the
+ * figures still line up as a column that can be read down.
+ *
+ * WHEN THERE IS NO AXIS THERE IS NO STRIP AT ALL. A lane whose project has
+ * never moved has nothing to plot, and the old row filled that slot with the
+ * words "not yet moved" floating in the middle of a 993px box — a caption
+ * detached from the thing it captions. It is now the last token in the
+ * cluster, beside the figures it qualifies, and the row is simply short. An
+ * empty right-hand side is honest; a phrase marooned in it is not.
  */
 function LaneRow({
   lane,
@@ -861,38 +881,44 @@ function LaneRow({
         // together. Stacked, the name and its counts stay adjacent and the
         // curve sits under both.
         "flex w-full flex-col gap-1 px-4 py-1.5 text-left",
-        "sm:flex-row sm:items-center sm:gap-3",
+        "sm:flex-row sm:items-center sm:gap-4",
         "transition-colors duration-100",
         "focus-visible:ring-ring focus-visible:-outline-offset-2 focus-visible:ring-2 focus-visible:outline-none",
         selected ? "bg-accent" : "hover:bg-accent/60",
       )}
     >
-      <span className="flex min-w-0 items-baseline gap-1.5 sm:w-[150px] sm:shrink-0">
-        <span className="truncate text-[12px]">{lane.name}</span>
-        {/* Archived is stated, not implied by position: a lane that is finished
-            for good reads differently from one that has merely gone quiet. */}
-        {lane.archived ? (
-          <span className="text-muted-foreground/60 shrink-0 text-[10px]">archived</span>
-        ) : null}
+      {/* ONE OBJECT. The name holds a fixed measure so the figures beside it
+          start at the same x on every row and can be read down as a column;
+          the cluster as a whole does not stretch, so nothing inside it drifts
+          apart as the stage widens. */}
+      <span className="flex min-w-0 items-baseline gap-2 sm:shrink-0">
+        <span className="truncate text-[12px] sm:w-[190px] sm:shrink-0">{lane.name}</span>
+
+        <Meta className="min-w-0 flex-nowrap">
+          {suppressRatio ? (
+            <span className="text-muted-foreground/70">{lane.total} shown</span>
+          ) : (
+            <Stat value={`${lane.settled}/${lane.total}`} label="settled" />
+          )}
+          {lane.underway > 0 ? <Stat value={lane.underway} label="underway" /> : null}
+          {lane.blocked > 0 ? <span className="text-warn">{lane.blocked} blocked</span> : null}
+          {/* Archived is stated, not implied by position: a lane that is
+              finished for good reads differently from one that has merely gone
+              quiet. It sits with the figures because it qualifies them. */}
+          {lane.archived ? <span className="text-muted-foreground/60">archived</span> : null}
+          {/* The caption for a strip that is not there, beside what it
+              qualifies rather than centred in the space the strip would have
+              taken. */}
+          {axis ? null : <span className="text-muted-foreground/50">not yet moved</span>}
+        </Meta>
       </span>
 
-      <span className="order-last min-w-0 flex-1 sm:order-none">
-        {axis ? (
+      {/* The drawing is the only thing here with a real use for width. */}
+      {axis ? (
+        <span className="order-last min-w-0 flex-1 sm:order-none">
           <LaneStrip lane={lane} axis={axis} />
-        ) : (
-          <span className="text-muted-foreground/50 block text-[10px]">not yet moved</span>
-        )}
-      </span>
-
-      <Meta className="shrink-0 flex-nowrap">
-        {suppressRatio ? (
-          <span className="text-muted-foreground/70">{lane.total} shown</span>
-        ) : (
-          <Stat value={`${lane.settled}/${lane.total}`} label="settled" />
-        )}
-        {lane.underway > 0 ? <Stat value={lane.underway} label="underway" /> : null}
-        {lane.blocked > 0 ? <span className="text-warn">{lane.blocked} blocked</span> : null}
-      </Meta>
+        </span>
+      ) : null}
     </button>
   );
 }
