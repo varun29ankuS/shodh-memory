@@ -45,6 +45,8 @@ import type { LearningLedger } from "./ledger.js";
 import { MEMORY_GUIDANCE } from "./memory-guidance.js";
 import { createMemoryTools } from "./memory-tools.js";
 import type { ModelRegistry } from "./models-registry.js";
+import { createTodoTools } from "./todo-tools.js";
+import { createViewTools } from "./view-tools.js";
 
 const HARNESS_SUFFIX = ".seat-harness";
 /** Backend limit: src/validation.rs MAX_USER_ID_LENGTH = 128. */
@@ -117,13 +119,34 @@ export const DEFAULT_MEMORY_MECHANISMS: MemoryMechanisms = {
 };
 
 /**
- * MCP tool base names (suffix after mcp__<server>__) that duplicate native
- * seat memory tools. Everything else — graph/lineage/entity/todo/fact tools —
- * stays bridged: none of those write memories or auto-ingest (verified against
- * mcp-server/index.ts: proactive_context is the only auto_ingest tool;
- * remember is the only general memory write).
+ * MCP tool base names (suffix after mcp__<server>__) that duplicate a native
+ * seat tool. Everything else — graph/lineage/entity/fact tools, and the todo
+ * verbs with no native equivalent (add_todo, delete_todo, list_subtasks,
+ * reorder) — stays bridged.
+ *
+ * The memory four are here because the duplicates measurably misbehave:
+ * relevance-percentage output the citation contract cannot parse, writes that
+ * bypass the ledger, recalls that bypass reinforcement, and auto-ingest.
+ *
+ * The todo four are here for a different and simpler reason: the native
+ * versions (todo-tools.ts) write the model's identity onto every mutation as a
+ * comment author, because `Todo` has no assignee field and that comment is the
+ * ONLY record of who moved the work. mcp-server/index.ts `update_todo`,
+ * `complete_todo` and `add_todo_comment` write no such attribution. Offering
+ * both means half the mutations are anonymous, chosen at random by whichever
+ * tool the model reaches for — and an audit trail with a hole in it chosen at
+ * random is worse than one with a known shape.
  */
-const REDUNDANT_MCP_MEMORY_TOOLS = new Set(["recall", "quick_recall", "proactive_context", "remember"]);
+const REDUNDANT_MCP_MEMORY_TOOLS = new Set([
+	"recall",
+	"quick_recall",
+	"proactive_context",
+	"remember",
+	"list_todos",
+	"update_todo",
+	"complete_todo",
+	"add_todo_comment",
+]);
 
 /**
  * Drop the bridged MCP tools that duplicate native memory ops.
@@ -163,8 +186,13 @@ const PROACTIVE_SEMANTIC_THRESHOLD = 0.6;
 
 /** Native memory tools are excluded from tool-usage attribution: their inputs
  * (the recall cue) trivially overlap surfaced memory content, which would turn
- * the act of recalling into a fake "usage" signal. */
-const MEMORY_TOOL_NAMES = new Set(["recall_memory", "remember_memory", "record_seat_learning"]);
+ * the act of recalling into a fake "usage" signal. `direct_view` joins them for
+ * exactly that reason and no other: its `highlight` terms are entity names the
+ * model just read out of recalled memories, so scoring them as tool usage would
+ * count a memory as "used" whenever the view moved to it. The todo tools are
+ * NOT here — their inputs are the model's own words about work, which is
+ * genuine usage evidence. */
+const MEMORY_TOOL_NAMES = new Set(["recall_memory", "remember_memory", "record_seat_learning", "direct_view"]);
 
 /**
  * The backend keeps ONE pending-feedback slot per user_id (set_pending
@@ -183,7 +211,12 @@ Memory discipline:
 - Use recall_memory when the user refers to past work, decisions, people, or preferences, or when prior context would materially improve the answer.
 - When a recalled memory informs your answer, cite it inline as [mem:<id>] using the id shown in the recall result.
 - Use remember_memory sparingly: durable facts, decisions, and learnings only.
-- Use record_seat_learning only for operational lessons about retrieval or tool strategy — never for user content.`;
+- Use record_seat_learning only for operational lessons about retrieval or tool strategy — never for user content.
+
+The workbench:
+- The user is looking at a workbench with several surfaces. Use direct_view when the shape of your answer has a place: the graph for relational answers, the map for geographic ones, sources for "where did this come from", anomalies, tasks, history. Give the entities the answer is about, and a reason in your own words — the reason is shown to the user, so state the evidence ("these 12 memories cluster on the Malabar coast"), not the action ("opening Geo").
+- direct_view is a request. The user outranks you: if they have moved that part of the view themselves during this turn, it waits as an offer they can accept. Never tell the user the view has moved.
+- Recorded work: list_todos to see it, claim_todo before doing any of it, comment_on_todo to leave findings, update_todo to change status. Your model identity is written onto every one of those, so they are the record of what you did.`;
 
 export class ConversationBusyError extends Error {
 	constructor() {
@@ -307,10 +340,10 @@ export class Conversation {
 	private readonly deps: ConversationDeps;
 	private readonly agent: Agent;
 	private readonly baseSystemPrompt: string;
-	/** The native memory tools, kept so the tool list can be rebuilt around a
-	 *  changed set of MCP tools without recreating them (they close over this
-	 *  conversation's ids and event sink). */
-	private readonly memoryTools: AgentTool<any>[];
+	/** The native tools — memory, view and todo — kept so the tool list can be
+	 *  rebuilt around a changed set of MCP tools without recreating them (they
+	 *  close over this conversation's ids and event sink). */
+	private readonly nativeTools: AgentTool<any>[];
 
 	private turn = 0;
 	private currentSink?: SeatEventSink;
@@ -366,7 +399,7 @@ export class Conversation {
 		if (options.systemPrompt?.trim()) promptBlocks.push(options.systemPrompt.trim());
 		this.baseSystemPrompt = promptBlocks.join("\n\n");
 
-		this.memoryTools = createMemoryTools({
+		const memoryTools = createMemoryTools({
 			backend: deps.backend,
 			userId: this.userId,
 			harnessUserId: this.harnessUserId,
@@ -385,13 +418,34 @@ export class Conversation {
 			renderLineage: this.mechanisms.recallLineage,
 		});
 
+		// The view tools check entities against the USER's graph, never the
+		// harness's: the person is looking at their own corpus, and framing a
+		// name that exists only in the seat's private learning namespace would
+		// light nothing while reporting success.
+		const viewTools = createViewTools({
+			backend: deps.backend,
+			userId: this.userId,
+			emit: (event) => this.emit(event),
+		});
+
+		const todoTools = createTodoTools({
+			backend: deps.backend,
+			userId: this.userId,
+			// Read late: `set_model` swaps the model mid-conversation, and a todo
+			// signed with the model that opened the conversation rather than the
+			// one that moved the work is a wrong signature, not a stale one.
+			getModel: () => this.model,
+		});
+
+		this.nativeTools = [...memoryTools, ...viewTools, ...todoTools];
+
 		this.agent = new Agent({
 			initialState: {
 				systemPrompt: this.baseSystemPrompt,
 				model: options.model,
 				thinkingLevel: "off",
 				tools: [
-					...this.memoryTools,
+					...this.nativeTools,
 					...withoutRedundantMcpTools(deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter),
 				],
 				// Restored transcripts were produced by this same agent and
@@ -502,7 +556,7 @@ export class Conversation {
 		// place a server that reconnected, dropped, or changed its tool list
 		// since the last turn actually takes effect.
 		this.agent.state.tools = [
-			...this.memoryTools,
+			...this.nativeTools,
 			...withoutRedundantMcpTools(this.deps.mcpTools(), this.mechanisms.mcpMemoryToolFilter),
 		];
 
