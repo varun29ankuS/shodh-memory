@@ -114,12 +114,20 @@ pub struct ListRemindersResponse {
 #[derive(Debug, Deserialize)]
 pub struct GetDueRemindersRequest {
     pub user_id: String,
-    #[serde(default = "default_true")]
+    /// Acknowledge every returned reminder, moving it `Pending` → `Triggered`.
+    ///
+    /// Defaults to FALSE: reading what is due must not consume it. This used
+    /// to default to true, so a caller that omitted the field — the natural
+    /// thing to do when polling for display — silently acknowledged every
+    /// reminder it saw. The 60-second scheduler
+    /// (`AppState::check_and_emit_due_reminders`) emits `REMINDER_DUE` only for
+    /// tasks still `Pending`, so those acknowledgements consumed the
+    /// notification without ever telling the user.
+    ///
+    /// Set it explicitly to true only when the caller is genuinely delivering
+    /// the reminder and taking responsibility for it.
+    #[serde(default)]
     pub mark_triggered: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// Response for due reminders
@@ -134,7 +142,13 @@ pub struct DueRemindersResponse {
 pub struct CheckContextRemindersRequest {
     pub user_id: String,
     pub context: String,
-    #[serde(default = "default_true")]
+    /// Acknowledge every matched reminder. Defaults to FALSE for the same
+    /// reason as [`GetDueRemindersRequest::mark_triggered`] — and more acutely
+    /// here, because a context-triggered reminder has no due time, so the
+    /// scheduler's `due:` index scan never sees it and this endpoint is the
+    /// only thing that can fire it. Consuming one on a display read would lose
+    /// it outright.
+    #[serde(default)]
     pub mark_triggered: bool,
 }
 
@@ -3606,5 +3620,65 @@ mod tests {
             "settling through /complete must give the spawned occurrence a \
              memory-side back-link"
         );
+    }
+}
+
+#[cfg(test)]
+mod reminder_read_purity_tests {
+    //! `/api/reminders/due` and `/api/reminders/check` used to default
+    //! `mark_triggered` to TRUE, so a caller that simply omitted the field —
+    //! the natural thing to do when reading — flipped every reminder it saw
+    //! from `Pending` to `Triggered`.
+    //!
+    //! That is not just a status change. The 60-second scheduler in
+    //! `AppState::check_and_emit_due_reminders` is what actually delivers a
+    //! reminder to the user, and it emits `REMINDER_DUE` only for tasks whose
+    //! `mark_triggered` returns `Ok(true)` — i.e. only for tasks still
+    //! `Pending`. Anything a read had already marked was skipped with a debug
+    //! line, so polling `/due` to *display* pending reminders consumed the very
+    //! notification the poller exists to deliver, and the user was never told.
+    //!
+    //! A read is now a read: mutation requires `mark_triggered: true`
+    //! explicitly. `proactive_context` already reads due tasks without marking
+    //! them (`handlers/recall.rs`), which is the behaviour these endpoints now
+    //! match.
+
+    use super::*;
+
+    #[test]
+    fn due_reminders_request_defaults_to_a_pure_read() {
+        let req: GetDueRemindersRequest =
+            serde_json::from_str(r#"{"user_id":"claude-code"}"#).expect("deserialize");
+        assert!(
+            !req.mark_triggered,
+            "omitting mark_triggered made /api/reminders/due a mutating read, \
+             consuming the notification the scheduler owes the user"
+        );
+    }
+
+    #[test]
+    fn context_reminders_request_defaults_to_a_pure_read() {
+        let req: CheckContextRemindersRequest =
+            serde_json::from_str(r#"{"user_id":"claude-code","context":"deploying"}"#)
+                .expect("deserialize");
+        assert!(
+            !req.mark_triggered,
+            "omitting mark_triggered made /api/reminders/check a mutating read"
+        );
+    }
+
+    #[test]
+    fn explicit_mark_triggered_still_opts_in() {
+        let due: GetDueRemindersRequest =
+            serde_json::from_str(r#"{"user_id":"u","mark_triggered":true}"#).expect("deserialize");
+        assert!(
+            due.mark_triggered,
+            "acknowledging a reminder must still be possible, explicitly"
+        );
+
+        let ctx: CheckContextRemindersRequest =
+            serde_json::from_str(r#"{"user_id":"u","context":"c","mark_triggered":true}"#)
+                .expect("deserialize");
+        assert!(ctx.mark_triggered);
     }
 }

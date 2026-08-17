@@ -2898,7 +2898,7 @@ mod tests {
     /// repeat N+1 of the same query saw different (stronger) edges than repeat
     /// N purely from having been queried once already — a same-system A/B
     /// confound the eval harness's read-only gate exists specifically to
-    /// prevent (see `recall_readonly()`'s doc comment in `memory/mod.rs`).
+    /// prevent (see `recall_is_readonly()`'s doc comment in `memory/mod.rs`).
     ///
     /// Asserts: under the flag, two recall passes leave the traversed edge's
     /// strength byte-identical; with the flag unset (production default), the

@@ -574,6 +574,38 @@ pub async fn update_memory(
     }))
 }
 
+/// Clear every todo link to a memory that has just been deleted.
+///
+/// The todo -> memory direction is verified when the link is written
+/// (`verify_memory_ids`) and repaired when the todo is deleted; nothing ran in
+/// the reverse direction, so deleting a memory left `related_memory_ids`
+/// pointing at nothing and `get_todo` kept rendering "Linked memories: <uuid>"
+/// for a memory that no longer exists.
+///
+/// Non-fatal: the memory is already gone, so a scrub failure is logged rather
+/// than turned into a delete failure the caller would retry.
+fn clear_todo_links_to_deleted_memory(
+    state: &AppState,
+    user_id: &str,
+    memory_id: &memory::MemoryId,
+) {
+    match state.todo_store.remove_memory_links(user_id, memory_id) {
+        Ok(0) => {}
+        Ok(n) => info!(
+            user_id = %user_id,
+            memory_id = %memory_id.0,
+            todos_updated = n,
+            "Cleared todo links to a deleted memory"
+        ),
+        Err(e) => tracing::warn!(
+            user_id = %user_id,
+            memory_id = %memory_id.0,
+            error = %e,
+            "Failed to clear todo links to a deleted memory —              related_memory_ids may still name it"
+        ),
+    }
+}
+
 // =============================================================================
 // DELETE MEMORY HANDLER
 // =============================================================================
@@ -602,8 +634,10 @@ pub async fn delete_memory(
     let resolved_id_str = resolved_id.0.to_string();
 
     memory_guard
-        .forget(memory::ForgetCriteria::ById(resolved_id))
+        .forget(memory::ForgetCriteria::ById(resolved_id.clone()))
         .map_err(AppError::Internal)?;
+
+    clear_todo_links_to_deleted_memory(&state, user_id, &resolved_id);
 
     state.log_event(user_id, "DELETE", &resolved_id_str, "Memory deleted");
 
@@ -653,8 +687,10 @@ pub async fn forget_by_id(
     let resolved_id_str = resolved_id.0.to_string();
 
     memory_guard
-        .forget(memory::ForgetCriteria::ById(resolved_id))
+        .forget(memory::ForgetCriteria::ById(resolved_id.clone()))
         .map_err(AppError::Internal)?;
+
+    clear_todo_links_to_deleted_memory(&state, &req.user_id, &resolved_id);
 
     state.log_event(&req.user_id, "DELETE", &resolved_id_str, "Memory deleted");
 

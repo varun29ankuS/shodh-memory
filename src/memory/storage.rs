@@ -1250,6 +1250,16 @@ pub struct MemoryStorage {
     /// taken by reads. Capture is low-frequency relative to reads, so a
     /// single per-storage (i.e. per-user) mutex is acceptable for v1.
     oplog_append_lock: parking_lot::Mutex<()>,
+    /// Serializes read-modify-write updates of a memory record (see
+    /// [`Self::modify`]). Same reasoning as `oplog_append_lock`: handlers hold
+    /// only `.read()` guards on `MemorySystem`, so two link/parent/metadata
+    /// writes to the same memory genuinely run at the same time, and a
+    /// `get` -> mutate -> `update` sequence loses whichever write read first.
+    ///
+    /// A process-local mutex is sufficient rather than a shortcut: RocksDB
+    /// takes an exclusive file lock, so exactly one process ever has this DB
+    /// open, and every writer to it goes through this struct.
+    record_mutation_lock: parking_lot::Mutex<()>,
 }
 
 impl MemoryStorage {
@@ -1368,6 +1378,7 @@ impl MemoryStorage {
             write_retry_buffer: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             write_failure_count: std::sync::atomic::AtomicU64::new(0),
             oplog_append_lock: parking_lot::Mutex::new(()),
+            record_mutation_lock: parking_lot::Mutex::new(()),
         })
     }
 
@@ -1912,6 +1923,36 @@ impl MemoryStorage {
     pub fn get(&self, id: &MemoryId) -> Result<Memory> {
         self.get_opt(id)?
             .ok_or_else(|| anyhow!("Memory not found: {id:?}"))
+    }
+
+    /// Atomically read a memory, apply `f`, and write it back.
+    ///
+    /// The read and the write happen under one lock, so two concurrent callers
+    /// cannot both read the pre-update record and have the second overwrite the
+    /// first's change. Every read-modify-write of a memory record must go
+    /// through here; doing the same three steps inline is the lost-update bug
+    /// this exists to remove, and no amount of shrinking the gap between them
+    /// fixes it.
+    ///
+    /// `f` sees the CURRENT stored record, not a snapshot the caller took
+    /// earlier — that is the whole point, so callers must express their change
+    /// as a mutation rather than as a whole replacement record.
+    ///
+    /// Returns the memory as written. `Ok(None)` if the memory does not exist;
+    /// an unreadable record is an `Err`, never a silent no-op (see
+    /// [`Self::get_opt`]).
+    pub fn modify<F>(&self, id: &MemoryId, f: F) -> Result<Option<Memory>>
+    where
+        F: FnOnce(&mut Memory),
+    {
+        let _guard = self.record_mutation_lock.lock();
+        let mut memory = match self.get_opt(id)? {
+            Some(memory) => memory,
+            None => return Ok(None),
+        };
+        f(&mut memory);
+        self.update(&memory)?;
+        Ok(Some(memory))
     }
 
     /// Re-write a memory in current format (lazy migration helper)
@@ -4933,5 +4974,87 @@ mod tests {
         assert_eq!(mv.vector_ids.len(), 3);
         assert_eq!(mv.dimension, 384);
         assert!(mv.chunk_ranges.is_none());
+    }
+
+    /// Two concurrent read-modify-write updates of the SAME memory must both
+    /// survive. Before `modify()` existed, callers did `get` -> mutate ->
+    /// `update` inline while holding only a `.read()` guard on `MemorySystem`,
+    /// so both readers saw the pre-update record and the second write silently
+    /// erased the first.
+    ///
+    /// The sleep inside each closure widens the window deterministically: with
+    /// the lock it only serializes the two calls, without it the loss is
+    /// reliable rather than occasional.
+    #[test]
+    fn concurrent_modify_does_not_lose_an_update() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(MemoryStorage::new(dir.path(), None).expect("storage"));
+
+        let id = MemoryId(uuid::Uuid::new_v4());
+        storage
+            .store(&sample_memory(id.clone(), "a memory two writers will touch"))
+            .expect("store");
+
+        let parent = MemoryId(uuid::Uuid::new_v4());
+
+        let a = {
+            let storage = Arc::clone(&storage);
+            let id = id.clone();
+            let parent = parent.clone();
+            std::thread::spawn(move || {
+                storage
+                    .modify(&id, |m| {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        m.set_parent(Some(parent));
+                    })
+                    .expect("modify parent")
+            })
+        };
+        let b = {
+            let storage = Arc::clone(&storage);
+            let id = id.clone();
+            std::thread::spawn(move || {
+                storage
+                    .modify(&id, |m| {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        m.experience.tags.push("tagged-by-the-other-writer".to_string());
+                    })
+                    .expect("modify tags")
+            })
+        };
+        a.join().expect("thread a");
+        b.join().expect("thread b");
+
+        let final_memory = storage.get(&id).expect("read back");
+        assert_eq!(
+            final_memory.get_parent(),
+            Some(&parent),
+            "the parent write was lost by the concurrent tag write"
+        );
+        assert!(
+            final_memory
+                .experience
+                .tags
+                .iter()
+                .any(|t| t == "tagged-by-the-other-writer"),
+            "the tag write was lost by the concurrent parent write"
+        );
+    }
+
+    /// `modify` must not invent a memory, and must not report absence for a
+    /// record it simply failed to read.
+    #[test]
+    fn modify_reports_a_missing_memory_without_writing_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = MemoryStorage::new(dir.path(), None).expect("storage");
+
+        let missing = MemoryId(uuid::Uuid::new_v4());
+        let mut ran = false;
+        let result = storage
+            .modify(&missing, |_| ran = true)
+            .expect("modify a missing memory is not an error");
+        assert!(result.is_none(), "modify reported a memory that never existed");
+        assert!(!ran, "the mutation ran against a memory that does not exist");
+        assert!(storage.get_opt(&missing).expect("get_opt").is_none());
     }
 }

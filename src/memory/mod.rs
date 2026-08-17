@@ -2331,9 +2331,17 @@ impl MemorySystem {
         // Populate prediction cache for VTA/dopamine-inspired feedback error weighting.
         // Uses importance as the prediction signal — "how useful we think this memory is."
         // When feedback arrives later, the prediction error scales learning rate.
-        for memory in &memories {
-            self.prediction_cache
-                .insert(memory.id.clone(), memory.importance());
+        //
+        // In-memory, but still a usage write: `process_feedback` reads this
+        // cache to weight how strongly a later signal is applied, so a
+        // "read-only" recall was changing the learning that followed it. Gated
+        // like its two neighbours. Under the flag the reader falls back to its
+        // 0.5 baseline, which is what an unrecalled memory already gets.
+        if !Self::recall_readonly(query) {
+            for memory in &memories {
+                self.prediction_cache
+                    .insert(memory.id.clone(), memory.importance());
+            }
         }
 
         // Increment and persist retrieval counter
@@ -2397,8 +2405,19 @@ impl MemorySystem {
         let criteria = storage::SearchCriteria::ByTags(tags.to_vec());
         let mut memories = self.advanced_search(criteria)?;
         memories.truncate(limit);
-        if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
-            self.stats.write().total_retrievals = count;
+        // Persisted usage write on a read path — same gate as every other one.
+        // This entry point takes no `Query`, which is why it was missed when
+        // the read-only pin went in: the pin followed the `Query` paths.
+        //
+        // With no `Query` there is no per-request `read_only` flag to consult,
+        // so this consults the process-wide pin directly rather than
+        // `recall_is_readonly`. That is the whole gate available here — a
+        // caller who needs per-request read-only semantics must come through a
+        // `Query` path.
+        if !recall_readonly_env() {
+            if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+                self.stats.write().total_retrievals = count;
+            }
         }
         Ok(memories)
     }
@@ -2415,8 +2434,12 @@ impl MemorySystem {
         let criteria = storage::SearchCriteria::ByDate { start, end };
         let mut memories = self.advanced_search(criteria)?;
         memories.truncate(limit);
-        if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
-            self.stats.write().total_retrievals = count;
+        // Same persisted usage write, same gate — see `recall_by_tags`, including
+        // why this consults the process-wide pin rather than `recall_is_readonly`.
+        if !recall_readonly_env() {
+            if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
+                self.stats.write().total_retrievals = count;
+            }
         }
         Ok(memories)
     }
@@ -8085,10 +8108,18 @@ impl MemorySystem {
         memory_id: &MemoryId,
         parent_id: Option<MemoryId>,
     ) -> Result<()> {
-        // Update the persistent copy in long-term storage
-        let mut memory = self.long_term_memory.get(memory_id)?;
-        memory.set_parent(parent_id.clone());
-        self.long_term_memory.update(&memory)?;
+        // Update the persistent copy in long-term storage.
+        //
+        // Read-modify-write under `storage.modify`, not inline: handlers call
+        // this while holding only a `.read()` guard on the MemorySystem (see
+        // `handlers/remember.rs`'s async parent resolution, and
+        // `zenoh_transport/handlers.rs`), so two writers to the same memory run
+        // concurrently and an inline get/mutate/update would drop whichever
+        // read first.
+        let memory = self
+            .long_term_memory
+            .modify(memory_id, |m| m.set_parent(parent_id.clone()))?
+            .ok_or_else(|| anyhow::anyhow!("Memory not found: {memory_id:?}"))?;
 
         // Also update the in-memory tier copy (working or session) so reads
         // reflect the parent_id immediately without waiting for tier promotion
@@ -12470,6 +12501,212 @@ mod unreadable_record_index_tests {
         assert!(
             system.long_term_memory.get_opt(&id).is_err(),
             "an undecodable record must be an error, not a report of absence"
+        );
+    }
+}
+
+#[cfg(test)]
+mod recall_readonly_write_gate_tests {
+    //! `recall_is_readonly()` is documented as the single source of truth for
+    //! "recall performs NO usage writes". Three recall-path writes were never
+    //! wired to it:
+    //!
+    //! * `recall_by_tags` and `recall_by_date` each increment and PERSIST the
+    //!   retrieval counter. Neither takes a `Query`, so neither ever looked at
+    //!   the gate — the pin covered the semantic path only. With no `Query`
+    //!   they consult `recall_readonly_env()` (the process-wide pin) directly;
+    //!   there is no per-request flag to OR in.
+    //! * `prediction_cache.insert` in the non-semantic recall path sat between
+    //!   two gated blocks and was itself ungated. It is not persisted, but it
+    //!   is read later by `process_feedback` to weight learning, so a
+    //!   "read-only" recall still changed how a subsequent feedback signal was
+    //!   applied.
+    //!
+    //! Each test asserts the gate holds AND, with the flag unset, that the
+    //! write still happens — the feature is gated, not deleted.
+
+    use super::*;
+    use crate::memory::types::Experience;
+
+    fn setup() -> (MemorySystem, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 30,
+            importance_threshold: 0.0,
+        };
+        let system = MemorySystem::new(config, None).expect("memory system");
+        (system, temp_dir)
+    }
+
+    fn remember_tagged(system: &MemorySystem, content: &str, tag: &str) -> MemoryId {
+        system
+            .remember(
+                Experience {
+                    content: content.to_string(),
+                    tags: vec![tag.to_string()],
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("remember")
+    }
+
+    fn retrieval_count(system: &MemorySystem) -> usize {
+        system
+            .long_term_memory
+            .get_retrieval_count()
+            .expect("retrieval count")
+    }
+
+    #[test]
+    fn recall_by_tags_respects_the_readonly_gate() {
+        let (system, _tmp) = setup();
+        remember_tagged(&system, "Deploy checklist for the release.", "release");
+
+        let before = {
+            let _pin = RecallEnvPin::pin("1");
+            let before = retrieval_count(&system);
+            let hits = system
+                .recall_by_tags(&["release".to_string()], 10)
+                .expect("recall_by_tags");
+            assert_eq!(hits.len(), 1, "the tagged memory should be found");
+            assert_eq!(
+                retrieval_count(&system),
+                before,
+                "recall_by_tags persisted a usage write under SHODH_RECALL_READONLY"
+            );
+            before
+        };
+
+        // Production default: the counter still moves. Pinned to an explicit
+        // "0" rather than removing the variable — `recall_readonly_env` treats
+        // the two identically, but only the explicit value is immune to a
+        // harness test's `pin_harness_threads`, which sets the pin when unset.
+        {
+            let _pin = RecallEnvPin::pin("0");
+            let _ = system
+                .recall_by_tags(&["release".to_string()], 10)
+                .expect("recall_by_tags");
+            assert_eq!(
+                retrieval_count(&system),
+                before + 1,
+                "gating the write also disabled it when the flag is unset"
+            );
+        }
+    }
+
+    #[test]
+    fn recall_by_date_respects_the_readonly_gate() {
+        let (system, _tmp) = setup();
+        remember_tagged(&system, "Deploy checklist for the release.", "release");
+
+        let start = chrono::Utc::now() - chrono::Duration::days(1);
+        let end = chrono::Utc::now() + chrono::Duration::days(1);
+
+        let before = {
+            let _pin = RecallEnvPin::pin("1");
+            let before = retrieval_count(&system);
+            let hits = system
+                .recall_by_date(start, end, 10)
+                .expect("recall_by_date");
+            assert_eq!(hits.len(), 1, "the memory should be inside the date range");
+            assert_eq!(
+                retrieval_count(&system),
+                before,
+                "recall_by_date persisted a usage write under SHODH_RECALL_READONLY"
+            );
+            before
+        };
+
+        {
+            let _pin = RecallEnvPin::pin("0");
+            let _ = system
+                .recall_by_date(start, end, 10)
+                .expect("recall_by_date");
+            assert_eq!(
+                retrieval_count(&system),
+                before + 1,
+                "gating the write also disabled it when the flag is unset"
+            );
+        }
+    }
+
+    #[test]
+    fn prediction_cache_is_not_populated_when_readonly() {
+        let (system, _tmp) = setup();
+        let id = remember_tagged(&system, "Deploy checklist for the release.", "release");
+
+        // The non-semantic recall path (no query_text) is where the ungated
+        // `prediction_cache.insert` lives.
+        let query = Query {
+            tags: Some(vec!["release".to_string()]),
+            max_results: 10,
+            ..Default::default()
+        };
+
+        {
+            let _pin = RecallEnvPin::pin("1");
+            let hits = system.recall(&query).expect("recall");
+            assert!(!hits.is_empty(), "the tagged memory should be recalled");
+            assert!(
+                system.prediction_cache.get(&id).is_none(),
+                "a read-only recall seeded the prediction cache, which later \
+                 weights feedback learning"
+            );
+        }
+
+        {
+            let _pin = RecallEnvPin::pin("0");
+            let _ = system.recall(&query).expect("recall");
+            assert!(
+                system.prediction_cache.get(&id).is_some(),
+                "gating the insert also disabled it when the flag is unset"
+            );
+        }
+    }
+
+    /// This site sits between two `recall_is_readonly(query)` gates and its
+    /// comment says it is "gated like its two neighbours", so the per-request
+    /// flag has to reach it too — not just the process-wide pin. The branch
+    /// that added the gate here predated `Query::read_only` and could only
+    /// express the env half; this pins the other half.
+    #[test]
+    fn prediction_cache_honours_the_per_request_readonly_flag() {
+        let (system, _tmp) = setup();
+        let id = remember_tagged(&system, "Deploy checklist for the release.", "release");
+
+        // Pin the PROCESS gate off, so the only thing that can suppress the
+        // write is the per-request flag.
+        let _pin = RecallEnvPin::pin("0");
+
+        let read_only = Query {
+            tags: Some(vec!["release".to_string()]),
+            max_results: 10,
+            read_only: true,
+            ..Default::default()
+        };
+        let hits = system.recall(&read_only).expect("recall");
+        assert!(!hits.is_empty(), "the tagged memory should be recalled");
+        assert!(
+            system.prediction_cache.get(&id).is_none(),
+            "a `read_only: true` request seeded the prediction cache — the \
+             per-request flag does not reach this write site"
+        );
+
+        let writing = Query {
+            read_only: false,
+            ..read_only.clone()
+        };
+        let _ = system.recall(&writing).expect("recall");
+        assert!(
+            system.prediction_cache.get(&id).is_some(),
+            "the write is gone rather than gated: an ordinary request no \
+             longer seeds the prediction cache"
         );
     }
 }
