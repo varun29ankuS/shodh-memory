@@ -530,7 +530,7 @@ fn timestamp_bounds() -> (DateTime<Utc>, DateTime<Utc>) {
     let floor = Utc
         .timestamp_opt(TIMESTAMP_FLOOR_UNIX, 0)
         .single()
-        .unwrap_or_else(|| DateTime::<Utc>::MIN_UTC);
+        .unwrap_or(DateTime::<Utc>::MIN_UTC);
     let ceiling = Utc::now()
         + chrono::Duration::from_std(TIMESTAMP_CEILING_SLACK)
             .unwrap_or_else(|_| chrono::Duration::days(1));
@@ -1525,6 +1525,48 @@ mod tests {
             "'0 corrupt' that means 'we stopped at 3 records' must never read \
              as healthy"
         );
+    }
+
+    #[test]
+    fn a_budget_spent_on_memories_does_not_leave_the_graph_looking_clean() {
+        // The budget is shared across every column family in one report. If
+        // the memory sweep spends it, the graph sweep must come back visibly
+        // empty and the report must be incomplete -- an untouched section
+        // reading "0 defects" beside a truncated one is the same lie this
+        // module exists to prevent, one level down.
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            crate::memory::storage::MemoryStorage::new(dir.path(), None).expect("storage");
+        for i in 0..10 {
+            storage.store(&memory_with(&format!("record {i}"))).unwrap();
+        }
+
+        let gdir = tempfile::tempdir().unwrap();
+        let gdb = graph_db(gdir.path());
+        let cf = gdb
+            .cf_handle(crate::graph_memory::ENTITIES_CF_NAME)
+            .unwrap();
+        // A node that would be flagged if it were ever reached.
+        let (uuid, bytes) = pre_july_node("shipping_line");
+        gdb.put_cf(cf, uuid.as_bytes(), &bytes).unwrap();
+
+        let report = scrub_user(
+            "u",
+            storage.raw_db(),
+            Some((&gdb, cf)),
+            ScrubBudget {
+                max_records: Some(2),
+                max_duration: None,
+            },
+        );
+
+        assert_eq!(report.memories.scanned, 2);
+        assert_eq!(report.graph_nodes.scanned, 0, "the graph was never reached");
+        assert_eq!(report.graph_nodes.defects(), 0);
+        assert!(!report.complete);
+        assert!(report.stop_reason.is_some());
+        assert_eq!(report.verdict, Verdict::Indeterminate);
+        assert!(!report.is_healthy);
     }
 
     #[test]

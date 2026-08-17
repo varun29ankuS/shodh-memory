@@ -46,7 +46,7 @@ fn open_read_only(path: &Path) -> anyhow::Result<DB> {
 
 fn top_n(map: &std::collections::BTreeMap<String, u64>, n: usize) -> Vec<(String, u64)> {
     let mut v: Vec<_> = map.iter().map(|(k, c)| (k.clone(), *c)).collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|e| std::cmp::Reverse(e.1));
     v.truncate(n);
     v
 }
@@ -130,7 +130,16 @@ fn scrub_live_profiles() {
 
         // A sample of the evidence, so a defect population can be recognised
         // by its cohort rather than only by its count.
-        for f in sweep.findings().iter().take(6) {
+        // Implausible records first and in full: they are the class the scrub
+        // exists for, and a defect population is identified by its cohort, not
+        // its count.
+        let mut ordered: Vec<_> = sweep.findings().iter().collect();
+        ordered.sort_by_key(|f| match f.classification {
+            shodh_memory::integrity::RecordClass::Implausible => 0,
+            shodh_memory::integrity::RecordClass::ChecksumMismatch => 1,
+            _ => 2,
+        });
+        for f in ordered.iter().take(28) {
             println!(
                 "    [{}] {} {:?} via {} created_at={:?} :: {}",
                 f.record_class,
