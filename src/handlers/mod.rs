@@ -15,6 +15,7 @@ pub mod utils;
 // Memory core operations
 pub mod anomalies;
 pub mod crud;
+pub mod history;
 pub mod recall;
 pub mod remember;
 

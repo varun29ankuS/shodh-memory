@@ -12,8 +12,8 @@ use std::sync::Arc;
 use super::state::MultiUserMemoryManager;
 use super::{
     ab_testing, anomalies, compression, consolidation, crud, export, facts, files, graph, health,
-    integrations, lineage, mif, recall, remember, search, sessions, todos, users, visualization,
-    webhooks,
+    history, integrations, lineage, mif, recall, remember, search, sessions, todos, users,
+    visualization, webhooks,
 };
 
 /// Application state type alias
@@ -128,6 +128,12 @@ pub fn build_protected_routes(state: AppState) -> Router {
         // =================================================================
         .route("/api/memory/{memory_id}", get(crud::get_memory))
         .route("/api/memories/{memory_id}", get(crud::get_memory)) // Cloudflare compat alias
+        // Read side of the audit trail that ~23 `log_event` sites have been
+        // writing all along, scoped to one memory.
+        .route(
+            "/api/memory/{memory_id}/history",
+            get(history::get_memory_history),
+        )
         .route("/api/memory/{memory_id}", put(crud::update_memory))
         .route("/api/memory/{memory_id}", delete(crud::delete_memory))
         .route("/api/forget/{memory_id}", delete(crud::delete_memory)) // OpenAPI alias

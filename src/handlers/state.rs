@@ -1205,53 +1205,90 @@ impl MultiUserMemoryManager {
         self.event_broadcaster.subscribe()
     }
 
-    /// Get audit history for user
-    pub fn get_history(&self, user_id: &str, memory_id: Option<&str>) -> Vec<AuditEvent> {
-        if let Some(log) = self.audit_logs.get(user_id) {
-            let events = log.read();
-            if !events.is_empty() {
-                return if let Some(mid) = memory_id {
-                    events
-                        .iter()
-                        .filter(|e| e.memory_id == mid)
-                        .cloned()
-                        .collect()
-                } else {
-                    events.iter().cloned().collect()
-                };
-            }
+    /// Read a user's audit trail, newest first, optionally filtered to one
+    /// memory.
+    ///
+    /// # Why this was rewritten rather than simply routed
+    ///
+    /// The previous body returned the in-memory cache whenever it was
+    /// non-empty and only fell through to disk when it was not. That cache is a
+    /// bounded `VecDeque` (`audit_max_entries_per_user`, default 10,000) that
+    /// `log_event` trims from the front, so for any user who has written a
+    /// single audit entry the disk branch was unreachable — and a per-memory
+    /// query for a memory whose events had aged out of that window returned an
+    /// empty vector while the durable trail still held them. A reader that
+    /// answers "no history" for a memory that has history is worse than no
+    /// reader at all, which is what this was: zero callers repo-wide.
+    ///
+    /// The fallback also hydrated the cache with a clone of the entire decoded
+    /// trail before filtering, so one per-memory lookup allocated a whole
+    /// user's history twice.
+    ///
+    /// This version filters during the scan and keeps at most `limit` events in
+    /// a bounded deque. Keys are `{user_id}:{timestamp_nanos:020}`, so RocksDB
+    /// yields them oldest-first and the newest `limit` are the last ones seen —
+    /// memory is bounded by `limit`, not by the size of the trail.
+    ///
+    /// The in-memory cache is then UNIONED in rather than consulted first:
+    /// `log_event` writes the cache synchronously but persists through
+    /// `spawn_blocking`, so an event logged moments ago may not have reached
+    /// disk. Duplicates are dropped on the full event tuple.
+    pub fn get_history(
+        &self,
+        user_id: &str,
+        memory_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<AuditEvent> {
+        if limit == 0 {
+            return Vec::new();
         }
 
-        let mut events = Vec::new();
         let prefix = format!("{user_id}:");
+        let matches = |e: &AuditEvent| memory_id.is_none_or(|mid| e.memory_id == mid);
 
+        let mut newest: VecDeque<AuditEvent> = VecDeque::new();
         let audit = self.audit_cf();
         let iter = self.shared_db.prefix_iterator_cf(audit, prefix.as_bytes());
         for (key, value) in iter.flatten() {
-            if let Ok(key_str) = std::str::from_utf8(&key) {
-                if !key_str.starts_with(&prefix) {
-                    break;
-                }
-
-                if let Ok((event, _)) = crate::serialization::try_decode::<AuditEvent>(&value) {
-                    events.push(event);
+            let Ok(key_str) = std::str::from_utf8(&key) else {
+                continue;
+            };
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+            if let Ok((event, _)) = crate::serialization::try_decode::<AuditEvent>(&value) {
+                if matches(&event) {
+                    newest.push_back(event);
+                    if newest.len() > limit {
+                        newest.pop_front();
+                    }
                 }
             }
         }
 
-        if !events.is_empty() {
-            self.audit_logs
-                .entry(user_id.to_string())
-                .or_insert_with(|| {
-                    Arc::new(parking_lot::RwLock::new(VecDeque::from(events.clone())))
+        let mut events: Vec<AuditEvent> = newest.into_iter().collect();
+
+        // Union the not-yet-persisted tail from the in-memory cache.
+        if let Some(log) = self.audit_logs.get(user_id) {
+            for event in log.read().iter() {
+                if !matches(event) {
+                    continue;
+                }
+                let already_seen = events.iter().any(|seen| {
+                    seen.timestamp == event.timestamp
+                        && seen.event_type == event.event_type
+                        && seen.memory_id == event.memory_id
+                        && seen.details == event.details
                 });
+                if !already_seen {
+                    events.push(event.clone());
+                }
+            }
         }
 
-        if let Some(mid) = memory_id {
-            events.into_iter().filter(|e| e.memory_id == mid).collect()
-        } else {
-            events
-        }
+        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.truncate(limit);
+        events
     }
 
     /// Get or create memory system for a user
