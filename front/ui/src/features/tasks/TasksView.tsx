@@ -1453,7 +1453,11 @@ export function TasksView({ reach }: { reach: Reachability }) {
         {lanes.length > 0 ? (
           <section className="border-border border-b py-1.5">
             <div className="flex items-baseline justify-between gap-2 px-4 pb-1">
-              <span className="flex items-baseline gap-0.5">
+              {/* A `div`, not a `span`: `<span>` permits phrasing content
+                  only and this wraps an `h2`. `display:flex` makes the two
+                  render identically, so the choice costs nothing and the
+                  document stays valid. */}
+              <div className="flex items-baseline gap-0.5">
                 <h2 className="text-[12px] font-medium tracking-tight">
                   {axis ? "How the work has moved" : "What has been recorded"}
                 </h2>
@@ -1487,7 +1491,7 @@ export function TasksView({ reach }: { reach: Reachability }) {
                   curves stop at today. There is no estimate, cycle or velocity here to extrapolate
                   from.
                 </InfoHint>
-              </span>
+              </div>
               {axis ? (
                 <Meta className="mono text-[10px]">
                   <span>{dateOf(axis.from)}</span>
