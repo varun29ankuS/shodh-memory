@@ -635,11 +635,15 @@ fn check_entity(n: &EntityNode, key: &[u8]) -> (Vec<&'static str>, String, Optio
         ));
     }
 
-    // This is the check that catches the July `EntityLabel` renumbering. Twelve
-    // variants inserted above `Other(String)` moved it from index 23 to 35, so
-    // a pre-July node reads index 23 as the unit variant `Norp` and hands the
-    // string's bytes to `created_at`. The record decodes. The timestamp does
-    // not survive the bounds.
+    // NOT the check that catches the July `EntityLabel` renumbering — measured,
+    // not assumed. That desync always dies inside postcard, because
+    // `DateTime<Utc>` serialises as a string and every following length varint
+    // lands misaligned; see
+    // `renumbered_entity_label_surfaces_as_undecodable_and_trips_the_alarm`.
+    // What this bound earns its place for is the case postcard cannot reject:
+    // `try_decode_compat` falls back to raw bincode 2.x for untagged records,
+    // and bincode tolerates trailing bytes, so a shifted read there can
+    // complete and hand back a node with an impossible date.
     let (floor, ceiling) = timestamp_bounds();
     for (name, ts) in [
         ("created_at", n.created_at),
@@ -1368,32 +1372,50 @@ mod tests {
     }
 
     #[test]
-    fn renumbered_entity_label_that_decodes_lands_in_implausible() {
-        // When the displaced payload happens to parse as a timestamp, the node
-        // decodes successfully into a wrong `created_at` -- the silent case.
-        // The timestamp bound is what catches it.
+    fn renumbered_entity_label_surfaces_as_undecodable_and_trips_the_alarm() {
+        // EMPIRICAL CORRECTION, and it matters.
+        //
+        // The obvious expectation is that the renumbering produces a silent
+        // wrong decode: index 23 reads as the unit variant `Norp`, the string
+        // payload lands in `created_at`, the node decodes into a wrong value.
+        // It does not. `DateTime<Utc>` serialises as a STRING, so the desync
+        // makes every subsequent length varint misaligned; the decode dies on
+        // "Hit the end of buffer" or "Tried to parse invalid utf-8" long
+        // before any field can be inspected. Probed across payloads and tail
+        // sizes from 0 to 20,000 bytes, every single shape errored.
+        //
+        // That agrees with the live symptom: graph traverse returned 500, an
+        // error, not wrong answers. So on graph nodes this defect class is
+        // caught as UNDECODABLE, and it is the undecodable RATE that raises
+        // the alarm — 74% of the live graph, three orders of magnitude above
+        // the threshold. The timestamp bound does not catch this one, and the
+        // scrub must not claim it does.
         let dir = tempfile::tempdir().unwrap();
         let db = graph_db(dir.path());
         let cf = db.cf_handle(crate::graph_memory::ENTITIES_CF_NAME).unwrap();
 
-        let (uuid, bytes) = pre_july_node("1970-01-01T00:00:00Z");
-        db.put_cf(cf, uuid.as_bytes(), &bytes).unwrap();
-
-        // Fail-first evidence: the production graph decoder returns Ok.
-        let laundered = crate::graph_memory::decode_entity_node_for_scrub(&bytes);
-        assert!(
-            laundered.is_ok(),
-            "premise: this shape decodes successfully into a wrong node. \
-             It errored instead: {:?}",
-            laundered.err()
-        );
+        for payload in ["shipping_line", "1970-01-01T00:00:00Z", "x"] {
+            let (uuid, bytes) = pre_july_node(payload);
+            assert!(
+                crate::graph_memory::decode_entity_node_for_scrub(&bytes).is_err(),
+                "payload {payload:?} decoded; if this ever succeeds the class                  moves from undecodable to implausible and the plausibility                  checks become the load-bearing signal for it"
+            );
+            db.put_cf(cf, uuid.as_bytes(), &bytes).unwrap();
+        }
 
         let mut sweep = Sweep::new(budget());
         let counts = scrub_graph_nodes(&db, cf, &mut sweep);
-
-        assert_eq!(counts.implausible, 1, "checks: {:?}", counts.checks_failed);
+        assert_eq!(counts.scanned, 3);
+        assert_eq!(counts.undecodable, 3);
         assert_eq!(counts.clean, 0);
-        assert_eq!(counts.checks_failed.get("timestamp_out_of_bounds"), Some(&1));
+        assert_eq!(sweep.findings.len(), 3);
+
+        // A whole-cohort breakage is far above the alarm rate, so it reports
+        // unhealthy rather than degraded.
+        assert_eq!(
+            decide(&ClassCounts::default(), &counts, true),
+            Verdict::Unhealthy
+        );
     }
 
     #[test]
@@ -1735,4 +1757,5 @@ mod tests {
         let counts = scrub_memories(storage.raw_db(), &mut sweep);
         assert_eq!(counts.clean, 2);
     }
+
 }
