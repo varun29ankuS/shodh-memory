@@ -814,7 +814,7 @@ export interface Board {
    */
   /** Open tasks past `due_date`, by the server's own strict rule. */
   overdue: number;
-  /** How late the latest of them is, in whole days, or null when none is. Days
+  /** How late the OLDEST of them is, in whole days, or null when none is. Days
    *  between local midnights, matching `dueMeta` exactly rather than being a
    *  second, slightly different lateness arithmetic. */
   overdueDays: number | null;

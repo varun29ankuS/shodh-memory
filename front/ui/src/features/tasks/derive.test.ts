@@ -1089,7 +1089,7 @@ describe("boardOf — the schedule", () => {
     expect(board.dated).toBe(1);
   });
 
-  it("reports how late the LATEST one is, so the count has a scale", () => {
+  it("reports how late the OLDEST one is, so the count has a scale", () => {
     const rows = [
       triage({ id: "a", due_date: iso(local(2026, 8, 15, 23)) }),
       triage({ id: "b", due_date: iso(local(2026, 4, 20, 23, 59)) }),
