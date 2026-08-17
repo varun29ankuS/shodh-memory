@@ -88,17 +88,97 @@ fn companion_gate_enabled() -> bool {
 /// rankings (L1 smoke non-determinism, PR #325 checks). Production default
 /// (flag unset): writes on, unchanged.
 ///
-/// This is the SINGLE SOURCE OF TRUTH for the gate. Every recall-path mutation
-/// site — in this module or a sibling (`graph_retrieval`, etc.) — must check
-/// this function rather than re-deriving the env check ad hoc, or a new write
-/// site can silently reintroduce the same measurement-integrity bug (see the
-/// graph-leg Hebbian strengthening fix this function's introduction shipped
-/// alongside: spreading activation was calling `batch_strengthen_synapses`
-/// unconditionally, bypassing the gate entirely).
-pub(crate) fn recall_readonly() -> bool {
+/// This env pin is PROCESS-WIDE. Mutation sites must not read it directly —
+/// they call [`recall_is_readonly`], which ORs it with the per-request
+/// `Query::read_only` flag. A process property cannot express "this one request
+/// must not learn" inside a server handling concurrent callers, which is what a
+/// caller needs to reproduce a result.
+fn recall_readonly_env() -> bool {
     std::env::var("SHODH_RECALL_READONLY")
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+/// Whether this recall must perform NO usage writes.
+///
+/// This is the SINGLE SOURCE OF TRUTH for the gate. Every recall-path mutation
+/// site — in this module or a sibling (`graph_retrieval`, etc.) — must check
+/// this function rather than re-deriving the decision ad hoc, or a new write
+/// site can silently reintroduce the same measurement-integrity bug (see the
+/// graph-leg Hebbian strengthening fix this function's introduction shipped
+/// alongside: spreading activation was calling `batch_strengthen_synapses`
+/// unconditionally, bypassing the gate entirely; and the stale-vector cleanup
+/// in `semantic_retrieve_inner`, which was soft-deleting vectors during a
+/// "read-only" recall).
+///
+/// True when EITHER source asks for it:
+/// - `SHODH_RECALL_READONLY=1` — the process-wide pin the eval harness sets
+///   (`pin_harness_threads`, the `recall_eval` binary). Eval repeats measure
+///   variance, not learning curves.
+/// - `Query::read_only` — the per-request flag a caller sets to get a
+///   reproducible answer without altering the corpus it read from.
+///
+/// The OR is deliberate and one-way: a per-request `read_only: false` can never
+/// re-enable writes under a process that pinned them off, so no request can
+/// contaminate an eval run.
+///
+/// Production default (pin unset, flag unset) is `false`: reinforcement on read
+/// stays on, unchanged.
+pub(crate) fn recall_is_readonly(query: &Query) -> bool {
+    recall_readonly_env() || query.read_only
+}
+
+/// Process-global lock for tests that manipulate `SHODH_RECALL_READONLY`,
+/// including the harness tests whose `pin_harness_threads` call sets it
+/// process-wide.
+///
+/// `env::set_var`/`remove_var` are not thread-safe against concurrent readers on
+/// other test threads, and `recall_is_readonly` re-reads the env on every call
+/// rather than caching it. This is deliberately ONE lock for the whole crate:
+/// module-local mutexes in each test file would not exclude each other, so a
+/// test asserting "the pin is unset" could still be raced by a test in a sibling
+/// module setting it.
+#[cfg(test)]
+pub(crate) static RECALL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Holds [`RECALL_ENV_LOCK`] and pins `SHODH_RECALL_READONLY` to an EXPLICIT
+/// value for the duration of a test, restoring the previous value on drop.
+///
+/// Pinning `"0"` rather than removing the variable is what makes a test immune
+/// to the harness pin. `pin_harness_threads` sets the variable only when it is
+/// unset — "a caller that explicitly chose a different value keeps their
+/// override" — so an explicit `"0"` cannot be clobbered by a harness test that
+/// slips past the lock, while a removed variable can. `recall_readonly_env`
+/// treats unset and `"0"` identically, so this changes nothing about what is
+/// being tested; it only removes a way for the test to be wrong for reasons
+/// that have nothing to do with the code under test.
+#[cfg(test)]
+pub(crate) struct RecallEnvPin {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl RecallEnvPin {
+    pub(crate) fn pin(value: &str) -> Self {
+        let lock = RECALL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("SHODH_RECALL_READONLY");
+        std::env::set_var("SHODH_RECALL_READONLY", value);
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for RecallEnvPin {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(v) => std::env::set_var("SHODH_RECALL_READONLY", v),
+            None => std::env::remove_var("SHODH_RECALL_READONLY"),
+        }
+    }
 }
 
 use crate::constants::{
@@ -1730,14 +1810,15 @@ impl MemorySystem {
     /// - Semantic search: Uses embeddings + vector similarity across ALL tiers
     /// - Non-semantic search: Uses importance * temporal decay
     /// - Zero shortcuts, no TODOs, enterprise-grade
-    /// SHODH_RECALL_READONLY=1 — recall performs no usage writes (access-count
-    /// persistence, co-retrieval edge creation). Delegates to the module-level
-    /// `recall_readonly()` (single source of truth — every recall-path mutation
-    /// site, including sibling modules like `graph_retrieval`, must check the
-    /// same function, not re-derive the env check ad hoc). See that function's
-    /// doc for the full rationale.
-    fn recall_readonly() -> bool {
-        recall_readonly()
+    /// Whether this recall performs no usage writes (access-count persistence,
+    /// co-retrieval edge creation, Hebbian strengthening, interference records,
+    /// stale-vector cleanup). Delegates to the module-level
+    /// `recall_is_readonly()` — the single source of truth, which every
+    /// recall-path mutation site including sibling modules like
+    /// `graph_retrieval` must check rather than re-deriving the decision.
+    /// See that function's doc for the full rationale.
+    fn recall_readonly(query: &Query) -> bool {
+        recall_is_readonly(query)
     }
 
     /// Harvest provenance companions for the already-ranked `memories`.
@@ -2214,7 +2295,7 @@ impl MemorySystem {
         // Update access counts (in-memory) + record consolidation events, then
         // persist all candidates' access bumps in ONE batched write instead of a
         // full re-index per candidate (the dominant old read-path cost).
-        if !Self::recall_readonly() {
+        if !Self::recall_readonly(query) {
             let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
             for memory in &memories {
                 let before =
@@ -2249,7 +2330,7 @@ impl MemorySystem {
         // Increment and persist retrieval counter
         // Sibling of the access-count/coactivation gate above: also a usage
         // write, so read-only recall must skip it too.
-        if !Self::recall_readonly() {
+        if !Self::recall_readonly(query) {
             if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
                 self.stats.write().total_retrievals = count;
             }
@@ -2406,7 +2487,7 @@ impl MemorySystem {
                 let results = self.retriever.search(query, query.max_results)?;
                 // Sibling of the access-count/coactivation gates elsewhere in this
                 // function: also a usage write, so read-only recall must skip it too.
-                if !Self::recall_readonly() {
+                if !Self::recall_readonly(query) {
                     if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
                         tracing::debug!("Retrieval count: {count}");
                     }
@@ -3641,6 +3722,11 @@ impl MemorySystem {
             prospective_signals: query.prospective_signals.clone(),
             recency_weight: query.recency_weight,
             layers: query.layers,
+            // Carried over, not defaulted: this derived query is what
+            // `matches_filters` and the vector leg see, and dropping the flag
+            // here would be exactly the kind of silent re-enable the gate
+            // exists to prevent.
+            read_only: query.read_only,
         };
 
         // ===========================================================================
@@ -5492,12 +5578,29 @@ impl MemorySystem {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        memory_id = %memory_id.0,
-                        error = %e,
-                        "Stale vector reference — cleaning up orphaned index entry"
-                    );
-                    self.retriever.remove_memory(&memory_id);
+                    // This cleanup is a WRITE on the read path — it soft-deletes
+                    // the vectors in Vamana and deletes the memory's vector
+                    // mapping from RocksDB — and it was the one recall-path
+                    // mutation that never consulted the read-only gate. A recall
+                    // that promises not to alter the corpus must not silently
+                    // unindex a memory, so it is gated like every sibling
+                    // mutation. The stale reference is not lost: the entry is
+                    // still there for the next writable recall (or a
+                    // `repair_index`) to collect.
+                    if Self::recall_readonly(query) {
+                        tracing::warn!(
+                            memory_id = %memory_id.0,
+                            error = %e,
+                            "Stale vector reference — cleanup SKIPPED (read-only recall)"
+                        );
+                    } else {
+                        tracing::warn!(
+                            memory_id = %memory_id.0,
+                            error = %e,
+                            "Stale vector reference — cleaning up orphaned index entry"
+                        );
+                        self.retriever.remove_memory(&memory_id);
+                    }
                 }
             }
 
@@ -5648,7 +5751,7 @@ impl MemorySystem {
             // (eval repeats) must not teach the detector (the records feed
             // Layer 4.6's boosts on future queries; the third write class
             // behind the L1 smoke cross-repeat divergence).
-            let record_state = !Self::recall_readonly();
+            let record_state = !Self::recall_readonly(query);
             let competition_result = self
                 .interference_detector
                 .write()
@@ -5691,8 +5794,16 @@ impl MemorySystem {
                 );
             }
 
-            // Persist interference records from retrieval competition
-            {
+            // Persist interference records from retrieval competition.
+            //
+            // Gated on `record_state` like the accumulation above. It was not:
+            // read-only recall suppressed the ACCUMULATION but still ran this
+            // block, so it wrote the detector's records and the global event
+            // count to RocksDB on a path that promises no writes. Suppressing
+            // the accumulation and then persisting anyway is the worst of both
+            // — the write happens, and what it writes is a snapshot of state
+            // this recall was told not to update.
+            if record_state {
                 let detector = self.interference_detector.read();
                 let affected_ids = detector.get_affected_ids_from_competition(&competition_result);
                 if !affected_ids.is_empty() {
@@ -5718,7 +5829,7 @@ impl MemorySystem {
         // RH-8 gate: access count mutates persistent state — only in `Full` mode.
         // Bump in-memory + record events, then persist all candidates' access
         // updates in ONE batched write rather than a full re-index per candidate.
-        if layer_full && !Self::recall_readonly() {
+        if layer_full && !Self::recall_readonly(query) {
             let mut access_refs: Vec<(&Memory, f32)> = Vec::with_capacity(memories.len());
             for memory in &memories {
                 let before =
@@ -5736,7 +5847,7 @@ impl MemorySystem {
         // participate in coactivation (biological: "neurons that fire together
         // wire together" but suppressed neurons don't fire).
         // RH-8 gate: Hebbian coactivation mutates graph state — only in `Full` mode.
-        if layer_full && !Self::recall_readonly() && memories.len() >= 2 {
+        if layer_full && !Self::recall_readonly(query) && memories.len() >= 2 {
             if let Some(graph) = &self.graph_memory {
                 let memory_uuids: Vec<uuid::Uuid> = memories.iter().map(|m| m.id.0).collect();
                 match graph.read().record_memory_coactivation(&memory_uuids) {
@@ -5769,7 +5880,7 @@ impl MemorySystem {
         // RH-8 gate: retrieval counter mutates persistent state — only in `Full` mode.
         // Also a usage write, so read-only recall must skip it (sibling of the
         // access-count/coactivation gates above).
-        if layer_full && !Self::recall_readonly() {
+        if layer_full && !Self::recall_readonly(query) {
             if let Ok(count) = self.long_term_memory.increment_retrieval_count() {
                 self.stats.write().total_retrievals = count;
             }
@@ -11393,6 +11504,292 @@ mod fact_extraction_flag_tests {
         assert!(
             !flag(&system),
             "everything eligible was processed; the flag must be consumed"
+        );
+    }
+}
+
+/// Read-only recall on the PRODUCTION path.
+///
+/// `SHODH_RECALL_READONLY` insulates the eval harness, but it is a property of
+/// the process: a server handling concurrent callers cannot use it to answer one
+/// request without learning. So a reviewer who ran the same query twice against
+/// the real product got the second answer from a corpus the first query had
+/// altered — defensible as design, but it meant the word *reproducible* could
+/// not be used without a caveat. `Query::read_only` is the per-request sibling
+/// that removes the caveat, without changing the default.
+///
+/// These tests are written against the failure mode a flag invites: an ignored
+/// flag also leaves state byte-identical, because so does an inert pipeline.
+/// Each one therefore drives BOTH arms on the SAME fixture in the SAME run — the
+/// read-only arm must change nothing and the default arm must change something,
+/// or neither assertion means anything.
+#[cfg(test)]
+mod readonly_recall_tests {
+    use super::*;
+    use crate::graph_memory::GraphMemory;
+    use crate::memory::types::Experience;
+
+    /// Everything a recall could persist about the memories it read, in a form
+    /// that compares exactly: access counts, importance bits and last-accessed
+    /// per memory, every graph edge's strength bits and activation count, and
+    /// the global retrieval counter. Bits rather than floats — "byte-identical"
+    /// is the claim being made.
+    #[derive(Debug, PartialEq, Eq)]
+    struct UsageSnapshot {
+        memories: Vec<(String, u32, u32, i64)>,
+        edges: Vec<(String, u32, u32)>,
+        retrievals: usize,
+    }
+
+    fn snapshot(system: &MemorySystem, graph: &GraphMemory, ids: &[MemoryId]) -> UsageSnapshot {
+        let mut memories: Vec<(String, u32, u32, i64)> = ids
+            .iter()
+            .map(|id| {
+                // Read through storage, not the cache: the claim is about what
+                // survives a restart.
+                let m = system.long_term_memory.get(id).expect("stored memory");
+                (
+                    id.0.to_string(),
+                    m.access_count(),
+                    m.importance().to_bits(),
+                    m.last_accessed().timestamp_micros(),
+                )
+            })
+            .collect();
+        memories.sort();
+
+        let mut edges: Vec<(String, u32, u32)> = graph
+            .get_all_relationships()
+            .expect("relationships")
+            .into_iter()
+            .map(|e| (e.uuid.to_string(), e.strength.to_bits(), e.activation_count))
+            .collect();
+        edges.sort();
+
+        UsageSnapshot {
+            memories,
+            edges,
+            retrievals: system
+                .long_term_memory
+                .get_retrieval_count()
+                .expect("retrieval count"),
+        }
+    }
+
+    /// A system with a graph attached and three memories about one subject, so a
+    /// single query returns several results and the co-activation / access-bump
+    /// writes have something to act on.
+    fn seeded_system() -> (
+        MemorySystem,
+        Arc<parking_lot::RwLock<GraphMemory>>,
+        Vec<MemoryId>,
+        tempfile::TempDir,
+    ) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 1,
+            importance_threshold: 0.0,
+        };
+        let mut system = MemorySystem::new(config, None).expect("memory system");
+        let graph = Arc::new(parking_lot::RwLock::new(
+            GraphMemory::new(&temp_dir.path().join("graph"), None).expect("graph"),
+        ));
+        system.set_graph_memory(graph.clone());
+
+        let ids: Vec<MemoryId> = [
+            "The Indian Navy commissioned INS Vikrant at Cochin Shipyard.",
+            "The Indian Navy inducted the Pinaka rocket artillery system.",
+            "Mazagon Dock delivered a submarine to the Indian Navy.",
+        ]
+        .into_iter()
+        .map(|content| {
+            system
+                .remember(
+                    Experience {
+                        content: content.to_string(),
+                        entities: vec!["Indian Navy".to_string()],
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .expect("remember")
+        })
+        .collect();
+
+        // Mint one memory<->memory co-retrieval edge so the snapshot's edge
+        // half is not vacuous. Co-activation is strengthen-only by default —
+        // it reinforces edges that already exist and never mints all-pairs
+        // `CoRetrieved` — so with no seeded edge the graph stays empty and
+        // "edge weights unchanged" would hold for the wrong reason.
+        //
+        // Calls the impl with `strengthen_only = false` rather than setting
+        // `SHODH_COACT_STRENGTHEN_ONLY=0`: the env var is read process-wide by
+        // every concurrent test, so mutating it here would make an unrelated
+        // recall mint edges — the same race class as the harness pin, pointed
+        // the other way. Passing the parameter is why the impl takes one.
+        let minted = graph
+            .read()
+            .record_memory_coactivation_impl(&[ids[0].0, ids[1].0], false)
+            .expect("seed co-retrieval edge");
+        assert_eq!(minted, 1, "fixture must seed exactly one co-retrieval edge");
+
+        (system, graph, ids, temp_dir)
+    }
+
+    fn navy_query(read_only: bool) -> Query {
+        Query {
+            query_text: Some("Indian Navy".to_string()),
+            max_results: 5,
+            read_only,
+            ..Query::default()
+        }
+    }
+
+    /// Two identical read-only recalls must leave importance, access counts,
+    /// last-accessed timestamps, edge weights and the retrieval counter exactly
+    /// as they were — and a third recall with the flag off must move them, which
+    /// is what makes the first two assertions mean something.
+    #[test]
+    fn read_only_recall_leaves_persisted_usage_state_byte_identical() {
+        // The process-wide pin is explicitly OFF: the claim is that the
+        // per-request flag ALONE suppresses the writes. With the pin on, the
+        // read-only half would pass for the wrong reason and the default half
+        // would fail.
+        let _env = RecallEnvPin::pin("0");
+
+        let (system, graph, ids, _dir) = seeded_system();
+
+        let baseline = snapshot(&system, &graph.read(), &ids);
+        assert_eq!(
+            baseline.edges.len(),
+            1,
+            "the snapshot must actually carry an edge, or its edge-weight half \
+             is vacuous"
+        );
+
+        let first = system
+            .recall(&navy_query(true))
+            .expect("read-only recall #1");
+        assert!(
+            first.len() >= 2,
+            "the fixture must return several memories or the access-count and \
+             co-activation writes have nothing to act on and this test is \
+             vacuous; got {}",
+            first.len()
+        );
+        let after_first = snapshot(&system, &graph.read(), &ids);
+        assert_eq!(
+            baseline, after_first,
+            "read_only=true must leave persisted usage state byte-identical \
+             after recall #1"
+        );
+
+        let second = system
+            .recall(&navy_query(true))
+            .expect("read-only recall #2");
+        let after_second = snapshot(&system, &graph.read(), &ids);
+        assert_eq!(
+            baseline, after_second,
+            "read_only=true must leave persisted usage state byte-identical \
+             after recall #2 — two identical read-only recalls must see the \
+             same corpus"
+        );
+
+        // The results themselves must also be reproducible: identical state is
+        // only half of what a caller running the same query twice needs.
+        let ranked =
+            |r: &[SharedMemory]| -> Vec<String> { r.iter().map(|m| m.id.0.to_string()).collect() };
+        assert_eq!(
+            ranked(&first),
+            ranked(&second),
+            "two read-only recalls of the same query must return the same ranking"
+        );
+
+        // Non-vacuity: same pipeline, same fixture, flag off, DOES learn.
+        // Without this the test would pass against a flag nobody reads.
+        //
+        // Checked immediately before the call: if some other test has pinned the
+        // process-wide variable behind our back, say THAT rather than blaming
+        // the flag. This exact failure — "the default path must still count the
+        // retrieval (0 -> 0)" — was the harness smoke-suite test leaking its
+        // pin, twice, before `HarnessEnvGuard` and this explicit "0" pin.
+        assert_eq!(
+            std::env::var("SHODH_RECALL_READONLY").as_deref(),
+            Ok("0"),
+            "another test clobbered the process-wide read-only pin; the              assertion below would fail for that reason, not because              read_only=false stopped reinforcing"
+        );
+        system.recall(&navy_query(false)).expect("default recall");
+        let after_default = snapshot(&system, &graph.read(), &ids);
+        assert_ne!(
+            baseline, after_default,
+            "read_only=false (product default) must still reinforce what it \
+             read — if this passes, the read-only assertions above proved only \
+             that the recall path writes nothing at all"
+        );
+    }
+
+    /// The companion, stated as a product guarantee rather than as a control:
+    /// adding the flag must not have quietly turned reinforcement-on-read off
+    /// for every existing caller. Access counts still rise, the retrieval
+    /// counter still advances.
+    #[test]
+    fn default_recall_still_reinforces_what_it_read() {
+        let _env = RecallEnvPin::pin("0");
+
+        let (system, graph, ids, _dir) = seeded_system();
+
+        let before = snapshot(&system, &graph.read(), &ids);
+        assert_eq!(
+            std::env::var("SHODH_RECALL_READONLY").as_deref(),
+            Ok("0"),
+            "another test clobbered the process-wide read-only pin; the              assertions below would fail for that reason, not because the              default path stopped reinforcing"
+        );
+        let results = system.recall(&navy_query(false)).expect("default recall");
+        assert!(
+            results.len() >= 2,
+            "fixture must return several memories; got {}",
+            results.len()
+        );
+        let after = snapshot(&system, &graph.read(), &ids);
+
+        assert!(
+            after.retrievals > before.retrievals,
+            "the default path must still count the retrieval ({} -> {})",
+            before.retrievals,
+            after.retrievals
+        );
+
+        let recalled: std::collections::HashSet<String> =
+            results.iter().map(|m| m.id.0.to_string()).collect();
+        let bumped = after
+            .memories
+            .iter()
+            .zip(before.memories.iter())
+            .filter(|((id, after_count, _, _), (_, before_count, _, _))| {
+                recalled.contains(id) && after_count > before_count
+            })
+            .count();
+        assert_eq!(
+            bumped,
+            recalled.len(),
+            "every memory the default path returned must have its access count \
+             bumped and persisted — before={:?} after={:?}",
+            before.memories,
+            after.memories
+        );
+
+        // Hebbian co-activation: the seeded memory<->memory edge must have been
+        // strengthened, not merely left alone.
+        assert_ne!(
+            before.edges, after.edges,
+            "the default path must still strengthen the co-retrieval edge \
+             between memories returned together — before={:?} after={:?}",
+            before.edges, after.edges
         );
     }
 }

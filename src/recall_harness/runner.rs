@@ -2371,6 +2371,52 @@ mod tests {
         std::env::temp_dir().join(format!("shodh-recall-{label}-{id}"))
     }
 
+    /// Contains `pin_harness_threads`'s process-wide env mutation to the test
+    /// that asked for it.
+    ///
+    /// `pin_harness_threads` sets `SHODH_RECALL_READONLY=1` for the PROCESS and
+    /// never restores it. That is correct for the eval binary, whose whole run
+    /// is the harness — but inside `cargo test --lib` the harness is one test
+    /// among a thousand sharing one process, so the pin leaked: every test that
+    /// ran afterwards, or concurrently, silently got a recall path that
+    /// performs no usage writes.
+    ///
+    /// It stayed invisible because nothing asserted that the DEFAULT path still
+    /// reinforces. The read-only recall tests in `memory::readonly_recall_tests`
+    /// do, and they failed intermittently — always on the default-path arm,
+    /// always with "the default path must still count the retrieval (0 -> 0)".
+    /// The env pin, not the code under test.
+    ///
+    /// So: take the same crate-wide lock every other env-sensitive test takes
+    /// (serialising this run against them), and put the variable back on the way
+    /// out. Restoring the previous value rather than removing it keeps an
+    /// explicit outer `SHODH_RECALL_READONLY=1` intact.
+    struct HarnessEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl HarnessEnvGuard {
+        fn acquire() -> Self {
+            let lock = crate::memory::RECALL_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            Self {
+                _lock: lock,
+                previous: std::env::var_os("SHODH_RECALL_READONLY"),
+            }
+        }
+    }
+
+    impl Drop for HarnessEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => std::env::set_var("SHODH_RECALL_READONLY", v),
+                None => std::env::remove_var("SHODH_RECALL_READONLY"),
+            }
+        }
+    }
+
     /// Lineage repro (substrate diagnosis 2026-06-10): root-cause P@1 has been
     /// 0.0 through every fix, and the instrumented CI run produced ZERO edge
     /// provenance lines and ZERO causal-funnel lines — hypothesis: the chain
@@ -2567,6 +2613,7 @@ mod tests {
     #[test]
     #[ignore = "training-data export — run explicitly"]
     fn export_fusion_training_data() {
+        let _env = HarnessEnvGuard::acquire();
         let dir = unique_storage_dir("fusion-export");
         let out = dir.join("fusion_features.jsonl");
         // SAFETY: process-wide env; run as a single explicit --ignored test.
@@ -2673,6 +2720,7 @@ mod tests {
     /// root, ranked first.
     #[test]
     fn lineage_fragment_bridges_never_form() {
+        let _env = HarnessEnvGuard::acquire();
         let dir = unique_storage_dir("lineage-flood-diag");
         let manager = build_manager(&dir).expect("manager");
         let chains = crate::recall_harness::multihop::DEFAULT_CHAINS;
@@ -2835,6 +2883,7 @@ mod tests {
 
     #[test]
     fn lineage_walk_survives_harness_scale() {
+        let _env = HarnessEnvGuard::acquire();
         let dir = unique_storage_dir("lineage-scale");
         let manager = build_manager(&dir).expect("manager");
         let chains = crate::recall_harness::multihop::DEFAULT_CHAINS;
@@ -2945,6 +2994,7 @@ mod tests {
     /// sequence or in the CI environment.
     #[test]
     fn lineage_harness_end_to_end_reproduces_ci() {
+        let _env = HarnessEnvGuard::acquire();
         let dir = unique_storage_dir("lineage-harness-e2e");
         let inputs = RunInputs {
             storage_path: dir.clone(),
@@ -3122,6 +3172,7 @@ mod tests {
     /// captured by RH-6 baseline runs, not by unit tests.
     #[test]
     fn runner_executes_smoke_suite_and_produces_well_formed_report() {
+        let _env = HarnessEnvGuard::acquire();
         let storage = unique_storage_dir("runner");
         let inputs = RunInputs {
             storage_path: storage.clone(),
@@ -3375,6 +3426,7 @@ mod tests {
     #[test]
     #[ignore = "expensive: runs the smoke suite twice (~12min). enable with --ignored before shipping harness changes."]
     fn runner_repeats_2_produces_same_quality_as_repeats_1() {
+        let _env = HarnessEnvGuard::acquire();
         let storage1 = unique_storage_dir("repeats1");
         let storage2 = unique_storage_dir("repeats2");
 
@@ -3457,6 +3509,7 @@ mod tests {
     #[test]
     #[ignore = "expensive: runs the smoke suite with 6 modes (~6× query time). enable with --ignored before shipping layer-gate changes."]
     fn runner_layer_all_emits_six_modes_with_per_mode_determinism() {
+        let _env = HarnessEnvGuard::acquire();
         let storage = unique_storage_dir("layer-all");
         let inputs = RunInputs {
             storage_path: storage.clone(),

@@ -507,10 +507,16 @@ pub async fn recall(
     let user_id_for_recall = req.user_id.clone();
     let query_for_recall = req.query.clone();
     let debug_mode = req.debug;
+    let read_only_for_recall = req.read_only;
     let neural_ner_for_recall = state.get_neural_ner();
 
-    let (mut memories, triggered_reminders, _prospective_signals, retrieval_stats) =
-        tokio::task::spawn_blocking(move || {
+    let (
+        mut memories,
+        triggered_reminders,
+        _prospective_signals,
+        retrieval_stats,
+        reinforcement_applied,
+    ) = tokio::task::spawn_blocking(move || {
             let memory_guard = memory_for_recall.read();
 
             // 1. Compute query embedding (reused for prospective + recall)
@@ -595,9 +601,16 @@ pub async fn recall(
                 terrain_type: terrain_type_for_recall,
                 tags: tags_for_recall,
                 layers: layer_mode_for_recall,
+                read_only: read_only_for_recall,
                 ..Default::default()
             };
             super::state::annotate_query_ner_with(&neural_ner_for_recall, &mut query);
+
+            // Derived from the gate the mutation sites consult, not from
+            // `req.read_only`: a server running under the process-wide
+            // SHODH_RECALL_READONLY pin performs no usage writes even for a
+            // caller that sent no flag, and the response must say so.
+            let reinforcement_applied = !crate::memory::recall_is_readonly(&query);
 
             let (memories, retrieval_stats) = if debug_mode {
                 let result = memory_guard
@@ -611,7 +624,13 @@ pub async fn recall(
                 (memories, None)
             };
 
-            Ok::<_, anyhow::Error>((memories, reminders, prospective_signals, retrieval_stats))
+            Ok::<_, anyhow::Error>((
+                memories,
+                reminders,
+                prospective_signals,
+                retrieval_stats,
+                reinforcement_applied,
+            ))
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
@@ -1151,6 +1170,7 @@ pub async fn recall(
         reminder_count,
         lineage,
         lineage_count,
+        reinforcement_applied,
     }))
 }
 
@@ -3491,6 +3511,11 @@ pub struct PaginatedRecallResponse {
     pub total_count: Option<usize>,
     pub offset: usize,
     pub limit: usize,
+    /// Whether this recall reinforced what it read. Same contract as
+    /// [`crate::handlers::types::RecallResponse::reinforcement_applied`]:
+    /// derived from the gate the mutation sites consulted, never echoed back
+    /// from the request.
+    pub reinforcement_applied: bool,
 }
 
 /// POST /api/recall/paginated - Paginated memory recall
@@ -3559,11 +3584,17 @@ pub async fn paginated_recall(
     let terrain_type = req.terrain_type.clone();
     let tags = req.tags.clone();
     let failures_only = req.failures_only.unwrap_or(false);
+    // This endpoint shares `RecallRequest`, so it already ACCEPTS `read_only`.
+    // Parsing the flag and then not honouring it would be worse than not
+    // offering it: the caller sees a documented field, sends it, and still gets
+    // a recall that reinforced what it read.
+    let read_only = req.read_only;
 
-    let paginated = tokio::task::spawn_blocking(move || {
+    let (paginated, reinforcement_applied) = tokio::task::spawn_blocking(move || {
         let memory_guard = memory.read();
 
         let query = MemoryQuery {
+            read_only,
             user_id: Some(user_id),
             query_text: Some(query_text),
             max_results: limit,
@@ -3582,7 +3613,12 @@ pub async fn paginated_recall(
             ..Default::default()
         };
 
-        memory_guard.paginated_recall(&query)
+        // Derived from the gate the mutation sites consult, so it stays honest
+        // under the process-wide SHODH_RECALL_READONLY pin.
+        let reinforcement_applied = !crate::memory::recall_is_readonly(&query);
+        memory_guard
+            .paginated_recall(&query)
+            .map(|p| (p, reinforcement_applied))
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
@@ -3628,6 +3664,7 @@ pub async fn paginated_recall(
         total_count: paginated.total_count,
         offset: paginated.offset,
         limit: paginated.limit,
+        reinforcement_applied,
     }))
 }
 

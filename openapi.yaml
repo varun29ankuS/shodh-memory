@@ -142,6 +142,17 @@ components:
           description: Maximum number of memories to return
         mode:
           $ref: '#/components/schemas/RetrievalMode'
+        read_only:
+          type: boolean
+          default: false
+          description: >-
+            Request a non-mutating recall. By default a recall reinforces what
+            it read — access counts, Hebbian edges, co-activation, interference
+            records — so running the same query twice gives the second answer
+            from a corpus the first altered. Set true and this recall persists
+            nothing it learned, making repeats reproducible. The default is
+            unchanged; read `reinforcement_applied` on the response to see which
+            mode you actually got.
 
     RecallMemory:
       type: object
@@ -191,6 +202,15 @@ components:
         count:
           type: integer
           example: 3
+        reinforcement_applied:
+          type: boolean
+          description: >-
+            Whether this recall reinforced what it read. Always present, and
+            derived from the gate the mutation sites actually consulted — never
+            echoed back from the request — so it reports false when the server
+            runs with SHODH_RECALL_READONLY=1 even if you sent no flag. Prove
+            the mode from this field, not from the flag you sent.
+          example: true
         retrieval_stats:
           type: object
           description: Optional retrieval statistics
