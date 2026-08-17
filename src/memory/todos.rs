@@ -664,11 +664,16 @@ impl TodoStore {
     }
 
     /// Complete a todo (marks as Done, handles recurrence)
+    ///
+    /// Read-modify-write, so it takes `mutation_mutex` like every other one:
+    /// a completion racing the async memory link-back would otherwise write
+    /// back a record that predates the link and drop it.
     pub fn complete_todo(
         &self,
         user_id: &str,
         todo_id: &TodoId,
     ) -> Result<Option<(Todo, Option<Todo>)>> {
+        let _lock = self.mutation_mutex.lock();
         match self.get_todo(user_id, todo_id)? {
             Some(mut todo) => {
                 todo.complete();
@@ -972,12 +977,18 @@ impl TodoStore {
 
     /// Reorder a todo within its status group
     /// direction: "up" moves earlier in list (lower sort_order), "down" moves later
+    /// Read-modify-write across TWO todos (the pair whose `sort_order` is
+    /// swapped), so it takes `mutation_mutex` for the same reason as the
+    /// single-record mutators — and additionally so the two writes cannot be
+    /// interleaved with a third party's, which would leave duplicate or
+    /// skipped sort orders.
     pub fn reorder_todo(
         &self,
         user_id: &str,
         todo_id: &TodoId,
         direction: &str,
     ) -> Result<Option<Todo>> {
+        let _lock = self.mutation_mutex.lock();
         let todo = match self.get_todo(user_id, todo_id)? {
             Some(t) => t,
             None => return Ok(None),
@@ -2124,8 +2135,10 @@ mod tests {
     /// comment landing at the same time still lost one of the two. A mutex one
     /// writer takes and the other ignores serializes nothing.
     ///
-    /// Both writers here mutate append-only collections, so nothing may be
-    /// lost: four links and four comments must survive four of each.
+    /// Every writer here mutates an append-only collection, so nothing may be
+    /// lost: four memory links, four comments and four activity entries must
+    /// all survive (activity is stored as a system comment, so twelve writes
+    /// leave four links and eight comments).
     #[test]
     fn concurrent_link_and_comment_writes_all_survive() {
         let temp_dir = TempDir::new().unwrap();
@@ -2143,6 +2156,15 @@ mod tests {
                 store
                     .add_related_memory("test_user", &id, MemoryId(Uuid::new_v4()))
                     .expect("add_related_memory");
+            }));
+        }
+        for i in 0..4 {
+            let store = Arc::clone(&store);
+            let id = todo.id.clone();
+            handles.push(std::thread::spawn(move || {
+                store
+                    .add_activity("test_user", &id, format!("activity {i}"))
+                    .expect("add_activity");
             }));
         }
         for i in 0..4 {
@@ -2170,10 +2192,12 @@ mod tests {
             4,
             "a memory link was lost to a concurrent todo write"
         );
+        // Activity entries are stored as system comments, so all eight
+        // appends land in the same collection.
         assert_eq!(
             stored.comments.len(),
-            4,
-            "a comment was lost to a concurrent todo write"
+            8,
+            "a comment or activity entry was lost to a concurrent todo write"
         );
     }
 
