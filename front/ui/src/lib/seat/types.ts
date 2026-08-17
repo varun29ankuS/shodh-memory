@@ -172,6 +172,24 @@ export type SeatEvent =
     }
   | {
       /**
+       * The seat telling the MODEL what this browser decided after its turn had
+       * already ended (seat/src/view-link.ts `composeViewNews`).
+       *
+       * DECLARED HERE AND DELIBERATELY NOT RENDERED. It travels the same stream
+       * as everything else, so leaving it out of this union would make the union
+       * a lie about what arrives; but it is absent from `ChatOp` because it is
+       * the one event whose subject is the model rather than the person. The
+       * browser already knows every verdict in it — it produced them — and a
+       * chip reading "we told the assistant you accepted" is a line about the
+       * plumbing, in a surface whose value is that every line is about the work.
+       */
+      type: "view_outcome_relayed";
+      outcomes: { tool_call_id: string; dimension: ViewDimension; state: string }[];
+      /** The prompt block verbatim, so what the model was shown is inspectable. */
+      injected_block: string;
+    }
+  | {
+      /**
        * The seat asking this browser what is on screen (`inspect_view`).
        *
        * Carries nothing but a correlation id, and that is the guarantee: there

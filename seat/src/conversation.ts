@@ -46,7 +46,7 @@ import { MEMORY_GUIDANCE } from "./memory-guidance.js";
 import { createMemoryTools } from "./memory-tools.js";
 import type { ModelRegistry } from "./models-registry.js";
 import { createTodoTools } from "./todo-tools.js";
-import type { ViewLink } from "./view-link.js";
+import { composeViewNews, type ViewLink } from "./view-link.js";
 import { createViewTools } from "./view-tools.js";
 
 const HARNESS_SUFFIX = ".seat-harness";
@@ -220,6 +220,7 @@ The workbench:
 - The tool result tells you what actually happened. Say the view moved ONLY when it says MOVED, ACCEPTED or ALREADY THERE. If it says WAITING, the person has an offer in front of them — mention it if it helps, never describe the change as done. If it says NOT KNOWN, nothing answered: say what you found and let them look.
 - Never re-issue a request to get around a refusal. An offer is the person's to accept, and asking twice is the same as not asking.
 - inspect_view is free and read-only: use it when you want to know where the person is before moving them, or whether they are already there.
+- An offer the person answers after your turn ended is reported to you at the start of the next one, under "Since your last turn, the workbench answered you". Read it before describing the view: it is how you learn that something you were told was WAITING has since been accepted, refused, or left to lapse. A refusal there is a decision already made, not a request to make again.
 - Recorded work: list_todos to see it, claim_todo before doing any of it, comment_on_todo to leave findings, update_todo to change status. Your model identity is written onto every one of those, so they are the record of what you did.`;
 
 export class ConversationBusyError extends Error {
@@ -599,7 +600,8 @@ export class Conversation {
 			const harnessBlock = this.harnessLearning
 				? await this.buildHarnessLearningsBlock(text)
 				: undefined;
-			this.agent.state.systemPrompt = [this.baseSystemPrompt, proactiveBlock, harnessBlock]
+			const viewNewsBlock = this.buildViewNewsBlock();
+			this.agent.state.systemPrompt = [this.baseSystemPrompt, proactiveBlock, harnessBlock, viewNewsBlock]
 				.filter((block): block is string => Boolean(block))
 				.join("\n\n");
 
@@ -776,6 +778,51 @@ export class Conversation {
 		} finally {
 			if (feedbackAllowed) proactiveFeedbackInFlight.delete(this.userId);
 		}
+	}
+
+	/**
+	 * The verdicts the model was never told about, as a block for this turn only.
+	 *
+	 * THE LAST OPEN SEGMENT OF THE VIEW LOOP. `direct_view` waits two seconds and
+	 * then says what it knows, which for a held offer is "WAITING". The person
+	 * then answers — minutes later, after the turn ended — and until now the only
+	 * thing that changed was the audit trail. The model's belief stayed frozen at
+	 * WAITING, so it would go on describing an offer as pending after it had been
+	 * accepted, and could only learn otherwise by happening to call inspect_view.
+	 *
+	 * IT COSTS NOTHING WHEN THERE IS NOTHING TO SAY. `drainNews` returns an empty
+	 * array for every conversation with no outstanding asks, `composeViewNews`
+	 * returns null for that, and the filter above drops it — so the ordinary turn
+	 * carries not one extra token. That is the whole answer to "without bloating
+	 * every prompt": the block is not trimmed to fit, it is absent.
+	 *
+	 * DRAINED, so a verdict is announced once. It is emitted as an event with the
+	 * block verbatim for the same reason the proactive pass emits its own: what
+	 * the model was actually shown has to be inspectable rather than
+	 * reconstructable.
+	 *
+	 * ONE RACE, ACCEPTED AND NOT PAPERED OVER. The browser reports `expired` at
+	 * the moment it begins a turn, which is the same moment it posts the message
+	 * that starts this one — two independent requests, so an offer that lapsed
+	 * exactly now may be reported after this block is built and will ride the
+	 * turn after. That is the least valuable of the six states (nothing happened)
+	 * and the only one exposed to the race: `followed` and `declined` are
+	 * produced by a hand on a button, long before.
+	 */
+	private buildViewNewsBlock(): string | undefined {
+		const news = this.deps.viewLink.drainNews(this.id);
+		const block = composeViewNews(news);
+		if (block === null) return undefined;
+		this.emit({
+			type: "view_outcome_relayed",
+			outcomes: news.map((item) => ({
+				tool_call_id: item.tool_call_id,
+				dimension: item.dimension,
+				state: item.state,
+			})),
+			injected_block: block,
+		});
+		return block;
 	}
 
 	/**

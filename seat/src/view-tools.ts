@@ -525,7 +525,10 @@ export function createViewTools(context: ViewToolContext): AgentTool<any>[] {
 			// handled before this call returns — a waiter opened after the emit
 			// would miss the verdict it exists to catch and report "not known"
 			// over an answer that had already arrived.
-			context.viewLink.open(context.conversationId, toolCallId);
+			// The reason travels with the ask so a verdict arriving after this call
+			// has returned can name the offer in the model's own words rather than
+			// quoting a tool call id back at it.
+			context.viewLink.open(context.conversationId, toolCallId, reason);
 			context.emit({
 				type: "view_command",
 				tool_call_id: toolCallId,

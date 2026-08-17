@@ -132,7 +132,7 @@ test("a focus with no id is refused; a focus with no name is not", () => {
 
 test("an ask that is opened, then answered, resolves with the outcomes", async () => {
 	const link = new ViewLink(50);
-	link.open("conv-1", "call-1");
+	link.open("conv-1", "call-1", "because the evidence is there");
 	const pending = link.await("call-1");
 	link.report("conv-1", parseViewReport(
 		body({ outcomes: [{ tool_call_id: "call-1", dimension: "cue", state: "applied" }] }),
@@ -146,7 +146,7 @@ test("an answer that arrives BEFORE anyone waits is still delivered", async () =
 	// verdict would show up as an occasional "not known" over an answer that had
 	// already arrived, and nothing would point at this class.
 	const link = new ViewLink(50);
-	link.open("conv-1", "call-1");
+	link.open("conv-1", "call-1", "because the evidence is there");
 	link.report("conv-1", parseViewReport(
 		body({ outcomes: [{ tool_call_id: "call-1", dimension: "frame", state: "offered" }] }),
 	).report);
@@ -157,7 +157,7 @@ test("an answer that arrives BEFORE anyone waits is still delivered", async () =
 
 test("nothing answering yields null — the honest unknown, never an empty success", async () => {
 	const link = new ViewLink(10);
-	link.open("conv-1", "call-1");
+	link.open("conv-1", "call-1", "because the evidence is there");
 	assert.equal(await link.await("call-1"), null);
 });
 
@@ -171,7 +171,7 @@ test("a verdict from another conversation cannot answer this ask", async () => {
 	// be unique within a conversation. Without this check one conversation's
 	// browser could resolve another's question.
 	const link = new ViewLink(30);
-	link.open("conv-1", "call-1");
+	link.open("conv-1", "call-1", "because the evidence is there");
 	const pending = link.await("call-1");
 	link.report("conv-2", parseViewReport(
 		body({ outcomes: [{ tool_call_id: "call-1", dimension: "cue", state: "applied" }] }),
@@ -188,7 +188,7 @@ const OFFERED = parseViewReport(
 
 test("the first report wins when two tabs answer the same ask, waiter first", async () => {
 	const link = new ViewLink(50);
-	link.open("conv-1", "call-1");
+	link.open("conv-1", "call-1", "because the evidence is there");
 	const pending = link.await("call-1");
 	link.report("conv-1", APPLIED);
 	link.report("conv-1", OFFERED);
@@ -205,7 +205,7 @@ test("the first report wins when BOTH arrive before anyone waits", async () => {
 	// model must be told the one that answered first rather than the one that
 	// happened to be written last.
 	const link = new ViewLink(50);
-	link.open("conv-1", "call-1");
+	link.open("conv-1", "call-1", "because the evidence is there");
 	link.report("conv-1", APPLIED);
 	link.report("conv-1", OFFERED);
 	assert.deepEqual(await link.await("call-1"), [
@@ -215,7 +215,7 @@ test("the first report wins when BOTH arrive before anyone waits", async () => {
 
 test("one ask's several dimensions resolve together, not one at a time", async () => {
 	const link = new ViewLink(50);
-	link.open("conv-1", "call-1");
+	link.open("conv-1", "call-1", "because the evidence is there");
 	const pending = link.await("call-1");
 	link.report("conv-1", parseViewReport(
 		body({
@@ -232,7 +232,7 @@ test("one ask's several dimensions resolve together, not one at a time", async (
 
 test("knows() is true only for asks this process issued", () => {
 	const link = new ViewLink(10);
-	link.open("conv-1", "call-1");
+	link.open("conv-1", "call-1", "because the evidence is there");
 	assert.equal(link.knows("call-1"), true);
 	assert.equal(link.knows("call-2"), false);
 });
@@ -260,7 +260,7 @@ test("every report caches the view, and the cache states its age", () => {
 
 test("forgetting a conversation drops its snapshot and its asks", () => {
 	const link = new ViewLink(10);
-	link.open("conv-1", "call-1");
+	link.open("conv-1", "call-1", "because the evidence is there");
 	link.report("conv-1", parseViewReport(body()).report);
 	link.forget("conv-1");
 	assert.equal(link.lastSnapshot("conv-1"), null);

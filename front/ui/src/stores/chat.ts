@@ -212,6 +212,14 @@ export function applyEvent(convo: ConvoLive, event: SeatEvent): ConvoLive {
     // than evidence, but it has to travel to `app/useAgentView.ts`, which reads
     // the live turn's `ops` and nothing else — see `ChatOp`.
     case "view_outcome":
+    // NOR IS THE SEAT TELLING THE MODEL WHAT THIS BROWSER ALREADY KNOWS. A
+    // `view_outcome_relayed` says a verdict finally reached the model one turn
+    // late; every verdict in it was produced HERE, by this store, from the
+    // person's own hand. Rendering it would play their click back to them as an
+    // event, captioned with what we said about it. It stays durable and
+    // inspectable on the conversation record, where a reader asking "did the
+    // assistant know?" can find it.
+    case "view_outcome_relayed":
     case "agent_end":
     case "conversation_created":
       return convo;
@@ -274,6 +282,7 @@ export function buildTurns(detail: ConversationDetail): ChatTurn[] {
       // and they belong in the audit trail rather than in the evidence panel.
       case "view_probe":
       case "view_outcome":
+      case "view_outcome_relayed":
         break;
       default:
         turn.ops.push(event);

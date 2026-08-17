@@ -187,6 +187,30 @@ export type SeatEvent =
 	  }
 	| {
 			/**
+			 * A verdict finally reaching the model, one turn after it was decided.
+			 *
+			 * THE DIFFERENCE BETWEEN THIS AND `view_outcome` IS THE AUDIENCE. That
+			 * one records what the PERSON's workbench did, and it is written the
+			 * moment the browser reports it. This one records that the MODEL was
+			 * told — which is a separate fact, happens later, and is exactly the
+			 * question a reader has when they see an offer accepted at 14:02 and an
+			 * assistant still calling it pending at 14:03.
+			 *
+			 * `injected_block` is the text verbatim, on the same rule the proactive
+			 * pass follows: what the model was actually shown must be inspectable,
+			 * not reconstructable from the pieces.
+			 *
+			 * IT IS NOT AN AUDIT SOURCE. `AUDIT_EVENT_TYPES` (audit.ts) deliberately
+			 * does not include it — the trail already carries the ask, the outcome
+			 * and the tool call, and a fourth row saying "and then we mentioned it"
+			 * would add a line to every export without adding an act to it.
+			 */
+			type: "view_outcome_relayed";
+			outcomes: { tool_call_id: string; dimension: ViewDimension; state: ViewOutcomeState }[];
+			injected_block: string;
+	  }
+	| {
+			/**
 			 * The seat asking the browser what is on screen (`inspect_view`).
 			 *
 			 * A REQUEST FOR A READING, and it is the only event in this union that

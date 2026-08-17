@@ -330,14 +330,55 @@ const ASK_RETENTION_MS = 600_000;
  *  anyway. */
 const MAX_REMEMBERED_ASKS = 512;
 
+/** Ceiling on undelivered late verdicts per conversation. One turn's worth of
+ *  offers is at most four (one per dimension), so this holds several turns of
+ *  them; past that the oldest go, because the model's next prompt is not the
+ *  place to replay a session. */
+const MAX_NEWS_PER_CONVERSATION = 16;
+
 interface Waiter<T> {
 	resolve(value: T | null): void;
 	timer: ReturnType<typeof setTimeout>;
 }
 
+/**
+ * A verdict that arrived after the tool call it answers had already returned.
+ *
+ * THE LAST OPEN SEGMENT OF THE LOOP. A Follow offer accepted three minutes after
+ * the turn ended reaches the audit trail and History correctly, and reached
+ * nobody else: the model that made the offer learned its fate only if it
+ * happened to call `inspect_view` again. So it would go on believing its request
+ * was still waiting, and would say so.
+ */
+export interface ViewNews {
+	tool_call_id: string;
+	dimension: ViewDimension;
+	state: ViewOutcomeState;
+	/** The ask's own words, so the catch-up names the offer rather than an id. */
+	reason: string;
+}
+
 interface Ask {
 	conversationId: string;
 	issuedAt: number;
+	/** The `reason` the model gave, carried so late news can quote it back. */
+	reason: string;
+	/**
+	 * What this ask's own tool call already told the model, per dimension.
+	 *
+	 * THE STATE, NOT MERELY THE DIMENSION, and that distinction is the whole
+	 * mechanism. The commonest sequence by far is `offered` inside the two-second
+	 * window and `followed` an hour later, on the same axis of the same ask — a
+	 * set of dimensions would call the second one already-said and swallow
+	 * precisely the verdict this feature exists to deliver.
+	 *
+	 * `await` populates it with exactly the outcomes it hands back, and what it
+	 * hands back is exactly what `composeVerdict` puts in front of the model. So
+	 * an entry here is a sentence the model has read; a dimension with no entry
+	 * is one it has heard nothing about, whether because the report came late or
+	 * because the ask timed out and it was told VERDICT NOT KNOWN.
+	 */
+	notified: Map<ViewDimension, ViewOutcomeState>;
 	waiter: Waiter<ViewOutcome[]> | null;
 	/**
 	 * Outcomes that arrived before anyone was waiting for them.
@@ -368,6 +409,9 @@ export class ViewLink {
 	/** The last snapshot each conversation's browser reported, with its arrival
 	 *  time. Never served as "current" — only ever as "this is how old it is". */
 	private readonly snapshots = new Map<string, { view: ViewSnapshot; at: number }>();
+	/** Verdicts that arrived after their tool call returned, waiting for the next
+	 *  turn to carry them to the model. Drained, never read twice. */
+	private readonly news = new Map<string, ViewNews[]>();
 	private readonly timeoutMs: number;
 	private probeSeq = 0;
 
@@ -384,9 +428,16 @@ export class ViewLink {
 	 * verdict that was sitting in the map. Callers must `open` first, `emit`
 	 * second, `await` third.
 	 */
-	open(conversationId: string, toolCallId: string): void {
+	open(conversationId: string, toolCallId: string, reason: string): void {
 		this.evictStale();
-		this.asks.set(toolCallId, { conversationId, issuedAt: Date.now(), waiter: null, delivered: null });
+		this.asks.set(toolCallId, {
+			conversationId,
+			issuedAt: Date.now(),
+			reason,
+			notified: new Map(),
+			waiter: null,
+			delivered: null,
+		});
 	}
 
 	/** Whether this call was issued by this process and is still answerable. */
@@ -412,10 +463,21 @@ export class ViewLink {
 	await(toolCallId: string): Promise<ViewOutcome[] | null> {
 		const ask = this.asks.get(toolCallId);
 		if (!ask) return Promise.resolve(null);
-		if (ask.delivered !== null) return Promise.resolve(ask.delivered);
+		// MARKED WHERE IT IS HANDED OVER, on every path that hands something over.
+		// Everything this method returns non-null is read out to the model by
+		// `composeVerdict`, so this is the one place that can honestly claim to
+		// know what the model has been told — and the news queue below is built
+		// entirely out of what is NOT in here.
+		const notify = (outcomes: ViewOutcome[]): ViewOutcome[] => {
+			for (const outcome of outcomes) ask.notified.set(outcome.dimension, outcome.state);
+			return outcomes;
+		};
+		if (ask.delivered !== null) return Promise.resolve(notify(ask.delivered));
 		return new Promise((resolve) => {
 			const timer = setTimeout(() => {
 				if (ask.waiter?.timer === timer) ask.waiter = null;
+				// Nothing is marked notified: the model was told NOT KNOWN, so
+				// every dimension of this ask is still news when it arrives.
 				resolve(null);
 			}, this.timeoutMs);
 			// DELIBERATELY NOT UNREF'D. An unref'd timer does not hold the event
@@ -423,7 +485,13 @@ export class ViewLink {
 			// simply never fire — leaving this promise pending forever and the
 			// tool call hung. A settled "not known" two seconds late is the whole
 			// contract; a promise that never settles is worse than either answer.
-			ask.waiter = { resolve, timer };
+			// The waiter's resolve is wrapped, not the raw one: `report` settles it
+			// with the outcomes it delivers, and those are exactly what the model
+			// will read.
+			ask.waiter = {
+				resolve: (value) => resolve(value === null ? null : notify(value)),
+				timer,
+			};
 		});
 	}
 
@@ -486,7 +554,31 @@ export class ViewLink {
 		}
 		for (const [toolCallId, outcomes] of byAsk) {
 			const ask = this.asks.get(toolCallId);
-			if (!ask || ask.conversationId !== conversationId) continue;
+			// An ask this process never issued, or one belonging to another
+			// conversation, resolves nothing here. The first case is real and
+			// routine — the seat restarts while an offer is still on screen — and
+			// it still produces news below, because the route validated the ask
+			// against the durable store before calling this.
+			if (ask && ask.conversationId !== conversationId) continue;
+
+			// QUEUED HERE, FILTERED AT DRAIN, and the order is not arbitrary. This
+			// report may be the one the tool is about to consume — on a loopback
+			// bind the browser answers before the emitting call returns, so at
+			// this instant `notified` is empty for an outcome the model is two
+			// lines away from reading. Deciding here would announce it twice.
+			// `drainNews` decides instead, by which time `await` has recorded
+			// exactly what was said.
+			//
+			// Terminal states only. `offered` is not news: the tool already said
+			// WAITING, and it is the state the catch-up exists to resolve.
+			this.rememberNews(
+				conversationId,
+				outcomes
+					.filter((outcome) => isTerminal(outcome.state))
+					.map((outcome) => ({ ...outcome, reason: ask?.reason ?? "" })),
+			);
+
+			if (!ask) continue;
 			// FIRST REPORT WINS. Two tabs on one conversation each dispatch and
 			// each report, and their verdicts can differ; the tool answers with
 			// the first that arrives rather than merging two people's views into
@@ -502,6 +594,65 @@ export class ViewLink {
 		}
 	}
 
+	/**
+	 * Queue late verdicts for the next turn's prompt, newest kept.
+	 *
+	 * BOUNDED BY DROPPING THE OLDEST, and silently, which is the one place in
+	 * this file where silence is right: this queue is a courtesy channel, not a
+	 * record. The record is the durable `view_outcome` rows the route wrote
+	 * before calling here, and nothing dropped from this map is lost from those.
+	 * A model told about the twenty-fifth-oldest lapsed offer instead of the
+	 * newest accepted one would be worse informed, not better.
+	 */
+	private rememberNews(conversationId: string, items: readonly ViewNews[]): void {
+		if (items.length === 0) return;
+		const queue = this.news.get(conversationId) ?? [];
+		queue.push(...items);
+		if (queue.length > MAX_NEWS_PER_CONVERSATION) queue.splice(0, queue.length - MAX_NEWS_PER_CONVERSATION);
+		this.news.set(conversationId, queue);
+	}
+
+	/**
+	 * Take everything this conversation has not yet been told, and forget it.
+	 *
+	 * DRAINING IS THE POINT. Read without clearing, the same accepted offer would
+	 * be announced on every turn for the rest of the session — the model would
+	 * keep being told about a decision it had already acted on, which is a slower
+	 * version of the same defect as never telling it.
+	 *
+	 * A verdict drained but never used because the turn then failed IS lost. That
+	 * is the accepted cost of not persisting a courtesy channel: the durable rows
+	 * remain, `inspect_view` still reports what is on screen, and the alternative
+	 * — a second store to keep in step with the first — buys a re-announcement
+	 * nobody asked for.
+	 */
+	drainNews(conversationId: string): ViewNews[] {
+		const queue = this.news.get(conversationId);
+		this.news.delete(conversationId);
+		if (!queue || queue.length === 0) return [];
+
+		// COLLAPSED TO THE LAST WORD PER AXIS, then compared against what the
+		// model has already read. Two tabs on one conversation both report, and a
+		// dimension can be offered, superseded and followed inside one turn —
+		// replaying that sequence would tell the person's assistant a story about
+		// the person's clicking rather than the state they ended in.
+		const latest = new Map<string, ViewNews>();
+		for (const item of queue) latest.set(`${item.tool_call_id} ${item.dimension}`, item);
+
+		const out: ViewNews[] = [];
+		for (const item of latest.values()) {
+			const ask = this.asks.get(item.tool_call_id);
+			// An ask this process no longer holds — evicted, or issued before a
+			// restart — has no record of what was said, so the verdict is news.
+			// That is the honest default: the alternative silently drops the one
+			// case (a restart while an offer is on screen) the durable store was
+			// consulted to let through.
+			if (ask && ask.notified.get(item.dimension) === item.state) continue;
+			out.push(item);
+		}
+		return out;
+	}
+
 	/** The last snapshot this conversation's browser sent, and its age in ms. */
 	lastSnapshot(conversationId: string): { view: ViewSnapshot; ageMs: number } | null {
 		const entry = this.snapshots.get(conversationId);
@@ -512,6 +663,7 @@ export class ViewLink {
 	/** Drop everything belonging to a conversation that is going away. */
 	forget(conversationId: string): void {
 		this.snapshots.delete(conversationId);
+		this.news.delete(conversationId);
 		for (const [id, ask] of this.asks) if (ask.conversationId === conversationId) this.asks.delete(id);
 		for (const [id, probe] of this.probes) {
 			if (probe.conversationId !== conversationId) continue;
@@ -618,6 +770,66 @@ export function composeVerdict(outcomes: readonly ViewOutcome[] | null): string 
 		);
 	}
 	return `VERDICT from the workbench:\n${lines.join("\n")}`;
+}
+
+/**
+ * What became of your requests while you were not looking.
+ *
+ * WHY THIS EXISTS AT ALL. `direct_view` waits two seconds and then tells the
+ * truth, which for a held offer is "WAITING — the person has not answered". Then
+ * the person answers, minutes later, and until now the only thing that changed
+ * was the audit trail. The model's belief was frozen at WAITING, so it would
+ * describe an offer as pending after the person had accepted it, or keep the
+ * offer alive in its own account of the conversation after they had refused.
+ *
+ * WHAT MAKES IT SAFE TO INJECT. It restates verdicts the browser reported and
+ * synthesises nothing; it appears only when there is something to say, so a
+ * conversation with no outstanding offers pays nothing for it; and it is capped
+ * by construction — a dimension can resolve once. Null, not an empty heading,
+ * when there is no news: an empty block is a line of prompt that teaches the
+ * model to expect a section that is usually noise.
+ *
+ * WHAT IT MUST NOT BECOME is a route around the person, so the refusals say so
+ * in the same breath as reporting them. Knowing an offer was declined is
+ * information about a decision that has been made, not an invitation to make it
+ * again.
+ */
+export function composeViewNews(news: readonly ViewNews[]): string | null {
+	if (news.length === 0) return null;
+	const lines = news.map((item) => {
+		const noun = DIMENSION_NOUN[item.dimension];
+		const because = item.reason.trim().length > 0 ? ` — your reason was "${item.reason.trim()}"` : "";
+		switch (item.state) {
+			case "followed":
+				return `- ACCEPTED: they took your offer to change ${noun}, and the view moved${because}.`;
+			case "declined":
+				return `- REFUSED: they dismissed your offer to change ${noun}, or took that axis themselves${because}.`;
+			case "expired":
+				return `- LAPSED: your offer to change ${noun} was still on screen when the turn ended; they neither accepted nor refused it${because}.`;
+			case "superseded":
+				return `- REPLACED: a later request of your own took over ${noun} before they answered this one${because}.`;
+			// `applied` and `already` reach here only when the ask timed out and
+			// the model was told NOT KNOWN. Saying so is the correction.
+			case "applied":
+				return `- MOVED after all: ${noun} changed, though you were told at the time that the verdict was not known${because}.`;
+			case "already":
+				return `- ALREADY THERE after all: ${noun} needed no change, though you were told at the time that the verdict was not known${because}.`;
+			// Not reachable: only terminal states are queued. Kept so a state
+			// added to the closed set cannot be silently dropped from this block.
+			case "offered":
+				return `- STILL WAITING: your offer to change ${noun} has not been answered${because}.`;
+		}
+	});
+	const refused = news.some((item) => item.state === "declined");
+	return (
+		"## Since your last turn, the workbench answered you\n" +
+		"These are the verdicts on view requests you made earlier and were not told about at the time.\n" +
+		lines.join("\n") +
+		(refused
+			? "\nA refusal is a decision the person has already made. Do not re-issue that request; if it still " +
+				"matters, say why in words and let them choose."
+			: "")
+	);
 }
 
 /**
