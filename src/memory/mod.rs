@@ -7074,6 +7074,25 @@ impl MemorySystem {
     /// unconditionally and everything after it was unreachable — this whole
     /// direction of the memory-edge tier coupling has been inert since it
     /// shipped.
+    ///
+    /// # Why the lock is taken with `try_read`
+    ///
+    /// Reviving this path moved the graph acquisition to BEFORE the early
+    /// return, and that turned a promotion heuristic into a re-entrancy hazard.
+    /// `remember()` reaches here on its own thread — `remember` →
+    /// `consolidate_if_needed` → `promote_working_to_session` → here — so any
+    /// caller holding the graph WRITE lock and then calling `remember` blocks
+    /// forever on a lock its own thread owns (`parking_lot::RwLock` is not
+    /// re-entrant). While the early return was unreachable that could not
+    /// happen, because the lock was never taken; the moment it became
+    /// reachable, it could.
+    ///
+    /// A tier-promotion decision must never block on the graph. When the lock
+    /// is unavailable this returns the UNADJUSTED threshold, which is neither a
+    /// discount nor a penalty — the same answer the memory got before this
+    /// direction was revived — and consolidation re-evaluates it on the next
+    /// cycle. Contention costs one cycle of adjustment; blocking would cost the
+    /// process.
     fn graph_adjusted_threshold(&self, memory: &Memory, base_threshold: f32) -> f32 {
         use crate::constants::*;
 
@@ -7082,7 +7101,13 @@ impl MemorySystem {
             None => return base_threshold,
         };
 
-        let graph_guard = graph.read();
+        let Some(graph_guard) = graph.try_read() else {
+            tracing::debug!(
+                memory_id = %memory.id.0,
+                "tier promotion: graph busy, using the unadjusted threshold for this cycle"
+            );
+            return base_threshold;
+        };
         let entity_ids = Self::entity_ids_from_graph(&graph_guard, memory);
 
         if entity_ids.is_empty() {
@@ -11378,6 +11403,50 @@ mod companion_injection_tests {
             cap,
             "injection is bounded by COMPANION_INJECTION_MAX"
         );
+    }
+
+    /// `remember()` must not block on a graph lock.
+    ///
+    /// It reaches the graph indirectly — `remember` → `consolidate_if_needed` →
+    /// `promote_working_to_session` → `graph_adjusted_threshold` — and
+    /// `parking_lot::RwLock` is not re-entrant, so a caller holding the WRITE
+    /// lock on its own thread would block forever on its own lock. That is
+    /// exactly what `respects_injection_cap` above does while seeding, which is
+    /// why it hung the entire lib suite the moment the tier-coupling path
+    /// stopped being inert and started taking the lock for real.
+    ///
+    /// This test exists because the failure mode is a HANG, and a hang is
+    /// indistinguishable from a slow test in a suite — it reports nothing, it
+    /// just never finishes. Asserting the call RETURNS converts that silence
+    /// into a named failure. The watchdog thread is the assertion: without it
+    /// a regression would hang this test too, and prove nothing.
+    #[test]
+    fn remember_does_not_block_while_the_graph_write_lock_is_held() {
+        let (system, _t) = setup();
+        let system = Arc::new(system);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = {
+            let system = Arc::clone(&system);
+            std::thread::spawn(move || {
+                let graph = system.graph_memory().expect("graph wired");
+                let _held = graph.write();
+                // The write lock is held across this call, on this same thread.
+                let id = remember_with_entities(&system, "Written under the graph lock.", &["A"]);
+                let _ = tx.send(id);
+            })
+        };
+
+        // Generous relative to a real remember (tens of milliseconds), tight
+        // relative to "forever".
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(60));
+        assert!(
+            outcome.is_ok(),
+            "remember() blocked while the graph write lock was held — a read on \
+             the tier-promotion path has become re-entrant against its own \
+             caller; see graph_adjusted_threshold"
+        );
+        worker.join().expect("writer thread panicked");
     }
 
     /// No provenance on the incident edges → nothing to harvest (no-op).
