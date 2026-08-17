@@ -106,11 +106,25 @@ export interface DeletionData {
 	/** When the destroyed thing was created, which its id does not carry. */
 	created_at: string;
 	/**
-	 * What went with it. `cascade_deleted` ids were destroyed too (todo subtasks);
-	 * `orphaned` ids survive with a dangling parent reference (memory children).
-	 * The distinction matters to a reviewer and neither backend reports it.
+	 * What went with it — and the two cases carry different things ON PURPOSE.
+	 *
+	 * `orphaned` holds ids alone because those objects SURVIVE: a memory's
+	 * children are not deleted, only left with a `parent_id` that no longer
+	 * resolves, so a reviewer can still go and read every one of them and an id is
+	 * a complete reference.
+	 *
+	 * `cascade_deleted` holds a preview per item because those objects are GONE:
+	 * `TodoStore::delete_todo` destroys every subtask beneath the target, and an
+	 * id that resolves to nothing is the same defect this whole entry exists to
+	 * prevent, one level down. "BOLT-7 took three subtasks with it" is not a
+	 * record of what was lost unless it says what the three were.
 	 */
-	collateral: { relation: "cascade_deleted" | "orphaned"; ids: string[] };
+	collateral:
+		| { relation: "orphaned"; ids: string[] }
+		| {
+				relation: "cascade_deleted";
+				destroyed: { id: string; short_id: string; content_preview: string }[];
+		  };
 	/** Why, in the actor's own words. The first question a reviewer asks. */
 	reason: string;
 	/** The identity that asked — `agentAuthor(model)` for a model-issued call. */
@@ -168,7 +182,12 @@ export function composeDeletionData(input: {
 	classification: string;
 	tags: readonly string[];
 	createdAt: string;
-	collateral: { relation: "cascade_deleted" | "orphaned"; ids: readonly string[] };
+	collateral:
+		| { relation: "orphaned"; ids: readonly string[] }
+		| {
+				relation: "cascade_deleted";
+				destroyed: readonly { id: string; shortId: string; content: string }[];
+		  };
 	reason: string;
 	author: string;
 }): DeletionData {
@@ -182,7 +201,22 @@ export function composeDeletionData(input: {
 		classification: input.classification,
 		tags: [...input.tags],
 		created_at: input.createdAt,
-		collateral: { relation: input.collateral.relation, ids: [...input.collateral.ids] },
+		// Each branch copies its own arrays: an append-only ledger that shares
+		// array references with its caller is not append-only.
+		collateral:
+			input.collateral.relation === "orphaned"
+				? { relation: "orphaned", ids: [...input.collateral.ids] }
+				: {
+						relation: "cascade_deleted",
+						destroyed: input.collateral.destroyed.map((item) => ({
+							id: item.id,
+							short_id: item.shortId,
+							// The same 200-character rule as the target's, for the same
+							// reason: enough for a reviewer to tell what was lost, not
+							// enough to make the ledger a shadow copy of it.
+							content_preview: item.content.slice(0, DELETION_PREVIEW_CHARS),
+						})),
+					},
 		reason: input.reason,
 		author: input.author,
 	};

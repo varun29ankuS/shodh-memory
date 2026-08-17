@@ -91,6 +91,14 @@ const DELETION_INPUT = {
 	author: "agent:anthropic/claude-x",
 };
 
+const CASCADE = {
+	relation: "cascade_deleted",
+	destroyed: [
+		{ id: "sub-1", shortId: "BOLT-8", content: "Sub one" },
+		{ id: "sub-2", shortId: "BOLT-9", content: "Sub two" },
+	],
+};
+
 // ── What a deletion record must contain ─────────────────────────────────────
 // Mutations: drop `content_length`; drop `content_sha256`; drop `reason`; drop
 // `author`; drop `collateral`; drop `created_at`.
@@ -151,13 +159,31 @@ test("collateral distinguishes what was destroyed from what was merely orphaned"
 	assert.equal(orphaning.collateral.relation, "orphaned");
 	assert.deepEqual(orphaning.collateral.ids, ["child-1"]);
 
-	const cascading = composeDeletionData({
+	const cascading = composeDeletionData({ ...DELETION_INPUT, target: "todo", collateral: CASCADE });
+	assert.equal(cascading.collateral.relation, "cascade_deleted");
+});
+
+test("cascade-destroyed items carry a preview, because their ids will resolve to nothing", () => {
+	// The same defect as an id-only entry, one level down: "BOLT-7 took three
+	// subtasks with it" records that something was lost without recording what,
+	// and the subtasks are not there to be consulted. Orphaned children get ids
+	// alone because they survive and remain readable — the asymmetry is the point.
+	const data = composeDeletionData({ ...DELETION_INPUT, target: "todo", collateral: CASCADE });
+	assert.deepEqual(data.collateral.destroyed, [
+		{ id: "sub-1", short_id: "BOLT-8", content_preview: "Sub one" },
+		{ id: "sub-2", short_id: "BOLT-9", content_preview: "Sub two" },
+	]);
+});
+
+test("a cascaded item's preview is bounded by the same rule as the target's", () => {
+	// Otherwise deleting one parent with ten long subtasks would write more of the
+	// user's text into the ledger than deleting the parent alone ever could.
+	const data = composeDeletionData({
 		...DELETION_INPUT,
 		target: "todo",
-		collateral: { relation: "cascade_deleted", ids: ["sub-1", "sub-2"] },
+		collateral: { relation: "cascade_deleted", destroyed: [{ id: "s", shortId: "B-1", content: "y".repeat(900) }] },
 	});
-	assert.equal(cascading.collateral.relation, "cascade_deleted");
-	assert.deepEqual(cascading.collateral.ids, ["sub-1", "sub-2"]);
+	assert.equal(data.collateral.destroyed[0].content_preview.length, DELETION_PREVIEW_CHARS);
 });
 
 test("the record copies its inputs, so a later mutation of the caller's arrays cannot rewrite history", () => {
@@ -170,6 +196,12 @@ test("the record copies its inputs, so a later mutation of the caller's arrays c
 	ids.push("leaked");
 	assert.deepEqual(data.tags, ["contracts"]);
 	assert.deepEqual(data.collateral.ids, ["child-1"]);
+	// The cascade branch is NOT asserted here on purpose: it is built with
+	// `.map()`, which allocates a new array and new objects unconditionally, so an
+	// aliasing assertion against it could not be made to fail by any edit to the
+	// composer. A test that cannot go red is invisible to a failing-test sweep and
+	// worse than no test — what that branch actually needs proving is the content
+	// it carries, which the two preview tests above cover.
 });
 
 // ── A deletion cannot be reverted, and says so ──────────────────────────────
@@ -411,10 +443,11 @@ test("cascaded subtasks are named back, so the model can tell the user what went
 	assert.match(text, /\[BOLT-8\], \[BOLT-9\]/);
 });
 
-test("a failed todo deletion says the board is unchanged", () => {
+test("a request that never reached the backend says the board is unchanged", () => {
 	const text = composeDeleteTodoFailureReport({
 		shortId: "BOLT-7",
 		error: "backend 503",
+		alreadyGone: false,
 		ledgerEventId: "evt-2",
 		compensationError: null,
 	});
@@ -423,10 +456,28 @@ test("a failed todo deletion says the board is unchanged", () => {
 	assert.doesNotMatch(text, /WARNING/);
 });
 
+test("a todo another session already removed is NOT reported as still on the board", () => {
+	// The opposite fact, and the one a shared message would get wrong. The todo
+	// really is gone — it was deleted between this tool's read and its write — so
+	// "still on the board" would be false, and "you deleted it" would be a
+	// misattribution in the ledger's own subject matter.
+	const text = composeDeleteTodoFailureReport({
+		shortId: "BOLT-7",
+		error: "the backend reported no such todo, so this call removed nothing",
+		alreadyGone: true,
+		ledgerEventId: "evt-2",
+		compensationError: null,
+	});
+	assert.doesNotMatch(text, /still on the board/);
+	assert.match(text, /already been removed/);
+	assert.match(text, /not by your hand/);
+});
+
 test("a failed todo deletion whose correction failed warns that the ledger overstates", () => {
 	const text = composeDeleteTodoFailureReport({
 		shortId: "BOLT-7",
 		error: "backend 503",
+		alreadyGone: false,
 		ledgerEventId: "evt-2",
 		compensationError: "disk full",
 	});

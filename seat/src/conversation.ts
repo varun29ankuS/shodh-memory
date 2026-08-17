@@ -219,8 +219,21 @@ const PROACTIVE_SEMANTIC_THRESHOLD = 0.6;
  * model just read out of recalled memories, so scoring them as tool usage would
  * count a memory as "used" whenever the view moved to it. The todo tools are
  * NOT here — their inputs are the model's own words about work, which is
- * genuine usage evidence. */
-const MEMORY_TOOL_NAMES = new Set(["recall_memory", "remember_memory", "record_seat_learning", "direct_view"]);
+ * genuine usage evidence.
+ *
+ * `forget_memory` joins them for a reason of its own, and a stronger one. Its
+ * only content-bearing input is a citation of a memory that was surfaced this
+ * run, so scoring it as usage would count every deletion as evidence that the
+ * memory was USEFUL — the precise inversion of what the call means. Worse, the
+ * signal would be applied to a memory that no longer exists, reinforcing an id
+ * the store cannot resolve. Deleting a memory is not using it. */
+const MEMORY_TOOL_NAMES = new Set([
+	"recall_memory",
+	"remember_memory",
+	"forget_memory",
+	"record_seat_learning",
+	"direct_view",
+]);
 
 /**
  * The backend keeps ONE pending-feedback slot per user_id (set_pending

@@ -347,19 +347,34 @@ export function composeDeleteTodoReport(input: {
 /**
  * What the model is told when the record was written and the deletion was not.
  *
- * Same contract as the memory path's, for the same reason: the entry is appended
- * first so that a failure overstates rather than hides, and the model's one job
- * in that window is to not report a deletion that did not happen.
+ * Same contract as the memory path's — the entry is appended first so that a
+ * failure overstates rather than hides, and the model's one job in that window is
+ * to not report a deletion that did not happen.
+ *
+ * THE TWO FAILURES ARE OPPOSITE FACTS AND CANNOT SHARE A SENTENCE. A thrown
+ * request means the backend never acted and the board is unchanged. A `success:
+ * false` means the store found no such row — another session deleted it between
+ * this tool's read and its write — so the todo is genuinely gone and telling the
+ * model it is "still on the board" would be the same false report in the other
+ * direction. The ledger entry is wrong in both cases, but only in the first is
+ * the object still there.
  */
 export function composeDeleteTodoFailureReport(input: {
 	shortId: string;
 	error: string;
+	/** The backend answered that no such todo exists, rather than not answering. */
+	alreadyGone: boolean;
 	ledgerEventId: string;
 	compensationError: string | null;
 }): string {
 	const lines = [
-		`[${input.shortId}] was NOT deleted: ${input.error}. The todo and its subtasks are still on the board — do ` +
-			"not tell the user they are gone.",
+		input.alreadyGone
+			? `[${input.shortId}] was NOT deleted by this call: ${input.error}. It had already been removed — by the ` +
+				"user or another session — between the moment this tool read it and the moment it tried to delete " +
+				"it, so this call destroyed nothing. The todo is gone, but not by your hand; do not describe it as " +
+				"your deletion."
+			: `[${input.shortId}] was NOT deleted: ${input.error}. The todo and its subtasks are still on the board — ` +
+				"do not tell the user they are gone.",
 	];
 	lines.push(
 		input.compensationError === null
@@ -589,6 +604,8 @@ async function recordDeletionNotPerformed(
 	ofEntryId: string,
 	data: DeletionData,
 	reason: string,
+	/** The todo was already gone, rather than the backend never having acted. */
+	alreadyGone: boolean,
 ): Promise<string | null> {
 	try {
 		await context.ledger.append({
@@ -601,9 +618,12 @@ async function recordDeletionNotPerformed(
 			data: {
 				of: ofEntryId,
 				compensation: deletionNotPerformed(data, reason),
-				note:
-					"The deletion recorded by the referenced event did NOT happen: the entry is appended before the " +
-					"backend call so that a failure overstates rather than hides. The todo is intact.",
+				note: alreadyGone
+					? "The deletion recorded by the referenced event was not performed BY THIS CALL: the todo had " +
+						"already been removed by the user or another session between the read and the write. The " +
+						"referenced entry does not attribute the destruction correctly."
+					: "The deletion recorded by the referenced event did NOT happen: the entry is appended before " +
+						"the backend call so that a failure overstates rather than hides. The todo is intact.",
 			},
 		});
 		return null;
@@ -982,8 +1002,18 @@ export function createTodoTools(context: TodoToolContext): AgentTool<any>[] {
 				tags: todo.tags,
 				createdAt: todo.created_at,
 				// Subtasks are DESTROYED, not orphaned — the opposite of what a
-				// memory's children get, and recorded as the different fact it is.
-				collateral: { relation: "cascade_deleted", ids: subtasks.map((subtask) => subtask.id) },
+				// memory's children get — so each one carries its own preview. Their
+				// ids will resolve to nothing a moment from now, and an id that
+				// resolves to nothing records that something was lost without
+				// recording what.
+				collateral: {
+					relation: "cascade_deleted",
+					destroyed: subtasks.map((subtask) => ({
+						id: subtask.id,
+						shortId: shortIdOf(subtask),
+						content: subtask.content,
+					})),
+				},
 				reason: params.why,
 				author,
 			});
@@ -1010,19 +1040,21 @@ export function createTodoTools(context: TodoToolContext): AgentTool<any>[] {
 					composeDeleteTodoFailureReport({
 						shortId,
 						error: reason,
+						alreadyGone: false,
 						ledgerEventId: ledgerEntry.id,
-						compensationError: await recordDeletionNotPerformed(context, ledgerEntry.id, data, reason),
+						compensationError: await recordDeletionNotPerformed(context, ledgerEntry.id, data, reason, false),
 					}),
 				);
 			}
 			if (!deleted) {
-				const reason = "the backend reported the todo was not found, so nothing was removed";
+				const reason = "the backend reported no such todo, so this call removed nothing";
 				throw new Error(
 					composeDeleteTodoFailureReport({
 						shortId,
 						error: reason,
+						alreadyGone: true,
 						ledgerEventId: ledgerEntry.id,
-						compensationError: await recordDeletionNotPerformed(context, ledgerEntry.id, data, reason),
+						compensationError: await recordDeletionNotPerformed(context, ledgerEntry.id, data, reason, true),
 					}),
 				);
 			}
