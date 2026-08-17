@@ -10,6 +10,7 @@ import {
   classifyLink,
   dueMeta,
   elapsedLabel,
+  hoistCommonPrefix,
   lanesOf,
   lifelineOf,
   originOf,
@@ -917,5 +918,81 @@ describe("stepPath", () => {
 
   it("draws nothing at all for an empty series", () => {
     expect(stepPath([], 100, 10)).toBe("");
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * THE PART OF A TITLE THAT IS NOT NEWS
+ * ------------------------------------------------------------------ */
+
+describe("hoistCommonPrefix", () => {
+  it("lifts the tag every row on the live profile carries", () => {
+    // Verbatim from the `claude` profile: all 50 rows open with these
+    // nineteen characters, and the part that differs starts after them.
+    const hoisted = hoistCommonPrefix([
+      "[shodh-redb audit] H5: Guard legacy tuple parse_lens against short data panic (src/types.rs)",
+      "[shodh-redb audit] H13: TTL expiry non-deterministic due to wall-clock race (src/ttl_table.rs)",
+      "[shodh-redb audit] M8: CompositeQuery normalize_semantic range guard missing (src/composite/scoring.rs)",
+    ]);
+    expect(hoisted?.prefix).toBe("[shodh-redb audit]");
+    expect(hoisted?.rest[0]).toBe(
+      "H5: Guard legacy tuple parse_lens against short data panic (src/types.rs)",
+    );
+    expect(hoisted?.rest[1]).toBe(
+      "H13: TTL expiry non-deterministic due to wall-clock race (src/ttl_table.rs)",
+    );
+  });
+
+  it("does not slice a token in half when the shared run runs past a space", () => {
+    // "H1" is common to both and is NOT a prefix: hoisting it would leave the
+    // rows reading "0:" and "3:".
+    const hoisted = hoistCommonPrefix([
+      "[audit report] H10: codebook padding",
+      "[audit report] H13: ttl race",
+    ]);
+    expect(hoisted?.prefix).toBe("[audit report]");
+    expect(hoisted?.rest).toEqual(["H10: codebook padding", "H13: ttl race"]);
+  });
+
+  it("leaves prose alone — a shared opening is only a label if it ends in one", () => {
+    // English, not a tag. Rows reading "parser" and "lexer" under a hoisted
+    // "Fix the" would assert a grouping nobody made.
+    expect(hoistCommonPrefix(["Fix the parser crash", "Fix the lexer crash"])).toBeNull();
+  });
+
+  it("takes a dash or a pipe as readily as a bracket, since corpora differ", () => {
+    expect(
+      hoistCommonPrefix(["SHODH-REDB AUDIT — H5: one", "SHODH-REDB AUDIT — H6: two"])?.prefix,
+    ).toBe("SHODH-REDB AUDIT —");
+    expect(hoistCommonPrefix(["ingest v2 | alpha", "ingest v2 | beta"])?.prefix).toBe(
+      "ingest v2 |",
+    );
+  });
+
+  it("hoists nothing from a corpus whose titles share nothing", () => {
+    expect(hoistCommonPrefix(["Rotate the signing key", "Ship the installer"])).toBeNull();
+  });
+
+  it("refuses a hoist that would leave a row with nothing to say", () => {
+    // The second row IS the prefix. Removing it would render an empty line.
+    expect(
+      hoistCommonPrefix(["[shodh-redb audit] H5: one", "[shodh-redb audit] "]),
+    ).toBeNull();
+  });
+
+  it("refuses a saving too small to be worth the indirection", () => {
+    expect(hoistCommonPrefix(["ab: one", "ab: two"])).toBeNull();
+  });
+
+  it("needs two rows — one row shares nothing with anything", () => {
+    expect(hoistCommonPrefix(["[shodh-redb audit] H5: one"])).toBeNull();
+    expect(hoistCommonPrefix([])).toBeNull();
+  });
+
+  it("keeps every row, in order, however many share the tag", () => {
+    const contents = ["[the audit] a", "[the audit] b", "[the audit] c", "[the audit] d"];
+    const hoisted = hoistCommonPrefix(contents);
+    expect(hoisted?.rest).toEqual(["a", "b", "c", "d"]);
+    expect(hoisted?.rest.length).toBe(contents.length);
   });
 });

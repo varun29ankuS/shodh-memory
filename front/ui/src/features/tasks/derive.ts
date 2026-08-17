@@ -852,6 +852,94 @@ export function positionOn(axis: Axis, at: number): number {
 }
 
 /* ================================================================== *
+ * THE PART OF A TITLE THAT IS NOT NEWS
+ *
+ * Every one of the 50 rows on the live `claude` profile opens with the same
+ * nineteen characters, `[shodh-redb audit] `, so the part that distinguishes
+ * one row from another — `H5:`, `M13:` — starts a fifth of the way along a
+ * line the reader is scanning vertically. Nineteen characters repeated fifty
+ * times is 950 characters of ink that carry one fact, and the eye has to step
+ * over all of it on every row to reach the first thing that differs.
+ *
+ * DERIVED, NEVER MATCHED. Nothing here knows what `[shodh-redb audit]` is. The
+ * prefix is whatever these rows happen to share, so a corpus tagged some other
+ * way is hoisted the same and a corpus with nothing in common is left alone —
+ * a hardcoded string would render every other corpus untouched while claiming
+ * to have tidied it.
+ *
+ * IT MUST END IN PUNCTUATION, and that is the rule that keeps this from lying.
+ * "Fix the parser" and "Fix the lexer" share `Fix the `, which is a coincidence
+ * of English and not a label: hoisting it would leave two rows reading "parser"
+ * and "lexer" under a heading that asserts a grouping nobody made. A shared
+ * opening that ends in a bracket, colon, dash, pipe or slash is a tag somebody
+ * wrote on purpose. Prose is left where it is.
+ *
+ * THE FULL TITLE IS NEVER DESTROYED. The caller keeps it on the row's
+ * accessible name and its tooltip, so search, screen readers and hover all
+ * still see what the server actually stored.
+ * ================================================================== */
+
+/** Characters that end a deliberate label. A shared opening that stops on one
+ *  of these was written as a tag; one that stops mid-phrase is prose that two
+ *  rows happen to share. U+2013/U+2014 are the dashes real titles use. */
+const LABEL_TERMINATORS = new Set(["]", ")", "}", ":", "-", "–", "—", "|", "/", ">", "»", "."]);
+
+/** Below this the hoist costs more than it saves: the heading gains a line and
+ *  every row saves a handful of characters. Counted on the trimmed prefix, so
+ *  the separating space is not padding the case for removing it. */
+const MIN_HOIST_CHARS = 6;
+
+export interface HoistedPrefix {
+  /** The shared opening, trimmed of its trailing space — what the heading
+   *  shows. */
+  prefix: string;
+  /** Each input with the shared opening (and the whitespace after it) removed,
+   *  in the same order and of the same length as the input. */
+  rest: string[];
+}
+
+/**
+ * The opening these titles all share, if hoisting it is honest and worth it.
+ *
+ * Null — meaning "render the rows as they are" — whenever there are fewer than
+ * two rows, nothing is shared, the shared part is prose rather than a label,
+ * it is too short to be worth the indirection, or removing it would leave any
+ * row with nothing to say.
+ */
+export function hoistCommonPrefix(contents: readonly string[]): HoistedPrefix | null {
+  if (contents.length < 2) return null;
+
+  let common = contents[0];
+  for (let i = 1; i < contents.length && common.length > 0; i += 1) {
+    const other = contents[i];
+    let end = 0;
+    const limit = Math.min(common.length, other.length);
+    while (end < limit && common[end] === other[end]) end += 1;
+    common = common.slice(0, end);
+  }
+
+  // Cut back to a word boundary — greedily, so the group is everything up to
+  // and including the LAST whitespace in the shared run. Without this the
+  // common run of "H10" and "H13" contributes its "H1" and the rows would read
+  // "0" and "3". No whitespace in the run at all means there is no word to cut
+  // at, and nothing is hoisted.
+  const boundary = /^(.*\s)\S*$/.exec(common);
+  if (!boundary) return null;
+  const opening = boundary[1];
+  const label = opening.trimEnd();
+
+  if (label.length < MIN_HOIST_CHARS) return null;
+  if (!LABEL_TERMINATORS.has(label[label.length - 1])) return null;
+
+  const rest = contents.map((content) => content.slice(opening.length).trimStart());
+  // A row reduced to nothing would disappear from a list it is a member of,
+  // which is a worse defect than the one being fixed.
+  if (rest.some((text) => text.length === 0)) return null;
+
+  return { prefix: label, rest };
+}
+
+/* ================================================================== *
  * WHO WROTE A COMMENT, AND WHAT THAT IS WORTH
  * ================================================================== */
 

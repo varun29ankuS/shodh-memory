@@ -41,6 +41,7 @@ import {
   boardOf,
   dueMeta,
   elapsedLabel,
+  hoistCommonPrefix,
   lanesOf,
   lifelineOf,
   originOf,
@@ -583,12 +584,17 @@ function TaskActions({ todo, profile }: { todo: TriageTodo; profile: string }) {
 
 function TaskRow({
   todo,
+  display,
   profile,
   all,
   byId,
   showProject,
 }: {
   todo: TriageTodo;
+  /** The title with any group-wide prefix already lifted to the heading. The
+   *  FULL string stays on the row's accessible name and its tooltip, so
+   *  nothing that was stored has been made unreachable — only unrepeated. */
+  display: string;
   profile: string;
   all: readonly TriageTodo[];
   byId: ReadonlyMap<string, TriageTodo>;
@@ -618,6 +624,7 @@ function TaskRow({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-label={`${shortId(todo)} — ${todo.content}`}
+        title={todo.content}
         className={cn(
           "hover:bg-accent/60 flex w-full items-center gap-2.5 px-4 py-1.5 text-left",
           "transition-colors duration-100",
@@ -626,7 +633,7 @@ function TaskRow({
       >
         <Icon aria-hidden="true" className={cn("size-3.5 shrink-0", meta.iconClass)} strokeWidth={1.8} />
         <span className={cn("min-w-0 flex-1 text-[13px]", open ? "whitespace-normal" : "truncate")}>
-          {todo.content}
+          {display}
         </span>
         <Meta className="shrink-0 flex-nowrap">
           <span className="text-muted-foreground/70 mono text-[10px]">{shortId(todo)}</span>
@@ -848,6 +855,7 @@ export function TasksView({ reach }: { reach: Reachability }) {
     () => visible.filter((t) => t.status === "done" || t.status === "cancelled"),
     [visible],
   );
+  const settledPrefix = useMemo(() => hoistCommonPrefix(settled.map((t) => t.content)), [settled]);
 
   if (reach.state !== "online") {
     return (
@@ -1110,6 +1118,9 @@ export function TasksView({ reach }: { reach: Reachability }) {
           if (rows.length === 0) return null;
           const meta = STATUS_META[status];
           const Icon = meta.icon;
+          // Said once above the group instead of fifty times down the left
+          // edge. Null on any group that does not genuinely share a label.
+          const shared = hoistCommonPrefix(rows.map((t) => t.content));
           return (
             <section key={status}>
               <div className="border-border bg-muted/50 sticky top-0 z-10 flex items-center gap-2 border-b px-4 py-1.5 backdrop-blur-sm">
@@ -1118,11 +1129,18 @@ export function TasksView({ reach }: { reach: Reachability }) {
                   {meta.label}
                 </span>
                 <span className="text-muted-foreground/60 mono text-[10px]">{rows.length}</span>
+                {shared ? (
+                  <span className="text-muted-foreground/70 min-w-0 truncate text-[11px]">
+                    every title begins{" "}
+                    <span className="mono text-muted-foreground">{shared.prefix}</span>
+                  </span>
+                ) : null}
               </div>
-              {rows.map((t) => (
+              {rows.map((t, i) => (
                 <TaskRow
                   key={t.id}
                   todo={t}
+                  display={shared ? shared.rest[i] : t.content}
                   profile={profile}
                   all={todos}
                   byId={byId}
@@ -1163,13 +1181,17 @@ export function TasksView({ reach }: { reach: Reachability }) {
               </span>
               <span className="text-muted-foreground/60 mono text-[10px]">{settled.length}</span>
               <span className="text-muted-foreground/60 text-[11px]">
-                {showSettled ? "" : "done and dismissed, with the reason"}
+                {showSettled
+                  ? settledPrefix
+                    ? `every title begins ${settledPrefix.prefix}`
+                    : ""
+                  : "done and dismissed, with the reason"}
               </span>
             </button>
 
             {showSettled ? (
               <div>
-                {settled.map((todo) => {
+                {settled.map((todo, i) => {
                   const reason = settledReason(todo);
                   const dismissed = todo.status === "cancelled";
                   const line = lifelineOf(todo);
@@ -1185,7 +1207,12 @@ export function TasksView({ reach }: { reach: Reachability }) {
                         <Check aria-hidden="true" className="text-muted-foreground/60 mt-0.5 size-3 shrink-0" strokeWidth={1.8} />
                       )}
                       <div className="min-w-0 flex-1">
-                        <p className="text-muted-foreground text-[12px] leading-snug">{todo.content}</p>
+                        <p
+                          className="text-muted-foreground text-[12px] leading-snug"
+                          title={todo.content}
+                        >
+                          {settledPrefix ? settledPrefix.rest[i] : todo.content}
+                        </p>
                         {dismissed ? (
                           reason ? (
                             <p className="text-[11px] leading-relaxed">
