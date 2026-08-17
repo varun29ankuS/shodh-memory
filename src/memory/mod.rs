@@ -7792,10 +7792,18 @@ impl MemorySystem {
         memory_id: &MemoryId,
         parent_id: Option<MemoryId>,
     ) -> Result<()> {
-        // Update the persistent copy in long-term storage
-        let mut memory = self.long_term_memory.get(memory_id)?;
-        memory.set_parent(parent_id.clone());
-        self.long_term_memory.update(&memory)?;
+        // Update the persistent copy in long-term storage.
+        //
+        // Read-modify-write under `storage.modify`, not inline: handlers call
+        // this while holding only a `.read()` guard on the MemorySystem (see
+        // `handlers/remember.rs`'s async parent resolution, and
+        // `zenoh_transport/handlers.rs`), so two writers to the same memory run
+        // concurrently and an inline get/mutate/update would drop whichever
+        // read first.
+        let memory = self
+            .long_term_memory
+            .modify(memory_id, |m| m.set_parent(parent_id.clone()))?
+            .ok_or_else(|| anyhow::anyhow!("Memory not found: {memory_id:?}"))?;
 
         // Also update the in-memory tier copy (working or session) so reads
         // reflect the parent_id immediately without waiting for tier promotion
