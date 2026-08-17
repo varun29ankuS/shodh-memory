@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils";
 import mark from "@/assets/shodh-mark.png";
 import { DotMap, type DotMapExtent } from "./DotMap";
 import { Learning } from "./Learning";
+import { Standing } from "./Standing";
 import {
   corpusSpan,
   lastWrite,
@@ -660,6 +661,18 @@ export function BriefingView({ reach }: { reach: Reachability }) {
               </p>
             ) : null}
           </section>
+
+          {/* ------------------------------------------------ you asked for
+              What you asked to be told about, above what the store has been
+              doing to itself: an obligation outranks a census. It is the same
+              kind of claim as "since you left" one line above — something that
+              happened on your behalf while you were not looking — and it is the
+              only reminder surface anywhere in the product. See Standing.tsx
+              for why it is not on Tasks.
+
+              Gated on `online` like every other read here, so an unreachable
+              store does not repeat what the standfirst already said. */}
+          {online ? <Standing profile={profile} /> : null}
 
           {/* ------------------------------------------------ is it learning
               The ontology band above says what was extracted; this says what
