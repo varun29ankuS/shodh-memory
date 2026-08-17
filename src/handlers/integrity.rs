@@ -25,10 +25,11 @@ pub type AppState = std::sync::Arc<MultiUserMemoryManager>;
 
 /// Upper bound on a caller-supplied time budget.
 ///
-/// Above the server's own request timeout the budget would never bind, and the
-/// scrub would be killed mid-sweep and return nothing at all instead of an
-/// honest partial report.
-const MAX_DURATION_MS: u64 = 120_000;
+/// Held below `ServerConfig::request_timeout_secs` (default 60s) on purpose: a
+/// budget above the request timeout could never bind, so the scrub would be
+/// killed mid-sweep and return nothing at all instead of the honest partial
+/// report the budget exists to produce.
+const MAX_DURATION_MS: u64 = 55_000;
 
 #[derive(Debug, Deserialize)]
 pub struct ScrubRequest {

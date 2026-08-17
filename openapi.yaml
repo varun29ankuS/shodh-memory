@@ -896,7 +896,7 @@ paths:
                     rather than health.
                 max_duration_ms:
                   type: integer
-                  description: Wall-clock ceiling. Defaults to 20000, max 120000.
+                  description: Wall-clock ceiling. Defaults to 45000, max 55000 -- both held under the 60s server request timeout so the budget binds before the timeout does.
       responses:
         '200':
           description: Integrity report

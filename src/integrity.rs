@@ -103,10 +103,16 @@ pub const FINDINGS_PER_CLASS: usize = 25;
 
 /// Default wall-clock ceiling for one scrub, in milliseconds.
 ///
-/// Comfortably below the server's `TimeoutLayer`, so a scrub that would outrun
-/// the request budget reports itself incomplete rather than being killed and
-/// returning nothing.
-pub const DEFAULT_MAX_DURATION_MS: u64 = 20_000;
+/// Below the server's `TimeoutLayer` (`request_timeout_secs`, default 60), so a
+/// scrub that would outrun the request budget reports itself incomplete rather
+/// than being killed and returning nothing at all.
+///
+/// Sized against measurement, not taste: the largest live profile sweeps in
+/// ~14s cold. A 20s ceiling would leave that profile one growth spurt away
+/// from permanently reporting `indeterminate` — honest, but useless. 45s keeps
+/// roughly 3x headroom over the measured cost while still leaving 15s of margin
+/// under the request timeout.
+pub const DEFAULT_MAX_DURATION_MS: u64 = 45_000;
 
 /// Readahead window for the sequential scans.
 ///
