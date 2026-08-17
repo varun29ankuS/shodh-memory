@@ -155,8 +155,35 @@ export function ConversationOverlay({ seat }: { seat: SeatReachability }) {
   // top of itself is noise.
   if (pathname === "/chat") return null;
   if (seat.state !== "online") return null;
+  /**
+   * NO CONVERSATION, NO DOCK.
+   *
+   * This used to render whatever the state, so every screen in the product
+   * carried a permanent bar in its bottom-right corner reading "No model" with
+   * a dismiss X beside it — overlapping the content on each one. It was neither
+   * of the two things a corner bar is allowed to be. Not a state indicator: the
+   * one place this product states its connections is the status strip, said
+   * once for the whole product, and a second permanent statement in the
+   * opposite corner is the three-places-one-fact problem that strip exists to
+   * have solved. Not a transient notice either, since it never went away and
+   * offered a dismissal for a state that was not going to change.
+   *
+   * And it could not act. With no active conversation the expanded panel had no
+   * model picker, no transcript and no composer — only a line telling the
+   * reader to go to Conversations. A bar whose whole content is directions to
+   * another screen is what the nav entry already is.
+   *
+   * So the dock exists exactly when there is a conversation for it to be about,
+   * which is also when its header answers the two questions it is for — which
+   * model, how many tokens. Nothing is orphaned: Conversations is still in the
+   * rail, and a stream starting un-dismisses this from anywhere.
+   */
+  if (!activeId || !convo) return null;
   if (dismissed) return null;
 
+  // Null for a real conversation whose model the seat has not reported yet —
+  // said plainly rather than guessed at, and now a fact about something that
+  // exists rather than a label on an empty shell.
   const label = model ? model.name || model.id : "No model";
 
   const body = (
@@ -247,39 +274,29 @@ export function ConversationOverlay({ seat }: { seat: SeatReachability }) {
       {mode === "expanded" ? (
         <>
           <div className="border-border flex shrink-0 items-center gap-1.5 border-y px-2 py-1.5">
-            {activeId ? (
-              <ModelPicker
-                current={model}
-                disabled={streaming}
-                swap
-                onSelect={async (m) => {
-                  const applied = await changeModel(activeId, m.provider, m.id);
-                  setModel(activeId, applied);
-                  void queryClient.invalidateQueries({ queryKey: ["seat-sessions"] });
-                }}
-              />
-            ) : (
-              <span className="text-muted-foreground text-[11px]">
-                Start a conversation from Conversations to use it here.
-              </span>
-            )}
+            <ModelPicker
+              current={model}
+              disabled={streaming}
+              swap
+              onSelect={async (m) => {
+                const applied = await changeModel(activeId, m.provider, m.id);
+                setModel(activeId, applied);
+                void queryClient.invalidateQueries({ queryKey: ["seat-sessions"] });
+              }}
+            />
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {activeId && convo ? (
-              <MessageList turns={convo.turns} conversationId={activeId} model={model} />
-            ) : null}
+            <MessageList turns={convo.turns} conversationId={activeId} model={model} />
           </div>
 
-          {activeId ? (
-            <div className="border-border shrink-0 border-t p-2">
-              <Composer
-                disabled={streaming}
-                disabledReason={streaming ? "Waiting for the current turn" : undefined}
-                onSend={(text) => void send(activeId, text)}
-              />
-            </div>
-          ) : null}
+          <div className="border-border shrink-0 border-t p-2">
+            <Composer
+              disabled={streaming}
+              disabledReason={streaming ? "Waiting for the current turn" : undefined}
+              onSend={(text) => void send(activeId, text)}
+            />
+          </div>
         </>
       ) : null}
     </section>
