@@ -4,6 +4,7 @@ import type { LinkedMemory, TodoComment, TriageProject, TriageTodo } from "./api
 import {
   authorKind,
   axisOf,
+  blockedNote,
   blockerIsSatisfied,
   blockersOf,
   boardOf,
@@ -15,10 +16,12 @@ import {
   lateDays,
   lifelineOf,
   originOf,
+  overdueAlarm,
   laneCurve,
   positionOn,
   priorityLabel,
   provenanceOf,
+  scheduleTokens,
   settledReason,
   shortId,
   statusChanges,
@@ -1139,5 +1142,166 @@ describe("boardOf — the schedule", () => {
       triage({ id: "b", status: "todo" }),
     ];
     expect(boardOf(rows, rows.length, [], NOW).recurring).toBe(1);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * WHAT THE RAIL SAYS IN WORDS
+ *
+ * These three replace five paragraphs, and every one of them is a claim that
+ * fails invisibly in the same way the counts do: a plural that reads as
+ * plausible, an "at least" that vanishes on a truncated list, a "no blocker
+ * named" printed over a profile that has three.
+ * ------------------------------------------------------------------ */
+
+/** A Board with every figure at rest. Each test below moves exactly the fields
+ *  its own claim is about, so a wrong branch cannot be masked by a fixture
+ *  that happened to satisfy two conditions at once. */
+const board = (extra: Partial<Board> = {}): Board => ({
+  shown: 0,
+  total: 0,
+  truncated: false,
+  open: 0,
+  underway: 0,
+  blocked: 0,
+  todo: 0,
+  backlog: 0,
+  settled: 0,
+  done: 0,
+  cancelled: 0,
+  overdue: 0,
+  overdueDays: null,
+  dueSoon: 0,
+  dated: 0,
+  recurring: 0,
+  projects: 0,
+  moved: 0,
+  dependencies: 0,
+  waiting: 0,
+  from: null,
+  to: null,
+  ...extra,
+});
+
+describe("overdueAlarm", () => {
+  it("says nothing when nothing is late", () => {
+    // Silence, not "0 overdue": the schedule tokens carry the denominator, and
+    // an alarm that fires with a zero in it stops being an alarm.
+    expect(overdueAlarm(board({ dated: 4 }))).toBeNull();
+  });
+
+  it("states the count with a scale, which is what makes it a judgement", () => {
+    expect(overdueAlarm(board({ overdue: 5, overdueDays: 118 }))).toEqual({
+      headline: "5 tasks are past their due date",
+      detail: "the oldest by 118 days",
+    });
+  });
+
+  it("agrees with itself in the singular, on both the count and the days", () => {
+    expect(overdueAlarm(board({ overdue: 1, overdueDays: 1 }))).toEqual({
+      headline: "1 task is past its due date",
+      detail: "the oldest by 1 day",
+    });
+  });
+
+  it("drops the scale rather than printing 'the oldest by 0 days'", () => {
+    // Late by less than a calendar day is real lateness with no useful number
+    // in it. `lateDays` returns 0 there, and 0 is not null.
+    expect(overdueAlarm(board({ overdue: 2, overdueDays: 0 }))?.detail).toBeNull();
+  });
+
+  it("states a FLOOR on a truncated list instead of withholding the alarm", () => {
+    // Every ratio is suppressed while truncated because no denominator is its
+    // own. A count of late work has no denominator — it can only undercount —
+    // so it is stated as a lower bound. Hiding it would be the worse failure.
+    expect(overdueAlarm(board({ overdue: 3, truncated: true }))?.headline).toBe(
+      "at least 3 tasks are past their due date",
+    );
+  });
+});
+
+describe("blockedNote", () => {
+  it("says the mechanism was never used, which is what makes 'Blocked 0' weak", () => {
+    // The zero is a count of a status somebody set. That no task in the whole
+    // profile NAMES a blocker is the part the count cannot carry, and it is
+    // the live state of every profile on this instance.
+    expect(blockedNote(board({ blocked: 0 }))).toBe("no blocker named");
+  });
+
+  it("still says it when tasks declare themselves blocked and name nothing", () => {
+    // Four rows in the blocked status with no `blocked_by` and no `blocked_on`
+    // is not a contradiction — it is exactly the case worth reporting.
+    expect(blockedNote(board({ blocked: 4 }))).toBe("no blocker named");
+  });
+
+  it("reports a real dependency, because that chain can be walked", () => {
+    expect(blockedNote(board({ dependencies: 3 }))).toBe("3 on another task");
+  });
+
+  it("keeps free text apart from a task reference — nothing can chase free text", () => {
+    expect(blockedNote(board({ dependencies: 2, waiting: 1 }))).toBe(
+      "2 on another task · 1 on something else",
+    );
+  });
+
+  it("reports free text on its own when no task names another", () => {
+    expect(blockedNote(board({ waiting: 2 }))).toBe("2 on something else");
+  });
+});
+
+describe("scheduleTokens", () => {
+  it("says so once when nothing is dated, so no badge reads as 'on time'", () => {
+    // The `claude` profile and most of this instance. Without this the absence
+    // of any overdue badge is indistinguishable from everything being current.
+    expect(scheduleTokens(board())).toEqual([
+      { text: "no due dates recorded", tone: "muted" },
+    ]);
+  });
+
+  it("keeps the denominator beside 'nothing overdue'", () => {
+    // A bare "0 overdue" over an unstated population is the same failure at
+    // the other end of the scale.
+    expect(scheduleTokens(board({ dated: 7 }))).toContainEqual({
+      text: "nothing overdue, of 7 dated",
+      tone: "muted",
+    });
+  });
+
+  it("drops the reassurance entirely once something IS late", () => {
+    // The alarm above the ledger owns that case; a "nothing overdue" beside it
+    // would be a direct contradiction.
+    expect(scheduleTokens(board({ dated: 7, overdue: 2 }))).not.toContainEqual({
+      text: "nothing overdue, of 7 dated",
+      tone: "muted",
+    });
+  });
+
+  it("gives due-soon the warn tone and nothing else takes it", () => {
+    const tokens = scheduleTokens(board({ dated: 3, dueSoon: 2 }));
+    expect(tokens).toContainEqual({ text: "2 due within 3 days", tone: "warn" });
+    expect(tokens.filter((t) => t.tone === "warn")).toHaveLength(1);
+  });
+
+  it("conjugates the repeat count as a verb", () => {
+    // "1 repeats" and "2 repeat" — one task repeats, two tasks repeat. The
+    // inverse reads as plausible English and is wrong.
+    expect(scheduleTokens(board({ recurring: 1 }))).toContainEqual({
+      text: "1 repeats",
+      tone: "muted",
+    });
+    expect(scheduleTokens(board({ recurring: 2 }))).toContainEqual({
+      text: "2 repeat",
+      tone: "muted",
+    });
+  });
+
+  it("says nothing repeats only where dates exist to make it a question", () => {
+    expect(scheduleTokens(board({ dated: 2 }))).toContainEqual({
+      text: "nothing repeats",
+      tone: "muted",
+    });
+    // Undated and non-recurring is the single-token case above; it must not
+    // also collect "nothing repeats".
+    expect(scheduleTokens(board())).toHaveLength(1);
   });
 });

@@ -925,6 +925,146 @@ export function boardOf(
   };
 }
 
+/* ================================================================== *
+ * WHAT THE RAIL SAYS IN WORDS — AND HOW LITTLE OF IT THERE SHOULD BE
+ *
+ * THE SCREEN WAS OPENING AS A DISCLOSURE DOCUMENT. Measured live at 1920×945
+ * on the `claude` profile, the rail held 166 words in five prose blocks, and
+ * four of the first five sentences a reader met were statements about
+ * something ABSENT: no due dates, nothing blocked, no dependency, no origin
+ * field, nothing extracted. Every one of them was true. Together they made a
+ * modest claim — here is recorded work — carry a disclaimer several times its
+ * own size, and a reader could not tell in two seconds what mattered.
+ *
+ * THE RULE APPLIED HERE: a caveat must be PROPORTIONATE to the claim it
+ * qualifies, and AVAILABLE rather than FIRST. Nothing below is deleted from
+ * the product; it is either compressed to the size of the thing it qualifies
+ * and moved beside it, or moved one level down behind the disclosure
+ * affordance. Which of the two depends on a single test — does it change how a
+ * number ON SCREEN should be read? If it does it stays visible, however short
+ * it has to become.
+ *
+ * A ZERO AND A SENTENCE SAYING ZERO ARE THE SAME FACT TWICE. The ledger
+ * already renders `Blocked 0`; a paragraph beginning "Nothing is marked
+ * blocked" restated it in thirty-two words and buried the part that was not
+ * already on screen — that no task in this profile has ever NAMED a blocker,
+ * which is what makes the zero weak evidence rather than proof. So the count
+ * stays a count and the caveat becomes a three-word note on the same line.
+ * ================================================================== */
+
+export interface OverdueAlarm {
+  /** The claim itself. Emphasised by the caller. */
+  headline: string;
+  /** How late the worst of them is, or null when the oldest is under a day
+   *  past — "the oldest by 0 days" is worse than saying nothing. */
+  detail: string | null;
+}
+
+/**
+ * The one thing on this screen that must not be missable, in words.
+ *
+ * A FLOOR RATHER THAN A SUPPRESSION WHEN THE LIST IS TRUNCATED. Every RATIO on
+ * this screen is withheld while `board.truncated`, because the server
+ * paginates across projects and no lane's denominator would be its own. A
+ * count of late work has no denominator to be wrong about — it can only be an
+ * undercount — so it is stated as "at least n". Withholding an alarm is a
+ * worse failure than stating a lower bound on it.
+ *
+ * The days figure is `board.overdueDays`, which is `lateDays` over the same
+ * clock the row badges use, so the standing figure and the rows cannot
+ * disagree by a day.
+ */
+export function overdueAlarm(board: Board): OverdueAlarm | null {
+  if (board.overdue === 0) return null;
+  const atLeast = board.truncated ? "at least " : "";
+  const headline =
+    board.overdue === 1
+      ? `${atLeast}1 task is past its due date`
+      : `${atLeast}${board.overdue} tasks are past their due date`;
+  const detail =
+    board.overdueDays !== null && board.overdueDays >= 1
+      ? `the oldest by ${board.overdueDays} ${board.overdueDays === 1 ? "day" : "days"}`
+      : null;
+  return { headline, detail };
+}
+
+/**
+ * What the profile's blocked-ness is GROUNDED IN — the note that sits on the
+ * ledger's Blocked line, beside the count it qualifies.
+ *
+ * "Blocked 0" is a literal count of a status somebody set. It is not evidence
+ * that the work is clear, and the reason is not visible anywhere else on the
+ * screen: `blocked_by` (real todo references, cycle-checked server-side) and
+ * `blocked_on` (free text) are both empty across every live profile, so the
+ * mechanism that would produce a non-zero has never been used. That is the
+ * absence of a signal, and it qualifies the number directly — which is why it
+ * stays on the surface rather than going behind the disclosure affordance,
+ * and why it is three words rather than thirty-two.
+ *
+ * Never null. A blank beside the count would be indistinguishable from a
+ * screen that had not looked.
+ */
+export function blockedNote(board: Board): string {
+  const parts: string[] = [];
+  // Named as a task: the chain can be walked, and the row will draw it.
+  if (board.dependencies > 0) parts.push(`${board.dependencies} on another task`);
+  // Free text: a person, a vendor, a decision. Nothing can chase it.
+  if (board.waiting > 0) parts.push(`${board.waiting} on something else`);
+  return parts.length > 0 ? parts.join(" · ") : "no blocker named";
+}
+
+export interface ScheduleToken {
+  text: string;
+  /** `warn` is work waiting on something; everything else is ink. Late work
+   *  does not appear here at all — it has its own alarm above the ledger. */
+  tone: "muted" | "warn";
+}
+
+/**
+ * The schedule, as scannable tokens rather than as a paragraph.
+ *
+ * WHAT WAS DROPPED AND WHY. This used to open with thirty words: "No open task
+ * carries a due date, so nothing here is early or late. Dates and repeats are
+ * set where a task is created; this screen does not add them." The first
+ * clause qualifies something visible — with no dates anywhere, a reader must
+ * not read the absence of overdue badges as "everything is on time" — and it
+ * survives, at four words. The second clause describes the PRODUCT, not this
+ * profile's numbers: it explains why there is no date-setting control, which
+ * is a question about the screen rather than about the work. It moved behind
+ * the disclosure affordance.
+ *
+ * "nothing overdue, of n dated" is kept in full, because a bare "0 overdue"
+ * over an unstated denominator is the same failure at the other end.
+ */
+export function scheduleTokens(board: Board): ScheduleToken[] {
+  if (board.dated === 0 && board.recurring === 0) {
+    return [{ text: "no due dates recorded", tone: "muted" }];
+  }
+
+  const tokens: ScheduleToken[] = [];
+  if (board.overdue === 0 && board.dated > 0) {
+    tokens.push({ text: `nothing overdue, of ${board.dated} dated`, tone: "muted" });
+  }
+  if (board.dueSoon > 0) {
+    tokens.push({ text: `${board.dueSoon} due within 3 days`, tone: "warn" });
+  }
+  if (board.recurring > 0) {
+    // A verb, not a noun: "1 repeats", "2 repeat" — one task repeats, two
+    // tasks repeat.
+    tokens.push({
+      text: `${board.recurring} ${board.recurring === 1 ? "repeats" : "repeat"}`,
+      tone: "muted",
+    });
+  } else {
+    // Reaching here means nothing recurs, and passing the guard above with
+    // nothing recurring means something IS dated — so this needs no second
+    // `dated > 0` test. One was written and removed: it could never be false,
+    // and a condition that cannot fail is a condition no test can pin.
+    tokens.push({ text: "nothing repeats", tone: "muted" });
+  }
+  return tokens;
+}
+
 /**
  * The time axis the lane strips share, or null when there is nothing to draw.
  *
