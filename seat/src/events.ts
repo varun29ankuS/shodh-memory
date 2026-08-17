@@ -105,6 +105,31 @@ export type SeatEvent =
 			temporal_credits_applied: number | null;
 			took_ms: number;
 	  }
+	| {
+			/**
+			 * The model asked to move the user's view (view-tools.ts `direct_view`).
+			 *
+			 * EMITTED AFTER VALIDATION, NOT AT THE CALL. The destination is a real
+			 * one and every entity here was resolved against this profile's graph,
+			 * so a consumer never has to re-check what the model claimed. The
+			 * unresolved terms are recorded too — a command that framed three of
+			 * five named things must not read as one that framed five.
+			 *
+			 * This is an ASK, not an outcome. Whether it applied or became a Follow
+			 * offer is decided by the authority ledger in the browser
+			 * (front/ui/src/stores/view.ts), which the seat cannot see.
+			 */
+			type: "view_command";
+			tool_call_id: string;
+			/** Why, in the model's own words. Shown to the person verbatim. */
+			reason: string;
+			/** Destination path (e.g. "/geo"), or null when the move only frames. */
+			destination: string | null;
+			/** Entity names as the graph knows them — resolved, not as typed. */
+			entities: string[];
+			/** Terms that named nothing in this profile. Never silently dropped. */
+			unresolved: string[];
+	  }
 	| { type: "harness_learning_applied"; memories: { id: string; content: string; score: number }[] }
 	| {
 			/**

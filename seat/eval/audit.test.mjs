@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 
 import {
 	AUDIT_COLUMNS,
+	AUDIT_EVENT_TYPES,
 	buildAuditRows,
 	csvEscape,
 	pairToolCalls,
@@ -336,4 +337,72 @@ test("toJsonl emits one parseable row per line and nothing for no rows", () => {
 		["led-1", "led-2"],
 	);
 	assert.equal(toJsonl([]), "", "no rows must not produce a blank line");
+});
+
+// ── View commands in the trail ──────────────────────────────────────────────
+
+function viewRow(overrides = {}) {
+	return {
+		conversation_id: "conv-1",
+		user_id: "demo",
+		turn: 1,
+		ts: "2026-08-16T10:00:00.100Z",
+		event: {
+			type: "view_command",
+			tool_call_id: "call-9",
+			reason: "these 12 memories cluster on the Malabar coast",
+			destination: "/geo",
+			entities: ["Malabar Coast", "Dali"],
+			unresolved: ["Atlantis"],
+		},
+		...overrides,
+	};
+}
+
+test("a view command becomes a durable row, so the move survives a reload", () => {
+	// It was browser-memory only before: the person reloaded and every record of
+	// where the conversation had taken them was gone.
+	const rows = buildAuditRows({ entries: [], events: [viewRow()] });
+	const view = rows.filter((row) => row.source === "view");
+	assert.equal(view.length, 1);
+	assert.equal(view[0].kind, "view_command");
+	assert.equal(view[0].actor, "agent");
+	assert.equal(view[0].ref, "call-9");
+});
+
+test("the row records the VALIDATED outcome, which its tool_call row cannot", () => {
+	// The tool call carries the arguments — the names the model hoped existed.
+	// This carries what the graph actually contained, and the two differ.
+	const [row] = buildAuditRows({ entries: [], events: [viewRow()] }).filter((r) => r.source === "view");
+	const detail = JSON.parse(row.detail);
+	assert.equal(detail.destination, "/geo");
+	assert.deepEqual(detail.entities, ["Malabar Coast", "Dali"]);
+	assert.deepEqual(detail.unresolved, ["Atlantis"]);
+	assert.equal(detail.reason, "these 12 memories cluster on the Malabar coast");
+});
+
+test("the row claims no verdict, because the seat never learns one", () => {
+	// Whether the command applied or waited as a Follow is decided by the
+	// authority ledger in the browser and reported to nobody. A field asserting
+	// it would be the trail inventing the one fact it cannot have.
+	const [row] = buildAuditRows({ entries: [], events: [viewRow()] }).filter((r) => r.source === "view");
+	const detail = JSON.parse(row.detail);
+	assert.deepEqual(Object.keys(detail).sort(), ["destination", "entities", "reason", "unresolved"]);
+});
+
+test("view_command is in the store filter, or the export would query past it", () => {
+	// buildAuditRows can only shape what the read returned; a type missing from
+	// this list is a row that is built and never fetched.
+	assert.ok(AUDIT_EVENT_TYPES.includes("view_command"));
+});
+
+test("a view command and its tool call both appear, and sort deterministically", () => {
+	const rows = buildAuditRows({
+		entries: [],
+		events: [startRow({ ts: "2026-08-16T10:00:00.000Z", event: { type: "tool_call_start", tool_call_id: "call-9", tool_name: "direct_view", args: { destination: "geo" } } }), viewRow()],
+	});
+	assert.deepEqual(
+		rows.map((row) => row.source),
+		["tool_call", "view"],
+	);
 });

@@ -105,7 +105,7 @@ export function pairToolCalls(rows: readonly StoredEventRow[]): ToolCallRecord[]
 }
 
 /** Where a row came from. */
-export type AuditSource = "ledger" | "tool_call" | "retrieval";
+export type AuditSource = "ledger" | "tool_call" | "retrieval" | "view";
 
 /**
  * One line of the audit trail. Deliberately flat and uniform across sources:
@@ -254,12 +254,53 @@ function retrievalRows(row: StoredEventRow): AuditRow[] {
 	return [];
 }
 
+/**
+ * A view command the model issued, as one row.
+ *
+ * WHY THIS IS NOT REDUNDANT WITH ITS `tool_call` ROW. The tool call records the
+ * ARGUMENTS: the destination id the model typed and the entity names it hoped
+ * existed. This records the OUTCOME of validation — the resolved path, the
+ * graph's own names for the entities (the resolver folds aliases, so the two
+ * lists differ), and the terms that named nothing. "The model asked to frame
+ * five things" and "three of them exist in this profile" are different facts,
+ * and only the second one describes what the person could have been shown.
+ *
+ * IT IS STILL AN ASK, NOT A VERDICT, and the trail must not be read as more.
+ * Whether the command applied or waited as a Follow offer is decided by the
+ * authority ledger in the browser against dimensions the person had touched;
+ * the seat never learns which. `detail` therefore states what was requested and
+ * says nothing about what appeared on screen.
+ */
+function viewRow(row: StoredEventRow): AuditRow | null {
+	if (row.event.type !== "view_command") return null;
+	const event = row.event;
+	return {
+		ts: row.ts,
+		source: "view",
+		// A view command exists only as the result of a model tool call; the
+		// seat has no path that issues one on its own behalf.
+		actor: "agent",
+		kind: "view_command",
+		user_id: row.user_id,
+		conversation_id: row.conversation_id,
+		turn: row.turn,
+		ref: event.tool_call_id,
+		detail: JSON.stringify({
+			reason: event.reason,
+			destination: event.destination,
+			entities: event.entities,
+			unresolved: event.unresolved,
+		}),
+	};
+}
+
 /** Event types {@link buildAuditRows} consumes. Also the store filter for the read. */
 export const AUDIT_EVENT_TYPES = [
 	"tool_call_start",
 	"tool_call_end",
 	"memory_recall",
 	"proactive_context",
+	"view_command",
 ] as const satisfies readonly SeatEvent["type"][];
 
 /**
@@ -279,6 +320,10 @@ export function buildAuditRows(input: {
 	for (const entry of input.entries) rows.push(ledgerRow(entry));
 	for (const call of pairToolCalls(input.events)) rows.push(toolCallRow(call));
 	for (const event of input.events) rows.push(...retrievalRows(event));
+	for (const event of input.events) {
+		const row = viewRow(event);
+		if (row) rows.push(row);
+	}
 
 	rows.sort((a, b) => {
 		if (a.ts !== b.ts) return a.ts < b.ts ? -1 : 1;

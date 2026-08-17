@@ -188,6 +188,122 @@ export interface ProactiveContextResponse {
 }
 
 /**
+ * src/graph_memory.rs `EntityNode`, narrowed to what the seat reads.
+ *
+ * `name` is the field that matters and the reason this lookup exists: the
+ * resolver's tier 0 maps a curated alias onto its canonical node, so asking for
+ * "the cargo ship" can come back named "Dali". Framing the caller's word rather
+ * than the graph's would light nothing, so the graph's name is what travels.
+ */
+export interface EntityNode {
+	uuid: string;
+	name: string;
+	entity_type?: string;
+	salience?: number;
+	mention_count?: number;
+}
+
+/** src/memory/types.rs `TodoStatus`, serialized snake_case. */
+export type TodoStatus = "backlog" | "todo" | "in_progress" | "blocked" | "done" | "cancelled";
+
+/**
+ * src/memory/types.rs `Todo` — the fields the seat reads, and ONLY those.
+ *
+ * `embedding` is deliberately absent from this type. It is 384 floats per todo
+ * and it IS serialized by the handlers on this branch (the strip landed on a
+ * separate branch, 59e9861d, which is not merged here): a fifty-todo listing
+ * carried roughly 287KB of floats. Declaring it would invite a caller to
+ * forward it, and everything a tool returns becomes model context.
+ */
+export interface BackendTodo {
+	id: string;
+	seq_num: number;
+	project_prefix: string | null;
+	project: string | null;
+	user_id: string;
+	content: string;
+	status: TodoStatus;
+	priority: string;
+	project_id: string | null;
+	parent_id: string | null;
+	contexts: string[];
+	tags: string[];
+	due_date: string | null;
+	blocked_on: string | null;
+	notes: string | null;
+	created_at: string;
+	updated_at: string;
+	completed_at: string | null;
+	blocked_by: string[];
+	related_memory_ids: string[];
+	comments: BackendTodoComment[];
+}
+
+/** src/memory/types.rs `TodoComment`. */
+export interface BackendTodoComment {
+	id: string;
+	todo_id: string;
+	author: string;
+	content: string;
+	comment_type: string;
+	created_at: string;
+	updated_at: string | null;
+}
+
+/** src/handlers/todos.rs `TodoListResponse`. */
+export interface TodoListResponse {
+	success: boolean;
+	count: number;
+	todos: BackendTodo[];
+	formatted: string;
+}
+
+/** src/handlers/todos.rs `TodoResponse`. */
+export interface TodoResponse {
+	success: boolean;
+	todo: BackendTodo | null;
+	formatted: string;
+}
+
+/** src/handlers/todos.rs `TodoCompleteResponse`. */
+export interface TodoCompleteResponse {
+	success: boolean;
+	todo: BackendTodo | null;
+	next_recurrence: BackendTodo | null;
+	unblocked: BackendTodo[];
+	formatted: string;
+}
+
+/** src/handlers/todos.rs `CommentResponse`. */
+export interface TodoCommentResponse {
+	success: boolean;
+	comment: BackendTodoComment | null;
+	formatted: string;
+}
+
+/** Filters for POST /api/todos — src/handlers/todos.rs `ListTodosRequest`. */
+export interface ListTodosParams {
+	userId: string;
+	status?: string[];
+	project?: string;
+	context?: string;
+	priority?: string;
+	query?: string;
+	limit?: number;
+	includeCompleted?: boolean;
+}
+
+/** Field patch for POST /api/todos/{id}/update — `UpdateTodoRequest`. */
+export interface UpdateTodoParams {
+	status?: TodoStatus;
+	priority?: string;
+	blockedOn?: string;
+	notes?: string;
+	contexts?: string[];
+	tags?: string[];
+}
+
+/**
  * Why a backend call failed, as a closed set of compile-time constants.
  *
  * The distinction this preserves cannot be recovered downstream: `request()`
@@ -500,6 +616,97 @@ export class ShodhBackend {
 			"DELETE",
 			`/api/memory/${encodeURIComponent(memoryId)}?user_id=${encodeURIComponent(userId)}`,
 		);
+	}
+
+	/**
+	 * POST /api/graph/entity/find — src/handlers/graph.rs `find_entity`.
+	 *
+	 * Returns `null` for a name this profile's graph does not know. The handler
+	 * calls the FUZZY resolver (`find_entity_by_name`: alias → exact →
+	 * case-insensitive → stemmed → substring → word), so a null here means the
+	 * term named nothing under any of those tiers, which is the strongest
+	 * "absent" this system can assert.
+	 *
+	 * `/api/graph/entities/all` is NOT usable for this: it truncates to a limit
+	 * after ranking by salience, so absence from that page is not absence from
+	 * the graph, and a checker built on it would call real entities imaginary.
+	 */
+	findEntity(userId: string, entityName: string): Promise<EntityNode | null> {
+		return this.request<EntityNode | null>("POST", "/api/graph/entity/find", {
+			user_id: userId,
+			entity_name: entityName,
+		});
+	}
+
+	/** POST /api/todos — src/handlers/todos.rs `list_todos` / `ListTodosRequest`. */
+	listTodos(params: ListTodosParams): Promise<TodoListResponse> {
+		return this.request<TodoListResponse>("POST", "/api/todos", {
+			user_id: params.userId,
+			status: params.status,
+			project: params.project,
+			context: params.context,
+			priority: params.priority,
+			query: params.query,
+			limit: params.limit,
+			include_completed: params.includeCompleted,
+		});
+	}
+
+	/** GET /api/todos/{id}?user_id=… — `get_todo` (Path + Query extractors). */
+	getTodo(userId: string, todoId: string): Promise<TodoResponse> {
+		return this.request<TodoResponse>(
+			"GET",
+			`/api/todos/${encodeURIComponent(todoId)}?user_id=${encodeURIComponent(userId)}`,
+		);
+	}
+
+	/**
+	 * POST /api/todos/{id}/update — `update_todo`.
+	 *
+	 * THE PATH-STYLE ROUTE, NOT THE FLAT ALIAS, and that is not a style choice.
+	 * On this branch `/api/todos/update` is registered without a path capture
+	 * while `update_todo` extracts `Path<String>`, so axum 0.8 fails the
+	 * extractor before the handler runs and every call returns 500 ("Wrong
+	 * number of path arguments"). The same holds for the flat complete, delete
+	 * and reorder aliases. Their repair (dedicated `*_flat` handlers reading
+	 * `todo_id` from the body) lives on `fix/todos-api-defects` and is not
+	 * merged. The path-style routes carry the `Path` extractor in BOTH versions,
+	 * so they are the shape that works before and after that merge.
+	 */
+	updateTodo(userId: string, todoId: string, patch: UpdateTodoParams): Promise<TodoResponse> {
+		return this.request<TodoResponse>("POST", `/api/todos/${encodeURIComponent(todoId)}/update`, {
+			user_id: userId,
+			status: patch.status,
+			priority: patch.priority,
+			blocked_on: patch.blockedOn,
+			notes: patch.notes,
+			contexts: patch.contexts,
+			tags: patch.tags,
+		});
+	}
+
+	/** POST /api/todos/{id}/complete — `complete_todo`. Path-style, for the
+	 *  reason given on {@link updateTodo}. */
+	completeTodo(userId: string, todoId: string): Promise<TodoCompleteResponse> {
+		return this.request<TodoCompleteResponse>("POST", `/api/todos/${encodeURIComponent(todoId)}/complete`, {
+			user_id: userId,
+		});
+	}
+
+	/** POST /api/todos/{id}/comments — `add_todo_comment` / `AddCommentRequest`. */
+	addTodoComment(params: {
+		userId: string;
+		todoId: string;
+		content: string;
+		author: string;
+		commentType: "comment" | "progress" | "resolution" | "activity";
+	}): Promise<TodoCommentResponse> {
+		return this.request<TodoCommentResponse>("POST", `/api/todos/${encodeURIComponent(params.todoId)}/comments`, {
+			user_id: params.userId,
+			content: params.content,
+			author: params.author,
+			comment_type: params.commentType,
+		});
 	}
 
 	/** GET /health — src/handlers/health.rs `health`. */
