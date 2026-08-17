@@ -113,9 +113,21 @@ describe("outageOf", () => {
     expect(out?.more).toContain("not reporting an empty profile");
   });
 
-  it("uses the status strip's own state names, so one product gives one verdict", () => {
-    // StatusStrip.tsx renders exactly these two strings for these two states.
+  it("names a rejected key exactly as the status strip does", () => {
+    // StatusStrip.tsx renders the literal string "Key rejected" for this state.
+    // This is the state the two surfaces were contradicting each other about,
+    // so it is the one where the words must match rather than merely agree.
     expect(outageOf({ state: "unauthorized", status: 401 }, absent)?.title).toBe("Key rejected");
-    expect(outageOf({ state: "offline", detail: "x" }, absent)?.title).toBe("Not connected");
+  });
+
+  it("does not claim a server that answered 500 is not running", () => {
+    // The strip says "Not running" for this state, which is right for a 26px
+    // strip and wrong as a full-page heading: `offline` also covers a backend
+    // that answered with an error, and that backend IS running. A heading
+    // asserting otherwise sends a reader to restart something healthy.
+    const errored = outageOf({ state: "offline", detail: "backend returned 500" }, absent);
+    expect(errored?.title).toBe("Not connected");
+    expect(errored?.title).not.toBe("Not running");
+    expect(errored?.more).toContain("backend returned 500");
   });
 });

@@ -65,10 +65,20 @@ export type Reachability =
  * views at once. So the discrimination lives HERE, next to the union that
  * carries it, and the views spend a sentence rather than a branch.
  *
- * THE WORDING IS THE STATUS STRIP'S. One product, one account of its
- * connection: `Key rejected` and `Not connected` are the strip's own states,
- * so a reader who looks up at the corner and down at the stage reads the same
- * verdict twice rather than two competing ones.
+ * `Key rejected` IS THE STATUS STRIP'S OWN STATE NAME, VERBATIM. That is the
+ * state the two surfaces were contradicting each other about, so it is the one
+ * where a reader who looks up at the corner and down at the stage must read
+ * the same words, not two paraphrases they have to reconcile.
+ *
+ * THE UNREACHABLE TITLE DELIBERATELY DIVERGES. The strip says `Not running`,
+ * which is a sharper remedy than "Offline" and right for a 26px strip that has
+ * room for one. It is not right here, because `offline` covers two different
+ * things: no answer at all, and an answer this client could not use
+ * (`backend returned 500` — see `probeBackend`). A server that replied 500 IS
+ * running, and a full-page heading asserting otherwise would send a reader to
+ * restart something healthy — the same class of mistake this whole function
+ * exists to stop. `Not connected` is true of both, and the specific evidence
+ * (`reach.detail`) is one click away.
  *
  * CONNECTED-AND-GENUINELY-EMPTY IS NOT THIS FUNCTION'S CASE, and deliberately.
  * "This profile holds nothing" is a claim about a corpus, which only the view
