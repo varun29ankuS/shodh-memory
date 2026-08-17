@@ -4,7 +4,9 @@ import { universeKey } from "@/features/graph/useUniverse";
 import { entityTypeToken, type UniverseModel } from "@/features/graph/universe";
 import { relName } from "@/features/recall/relation";
 import { useEntityMemories } from "@/features/graph/useEntityMemories";
+import { coOccurrenceOnly, observedWindow, typingLabel } from "@/features/graph/provenance";
 import { Badge } from "@/components/ui/badge";
+import { Meta, Stat } from "@/components/ui/meta";
 
 /**
  * The Inspector's content for a selected ENTITY.
@@ -193,6 +195,7 @@ function SourceMemories({
   entityId: string;
 }) {
   const { data, error, isFetching } = useEntityMemories(profile, name, entityId);
+  const census = data?.census ?? [];
 
   return (
     <section className="border-border border-t px-4 py-3">
@@ -204,7 +207,7 @@ function SourceMemories({
         <p className="text-muted-foreground mt-1 text-[11px] leading-relaxed">
           Provenance did not load for this entity.
         </p>
-      ) : !data || data.episodes.length === 0 ? (
+      ) : !data || data.sources.length === 0 ? (
         <p className="text-muted-foreground mt-1 text-[11px] leading-relaxed">
           No source episode is recorded for this entity's edges. An edge needs two entities, so a
           memory that mentioned only this one leaves no trace here.
@@ -214,23 +217,79 @@ function SourceMemories({
           <p className="text-muted-foreground/70 mt-0.5 text-[11px] leading-relaxed">
             Memories whose extraction connected this entity to another.
           </p>
-          <div className="mt-2 flex flex-col gap-1.5">
-            {data.episodes.map((ep) => (
-              <p
-                key={ep.uuid}
-                className="text-muted-foreground border-border/60 border-l-2 pl-2 text-[11px] leading-relaxed"
-              >
-                {ep.content.length > 240 ? `${ep.content.slice(0, 239)}…` : ep.content}
-              </p>
-            ))}
+
+          {/* HOW THE EDGES WERE DECIDED — the field that was arriving on every
+              traverse and being dropped. It goes above the excerpts because it
+              qualifies all of them at once: an entity attested only by
+              co-occurrence has a neighbourhood built from adjacency, and a
+              reader who learns that after reading eight excerpts has read them
+              under the wrong assumption. */}
+          {census.length > 0 ? (
+            <div className="mt-2">
+              <Meta className="text-[10px]">
+                {census.map((c) => (
+                  <Stat key={c.method} value={c.count} label={typingLabel(c.method)} />
+                ))}
+              </Meta>
+              {coOccurrenceOnly(census) ? (
+                // A caveat, so it is on screen rather than behind the info
+                // affordance — it changes how every excerpt below reads.
+                <p className="text-muted-foreground/80 border-warn/40 mt-1.5 border-l pl-2 text-[10px] leading-relaxed">
+                  Nothing read the relation. Every attestation here is two names inside the same
+                  window of text, so these links record adjacency, not a stated connection.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="mt-2 flex flex-col gap-2">
+            {data.sources.map(({ episode, provenance }) => {
+              const window = provenance ? observedWindow(provenance) : null;
+              return (
+                <div key={episode.uuid} className="border-border/60 border-l-2 pl-2">
+                  <p className="text-muted-foreground text-[11px] leading-relaxed">
+                    {episode.content.length > 240
+                      ? `${episode.content.slice(0, 239)}…`
+                      : episode.content}
+                  </p>
+                  {/* What this one source attests, from its own record. NOT
+                      `evidence_span` and NOT `confidence`: both are structurally
+                      empty in production and the reasoning is on the interface
+                      in lib/api/graph.ts. A single observation says so instead
+                      of printing a range whose ends are the same instant. */}
+                  {window ? (
+                    <Meta className="mt-0.5 text-[10px]">
+                      {provenance?.typed_by ? <span>{typingLabel(provenance.typed_by)}</span> : null}
+                      <Stat
+                        value={window.mentions}
+                        label={window.mentions === 1 ? "mention" : "mentions"}
+                      />
+                      <span>
+                        {window.sameDay
+                          ? observedDay(window.first)
+                          : `${observedDay(window.first)} – ${observedDay(window.last)}`}
+                      </span>
+                    </Meta>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
-          {data.totalSources > data.episodes.length ? (
+          {data.totalSources > data.sources.length ? (
             <p className="text-muted-foreground/60 mt-1.5 text-[10px]">
-              {data.episodes.length} of {data.totalSources} attesting sources shown
+              {data.sources.length} of {data.totalSources} attesting sources shown
             </p>
           ) : null}
         </>
       )}
     </section>
   );
+}
+
+/** A provenance timestamp as a date. The time of day is noise here — what the
+ *  record is being asked is when this entity was seen, not at which second. */
+function observedDay(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "";
+  return at.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" });
 }

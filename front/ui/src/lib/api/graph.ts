@@ -145,15 +145,62 @@ export interface TraverseRequest {
   max_depth?: number;
 }
 
-/** `ProvenanceRecord` — src/graph_memory.rs:771-786. One source episode that
- *  attested an edge. `source_episode_id` is a memory id. */
+/**
+ * `TypingMethod` — src/graph_memory.rs:898-908. HOW an edge came to be typed,
+ * which is the single most trust-relevant thing a provenance record carries: an
+ * entity whose edges are all `CoOccurrence` is held together by two names
+ * landing in the same 150 characters, while `Catena`, `Semantic` and `Glirel`
+ * are extractions that read the relation.
+ *
+ * Serialised with the variant names verbatim — no `rename_all` on the enum, and
+ * confirmed against a live traverse on `gdelt-bridge`, which returns
+ * `CoOccurrence`, `Catena`, `Cue`, `Semantic` and `LabelPair`.
+ *
+ * Typed as `string` for the same reason `memory_type` and `tier` are: the
+ * three unseen variants (`Learned`, `Glirel`, `OpenIe`) are all declared in the
+ * Rust enum and a union here would turn a server-side addition into a client
+ * compile error. `typingLabel()` in features/graph/provenance.ts names them.
+ */
+export type TypingMethod = string;
+
+/**
+ * `ProvenanceRecord` — src/graph_memory.rs:911-924. One source episode that
+ * attested an edge. `source_episode_id` is a memory id.
+ *
+ * TWO OF THESE SIX FIELDS ARE STRUCTURALLY EMPTY AND MUST NOT BE RENDERED.
+ * Both are typed here because they are on the wire, and both are documented
+ * here so the next person does not rediscover them the expensive way:
+ *
+ *  - `evidence_span` LOOKS like the offsets that would locate the exact quote
+ *    justifying an edge. It is not. Every write site sets it to a prefix
+ *    anchored at char 0 — `Some((0, truncated_context.chars().count()))` at
+ *    src/handlers/state.rs:3880 and `Some((0, span_len))` at
+ *    graph_memory.rs:3097 — and `truncated_context` is the first 150 chars of
+ *    the episode. Verified live: 79 of 79 provenance records on `gdelt-bridge`
+ *    carry exactly `[0, 150]`. The source's own comment says it is recorded
+ *    "so a later increment can resurface the exact attesting passage", i.e. it
+ *    is a forward reference, not a located span. Rendering it as evidence would
+ *    replace the existing 239-char excerpt with an ARBITRARY TRUNCATION 89
+ *    CHARACTERS SHORTER, wearing a provenance costume. It is a downgrade.
+ *  - `confidence` is `None` at every non-test construction site
+ *    (state.rs:3905, graph_memory.rs:3096, :4351, :4398, :6570, mod.rs:8585,
+ *    :8980, :10828). Live: 0 of 79 populated.
+ *
+ * The three that ARE real — `typed_by`, `mention_count` and the observed
+ * window — are what features/inspector/EntityDetail.tsx renders.
+ */
 export interface ProvenanceRecord {
   source_episode_id: string;
+  /** How many times this episode mentioned the pair. Real: live values span
+   *  1–6 with a long tail at 1. */
   mention_count: number;
   first_observed: string;
   last_observed: string;
+  /** Always `null` in production — see the note above. Do not render. */
   confidence?: number | null;
+  /** Always `[0, 150]` in production — see the note above. Do not render. */
   evidence_span?: [number, number] | null;
+  typed_by?: TypingMethod | null;
 }
 
 /** `RelationshipEdge` — src/graph_memory.rs:638-680. Only the fields this hop
