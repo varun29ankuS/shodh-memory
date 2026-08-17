@@ -58,6 +58,39 @@ pub struct TypedSpan {
     pub end: usize,
 }
 
+/// How the typer ranked the candidate labels at one span.
+///
+/// The decode keeps only the winner, which makes a confident call and a
+/// coin-flip between two labels indistinguishable downstream. This exposes the
+/// competition itself, so "the schema asks one argmax to separate 141
+/// near-colinear labels" is a claim that can be measured rather than assumed.
+#[derive(Debug, Clone)]
+pub struct SpanLabelRanking {
+    /// Surface text of the span, sliced from the original input.
+    pub text: String,
+    /// Byte offset of the span start in the original text.
+    pub start: usize,
+    /// Byte offset of the span end (exclusive) in the original text.
+    pub end: usize,
+    /// `(fine_label, sigmoid probability)` for the strongest labels at this
+    /// span, highest first. Length is `min(top_k, num_labels)`.
+    pub top: Vec<(String, f32)>,
+}
+
+impl SpanLabelRanking {
+    /// Probability gap between the winning label and the runner-up.
+    ///
+    /// A small margin means the winner was nearly a tie and the assigned type is
+    /// close to arbitrary; a large one means the label set separated this span
+    /// cleanly. `None` when fewer than two labels were ranked.
+    pub fn margin(&self) -> Option<f32> {
+        match self.top.as_slice() {
+            [first, second, ..] => Some(first.1 - second.1),
+            _ => None,
+        }
+    }
+}
+
 /// Configuration for the GLiNER bi-edge typer.
 #[derive(Debug, Clone)]
 pub struct GlinerConfig {
@@ -338,13 +371,84 @@ impl GlinerTyper {
         self.extract_inner(text)
     }
 
+    /// Rank the candidate labels at every span the decode would emit for `text`.
+    ///
+    /// Runs the same forward pass and the same greedy span selection as
+    /// [`extract`](Self::extract) — these are the spans the typer actually
+    /// commits to — then reports the top `top_k` labels at each, rather than
+    /// only the winner. Returns spans in the same order `extract` does.
+    pub fn rank_labels(&self, text: &str, top_k: usize) -> Result<Vec<SpanLabelRanking>> {
+        if text.trim().is_empty() || top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(pass) = self.forward(text)? else {
+            return Ok(Vec::new());
+        };
+        let model = pass.model;
+        let selected = Self::select_spans(
+            self.config.threshold,
+            &pass.logits,
+            pass.l_dim,
+            pass.k_dim,
+            pass.c_dim,
+            pass.num_words,
+        );
+
+        let mut rankings = Vec::with_capacity(selected.len());
+        for cand in selected {
+            if cand.start >= pass.num_words || cand.end >= pass.num_words {
+                continue;
+            }
+            // Every class score at this exact span, strongest first.
+            let base = (cand.start * pass.k_dim + (cand.end - cand.start)) * pass.c_dim;
+            let mut scored: Vec<(usize, f32)> = (0..pass.c_dim)
+                .map(|c| (c, sigmoid(pass.logits[base + c])))
+                .collect();
+            scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+            scored.truncate(top_k);
+
+            let top: Vec<(String, f32)> = scored
+                .into_iter()
+                .filter_map(|(c, p)| model.fine_labels.get(c).map(|l| (l.clone(), p)))
+                .collect();
+
+            let start_byte = pass.words[cand.start].start;
+            let end_byte = pass.words[cand.end].end;
+            rankings.push(SpanLabelRanking {
+                text: text.get(start_byte..end_byte).unwrap_or("").to_string(),
+                start: start_byte,
+                end: end_byte,
+                top,
+            });
+        }
+        Ok(rankings)
+    }
+
     fn extract_inner(&self, text: &str) -> Result<Vec<TypedSpan>> {
-        let model = self.ensure_model_loaded()?;
+        let Some(pass) = self.forward(text)? else {
+            return Ok(Vec::new());
+        };
+        Ok(self.decode(
+            text,
+            &pass.words,
+            pass.num_words,
+            &pass.logits,
+            pass.l_dim,
+            pass.k_dim,
+            pass.c_dim,
+            pass.model,
+        ))
+    }
+
+    /// One GLiNER forward pass over `text`. `Ok(None)` when the text contains no
+    /// words at all, which is not an error and has no spans to report.
+    fn forward(&self, text: &str) -> Result<Option<ForwardPass<'_>>> {
+        let model: &LazyGlinerModel = self.ensure_model_loaded()?.as_ref();
 
         // 1. Word split (gliner WhitespaceTokenSplitter: `\w+(?:[-_]\w+)*|\S`).
         let mut words = whitespace_split(text);
         if words.is_empty() {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         if words.len() > self.config.max_len {
             words.truncate(self.config.max_len);
@@ -437,32 +541,28 @@ impl GlinerTyper {
         let k_dim = shape[2] as usize;
         let c_dim = shape[3] as usize;
 
-        Ok(self.decode(text, &words, num_words, logits, l_dim, k_dim, c_dim, model))
+        Ok(Some(ForwardPass {
+            words,
+            num_words,
+            logits: logits.to_vec(),
+            l_dim,
+            k_dim,
+            c_dim,
+            model,
+        }))
     }
 
-    /// gliner `SpanDecoder` decode: threshold on sigmoid probabilities, drop
-    /// out-of-range spans, then greedy non-overlapping selection (flat NER).
-    #[allow(clippy::too_many_arguments)]
-    fn decode(
-        &self,
-        text: &str,
-        words: &[Word],
-        num_words: usize,
+    /// gliner `SpanDecoder` span selection: threshold on sigmoid probabilities,
+    /// drop out-of-range spans, then greedy non-overlapping selection (flat NER,
+    /// single-label). Returned sorted by start word, as gliner returns them.
+    fn select_spans(
+        threshold: f32,
         logits: &[f32],
         l_dim: usize,
         k_dim: usize,
         c_dim: usize,
-        model: &LazyGlinerModel,
-    ) -> Vec<TypedSpan> {
-        let threshold = self.config.threshold;
-
-        // Candidate (start, end_word_inclusive, class, score) above threshold.
-        struct Cand {
-            start: usize,
-            end: usize,
-            class: usize,
-            score: f32,
-        }
+        num_words: usize,
+    ) -> Vec<Cand> {
         let mut cands: Vec<Cand> = Vec::new();
 
         for s in 0..l_dim {
@@ -486,9 +586,9 @@ impl GlinerTyper {
             }
         }
 
-        // greedy_search (flat NER, single-label): sort by descending score, keep a
-        // candidate only if it does not overlap any already-selected span. Overlap
-        // (gliner `has_overlapping`): identical (start,end) OR intervals intersect.
+        // greedy_search: sort by descending score, keep a candidate only if it
+        // does not overlap any already-selected span. Overlap (gliner
+        // `has_overlapping`): identical (start,end) OR intervals intersect.
         cands.sort_by(|a, b| b.score.total_cmp(&a.score));
         let mut selected: Vec<Cand> = Vec::new();
         for cand in cands {
@@ -504,8 +604,32 @@ impl GlinerTyper {
             }
         }
 
-        // Map to char offsets + labels, sorted by start (gliner returns by start).
         selected.sort_by_key(|c| c.start);
+        selected
+    }
+
+    /// Select spans and resolve each winner to its fine label, coarse rollup and
+    /// byte offsets in the original text.
+    #[allow(clippy::too_many_arguments)]
+    fn decode(
+        &self,
+        text: &str,
+        words: &[Word],
+        num_words: usize,
+        logits: &[f32],
+        l_dim: usize,
+        k_dim: usize,
+        c_dim: usize,
+        model: &LazyGlinerModel,
+    ) -> Vec<TypedSpan> {
+        let selected = Self::select_spans(
+            self.config.threshold,
+            logits,
+            l_dim,
+            k_dim,
+            c_dim,
+            num_words,
+        );
         let mut spans = Vec::with_capacity(selected.len());
         for cand in selected {
             if cand.start >= num_words || cand.end >= num_words {
@@ -536,6 +660,29 @@ impl GlinerTyper {
         }
         spans
     }
+}
+
+/// A span/label candidate: word range (end inclusive), class index, and the
+/// sigmoid probability the scorer gave that pairing.
+struct Cand {
+    start: usize,
+    end: usize,
+    class: usize,
+    score: f32,
+}
+
+/// The result of one GLiNER forward pass, kept so that both the decode and the
+/// label-ranking diagnostic can read the same logits without running the model
+/// twice.
+struct ForwardPass<'a> {
+    words: Vec<Word>,
+    num_words: usize,
+    /// `[1, l_dim, k_dim, c_dim]` flattened span/label logits.
+    logits: Vec<f32>,
+    l_dim: usize,
+    k_dim: usize,
+    c_dim: usize,
+    model: &'a LazyGlinerModel,
 }
 
 /// One whitespace-split word with its byte offsets in the original text.
@@ -720,6 +867,145 @@ mod tests {
                 b.coarse
             );
         }
+    }
+
+    /// HYPOTHESIS PROBE — is the 141-label inference set self-defeating?
+    ///
+    /// The standing explanation for entity-type collapse was that one bi-encoder
+    /// argmax cannot separate 141 near-colinear label embeddings, so the winner
+    /// at each span is close to a coin flip between many near-tied labels. That
+    /// is a measurable claim, and this measures it: for each span the typer
+    /// commits to, it dumps the top-5 label probabilities and the winner's
+    /// margin over the runner-up.
+    ///
+    /// It asserts the weak, load-bearing form of the claim's negation — that the
+    /// winner is not routinely a near-tie. If the label set really were
+    /// unseparable, margins would cluster near zero and this would fail, which
+    /// is exactly the signal a coarse-first redesign would need before it could
+    /// be justified.
+    #[test]
+    fn label_competition_is_not_a_near_tie() {
+        let config = GlinerConfig::from_env();
+        if !config.assets_present() {
+            eprintln!(
+                "SKIP label_competition_is_not_a_near_tie: assets not found at {:?}",
+                config.model_path
+            );
+            return;
+        }
+        let threshold = config.threshold;
+        let typer = GlinerTyper::new(config);
+
+        // Indian defence text, the corpus where the collapse was reported.
+        let texts = [
+            "Hindustan Aeronautics Limited is headquartered in Bangalore and \
+             assembles the Tejas at its Nashik division.",
+            "Bharat Dynamics Limited operates plants in Hyderabad and Visakhapatnam \
+             for the Akash missile programme.",
+            "The Ordnance Factory Board transferred the Pinaka rocket line to \
+             Nagpur, while Goa Shipyard delivered patrol vessels to the Indian Navy.",
+            "Mazagon Dock Shipbuilders in Mumbai launched the Scorpene submarine, \
+             and Cochin Shipyard built INS Vikrant in Kochi.",
+        ];
+
+        let mut margins: Vec<f32> = Vec::new();
+        for text in texts {
+            let rankings = typer
+                .rank_labels(text, 5)
+                .expect("rank_labels must run once the assets are present");
+            for r in &rankings {
+                let top: Vec<String> = r.top.iter().map(|(l, p)| format!("{l}={p:.3}")).collect();
+                eprintln!(
+                    "span {:?} margin={:?} top5=[{}]",
+                    r.text,
+                    r.margin().map(|m| format!("{m:.3}")),
+                    top.join(", ")
+                );
+                if let Some(m) = r.margin() {
+                    margins.push(m);
+                }
+            }
+        }
+
+        assert!(
+            !margins.is_empty(),
+            "the defence sentences must yield typed spans to measure"
+        );
+
+        // A "near-tie" is a winner the runner-up is within 5 points of — at that
+        // gap the assigned label is close to arbitrary. The design-error
+        // hypothesis predicts these dominate.
+        let near_ties = margins.iter().filter(|m| **m < 0.05).count();
+        let near_tie_frac = near_ties as f64 / margins.len() as f64;
+        let mean_margin: f32 = margins.iter().sum::<f32>() / margins.len() as f32;
+        eprintln!(
+            "label margins over {} spans: mean={mean_margin:.3}, near-ties(<0.05)={near_ties} \
+             ({:.1}%), threshold={threshold}",
+            margins.len(),
+            near_tie_frac * 100.0
+        );
+
+        assert!(
+            near_tie_frac < 0.5,
+            "the 141-label argmax is a coin flip on {:.1}% of spans (margin < 0.05) — \
+             the label set does not separate this corpus and coarse-first typing is \
+             warranted. Mean margin {mean_margin:.3}",
+            near_tie_frac * 100.0
+        );
+    }
+
+    /// The ranking diagnostic must describe the same spans the typer commits to.
+    /// If they drift apart the dump stops being evidence about production
+    /// behaviour and becomes evidence about a second, unused code path.
+    #[test]
+    fn rank_labels_agrees_with_extract_on_span_and_winner() {
+        let config = GlinerConfig::from_env();
+        if !config.assets_present() {
+            eprintln!(
+                "SKIP rank_labels_agrees_with_extract_on_span_and_winner: assets not found at {:?}",
+                config.model_path
+            );
+            return;
+        }
+        let typer = GlinerTyper::new(config);
+        let text =
+            "A cargo ship rammed the Francis Scott Key Bridge in Baltimore. The Dali lost power.";
+
+        let spans = typer.extract(text);
+        let rankings = typer.rank_labels(text, 5).expect("rank_labels must run");
+
+        assert_eq!(
+            spans.len(),
+            rankings.len(),
+            "the ranking must cover exactly the committed spans"
+        );
+        for (span, ranking) in spans.iter().zip(&rankings) {
+            assert_eq!((span.start, span.end), (ranking.start, ranking.end));
+            assert_eq!(span.text, ranking.text);
+            assert_eq!(
+                Some(span.fine_label.as_str()),
+                ranking.top.first().map(|(l, _)| l.as_str()),
+                "the ranking's winner must be the label extract assigned to {:?}",
+                span.text
+            );
+        }
+    }
+
+    #[test]
+    fn margin_needs_two_ranked_labels() {
+        let one = SpanLabelRanking {
+            text: "x".into(),
+            start: 0,
+            end: 1,
+            top: vec![("city".into(), 0.9)],
+        };
+        assert_eq!(one.margin(), None);
+
+        let two = SpanLabelRanking {
+            top: vec![("city".into(), 0.9), ("country".into(), 0.4)],
+            ..one
+        };
+        assert!((two.margin().expect("two labels ranked") - 0.5).abs() < 1e-6);
     }
 
     fn debug_spans(spans: &[TypedSpan]) -> Vec<(String, String, f32)> {

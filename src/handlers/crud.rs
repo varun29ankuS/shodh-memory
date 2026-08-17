@@ -694,6 +694,17 @@ pub async fn patch_memory(
             if !current_memory.experience.entities.contains(tag) {
                 current_memory.experience.entities.push(tag.clone());
             }
+            // A tag typed on an update is the caller asserting a name, exactly
+            // like a tag on the original write, and the graph admits nodes on
+            // that authority. Recording it only in the merged `entities` list
+            // would make an edit's tags weaker evidence than the same tags sent
+            // at creation, for no reason a caller could observe.
+            if !current_memory.experience.declared_entities.contains(tag) {
+                current_memory
+                    .experience
+                    .declared_entities
+                    .push(tag.clone());
+            }
         }
         changes.push("tags");
     }

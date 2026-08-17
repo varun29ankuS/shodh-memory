@@ -607,7 +607,21 @@ pub enum RelationshipType {
 /// Structured NER entity record preserving type classification and confidence.
 /// Used to carry NER results from handler through to graph insertion
 /// without losing type information (Person, Organization, Location, Misc).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+///
+/// # Wire format
+///
+/// `Deserialize` is hand-written rather than derived because this struct sits
+/// MID-PAYLOAD in the stored `Memory` record (`Experience::ner_entities` is
+/// followed by `cooccurrence_pairs`, `importance_override`, and then the whole
+/// of `MemoryFlat` after `experience`). Postcard is positional, so the
+/// [`fine_label`](Self::fine_label) field appended in July 2026 shifted every
+/// byte after each NER record in every memory written before it — the exact
+/// failure mode `Experience::toponyms`' doc comment warns about, except that
+/// the tail-suffix repair in `MEMORY_DEFAULT_SUFFIX` structurally cannot fix it
+/// (a suffix repairs a missing TAIL, not a hole in the middle).
+///
+/// See [`NerWireGeneration`] for how a record written before that field is read.
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct NerEntityRecord {
     pub text: String,
     /// NER type: "PER", "ORG", "LOC", "MISC"
@@ -624,6 +638,135 @@ pub struct NerEntityRecord {
     /// and the precise primary label survive. `None` on the rule-based path.
     #[serde(default)]
     pub fine_label: Option<String>,
+}
+
+/// Which generation of the [`NerEntityRecord`] wire format the current thread is
+/// decoding.
+///
+/// A positional format has no way to discover, from the bytes alone, that a
+/// nested struct gained a field. The only recoverable signal is that decoding
+/// the whole record under the current layout FAILS — so the decoder retries
+/// under the older layout, and this flag is how the outer decode tells the inner
+/// `Deserialize` impl which layout to expect.
+///
+/// A thread-local rather than a parameter because the choice has to reach a
+/// `Deserialize` impl nested ~4 levels inside a derived one, and serde offers no
+/// channel for that. It is deliberately narrow:
+///
+/// * only [`crate::memory::storage`]'s decode path sets it, via
+///   [`NerWireGeneration::enter`], which restores the previous value on drop;
+/// * the scope is a single synchronous `postcard::from_bytes` call, so it can
+///   never be held across an `await` or observed by another request;
+/// * it affects DEserialization only. Writing is always current-generation, so a
+///   record read through the legacy path and rewritten comes back in the current
+///   format (see `needs_migration` in `deserialize_memory`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NerWireGeneration {
+    /// `NerEntityRecord` as declared today, `fine_label` included.
+    Current,
+    /// The layout written before `fine_label` existed (July 2026): five fields,
+    /// ending at `end_char`. Reading one of these under [`Current`] consumes one
+    /// byte too many per record and desynchronises the rest of the payload.
+    ///
+    /// [`Current`]: NerWireGeneration::Current
+    PreFineLabel,
+}
+
+thread_local! {
+    static NER_WIRE_GENERATION: std::cell::Cell<NerWireGeneration> =
+        const { std::cell::Cell::new(NerWireGeneration::Current) };
+}
+
+/// Restores the previous [`NerWireGeneration`] when dropped.
+///
+/// Held by value for the duration of one decode attempt; see
+/// [`NerWireGeneration::enter`].
+#[must_use = "the generation is restored when this guard drops, so it must be held \
+              for the duration of the decode"]
+pub struct NerWireGenerationGuard(NerWireGeneration);
+
+impl NerWireGeneration {
+    /// Decode `NerEntityRecord` under this generation until the returned guard
+    /// drops.
+    pub fn enter(self) -> NerWireGenerationGuard {
+        let previous = NER_WIRE_GENERATION.with(|g| g.replace(self));
+        NerWireGenerationGuard(previous)
+    }
+
+    /// The generation the current thread is decoding under.
+    pub fn current() -> Self {
+        NER_WIRE_GENERATION.with(|g| g.get())
+    }
+}
+
+impl Drop for NerWireGenerationGuard {
+    fn drop(&mut self) {
+        NER_WIRE_GENERATION.with(|g| g.set(self.0));
+    }
+}
+
+/// `NerEntityRecord` exactly as it is declared today. Deriving the impl on a
+/// twin keeps the current path byte-identical to the derived one it replaced.
+#[derive(Deserialize)]
+#[serde(rename = "NerEntityRecord")]
+struct NerEntityRecordCurrent {
+    text: String,
+    entity_type: String,
+    confidence: f32,
+    #[serde(default)]
+    start_char: Option<usize>,
+    #[serde(default)]
+    end_char: Option<usize>,
+    #[serde(default)]
+    fine_label: Option<String>,
+}
+
+/// `NerEntityRecord` as written before `fine_label` existed.
+#[derive(Deserialize)]
+#[serde(rename = "NerEntityRecord")]
+struct NerEntityRecordPreFineLabel {
+    text: String,
+    entity_type: String,
+    confidence: f32,
+    #[serde(default)]
+    start_char: Option<usize>,
+    #[serde(default)]
+    end_char: Option<usize>,
+}
+
+impl<'de> Deserialize<'de> for NerEntityRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match NerWireGeneration::current() {
+            NerWireGeneration::Current => {
+                let r = NerEntityRecordCurrent::deserialize(deserializer)?;
+                Ok(Self {
+                    text: r.text,
+                    entity_type: r.entity_type,
+                    confidence: r.confidence,
+                    start_char: r.start_char,
+                    end_char: r.end_char,
+                    fine_label: r.fine_label,
+                })
+            }
+            NerWireGeneration::PreFineLabel => {
+                let r = NerEntityRecordPreFineLabel::deserialize(deserializer)?;
+                Ok(Self {
+                    text: r.text,
+                    entity_type: r.entity_type,
+                    confidence: r.confidence,
+                    start_char: r.start_char,
+                    end_char: r.end_char,
+                    // The record predates the field. `None` is what it means:
+                    // no fine label was ever recorded, and inventing one would
+                    // give the graph a schema leaf nothing ever asserted.
+                    fine_label: None,
+                })
+            }
+        }
+    }
 }
 
 /// Raw per-episode surprise components, computed at ingest from graph
@@ -911,6 +1054,32 @@ pub struct Experience {
     /// records written before it existed.
     #[serde(skip)]
     pub toponyms: Vec<Toponym>,
+
+    // =========================================================================
+    // DECLARED ENTITIES (names the CALLER asserted, not names anything inferred)
+    // =========================================================================
+    /// Entity names supplied by whoever wrote the memory — `tags` on the
+    /// `remember` request, the names an integration hands over with a record.
+    ///
+    /// Kept separate from [`entities`](Self::entities) and [`tags`](Self::tags)
+    /// because those two are *merged* lists: `remember` concatenates the
+    /// caller's tags, the NER surfaces and the YAKE keyphrases into one vector
+    /// and writes it to both. After that merge nothing downstream can tell "the
+    /// user told us this is an entity" from "a statistical keyphrase extractor
+    /// produced this string", and the knowledge graph was admitting both on the
+    /// same authority — which is how filenames and phrases like "empty weight"
+    /// became entities. This field is the provenance that merge destroys.
+    ///
+    /// It is deliberately NOT part of the search surface: `tags` still carries
+    /// everything, so BM25, the tag index and `recall_by_tags` are unaffected.
+    /// The only consumer is graph admission, where an assertion by the caller is
+    /// one of the three authorities that can put a node in the graph (the other
+    /// two being a committed typer span and the curated identifier table).
+    ///
+    /// `#[serde(skip)]` for the same reason as [`toponyms`](Self::toponyms) —
+    /// see that field's note. It is carried at the tail of `MemoryFlat`.
+    #[serde(skip)]
+    pub declared_entities: Vec<String>,
 }
 
 /// A place mentioned in a memory's content, resolved to coordinates.
@@ -1067,6 +1236,14 @@ impl Experience {
                 delta.fields_filled.push(name);
             }
         };
+        // A duplicate write's tags are a second caller asserting the same names.
+        // Unioned like every other additive field: the second write can add an
+        // assertion but its silence cannot retract the first one's.
+        union_strings(
+            &mut self.declared_entities,
+            &incoming.declared_entities,
+            "declared_entities",
+        );
         union_strings(
             &mut self.temporal_refs,
             &incoming.temporal_refs,
@@ -1290,6 +1467,7 @@ impl Default for Experience {
             cooccurrence_pairs: Vec::new(),
             importance_override: None,
             toponyms: Vec::new(),
+            declared_entities: Vec::new(),
         }
     }
 }
@@ -2081,11 +2259,16 @@ struct MemoryFlat {
     /// to a wire format without shifting every field written after it. See
     /// [`Experience::toponyms`] for the full reasoning, and
     /// `MEMORY_DEFAULT_SUFFIX` in `storage.rs` for the decoder side.
-    ///
-    /// MUST remain the last field. Anything appended after it has to extend the
-    /// default suffix too.
     #[serde(default)]
     toponyms: Vec<Toponym>,
+    /// Entity names the caller asserted. Logically part of `Experience` and
+    /// exposed there; carried here for the same positional-format reason as
+    /// `toponyms`.
+    ///
+    /// MUST remain the last field. Anything appended after it has to extend
+    /// `MEMORY_DEFAULT_SUFFIX` too.
+    #[serde(default)]
+    declared_entities: Vec<String>,
 }
 
 impl Serialize for Memory {
@@ -2126,6 +2309,7 @@ impl Serialize for Memory {
             // format; `Experience::toponyms` is `#[serde(skip)]` precisely so it
             // is carried here exactly once.
             toponyms: self.experience.toponyms.clone(),
+            declared_entities: self.experience.declared_entities.clone(),
         };
         flat.serialize(serializer)
     }
@@ -2141,6 +2325,7 @@ impl<'de> Deserialize<'de> for Memory {
         // Put the tail-carried toponyms back where they belong on the domain
         // type. Records written before the field existed decode as empty.
         flat.experience.toponyms = flat.toponyms;
+        flat.experience.declared_entities = flat.declared_entities;
         Ok(Memory {
             id: flat.id,
             experience: flat.experience,
@@ -3481,6 +3666,24 @@ pub struct RetrievalStats {
     /// Per-memory score attribution (only when debug=true)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_attributions: Option<Vec<ScoreAttribution>>,
+
+    /// Graph seeds this query could not use because their stored node failed to
+    /// decode.
+    ///
+    /// Zero is the normal case and is omitted from the response. A non-zero
+    /// value means the answer is INCOMPLETE in a specific, nameable way: the
+    /// query's entity resolved to a node in the name index, but the node's bytes
+    /// could not be read by this build, so the graph leg ran without that seed.
+    /// The names are in the WARN log; this is the count the caller gets, and it
+    /// exists so a degraded answer is never indistinguishable from a complete
+    /// one. Previously the same condition failed the whole request with a 500.
+    #[serde(default, skip_serializing_if = "crate::memory::types::is_zero_usize")]
+    pub unreadable_graph_nodes: usize,
+}
+
+/// `skip_serializing_if` helper: omit a count that is zero.
+pub(crate) fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Per-stage timing breakdown in microseconds.

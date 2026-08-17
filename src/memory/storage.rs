@@ -546,6 +546,11 @@ impl LegacyExperienceV1 {
             // remember time, and silently minting coordinates during a legacy
             // decode would make old records look like they always had them.
             toponyms: Vec::new(),
+            // Same reasoning: a v0.1.0 record has no record of which of its
+            // `entities` the caller asserted, and inventing that provenance on
+            // read would let a legacy keyphrase enter the graph as a caller
+            // claim.
+            declared_entities: Vec::new(),
         }
     }
 }
@@ -703,20 +708,68 @@ impl LegacyMemoryV2 {
 /// was in a legacy format and should be re-written for future performance.
 /// Postcard defaults for every trailing `MemoryFlat` field added after the
 /// postcard cutover (#192), in field order: `toponyms: Vec<Toponym>` (empty =
-/// varint `0x00`).
+/// varint `0x00`), then `declared_entities: Vec<String>` (empty = varint
+/// `0x00`).
 ///
 /// `parent_id` is NOT listed: it was added in January, before the April
 /// postcard cutover, so every postcard-era record already carries it.
 ///
 /// `decode_raw_compat` appends these one at a time, so a record missing any
 /// suffix of these fields decodes (postcard has no `#[serde(default)]` EOF
-/// tolerance). Keep in sync with any new trailing field — and note that this
-/// mechanism ONLY works for fields appended at the end of `MemoryFlat`. A field
-/// added to `Experience` instead lands mid-payload, where an old record decodes
-/// to silently wrong values rather than failing; that is why
-/// `Experience::toponyms` is `#[serde(skip)]` and carried at the `MemoryFlat`
-/// tail.
-const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00];
+/// tolerance). Keep in sync with any new trailing field — appending a field to
+/// `MemoryFlat` means appending its postcard default here, in the SAME ORDER as
+/// the struct declares it. The order is a contract: `toponyms` then
+/// `declared_entities`, and a third tail field (`origin`, on `fix/origin-field`)
+/// extends this to `[0x00, 0x00, 0x00]` with `origin` last, matching its
+/// position in `MemoryFlat`. Bytes appended in the wrong order default the wrong
+/// fields.
+///
+/// Note that this mechanism ONLY works for fields appended at the end of
+/// `MemoryFlat`. A field added to `Experience` instead lands mid-payload, where
+/// an old record decodes to silently wrong values rather than failing; that is
+/// why `Experience::toponyms` is `#[serde(skip)]` and carried at the
+/// `MemoryFlat` tail. `NerEntityRecord::fine_label` is what happens when that
+/// rule is broken — see [`decode_postcard_memory`].
+const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00];
+
+/// Decode a SHO v2 (postcard) payload, tolerating both compatible-change classes
+/// the stored format has accumulated.
+///
+/// 1. **Missing tail fields** — repaired by appending `MEMORY_DEFAULT_SUFFIX`
+///    one default at a time (see [`crate::serialization::decode_raw_compat`]).
+/// 2. **A mid-payload field added to a nested struct** — NOT repairable by any
+///    suffix, because the missing bytes are in the middle. `NerEntityRecord`
+///    gained `fine_label` in July 2026, and `Experience::ner_entities` sits
+///    ahead of `cooccurrence_pairs`, `importance_override` and the whole of
+///    `MemoryFlat` after `experience`. Every memory written before that commit
+///    with a non-empty `ner_entities` therefore desynchronises the decoder by
+///    one byte per NER record. On a live 19,394-record store that is ~5% of
+///    memories, surfacing as `Found an Option discriminant that wasn't 0 or 1`,
+///    `Tried to parse invalid utf-8`, or a spurious end-of-buffer — whichever
+///    the shifted bytes happened to hit.
+///
+/// The second class is recovered by re-running the decode under
+/// [`NerWireGeneration::PreFineLabel`]. The retry is attempted only after the
+/// current layout has failed, so a record written today never pays for it, and
+/// the error reported on total failure is the CURRENT-format one — the honest
+/// answer to "why can this store not be read by this build".
+///
+/// A record recovered through the retry is reported as needing migration, so
+/// [`MemoryStorage::get`] rewrites it in the current format and no later read
+/// has to guess again.
+fn decode_postcard_memory(payload: &[u8]) -> Result<(Memory, bool)> {
+    let current_err =
+        match crate::serialization::decode_raw_compat::<Memory>(payload, MEMORY_DEFAULT_SUFFIX) {
+            Ok((memory, defaulted)) => return Ok((memory, defaulted)),
+            Err(e) => e,
+        };
+
+    let _generation = NerWireGeneration::PreFineLabel.enter();
+    match crate::serialization::decode_raw_compat::<Memory>(payload, MEMORY_DEFAULT_SUFFIX) {
+        Ok((memory, _)) => Ok((memory, true)),
+        Err(_) => Err(current_err),
+    }
+}
 
 fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
     use crate::serialization::{SHO_VERSION_BINCODE2, SHO_VERSION_POSTCARD};
@@ -726,10 +779,10 @@ fn deserialize_memory(data: &[u8]) -> Result<(Memory, bool)> {
         match version {
             SHO_VERSION_POSTCARD => {
                 // Current format: postcard, tolerating records written before
-                // the trailing fields listed in MEMORY_DEFAULT_SUFFIX existed.
-                let (memory, defaulted): (Memory, bool) =
-                    crate::serialization::decode_raw_compat(payload, MEMORY_DEFAULT_SUFFIX)
-                        .map_err(|e| anyhow!("SHO v2 postcard decode failed: {e}"))?;
+                // the trailing fields listed in MEMORY_DEFAULT_SUFFIX existed,
+                // and before `NerEntityRecord::fine_label` existed.
+                let (memory, defaulted) = decode_postcard_memory(payload)
+                    .map_err(|e| anyhow!("SHO v2 postcard decode failed: {e}"))?;
                 // `defaulted` marks the record for rewrite in the current schema,
                 // the same signal the legacy-format branches return.
                 Ok((memory, defaulted))
@@ -4219,6 +4272,221 @@ mod tests {
             Vec::new(),
             Vec::new(),
         )
+    }
+
+    /// Build the SHO v2 bytes a pre-2026-07-12 build would have written for
+    /// `memory`, whose experience must carry exactly one `NerEntityRecord` with
+    /// `fine_label: None`.
+    ///
+    /// Today's encoder cannot produce that layout, and replicating `Experience`
+    /// (50+ fields) to serialize it would be a second source of truth that rots.
+    /// So the old bytes are derived by DIFFERENCE: encode the same memory twice,
+    /// once with an empty `ner_entities` and once with the one record, and the
+    /// encodings agree on every byte outside the span the record occupies. That
+    /// span ends with the `0x00` that encodes `fine_label: None` — the byte the
+    /// old format did not have — so removing it yields the pre-fine_label
+    /// payload without duplicating a single field declaration.
+    fn encode_pre_fine_label(memory: &Memory) -> Vec<u8> {
+        assert_eq!(
+            memory.experience.ner_entities.len(),
+            1,
+            "fixture expects exactly one NER record"
+        );
+        assert!(
+            memory.experience.ner_entities[0].fine_label.is_none(),
+            "the pre-fine_label format cannot carry a fine label"
+        );
+
+        let with_record = crate::serialization::encode_raw(memory).expect("encode with record");
+
+        let mut without = memory.clone();
+        without.experience.ner_entities.clear();
+        let without_record = crate::serialization::encode_raw(&without).expect("encode without");
+
+        // The encodings agree up to the `ner_entities` length varint, where one
+        // says 1 and the other 0. Everything after that varint in the
+        // record-less encoding is the shared tail (cooccurrence_pairs onward),
+        // so its length pins where the record ends in the other encoding.
+        // Deriving the tail by length rather than by scanning backwards for a
+        // common suffix matters: the record's final byte IS 0x00, so a backward
+        // scan runs straight past it into the record.
+        let prefix = with_record
+            .iter()
+            .zip(without_record.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert!(
+            prefix < without_record.len(),
+            "the two encodings must differ at the ner_entities length varint"
+        );
+        assert_eq!(
+            without_record[prefix], 0x00,
+            "empty ner_entities is length 0"
+        );
+        assert_eq!(with_record[prefix], 0x01, "one NER record is length 1");
+
+        let tail_len = without_record.len() - prefix - 1;
+        let record_end = with_record.len() - tail_len;
+        assert_eq!(
+            with_record[record_end - 1],
+            0x00,
+            "the last byte of the NER record must be the fine_label None marker"
+        );
+
+        let mut legacy = Vec::with_capacity(with_record.len() - 1);
+        legacy.extend_from_slice(&with_record[..record_end - 1]);
+        legacy.extend_from_slice(&with_record[record_end..]);
+        crate::serialization::wrap_sho_v2(&legacy)
+    }
+
+    #[test]
+    fn memory_written_before_ner_fine_label_still_decodes() {
+        // `NerEntityRecord::fine_label` was appended on 2026-07-12. The record
+        // sits MID-PAYLOAD inside `Experience::ner_entities`, so a memory
+        // written before that date desynchronises today's decoder by one byte
+        // per NER record — everything after it (cooccurrence_pairs,
+        // importance_override, and the whole of MemoryFlat past `experience`)
+        // is read from the wrong offset. No tail-default suffix can repair a
+        // hole in the middle, which is why this needs a generation retry.
+        let id = MemoryId(
+            uuid::Uuid::parse_str("7c1e5a6b-9d24-4f31-8a55-2b6c7d8e9f01").expect("static uuid"),
+        );
+        let mut memory = sample_memory(id.clone(), "the Dali struck the Key Bridge");
+        memory.experience.ner_entities = vec![NerEntityRecord {
+            text: "Key Bridge".to_string(),
+            entity_type: "LOC".to_string(),
+            confidence: 0.87,
+            start_char: Some(19),
+            end_char: Some(29),
+            fine_label: None,
+        }];
+        memory.experience.cooccurrence_pairs = vec![("Dali".to_string(), "Key Bridge".to_string())];
+        memory.experience.importance_override = Some(0.9);
+        let created_at = memory.created_at;
+
+        let legacy_bytes = encode_pre_fine_label(&memory);
+
+        let (decoded, needs_migration) = deserialize_memory(&legacy_bytes)
+            .expect("a memory written before fine_label existed must still be readable");
+
+        assert_eq!(decoded.id, id);
+        assert_eq!(decoded.experience.content, "the Dali struck the Key Bridge");
+        assert_eq!(decoded.experience.ner_entities.len(), 1);
+        assert_eq!(decoded.experience.ner_entities[0].text, "Key Bridge");
+        assert_eq!(decoded.experience.ner_entities[0].end_char, Some(29));
+        assert_eq!(
+            decoded.experience.ner_entities[0].fine_label, None,
+            "a record written before the field existed asserts no fine label"
+        );
+        // The fields AFTER the NER record are what a byte shift destroys, so
+        // they are the real assertion: if the decoder is off by one, these come
+        // back as garbage rather than these values.
+        assert_eq!(
+            decoded.experience.cooccurrence_pairs,
+            vec![("Dali".to_string(), "Key Bridge".to_string())]
+        );
+        assert_eq!(decoded.experience.importance_override, Some(0.9));
+        assert_eq!(decoded.created_at, created_at);
+        assert!(
+            needs_migration,
+            "a record recovered through the legacy generation must be rewritten"
+        );
+
+        // The retry is scoped to the decode call and must not leak.
+        assert_eq!(
+            NerWireGeneration::current(),
+            NerWireGeneration::Current,
+            "the decode generation must be restored when the guard drops"
+        );
+    }
+
+    #[test]
+    fn current_memory_with_fine_label_is_unaffected_by_the_legacy_retry() {
+        // A memory written today keeps its fine labels and must decode on the
+        // first attempt, with no migration flag — the retry is a fallback, not
+        // a second opinion.
+        let id = MemoryId(
+            uuid::Uuid::parse_str("2d4f6a8b-0c13-4e57-9a2b-3c5d7e9f0a1b").expect("static uuid"),
+        );
+        let mut memory = sample_memory(id.clone(), "GLiNER typed the span");
+        memory.experience.ner_entities = vec![NerEntityRecord {
+            text: "Key Bridge".to_string(),
+            entity_type: "LOC".to_string(),
+            confidence: 0.87,
+            start_char: Some(0),
+            end_char: Some(10),
+            fine_label: Some("bridge".to_string()),
+        }];
+
+        let bytes = crate::serialization::encode_sho(&memory).unwrap();
+        let (decoded, needs_migration) = deserialize_memory(&bytes).unwrap();
+
+        assert_eq!(
+            decoded.experience.ner_entities[0].fine_label.as_deref(),
+            Some("bridge")
+        );
+        assert!(
+            !needs_migration,
+            "a current-format record must not be flagged for rewrite"
+        );
+    }
+
+    #[test]
+    fn memory_missing_its_tail_fields_is_defaulted_in_declaration_order() {
+        // MEMORY_DEFAULT_SUFFIX repairs fields appended to the END of
+        // MemoryFlat, one at a time, and the ORDER is a contract: `toponyms`
+        // then `declared_entities`. A record written before both, before only
+        // the second, and a complete record must all decode, and a record short
+        // by one field must not have the wrong field defaulted.
+        //
+        // `fix/origin-field` adds a third tail field. When these branches meet,
+        // the suffix becomes [0x00, 0x00, 0x00] with `origin` last, matching its
+        // position in MemoryFlat — this test is what catches getting that order
+        // wrong, because a mis-ordered suffix defaults the wrong field.
+        let id = MemoryId(
+            uuid::Uuid::parse_str("8a7b6c5d-4e3f-4a2b-9c1d-0e1f2a3b4c5d").expect("static uuid"),
+        );
+        let mut memory = sample_memory(id.clone(), "a record with a populated tail");
+        memory.experience.toponyms = vec![Toponym {
+            mention: "Baltimore".to_string(),
+            name: "Baltimore".to_string(),
+            lat: 39.2904,
+            lon: -76.6122,
+            country: "US".to_string(),
+            population: 585_708,
+        }];
+        memory.experience.declared_entities = vec!["Baltimore".to_string()];
+
+        let full = crate::serialization::encode_raw(&memory).expect("encode");
+
+        // Complete record: no defaults applied.
+        let (decoded, defaulted) =
+            crate::serialization::decode_raw_compat::<Memory>(&full, MEMORY_DEFAULT_SUFFIX)
+                .unwrap();
+        assert!(!defaulted);
+        assert_eq!(decoded.experience.declared_entities, vec!["Baltimore"]);
+        assert_eq!(decoded.experience.toponyms.len(), 1);
+
+        // Written before `declared_entities`: the tail ends after `toponyms`.
+        // A one-entry Vec<String> encodes as [len=1, strlen, bytes...], so
+        // dropping "Baltimore" plus its two varints leaves the pre-field shape.
+        let without_declared = &full[..full.len() - ("Baltimore".len() + 2)];
+        let (decoded, defaulted) = crate::serialization::decode_raw_compat::<Memory>(
+            without_declared,
+            MEMORY_DEFAULT_SUFFIX,
+        )
+        .expect("a record written before declared_entities must decode");
+        assert!(
+            defaulted,
+            "the missing tail field must be reported as defaulted"
+        );
+        assert!(decoded.experience.declared_entities.is_empty());
+        assert_eq!(
+            decoded.experience.toponyms.len(),
+            1,
+            "the field before the missing one must survive intact — a suffix \
+             applied in the wrong order would empty this instead"
+        );
     }
 
     #[test]
