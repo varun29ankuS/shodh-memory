@@ -93,17 +93,29 @@ export function SystemPulse({ tone }: { tone: Tone }) {
  * outage explanation and nothing else.
  */
 export function SystemBanner({ alerts }: { alerts: ServiceReading[] }) {
-  if (alerts.length === 0) return null;
+  const quiet = alerts.length === 0;
 
   return (
     <div
-      // A live region, so the state is announced rather than only shown. The
-      // one string in here that changes every second — the age — is hidden from
-      // it below, or this would be read aloud on every tick.
+      // A live region, so an outage is announced and not only drawn.
+      //
+      // IT IS ALWAYS IN THE DOM, and collapses to nothing rather than
+      // unmounting. A live region that is inserted at the same moment as its
+      // first content is not reliably announced — assistive technology has to
+      // be observing the region already for the change to register. Returning
+      // null while healthy would therefore have made the one announcement that
+      // matters the one least likely to happen.
+      //
+      // The one string in here that changes every second — the age — is hidden
+      // from this region below, or the whole outage would be read aloud on
+      // every tick.
       role="status"
       className={cn(
-        "border-border bg-card absolute inset-x-0 top-12 z-20 border-b",
+        "absolute inset-x-0 top-12 z-20",
         RAIL_OFFSET,
+        quiet
+          ? "pointer-events-none h-0 overflow-hidden border-0"
+          : "border-border bg-card border-b",
       )}
     >
       <ul className="flex flex-col">
