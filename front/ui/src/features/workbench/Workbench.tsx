@@ -11,6 +11,7 @@ import {
   paneByPath,
   parseTrail,
   promoteTrail,
+  spineOrdinal,
   type Pane,
 } from "./trail";
 import {
@@ -198,7 +199,7 @@ export function Workbench({ children }: { children: ReactNode }) {
               <Spine
                 title={pane.title}
                 caption={pane.caption}
-                ordinal={i + 1}
+                ordinal={spineOrdinal(trail.length, i)}
                 onOpen={() => navigate(hrefFor(trail, i))}
               />
             )}

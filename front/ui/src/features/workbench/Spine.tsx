@@ -1,5 +1,6 @@
 import { ChevronLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { spineText } from "./trail";
 
 /**
  * A pane compressed to its spine.
@@ -33,6 +34,39 @@ import { cn } from "@/lib/utils";
  * positions at rest; hover and focus change colour and the backing surface
  * only. A spine that grew or slid on approach would move the target while it
  * was being aimed at.
+ *
+ * IT SAYS WHAT IT DOES, IN WORDS, BECAUSE THE GLYPH ALONE DID NOT.
+ *
+ * This read `1`, a chevron, and `Briefing`, as three items spaced 10px apart
+ * down a 40px column, and two people — including the person whose product it
+ * is — could not work out what it was for. That is the same defect as a lane
+ * row whose name, state and figure float apart: fragments near each other are
+ * not an object, and a reader given a bare number, an arrow and a noun will
+ * assemble a meaning out of them or give up, and giving up is the common case.
+ *
+ * The remedies, in the order they matter:
+ *
+ *   1. THE TEXT IS THE SENTENCE. `Back to Briefing`, not `Briefing`. A
+ *      destination on its own is a label; a label plus a verb is a control.
+ *      This is now the same string the accessible name has always carried, so
+ *      what is seen and what is spoken agree instead of the sighted reader
+ *      getting the poorer half.
+ *   2. THE CHEVRON JOINS THE TEXT. It sits directly against the words at a
+ *      1.5-unit gap rather than floating 10px clear of them, so the pair reads
+ *      as one arrow-and-phrase and not as two marks that happen to be stacked.
+ *   3. THE ORDINAL EARNS ITS PLACE OR IS NOT DRAWN. With one spine on screen
+ *      it is a lone `1` above an unrelated word, which is the single most
+ *      confusing thing in the column and says nothing a reader did not know.
+ *      It is drawn only from the second spine onward, where a stack genuinely
+ *      has an order to state.
+ *
+ * WHAT WAS NOT DONE, AND WHY. The alternative was to hide the spine until the
+ * trail has depth. There is no such state: the trail is `[briefing, …primary]`,
+ * so every screen in the product that is not the briefing has exactly one
+ * spine or more, and hiding it at one would delete the way back from every
+ * screen that has one. The 40px is not rent the spine has to justify against
+ * an empty alternative — it is the only thing on screen that says where you
+ * came from.
  */
 
 /** The spine's width, in px. Read by the workbench for its flex basis, so the
@@ -47,19 +81,23 @@ export function Spine({
 }: {
   title: string;
   caption: string;
-  /** 1-based position in the trail, spoken to screen readers so a stack of
-   *  spines has an order rather than being four buttons named "back to". */
-  ordinal: number;
+  /** 1-based position in the trail, or null where there is only one spine and
+   *  a position is not a fact worth stating. Drawn, and `aria-hidden`: the
+   *  accessible name states the destination in words, which is a better answer
+   *  to "which of these is which" than a digit read aloud. */
+  ordinal: number | null;
   onOpen: () => void;
 }) {
+  const { visible, accessible } = spineText(title, caption);
+
   return (
     <button
       type="button"
       onClick={onOpen}
       // States the destination and what is there. A control called "Briefing"
       // tells a screen reader which button it is, not what pressing it does.
-      aria-label={`Back to ${title} — ${caption}`}
-      title={`Back to ${title}`}
+      aria-label={accessible}
+      title={visible}
       style={{ width: `${SPINE_WIDTH_PX}px` }}
       className={cn(
         // Pinned to the LEFT EDGE of its pane rather than filling it. While a
@@ -67,7 +105,10 @@ export function Spine({
         // left edge does not move — so anchoring the spine there means the
         // title is stationary for the whole transition instead of drifting in
         // from the middle. The eye's anchor is kept by not moving it.
-        "group absolute inset-y-0 left-0 z-10 flex cursor-pointer flex-col items-center gap-2.5 py-3",
+        // gap-1.5, not gap-2.5: the chevron and the phrase are one control and
+        // are spaced as one. The ordinal, when there is one, buys its own
+        // separation back with a margin rather than pushing the pair apart.
+        "group absolute inset-y-0 left-0 z-10 flex cursor-pointer flex-col items-center gap-1.5 py-3",
         "border-border bg-background border-r",
         "hover:bg-accent focus-visible:bg-accent transition-colors duration-100",
         // An INSET focus ring, and that is a correctness fix rather than a
@@ -79,12 +120,14 @@ export function Spine({
         "focus-visible:shadow-[inset_0_0_0_2px_var(--ring)] focus-visible:outline-none",
       )}
     >
-      <span
-        aria-hidden="true"
-        className="mono text-muted-foreground text-[10px] leading-none tabular-nums"
-      >
-        {ordinal}
-      </span>
+      {ordinal === null ? null : (
+        <span
+          aria-hidden="true"
+          className="mono text-muted-foreground/70 mb-1 text-[10px] leading-none tabular-nums"
+        >
+          {ordinal}
+        </span>
+      )}
       <ChevronLeft
         aria-hidden="true"
         className="text-muted-foreground group-hover:text-primary group-focus-visible:text-primary size-3.5 shrink-0 transition-colors duration-100"
@@ -105,7 +148,7 @@ export function Spine({
           textOverflow: "ellipsis",
         }}
       >
-        {title}
+        {visible}
       </span>
     </button>
   );

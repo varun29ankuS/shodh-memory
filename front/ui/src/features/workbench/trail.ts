@@ -207,6 +207,64 @@ export function promoteHref(
   return hrefFor(next, next.length - 1);
 }
 
+/* ================================================================== *
+ * WHAT A COMPRESSED PANE SAYS
+ *
+ * Both of these are rules rather than markup, and both were got wrong in the
+ * shipped spine in ways nothing in this project could have caught: there is no
+ * DOM harness here, so a rule that lives in JSX is a rule with no way to pin
+ * it. They live beside `Pane` because they are functions of a pane's own
+ * fields and of its position in the trail.
+ * ================================================================== */
+
+/**
+ * The two strings a spine carries, derived from ONE source.
+ *
+ * THE INVARIANT IS THAT THE ACCESSIBLE NAME OPENS WITH THE VISIBLE TEXT, and
+ * that is the whole reason this returns a pair rather than leaving two
+ * independent template literals in the component. The shipped spine DREW the
+ * destination alone — `Briefing` — while its `aria-label` said `Back to
+ * Briefing — What is in here, and what changed`. A screen reader was told what
+ * the control does; a sighted reader was given a bare noun beside a chevron
+ * and left to infer it, and two people including the product's owner did not.
+ * Deriving both from one string makes that divergence impossible to
+ * reintroduce quietly.
+ *
+ * The caption goes on the accessible name only. It says what is AT the
+ * destination, which is worth hearing when a control's whole purpose has to
+ * arrive through speech, and is more than a 40px column can hold without
+ * becoming a paragraph turned on its side.
+ */
+export function spineText(
+  title: string,
+  caption: string,
+): { visible: string; accessible: string } {
+  const visible = `Back to ${title}`;
+  return { visible, accessible: `${visible} — ${caption}` };
+}
+
+/**
+ * The number to draw on the spine at `index`, or null to draw none.
+ *
+ * A POSITION IS ONLY A FACT WHEN THERE IS SOMETHING TO BE POSITIONED AMONG.
+ * The trail is `[briefing, …ancestors, primary]` and every pane but the last is
+ * a spine, so a two-pane trail — which is every screen in this product reached
+ * from the rail — has exactly one. A `1` above it is a digit with no series,
+ * sitting immediately above an unrelated word, and it was the least
+ * decipherable mark in the column.
+ *
+ * From two spines up it does real work: it says which of the stacked panes is
+ * nearer the base, in a column where they are otherwise told apart only by a
+ * word read vertically.
+ *
+ * `length` is the whole trail and ordinals are 1-based over it, so a spine's
+ * number matches its position in `Briefing │ Recall │ Graph` as read.
+ */
+export function spineOrdinal(length: number, index: number): number | null {
+  if (length - 1 < 2) return null;
+  return index + 1;
+}
+
 /**
  * One level back, or `null` at the briefing.
  *

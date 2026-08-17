@@ -9,6 +9,8 @@ import {
   promoteHref,
   promoteTrail,
   railHref,
+  spineOrdinal,
+  spineText,
 } from "./trail";
 
 /** Trails read as the ids a person would see spines for, briefing first. */
@@ -215,5 +217,44 @@ describe("the rail's width", () => {
     // the check that makes writing it out safe: get them out of step and the
     // rail sits on top of the stage in the built product only.
     expect(RAIL_OFFSET).toBe(`pl-[${RAIL_WIDTH_PX}px]`);
+  });
+});
+
+describe("what a compressed pane says", () => {
+  it("opens the accessible name with the exact visible text", () => {
+    // THE REGRESSION THIS EXISTS FOR. The shipped spine DREW `Briefing` and
+    // ANNOUNCED `Back to Briefing — …`, so the sighted reader was handed the
+    // half that does not say what the control does. Any edit that drops the
+    // verb from one of the two breaks this.
+    const { visible, accessible } = spineText("Briefing", "What is in here, and what changed");
+    expect(visible).toBe("Back to Briefing");
+    expect(accessible.startsWith(visible)).toBe(true);
+  });
+
+  it("states what is at the destination, but only where it can be heard", () => {
+    const { visible, accessible } = spineText("Recall", "Search memory and its connections");
+    expect(visible).not.toContain("Search memory");
+    expect(accessible).toBe("Back to Recall — Search memory and its connections");
+  });
+
+  it("numbers nothing when the trail carries a single spine", () => {
+    // [briefing, tasks] — every screen reached from the rail. A lone "1"
+    // above one unrelated word.
+    expect(spineOrdinal(2, 0)).toBeNull();
+  });
+
+  it("numbers the spines once there are two of them", () => {
+    // [briefing, recall, graph] — which pane is nearer the base is otherwise
+    // carried only by a word read vertically.
+    expect(spineOrdinal(3, 0)).toBe(1);
+    expect(spineOrdinal(3, 1)).toBe(2);
+  });
+
+  it("numbers over the whole trail, so a spine's figure matches its position", () => {
+    expect(spineOrdinal(4, 2)).toBe(3);
+  });
+
+  it("numbers nothing at the briefing, where there is no spine at all", () => {
+    expect(spineOrdinal(1, 0)).toBeNull();
   });
 });
