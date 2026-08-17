@@ -1,5 +1,6 @@
-import type { Todo, TodoPriority } from "@/lib/api";
-import type { LinkedMemory, TriageTodo } from "./api";
+import type { Todo, TodoPriority, TodoStatus } from "@/lib/api";
+import { parseTime } from "@/features/briefing/derive";
+import type { LinkedMemory, TriageProject, TriageTodo } from "./api";
 
 /**
  * The arithmetic behind the Tasks screen, kept out of the component so it can
@@ -11,11 +12,27 @@ import type { LinkedMemory, TriageTodo } from "./api";
  * nobody ever checks it against the rows.
  */
 
-/** The row limit this screen asks the server for. Stated here because the
- *  reduction notice has to quote the same number the request used, and two
- *  copies of it is how a screen ends up claiming "first 200 of 431" while
- *  showing 100 rows. */
-export const TASK_LIMIT = 200;
+/**
+ * The row limit this screen asks the server for. Stated here because the
+ * reduction notice has to quote the same number the request used, and two
+ * copies of it is how a screen ends up claiming "first 200 of 431" while
+ * showing 100 rows.
+ *
+ * RAISED FROM 200 BECAUSE EVERY DENOMINATOR ON THIS SCREEN NOW DEPENDS ON IT.
+ * The completion meters count settled against total over the rows in hand, and
+ * the server paginates AFTER sorting by `sort_order`, priority and due date
+ * (src/handlers/todos.rs:1007-1012, 1419-1432) — an order that has nothing to
+ * do with project or status. So a truncated response is an arbitrary slice
+ * across every project at once, and "13 of 13 done" computed over it would be
+ * a fabricated number of exactly the kind this module exists to refuse.
+ *
+ * 1000 is the smallest round figure that is not a real constraint here: the
+ * server's own ceiling is 10,000 (`MAX_LIMIT`, src/validation.rs:445 — verified
+ * live, a limit of 100,000 is rejected with INVALID_INPUT), and the largest
+ * profile on this instance holds 93 todos. Truncation is still reported rather
+ * than assumed away, and it still disables the meters — see `boardOf`.
+ */
+export const TASK_LIMIT = 1000;
 
 /**
  * Mirrors `Todo::short_id()` (src/memory/types.rs:3776-3784) exactly, including
@@ -297,4 +314,637 @@ export function summarise(todos: Todo[], total: number, now: number): TaskSummar
     overdue,
     projects: prefixes.size,
   };
+}
+
+/* ================================================================== *
+ * WHEN THE WORK MOVED
+ *
+ * THE FIELDS DO NOT RECORD THIS AND THE ACTIVITY LOG DOES. That is the
+ * measurement this whole section exists for, and it is not a nicety:
+ *
+ *   - `updated_at` is the LAST change of any kind, so it cannot say when work
+ *     began.
+ *   - `completed_at` is set in exactly one place — `Todo::complete()`
+ *     (src/memory/types.rs:4251) — which only `POST /todos/{id}/complete`
+ *     reaches. Setting `status: "done"` through the UPDATE handler never
+ *     touches it, and cancelling never touches it at all.
+ *
+ * Measured on the live `claude-code` profile: of 82 settled todos, 39 carry
+ * `completed_at` and 43 DO NOT — 20 marked done through update, 23 cancelled.
+ * For those 43 the activity log is the only record that they ever settled, let
+ * alone when. A screen that read `completed_at` alone would show more than half
+ * of the finished work as having no completion date, and any cycle-time figure
+ * over it would be computed from the unrepresentative half that happened to use
+ * one of the two endpoints.
+ *
+ * Every one of the 82 is recoverable from the two sources together — verified
+ * live, zero unaccounted.
+ * ================================================================== */
+
+/** The Debug-formatted `TodoStatus` names the server writes into its activity
+ *  text (`format!("status → {:?}", todo.status)`, src/handlers/todos.rs:1682),
+ *  mapped to the snake_case values the same enum serialises as on the wire.
+ *  The two spellings are genuinely different and both come from one enum. */
+const DEBUG_STATUS: Record<string, TodoStatus> = {
+  Backlog: "backlog",
+  Todo: "todo",
+  InProgress: "in_progress",
+  Blocked: "blocked",
+  Done: "done",
+  Cancelled: "cancelled",
+};
+
+/** `Updated: status → InProgress, priority → High` — the status clause is
+ *  always first when present (the change list is built in field order,
+ *  todos.rs:1680-1707) and the rest is ignored here. U+2192, not "->". */
+const STATUS_LINE = /^Updated: status → (\w+)/;
+
+/** `Marked complete after 0.0 days` (todos.rs:1855). The DURATION IN IT IS
+ *  NEVER PARSED — it is `{:.1}` rounded, so "0.0 days" covers everything under
+ *  about 72 minutes, and a screen quoting it would be restating the server's
+ *  rounding as a measurement. Only the fact and the comment's own timestamp are
+ *  taken. */
+const COMPLETE_LINE = /^Marked complete after /;
+
+export interface StatusChange {
+  at: number;
+  to: TodoStatus;
+}
+
+/**
+ * Every recorded status change on one todo, oldest first.
+ *
+ * GATED ON THE AUTHOR, NOT ONLY THE TEXT. `TodoComment::system_activity`
+ * (src/memory/types.rs:4037-4047) hardcodes `author: "system"` and
+ * `comment_type: Activity`, and it is the only writer of these strings
+ * server-side. Callers may set both fields freely
+ * (`AddCommentRequest.author`/`comment_type`, todos.rs:339-346), so a person or
+ * an agent can post a comment reading "Updated: status → Done" — and without
+ * this gate that comment would be read back as a state transition that never
+ * happened. Author is the one field on a comment the server sets itself.
+ *
+ * SORTED BY TIMESTAMP RATHER THAN TRUSTING ARRAY ORDER. The array is appended
+ * to (`Todo::add_activity`, types.rs:4301-4305) so it is in order today, but
+ * ordering is what "first started" and "last settled" below are read off, and
+ * inheriting that assumption silently would make both wrong the day anything
+ * rewrites the list.
+ *
+ * A creation entry is NOT a status change. "Created in project 'X'" records no
+ * status, and `CreateTodoRequest.status` (todos.rs:170) means a todo can be
+ * created directly as `in_progress` or `done` — so the initial status is
+ * genuinely unknown from the log and is not guessed at.
+ */
+export function statusChanges(todo: TriageTodo): StatusChange[] {
+  const changes: StatusChange[] = [];
+  for (const comment of todo.comments ?? []) {
+    if (comment.author !== "system" || comment.comment_type !== "activity") continue;
+    const at = parseTime(comment.created_at);
+    if (at === null) continue;
+
+    const matched = STATUS_LINE.exec(comment.content);
+    if (matched) {
+      const to = DEBUG_STATUS[matched[1]];
+      // An unrecognised variant name is dropped rather than coerced. It means
+      // this build is older than the server's enum, and inventing a status for
+      // it would be worse than showing one fewer transition.
+      if (to) changes.push({ at, to });
+      continue;
+    }
+    if (COMPLETE_LINE.test(comment.content)) changes.push({ at, to: "done" });
+  }
+  return changes.sort((a, b) => a.at - b.at);
+}
+
+export interface Lifeline {
+  /** `created_at`. Always present — it is a required field. */
+  recorded: number;
+  /** The FIRST move into `in_progress`. First, not last: a todo can be pushed
+   *  back to `todo` and picked up again (live data carries such a reversal),
+   *  and the question this answers is when work began, not when it last
+   *  resumed. Null when no start was ever recorded — including for a todo
+   *  created directly as `in_progress`, whose start leaves no entry. */
+  started: number | null;
+  /** When it reached `done` or `cancelled`: `completed_at` when the server set
+   *  one, else the last settling transition in the log. Null while open. */
+  settled: number | null;
+  /** True when `settled` came only from the log because no `completed_at` was
+   *  ever written. 43 of 82 settled todos on the live profile. */
+  settledFromLog: boolean;
+}
+
+export function lifelineOf(todo: TriageTodo): Lifeline | null {
+  const recorded = parseTime(todo.created_at);
+  if (recorded === null) return null;
+
+  const changes = statusChanges(todo);
+  const started = changes.find((c) => c.to === "in_progress")?.at ?? null;
+
+  const stamped = parseTime(todo.completed_at);
+  let settled = stamped;
+  let settledFromLog = false;
+  if (settled === null && (todo.status === "done" || todo.status === "cancelled")) {
+    for (const change of changes) {
+      if (change.to === "done" || change.to === "cancelled") {
+        settled = change.at;
+        settledFromLog = true;
+      }
+    }
+  }
+
+  return { recorded, started, settled, settledFromLog };
+}
+
+/** Has this task ever changed state? The predicate the whole screen turns on:
+ *  a profile where this is false everywhere is a list of rows nobody has ever
+ *  acted on, which is a fact worth stating outright rather than drawing. */
+export function hasMoved(todo: TriageTodo): boolean {
+  return statusChanges(todo).length > 0;
+}
+
+/* ================================================================== *
+ * BLOCKED — TWO DIFFERENT THINGS THAT MUST NOT SHARE A TREATMENT
+ *
+ * Linear settles this by making blocking a RELATION and not a status at all:
+ * its four relation types are Related, Blocked by, Blocks and Duplicate, drawn
+ * as flags in the issue's properties sidebar, and "blocked" appears nowhere in
+ * its workflow states (linear.app/docs/issue-relations).
+ *
+ * This model has BOTH, plus a third thing, and they answer different questions:
+ *
+ *   - `status: "blocked"` — the enum's own "Waiting for someone/something"
+ *     (src/memory/types.rs:3835-3836). A declaration, with no object.
+ *   - `blocked_on: Option<String>` — free text. WHO or WHAT is being waited on
+ *     when it is not another task: a person, a vendor, a decision.
+ *   - `blocked_by: Vec<TodoId>` — real todo references, resolved and
+ *     cycle-checked server-side (src/memory/todos.rs:804-867).
+ *
+ * "Waiting on a person" and "waiting on another task" are therefore separable
+ * here in a way they are not in most trackers, and the second is actionable in
+ * a way the first is not — a blocker task has a status of its own, so the
+ * screen can say whether the thing being waited on is itself moving.
+ * ================================================================== */
+
+export type Blocker =
+  /** A real todo, resolved against the rows in hand. */
+  | { kind: "task"; id: string; todo: TriageTodo }
+  /** A todo reference that is not in the fetched set. NOT dropped: a dependency
+   *  that exists and cannot be shown is different from no dependency, and
+   *  silently omitting it would understate what a task is waiting on. */
+  | { kind: "task-missing"; id: string }
+  /** The free-text `blocked_on`. A person or a thing, not a task. */
+  | { kind: "waiting"; text: string };
+
+export function blockersOf(todo: TriageTodo, byId: ReadonlyMap<string, TriageTodo>): Blocker[] {
+  const blockers: Blocker[] = [];
+  for (const id of todo.blocked_by ?? []) {
+    const found = byId.get(id);
+    blockers.push(found ? { kind: "task", id, todo: found } : { kind: "task-missing", id });
+  }
+  // Trimmed and emptiness-checked because the update handler writes the field
+  // through verbatim, and clearing it produces "" rather than null — live data
+  // carries an activity entry reading "blocked on: " with nothing after it.
+  const waiting = todo.blocked_on?.trim();
+  if (waiting) blockers.push({ kind: "waiting", text: waiting });
+  return blockers;
+}
+
+/** A blocker task that is itself settled is no longer holding anything up, and
+ *  the server agrees — `unblocked_by_completion` (src/memory/todos.rs:869-895)
+ *  treats Done and Cancelled blockers as satisfied. A chain still listing one
+ *  is stale, not blocking, and reads differently. */
+export function blockerIsSatisfied(blocker: Blocker): boolean {
+  return blocker.kind === "task" && (blocker.todo.status === "done" || blocker.todo.status === "cancelled");
+}
+
+/* ================================================================== *
+ * HOW MUCH IS DONE
+ *
+ * THE ONLY HONEST DENOMINATOR ON THIS CORPUS IS A COUNT OF TASKS. There is no
+ * estimate, no story point and no size field anywhere on `Todo`
+ * (src/memory/types.rs:4067-4162), so there is nothing to weight by.
+ *
+ * Linear lands in the same place whenever a team has not enabled estimates:
+ * "When estimates are not enabled, we calculate statistics using a default
+ * value of 1 estimate point per issue" (linear.app/docs/estimates), and its
+ * project graph "treats all issues as 1 estimate point" in that case
+ * (linear.app/docs/project-graph). Our permanent condition is their fallback,
+ * so a count-based ratio is the same measure they ship rather than a
+ * simplification of it.
+ *
+ * WHAT IS DELIBERATELY NOT BORROWED: Linear's project graph applies "a 1/4
+ * modifier for any in-progress issues". That number exists to smooth a VELOCITY
+ * FORECAST, not to describe a task — and this screen makes no forecast, having
+ * neither estimates nor cycles. Rendering an in-progress task as 25% done would
+ * put a fraction on work whose partial progress nobody measured. Underway is
+ * counted and named; it is not scored.
+ *
+ * NO TASK EVER GETS A PERCENTAGE. Status is the whole of what is known about
+ * one task. A number appears only where there is a real population to count
+ * over: a project, or a parent's subtasks.
+ * ================================================================== */
+
+/** The lane key for todos belonging to no project. Empty string cannot collide
+ *  with a UUID. */
+export const NO_PROJECT = "";
+
+export interface Lane {
+  /** `project_id`, or `NO_PROJECT`. */
+  key: string;
+  name: string;
+  prefix: string | null;
+  archived: boolean;
+  todos: TriageTodo[];
+  total: number;
+  done: number;
+  cancelled: number;
+  /** done + cancelled. Both are settled: a cancelled task is not outstanding
+   *  work, and counting it as open would make a project that abandoned half its
+   *  scope look permanently unfinished. They are reported separately too,
+   *  because "we finished it" and "we dropped it" are not the same outcome. */
+  settled: number;
+  open: number;
+  underway: number;
+  blocked: number;
+  /** Earliest `created_at` and latest movement among these todos. */
+  from: number;
+  to: number;
+  /** How many of these have ever changed state. */
+  moved: number;
+}
+
+/**
+ * Group todos into project lanes.
+ *
+ * KEYED ON `project_id`, NEVER ON `project_prefix`, AND THE DIFFERENCE IS LIVE.
+ * The `claude-code` profile has two distinct projects both carrying the prefix
+ * "SHOD" — "shodh-memory" (archived, 39 todos) and "Shodh-redb" (active, 1) —
+ * because the prefix is derived from the name (`Project::derive_prefix`) and is
+ * not unique. Grouping by prefix would merge a finished project into a running
+ * one and report a single wrong ratio over both.
+ *
+ * The prefix is still carried, because it is what the short ids on the rows are
+ * built from and a lane whose rows all read "SHOD-n" must say so.
+ *
+ * Projects with no todos in hand are NOT given empty lanes: the profile's whole
+ * project list ships with every response (todos.rs:1435-1438), and six of the
+ * nine on the live profile would otherwise draw a lane reading "0 of 0".
+ */
+export function lanesOf(todos: TriageTodo[], projects: readonly TriageProject[]): Lane[] {
+  const meta = new Map(projects.map((p) => [p.id, p]));
+  const lanes = new Map<string, Lane>();
+
+  for (const todo of todos) {
+    const key = todo.project_id ?? NO_PROJECT;
+    let lane = lanes.get(key);
+    if (!lane) {
+      const project = key === NO_PROJECT ? undefined : meta.get(key);
+      lane = {
+        key,
+        // A todo can name a project the project list does not contain; the id
+        // is then all there is and the lane says exactly that rather than
+        // rendering a blank heading.
+        name: key === NO_PROJECT ? "No project" : (project?.name ?? "Unnamed project"),
+        prefix: project?.prefix ?? todo.project_prefix ?? null,
+        archived: project?.status === "archived" || project?.status === "completed",
+        todos: [],
+        total: 0,
+        done: 0,
+        cancelled: 0,
+        settled: 0,
+        open: 0,
+        underway: 0,
+        blocked: 0,
+        from: Number.POSITIVE_INFINITY,
+        to: Number.NEGATIVE_INFINITY,
+        moved: 0,
+      };
+      lanes.set(key, lane);
+    }
+
+    lane.todos.push(todo);
+    lane.total += 1;
+    if (todo.status === "done") lane.done += 1;
+    else if (todo.status === "cancelled") lane.cancelled += 1;
+    else {
+      lane.open += 1;
+      if (todo.status === "in_progress") lane.underway += 1;
+      if (todo.status === "blocked") lane.blocked += 1;
+    }
+
+    const line = lifelineOf(todo);
+    if (line) {
+      lane.from = Math.min(lane.from, line.recorded);
+      lane.to = Math.max(lane.to, line.settled ?? line.started ?? line.recorded);
+    }
+    if (hasMoved(todo)) lane.moved += 1;
+  }
+
+  for (const lane of lanes.values()) {
+    lane.settled = lane.done + lane.cancelled;
+    // A lane whose every todo had an unreadable created_at would otherwise
+    // carry infinities into the axis arithmetic.
+    if (!Number.isFinite(lane.from)) lane.from = 0;
+    if (!Number.isFinite(lane.to)) lane.to = lane.from;
+  }
+
+  return [...lanes.values()].sort(laneOrder);
+}
+
+/**
+ * Lane order: running work first, finished work after it, unfiled last.
+ *
+ * Linear's My Issues groups in the same spirit — "urgent work, SLA-bound work,
+ * blockers, cycle work, other active work, triage, backlog, and completed work"
+ * (linear.app/docs/my-issues) — with completed work last. The principle taken
+ * is that ordering follows what still needs a decision, not alphabetical or
+ * chronological neatness. The specific groups are not taken: there is no SLA,
+ * cycle or triage concept in this model and inventing lanes for them would be
+ * chrome with nothing behind it.
+ *
+ * Within a tier, most recently active first, so a lane that moved this week
+ * outranks one that has been quiet for months.
+ */
+function laneOrder(a: Lane, b: Lane): number {
+  const tier = (lane: Lane) => (lane.key === NO_PROJECT ? 2 : lane.archived ? 1 : 0);
+  const byTier = tier(a) - tier(b);
+  if (byTier !== 0) return byTier;
+  return b.to - a.to;
+}
+
+export interface SubtaskProgress {
+  done: number;
+  total: number;
+}
+
+/**
+ * Completion across a parent's subtasks, or null when it has none.
+ *
+ * NULL RATHER THAN ZERO, AND ONLY WHERE CHILDREN EXIST. This is the one place
+ * a task-level ratio has a real population behind it. Every other task gets no
+ * number, because a percentage derived from a single task's status would be
+ * invented — the reason `in_progress` is reported as a word and never as a
+ * fraction.
+ *
+ * NOTHING ON THE LIVE INSTANCE USES `parent_id`: zero of 143 todos across four
+ * profiles carry one. This is written against the field rather than against the
+ * corpus because the field is real, the create and update handlers both accept
+ * it (todos.rs:182, 288), and the list endpoint returns subtasks inline with
+ * everything else — but nothing on screen will render from it today, and the
+ * surface must not imply otherwise.
+ */
+export function subtaskProgress(parent: TriageTodo, todos: readonly TriageTodo[]): SubtaskProgress | null {
+  let done = 0;
+  let total = 0;
+  for (const todo of todos) {
+    if (todo.parent_id !== parent.id) continue;
+    total += 1;
+    // Cancelled counts as settled for the same reason it does in a lane: a
+    // dropped subtask is not outstanding, and leaving it in the denominator
+    // would strand a parent at "3 of 4" forever.
+    if (todo.status === "done" || todo.status === "cancelled") done += 1;
+  }
+  return total === 0 ? null : { done, total };
+}
+
+/* ================================================================== *
+ * WHAT THE HEADER IS ALLOWED TO SAY
+ * ================================================================== */
+
+export interface Board {
+  shown: number;
+  total: number;
+  /** When true EVERY RATIO ON THIS SCREEN IS SUPPRESSED. The server paginates
+   *  after sorting by manual order, priority and due date — never by project —
+   *  so a truncated response is an arbitrary slice across all projects at once
+   *  and no lane's denominator is its own. */
+  truncated: boolean;
+  open: number;
+  underway: number;
+  blocked: number;
+  settled: number;
+  done: number;
+  cancelled: number;
+  /** Lanes with at least one todo in hand. */
+  projects: number;
+  /** Todos that have ever changed state. Zero means nothing here has moved. */
+  moved: number;
+  /** Todos naming another todo as a blocker. Zero across every live profile. */
+  dependencies: number;
+  /** Todos carrying free-text `blocked_on`. */
+  waiting: number;
+  /** Span of `created_at` across the rows, for the "recorded in one sitting"
+   *  finding. Null when nothing could be read. */
+  from: number | null;
+  to: number | null;
+}
+
+export function boardOf(todos: TriageTodo[], total: number, lanes: readonly Lane[]): Board {
+  let open = 0;
+  let underway = 0;
+  let blocked = 0;
+  let done = 0;
+  let cancelled = 0;
+  let moved = 0;
+  let dependencies = 0;
+  let waiting = 0;
+  let from: number | null = null;
+  let to: number | null = null;
+
+  for (const todo of todos) {
+    if (todo.status === "done") done += 1;
+    else if (todo.status === "cancelled") cancelled += 1;
+    else {
+      open += 1;
+      if (todo.status === "in_progress") underway += 1;
+      if (todo.status === "blocked") blocked += 1;
+    }
+    if (hasMoved(todo)) moved += 1;
+    if ((todo.blocked_by ?? []).length > 0) dependencies += 1;
+    if (todo.blocked_on?.trim()) waiting += 1;
+
+    const at = parseTime(todo.created_at);
+    if (at !== null) {
+      from = from === null ? at : Math.min(from, at);
+      to = to === null ? at : Math.max(to, at);
+    }
+  }
+
+  return {
+    shown: todos.length,
+    ...truncation(todos.length, total),
+    open,
+    underway,
+    blocked,
+    settled: done + cancelled,
+    done,
+    cancelled,
+    projects: lanes.length,
+    moved,
+    dependencies,
+    waiting,
+    from,
+    to,
+  };
+}
+
+/**
+ * The time axis the lane strips share, or null when there is nothing to draw.
+ *
+ * NULL WHEN NOTHING HAS EVER MOVED, and that is the whole rule. A strip is a
+ * picture of work progressing; with no transitions anywhere, all it can plot is
+ * the instants at which rows were written down, which is a picture of an import
+ * and reads as one only if you already know that. The live `claude` profile is
+ * exactly this case — 50 todos, all created inside 33 minutes on one day, not
+ * one of them ever moved — and it gets a sentence stating that instead, which
+ * says more than the drawing could.
+ *
+ * A SHARED AXIS ACROSS ALL LANES, not one per lane. Per-lane axes would draw a
+ * project that ran for a day and one that ran for four months at the same
+ * width, which inverts the comparison the strips exist to support.
+ */
+export interface Axis {
+  from: number;
+  to: number;
+  span: number;
+}
+
+export function axisOf(lanes: readonly Lane[], board: Board): Axis | null {
+  if (board.moved === 0) return null;
+  let from = Number.POSITIVE_INFINITY;
+  let to = Number.NEGATIVE_INFINITY;
+  for (const lane of lanes) {
+    if (lane.total === 0) continue;
+    from = Math.min(from, lane.from);
+    to = Math.max(to, lane.to);
+  }
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+  // A zero span would divide by zero in every position below. One millisecond
+  // of width puts every mark at the left edge, which is truthful for a set of
+  // events that genuinely share an instant.
+  const span = Math.max(to - from, 1);
+  return { from, to, span };
+}
+
+/** Where an instant sits on the axis, as a 0..1 fraction. Clamped: a todo
+ *  settled before it was recorded (clock skew between two writes) would
+ *  otherwise place a mark outside the track. */
+export function positionOn(axis: Axis, at: number): number {
+  return Math.min(1, Math.max(0, (at - axis.from) / axis.span));
+}
+
+/**
+ * How long something took, in the coarsest unit that still says something.
+ *
+ * BUILT ON TOTAL MINUTES WITH FLOOR AND MODULO, NOT ON NESTED ROUNDING. The
+ * failure this shape avoids has bitten this codebase before: rounding a
+ * remainder independently of the unit above it produces "1h 60m", which is
+ * wrong and reads as plausible. Here the rounding happens exactly once, to
+ * minutes, and every larger unit is derived from that single number, so a
+ * remainder can never reach its own base.
+ *
+ * Null for a negative span. Two writes on different clocks can settle a todo
+ * before it was recorded, and "-3h" beside a finished task is worse than
+ * nothing at all.
+ */
+export function elapsedLabel(from: number, to: number): string | null {
+  const ms = to - from;
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 1) return "under a minute";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    const rest = minutes % 60;
+    return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
+  }
+  const days = Math.floor(hours / 24);
+  const rest = hours % 24;
+  return rest === 0 ? `${days}d` : `${days}d ${rest}h`;
+}
+
+export interface CurvePoint {
+  /** 0..1 along the shared axis. */
+  x: number;
+  /** 0..1 of the lane's total task count. */
+  y: number;
+}
+
+export interface LaneCurve {
+  /** How much work existed by time t. Linear calls this scope, and plots it
+   *  for the same reason: a project that "finished 13 of 13" having quietly
+   *  grown from 4 is a different story from one that never moved the target. */
+  scope: CurvePoint[];
+  /** How much of it had settled by time t. */
+  settled: CurvePoint[];
+}
+
+/**
+ * The two step functions behind a lane's strip.
+ *
+ * WHY TWO SERIES AND NOT A SINGLE PERCENTAGE. A meter reading "31 of 40" is one
+ * number at one instant and cannot distinguish a project that shipped steadily
+ * from one that sat still for three months and then closed everything in a day
+ * — and on this corpus that difference is real and visible. Linear's project
+ * graph plots scope alongside completed work for the same reason
+ * (linear.app/docs/project-graph); this is the same pair, reduced to what a
+ * count-only model can support.
+ *
+ * WHAT IS DELIBERATELY NOT PLOTTED: Linear's third series is a velocity-based
+ * FORECAST, wrapped in "a buffer of about ±40%". Nothing here forecasts. There
+ * are no estimates, no cycles and no velocity to extrapolate from, so a
+ * projected finish would be a line with no measurement under it — the exact
+ * failure this module exists to refuse. Both series stop at the present.
+ *
+ * BOTH ARE STEP FUNCTIONS AND ARE RETURNED AS SUCH. Interpolating between two
+ * completions would draw work progressing on days when nothing happened. The
+ * caller draws the steps; joining these points with straight lines would
+ * silently reintroduce exactly that lie.
+ */
+export function laneCurve(lane: Lane, axis: Axis): LaneCurve {
+  const series = (times: number[]): CurvePoint[] => {
+    if (lane.total === 0) return [];
+    const sorted = [...times].sort((a, b) => a - b);
+    const points: CurvePoint[] = [{ x: 0, y: 0 }];
+    let count = 0;
+    for (const time of sorted) {
+      const x = positionOn(axis, time);
+      count += 1;
+      // Two events at the same position collapse to the taller step rather
+      // than stacking a zero-width segment between them.
+      const last = points[points.length - 1];
+      if (last.x === x) last.y = count / lane.total;
+      else points.push({ x, y: count / lane.total });
+    }
+    // Carried to the right edge: the last known level holds until now, and a
+    // curve stopping mid-track would read as work that stopped being counted.
+    points.push({ x: 1, y: count / lane.total });
+    return points;
+  };
+
+  const recorded: number[] = [];
+  const settled: number[] = [];
+  for (const todo of lane.todos) {
+    const line = lifelineOf(todo);
+    if (!line) continue;
+    recorded.push(line.recorded);
+    if (line.settled !== null) settled.push(line.settled);
+  }
+
+  return { scope: series(recorded), settled: series(settled) };
+}
+
+/** The stepped SVG path for one series, in a `width` × `height` box with y
+ *  inverted (SVG's origin is top-left, the curve grows upward). Empty for a
+ *  series with nothing in it, which draws nothing rather than a flat line at
+ *  zero that looks like a measurement. */
+export function stepPath(points: readonly CurvePoint[], width: number, height: number): string {
+  if (points.length === 0) return "";
+  const px = (p: CurvePoint) => `${(p.x * width).toFixed(2)},${(height - p.y * height).toFixed(2)}`;
+  let path = `M ${px(points[0])}`;
+  for (let i = 1; i < points.length; i += 1) {
+    // Horizontal to the new x at the OLD y, then vertical: the step itself.
+    path += ` L ${(points[i].x * width).toFixed(2)},${(height - points[i - 1].y * height).toFixed(2)}`;
+    path += ` L ${px(points[i])}`;
+  }
+  return path;
 }
