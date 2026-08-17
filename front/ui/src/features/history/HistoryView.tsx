@@ -116,9 +116,10 @@ const SOURCE_META: Record<AuditSource, { label: string; hint: string }> = {
   tool_call: { label: "Tool calls", hint: "A tool the model invoked, with how long it took" },
   ledger: { label: "Memory changes", hint: "Something written to or adjusted in memory" },
   retrieval: { label: "Retrievals", hint: "What was searched for, and what came back" },
+  view: { label: "View changes", hint: "Where the model asked to take you, and why" },
 };
 
-const SOURCE_ORDER: AuditSource[] = ["tool_call", "ledger", "retrieval"];
+const SOURCE_ORDER: AuditSource[] = ["tool_call", "ledger", "retrieval", "view"];
 
 /** A labelled line inside an opened row. Same shape as the Tasks detail: these
  *  are read, not scanned, so they are lines rather than more chips. */

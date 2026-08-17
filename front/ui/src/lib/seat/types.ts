@@ -136,6 +136,26 @@ export type SeatEvent =
       temporal_credits_applied: number | null;
       took_ms: number;
     }
+  | {
+      /**
+       * The model asked to move this view (seat/src/view-tools.ts `direct_view`).
+       *
+       * ALREADY VALIDATED WHEN IT ARRIVES. `destination` is a real path and
+       * every name in `entities` was resolved against this profile's graph by
+       * the seat, so `lib/view/commands.ts` translates it without re-checking
+       * anything. `unresolved` carries the terms that named nothing — kept on
+       * the wire because a command that framed three of five things must not be
+       * indistinguishable from one that framed five.
+       */
+      type: "view_command";
+      tool_call_id: string;
+      /** Why, in the model's own words. Shown to the person verbatim. */
+      reason: string;
+      /** Destination path, or null when the move only frames. */
+      destination: string | null;
+      entities: string[];
+      unresolved: string[];
+    }
   | { type: "harness_learning_applied"; memories: { id: string; content: string; score: number }[] }
   | { type: "model_changed"; model: ModelRef }
   | { type: "usage"; model: ModelRef; usage: UsagePayload }
@@ -343,7 +363,7 @@ export type LedgerActor = "user" | "agent" | "system";
 export type LedgerActorView = LedgerActor | "unknown";
 
 /** seat/src/audit.ts `AuditSource` — which store a row came from. */
-export type AuditSource = "ledger" | "tool_call" | "retrieval";
+export type AuditSource = "ledger" | "tool_call" | "retrieval" | "view";
 
 /**
  * seat/src/audit.ts `AuditRow` — one line of the audit trail, flat and uniform

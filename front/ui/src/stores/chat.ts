@@ -35,6 +35,7 @@ export type ChatOp = Extract<
       | "harness_learning_applied"
       | "tool_call_start"
       | "tool_call_end"
+      | "view_command"
       | "model_changed"
       | "error";
   }

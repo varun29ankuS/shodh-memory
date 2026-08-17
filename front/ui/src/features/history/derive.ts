@@ -139,6 +139,7 @@ const AUDIT_SOURCES: ReadonlySet<string> = new Set<AuditSource>([
   "ledger",
   "tool_call",
   "retrieval",
+  "view",
 ]);
 
 const ACTOR_VIEWS: ReadonlySet<string> = new Set<LedgerActorView>([
@@ -295,7 +296,7 @@ function nearestRank(sorted: readonly number[], quantile: number): number | null
 
 export function summarise(rows: readonly AuditRow[]): TrailSummary {
   const actors: Record<LedgerActorView, number> = { user: 0, agent: 0, system: 0, unknown: 0 };
-  const sources: Record<AuditSource, number> = { ledger: 0, tool_call: 0, retrieval: 0 };
+  const sources: Record<AuditSource, number> = { ledger: 0, tool_call: 0, retrieval: 0, view: 0 };
   const conversations = new Set<string>();
   const durations: number[] = [];
   let failed = 0;
@@ -514,6 +515,13 @@ export function kindLabel(row: AuditRow): string {
       return "Searched memory";
     case "proactive_context":
       return "Surfaced context unasked";
+    // NOT "Moved the view". The seat records the request and never learns the
+    // verdict — the authority ledger that decides whether a command applied or
+    // waited as a Follow lives in this browser and reports to nobody. A label
+    // asserting the view moved would be the trail claiming an outcome it has no
+    // evidence for, on the one screen whose entire value is that it does not.
+    case "view_command":
+      return "Asked to move the view";
     default:
       return row.kind;
   }

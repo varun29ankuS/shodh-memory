@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SeatEvent } from "@/lib/seat/types";
 import type { RecallFact, RecallMemory } from "@/lib/api/types";
-import { ENTITY_LIMIT, commandsFromOp, describeCommands, dimensionsOf } from "./commands";
+import { ENTITY_LIMIT, commandsFromOp, describeCommands, dimensionsOf, reasonOf } from "./commands";
 
 /**
  * The event→command translation is the contract between the conversation and
@@ -199,5 +199,156 @@ describe("describeCommands", () => {
 
   it("is empty for no commands, so the offer cannot render a bare frame", () => {
     expect(describeCommands([])).toBe("");
+  });
+});
+
+/* -------------------------------------------------------------------------- *
+ * THE MODEL ASKING, RATHER THAN THE BROWSER INFERRING
+ * -------------------------------------------------------------------------- */
+
+function request(
+  over: Partial<Extract<SeatEvent, { type: "view_command" }>> = {},
+): SeatEvent {
+  return {
+    type: "view_command",
+    tool_call_id: "call-1",
+    reason: "these 12 memories cluster on the Malabar coast",
+    destination: "/geo",
+    entities: ["Malabar Coast", "Dali"],
+    unresolved: [],
+    ...over,
+  };
+}
+
+describe("commandsFromOp — view_command", () => {
+  it("carries the model's reason on every command the request produced", () => {
+    const commands = commandsFromOp(request(), "/chat");
+
+    expect(commands).toEqual([
+      {
+        dimension: "cue",
+        text: "Malabar Coast, Dali",
+        entities: ["Malabar Coast", "Dali"],
+        reason: "these 12 memories cluster on the Malabar coast",
+      },
+      {
+        dimension: "frame",
+        entities: ["Malabar Coast", "Dali"],
+        reason: "these 12 memories cluster on the Malabar coast",
+      },
+      {
+        dimension: "destination",
+        path: "/geo",
+        reason: "these 12 memories cluster on the Malabar coast",
+      },
+    ]);
+  });
+
+  it("puts the ENTITIES in the cue field, never the reason", () => {
+    // `dispatch` writes a cue through to the visible search field. The reason is
+    // prose about evidence; a person watching their own search box fill with a
+    // sentence they did not type has been handed a different app. The field has
+    // to hold something they could have typed and can check the picture against.
+    const [cue] = commandsFromOp(request({ reason: "a sentence about evidence" }), "/chat");
+    expect(cue).toMatchObject({ dimension: "cue", text: "Malabar Coast, Dali" });
+  });
+
+  it("sends BOTH the cue and the frame, because they light different things", () => {
+    // The cue is what recedes the unmatched (and it is the map's only channel);
+    // the frame is the graph's camera. One without the other either aims at
+    // entities that were never distinguished, or distinguishes entities that are
+    // off screen.
+    expect(dimensionsOf(commandsFromOp(request({ destination: null }), "/graph"))).toEqual([
+      "cue",
+      "frame",
+    ]);
+  });
+
+  it("does not navigate to the surface the person is already on", () => {
+    const commands = commandsFromOp(request({ destination: "/geo" }), "/geo");
+    expect(dimensionsOf(commands)).toEqual(["cue", "frame"]);
+  });
+
+  it("frames nothing when the seat resolved nothing, and still opens the surface", () => {
+    // The seat checked every term against the graph and none of them named
+    // anything. A frame command with no subject would reset the camera to the
+    // whole corpus while claiming to have narrowed it.
+    const commands = commandsFromOp(
+      request({ entities: [], unresolved: ["Atlantis", "Shangri-La"] }),
+      "/chat",
+    );
+    expect(commands).toEqual([
+      {
+        dimension: "destination",
+        path: "/geo",
+        reason: "these 12 memories cluster on the Malabar coast",
+      },
+    ]);
+  });
+
+  it("does nothing at all when there is neither a destination nor an entity", () => {
+    expect(commandsFromOp(request({ destination: null, entities: [] }), "/chat")).toEqual([]);
+  });
+
+  it("refuses a command that gives no account of itself", () => {
+    // The tool requires a reason and the store renders it; an event without one
+    // is a wire-level malformation. Moving the view on it would produce exactly
+    // the unexplained lurch this whole mechanism exists to abolish.
+    expect(commandsFromOp(request({ reason: "   " }), "/chat")).toEqual([]);
+  });
+
+  it("drops blank entity names rather than framing on an empty string", () => {
+    const [cue] = commandsFromOp(request({ entities: ["Dali", "  ", ""] }), "/chat");
+    expect(cue).toMatchObject({ entities: ["Dali"], text: "Dali" });
+  });
+
+  it("leaves a recall's commands with no reason, because nobody gave one", () => {
+    // Inventing "because you asked about X" would put words in the model's
+    // mouth that it never said, in a chip that quotes it.
+    const commands = commandsFromOp(recall({ memories: [memory("m1")] }), "/chat");
+    expect(commands.every((command) => command.reason === undefined)).toBe(true);
+  });
+});
+
+describe("reasonOf", () => {
+  it("finds the reason the commands share", () => {
+    expect(reasonOf(commandsFromOp(request(), "/chat"))).toBe(
+      "these 12 memories cluster on the Malabar coast",
+    );
+  });
+
+  it("is null when nothing was justified, so the chip cannot quote an empty string", () => {
+    expect(reasonOf(commandsFromOp(recall({ memories: [memory("m1")] }), "/chat"))).toBeNull();
+    expect(reasonOf([{ dimension: "frame", entities: ["Dali"], reason: "  " }])).toBeNull();
+    expect(reasonOf([])).toBeNull();
+  });
+});
+
+describe("describeCommands — the ten surfaces", () => {
+  it("names every destination the model can choose", () => {
+    // The list used to hold one entry because one destination could be produced.
+    // A surface the model can name but this table cannot would render as a raw
+    // path in the offer the person is asked to accept.
+    const nouns = [
+      ["/", "the briefing"],
+      ["/chat", "the conversation"],
+      ["/recall", "recall"],
+      ["/graph", "the graph"],
+      ["/geo", "the map"],
+      ["/anomalies", "anomalies"],
+      ["/tasks", "tasks"],
+      ["/history", "history"],
+      ["/sources", "sources"],
+      ["/providers", "providers"],
+    ] as const;
+    for (const [path, noun] of nouns) {
+      expect(describeCommands([{ dimension: "destination", path }])).toBe(`open ${noun}`);
+    }
+  });
+
+  it("falls back to the path for a surface added to the router but not to the table", () => {
+    expect(describeCommands([{ dimension: "destination", path: "/newthing" }])).toBe(
+      "open /newthing",
+    );
   });
 });

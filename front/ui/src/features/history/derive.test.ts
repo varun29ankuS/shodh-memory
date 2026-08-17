@@ -206,7 +206,7 @@ describe("summarise", () => {
   it("keeps a zero for every actor and source so the filter can say 'none'", () => {
     const summary = summarise([row({ actor: "system" })]);
     expect(summary.actors).toEqual({ user: 0, agent: 0, system: 1, unknown: 0 });
-    expect(summary.sources).toEqual({ ledger: 1, tool_call: 0, retrieval: 0 });
+    expect(summary.sources).toEqual({ ledger: 1, tool_call: 0, retrieval: 0, view: 0 });
   });
 
   it("has no span on an empty trail rather than an invalid one", () => {

@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Sparkle } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { describeCommands } from "@/lib/view/commands";
+import { describeCommands, reasonOf } from "@/lib/view/commands";
 import { useView } from "@/stores/view";
 
 /**
@@ -43,18 +43,28 @@ import { useView } from "@/stores/view";
  * be on its way to it, which is the shift the craft bar forbids.
  */
 export function useHasViewNotice(): boolean {
-  return useView((s) => Object.keys(s.offers).length > 0 || s.cue !== null);
+  return useView((s) => Object.keys(s.offers).length > 0 || s.cue !== null || s.notice !== null);
 }
 
 export function FollowOffer() {
   const offers = useView((s) => s.offers);
   const cue = useView((s) => s.cue);
+  const notice = useView((s) => s.notice);
   const follow = useView((s) => s.follow);
   const dismiss = useView((s) => s.dismiss);
   const release = useView((s) => s.release);
 
   const pending = useMemo(() => Object.values(offers), [offers]);
   const description = describeCommands(pending);
+  /* THE REASON IS QUOTED; THE DESCRIPTION IS NOT. `describeCommands` is this
+     app's own account of what a command would do, generated from its shape;
+     `reasonOf` is the model's sentence about the evidence, unedited. Rendering
+     them as one phrase would make the app's wording read as something the model
+     said, which is the same class of misattribution as a chip crediting the
+     model for a cue the person typed. So the reason is set off by an em dash
+     and — where there is room — carries the quotation the applied line already
+     uses for the model's words. */
+  const offeredReason = reasonOf(pending);
 
   if (pending.length > 0 && description.length > 0) {
     return (
@@ -74,11 +84,18 @@ export function FollowOffer() {
         <p className="min-w-0 truncate text-[12px]">
           <span className="text-muted-foreground">The conversation would </span>
           {description}
+          {offeredReason ? (
+            <span className="text-muted-foreground"> — “{offeredReason}”</span>
+          ) : null}
         </p>
         <button
           type="button"
           onClick={follow}
-          aria-label={`Follow the conversation: ${description}`}
+          aria-label={
+            offeredReason
+              ? `Follow the conversation: ${description}, because ${offeredReason}`
+              : `Follow the conversation: ${description}`
+          }
           className="bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:ring-ring shrink-0 rounded px-2 py-[3px] text-[11px] font-medium transition-colors focus-visible:ring-2 focus-visible:outline-none"
         >
           Follow
@@ -95,7 +112,13 @@ export function FollowOffer() {
     );
   }
 
-  if (!cue) return null;
+  /* AN APPLIED MOVE WITH NO CUE IS STILL A MOVE. `direct_view` can open a
+     surface without naming a single entity — "these came from an import you ran
+     in March", on sources — and before the notice record that produced a silent
+     navigation: the stage changed under the reader with nothing anywhere saying
+     who did it or why. The cue is no longer the only evidence that the
+     conversation touched this view, so it is no longer the gate. */
+  if (!cue && !notice) return null;
 
   return (
     <div
@@ -114,8 +137,17 @@ export function FollowOffer() {
             every surface and whether or not anything matched.
 
             The query, not a count: it is the one thing that lets a reader check
-            the view against the answer they are reading. */}
-        Following the conversation — <span className="text-foreground">“{cue.text}”</span>
+            the view against the answer they are reading.
+
+            THE REASON OUTRANKS THE CUE TEXT WHEN THERE IS ONE, and not because
+            it is nicer prose. The cue text is already on screen verbatim, in
+            the search field two inches to the right — printing it again spends
+            the one line this bar has on something the eye can already see,
+            while the account of WHY is nowhere else in the interface. When the
+            model gave no reason (a narrowing inferred from a recall), the cue
+            text is all there is, and it is shown. */}
+        Following the conversation —{" "}
+        <span className="text-foreground">“{notice ? notice.reason : cue?.text}”</span>
       </p>
       <button
         type="button"
