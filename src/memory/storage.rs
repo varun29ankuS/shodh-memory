@@ -551,6 +551,12 @@ impl LegacyExperienceV1 {
             // read would let a legacy keyphrase enter the graph as a caller
             // claim.
             declared_entities: Vec::new(),
+            // A v1 bincode record was written years before any write path
+            // stamped an origin, so there is nothing to recover. `Unknown` is
+            // the truth; guessing "this looks like it came from the API" and
+            // persisting that on the migration rewrite would mint provenance
+            // that never existed.
+            origin: crate::memory::types::MemoryOrigin::Unknown,
         }
     }
 }
@@ -709,6 +715,7 @@ impl LegacyMemoryV2 {
 /// Postcard defaults for every trailing `MemoryFlat` field added after the
 /// postcard cutover (#192), in field order: `toponyms: Vec<Toponym>` (empty =
 /// varint `0x00`), then `declared_entities: Vec<String>` (empty = varint
+/// `0x00`), then `origin: MemoryOrigin` (`Unknown` = variant index varint
 /// `0x00`).
 ///
 /// `parent_id` is NOT listed: it was added in January, before the April
@@ -718,11 +725,18 @@ impl LegacyMemoryV2 {
 /// suffix of these fields decodes (postcard has no `#[serde(default)]` EOF
 /// tolerance). Keep in sync with any new trailing field — appending a field to
 /// `MemoryFlat` means appending its postcard default here, in the SAME ORDER as
-/// the struct declares it. The order is a contract: `toponyms` then
-/// `declared_entities`, and a third tail field (`origin`, on `fix/origin-field`)
-/// extends this to `[0x00, 0x00, 0x00]` with `origin` last, matching its
-/// position in `MemoryFlat`. Bytes appended in the wrong order default the wrong
-/// fields.
+/// the struct declares it. The order is a contract: `toponyms`, then
+/// `declared_entities`, then `origin` — the order `MemoryFlat` declares them.
+/// Bytes appended in the wrong order default the wrong fields.
+///
+/// All three defaults happen to encode as the same byte (`0x00`: an empty
+/// `Vec` length, an empty `Vec` length, and `MemoryOrigin::Unknown`'s variant
+/// index), so the SUFFIX is order-agnostic and a mis-ordered suffix would not
+/// be caught by inspecting it. What is NOT order-agnostic is the declaration
+/// order in `MemoryFlat`, which decides which stored bytes are read as which
+/// field. `declared_entities` shipped first and live records already carry it,
+/// so `origin` goes after it — putting `origin` first would make every such
+/// record read `declared_entities`' length varint as the origin discriminant.
 ///
 /// Note that this mechanism ONLY works for fields appended at the end of
 /// `MemoryFlat`. A field added to `Experience` instead lands mid-payload, where
@@ -730,7 +744,7 @@ impl LegacyMemoryV2 {
 /// why `Experience::toponyms` is `#[serde(skip)]` and carried at the
 /// `MemoryFlat` tail. `NerEntityRecord::fine_label` is what happens when that
 /// rule is broken — see [`decode_postcard_memory`].
-const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00];
+const MEMORY_DEFAULT_SUFFIX: &[u8] = &[0x00, 0x00, 0x00];
 
 /// Decode a SHO v2 (postcard) payload, tolerating both compatible-change classes
 /// the stored format has accumulated.
@@ -4434,15 +4448,21 @@ mod tests {
     #[test]
     fn memory_missing_its_tail_fields_is_defaulted_in_declaration_order() {
         // MEMORY_DEFAULT_SUFFIX repairs fields appended to the END of
-        // MemoryFlat, one at a time, and the ORDER is a contract: `toponyms`
-        // then `declared_entities`. A record written before both, before only
-        // the second, and a complete record must all decode, and a record short
-        // by one field must not have the wrong field defaulted.
+        // MemoryFlat, one at a time, and the ORDER is a contract: `toponyms`,
+        // then `declared_entities`, then `origin`. A record written before all
+        // three, before the last two, before only the last, and a complete
+        // record must all decode — and a record short by one field must not
+        // have the WRONG field defaulted.
         //
-        // `fix/origin-field` adds a third tail field. When these branches meet,
-        // the suffix becomes [0x00, 0x00, 0x00] with `origin` last, matching its
-        // position in MemoryFlat — this test is what catches getting that order
-        // wrong, because a mis-ordered suffix defaults the wrong field.
+        // The suffix bytes cannot catch a mis-ordering on their own: all three
+        // defaults encode as `0x00` (two empty `Vec` lengths and
+        // `MemoryOrigin::Unknown`'s variant index), so the suffix is
+        // order-agnostic and reordering `MemoryFlat` still produces a decode
+        // that succeeds. What catches it is truncating a REAL encoding one tail
+        // field at a time and checking that the fields BEFORE the missing one
+        // came back intact, which is what this test does. `origin` is therefore
+        // set to a non-default variant: a defaulted `origin` is indistinguishable
+        // from a correctly decoded `Unknown`.
         let id = MemoryId(
             uuid::Uuid::parse_str("8a7b6c5d-4e3f-4a2b-9c1d-0e1f2a3b4c5d").expect("static uuid"),
         );
@@ -4456,6 +4476,17 @@ mod tests {
             population: 585_708,
         }];
         memory.experience.declared_entities = vec!["Baltimore".to_string()];
+        memory.experience.origin = MemoryOrigin::Api;
+
+        // The property MEMORY_DEFAULT_SUFFIX depends on: `Unknown` must encode
+        // as exactly the one `0x00` byte the decoder appends for a record
+        // written before the field existed. Renumbering the enum so `Unknown`
+        // is no longer variant 0 would break every such record silently.
+        assert_eq!(
+            crate::serialization::encode_raw(&MemoryOrigin::Unknown).expect("encode origin"),
+            vec![0x00],
+            "MemoryOrigin::Unknown must encode as the single byte the tail-default supplies"
+        );
 
         let full = crate::serialization::encode_raw(&memory).expect("encode");
 
@@ -4466,11 +4497,38 @@ mod tests {
         assert!(!defaulted);
         assert_eq!(decoded.experience.declared_entities, vec!["Baltimore"]);
         assert_eq!(decoded.experience.toponyms.len(), 1);
+        assert_eq!(decoded.experience.origin, MemoryOrigin::Api);
 
-        // Written before `declared_entities`: the tail ends after `toponyms`.
-        // A one-entry Vec<String> encodes as [len=1, strlen, bytes...], so
-        // dropping "Baltimore" plus its two varints leaves the pre-field shape.
-        let without_declared = &full[..full.len() - ("Baltimore".len() + 2)];
+        // Written before `origin`: the tail ends after `declared_entities`. A
+        // non-Unknown origin is one varint byte, so dropping the last byte
+        // leaves exactly the shape the live `declared_entities`-era build wrote
+        // — the records that already exist on disk.
+        let without_origin = &full[..full.len() - 1];
+        let (decoded, defaulted) =
+            crate::serialization::decode_raw_compat::<Memory>(without_origin, MEMORY_DEFAULT_SUFFIX)
+                .expect("a record written before origin must decode");
+        assert!(
+            defaulted,
+            "the missing tail field must be reported as defaulted"
+        );
+        assert_eq!(
+            decoded.experience.origin,
+            MemoryOrigin::Unknown,
+            "a record written before the field existed has no origin to recover"
+        );
+        assert_eq!(
+            decoded.experience.declared_entities,
+            vec!["Baltimore"],
+            "the field before the missing one must survive intact — declaring \
+             `origin` ahead of `declared_entities` would empty this instead"
+        );
+        assert_eq!(decoded.experience.toponyms.len(), 1);
+
+        // Written before `declared_entities` too: the tail ends after
+        // `toponyms`. A one-entry Vec<String> encodes as [len=1, strlen,
+        // bytes...], so dropping "Baltimore" plus its two varints (on top of
+        // the origin byte already dropped) leaves the pre-field shape.
+        let without_declared = &full[..full.len() - 1 - ("Baltimore".len() + 2)];
         let (decoded, defaulted) = crate::serialization::decode_raw_compat::<Memory>(
             without_declared,
             MEMORY_DEFAULT_SUFFIX,
@@ -4478,13 +4536,14 @@ mod tests {
         .expect("a record written before declared_entities must decode");
         assert!(
             defaulted,
-            "the missing tail field must be reported as defaulted"
+            "the missing tail fields must be reported as defaulted"
         );
         assert!(decoded.experience.declared_entities.is_empty());
+        assert_eq!(decoded.experience.origin, MemoryOrigin::Unknown);
         assert_eq!(
             decoded.experience.toponyms.len(),
             1,
-            "the field before the missing one must survive intact — a suffix \
+            "the field before the missing ones must survive intact — a suffix \
              applied in the wrong order would empty this instead"
         );
     }

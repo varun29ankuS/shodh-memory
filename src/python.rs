@@ -496,6 +496,9 @@ impl PyMemorySystem {
             // NER records, which the direct Python API never produces (see
             // `ner_entities` above). No NER records means no toponyms to resolve.
             toponyms: vec![],
+            // In-process binding: the embedding Python app called us directly,
+            // with no HTTP hop and no axum handler in between.
+            origin: crate::memory::types::MemoryOrigin::PythonApi,
         };
 
         let memory_id = self
@@ -1847,6 +1850,9 @@ impl PyMemorySystem {
                 experience_type: ExperienceType::Conversation,
                 content: context.clone(),
                 tags: vec!["proactive-context".to_string()],
+                // Same shape as the HTTP auto-ingest: the caller asked for
+                // context, not for a write.
+                origin: crate::memory::types::MemoryOrigin::AutoIngest,
                 ..Default::default()
             };
             match self.inner.remember(experience, None) {

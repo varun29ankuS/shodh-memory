@@ -805,6 +805,159 @@ pub struct SurpriseComponents {
 /// Episode-metadata key under which [`SurpriseComponents`] is stored as JSON.
 pub const SURPRISE_METADATA_KEY: &str = "shodh.surprise";
 
+/// Which write path put a memory in the store.
+///
+/// # Why this is server-observed, never caller-declared
+///
+/// Before this field existed, the only way to guess where a memory came from
+/// was `Experience::tags` — but tags are the MERGED set of request tags, NER
+/// surfaces and YAKE keyphrases, so a `source:hook` tag is a string some writer
+/// chose to include, not provenance the store holds. A caller could claim any
+/// of it, and half the memories in a real store (every server-generated
+/// lifecycle echo) carry no such tag at all.
+///
+/// So the value here is decided by the handler that performed the write, from
+/// what the *server* knows: which endpoint ran. It is never read out of a
+/// request body, and there is deliberately no way for a client to set it.
+/// Caller-declared identity already has its own fields — `Memory::agent_id`,
+/// `Memory::actor_id`, and `RichContext::source_type` — and mixing a claim into
+/// an authority field is exactly how `labels.first()` came to report a type no
+/// typer can emit.
+///
+/// # Wire format: APPEND ONLY
+///
+/// This enum is encoded by postcard as its declaration index (a varint), inside
+/// `MemoryFlat`. Reordering variants, or removing one, silently re-points every
+/// stored record at a different origin. New variants go at the END, and
+/// [`MemoryOrigin::Unknown`] must stay at index 0 so its postcard encoding is
+/// the single byte `0x00` that `MEMORY_DEFAULT_SUFFIX` supplies for records
+/// written before the field existed.
+///
+/// # `Unknown` is not a backfill target
+///
+/// Every memory written before this field existed reads as `Unknown`, and stays
+/// that way. The information was never recorded, so there is nothing to
+/// recover: a migration that inferred an origin from tags or content would be
+/// manufacturing provenance, which is worse than admitting there is none. No
+/// code path assigns `Unknown` to a NEW write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryOrigin {
+    /// The record predates the field, or was recovered by a legacy decoder that
+    /// never carried one. Honest absence — see the type doc.
+    #[default]
+    Unknown,
+    /// `POST /api/remember` — a single memory a client explicitly asked to
+    /// store. This covers the Claude Code hooks, the MCP server and the CLI
+    /// alike: all three are plain HTTP clients of this endpoint, so the server
+    /// cannot and does not distinguish them here.
+    Api,
+    /// `POST /api/remember/batch` (alias `/api/batch_remember`).
+    BatchApi,
+    /// `POST /api/upsert` — external-id linked write with update semantics.
+    Upsert,
+    /// The server segmented and stored text the caller never asked to store:
+    /// `POST /api/proactive_context` with `auto_ingest` (which defaults to
+    /// TRUE), covering both the caller's own context and the previous
+    /// assistant response, plus the same auto-ingest inside the Python
+    /// binding's `proactive_context`.
+    AutoIngest,
+    /// Mined out of a live conversation stream by `StreamingManager`, which
+    /// buffers messages and decides for itself which turns are worth keeping.
+    /// Reached over the `/api/stream` WebSocket and over the Zenoh stream key.
+    ConversationStream,
+    /// An echo memory the server writes itself when a todo is created,
+    /// updated, completed or commented on (`/api/todos/*`).
+    TodoLifecycle,
+    /// The session digest the server writes when a context window is compacted
+    /// (`/api/sessions/context-compressed`).
+    SessionSummary,
+    /// `POST /api/import/mif` — imported from a Memory Interchange Format
+    /// document. Note this is the origin of the IMPORT, not of whatever wrote
+    /// the memory before it was exported: MIF carries no origin field, so a
+    /// round trip through export/import legitimately reads as `MifImport`.
+    MifImport,
+    /// The Linear connector — `POST /webhook/linear` or `POST /api/sync/linear`.
+    LinearConnector,
+    /// The GitHub connector — `POST /webhook/github` or `POST /api/sync/github`.
+    GithubConnector,
+    /// The Zenoh robotics transport (`zenoh` feature), which accepts remembers
+    /// off the wire without going through axum. The Zenoh analogue of [`Self::Api`].
+    Zenoh,
+    /// A mission-start or mission-end memory the Zenoh transport composes when
+    /// a robot announces a mission boundary. The Zenoh analogue of
+    /// [`Self::TodoLifecycle`]: the publisher asked to start a mission, not to
+    /// store a memory.
+    ZenohMission,
+    /// The in-process Python binding (`python` feature), which calls
+    /// `MemorySystem::remember` directly with no HTTP hop.
+    PythonApi,
+    /// Corpus seeding by the recall benchmark harness. These memories exist to
+    /// be measured against, and giving them their own origin is what lets an
+    /// eval store be told apart from a user's — which `Unknown` would not do,
+    /// since here the write path IS known.
+    RecallHarness,
+}
+
+impl MemoryOrigin {
+    /// Stable wire name, matching the JSON `rename_all = "snake_case"` output.
+    ///
+    /// Written out by hand rather than derived from `Debug` so that renaming a
+    /// variant in Rust cannot silently change the API contract or the accepted
+    /// filter values.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Api => "api",
+            Self::BatchApi => "batch_api",
+            Self::Upsert => "upsert",
+            Self::AutoIngest => "auto_ingest",
+            Self::ConversationStream => "conversation_stream",
+            Self::TodoLifecycle => "todo_lifecycle",
+            Self::SessionSummary => "session_summary",
+            Self::MifImport => "mif_import",
+            Self::LinearConnector => "linear_connector",
+            Self::GithubConnector => "github_connector",
+            Self::Zenoh => "zenoh",
+            Self::ZenohMission => "zenoh_mission",
+            Self::PythonApi => "python_api",
+            Self::RecallHarness => "recall_harness",
+        }
+    }
+
+    /// Every variant, in declaration (and therefore postcard-discriminant)
+    /// order. The single list [`Self::parse`] and the tests both read from, so
+    /// a variant added without a wire name cannot pass unnoticed.
+    pub const ALL: &'static [Self] = &[
+        Self::Unknown,
+        Self::Api,
+        Self::BatchApi,
+        Self::Upsert,
+        Self::AutoIngest,
+        Self::ConversationStream,
+        Self::TodoLifecycle,
+        Self::SessionSummary,
+        Self::MifImport,
+        Self::LinearConnector,
+        Self::GithubConnector,
+        Self::Zenoh,
+        Self::ZenohMission,
+        Self::PythonApi,
+        Self::RecallHarness,
+    ];
+
+    /// Parse a wire name back into an origin, for read-path filtering.
+    ///
+    /// Case-insensitive and tolerant of `-` in place of `_`, because these
+    /// values arrive as query-string parameters typed by humans. Returns `None`
+    /// for anything unrecognised so the caller can reject the request rather
+    /// than silently returning the wrong slice of the store.
+    pub fn parse(s: &str) -> Option<Self> {
+        let normalized = s.trim().to_ascii_lowercase().replace('-', "_");
+        Self::ALL.iter().copied().find(|o| o.as_str() == normalized)
+    }
+}
+
 /// Raw experience data to be stored (ENHANCED with smart defaults)
 ///
 /// Only `content` is required. All other fields have intelligent defaults:
@@ -1080,6 +1233,18 @@ pub struct Experience {
     /// see that field's note. It is carried at the tail of `MemoryFlat`.
     #[serde(skip)]
     pub declared_entities: Vec<String>,
+
+    /// Which write path stored this memory. See [`MemoryOrigin`].
+    ///
+    /// `#[serde(skip)]` for exactly the reason spelled out on `toponyms` above:
+    /// `Experience` is only ever serialized as field 2 of 21 inside
+    /// `MemoryFlat`, so a new field here lands MID-payload and shifts every
+    /// field after it on old records — a decode that succeeds and returns
+    /// garbage rather than failing. The value is carried as the last field of
+    /// `MemoryFlat`, where `decode_raw_compat` can default it, and is restored
+    /// onto the experience by `Memory`'s `Deserialize` impl.
+    #[serde(skip)]
+    pub origin: MemoryOrigin,
 }
 
 /// A place mentioned in a memory's content, resolved to coordinates.
@@ -1301,6 +1466,14 @@ impl Experience {
             delta.fields_filled.push("toponyms");
         }
 
+        // `origin` is deliberately NOT merged, and must never be. It records
+        // which write path FIRST stored this content; a later duplicate
+        // arriving down a different path (an MCP retry, an auto-ingest that
+        // happens to re-say the same sentence, a MIF re-import) did not create
+        // the memory and does not get to relabel where it came from. This
+        // omission is the whole first-write-wins guarantee, so it is stated
+        // here rather than left as an absence for someone to "fix".
+
         let mut media_added = false;
         for media in &incoming.media_refs {
             if !self.media_refs.iter().any(|m| m.uri == media.uri) {
@@ -1468,6 +1641,10 @@ impl Default for Experience {
             importance_override: None,
             toponyms: Vec::new(),
             declared_entities: Vec::new(),
+            // Deliberately Unknown: `Default` is what every construction site
+            // that does NOT know its write path falls back to (legacy decoders,
+            // test fixtures). A write path that DOES know stamps it explicitly.
+            origin: MemoryOrigin::Unknown,
         }
     }
 }
@@ -2265,10 +2442,33 @@ struct MemoryFlat {
     /// exposed there; carried here for the same positional-format reason as
     /// `toponyms`.
     ///
-    /// MUST remain the last field. Anything appended after it has to extend
-    /// `MEMORY_DEFAULT_SUFFIX` too.
+    /// # This position is load-bearing, not stylistic
+    ///
+    /// `declared_entities` and `origin` were appended on two branches developed
+    /// in parallel, each as "the last field". They shipped in this order because
+    /// a build carrying `declared_entities` — and NOT `origin` — had already
+    /// written live records before the two met. Those records' tails end with
+    /// this Vec, so it has to be read second and `origin` third. Swapping them
+    /// would make every such record read this Vec's length varint as the
+    /// `MemoryOrigin` discriminant and shift everything after it.
+    ///
+    /// The `MEMORY_DEFAULT_SUFFIX` bytes cannot catch that mistake — all three
+    /// tail defaults encode as `0x00`, so the suffix is order-agnostic and only
+    /// this declaration order decides which stored byte becomes which field.
+    /// What catches it is
+    /// `memory_missing_its_tail_fields_is_defaulted_in_declaration_order` in
+    /// `storage.rs`, which truncates a real encoding one tail field at a time.
     #[serde(default)]
     declared_entities: Vec<String>,
+    /// Which write path stored this memory. Logically part of `Experience` and
+    /// exposed there; carried here for the same positional-format reason as
+    /// `toponyms`. See [`Experience::origin`] and [`MemoryOrigin`].
+    ///
+    /// MUST remain the last field. Anything appended after it has to extend
+    /// `MEMORY_DEFAULT_SUFFIX` in `storage.rs` too, appending the new field's
+    /// postcard default AFTER this one's.
+    #[serde(default)]
+    origin: MemoryOrigin,
 }
 
 impl Serialize for Memory {
@@ -2310,6 +2510,7 @@ impl Serialize for Memory {
             // is carried here exactly once.
             toponyms: self.experience.toponyms.clone(),
             declared_entities: self.experience.declared_entities.clone(),
+            origin: self.experience.origin,
         };
         flat.serialize(serializer)
     }
@@ -2326,6 +2527,10 @@ impl<'de> Deserialize<'de> for Memory {
         // type. Records written before the field existed decode as empty.
         flat.experience.toponyms = flat.toponyms;
         flat.experience.declared_entities = flat.declared_entities;
+        // Same for the origin. A record written before the field existed
+        // decodes as `Unknown`, which is the honest answer — nothing infers one
+        // from tags or content on the way past.
+        flat.experience.origin = flat.origin;
         Ok(Memory {
             id: flat.id,
             experience: flat.experience,

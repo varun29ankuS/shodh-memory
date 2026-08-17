@@ -289,6 +289,17 @@ pub struct RecallExperience {
     /// every result would grow every response for nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub toponyms: Vec<crate::memory::types::Toponym>,
+
+    /// Which write path stored this memory, as a stable wire name — see
+    /// [`crate::memory::types::MemoryOrigin`].
+    ///
+    /// Unlike the two fields above this is ALWAYS emitted, `"unknown"`
+    /// included. Those are omitted when absent because most memories have no
+    /// coordinates and an empty array carries no information; an origin always
+    /// carries information, and `"unknown"` in particular is the answer a
+    /// caller needs in order to distinguish a record written before origins
+    /// were recorded from one whose origin the server declined to report.
+    pub origin: String,
 }
 
 // =============================================================================

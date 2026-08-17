@@ -1019,6 +1019,9 @@ pub fn ingest_corpus(
             // measure a pipeline the server does not run.
             declared_entities: item.tags.clone(),
             ner_entities,
+            // Benchmark corpus, not a user's memory. Stamped so an eval store
+            // is distinguishable from a real one.
+            origin: crate::memory::types::MemoryOrigin::RecallHarness,
             ..Default::default()
         };
 

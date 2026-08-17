@@ -119,6 +119,8 @@ pub async fn linear_webhook(
         // storage/search list, and the graph admits nodes by authority.
         entities: tags.clone(),
         declared_entities: tags.clone(),
+        // Linear pushed this issue event; the server composed the content.
+        origin: crate::memory::types::MemoryOrigin::LinearConnector,
         ..Default::default()
     };
 
@@ -218,6 +220,8 @@ pub async fn linear_sync(
             // storage/search list, and the graph admits nodes by authority.
             declared_entities: tags.clone(),
             entities: tags,
+            // Operator-initiated bulk pull from Linear.
+            origin: crate::memory::types::MemoryOrigin::LinearConnector,
             ..Default::default()
         };
 
@@ -367,6 +371,8 @@ pub async fn github_webhook(
         // storage/search list, and the graph admits nodes by authority.
         entities: tags.clone(),
         declared_entities: tags.clone(),
+        // GitHub pushed this issue/PR event; the server composed the content.
+        origin: crate::memory::types::MemoryOrigin::GithubConnector,
         ..Default::default()
     };
 
@@ -467,6 +473,8 @@ pub async fn github_sync(
                 // storage/search list, and the graph admits nodes by authority.
                 declared_entities: tags.clone(),
                 entities: tags,
+                // Operator-initiated bulk pull from GitHub.
+                origin: crate::memory::types::MemoryOrigin::GithubConnector,
                 ..Default::default()
             };
 
@@ -530,6 +538,8 @@ pub async fn github_sync(
                 // storage/search list, and the graph admits nodes by authority.
                 declared_entities: tags.clone(),
                 entities: tags,
+                // Operator-initiated bulk pull from GitHub.
+                origin: crate::memory::types::MemoryOrigin::GithubConnector,
                 ..Default::default()
             };
 

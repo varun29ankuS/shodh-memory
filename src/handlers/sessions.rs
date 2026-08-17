@@ -292,6 +292,9 @@ pub async fn context_compressed(
             content,
             entities,
             metadata,
+            // The caller reported that its context window was compacted; the
+            // digest below is the server's own summary of the session.
+            origin: crate::memory::types::MemoryOrigin::SessionSummary,
             ..Default::default()
         };
 

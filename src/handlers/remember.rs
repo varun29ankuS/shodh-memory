@@ -12,8 +12,8 @@ use crate::errors::{AppError, ValidationErrorExt};
 use crate::memory::{
     storage::Modality,
     types::{
-        ChangeType, ContextId, EmotionalContext, EpisodeContext, MediaRef, NerEntityRecord,
-        RichContext, SourceContext, SourceType,
+        ChangeType, ContextId, EmotionalContext, EpisodeContext, MediaRef, MemoryOrigin,
+        NerEntityRecord, RichContext, SourceContext, SourceType,
     },
     Experience, ExperienceType, SessionEvent,
 };
@@ -700,6 +700,11 @@ pub async fn remember(
         audio_embeddings: req.audio_embeddings.clone(),
         video_embeddings: req.video_embeddings.clone(),
         media_refs: req.media_refs.clone(),
+        // Server-observed write path. `POST /api/remember` is all the server
+        // knows: the hooks, the MCP server and the CLI are indistinguishable
+        // HTTP clients of this endpoint, and nothing in the request body is
+        // allowed to override this.
+        origin: MemoryOrigin::Api,
         ..Default::default()
     };
 
@@ -1117,6 +1122,7 @@ pub async fn batch_remember(
             ner_entities: ner_records,
             toponyms,
             importance_override: item.importance.map(|v| v.clamp(0.0, 1.0)),
+            origin: MemoryOrigin::BatchApi,
             ..Default::default()
         };
 
@@ -1310,6 +1316,10 @@ pub async fn upsert_memory(
         ner_entities,
         toponyms,
         importance_override: req.importance.map(|v| v.clamp(0.0, 1.0)),
+        // Only reaches storage on the CREATE half of the upsert; the update
+        // half mutates the stored memory in place and leaves its original
+        // origin alone.
+        origin: MemoryOrigin::Upsert,
         ..Default::default()
     };
 

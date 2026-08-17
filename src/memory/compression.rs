@@ -368,6 +368,11 @@ impl CompressionPipeline {
             // drop resolved places and LZ4 compression would stop being
             // lossless, contrary to `is_lossless`.
             experience.toponyms = memory.experience.toponyms.clone();
+            // `Experience::origin` is `#[serde(skip)]` for the same reason and
+            // is likewise absent from the blob. Without this line every
+            // compressed memory would decompress as `Unknown` — a silent
+            // provenance wipe that looks exactly like an old record.
+            experience.origin = memory.experience.origin;
 
             // Restore the memory
             let mut restored = memory.clone();

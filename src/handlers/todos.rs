@@ -18,7 +18,7 @@ use super::types::MemoryEvent;
 use crate::errors::{AppError, ValidationErrorExt};
 use crate::memory::sessions::SessionEvent;
 use crate::memory::todo_formatter;
-use crate::memory::{Experience, ExperienceType};
+use crate::memory::{Experience, ExperienceType, MemoryOrigin};
 use crate::memory::{
     MemoryId, Project, ProjectId, ProjectStats, ProjectStatus, ProspectiveTask, ProspectiveTaskId,
     ProspectiveTaskStatus, ProspectiveTrigger, Recurrence, Todo, TodoComment, TodoCommentId,
@@ -1141,6 +1141,9 @@ pub async fn create_todo(
         content: memory_content,
         experience_type: ExperienceType::Task,
         tags,
+        // The caller asked to change a todo, not to store a memory; the server
+        // composed this text itself.
+        origin: MemoryOrigin::TodoLifecycle,
         ..Default::default()
     };
 
@@ -1740,6 +1743,7 @@ pub async fn update_todo(
             content: memory_content,
             experience_type: ExperienceType::Context,
             tags,
+            origin: MemoryOrigin::TodoLifecycle,
             ..Default::default()
         };
 
@@ -1879,6 +1883,7 @@ pub async fn complete_todo(
             content: memory_content,
             experience_type: ExperienceType::Task,
             tags,
+            origin: MemoryOrigin::TodoLifecycle,
             ..Default::default()
         };
 
@@ -2278,6 +2283,7 @@ pub async fn add_todo_comment(
         content: memory_content,
         experience_type,
         tags,
+        origin: MemoryOrigin::TodoLifecycle,
         ..Default::default()
     };
 

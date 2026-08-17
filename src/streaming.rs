@@ -1094,6 +1094,9 @@ impl StreamingMemoryExtractor {
                 metadata: string_metadata,
                 embeddings: None, // Will be computed by MemorySystem
                 tags,
+                // The stream carries conversation turns; this manager decides
+                // for itself which of them become memories.
+                origin: crate::memory::types::MemoryOrigin::ConversationStream,
                 ..Default::default()
             };
 

@@ -407,6 +407,9 @@ pub async fn handle_remember(sample: Sample, manager: Arc<MultiUserMemoryManager
         outcome_details: req.outcome_details.clone(),
         confidence: req.confidence,
         terrain_type: req.terrain_type.clone(),
+        // The Zenoh analogue of `POST /api/remember`: a fleet client asked for
+        // this to be stored.
+        origin: crate::memory::types::MemoryOrigin::Zenoh,
         nearby_agents: req.nearby_agents.clone(),
         is_failure: req.is_failure,
         is_anomaly: req.is_anomaly,
@@ -746,6 +749,7 @@ pub async fn handle_recall(query: Query, manager: Arc<MultiUserMemoryManager>) {
                     tags: m.experience.entities.clone(),
                     geo_location: m.experience.geo_location,
                     toponyms: m.experience.toponyms.clone(),
+                    origin: m.experience.origin.as_str().to_string(),
                 },
                 importance: m.importance(),
                 created_at: m.created_at.to_rfc3339(),
@@ -1210,6 +1214,9 @@ pub async fn handle_mission_start(sample: Sample, manager: Arc<MultiUserMemoryMa
             robot_id,
             tags: vec!["mission".to_string(), "mission_start".to_string()],
             entities: vec!["mission".to_string(), "mission_start".to_string()],
+            // The publisher announced a mission boundary; the server composed
+            // this memory as a side effect.
+            origin: crate::memory::types::MemoryOrigin::ZenohMission,
             ..Default::default()
         };
         guard.remember(experience, None)
@@ -1312,6 +1319,7 @@ pub async fn handle_mission_end(sample: Sample, manager: Arc<MultiUserMemoryMana
             reward,
             tags: vec!["mission".to_string(), "mission_end".to_string()],
             entities: vec!["mission".to_string(), "mission_end".to_string()],
+            origin: crate::memory::types::MemoryOrigin::ZenohMission,
             ..Default::default()
         };
         guard.remember(experience, None)
