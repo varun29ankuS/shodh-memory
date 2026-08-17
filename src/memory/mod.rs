@@ -12002,7 +12002,9 @@ mod readonly_recall_tests {
         assert_eq!(
             std::env::var("SHODH_RECALL_READONLY").as_deref(),
             Ok("0"),
-            "another test clobbered the process-wide read-only pin; the              assertion below would fail for that reason, not because              read_only=false stopped reinforcing"
+            "another test clobbered the process-wide read-only pin; the \
+             assertion below would fail for that reason, not because \
+             read_only=false stopped reinforcing"
         );
         system.recall(&navy_query(false)).expect("default recall");
         let after_default = snapshot(&system, &graph.read(), &ids);
@@ -12028,7 +12030,9 @@ mod readonly_recall_tests {
         assert_eq!(
             std::env::var("SHODH_RECALL_READONLY").as_deref(),
             Ok("0"),
-            "another test clobbered the process-wide read-only pin; the              assertions below would fail for that reason, not because the              default path stopped reinforcing"
+            "another test clobbered the process-wide read-only pin; the \
+             assertions below would fail for that reason, not because the \
+             default path stopped reinforcing"
         );
         let results = system.recall(&navy_query(false)).expect("default recall");
         assert!(

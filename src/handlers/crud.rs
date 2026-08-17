@@ -601,7 +601,8 @@ fn clear_todo_links_to_deleted_memory(
             user_id = %user_id,
             memory_id = %memory_id.0,
             error = %e,
-            "Failed to clear todo links to a deleted memory —              related_memory_ids may still name it"
+            "Failed to clear todo links to a deleted memory — \
+             related_memory_ids may still name it"
         ),
     }
 }
