@@ -13,20 +13,24 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-	agentAuthor,
 	agentComments,
 	claimRefusal,
 	composeClaimReport,
 	composeCreateReport,
 	composeEmptyListingReport,
 	describeTodoFilters,
-	memoryCitationKey,
 	resolveMemoryLinks,
 	formatTodoLine,
 	parseTodoStatus,
 	shortIdOf,
 	TODO_STATUSES,
 } from "../dist/todo-tools.js";
+// `agentAuthor` moved to events.ts and `memoryCitationKey` to memory-tools.ts
+// when each gained a second consumer — the signature is now written to the
+// ledger as well as to a comment, and the citation parser now gates a deletion
+// as well as a link. The rules under test are unchanged.
+import { agentAuthor } from "../dist/events.js";
+import { memoryCitationKey } from "../dist/memory-tools.js";
 
 function todo(over = {}) {
 	return {

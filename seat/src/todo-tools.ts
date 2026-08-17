@@ -28,6 +28,13 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { BackendTodo, ShodhBackend, TodoStatus } from "./backend.js";
 import type { ModelRef } from "./events.js";
+import { agentAuthor } from "./events.js";
+import type { DeletionData, LearningLedger } from "./ledger.js";
+import { composeDeletionData, deletionNotPerformed } from "./ledger.js";
+// The citation parser lives with the memory tools because the `[mem:…]` contract
+// is theirs; a todo links TO memories, so the dependency runs this way and not
+// the other.
+import { memoryCitationKey } from "./memory-tools.js";
 import { composeToolDescription } from "./tool-descriptions.js";
 
 /** src/memory/types.rs `TodoStatus`, in workflow order. */
@@ -50,16 +57,10 @@ export function parseTodoStatus(raw: string): TodoStatus | null {
 	return (TODO_STATUSES as readonly string[]).includes(value) ? (value as TodoStatus) : null;
 }
 
-/**
- * How the model signs its work.
- *
- * The model reference and not the string "agent": two different models moving
- * the same todo on two different days is exactly the distinction an audit is
- * for, and the seat already knows which one is running.
- */
-export function agentAuthor(model: ModelRef): string {
-	return `agent:${model.provider}/${model.id}`;
-}
+// `agentAuthor` used to live here. It moved to events.ts when the deletion path
+// became its second consumer: a ledger entry has to carry the same model identity
+// a todo comment does, and two definitions of one signature format is two
+// identities for one model.
 
 /**
  * The id a person and a model both use — `Todo::short_id()`, reproduced.
@@ -221,27 +222,6 @@ export function composeEmptyListingReport(applied: readonly string[]): string {
 	);
 }
 
-/**
- * A `[mem:xxxxxxxx]` citation, reduced to the eight characters that identify it.
- *
- * THE MODEL ONLY EVER HAS SHORT IDS. Every surface that shows it a memory —
- * recall results, the auto-surfaced block, its own writes — prints the first
- * eight hex characters of the uuid, because that is the citation contract. The
- * backend's todo-to-memory link, by contrast, verifies FULL uuids and rejects
- * anything else. So a `create_todo` that took memory ids as typed would reject
- * every id the model is capable of producing.
- *
- * Both spellings are accepted because both are things the model has seen: the
- * bracketed citation is what it writes into prose, the bare eight characters are
- * what it reads out of a listing.
- */
-export function memoryCitationKey(raw: string): string | null {
-	const trimmed = raw.trim();
-	const bracketed = /^\[mem:([0-9a-fA-F]{8})\]$/.exec(trimmed);
-	if (bracketed) return bracketed[1]!.toLowerCase();
-	return /^[0-9a-fA-F]{8}$/.test(trimmed) ? trimmed.toLowerCase() : null;
-}
-
 /** One requested memory link, resolved or refused. */
 export interface MemoryLinkOutcome {
 	/** Full uuids, ready for the backend's verification. */
@@ -280,6 +260,115 @@ export function resolveMemoryLinks(
 		ids.push(full);
 	}
 	return { ids, unknown };
+}
+
+/**
+ * Why a deletion cannot proceed, or null when it can.
+ *
+ * TWO REFUSALS, AND BOTH ARE ABOUT WORK NOBODY ELSE CAN SEE IS AT RISK.
+ *
+ * The first is `claimRefusal`'s reasoning applied to a sharper act: a todo
+ * another agent claimed may be work in progress RIGHT NOW, and there is no
+ * assignee field to consult — the claim comment is the only evidence, and
+ * deleting the todo destroys that evidence along with the work.
+ *
+ * The second is the cascade, and it exists because the backend performs it
+ * silently. `TodoStore::delete_todo` (src/memory/todos.rs) deletes every subtask
+ * of the target and reports a single boolean; `list_todos` shows a row's own
+ * `parent_id` but never its children, so a model deleting BOLT-7 has no way to
+ * know three other todos go with it. There is no dry-run endpoint, so the
+ * refusal IS the dry run: it names the subtasks and requires `cascade` to be set
+ * before the same call will proceed. A cascade the model had to ask for twice is
+ * a decision; one it discovers afterwards is an accident.
+ */
+export function deleteTodoRefusal(
+	todo: BackendTodo,
+	subtasks: readonly BackendTodo[],
+	author: string,
+	cascade: boolean,
+): string | null {
+	const others = agentComments(todo).filter((comment) => comment.author !== author);
+	const last = others[others.length - 1];
+	if (todo.status === "in_progress" && last !== undefined) {
+		return (
+			`[${shortIdOf(todo)}] is in progress and was claimed by ${last.author} at ${last.created_at}: ` +
+			`"${last.content}". Deleting it would destroy that claim and the work behind it while another agent ` +
+			"believes it owns the task. Ask the user."
+		);
+	}
+	if (subtasks.length > 0 && !cascade) {
+		const named = subtasks.map((subtask) => `[${shortIdOf(subtask)}] ${subtask.content}`).join("; ");
+		return (
+			`[${shortIdOf(todo)}] has ${subtasks.length} subtask(s) and deleting it DELETES THEM TOO: ${named}. ` +
+			"Nothing warned you of this and no listing shows it. If the user meant to lose all of it, call again " +
+			"with cascade set to true; if they meant only the parent, they cannot have that — move the subtasks " +
+			"first or cancel the parent with update_todo instead."
+		);
+	}
+	return null;
+}
+
+/**
+ * What the model is told a deletion achieved.
+ *
+ * IT COUNTS THE COMMENTS, because they are what makes a todo deletion different
+ * in kind from a status change: every attribution this seat ever wrote onto the
+ * todo — who claimed it, who moved it, what they found — was a comment, and the
+ * delete takes all of them. A model that reports "deleted BOLT-7" without
+ * knowing it also erased four signed records has understated what it did.
+ */
+export function composeDeleteTodoReport(input: {
+	shortId: string;
+	content: string;
+	status: string;
+	commentCount: number;
+	cascaded: readonly string[];
+	ledgerEventId: string;
+}): string {
+	const lines = [`Deleted [${input.shortId}] (${input.status}): "${input.content}"`];
+	if (input.cascaded.length > 0) {
+		lines.push(
+			`Its ${input.cascaded.length} subtask(s) went with it: ${input.cascaded.map((id) => `[${id}]`).join(", ")}.`,
+		);
+	}
+	if (input.commentCount > 0) {
+		lines.push(
+			`${input.commentCount} comment(s) were destroyed with it, including every record of who worked on this ` +
+				"task — that history exists nowhere else.",
+		);
+	}
+	lines.push(
+		`Recorded in the learning ledger as ${input.ledgerEventId}, which is now the only account of this work. ` +
+			"Nothing can restore it.",
+	);
+	return lines.join("\n");
+}
+
+/**
+ * What the model is told when the record was written and the deletion was not.
+ *
+ * Same contract as the memory path's, for the same reason: the entry is appended
+ * first so that a failure overstates rather than hides, and the model's one job
+ * in that window is to not report a deletion that did not happen.
+ */
+export function composeDeleteTodoFailureReport(input: {
+	shortId: string;
+	error: string;
+	ledgerEventId: string;
+	compensationError: string | null;
+}): string {
+	const lines = [
+		`[${input.shortId}] was NOT deleted: ${input.error}. The todo and its subtasks are still on the board — do ` +
+			"not tell the user they are gone.",
+	];
+	lines.push(
+		input.compensationError === null
+			? `Ledger event ${input.ledgerEventId} recorded the attempt and has been marked as not performed.`
+			: `WARNING: ledger event ${input.ledgerEventId} recorded a deletion that did not happen, and the ` +
+					`correction ALSO failed (${input.compensationError}). The ledger currently overstates what was ` +
+					"destroyed. Tell the user.",
+	);
+	return lines.join("\n");
 }
 
 /**
@@ -325,6 +414,17 @@ export function composeCreateReport(input: {
 export interface TodoToolContext {
 	backend: ShodhBackend;
 	userId: string;
+	/**
+	 * Where a destructive todo mutation signs, because the todo cannot.
+	 *
+	 * Every other verb here signs by writing an authored comment onto the todo.
+	 * `delete_todo` destroys the todo AND its comments, so a signature written
+	 * that way would be destroyed by the act it was recording; the ledger is the
+	 * only append-only store in this seat that outlives its subject.
+	 */
+	ledger: LearningLedger;
+	conversationId: string;
+	getTurn(): number;
 	/** Read at call time: the conversation's model can change mid-session. */
 	getModel(): ModelRef;
 	/**
@@ -440,6 +540,25 @@ const updateParameters = Type.Object({
 	}),
 });
 
+const deleteParameters = Type.Object({
+	todo_id: Type.String({ minLength: 1, maxLength: 100, description: TODO_ID_DESCRIPTION }),
+	why: Type.String({
+		minLength: 10,
+		maxLength: 1000,
+		description:
+			"Why this work is being deleted rather than cancelled, in your own words — normally the user's own " +
+			"reason. It is written to the learning ledger and becomes the only surviving explanation.",
+	}),
+	cascade: Type.Optional(
+		Type.Boolean({
+			description:
+				"Set true only after a refusal has named the subtasks this will also destroy. Deleting a parent " +
+				"deletes every subtask under it; leave this unset on the first attempt so you are told what is at " +
+				"stake before agreeing to it.",
+		}),
+	),
+});
+
 const commentParameters = Type.Object({
 	todo_id: Type.String({ minLength: 1, maxLength: 100, description: TODO_ID_DESCRIPTION }),
 	content: Type.String({ minLength: 3, maxLength: 4000, description: "The comment, markdown allowed." }),
@@ -453,6 +572,44 @@ const commentParameters = Type.Object({
 
 function textResult<T>(text: string, details: T): AgentToolResult<T> {
 	return { content: [{ type: "text", text }], details };
+}
+
+/**
+ * Append the entry that says a recorded deletion did not happen, returning the
+ * reason it could not be appended — or null when it was.
+ *
+ * Its own failure is returned rather than thrown because the caller is already
+ * on a failure path with a message to deliver, and losing the original backend
+ * error to a secondary one would tell the model nothing about why the deletion
+ * failed. The two states of the ledger are then reported separately, since a
+ * reviewer's reading depends on which one it is in.
+ */
+async function recordDeletionNotPerformed(
+	context: TodoToolContext,
+	ofEntryId: string,
+	data: DeletionData,
+	reason: string,
+): Promise<string | null> {
+	try {
+		await context.ledger.append({
+			kind: "revert",
+			actor: "system",
+			scope: "user",
+			userId: context.userId,
+			conversationId: context.conversationId,
+			turn: context.getTurn(),
+			data: {
+				of: ofEntryId,
+				compensation: deletionNotPerformed(data, reason),
+				note:
+					"The deletion recorded by the referenced event did NOT happen: the entry is appended before the " +
+					"backend call so that a failure overstates rather than hides. The todo is intact.",
+			},
+		});
+		return null;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
 }
 
 /** Fetch a todo or throw a message the model can act on. */
@@ -761,6 +918,129 @@ export function createTodoTools(context: TodoToolContext): AgentTool<any>[] {
 		},
 	};
 
+	/**
+	 * The verb that erases the record instead of adding to it.
+	 *
+	 * WHY IT IS NOT MERELY "ANOTHER UNSIGNED MUTATION". The bridged MCP
+	 * `delete_todo` is worse than the anonymous mutations `create_todo` replaced:
+	 * those arrived without a signature, while this one DESTROYS signatures. A
+	 * todo's comments are where every attribution on this surface lives — the
+	 * claim, the status changes, the findings, each authored `agent:<provider>/<id>`
+	 * — and the delete takes the comments with the todo. Left bridged, the model
+	 * had a way to remove signed history and leave nothing behind saying so.
+	 *
+	 * WHY IT EXISTS AT ALL, GIVEN `update_todo(cancelled)`. Cancelling is the right
+	 * answer for work that stopped, and the description says so. It is not an
+	 * answer for a row that should never have existed — a duplicate, a typo, a todo
+	 * created against the wrong project — and a board that can only accumulate is a
+	 * board people stop trusting. The verb stays, and the record moves to the
+	 * ledger where the deletion cannot reach it.
+	 */
+	const deleteTool: AgentTool<typeof deleteParameters> = {
+		name: "delete_todo",
+		label: "Delete a todo",
+		description: composeToolDescription("delete_todo", {
+			does:
+				"PERMANENTLY DELETES a todo, every subtask beneath it, and all of its comments — including every " +
+				"record of who claimed it, who changed it and what they found — and writes the deletion to the " +
+				"learning ledger under your model identity with your stated reason.",
+			useWhen:
+				"Use it only when the user asks for a todo to be removed and the row itself is the mistake: a " +
+				"duplicate, a typo, something filed against the wrong project. Say why in `why`, because once the " +
+				"todo and its comment history are gone that sentence is the only account of what was on the board.",
+			notFor:
+				"WORK THAT STOPPED IS NOT WORK THAT SHOULD VANISH — use update_todo with status `cancelled` for " +
+				"anything abandoned, deferred, obsolete or done wrong, so the task and its history stay readable. " +
+				"Nothing undoes this: there is no restore and the workbench's revert control refuses deletions. Do " +
+				"not use it to tidy a board the user has not asked you to tidy, and never on a todo another agent " +
+				"has claimed.",
+			returns:
+				"Confirmation naming the todo, the subtasks that went with it, and how many comments were destroyed, " +
+				"plus the ledger event that now records all of it. The FIRST call on a todo with subtasks is refused " +
+				"and lists them — no listing shows a todo's children, so that refusal is the only warning you get; " +
+				"pass `cascade` to accept it. On failure it says plainly that the todo is still there.",
+		}),
+		parameters: deleteParameters,
+		execute: async (_toolCallId, params) => {
+			const author = agentAuthor(context.getModel());
+			const todo = await requireTodo(context, params.todo_id);
+			const shortId = shortIdOf(todo);
+
+			// Read the children before deciding anything: they are what the refusal
+			// is about, and after the delete there is nothing left to ask.
+			const subtasks = (await context.backend.listSubtasks(context.userId, todo.id)).todos;
+			const refusal = deleteTodoRefusal(todo, subtasks, author, params.cascade ?? false);
+			if (refusal) throw new Error(refusal);
+
+			const cascaded = subtasks.map((subtask) => shortIdOf(subtask));
+			const data = composeDeletionData({
+				target: "todo",
+				targetId: todo.id,
+				shortId,
+				content: todo.content,
+				classification: todo.status,
+				tags: todo.tags,
+				createdAt: todo.created_at,
+				// Subtasks are DESTROYED, not orphaned — the opposite of what a
+				// memory's children get, and recorded as the different fact it is.
+				collateral: { relation: "cascade_deleted", ids: subtasks.map((subtask) => subtask.id) },
+				reason: params.why,
+				author,
+			});
+			const ledgerEntry = await context.ledger.append({
+				kind: "deletion",
+				actor: "agent",
+				scope: "user",
+				userId: context.userId,
+				conversationId: context.conversationId,
+				turn: context.getTurn(),
+				data,
+			});
+
+			let deleted: boolean;
+			try {
+				// `success: false` is a real answer here, not an error: the store
+				// returns Ok(false) for a row that is already gone, and a 200 alone
+				// proves nothing.
+				deleted = (await context.backend.deleteTodo(context.userId, todo.id)).success;
+			} catch (error) {
+				deleted = false;
+				const reason = error instanceof Error ? error.message : String(error);
+				throw new Error(
+					composeDeleteTodoFailureReport({
+						shortId,
+						error: reason,
+						ledgerEventId: ledgerEntry.id,
+						compensationError: await recordDeletionNotPerformed(context, ledgerEntry.id, data, reason),
+					}),
+				);
+			}
+			if (!deleted) {
+				const reason = "the backend reported the todo was not found, so nothing was removed";
+				throw new Error(
+					composeDeleteTodoFailureReport({
+						shortId,
+						error: reason,
+						ledgerEventId: ledgerEntry.id,
+						compensationError: await recordDeletionNotPerformed(context, ledgerEntry.id, data, reason),
+					}),
+				);
+			}
+
+			return textResult(
+				composeDeleteTodoReport({
+					shortId,
+					content: todo.content,
+					status: todo.status,
+					commentCount: todo.comments.length,
+					cascaded,
+					ledgerEventId: ledgerEntry.id,
+				}),
+				{ todo_id: shortId, cascaded, ledger_event_id: ledgerEntry.id },
+			);
+		},
+	};
+
 	const commentTool: AgentTool<typeof commentParameters> = {
 		name: "comment_on_todo",
 		label: "Comment on a todo",
@@ -808,8 +1088,10 @@ export function createTodoTools(context: TodoToolContext): AgentTool<any>[] {
 		},
 	};
 
-	// Read, then create, then take, then change, then annotate — the order work
-	// actually moves in. Stable, because a tool list that reorders itself between
-	// turns costs a prompt-cache hit on every one of them.
-	return [listTool, createTool, claimTool, updateTool, commentTool];
+	// Read, then create, then take, then change, then annotate, then destroy — the
+	// order work actually moves in, with the irreversible verb last because it is
+	// the one the model should reach past the others to find. Stable, because a
+	// tool list that reorders itself between turns costs a prompt-cache hit on
+	// every one of them.
+	return [listTool, createTool, claimTool, updateTool, commentTool, deleteTool];
 }

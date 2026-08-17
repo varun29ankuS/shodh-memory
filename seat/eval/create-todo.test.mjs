@@ -22,7 +22,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { composeCreateReport, memoryCitationKey, resolveMemoryLinks } from "../dist/todo-tools.js";
+import { composeCreateReport, resolveMemoryLinks } from "../dist/todo-tools.js";
+// `memoryCitationKey` moved to memory-tools.ts when it gained a second consumer:
+// it now also gates forget_memory, where refusing anything but the two spellings
+// the model has actually seen is what keeps a model-supplied string out of a
+// destructive request URL. The rule under test is unchanged.
+import { memoryCitationKey } from "../dist/memory-tools.js";
 
 // ── Reading an id the model is capable of producing ─────────────────────────
 // Mutations: delete the bracketed branch; delete the bare-8 branch; drop

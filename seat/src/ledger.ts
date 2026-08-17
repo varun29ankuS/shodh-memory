@@ -15,6 +15,22 @@
  *     recorded as such in the revert event.
  *   - "neutral" reinforcements record access only; there is nothing to
  *     compensate, and the revert event says so.
+ *   - deletions CANNOT be reverted and the attempt is refused, not faked. See
+ *     `deletionRevertRefusal`: this file holds a preview of what was destroyed,
+ *     never the object, so a "restore" could only fabricate one.
+ *
+ * ORDERING, FOR THE ONE OPERATION WHERE IT MATTERS. Recoverable updates append
+ * after the backend call, because the entry describes something that demonstrably
+ * happened. A DELETION appends BEFORE it, and that ordering is chosen for its
+ * failure mode: append-then-delete can leave an entry for a deletion that did not
+ * occur, which a reviewer detects immediately because the named object is still
+ * in the store and can be corrected by a compensating entry
+ * (`deletionNotPerformed`); delete-then-append can leave a destruction with no
+ * record anywhere, which is undetectable by construction and permanently
+ * uncorrectable. The first keeps this ledger a superset of what happened, which
+ * is auditable; the second makes it a subset, which cannot be told apart from a
+ * complete record. A process that dies between the append and the backend call
+ * leaves exactly the detectable phantom, by design.
  */
 
 import * as crypto from "node:crypto";
@@ -38,13 +54,175 @@ export interface ReinforceData {
 	stats: ReinforceStats;
 }
 
+/**
+ * A destruction, recorded so that what was destroyed is still reviewable.
+ *
+ * WHY THIS KIND EXISTS AT ALL. Every other entry in this file records a change
+ * that the thing it changed survives: a written memory can be read, a reinforced
+ * one can be inspected, and a reviewer who wants to know what an entry means can
+ * go and look at its subject. A deletion is the one event whose subject is gone
+ * by the time anybody reads about it, so whatever the entry does not carry is
+ * not recoverable from anywhere. `{ memory_id }` alone would prove that a
+ * deletion happened and leave "what was lost" permanently unanswerable.
+ *
+ * WHAT IT CARRIES, AND THE PRIVACY LINE. Who (`author`, `reason`), when (the
+ * entry's own `ts`), which (`target_id` + `short_id`), and enough of what
+ * (`content_preview`, `content_length`, `content_sha256`, `classification`,
+ * `tags`, `created_at`) for a reviewer to tell what class of thing was destroyed
+ * and recognise it if they hold a copy.
+ *
+ * It is a 200-character preview and NOT the full content, deliberately:
+ * - `MemoryWriteData.content_preview` is already 200 characters, so a deletion
+ *   preview is not a new class of exposure for anything the seat itself wrote.
+ * - Storing the whole body would make `forget` a lie. The user's one
+ *   unambiguous request to destroy something would instead move it to a
+ *   plaintext JSONL file that no forget path touches and no retention rule
+ *   trims — an undeletable shadow copy created by the act of deletion.
+ * - `content_sha256` covers the case the preview cannot: a reviewer who still
+ *   holds the text can prove the entry refers to it, without the ledger having
+ *   to hold the text to make that possible.
+ *
+ * The edge this accepts, stated rather than hidden: a memory the seat never
+ * wrote — hook-captured, imported, or from before the seat existed — has its
+ * first 200 characters written into the ledger for the first time by being
+ * deleted. That is the floor a review needs to mean anything, and it is bounded,
+ * hashed and attributed rather than open-ended.
+ */
+export interface DeletionData {
+	target: "memory" | "todo";
+	/** The resolved full id the destructive call actually ran against. */
+	target_id: string;
+	/** The handle a person recognises: an 8-char memory citation, or "BOLT-7". */
+	short_id: string;
+	/** First 200 characters of what was destroyed. */
+	content_preview: string;
+	/** Full length in characters, so a reviewer sees how much the preview omits. */
+	content_length: number;
+	/** SHA-256 of the full content: verification without disclosure. */
+	content_sha256: string;
+	/** Memory type, or todo status — what KIND of thing this was. */
+	classification: string;
+	tags: string[];
+	/** When the destroyed thing was created, which its id does not carry. */
+	created_at: string;
+	/**
+	 * What went with it. `cascade_deleted` ids were destroyed too (todo subtasks);
+	 * `orphaned` ids survive with a dangling parent reference (memory children).
+	 * The distinction matters to a reviewer and neither backend reports it.
+	 */
+	collateral: { relation: "cascade_deleted" | "orphaned"; ids: string[] };
+	/** Why, in the actor's own words. The first question a reviewer asks. */
+	reason: string;
+	/** The identity that asked — `agentAuthor(model)` for a model-issued call. */
+	author: string;
+}
+
 export interface RevertData {
 	of: string;
 	compensation:
 		| { kind: "memory_delete"; memory_id: string }
 		| { kind: "counter_reinforce"; outcome: ReinforceOutcome; memory_ids: string[]; stats: ReinforceStats }
+		/**
+		 * The deletion recorded by the referenced entry did NOT happen: the entry
+		 * was appended first (see {@link LearningLedger.append} ordering note) and
+		 * the backend call that followed it failed.
+		 *
+		 * A distinct kind rather than `none`, because "nothing needed undoing" and
+		 * "the record is wrong and here is the correction" are opposite facts and a
+		 * reviewer reading `none` would take the deletion as real.
+		 */
+		| { kind: "deletion_not_performed"; target: "memory" | "todo"; target_id: string; error: string }
 		| { kind: "none" };
 	note: string;
+}
+
+/**
+ * SHA-256 of content, hex — the part of a deletion record that survives the
+ * privacy line.
+ *
+ * Over the exact string that was destroyed, unnormalised: a digest computed
+ * over trimmed or case-folded text would not match anything a reviewer could
+ * produce from a copy, which is the only thing it is for.
+ */
+export function contentDigest(content: string): string {
+	return crypto.createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+/** How much of a destroyed body a ledger entry keeps. Matches
+ *  `MemoryWriteData.content_preview` on purpose — see {@link DeletionData}. */
+export const DELETION_PREVIEW_CHARS = 200;
+
+/**
+ * A deletion entry, from the thing about to be destroyed.
+ *
+ * Pure and separate from the tool that calls it so the record's shape can be
+ * tested without a backend: this is the only description of the deleted object
+ * that will exist a second later, and a defect in it is undetectable afterwards
+ * by construction.
+ */
+export function composeDeletionData(input: {
+	target: "memory" | "todo";
+	targetId: string;
+	shortId: string;
+	content: string;
+	classification: string;
+	tags: readonly string[];
+	createdAt: string;
+	collateral: { relation: "cascade_deleted" | "orphaned"; ids: readonly string[] };
+	reason: string;
+	author: string;
+}): DeletionData {
+	return {
+		target: input.target,
+		target_id: input.targetId,
+		short_id: input.shortId,
+		content_preview: input.content.slice(0, DELETION_PREVIEW_CHARS),
+		content_length: input.content.length,
+		content_sha256: contentDigest(input.content),
+		classification: input.classification,
+		tags: [...input.tags],
+		created_at: input.createdAt,
+		collateral: { relation: input.collateral.relation, ids: [...input.collateral.ids] },
+		reason: input.reason,
+		author: input.author,
+	};
+}
+
+/**
+ * The correction appended when a recorded deletion did not actually happen.
+ *
+ * It rides the `revert` kind because that is what the read side already
+ * understands: {@link LearningLedger.list} annotates the original with
+ * `reverted_by`, so the deletion entry stops reading as a standing fact the
+ * moment this lands. The note says plainly that the item is INTACT — a reviewer
+ * who took "reverted" to mean "deleted, then restored" would draw exactly the
+ * wrong conclusion about a memory that was never touched.
+ */
+export function deletionNotPerformed(data: DeletionData, error: string): RevertData["compensation"] {
+	return { kind: "deletion_not_performed", target: data.target, target_id: data.target_id, error };
+}
+
+/**
+ * Why a deletion entry cannot be reverted, or null for an entry that can.
+ *
+ * NOTHING HERE CAN UNDO A DELETION, and the honest thing is to say so rather
+ * than offer a button that fabricates. Every other compensation in this file
+ * acts on an object that still exists; this one would have to invent its
+ * subject — writing the 200-character preview back under a NEW id, with a fresh
+ * `created_at`, no embeddings, no graph episode and no comment history. That is
+ * not a restored memory, it is a truncated forgery that reads as recovery, and a
+ * ledger whose stated rule is that a missing field is never backfilled by
+ * inference cannot also manufacture the object the field described.
+ */
+export function deletionRevertRefusal(entry: Extract<LedgerEntry, { kind: "deletion" }>): string {
+	const what = entry.data.target === "memory" ? "memory" : "todo";
+	return (
+		`Event ${entry.id} recorded the deletion of ${what} ${entry.data.short_id}, and a deletion cannot be ` +
+		"reverted. Nothing in this ledger holds the deleted object — only a 200-character preview, its length and " +
+		`its SHA-256 (${entry.data.content_sha256.slice(0, 16)}…) — so a "restore" would write a truncated copy ` +
+		"under a new id with a new creation time, which is a fabrication wearing recovery's clothes. This entry " +
+		"stands as the record of what was destroyed."
+	);
 }
 
 /**
@@ -106,6 +284,7 @@ export type LedgerEntry =
 	| LedgerEntryBase<"memory_write", MemoryWriteData>
 	| LedgerEntryBase<"reinforce", ReinforceData>
 	| LedgerEntryBase<"implicit_feedback", ImplicitFeedbackData>
+	| LedgerEntryBase<"deletion", DeletionData>
 	| LedgerEntryBase<"revert", RevertData>;
 
 interface LedgerEntryBase<K extends string, D> {
@@ -282,6 +461,12 @@ export class LearningLedger {
 		if (view.reverted_by) throw new LedgerError(`Event ${id} was already reverted by ${view.reverted_by}`);
 		const original = view.entry;
 		if (original.kind === "revert") throw new LedgerError("Revert events cannot be reverted");
+
+		// Refused before any backend call, because there is no backend call that
+		// could help: the refusal is about what this ledger does and does not hold.
+		// Written as a `kind` check rather than a truthiness test on the refusal so
+		// the compiler also narrows `original` out of the reinforce branch below.
+		if (original.kind === "deletion") throw new LedgerError(deletionRevertRefusal(original));
 
 		let compensation: RevertData["compensation"];
 		let note: string;

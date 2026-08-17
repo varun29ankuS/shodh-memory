@@ -49,6 +49,34 @@ export interface RecallMemory {
 	score_attribution?: ScoreAttribution;
 }
 
+/**
+ * GET /api/memory/{id} — src/handlers/crud.rs `MemoryWithHierarchy`, which
+ * `#[serde(flatten)]`s the whole `Memory` and appends the hierarchy fields.
+ *
+ * DELIBERATELY A NARROW SLICE of a very wide payload. `Memory` serializes
+ * `experience.embeddings` (384 floats) plus image/audio/video embedding slots,
+ * entity refs and the robotics block; declaring them here would invite a caller
+ * to forward them. The five fields below are what a deletion record needs —
+ * what the thing was, when it arrived, and what hangs off it.
+ *
+ * `experience_type` is an externally-tagged unit enum, so it is the bare variant
+ * name ("Observation", "Decision"); `id` is `MemoryId(Uuid)` with
+ * `#[serde(transparent)]`, so it is a plain uuid string.
+ *
+ * `children_count` is the reason this endpoint is called at all before a delete:
+ * `MemorySystem::forget(ForgetCriteria::ById)` (src/memory/mod.rs) removes the
+ * memory from every tier, the vector index, BM25 and the graph episode, but it
+ * does NOT touch child memories — their `parent_id` is left pointing at an id
+ * that no longer resolves, and nothing else reports that.
+ */
+export interface MemoryDetail {
+	id: string;
+	experience: { content: string; experience_type: string; tags: string[] };
+	created_at: string;
+	children_ids: string[];
+	children_count: number;
+}
+
 /** src/handlers/types.rs `RecallFact` */
 export interface RecallFact {
 	id: string;
@@ -610,6 +638,22 @@ export class ShodhBackend {
 		});
 	}
 
+	/**
+	 * GET /api/memory/{id}?user_id=… — src/handlers/crud.rs `get_memory`.
+	 *
+	 * The id may be a full uuid or an 8+ character hex prefix: the handler runs
+	 * `resolve_memory` → `validate_memory_id_or_prefix` → `find_memory_by_prefix`,
+	 * and an ambiguous prefix is a 4xx naming the match count rather than an
+	 * arbitrary pick. The response's `id` is the RESOLVED full uuid, which is the
+	 * only id safe to hand to a destructive call.
+	 */
+	getMemory(userId: string, memoryId: string): Promise<MemoryDetail> {
+		return this.request<MemoryDetail>(
+			"GET",
+			`/api/memory/${encodeURIComponent(memoryId)}?user_id=${encodeURIComponent(userId)}`,
+		);
+	}
+
 	/** DELETE /api/memory/{id}?user_id=… — src/handlers/crud.rs `delete_memory`. */
 	deleteMemory(userId: string, memoryId: string): Promise<unknown> {
 		return this.request<unknown>(
@@ -725,6 +769,42 @@ export class ShodhBackend {
 		return this.request<TodoCompleteResponse>("POST", `/api/todos/${encodeURIComponent(todoId)}/complete`, {
 			user_id: userId,
 		});
+	}
+
+	/**
+	 * GET /api/todos/{id}/subtasks?user_id=… — `list_subtasks`.
+	 *
+	 * Called before a delete, not for display: `TodoStore::delete_todo`
+	 * (src/memory/todos.rs) CASCADES to every subtask of the target and reports
+	 * only a boolean, so this is the one chance to learn what a deletion is about
+	 * to take with it.
+	 */
+	listSubtasks(userId: string, todoId: string): Promise<TodoListResponse> {
+		return this.request<TodoListResponse>(
+			"GET",
+			`/api/todos/${encodeURIComponent(todoId)}/subtasks?user_id=${encodeURIComponent(userId)}`,
+		);
+	}
+
+	/**
+	 * DELETE /api/todos/{id}?user_id=… — `delete_todo`.
+	 *
+	 * THE PATH-STYLE ROUTE WITH THE DELETE VERB, for the same reason given on
+	 * {@link updateTodo}: `POST /api/todos/delete` is registered without a path
+	 * capture while `delete_todo` extracts `Path<String>`, so it 500s before the
+	 * handler runs. `delete_todo` reads `user_id` from the QUERY string
+	 * (`Query<TodoQuery>`), not a body — a DELETE with a JSON body would be
+	 * rejected for a missing `user_id`.
+	 *
+	 * `success: false` with `formatted: "Todo not found"` is a real outcome here,
+	 * not an error status: the store returns `Ok(false)` when the row is already
+	 * gone. Callers must read the flag rather than infer success from a 200.
+	 */
+	deleteTodo(userId: string, todoId: string): Promise<TodoResponse> {
+		return this.request<TodoResponse>(
+			"DELETE",
+			`/api/todos/${encodeURIComponent(todoId)}?user_id=${encodeURIComponent(userId)}`,
+		);
 	}
 
 	/** POST /api/todos/{id}/comments — `add_todo_comment` / `AddCommentRequest`. */

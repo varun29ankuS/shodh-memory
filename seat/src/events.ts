@@ -28,6 +28,26 @@ export interface ModelRef {
 	name: string;
 }
 
+/**
+ * How the model signs its work — one spelling, for every surface that records
+ * an act as the model's.
+ *
+ * It lives beside `ModelRef` rather than in any one tool module because it now
+ * has two consumers with nothing else in common: the todo tools write it as a
+ * comment author (a `Todo` has no assignee field, so the comment is the only
+ * place a name fits), and the deletion path writes it into a ledger entry
+ * (nothing survives a deletion to carry a signature, so the record must outlive
+ * its subject). A second definition of this format in either place would be a
+ * second identity for the same model, and an audit that cannot join the two.
+ *
+ * The model reference and not the string "agent": two different models moving
+ * the same work on two different days is exactly the distinction an audit is
+ * for, and the seat always knows which one is running.
+ */
+export function agentAuthor(model: ModelRef): string {
+	return `agent:${model.provider}/${model.id}`;
+}
+
 export interface UsagePayload {
 	input: number;
 	output: number;

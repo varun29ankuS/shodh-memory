@@ -129,9 +129,20 @@ test("four required parts put every description over the three-to-four sentence 
 // accident: a tool added without anyone deciding to add one is exactly how a
 // surface drifts past the point where the model can choose reliably.
 //
-// Mutations: add an eleventh name to EXPECTED and watch it go red; change one
+// Mutations: add a thirteenth name to EXPECTED and watch it go red; change one
 // name's spelling; remove the name-shape assertion and rename a tool with a
 // space in it.
+//
+// TEN BECAME TWELVE, and the two additions were argued rather than assumed. Both
+// are destructive verbs that existed already as unattributed bridged MCP tools:
+// `forget_memory` and `delete_todo` replace `forget` and `delete_todo`, which are
+// now filtered out of the bridge (conversation.ts REDUNDANT_MCP_MEMORY_TOOLS), so
+// the model's total choice set did not grow — it swapped two anonymous verbs for
+// two that write a ledger entry naming who, when, what and why. The third
+// candidate, `reorder_todo`, was REFUSED and left bridged: it swaps `sort_order`
+// between two adjacent rows, "down" undoes "up", and there is no record worth
+// signing, so a native version would have cost a tool slot and improved nothing.
+// That refusal is the evidence this list is a decision and not a drift.
 
 import { createTodoTools } from "../dist/todo-tools.js";
 import { createViewTools } from "../dist/view-tools.js";
@@ -152,6 +163,7 @@ const INERT = {
 	onWeakRecall: () => {},
 	getModel: () => ({ provider: "p", id: "m", name: "M" }),
 	resolveMemoryCitation: () => null,
+	resolveShownMemory: () => null,
 };
 
 const NATIVE = [...createMemoryTools(INERT), ...createViewTools(INERT), ...createTodoTools(INERT)];
@@ -159,6 +171,7 @@ const NATIVE = [...createMemoryTools(INERT), ...createViewTools(INERT), ...creat
 const EXPECTED = [
 	"recall_memory",
 	"remember_memory",
+	"forget_memory",
 	"record_seat_learning",
 	"direct_view",
 	"inspect_view",
@@ -167,10 +180,29 @@ const EXPECTED = [
 	"claim_todo",
 	"update_todo",
 	"comment_on_todo",
+	"delete_todo",
 ];
 
-test("the native surface is exactly these ten tools", () => {
+test("the native surface is exactly these twelve tools", () => {
 	assert.deepEqual(NATIVE.map((tool) => tool.name), EXPECTED);
+});
+
+test("every verb that destroys states its irreversibility in its own description", () => {
+	// The description IS the safety on these two: there is no dry-run endpoint,
+	// no confirmation dialog and no restore, so the only thing standing between a
+	// casual call and an unrecoverable one is what the model reads before it
+	// chooses. A destructive tool whose prose reads like the others' is a trap.
+	for (const name of ["forget_memory", "delete_todo"]) {
+		const tool = NATIVE.find((candidate) => candidate.name === name);
+		assert.ok(tool, `${name} is missing from the native surface`);
+		assert.match(tool.description, /PERMANENTLY DELETES/, `${name} does not lead with what it destroys`);
+		assert.match(tool.description, /ledger/, `${name} does not say where the deletion is recorded`);
+		assert.match(
+			tool.description,
+			/Nothing undoes this|NOTHING UNDOES THIS/,
+			`${name} does not say the act cannot be undone`,
+		);
+	}
 });
 
 test("the surface stays well under the count at which tool selection degrades", () => {

@@ -122,14 +122,14 @@ export const DEFAULT_MEMORY_MECHANISMS: MemoryMechanisms = {
 /**
  * MCP tool base names (suffix after mcp__<server>__) that duplicate a native
  * seat tool. Everything else — graph/lineage/entity/fact tools, and the todo
- * verbs with still no native equivalent (delete_todo, list_subtasks, reorder) —
- * stays bridged.
+ * verbs with still no native equivalent (list_subtasks, reorder_todo) — stays
+ * bridged.
  *
  * The memory four are here because the duplicates measurably misbehave:
  * relevance-percentage output the citation contract cannot parse, writes that
  * bypass the ledger, recalls that bypass reinforcement, and auto-ingest.
  *
- * The todo five are here for a different and simpler reason: the native
+ * The todo verbs are here for a different and simpler reason: the native
  * versions (todo-tools.ts) write the model's identity onto every mutation as a
  * comment author, because `Todo` has no assignee field and that comment is the
  * ONLY record of who moved the work. mcp-server/index.ts `update_todo`,
@@ -144,17 +144,36 @@ export const DEFAULT_MEMORY_MECHANISMS: MemoryMechanisms = {
  * existence — was the single mutation on this surface that arrived unsigned. A
  * board cannot say which of its rows an assistant put there if the verb that
  * puts them there is anonymous.
+ *
+ * `forget` AND `delete_todo` JOINED THEM WHEN THE NATIVE DESTRUCTIVE VERBS
+ * LANDED, and their exemption was sharper still. A deletion is the one act whose
+ * subject cannot be consulted afterwards, so an unrecorded one is unauditable by
+ * construction — and the bridged `delete_todo` went further than arriving
+ * unsigned: it DESTROYS signatures, because a todo's comments are where every
+ * attribution on that surface lives and the delete takes them with the row. The
+ * native versions record who, when, what and why in the learning ledger, which is
+ * the only store here that outlives the thing it describes.
+ *
+ * `reorder_todo` STAYS BRIDGED ON PURPOSE, and it is the case that shows the rule
+ * is about attribution rather than about tool count. `TodoStore::reorder_todo`
+ * swaps `sort_order` between two adjacent same-status rows: nothing is created,
+ * nothing is destroyed, and "down" undoes "up" exactly. There is no record worth
+ * signing, so a native equivalent would add a twelfth tool to the model's choice
+ * set and improve nothing — and filtering it without one would remove a
+ * capability while improving nothing either.
  */
 const REDUNDANT_MCP_MEMORY_TOOLS = new Set([
 	"recall",
 	"quick_recall",
 	"proactive_context",
 	"remember",
+	"forget",
 	"list_todos",
 	"add_todo",
 	"update_todo",
 	"complete_todo",
 	"add_todo_comment",
+	"delete_todo",
 ]);
 
 /**
@@ -221,6 +240,7 @@ Memory discipline:
 - When a recalled memory informs your answer, cite it inline as [mem:<id>] using the id shown in the recall result.
 - Use remember_memory sparingly: durable facts, decisions, and learnings only.
 - Use record_seat_learning only for operational lessons about retrieval or tool strategy — never for user content.
+- forget_memory permanently destroys a memory and nothing restores it. Use it only when the user asks for something to be forgotten, only on a memory you have recalled and read this turn, and never to correct a memory — remember the correction instead, so both the belief and its revision survive. Every deletion is written to the learning ledger with your identity and your stated reason; that record is all that remains.
 
 The workbench:
 - The user is looking at a workbench with several surfaces. Use direct_view when the shape of your answer has a place: the graph for relational answers, the map for geographic ones, sources for "where did this come from", anomalies, tasks, history. Give the entities the answer is about, and a reason in your own words — the reason is shown to the user, so state the evidence ("these 12 memories cluster on the Malabar coast"), not the action ("opening Geo").
@@ -229,7 +249,8 @@ The workbench:
 - Never re-issue a request to get around a refusal. An offer is the person's to accept, and asking twice is the same as not asking.
 - inspect_view is free and read-only: use it when you want to know where the person is before moving them, or whether they are already there.
 - An offer the person answers after your turn ended is reported to you at the start of the next one, under "Since your last turn, the workbench answered you". Read it before describing the view: it is how you learn that something you were told was WAITING has since been accepted, refused, or left to lapse. A refusal there is a decision already made, not a request to make again.
-- Recorded work: list_todos to see it, create_todo to record work the user has agreed to, claim_todo before doing any of it, comment_on_todo to leave findings, update_todo to change status. Your model identity is written onto every one of those, so they are the record of what you did — and never create work the user did not ask for.`;
+- Recorded work: list_todos to see it, create_todo to record work the user has agreed to, claim_todo before doing any of it, comment_on_todo to leave findings, update_todo to change status. Your model identity is written onto every one of those, so they are the record of what you did — and never create work the user did not ask for.
+- Work that stopped is cancelled, not deleted: update_todo with status \`cancelled\` keeps the task and its history readable. delete_todo destroys the todo, its subtasks and every comment on it — including the record of who worked on it — so use it only for a row that should never have existed, and only when the user asks.`;
 
 export class ConversationBusyError extends Error {
 	constructor() {
@@ -381,8 +402,16 @@ export class Conversation {
 	private proactiveIds = new Set<string>();
 	/** Content of proactively injected memories this run (verify-loop misattribution check). */
 	private proactiveContents = new Map<string, string>();
-	/** Memory ids written this run (remember/seat-learning) — citable, never "unknown". */
-	private writtenIds = new Set<string>();
+	/**
+	 * Memory ids written this run (remember/seat-learning) — citable, never
+	 * "unknown".
+	 *
+	 * Keyed by scope rather than a bare set because `forget_memory` resolves
+	 * through the same map and must refuse a harness-scope id: the two scopes are
+	 * separate backend stores, and a lesson in the assistant's namespace is not
+	 * the user's memory to lose. Citation checking ignores the value.
+	 */
+	private writtenIds = new Map<string, MemoryScope>();
 	/** User-scope recall_memory calls this run (verify-loop absence check). */
 	private userRecallCount = 0;
 	/** Previous run's proactive ids — excluded from explicit negative-followup
@@ -438,6 +467,14 @@ export class Conversation {
 			},
 			ledger: deps.ledger,
 			renderLineage: this.mechanisms.recallLineage,
+			// Read late for the same reason the todo tools' is: a deletion signed
+			// with the model that opened the conversation rather than the one that
+			// ordered it is a wrong signature on the one act nothing can revisit.
+			getModel: () => this.model,
+			// The gate on forget_memory, and the reason a model-supplied string
+			// never reaches a destructive URL: the id sent to the backend is a uuid
+			// this process already held, matched by short id and scope.
+			resolveShownMemory: (shortId) => this.shownMemories().get(shortId) ?? null,
 		});
 
 		// The view tools check entities against the USER's graph, never the
@@ -455,6 +492,12 @@ export class Conversation {
 		const todoTools = createTodoTools({
 			backend: deps.backend,
 			userId: this.userId,
+			// Where delete_todo signs. Every other todo verb signs by writing an
+			// authored comment onto the todo; the delete destroys the comments, so
+			// its record has to live somewhere the deletion cannot reach.
+			ledger: deps.ledger,
+			conversationId: this.id,
+			getTurn: () => this.turn,
 			// Read late: `set_model` swaps the model mid-conversation, and a todo
 			// signed with the model that opened the conversation rather than the
 			// one that moved the work is a wrong signature, not a stale one.
@@ -504,7 +547,7 @@ export class Conversation {
 	private emit(event: SeatEvent): void {
 		// Verify-loop bookkeeping, kept here so every emitter (native tools,
 		// proactive pass) feeds it without additional plumbing.
-		if (event.type === "memory_write") this.writtenIds.add(event.memory_id);
+		if (event.type === "memory_write") this.writtenIds.set(event.memory_id, event.scope);
 		if (event.type === "memory_recall" && event.scope === "user") this.userRecallCount += 1;
 		if (this.currentSink) {
 			this.currentSink(event);
@@ -595,7 +638,7 @@ export class Conversation {
 		this.prevProactiveIds = this.proactiveIds;
 		this.proactiveIds = new Set();
 		this.proactiveContents = new Map();
-		this.writtenIds = new Set();
+		this.writtenIds = new Map();
 		this.userRecallCount = 0;
 		this.weakRecalls = [];
 		this.toolErrors = [];
@@ -884,7 +927,34 @@ export class Conversation {
 		const shown = new Map<string, string>();
 		for (const memoryId of this.surfaced.keys()) shown.set(memoryShortId(memoryId), memoryId);
 		for (const memoryId of this.proactiveContents.keys()) shown.set(memoryShortId(memoryId), memoryId);
-		for (const memoryId of this.writtenIds) shown.set(memoryShortId(memoryId), memoryId);
+		for (const memoryId of this.writtenIds.keys()) shown.set(memoryShortId(memoryId), memoryId);
+		return shown;
+	}
+
+	/**
+	 * The full uuid AND scope behind a short id the model has been shown this run.
+	 *
+	 * Separate from {@link shownMemoryIds} because its consumer is destructive and
+	 * needs one thing that map cannot carry: which backend store the memory lives
+	 * in. `forget_memory` refuses anything outside the user's scope, and the three
+	 * sources disagree — `surfaced` records the scope it was recalled under,
+	 * proactive context is always the user's namespace, and a written id can be
+	 * either, since `record_seat_learning` writes to the harness store.
+	 *
+	 * Later sources win, matching the citation map's own precedence: a memory that
+	 * was both surfaced and rewritten this run is described by its most recent act.
+	 */
+	private shownMemories(): Map<string, { id: string; scope: MemoryScope }> {
+		const shown = new Map<string, { id: string; scope: MemoryScope }>();
+		for (const [memoryId, memory] of this.surfaced) {
+			shown.set(memoryShortId(memoryId), { id: memoryId, scope: memory.scope });
+		}
+		for (const memoryId of this.proactiveContents.keys()) {
+			shown.set(memoryShortId(memoryId), { id: memoryId, scope: "user" });
+		}
+		for (const [memoryId, scope] of this.writtenIds) {
+			shown.set(memoryShortId(memoryId), { id: memoryId, scope });
+		}
 		return shown;
 	}
 
@@ -904,7 +974,7 @@ export class Conversation {
 		const knownShort = new Map<string, string>(); // shortId -> content ("" when unknown)
 		for (const [memoryId, memory] of this.surfaced) knownShort.set(memoryShortId(memoryId), memory.content);
 		for (const [memoryId, content] of this.proactiveContents) knownShort.set(memoryShortId(memoryId), content);
-		for (const memoryId of this.writtenIds) knownShort.set(memoryShortId(memoryId), "");
+		for (const memoryId of this.writtenIds.keys()) knownShort.set(memoryShortId(memoryId), "");
 
 		const cited = extractCitations(answer);
 		const unknown = [...cited].filter((shortId) => !knownShort.has(shortId));
