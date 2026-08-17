@@ -4,6 +4,7 @@ import {
   arrived,
   axisStateLabel,
   returnTarget,
+  traceAnnouncement,
   traceKey,
   traceOf,
   viewDimensionLabel,
@@ -197,5 +198,46 @@ describe("words", () => {
   it("names the person as the one a held request is waiting on", () => {
     expect(axisStateLabel("waiting")).toBe("waiting on you");
     expect(axisStateLabel("applied")).toBe("applied");
+  });
+});
+
+describe("traceAnnouncement", () => {
+  it("speaks the pairs the eye reads from the alignment", () => {
+    expect(
+      traceAnnouncement({
+        reason: REASON,
+        axes: [
+          { dimension: "cue", state: "applied" },
+          { dimension: "frame", state: "applied" },
+          { dimension: "destination", state: "waiting" },
+        ],
+      }),
+    ).toBe(
+      `The conversation: “${REASON}”. It moved the narrowing and the camera. ` +
+        "It is waiting on you for the destination.",
+    );
+  });
+
+  it("never says the view moved when nothing did", () => {
+    const spoken = traceAnnouncement({
+      reason: REASON,
+      axes: [{ dimension: "destination", state: "waiting" }],
+    });
+    expect(spoken).not.toContain("moved");
+    expect(spoken).toContain("It is waiting on you for the destination.");
+  });
+
+  it("says nothing about waiting when nothing is", () => {
+    const spoken = traceAnnouncement({
+      reason: REASON,
+      axes: [{ dimension: "focus", state: "applied" }],
+    });
+    expect(spoken).toBe(`The conversation: “${REASON}”. It moved the opened entity.`);
+  });
+
+  it("does not put a conjunction in a list of one", () => {
+    expect(
+      traceAnnouncement({ reason: REASON, axes: [{ dimension: "cue", state: "applied" }] }),
+    ).toContain("It moved the narrowing.");
   });
 });

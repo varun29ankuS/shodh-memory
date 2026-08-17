@@ -1,7 +1,10 @@
 import { useMemo } from "react";
-import { Sparkle } from "lucide-react";
+import { Sparkle, Undo2 } from "lucide-react";
+import { useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { describeCommands, reasonOf } from "@/lib/view/commands";
+import { describeCommands, destinationNoun, reasonOf } from "@/lib/view/commands";
+import { returnTarget, traceKey, traceOf } from "@/lib/view/presence";
+import { useTrace } from "@/stores/trace";
 import { useView } from "@/stores/view";
 
 /**
@@ -46,13 +49,63 @@ export function useHasViewNotice(): boolean {
   return useView((s) => Object.keys(s.offers).length > 0 || s.cue !== null || s.notice !== null);
 }
 
+/**
+ * The block's mark, doubling as the way back into it.
+ *
+ * THE ECLIPSE THIS ANSWERS. One line at 12px can hold one claim, so when a
+ * request applies on three axes and waits on a fourth this bar shows the fourth
+ * and the other three are invisible from here. `AgentTrace` shows all four, and
+ * it collapses after a moment — so without a way to re-open it the fullest
+ * account this system can give would be available for nine seconds and then
+ * never again. The mark was already sitting here as decoration; making it the
+ * control costs no pixels and no words.
+ *
+ * Decorative when there is no trace to re-open, which is the recall-derived
+ * narrowing: nothing there carries a reason, so there is no block behind it and
+ * a button would open nothing.
+ */
+function TraceMark({ traceOpen }: { traceOpen: (() => void) | null }) {
+  if (traceOpen === null) {
+    return <Sparkle aria-hidden="true" className="text-primary size-3 shrink-0" strokeWidth={2} />;
+  }
+  return (
+    <button
+      type="button"
+      onClick={traceOpen}
+      aria-label="Show what the conversation did to this view, and why"
+      className="focus-visible:ring-ring -ml-0.5 shrink-0 rounded p-0.5 focus-visible:ring-2 focus-visible:outline-none"
+    >
+      <Sparkle className="text-primary hover:text-primary/80 size-3 transition-colors" strokeWidth={2} />
+    </button>
+  );
+}
+
 export function FollowOffer() {
   const offers = useView((s) => s.offers);
   const cue = useView((s) => s.cue);
   const notice = useView((s) => s.notice);
+  const destination = useView((s) => s.destination);
   const follow = useView((s) => s.follow);
   const dismiss = useView((s) => s.dismiss);
   const release = useView((s) => s.release);
+  const back = useView((s) => s.back);
+  const shown = useTrace((s) => s.shown);
+  const { pathname } = useLocation();
+
+  /* ONE OWNER PER MOMENT. `AgentTrace` holds the arrival — the model's sentence
+     at full length, beside every axis and its fate — and this bar holds what is
+     left afterwards. While the block is up, this line would print the same
+     sentence a second time, truncated, two inches away from the untruncated
+     one; that is the clutter the density pass was spent removing. The caption
+     stays hidden throughout (`useHasViewNotice` is unaffected by this), so
+     nothing in the bar moves as the block opens and closes. */
+  const trace = useMemo(() => traceOf(notice, offers), [notice, offers]);
+  const key = trace === null ? null : traceKey(trace);
+  const traceOpen = useMemo(
+    () => (key === null ? null : () => useTrace.getState().open(key)),
+    [key],
+  );
+  const target = returnTarget(destination, pathname);
 
   const pending = useMemo(() => Object.values(offers), [offers]);
   const description = describeCommands(pending);
@@ -65,6 +118,8 @@ export function FollowOffer() {
      and — where there is room — carries the quotation the applied line already
      uses for the model's words. */
   const offeredReason = reasonOf(pending);
+
+  if (key !== null && key === shown) return null;
 
   if (pending.length > 0 && description.length > 0) {
     return (
@@ -80,7 +135,7 @@ export function FollowOffer() {
           "offer-in",
         )}
       >
-        <Sparkle aria-hidden="true" className="text-primary size-3 shrink-0" strokeWidth={2} />
+        <TraceMark traceOpen={traceOpen} />
         <p className="min-w-0 truncate text-[12px]">
           <span className="text-muted-foreground">The conversation would </span>
           {description}
@@ -125,7 +180,7 @@ export function FollowOffer() {
       role="status"
       className="border-border bg-muted/60 flex min-w-0 max-w-[560px] shrink items-center gap-2 rounded-md border py-0.5 pr-0.5 pl-2"
     >
-      <Sparkle aria-hidden="true" className="text-primary size-3 shrink-0" strokeWidth={2} />
+      <TraceMark traceOpen={traceOpen} />
       <p className="text-muted-foreground min-w-0 truncate text-[12px]">
         {/* "FOLLOWING", NOT "SHOWING", and the difference is honesty rather than
             tone. This line is on every surface, and the cue only visibly
@@ -149,6 +204,26 @@ export function FollowOffer() {
         Following the conversation —{" "}
         <span className="text-foreground">“{notice ? notice.reason : cue?.text}”</span>
       </p>
+      {/* THE INVERSE OUTLIVES THE MOMENT. `AgentTrace` offers the way back as the
+          move lands, and then collapses; a destination change whose undo lasted
+          nine seconds would be reversible in principle and irreversible in
+          practice. It is rendered only while the record still describes where
+          the person is standing (`returnTarget`), so it can never be a button
+          that moves someone off a stage they chose themselves.
+
+          BEFORE Release, and that order is the reading order of the two: this
+          one undoes what just happened, Release hands the whole corpus back. */}
+      {target !== null ? (
+        <button
+          type="button"
+          onClick={back}
+          aria-label={`Go back to ${destinationNoun(target)}`}
+          className="text-muted-foreground hover:text-foreground focus-visible:ring-ring flex shrink-0 items-center gap-1 rounded px-1.5 py-[3px] text-[11px] transition-colors focus-visible:ring-2 focus-visible:outline-none"
+        >
+          <Undo2 aria-hidden="true" className="size-3" />
+          Back
+        </button>
+      ) : null}
       <button
         type="button"
         onClick={release}

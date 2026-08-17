@@ -1,6 +1,5 @@
 import { cn } from "@/lib/utils";
 import type { ServiceReading, Tone } from "./systemHealth";
-import { RAIL_OFFSET } from "./destinations";
 
 /**
  * Tone as colour, in one table, so no state can be coloured by hand.
@@ -91,6 +90,13 @@ export function SystemPulse({ tone }: { tone: Tone }) {
  * does not own. The cost is bounded — one line per unhealthy service, at the
  * top of a stage which, for the memory-server failures, is already showing an
  * outage explanation and nothing else.
+ *
+ * IT NO LONGER POSITIONS ITSELF. `TopBar` stacks this and the conversation's
+ * account of a view move in one column under the header, because both want the
+ * same band and each claiming `top-12` for itself would put them on top of one
+ * another in exactly the state where something is also wrong with the system.
+ * A flow child of that column keeps the ordering explicit: the outage reads
+ * first.
  */
 export function SystemBanner({ alerts }: { alerts: ServiceReading[] }) {
   const quiet = alerts.length === 0;
@@ -111,11 +117,9 @@ export function SystemBanner({ alerts }: { alerts: ServiceReading[] }) {
       // every tick.
       role="status"
       className={cn(
-        "absolute inset-x-0 top-12 z-20",
-        RAIL_OFFSET,
         quiet
           ? "pointer-events-none h-0 overflow-hidden border-0"
-          : "border-border bg-card border-b",
+          : "pointer-events-auto border-border bg-card border-b",
       )}
     >
       <ul className="flex flex-col">

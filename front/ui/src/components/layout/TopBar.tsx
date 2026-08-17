@@ -6,6 +6,7 @@ import { StatusStrip } from "./StatusStrip";
 import { SystemBanner, SystemPulse } from "./SystemRibbon";
 import { useSystemHealth } from "./useSystemHealth";
 import { FollowOffer, useHasViewNotice } from "./FollowOffer";
+import { AgentTrace } from "./AgentTrace";
 import { DESTINATIONS } from "./Sidebar";
 import { RAIL_OFFSET } from "./destinations";
 
@@ -94,7 +95,17 @@ export function TopBar({
         </div>
       </header>
 
-      <SystemBanner alerts={alerts} />
+      {/* ONE COLUMN UNDER THE HEADER, TWO TENANTS. The outage banner and the
+          conversation's account of a view move both belong in the band directly
+          below the bar, and both used to be able to claim `top-12`; stacking
+          them makes the ordering explicit rather than accidental — a service
+          that is down reads before a view that moved. The column is inert
+          except where its children opt back in, so a quiet system and an idle
+          conversation cost the stage nothing at all. */}
+      <div className={cn("pointer-events-none absolute inset-x-0 top-12 z-20", RAIL_OFFSET)}>
+        <SystemBanner alerts={alerts} />
+        <AgentTrace />
+      </div>
     </>
   );
 }

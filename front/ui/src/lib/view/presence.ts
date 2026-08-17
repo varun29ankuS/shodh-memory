@@ -260,3 +260,38 @@ export function viewDimensionLabel(dimension: string): string {
 export function axisStateLabel(state: AxisState): string {
   return state === "applied" ? "applied" : "waiting on you";
 }
+
+/** A list, as a person would say it. */
+function list(items: readonly string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/**
+ * The whole trace as one spoken sentence, for the live region.
+ *
+ * WRITTEN AS PROSE RATHER THAN LET THE ROWS BE READ OUT. The visual block is a
+ * label column beside a state column, which a screen reader renders as "the
+ * narrowing applied the camera applied the destination waiting on you" — a run
+ * of eight words with no grammar, from which the listener has to reconstruct
+ * that these are pairs. The eye gets the pairing from the alignment for free;
+ * the ear has to be given it.
+ *
+ * "MOVED" IS SAID ONLY OF AXES THAT MOVED, which is the same discipline
+ * `features/history/derive.ts` keeps when it refuses to relabel an ask as a
+ * move. A wholly declined request announces the waiting clause and no other, so
+ * the listener is never told the view moved when it did not.
+ */
+export function traceAnnouncement(trace: Trace): string {
+  const applied = trace.axes
+    .filter((axis) => axis.state === "applied")
+    .map((axis) => viewDimensionLabel(axis.dimension));
+  const waiting = trace.axes
+    .filter((axis) => axis.state === "waiting")
+    .map((axis) => viewDimensionLabel(axis.dimension));
+
+  const parts = [`The conversation: “${trace.reason}”.`];
+  if (applied.length > 0) parts.push(`It moved ${list(applied)}.`);
+  if (waiting.length > 0) parts.push(`It is waiting on you for ${list(waiting)}.`);
+  return parts.join(" ");
+}
