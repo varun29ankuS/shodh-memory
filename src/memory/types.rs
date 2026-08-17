@@ -5448,4 +5448,42 @@ mod tests {
             "new keys are added"
         );
     }
+
+    // ── todo settlement and recurrence ──────────────────────────────────
+
+    fn at(y: i32, m: u32, d: u32) -> DateTime<Utc> {
+        use chrono::TimeZone;
+        Utc.with_ymd_and_hms(y, m, d, 9, 30, 0).unwrap()
+    }
+
+    /// `Monthly { day }` was only ever reachable as `day: 1`, so its date math
+    /// was never exercised: it capped the target at 28 and advanced by "+32
+    /// days", which skips February entirely. Now that a client can ask for
+    /// day 31, the next occurrence has to land in the very next month, on the
+    /// last day of that month when it is shorter than the target.
+    #[test]
+    fn monthly_recurrence_lands_in_the_next_month() {
+        let r = Recurrence::Monthly { day: 31 };
+        assert_eq!(
+            r.next_occurrence(at(2026, 1, 31)),
+            at(2026, 2, 28),
+            "January 31 must roll to February, clamped to the month's last day"
+        );
+        assert_eq!(
+            r.next_occurrence(at(2028, 1, 31)),
+            at(2028, 2, 29),
+            "a leap February has a 29th"
+        );
+        assert_eq!(
+            Recurrence::Monthly { day: 15 }.next_occurrence(at(2026, 3, 2)),
+            at(2026, 3, 15),
+            "a target still ahead in this month fires this month"
+        );
+        assert_eq!(
+            Recurrence::Monthly { day: 15 }.next_occurrence(at(2026, 12, 20)),
+            at(2027, 1, 15),
+            "December rolls the year over"
+        );
+    }
+
 }

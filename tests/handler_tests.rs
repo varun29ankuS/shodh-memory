@@ -1883,6 +1883,279 @@ async fn project_lifecycle() {
     assert!(status.is_success());
 }
 
+/// `update_todo` with `status=done` assigned the status and stopped: no
+/// `completed_at`, and — the expensive part — no recurrence rollover. A daily
+/// task "finished" that way silently stopped recurring. Every client but the
+/// one routed through `/complete` was exposed; the TUI cycles
+/// `in_progress → done` through this exact path (`tui/src/stream.rs`,
+/// `next_status`), and the MCP `update_todo` tool lists `done` in its enum.
+#[tokio::test]
+async fn update_to_done_settles_and_rolls_over_recurrence() {
+    let h = Harness::new();
+    let user = "settle-user";
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({
+                "user_id": user,
+                "content": "Water the plants",
+                "recurrence": "daily",
+                "due_date": "today"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create todo: {body}");
+    let todo_id = body["todo"]["id"].as_str().expect("todo id").to_string();
+    assert_eq!(
+        body["todo"]["recurrence"]["type"],
+        json!("daily"),
+        "recurrence must be persisted on create: {body}"
+    );
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "status": "done"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "update to done: {body}");
+    assert_eq!(body["todo"]["status"], json!("done"), "status: {body}");
+    assert!(
+        body["todo"]["completed_at"].is_string(),
+        "completing through the update path must stamp completed_at: {body}"
+    );
+    assert_eq!(
+        body["next_recurrence"]["content"],
+        json!("Water the plants"),
+        "the update response must surface the occurrence it spawned: {body}"
+    );
+
+    // The decisive assertion: a recurring task completed through /update must
+    // leave a live next occurrence behind, exactly as /complete does.
+    let (status, body) = json_of(
+        h.app(),
+        authed_post("/api/todos", json!({"user_id": user})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let live: Vec<&serde_json::Value> = body["todos"]
+        .as_array()
+        .expect("todos array")
+        .iter()
+        .filter(|t| t["content"] == json!("Water the plants"))
+        .collect();
+    assert_eq!(
+        live.len(),
+        1,
+        "completing a daily todo through /update must spawn exactly one next occurrence: {body}"
+    );
+    assert_ne!(
+        live[0]["id"].as_str(),
+        Some(todo_id.as_str()),
+        "the next occurrence must be a new todo, not the completed one: {body}"
+    );
+    assert!(
+        live[0]["completed_at"].is_null(),
+        "a freshly spawned occurrence must not carry a completion stamp: {body}"
+    );
+}
+
+/// `completed_at` was written only by `Todo::complete()`, and never cleared.
+/// A todo reopened after being done kept its completion stamp, which is how a
+/// row in the "To do" column ended up reporting "took 2d". Settlement is the
+/// server's job: entering Done/Cancelled stamps it, leaving them clears it.
+#[tokio::test]
+async fn settlement_stamp_follows_status_in_both_directions() {
+    let h = Harness::new();
+    let user = "stamp-user";
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({"user_id": user, "content": "Reopen me later"}),
+        ),
+    )
+    .await;
+    let todo_id = body["todo"]["id"].as_str().expect("todo id").to_string();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/complete"),
+            json!({"user_id": user}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "complete: {body}");
+    let stamped_at = body["todo"]["completed_at"]
+        .as_str()
+        .expect("complete must stamp completed_at")
+        .to_string();
+
+    // Reopen: the stamp must go, or every client has to reconstruct settlement
+    // from the status field to avoid showing "took 2d" on an open task.
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "status": "todo"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "reopen: {body}");
+    assert!(
+        body["todo"]["completed_at"].is_null(),
+        "reopening must clear completed_at (was {stamped_at}): {body}"
+    );
+
+    // Cancelling settles the todo too — it leaves the working set and stops
+    // counting as overdue, so it needs a settlement time like Done does.
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "status": "cancelled"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "cancel: {body}");
+    assert!(
+        body["todo"]["completed_at"].is_string(),
+        "cancelling must stamp the settlement time: {body}"
+    );
+    assert!(
+        body["next_recurrence"].is_null(),
+        "cancelling must not spawn a next occurrence: {body}"
+    );
+}
+
+/// `parse_recurrence` accepted three words and hardcoded their parameters:
+/// weekly was always Mon–Fri, monthly always day 1, and `EveryNDays` was
+/// unreachable from any client. All four variants must be expressible, the
+/// bare words must keep working, and a zero interval must be rejected rather
+/// than stored as a same-day infinite repeat.
+#[tokio::test]
+async fn recurrence_grammar_reaches_every_variant() {
+    let h = Harness::new();
+    let user = "recur-user";
+
+    let cases = [
+        ("daily", json!({"type": "daily"})),
+        ("weekly", json!({"type": "weekly", "days": [1, 2, 3, 4, 5]})),
+        ("monthly", json!({"type": "monthly", "day": 1})),
+        ("weekly:mon,fri", json!({"type": "weekly", "days": [1, 5]})),
+        ("weekly:0,6", json!({"type": "weekly", "days": [0, 6]})),
+        // `next_occurrence` scans `days` for the first entry greater than
+        // today, so the list has to come out sorted and deduplicated.
+        ("Weekly:FRI,mon", json!({"type": "weekly", "days": [1, 5]})),
+        ("weekly:mon,mon", json!({"type": "weekly", "days": [1]})),
+        ("monthly:15", json!({"type": "monthly", "day": 15})),
+        ("every 3 days", json!({"type": "every_n_days", "n": 3})),
+        ("every_10_days", json!({"type": "every_n_days", "n": 10})),
+    ];
+
+    for (input, expected) in cases {
+        let (status, body) = json_of(
+            h.app(),
+            authed_post(
+                "/api/todos/add",
+                json!({"user_id": user, "content": format!("Recurs {input}"), "recurrence": input}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create with '{input}': {body}");
+        assert_eq!(
+            body["todo"]["recurrence"], expected,
+            "'{input}' must parse to {expected}: {body}"
+        );
+    }
+
+    for bad in ["every 0 days", "weekly:funday", "monthly:0", "fortnightly"] {
+        let (status, body) = json_of(
+            h.app(),
+            authed_post(
+                "/api/todos/add",
+                json!({"user_id": user, "content": format!("Bad {bad}"), "recurrence": bad}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "'{bad}' must be rejected, got: {body}"
+        );
+    }
+}
+
+/// `UpdateTodoRequest` had no `recurrence` field, so a recurrence could never
+/// be changed or removed once the todo was created — the only escape was
+/// delete-and-recreate, which loses the id, the comments and the links.
+#[tokio::test]
+async fn recurrence_is_editable_and_removable() {
+    let h = Harness::new();
+    let user = "recur-edit-user";
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/todos/add",
+            json!({"user_id": user, "content": "Standup", "recurrence": "daily"}),
+        ),
+    )
+    .await;
+    let todo_id = body["todo"]["id"].as_str().expect("todo id").to_string();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "recurrence": "weekly:mon"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "change recurrence: {body}");
+    assert_eq!(
+        body["todo"]["recurrence"],
+        json!({"type": "weekly", "days": [1]}),
+        "recurrence must be changeable: {body}"
+    );
+
+    // Empty string clears, matching how `parent_id` clears on this same request.
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "recurrence": ""}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "clear recurrence: {body}");
+    assert!(
+        body["todo"]["recurrence"].is_null(),
+        "an empty recurrence must remove it: {body}"
+    );
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            &format!("/api/todos/{todo_id}/update"),
+            json!({"user_id": user, "recurrence": "fortnightly"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unparseable recurrence must be rejected on update too: {body}"
+    );
+}
+
 #[tokio::test]
 async fn list_reminders_empty() {
     let h = Harness::new();
