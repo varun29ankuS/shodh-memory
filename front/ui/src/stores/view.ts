@@ -33,9 +33,21 @@ export interface FrameRecord {
   seq: number;
 }
 
-/** The stage a command asked for. */
+/**
+ * The stage a command asked for, and the one it took the person off.
+ *
+ * `from` IS THE INVERSE, HELD WITH THE MOVE. Every other axis this bus owns can
+ * be undone by doing the ordinary thing — clear the field, pan the graph, click
+ * another node — and the destination could not: the reader whose screen was
+ * swapped mid-sentence had to remember where they had been. The stack the hash
+ * router keeps is not a substitute, because it is the browser's own history and
+ * stepping back through it walks past every navigation the person made by hand.
+ *
+ * `null` where there is nothing to go back to. See `ViewCommand`'s `from`.
+ */
 export interface DestinationRecord {
   path: string;
+  from: string | null;
   seq: number;
 }
 
@@ -121,6 +133,8 @@ interface ViewState {
   follow: () => void;
   /** Refuse them, visibly and once. */
   dismiss: () => void;
+  /** Return to the stage the last agent-applied destination took you off. */
+  back: () => void;
   /** Drop the model's cue and hand the whole corpus back. */
   release: () => void;
 }
@@ -220,7 +234,7 @@ export const useView = create<ViewState>((set, get) => ({
         set({ frame: { entities: command.entities, seq }, seq, offers, claimed, notice });
         break;
       case "destination":
-        set({ destination: { path: command.path, seq }, seq, offers, claimed, notice });
+        set({ destination: { path: command.path, from: command.from, seq }, seq, offers, claimed, notice });
         break;
       case "focus":
         // Same order rule, and the same reason, as the cue: the record must be
@@ -298,6 +312,35 @@ export const useView = create<ViewState>((set, get) => ({
       }
       return { claimed, offers: {} };
     });
+  },
+
+  /**
+   * The way back from a stage the conversation opened.
+   *
+   * A TOUCH FOLLOWED BY A USER DISPATCH, not a bare navigation, and each half is
+   * load-bearing. The touch is the truthful part: going back is the person
+   * taking the destination by hand, so the model must not move it again
+   * underneath them this turn, and the account of the move — a reason that
+   * covered the destination — has to die with the move it was accounting for.
+   * The dispatch is what makes it a MOVE rather than a state edit: nothing here
+   * navigates, `useAgentView` watches the record, and only a record change gets
+   * the person to the other stage.
+   *
+   * The return command carries `from: null`. One inverse, offered once — a
+   * return trip that could itself be returned from is a toggle, and a control
+   * that swaps between two stages on repeated presses is not the "one obvious
+   * action" a moved reader is looking for.
+   *
+   * Silent when there is nowhere to go. The button that calls this is gated on
+   * `returnTarget` (lib/view/presence.ts), which knows the current path and this
+   * does not; the guard here is for the case where those two disagree, and it is
+   * a no-op rather than a navigation to a stage nobody asked for.
+   */
+  back: () => {
+    const record = get().destination;
+    if (!record || record.from === null) return;
+    get().touch("destination");
+    get().dispatch({ dimension: "destination", path: record.from, from: null }, "user");
   },
 
   release: () => {

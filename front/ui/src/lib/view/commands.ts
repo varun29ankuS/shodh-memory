@@ -60,10 +60,26 @@ interface Authored {
   origin?: string;
 }
 
+/**
+ * The stage this command moves AWAY from — the return ticket.
+ *
+ * REQUIRED, NOT OPTIONAL, AND THAT IS THE POINT. A destination change is the
+ * only view move with no inverse the person can reach for: a cue can be
+ * cleared, a camera re-panned, a selection re-clicked, but a reader taken from
+ * the graph to tasks mid-sentence has to REMEMBER where they were. Every other
+ * axis of this feature is reversible and this one was not, so the way back
+ * travels with the ask rather than being reconstructed from a history stack the
+ * hash router shares with the browser's own back button.
+ *
+ * `null` says there is no way back to offer, and it is used by exactly one
+ * producer: the return trip itself (`stores/view.ts` `back`). Making the return
+ * trip carry a return trip would turn one obvious inverse into a toggle between
+ * two stages, which is a different affordance and a worse one.
+ */
 export type ViewCommand =
   | ({ dimension: "cue"; text: string; entities: string[] } & Authored)
   | ({ dimension: "frame"; entities: string[] } & Authored)
-  | ({ dimension: "destination"; path: string } & Authored)
+  | ({ dimension: "destination"; path: string; from: string | null } & Authored)
   | ({ dimension: "focus"; id: string; name: string } & Authored);
 
 /**
@@ -215,7 +231,7 @@ function commandsFromRequest(
   // model chose this surface deliberately, so a redundant navigation would
   // remount the stage under someone who was already reading it.
   if (op.destination !== null && !isAlreadyThere(op, path)) {
-    commands.push({ dimension: "destination", path: op.destination, reason, origin });
+    commands.push({ dimension: "destination", path: op.destination, from: path, reason, origin });
   }
 
   // The one object to open. Sent whether or not the destination moved: the
@@ -300,7 +316,7 @@ export function commandsFromOp(op: SeatEvent, path: string): ViewCommand[] {
   // claiming to have narrowed it.
   if (entities.length > 0) commands.push({ dimension: "frame", entities });
 
-  if (STAGE !== path) commands.push({ dimension: "destination", path: STAGE });
+  if (STAGE !== path) commands.push({ dimension: "destination", path: STAGE, from: path });
 
   return commands;
 }
@@ -332,6 +348,18 @@ const DESTINATION_NOUN: Record<string, string> = {
   "/sources": "sources",
   "/providers": "providers",
 };
+
+/**
+ * How a stage is named inside a sentence.
+ *
+ * Exported so the way BACK can be offered in the same words the way there was,
+ * from the one table. "Follow … open the map" and "Back to the graph" naming the
+ * same ten surfaces from two lists is a drift that shows up as the return button
+ * calling a destination something the offer never called it.
+ */
+export function destinationNoun(path: string): string {
+  return DESTINATION_NOUN[path] ?? path;
+}
 
 /**
  * The reason behind a set of commands, or null when they carry none.
@@ -369,7 +397,7 @@ export function describeCommands(commands: readonly ViewCommand[]): string {
     if (command.dimension === "cue") parts.push(`follow its cue “${command.text}”`);
     else if (command.dimension === "frame") parts.push("frame those entities");
     else if (command.dimension === "focus") parts.push(`open ${command.name}`);
-    else parts.push(`open ${DESTINATION_NOUN[command.path] ?? command.path}`);
+    else parts.push(`open ${destinationNoun(command.path)}`);
   }
   if (parts.length === 0) return "";
   if (parts.length === 1) return parts[0];

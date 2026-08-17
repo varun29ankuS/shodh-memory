@@ -600,21 +600,14 @@ export function viewOutcomeDetail(row: AuditRow): ViewOutcomeDetail | null {
  * happened" and "to what" — and a row that ran them together would read as one
  * claim. The raw dimension survives an unknown value for the same reason
  * everything else here does.
+ *
+ * DEFINED IN `lib/view/presence.ts` AND RE-EXPORTED, not because this screen
+ * borrowed it but because the live account of a move now names the same four
+ * axes while it happens. Two copies would let the block that says "the camera —
+ * applied" sit above a permanent row calling that same axis something else, and
+ * a reader comparing the two would be reading about two events.
  */
-export function viewDimensionLabel(dimension: string): string {
-  switch (dimension) {
-    case "cue":
-      return "the narrowing";
-    case "frame":
-      return "the camera";
-    case "destination":
-      return "the destination";
-    case "focus":
-      return "the opened entity";
-    default:
-      return dimension;
-  }
-}
+export { viewDimensionLabel } from "@/lib/view/presence";
 
 /**
  * Who acted.

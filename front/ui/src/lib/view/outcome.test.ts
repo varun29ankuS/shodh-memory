@@ -22,7 +22,7 @@ function agentCue(origin?: string): ViewCommand {
 }
 
 function agentDestination(origin?: string): ViewCommand {
-  return { dimension: "destination", path: "/geo", reason: "why", origin };
+  return { dimension: "destination", path: "/geo", from: "/chat", reason: "why", origin };
 }
 
 describe("verdictsForDispatch", () => {

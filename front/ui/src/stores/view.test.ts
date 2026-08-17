@@ -19,7 +19,7 @@ import { useView } from "./view";
 const REASON = "these 12 memories cluster on the Malabar coast";
 
 function agentCommand(over: Partial<Extract<ViewCommand, { dimension: "destination" }>> = {}): ViewCommand {
-  return { dimension: "destination", path: "/geo", reason: REASON, origin: "call-1", ...over };
+  return { dimension: "destination", path: "/geo", from: "/chat", reason: REASON, origin: "call-1", ...over };
 }
 
 let reported: ViewVerdict[];
@@ -168,5 +168,66 @@ describe("the person still outranks the model after the loop is closed", () => {
     // no advantage — the ledger is consulted identically both times.
     expect(useView.getState().destination).toBeNull();
     expect(spy.mock.calls.flat(2).filter((v: ViewVerdict) => v.state === "applied")).toHaveLength(0);
+  });
+});
+
+/**
+ * The inverse of a destination change.
+ *
+ * THE ONE AXIS THAT HAD NO WAY BACK. A cue can be cleared, a camera re-panned, a
+ * selection re-clicked; a reader whose stage was swapped mid-sentence had to
+ * remember where they had been. These pin that going back is treated as the
+ * person's own act — so the model cannot re-take the axis this turn, and the
+ * account of a move no longer describes the view.
+ */
+describe("back", () => {
+  beforeEach(() => {
+    useView.setState({ claimed: [], offers: {}, destination: null, notice: null, seq: 0 });
+  });
+
+  it("returns to the stage the move took the person off", () => {
+    useView.getState().dispatch(agentCommand({ path: "/geo", from: "/tasks" }), "agent");
+    useView.getState().back();
+    expect(useView.getState().destination?.path).toBe("/tasks");
+  });
+
+  it("claims the destination, so the model cannot take it again this turn", () => {
+    useView.getState().dispatch(agentCommand({ path: "/geo", from: "/tasks" }), "agent");
+    useView.getState().back();
+    expect(useView.getState().claimed).toContain("destination");
+    expect(useView.getState().dispatch(agentCommand({ path: "/graph" }), "agent")).toBe("offer");
+  });
+
+  it("drops the account of a move it has just undone", () => {
+    useView.getState().dispatch(agentCommand({ path: "/geo", from: "/tasks" }), "agent");
+    expect(useView.getState().notice?.reason).toBe(REASON);
+    useView.getState().back();
+    expect(useView.getState().notice).toBeNull();
+  });
+
+  it("offers no return trip from the return trip, so it cannot become a toggle", () => {
+    useView.getState().dispatch(agentCommand({ path: "/geo", from: "/tasks" }), "agent");
+    useView.getState().back();
+    expect(useView.getState().destination?.from).toBeNull();
+  });
+
+  it("does nothing when there is nowhere to go back to", () => {
+    useView.getState().dispatch(agentCommand({ path: "/geo", from: null }), "agent");
+    const seq = useView.getState().seq;
+    useView.getState().back();
+    expect(useView.getState().destination?.path).toBe("/geo");
+    expect(useView.getState().seq).toBe(seq);
+  });
+
+  it("does nothing when no destination command has ever landed", () => {
+    useView.getState().back();
+    expect(useView.getState().destination).toBeNull();
+  });
+
+  it("reports no verdict, because nobody asked for the return trip", () => {
+    useView.getState().dispatch(agentCommand({ path: "/geo", from: "/tasks" }), "agent");
+    reported = [];
+    useView.getState().back();
+    expect(reported).toEqual([]);
   });
 });

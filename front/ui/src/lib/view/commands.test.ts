@@ -5,6 +5,7 @@ import {
   ENTITY_LIMIT,
   commandsFromOp,
   describeCommands,
+  destinationNoun,
   dimensionsOf,
   isAlreadyThere,
   reasonOf,
@@ -150,11 +151,11 @@ describe("commandsFromOp", () => {
       recall({ memories: [memory("m1", [39.26, -76.57, 0])] }),
       "/",
     );
-    expect(located).toContainEqual({ dimension: "destination", path: "/graph" });
+    expect(located).toContainEqual({ dimension: "destination", path: "/graph", from: "/" });
     expect(located.every((c) => c.dimension !== "destination" || c.path !== "/geo")).toBe(true);
 
     const plain = commandsFromOp(recall({ memories: [memory("m1")] }), "/");
-    expect(plain).toContainEqual({ dimension: "destination", path: "/graph" });
+    expect(plain).toContainEqual({ dimension: "destination", path: "/graph", from: "/" });
   });
 
   it("does not ask to open the destination it is already on", () => {
@@ -199,7 +200,7 @@ describe("describeCommands", () => {
     expect(
       describeCommands([
         { dimension: "cue", text: "baltimore port", entities: [] },
-        { dimension: "destination", path: "/graph" },
+        { dimension: "destination", path: "/graph", from: "/recall" },
       ]),
     ).toBe("follow its cue “baltimore port” and open the graph");
   });
@@ -249,6 +250,7 @@ describe("commandsFromOp — view_command", () => {
       {
         dimension: "destination",
         path: "/geo",
+        from: "/chat",
         reason: "these 12 memories cluster on the Malabar coast",
         origin: "call-1",
       },
@@ -292,6 +294,7 @@ describe("commandsFromOp — view_command", () => {
       {
         dimension: "destination",
         path: "/geo",
+        from: "/chat",
         reason: "these 12 memories cluster on the Malabar coast",
         origin: "call-1",
       },
@@ -404,13 +407,51 @@ describe("describeCommands — the ten surfaces", () => {
       ["/providers", "providers"],
     ] as const;
     for (const [path, noun] of nouns) {
-      expect(describeCommands([{ dimension: "destination", path }])).toBe(`open ${noun}`);
+      expect(describeCommands([{ dimension: "destination", path, from: null }])).toBe(`open ${noun}`);
     }
   });
 
   it("falls back to the path for a surface added to the router but not to the table", () => {
-    expect(describeCommands([{ dimension: "destination", path: "/newthing" }])).toBe(
+    expect(describeCommands([{ dimension: "destination", path: "/newthing", from: null }])).toBe(
       "open /newthing",
     );
+  });
+});
+
+/**
+ * The return ticket.
+ *
+ * A destination change is the one view move a person cannot undo by doing the
+ * ordinary thing, so the stage it took them off travels with the ask. These pin
+ * that it is the stage they were ACTUALLY ON — a constant, or the destination
+ * itself, would produce a "back" button that goes somewhere they never were.
+ */
+describe("the way back travels with the destination", () => {
+  it("stamps the stage the person was on when the model asked", () => {
+    const commands = commandsFromOp(request({ entities: [] }), "/tasks");
+    expect(commands).toEqual([
+      {
+        dimension: "destination",
+        path: "/geo",
+        from: "/tasks",
+        reason: "these 12 memories cluster on the Malabar coast",
+        origin: "call-1",
+      },
+    ]);
+  });
+
+  it("stamps it on a recall-derived move too, which no reason accounts for", () => {
+    const commands = commandsFromOp(recall({ memories: [memory("m1")] }), "/anomalies");
+    expect(commands).toContainEqual({ dimension: "destination", path: "/graph", from: "/anomalies" });
+  });
+});
+
+describe("destinationNoun", () => {
+  it("names a surface the same way the offer does", () => {
+    expect(destinationNoun("/geo")).toBe("the map");
+  });
+
+  it("falls back to the path for a surface the table does not know", () => {
+    expect(destinationNoun("/newthing")).toBe("/newthing");
   });
 });
