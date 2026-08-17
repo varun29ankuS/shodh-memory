@@ -4979,6 +4979,11 @@ impl MemorySystem {
         let mut cache_hits = 0;
         let mut storage_fetches = 0;
         let mut filtered_out = 0;
+        // Candidates skipped because their record could not be read. Counted
+        // separately from `filtered_out` (a deliberate exclusion) because a
+        // non-zero value here means results are silently incomplete and the
+        // storage underneath needs looking at.
+        let mut unreadable_records = 0;
 
         // Layer 5: Unified scoring with hebbian + recency + emotional + feedback signals
         // All signals are multiplicative on the base score to preserve RRF ranking.
@@ -5304,9 +5309,21 @@ impl MemorySystem {
                 continue;
             }
 
-            // Cold path: Fetch from RocksDB storage (expensive deserialization)
-            match self.retriever.get_from_storage(&memory_id) {
-                Ok(memory) => {
+            // Cold path: Fetch from RocksDB storage (expensive deserialization).
+            //
+            // The three outcomes are deliberately NOT collapsed. Removing the
+            // index entry unindexes a live memory permanently — `remove_memory`
+            // drops the id mapping AND calls `storage.delete_vector_mapping`,
+            // so the removal outlives a restart while the record itself stays
+            // in RocksDB, reachable by nothing. That is only ever correct when
+            // the memory is genuinely gone, which is exactly what `Ok(None)`
+            // (and only `Ok(None)`) attests to. An `Err` — transient IO, a
+            // locked or unreadable file, a record that does not decode — is an
+            // inconclusive read, never proof of absence: we skip the candidate
+            // and leave the index alone, matching the tolerance the scanning
+            // paths already apply to individual bad records.
+            match self.retriever.get_from_storage_opt(&memory_id) {
+                Ok(Some(memory)) => {
                     // CRITICAL FIX: Apply filters before adding to results
                     if self.retriever.matches_filters(&memory, &vector_query) {
                         // Reuse unified scoring (includes feedback_multiplier)
@@ -5322,13 +5339,23 @@ impl MemorySystem {
                         filtered_out += 1;
                     }
                 }
+                Ok(None) => {
+                    tracing::warn!(
+                        memory_id = %memory_id.0,
+                        "recall: vector index points at a memory RocksDB reports \
+                         absent — cleaning up the orphaned index entry"
+                    );
+                    self.retriever.remove_memory(&memory_id);
+                }
                 Err(e) => {
+                    unreadable_records += 1;
                     tracing::warn!(
                         memory_id = %memory_id.0,
                         error = %e,
-                        "Stale vector reference — cleaning up orphaned index entry"
+                        "recall: memory record could not be read — skipping this \
+                         candidate and KEEPING its index entry; an inconclusive \
+                         read is not proof the memory is gone"
                     );
-                    self.retriever.remove_memory(&memory_id);
                 }
             }
 
@@ -5359,8 +5386,16 @@ impl MemorySystem {
             cache_hits,
             storage_fetches,
             filtered_out,
+            unreadable_records,
             "recall [layer:5] memory fetch + unified scoring"
         );
+        if unreadable_records > 0 {
+            tracing::warn!(
+                unreadable_records,
+                "recall returned incomplete results: some candidate records \
+                 could not be read; their index entries were kept"
+            );
+        }
         if let Some(ref mut s) = stats {
             s.stage_timings
                 .get_or_insert_with(StageTiming::default)
@@ -11581,5 +11616,157 @@ mod memory_entity_resolution_tests {
 
         assert_eq!(compensated, 0, "an unrelated memory was compensated");
         assert_eq!(memory.importance(), before);
+    }
+}
+
+#[cfg(test)]
+mod unreadable_record_index_tests {
+    //! The cold read path used to collapse three different outcomes of
+    //! `get_from_storage` into one: "RocksDB says this key does not exist",
+    //! "RocksDB failed to read", and "the bytes are there but do not decode".
+    //! All three landed in the same `Err` arm, whose only action was
+    //! `retriever.remove_memory(...)` — which drops the memory's vector ids
+    //! from the id mapping AND calls `storage.delete_vector_mapping`, so the
+    //! removal survives a restart.
+    //!
+    //! That made a *transient* read failure permanently unindex a live memory:
+    //! the record is still in RocksDB, but nothing points at it any more.
+    //! Deleting an index entry must require proof of absence.
+
+    use super::*;
+    use crate::memory::types::Experience;
+
+    /// A value too short for even the most permissive entry in the 17-path
+    /// legacy fallback chain (`MinimalMemory`, the shortest, needs 16 bytes
+    /// of UUID before it reads anything else). Longer garbage is NOT reliably
+    /// undecodable — the fallback chain will happily reinterpret it — so the
+    /// test pins the one shape that is guaranteed to reach the error arm.
+    const UNDECODABLE_BYTES: &[u8] = &[0x01];
+
+    fn setup() -> (MemorySystem, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 30,
+            importance_threshold: 0.0,
+        };
+        let system = MemorySystem::new(config, None).expect("memory system");
+        (system, temp_dir)
+    }
+
+    fn remember(system: &MemorySystem, content: &str) -> MemoryId {
+        system
+            .remember(
+                Experience {
+                    content: content.to_string(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("remember")
+    }
+
+    /// Force the cold path: the fetch loop checks working then session memory
+    /// before touching RocksDB, so a just-written memory would never reach the
+    /// storage read this test is about.
+    fn evict_from_caches(system: &MemorySystem, id: &MemoryId) {
+        let _ = system.working_memory.write().remove(id);
+        let _ = system.session_memory.write().remove(id);
+    }
+
+    fn recall_text(system: &MemorySystem, text: &str) {
+        let query = Query {
+            query_text: Some(text.to_string()),
+            max_results: 10,
+            ..Default::default()
+        };
+        let _ = system.recall(&query).expect("recall");
+    }
+
+    /// THE decisive test: a record that cannot be read is not evidence that the
+    /// memory is gone, so the index entry must survive. Writing undecodable
+    /// bytes at the key reproduces the same `Err` the read path sees for a
+    /// transient RocksDB IO failure — `MemoryStorage::get` funnels both into
+    /// one `Err`, which is precisely the conflation under test.
+    #[test]
+    fn unreadable_record_does_not_drop_the_index_entry() {
+        let (system, _tmp) = setup();
+        let id = remember(&system, "The quarterly revenue report is due on Friday.");
+        assert!(
+            system.retriever.get_indexed_memory_ids().contains(&id),
+            "precondition: the memory should be in the vector index"
+        );
+        evict_from_caches(&system, &id);
+
+        // Corrupt the stored bytes in place: the key EXISTS, the value is
+        // undecodable. `db.get` succeeds, `deserialize_memory` fails.
+        system
+            .long_term_memory
+            .db()
+            .put(id.0.as_bytes(), UNDECODABLE_BYTES)
+            .expect("write undecodable bytes");
+
+        recall_text(&system, "quarterly revenue report");
+
+        assert!(
+            system.retriever.get_indexed_memory_ids().contains(&id),
+            "an unreadable record was treated as proof of absence and the live \
+             memory was permanently unindexed"
+        );
+    }
+
+    /// The other half of the discrimination: a key RocksDB positively reports
+    /// as absent IS proof, and the orphaned index entry must still be cleaned
+    /// up. Without this the fix would just disable the cleanup.
+    #[test]
+    fn genuinely_absent_record_still_drops_the_index_entry() {
+        let (system, _tmp) = setup();
+        let id = remember(&system, "The quarterly revenue report is due on Friday.");
+        assert!(system.retriever.get_indexed_memory_ids().contains(&id));
+        evict_from_caches(&system, &id);
+
+        // Delete the record only — deliberately NOT via `forget`, so the vector
+        // index keeps pointing at a key that no longer exists.
+        system
+            .long_term_memory
+            .db()
+            .delete(id.0.as_bytes())
+            .expect("delete record");
+
+        recall_text(&system, "quarterly revenue report");
+
+        assert!(
+            !system.retriever.get_indexed_memory_ids().contains(&id),
+            "a genuinely absent record left its orphaned index entry behind"
+        );
+    }
+
+    /// `get_opt` is the seam the read path uses to tell the two apart, so pin
+    /// its contract directly: absence is `Ok(None)`, an undecodable record is
+    /// `Err` — never `Ok(None)`.
+    #[test]
+    fn get_opt_reports_absence_and_unreadability_differently() {
+        let (system, _tmp) = setup();
+        let id = remember(&system, "A memory that will be corrupted.");
+
+        let missing = MemoryId(uuid::Uuid::new_v4());
+        assert!(
+            matches!(system.long_term_memory.get_opt(&missing), Ok(None)),
+            "a key that was never written must read back as Ok(None)"
+        );
+
+        system
+            .long_term_memory
+            .db()
+            .put(id.0.as_bytes(), UNDECODABLE_BYTES)
+            .expect("write undecodable bytes");
+        assert!(
+            system.long_term_memory.get_opt(&id).is_err(),
+            "an undecodable record must be an error, not a report of absence"
+        );
     }
 }
