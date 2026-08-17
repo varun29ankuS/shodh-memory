@@ -1290,8 +1290,12 @@ export function TasksView({ reach }: { reach: Reachability }) {
           )}
         >
           <div className="flex items-baseline justify-between gap-2">
+            {/* "open", not "to do": `To do` is the name of ONE of the four
+                buckets below, and a heading using the same words for the whole
+                set would make the ledger's own `To do 50` read as a
+                contradiction of it. */}
             <h2 className="text-[12px] font-medium tracking-tight">
-              {board.open} to do, {board.settled} settled
+              {board.open} open, {board.settled} settled
             </h2>
             {board.projects > 1 ? (
               <Meta className="text-[11px]">
