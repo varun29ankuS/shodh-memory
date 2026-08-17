@@ -391,6 +391,19 @@ pub struct SessionHistoryResponse {
     pub project_threads: Vec<ProjectThread>,
     /// Total matching sessions (not just the returned page). Compare against
     /// `offset + sessions.len()` to know whether more pages remain.
+    ///
+    /// SATURATES. This is derived from an over-fetch of
+    /// [`validation::MAX_LIMIT`] session memories which is then deduplicated by
+    /// `session_id`, so it can never exceed 10,000 and understates the truth
+    /// for any user who has accumulated more session summaries than that.
+    /// Sessions past the cap are not merely uncounted — they are unreachable,
+    /// because `offset` pages within the over-fetched window rather than
+    /// within the store.
+    ///
+    /// Lifting it is not a change to this handler: it needs a counting or
+    /// streaming path through the tag index (`recall_by_tags` requires a limit
+    /// and returns whole memories), which is why the ceiling is documented
+    /// here rather than quietly raised.
     pub total: usize,
 }
 

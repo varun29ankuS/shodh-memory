@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use super::state::MultiUserMemoryManager;
 use super::{
-    ab_testing, anomalies, compression, consolidation, crud, export, facts, files, graph, health,
-    integrations, lineage, mif, recall, remember, search, sessions, todos, users, visualization,
-    webhooks,
+    ab_testing, anomalies, audit, compression, consolidation, crud, export, facts, files, graph,
+    health, integrations, lineage, mif, recall, remember, search, sessions, todos, users,
+    visualization, webhooks,
 };
 
 /// Application state type alias
@@ -145,6 +145,14 @@ pub fn build_protected_routes(state: AppState) -> Router {
         .route("/api/forget/pattern", post(crud::forget_by_pattern))
         .route("/api/forget/tags", post(crud::forget_by_tags))
         .route("/api/forget/date", post(crud::forget_by_date))
+        // =================================================================
+        // AUDIT TRAIL
+        //
+        // Read side of the `audit` column family that ~23 `log_event` call
+        // sites have been writing to all along. Authenticated and user-scoped
+        // like the other namespace reads.
+        // =================================================================
+        .route("/api/audit/{user_id}", get(audit::get_audit_trail))
         // =================================================================
         // USER MANAGEMENT
         // =================================================================

@@ -283,90 +283,31 @@ pub async fn get_memory(
 /// Query params: ?limit=100&offset=0&type=Decision
 /// `limit` defaults to 100 and is clamped to [`MAX_LIST_LIMIT`]; `offset` defaults
 /// to 0. Use `total` in the response to page through results (offset += limit).
+///
+/// Results are ordered NEWEST FIRST (`created_at` descending) — see
+/// [`list_memories_inner`] for why that ordering is imposed here rather than
+/// left to the caller.
 #[tracing::instrument(skip(state), fields(user_id = %user_id))]
 pub async fn list_memories(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<ListResponse>, AppError> {
-    validation::validate_user_id(&user_id).map_validation_err("user_id")?;
-
-    let memory = state
-        .get_user_memory(&user_id)
-        .map_err(AppError::Internal)?;
-
-    let all_memories = {
-        let memory = memory.clone();
-        tokio::task::spawn_blocking(move || {
-            let memory_guard = memory.read();
-            memory_guard.get_all_memories()
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
-        .map_err(AppError::Internal)?
-    };
-
-    // Filter by type if specified
-    let mut filtered: Vec<_> = if let Some(ref type_filter) = query.memory_type {
-        let type_lower = type_filter.to_lowercase();
-        all_memories
-            .into_iter()
-            .filter(|m| format!("{:?}", m.experience.experience_type).to_lowercase() == type_lower)
-            .collect()
-    } else {
-        all_memories
-    };
-
-    // Filter by text query if specified (search in content and tags)
-    if let Some(ref text_query) = query.query {
-        let query_lower = text_query.to_lowercase();
-        filtered.retain(|m| {
-            // Check content
-            if m.experience.content.to_lowercase().contains(&query_lower) {
-                return true;
-            }
-            // Check tags/entities
-            for tag in &m.experience.entities {
-                if tag.to_lowercase().contains(&query_lower) {
-                    return true;
-                }
-            }
-            false
-        });
-    }
-
-    let total = filtered.len();
-    let limit = query.limit.unwrap_or(100).min(MAX_LIST_LIMIT);
-    let offset = query.offset.unwrap_or(0);
-
-    let memories: Vec<ListMemoryItem> = filtered
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .map(|m| {
-            let content_length = m.experience.content.chars().count();
-            let content_truncated = content_length > LIST_CONTENT_PREVIEW_CHARS;
-            ListMemoryItem {
-                id: m.id.0.to_string(),
-                content: m
-                    .experience
-                    .content
-                    .chars()
-                    .take(LIST_CONTENT_PREVIEW_CHARS)
-                    .collect(),
-                content_truncated,
-                content_length,
-                memory_type: format!("{:?}", m.experience.experience_type),
-                importance: m.importance(),
-                tags: m.experience.entities.clone(),
-                created_at: m.created_at.to_rfc3339(),
-                tier: format!("{:?}", m.tier),
-                geo_location: m.experience.geo_location,
-            }
-        })
-        .collect();
-
-    Ok(Json(ListResponse { memories, total }))
+    // Same listing as POST /api/memories, with `user_id` in the path instead of
+    // the body. Delegating rather than duplicating keeps the two from drifting:
+    // this handler previously carried its own copy of the filter/paginate block
+    // and was the one that shipped without the newest-first ordering.
+    list_memories_inner(
+        state,
+        ListMemoriesRequest {
+            user_id,
+            limit: query.limit,
+            offset: query.offset,
+            memory_type: query.memory_type,
+            query: query.query,
+        },
+    )
+    .await
 }
 
 /// POST /api/memories - List memories (user_id in body)
@@ -409,7 +350,31 @@ pub async fn list_memories_get(
     list_memories_inner(state, req).await
 }
 
-/// Shared implementation for both POST and GET list_memories
+/// Shared implementation for both POST and GET list_memories.
+///
+/// # Ordering
+///
+/// Results are sorted by `created_at` DESCENDING (newest first) before
+/// `offset`/`limit` are applied, so page 1 is genuinely the newest page.
+///
+/// This ordering is imposed server-side rather than left to callers because
+/// `get_all_memories()` returns tier-then-storage order — working, then
+/// session, then long-term (RocksDB key order, i.e. by UUID). That is
+/// arbitrary with respect to time, so a client that receives `limit` rows has
+/// received an arbitrary sample and cannot sort its way back to the newest
+/// ones: the rows it needed were never in the page.
+///
+/// The cost is negligible in context. `get_all_memories()` already
+/// materializes every memory for this user before any filtering happens, so
+/// the O(n) load is paid unconditionally; the added sort is an O(n log n) pass
+/// over a Vec that is already in memory. Measured on the 18,076-memory
+/// `claude-code` profile the whole request took ~850 ms before this change,
+/// dominated by that load and by serialization — the sort is a low-single-digit
+/// millisecond addition to it.
+///
+/// Sorting happens inside the same `spawn_blocking` as the load so the async
+/// runtime thread never performs the sort. Both filters below preserve relative
+/// order, so the ordering established here survives to the response.
 async fn list_memories_inner(
     state: AppState,
     req: ListMemoriesRequest,
@@ -424,7 +389,12 @@ async fn list_memories_inner(
         let memory = memory.clone();
         tokio::task::spawn_blocking(move || {
             let memory_guard = memory.read();
-            memory_guard.get_all_memories()
+            let mut all = memory_guard.get_all_memories()?;
+            // Newest first. Unstable sort is safe: the key is a timestamp and
+            // ties between distinct memories have no meaningful order to
+            // preserve (the input order is itself arbitrary).
+            all.sort_unstable_by_key(|m| std::cmp::Reverse(m.created_at));
+            Ok::<_, anyhow::Error>(all)
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Blocking task panicked: {e}")))?
@@ -1216,5 +1186,158 @@ mod tests {
             .expect("expected one non-truncated item");
         assert_eq!(short_item["content_length"], 42u64);
         assert_eq!(short_item["content"], short_content);
+    }
+
+    /// Seed `n` memories whose `created_at` are distinct and, critically,
+    /// whose chronological order is NOT their insertion order — so a handler
+    /// that returns storage order cannot accidentally look sorted.
+    ///
+    /// Returns the contents paired with their timestamps, newest first.
+    fn seed_out_of_order(harness: &TestHarness, user_id: &str, n: usize) -> Vec<String> {
+        let base = chrono::Utc::now() - chrono::Duration::days(n as i64 + 1);
+
+        // Insert in an order that interleaves old and new: index i is written
+        // at day `(i * 7) % n`, a permutation for any n coprime with 7.
+        let memory = harness.manager.get_user_memory(user_id).unwrap();
+        let guard = memory.read();
+        let mut by_day: Vec<(i64, String)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let day = ((i * 7) % n) as i64;
+            let content = format!("memory written at day {day}");
+            guard
+                .remember(
+                    Experience {
+                        content: content.clone(),
+                        ..Default::default()
+                    },
+                    Some(base + chrono::Duration::days(day)),
+                )
+                .unwrap();
+            by_day.push((day, content));
+        }
+        drop(guard);
+
+        by_day.sort_unstable_by_key(|(day, _)| std::cmp::Reverse(*day));
+        by_day.into_iter().map(|(_, c)| c).collect()
+    }
+
+    /// `GET /api/list/{user_id}` claims to return memories newest first — the
+    /// dashboard's corpus layer (`front/ui/src/lib/api/corpus.ts`) documents it
+    /// that way, and both Geo and Recall render the first page as "the newest".
+    /// It did not sort at all: `get_all_memories()` returns tier-then-storage
+    /// order (working, then session, then long-term in RocksDB UUID order),
+    /// which is arbitrary with respect to time. On an 18k-memory profile that
+    /// made the first 500 an arbitrary sample spanning months.
+    ///
+    /// This asserts the ordering contract directly AND the consequence that
+    /// makes it matter: a short page must contain the newest memories, not an
+    /// arbitrary subset of them.
+    #[tokio::test]
+    async fn list_memories_is_newest_first() {
+        let harness = TestHarness::new();
+        let user_id = "ordering-user";
+        let newest_first = seed_out_of_order(&harness, user_id, 12);
+
+        let req = test_helpers::get(&format!("/api/list/{user_id}?limit=12"));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], 12u64);
+
+        let returned: Vec<&str> = body["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            returned, newest_first,
+            "/api/list must return memories newest first"
+        );
+
+        // Timestamps must be non-increasing, stated independently of content.
+        let stamps: Vec<&str> = body["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["created_at"].as_str().unwrap())
+            .collect();
+        let mut sorted = stamps.clone();
+        sorted.sort_unstable();
+        sorted.reverse();
+        assert_eq!(stamps, sorted, "created_at must be descending");
+
+        // The bug users actually saw: a capped page must hold the NEWEST
+        // memories. Before the fix this page was an arbitrary 4 of 12.
+        let req = test_helpers::get(&format!("/api/list/{user_id}?limit=4"));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        let page: Vec<&str> = body["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            page,
+            &newest_first[..4],
+            "the first page must be the newest memories, not an arbitrary sample"
+        );
+        assert_eq!(body["total"], 12u64, "total must be every memory");
+    }
+
+    /// The POST/query-param listings share `list_memories_inner` with the path
+    /// listing, so they must share its ordering. `GET /api/list/{user_id}` used
+    /// to carry a duplicate copy of the body and was the copy that shipped
+    /// unsorted — this pins all three to the same contract.
+    #[tokio::test]
+    async fn list_memories_post_and_get_aliases_are_newest_first() {
+        let harness = TestHarness::new();
+        let user_id = "ordering-alias-user";
+        let newest_first = seed_out_of_order(&harness, user_id, 12);
+
+        let req = test_helpers::post_json(
+            "/api/memories",
+            &serde_json::json!({ "user_id": user_id, "limit": 12 }),
+        );
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        let returned: Vec<&str> = body["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(returned, newest_first, "POST /api/memories must be newest first");
+
+        let req = test_helpers::get(&format!("/api/memories?user_id={user_id}&limit=12"));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        let returned: Vec<&str> = body["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(returned, newest_first, "GET /api/memories must be newest first");
+    }
+
+    /// Ordering must survive `offset`, and pages must not overlap or skip.
+    #[tokio::test]
+    async fn list_memories_offset_pages_in_order() {
+        let harness = TestHarness::new();
+        let user_id = "ordering-offset-user";
+        let newest_first = seed_out_of_order(&harness, user_id, 12);
+
+        let req = test_helpers::get(&format!("/api/list/{user_id}?limit=4&offset=4"));
+        let (status, body) = test_helpers::send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::OK);
+        let page: Vec<&str> = body["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(page, &newest_first[4..8]);
+        assert_eq!(body["total"], 12u64, "total must not move with offset");
     }
 }

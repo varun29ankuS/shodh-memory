@@ -1691,6 +1691,81 @@ impl MultiUserMemoryManager {
         }
     }
 
+    /// Read one page of a user's audit trail, newest first, plus the true
+    /// total number of entries stored for that user.
+    ///
+    /// `total` is the count of stored entries, NOT `min(count, limit)` and not
+    /// a count capped by any over-fetch: the prefix scan visits every key for
+    /// the user, so paging with `offset` is exact rather than an approximation
+    /// that quietly saturates.
+    ///
+    /// Memory is bounded by `offset + limit`, not by the size of the trail.
+    /// Keys are `{user_id}:{timestamp_nanos:020}`, so RocksDB yields them
+    /// oldest-first; the newest `offset + limit` entries are therefore the last
+    /// ones seen, and a bounded deque keeps exactly those while the rest are
+    /// counted and dropped.
+    ///
+    /// Entries that fail to decode are counted in `total` — they are stored —
+    /// but cannot appear in a page. That is a corruption signal, so each one is
+    /// logged rather than silently skipped.
+    pub fn get_audit_page(
+        &self,
+        user_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<AuditEvent>, usize) {
+        let prefix = format!("{user_id}:");
+        let audit = self.audit_cf();
+        let window = offset.saturating_add(limit);
+
+        let mut newest: VecDeque<AuditEvent> = VecDeque::new();
+        let mut total = 0usize;
+        let mut undecodable = 0usize;
+
+        let iter = self.shared_db.prefix_iterator_cf(audit, prefix.as_bytes());
+        for (key, value) in iter.flatten() {
+            let Ok(key_str) = std::str::from_utf8(&key) else {
+                continue;
+            };
+            if !key_str.starts_with(&prefix) {
+                break;
+            }
+            total += 1;
+
+            if window == 0 {
+                continue;
+            }
+            match crate::serialization::try_decode::<AuditEvent>(&value) {
+                Ok((event, _)) => {
+                    newest.push_back(event);
+                    if newest.len() > window {
+                        newest.pop_front();
+                    }
+                }
+                Err(_) => undecodable += 1,
+            }
+        }
+
+        if undecodable > 0 {
+            tracing::warn!(
+                user_id,
+                undecodable,
+                total,
+                "audit entries failed to decode; they are counted in `total` but absent from pages"
+            );
+        }
+
+        // The deque is oldest-first; the page is newest-first.
+        let events: Vec<AuditEvent> = newest
+            .into_iter()
+            .rev()
+            .skip(offset)
+            .take(limit)
+            .collect();
+
+        (events, total)
+    }
+
     /// Get audit logs for a user
     pub fn get_audit_logs(&self, user_id: &str, limit: usize) -> Vec<AuditEvent> {
         let mut events: Vec<AuditEvent> = Vec::new();
