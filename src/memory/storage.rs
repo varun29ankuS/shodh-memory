@@ -5057,4 +5057,70 @@ mod tests {
         assert!(!ran, "the mutation ran against a memory that does not exist");
         assert!(storage.get_opt(&missing).expect("get_opt").is_none());
     }
+
+    /// `modify()` is a decode → mutate → re-encode round trip, so it can drop
+    /// any field the round trip does not carry. The three `MemoryFlat` tail
+    /// fields are exactly that shape: they are `#[serde(skip)]` on `Experience`
+    /// and ride at the tail of `MemoryFlat` instead, which is why the LZ4 path
+    /// has to copy them back by hand.
+    ///
+    /// `modify()` was written on a branch that had no `origin` and no
+    /// `declared_entities` at all, so it could not have been checked against
+    /// them, and its live caller is `set_memory_parent` — a path that runs on
+    /// memories carrying exactly this authority. If the round trip dropped
+    /// them, reparenting a memory would silently retract every caller entity
+    /// assertion the graph admits on, and reset its provenance to `Unknown`,
+    /// while changing nothing a caller of `set_memory_parent` would think to
+    /// look at.
+    ///
+    /// `origin` is set to a non-default variant deliberately: a dropped
+    /// `origin` decodes as `Unknown`, which is indistinguishable from a record
+    /// that never had one.
+    #[test]
+    fn modify_preserves_the_memory_flat_tail_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = MemoryStorage::new(dir.path(), None).expect("storage");
+
+        let id = MemoryId(uuid::Uuid::new_v4());
+        let mut memory = sample_memory(id.clone(), "a memory whose tail must survive a modify");
+        memory.experience.toponyms = vec![Toponym {
+            mention: "Baltimore".to_string(),
+            name: "Baltimore".to_string(),
+            lat: 39.2904,
+            lon: -76.6122,
+            country: "US".to_string(),
+            population: 585_708,
+        }];
+        memory.experience.declared_entities = vec!["Baltimore".to_string()];
+        memory.experience.origin = MemoryOrigin::Api;
+        storage.store(&memory).expect("store");
+
+        // The live mutation: reparenting touches none of the three.
+        let parent = MemoryId(uuid::Uuid::new_v4());
+        storage
+            .modify(&id, |m| m.set_parent(Some(parent.clone())))
+            .expect("modify")
+            .expect("the memory exists");
+
+        let after = storage.get(&id).expect("read back");
+        assert_eq!(after.get_parent(), Some(&parent), "the mutation itself");
+        assert_eq!(
+            after.experience.declared_entities,
+            vec!["Baltimore".to_string()],
+            "modify() retracted the caller's declared entities — graph \
+             admission runs on exactly this authority"
+        );
+        assert_eq!(
+            after.experience.origin,
+            MemoryOrigin::Api,
+            "modify() reset the memory's origin to Unknown, which reads as a \
+             record that never had one"
+        );
+        assert_eq!(
+            after.experience.toponyms.len(),
+            1,
+            "modify() dropped the resolved toponyms"
+        );
+        assert_eq!(after.experience.toponyms[0].name, "Baltimore");
+    }
 }
