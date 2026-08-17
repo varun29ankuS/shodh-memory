@@ -1093,7 +1093,12 @@ function LaneRow({
       <span className="flex min-w-0 items-baseline gap-2 sm:shrink-0">
         <span className="truncate text-[12px] sm:w-[190px] sm:shrink-0">{lane.name}</span>
 
-        <Meta className="min-w-0 flex-nowrap">
+        {/* Wrapping, not `flex-nowrap`. The figures used to sit in a slot that
+            could never be squeezed, because the strip beside them absorbed
+            every spare pixel; inside the cluster they are a shrinkable item,
+            and a nowrap run in a shrinkable item overflows its parent on a
+            narrow window rather than reflowing. */}
+        <Meta className="min-w-0">
           {suppressRatio ? (
             <span className="text-muted-foreground/70">{lane.total} shown</span>
           ) : (
