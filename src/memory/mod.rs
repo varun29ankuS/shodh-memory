@@ -6887,8 +6887,18 @@ impl MemorySystem {
         // One guard for the whole scan rather than one acquisition per memory.
         let graph_guard = self.graph_memory.as_ref().map(|g| g.read());
 
+        // `remember()` puts the SAME `Arc<Memory>` in working memory and — when
+        // importance clears `importance_threshold` — in session memory too, so
+        // the two tiers overlap. Without this set such a memory receives the
+        // boost twice and is counted twice. That was latent for as long as this
+        // loop body was unreachable; activating it made it observable.
+        let mut seen: std::collections::HashSet<MemoryId> = std::collections::HashSet::new();
+
         for memories in &tiers {
             for memory in memories {
+                if !seen.insert(memory.id.clone()) {
+                    continue;
+                }
                 let entity_ids = match &graph_guard {
                     Some(graph) => Self::entity_ids_from_graph(graph, memory),
                     None => memory.entity_refs.iter().map(|r| r.entity_id).collect(),
@@ -11512,6 +11522,12 @@ mod memory_entity_resolution_tests {
     ///
     /// Mutation that turns this red again: read `memory.entity_refs` instead of
     /// resolving the memory's entities through the graph.
+    ///
+    /// The exact-boost assertion is a second, independent guard. `remember()`
+    /// files one `Arc<Memory>` into both working and session memory, so the
+    /// two-tier scan sees it twice; before the dedup this reported
+    /// `compensated == 2` and applied the boost twice. Removing the `seen` set
+    /// turns this red.
     #[test]
     fn orphan_compensation_finds_entities_through_the_graph() {
         let (system, _dir) = setup();
@@ -11530,12 +11546,15 @@ mod memory_entity_resolution_tests {
 
         assert_eq!(
             compensated, 1,
-            "the memory referencing the orphaned entity was not compensated"
+            "the memory referencing the orphaned entity was compensated {compensated} times, \
+             expected exactly once"
         );
+
+        let expected = before + crate::constants::ORPHAN_COMPENSATORY_BOOST as f32;
+        let actual = memory.importance();
         assert!(
-            memory.importance() > before,
-            "importance did not move: {before} -> {}",
-            memory.importance()
+            (actual - expected).abs() < 1e-6,
+            "importance moved by the wrong amount: {before} -> {actual}, expected {expected}"
         );
     }
 
