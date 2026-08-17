@@ -609,7 +609,7 @@ function TaskRow({
   // 0.0 days" is NOT used — it is `{:.1}` rounded, so it reads 0.0 for anything
   // under about 72 minutes, and quoting it would restate a rounding as a
   // measurement.
-  const took = line?.settled !== null && line !== null ? elapsedLabel(line.recorded, line.settled) : null;
+  const took = line && line.settled !== null ? elapsedLabel(line.recorded, line.settled) : null;
 
   return (
     <div className="border-border border-b">
@@ -757,14 +757,20 @@ function LaneRow({
       aria-pressed={selected}
       onClick={onSelect}
       className={cn(
-        "grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 px-4 py-1.5 text-left",
-        "sm:grid-cols-[minmax(0,150px)_minmax(0,1fr)_auto]",
+        // Flex rather than grid, and the strip is ordered LAST on a narrow
+        // screen. A three-column grid collapses by pushing each cell onto its
+        // own row in DOM order, which puts the curve between the project name
+        // and its own figures and separates the two things that are read
+        // together. Stacked, the name and its counts stay adjacent and the
+        // curve sits under both.
+        "flex w-full flex-col gap-1 px-4 py-1.5 text-left",
+        "sm:flex-row sm:items-center sm:gap-3",
         "transition-colors duration-100",
         "focus-visible:ring-ring focus-visible:-outline-offset-2 focus-visible:ring-2 focus-visible:outline-none",
         selected ? "bg-accent" : "hover:bg-accent/60",
       )}
     >
-      <span className="flex min-w-0 items-baseline gap-1.5">
+      <span className="flex min-w-0 items-baseline gap-1.5 sm:w-[150px] sm:shrink-0">
         <span className="truncate text-[12px]">{lane.name}</span>
         {/* Archived is stated, not implied by position: a lane that is finished
             for good reads differently from one that has merely gone quiet. */}
@@ -773,7 +779,7 @@ function LaneRow({
         ) : null}
       </span>
 
-      <span className="col-span-2 sm:col-span-1 sm:min-w-0">
+      <span className="order-last min-w-0 flex-1 sm:order-none">
         {axis ? (
           <LaneStrip lane={lane} axis={axis} />
         ) : (
@@ -781,7 +787,7 @@ function LaneRow({
         )}
       </span>
 
-      <Meta className="shrink-0 flex-nowrap justify-self-end">
+      <Meta className="shrink-0 flex-nowrap">
         {suppressRatio ? (
           <span className="text-muted-foreground/70">{lane.total} shown</span>
         ) : (
