@@ -17,6 +17,7 @@ import {
 import { cn } from "@/lib/utils";
 import mark from "@/assets/shodh-mark.png";
 import { DotMap, type DotMapExtent } from "./DotMap";
+import { Learning } from "./Learning";
 import {
   corpusSpan,
   lastWrite,
@@ -659,6 +660,19 @@ export function BriefingView({ reach }: { reach: Reachability }) {
               </p>
             ) : null}
           </section>
+
+          {/* ------------------------------------------------ is it learning
+              The ontology band above says what was extracted; this says what
+              has happened to it since — tier census, causal backbone, and the
+              consolidation events of the last hour. Three endpoints that were
+              live and rendered nowhere in the product. See Learning.tsx for
+              why this belongs on the front page rather than on a destination.
+
+              Gated on `online` for the same reason every other read here is:
+              offline, the rows would be absent, and an absent row on this
+              section reads as "the store did nothing" rather than "nothing was
+              asked". */}
+          {online ? <Learning profile={profile} /> : null}
 
           {corpusError ? (
             <ReadFailed what="This profile's memories" err={corpusError} stale={!corpusLost} />
