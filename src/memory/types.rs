@@ -3921,6 +3921,15 @@ impl TodoStatus {
             _ => None,
         }
     }
+
+    /// Whether this status means the todo has left the working set.
+    ///
+    /// Done and Cancelled are already treated as one class everywhere that
+    /// matters — overdue counting, the default list filter, dependency
+    /// unblocking — and both carry a settlement time in `completed_at`.
+    pub fn is_settled(&self) -> bool {
+        matches!(self, TodoStatus::Done | TodoStatus::Cancelled)
+    }
 }
 
 /// Todo priority (Linear-style)
@@ -3976,6 +3985,21 @@ impl TodoPriority {
     }
 }
 
+/// Number of days in a calendar month (handles leap years).
+fn days_in_month(year: i32, month: u32) -> u32 {
+    use chrono::{Datelike, NaiveDate};
+
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .and_then(|first_of_next| first_of_next.pred_opt())
+        .map(|last| last.day())
+        .unwrap_or(28)
+}
+
 /// Recurrence pattern for repeating todos
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -4017,14 +4041,25 @@ impl Recurrence {
                 from + Duration::days(days_until)
             }
             Recurrence::Monthly { day } => {
-                let target_day = (*day).min(28) as u32; // Cap at 28 to avoid month overflow
-                let mut next = from;
-                // Move to next month if we're past the target day
-                if from.day() >= target_day {
-                    next = from + Duration::days(32); // Jump to next month
+                use chrono::{NaiveDate, TimeZone};
+
+                let target = (*day).clamp(1, 31) as u32;
+                let (mut year, mut month) = (from.year(), from.month());
+                // On or past the target day, the next occurrence is next month.
+                if from.day() >= target {
+                    if month == 12 {
+                        year += 1;
+                        month = 1;
+                    } else {
+                        month += 1;
+                    }
                 }
-                // Set to target day
-                next.with_day(target_day).unwrap_or(next)
+                // A month shorter than the target fires on its last day rather
+                // than sliding into the following month.
+                let last_day = days_in_month(year, month);
+                NaiveDate::from_ymd_opt(year, month, target.min(last_day))
+                    .map(|d| Utc.from_utc_datetime(&d.and_time(from.time())))
+                    .unwrap_or(from)
             }
             Recurrence::EveryNDays { n } => from + Duration::days(*n as i64),
         }
@@ -4271,9 +4306,7 @@ impl Todo {
     /// Check if todo is overdue
     pub fn is_overdue(&self) -> bool {
         if let Some(due) = &self.due_date {
-            Utc::now() > *due
-                && self.status != TodoStatus::Done
-                && self.status != TodoStatus::Cancelled
+            Utc::now() > *due && !self.status.is_settled()
         } else {
             false
         }
@@ -4283,8 +4316,7 @@ impl Todo {
     pub fn overdue_seconds(&self) -> Option<i64> {
         if let Some(due) = &self.due_date {
             let now = Utc::now();
-            if now > *due && self.status != TodoStatus::Done && self.status != TodoStatus::Cancelled
-            {
+            if now > *due && !self.status.is_settled() {
                 return Some((now - *due).num_seconds());
             }
         }
@@ -4301,11 +4333,43 @@ impl Todo {
         }
     }
 
+    /// Apply a status transition, keeping `completed_at` honest.
+    ///
+    /// Settlement is the server's business, not each client's: entering a
+    /// settled state (Done or Cancelled) stamps the settlement time, and
+    /// leaving one clears it, so a reopened todo cannot go on reporting how
+    /// long it "took". Moving between two settled states keeps the original
+    /// stamp — the todo settled when it settled.
+    ///
+    /// Every write path that changes a todo's status must go through here.
+    pub fn apply_status(&mut self, status: TodoStatus) {
+        let now = Utc::now();
+        let was_settled = self.status.is_settled();
+        self.status = status;
+
+        if self.status.is_settled() {
+            if !was_settled {
+                self.completed_at = Some(now);
+            }
+        } else {
+            // Unconditional: an unsettled todo has no completion time, and a
+            // legacy row carrying one is exactly the bug this closes.
+            self.completed_at = None;
+        }
+
+        self.updated_at = now;
+    }
+
     /// Mark as completed
     pub fn complete(&mut self) {
-        self.status = TodoStatus::Done;
-        self.completed_at = Some(Utc::now());
-        self.updated_at = Utc::now();
+        self.apply_status(TodoStatus::Done);
+        // `/complete` is an explicit "this is done, now". A todo that was
+        // already Done but never stamped (rows written before settlement was
+        // owned by the server) gets its stamp from that action rather than
+        // from a guess about when it originally happened.
+        if self.completed_at.is_none() {
+            self.completed_at = Some(self.updated_at);
+        }
     }
 
     /// Create next recurrence if applicable
@@ -5486,4 +5550,46 @@ mod tests {
         );
     }
 
+    /// Entering a settled state stamps the settlement time; leaving one clears
+    /// it. Before this, `completed_at` was written only by `complete()` and
+    /// never cleared, so a reopened todo kept reporting how long it "took".
+    #[test]
+    fn status_transitions_keep_completed_at_honest() {
+        let mut todo = Todo::new("u".to_string(), "Ship the thing".to_string());
+        assert!(todo.completed_at.is_none());
+
+        todo.apply_status(TodoStatus::Done);
+        let settled_at = todo.completed_at.expect("entering Done must stamp");
+
+        // Moving between settled states must not move the stamp: the
+        // settlement happened when it happened.
+        todo.apply_status(TodoStatus::Cancelled);
+        assert_eq!(
+            todo.completed_at,
+            Some(settled_at),
+            "moving between settled states keeps the original settlement time"
+        );
+
+        todo.apply_status(TodoStatus::InProgress);
+        assert!(
+            todo.completed_at.is_none(),
+            "reopening must clear the settlement time"
+        );
+
+        todo.apply_status(TodoStatus::Cancelled);
+        assert!(
+            todo.completed_at.is_some(),
+            "cancelling settles the todo and must stamp it"
+        );
+
+        // A legacy row that is Done with no stamp gets one from an explicit
+        // /complete — an action taken now, not a guess about the past.
+        let mut legacy = Todo::new("u".to_string(), "Legacy done row".to_string());
+        legacy.status = TodoStatus::Done;
+        legacy.complete();
+        assert!(
+            legacy.completed_at.is_some(),
+            "complete() must always leave a stamp behind"
+        );
+    }
 }
