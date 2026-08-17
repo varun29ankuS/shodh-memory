@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeZone, Utc};
-use rocksdb::{ColumnFamily, IteratorMode, ReadOptions, DB};
+use rocksdb::{ColumnFamily, ReadOptions, DB};
 use serde::{Deserialize, Serialize};
 
 use crate::graph_memory::EntityNode;
@@ -95,7 +95,11 @@ const EMBEDDING_DIM_MAX: usize = 16_384;
 ///
 /// Findings are evidence for a human, not a data export. Beyond this the counts
 /// carry the signal and `findings_truncated` says so out loud.
-pub const MAX_FINDINGS: usize = 100;
+/// Retained findings per (record kind, classification) pair.
+///
+/// Deliberately a per-class quota rather than one shared budget: see
+/// [`Sweep::push_finding`].
+pub const FINDINGS_PER_CLASS: usize = 25;
 
 /// Default wall-clock ceiling for one scrub, in milliseconds.
 ///
@@ -103,6 +107,14 @@ pub const MAX_FINDINGS: usize = 100;
 /// the request budget reports itself incomplete rather than being killed and
 /// returning nothing.
 pub const DEFAULT_MAX_DURATION_MS: u64 = 20_000;
+
+/// Readahead window for the sequential scans.
+///
+/// The memory default column family is shared with several prefixed subsystem
+/// keyspaces; on the live claude-code store 97% of its 679,118 keys are not
+/// memories. Scanning it is I/O bound on sequential block reads, which is
+/// exactly what readahead is for.
+const SCAN_READAHEAD_BYTES: usize = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Report types
@@ -329,6 +341,7 @@ pub struct Sweep {
     records: u64,
     stop_reason: Option<String>,
     findings: Vec<Finding>,
+    finding_quota: BTreeMap<(String, RecordClass), usize>,
     findings_truncated: bool,
 }
 
@@ -341,6 +354,7 @@ impl Sweep {
             records: 0,
             stop_reason: None,
             findings: Vec::new(),
+            finding_quota: BTreeMap::new(),
             findings_truncated: false,
         }
     }
@@ -377,7 +391,7 @@ impl Sweep {
         true
     }
 
-    /// Evidence collected so far, capped at [`MAX_FINDINGS`].
+    /// Evidence collected so far, capped at [`FINDINGS_PER_CLASS`] per class.
     pub fn findings(&self) -> &[Finding] {
         &self.findings
     }
@@ -393,7 +407,16 @@ impl Sweep {
     }
 
     fn push_finding(&mut self, f: Finding) {
-        if self.findings.len() < MAX_FINDINGS {
+        // Quota per (record kind, classification) rather than one global cap.
+        // Measured on the live claude-code store: 301 undecodable graph nodes
+        // and 19 undecodable memories filled a flat 100-slot budget before a
+        // single implausible record reached it, hiding the exact class this
+        // module exists to surface. A shared budget lets the loudest failure
+        // mode censor the quietest one.
+        let bucket = (f.record_class.clone(), f.classification);
+        let used = self.finding_quota.entry(bucket).or_insert(0);
+        if *used < FINDINGS_PER_CLASS {
+            *used += 1;
             self.findings.push(f);
         } else {
             self.findings_truncated = true;
@@ -458,9 +481,7 @@ fn decode_memory_value(value: &[u8]) -> DecodeOutcome<Memory> {
                 // Decoded only after supplying defaults for trailing fields the
                 // record predates. Readable, but written against an older
                 // schema — exactly the population a positional change breaks.
-                Ok((m, true)) => {
-                    DecodeOutcome::Legacy(m, "sho_v2_postcard_defaulted".to_string())
-                }
+                Ok((m, true)) => DecodeOutcome::Legacy(m, "sho_v2_postcard_defaulted".to_string()),
                 Err(e) => DecodeOutcome::Failed(e.to_string(), "sho_v2_postcard"),
             }
         }
@@ -537,7 +558,9 @@ fn check_embedding(
 
     if !(EMBEDDING_DIM_MIN..=EMBEDDING_DIM_MAX).contains(&dim) {
         failed.push("embedding_dimension");
-        detail.push(format!("embedding dimension {dim} outside [{EMBEDDING_DIM_MIN},{EMBEDDING_DIM_MAX}]"));
+        detail.push(format!(
+            "embedding dimension {dim} outside [{EMBEDDING_DIM_MIN},{EMBEDDING_DIM_MAX}]"
+        ));
         // A length this wrong means the length varint was read out of the wrong
         // place; the floats behind it are not worth further inspection.
         return Some(dim);
@@ -584,7 +607,10 @@ fn check_memory(m: &Memory, key: &[u8]) -> (Vec<&'static str>, String, Option<us
 
     let (floor, ceiling) = timestamp_bounds();
     let last_accessed = m.last_accessed();
-    for (name, ts) in [("created_at", m.created_at), ("last_accessed", last_accessed)] {
+    for (name, ts) in [
+        ("created_at", m.created_at),
+        ("last_accessed", last_accessed),
+    ] {
         if ts < floor || ts > ceiling {
             failed.push("timestamp_out_of_bounds");
             detail.push(format!("{name} = {ts} outside [{floor}, {ceiling}]"));
@@ -707,11 +733,17 @@ fn check_entity(n: &EntityNode, key: &[u8]) -> (Vec<&'static str>, String, Optio
 // Column-family sweeps
 // ---------------------------------------------------------------------------
 
+/// Sequential-scan read options.
+///
+/// `fill_cache(false)` because a scrub is cold-data maintenance: charging every
+/// record it touches to the shared block cache would evict the working set of
+/// every other tenant. `set_readahead_size` because that same flag defeats
+/// RocksDB own prefetching heuristics, and a full scan without readahead
+/// degenerates into one synchronous block read at a time.
 fn scan_opts() -> ReadOptions {
     let mut o = ReadOptions::default();
-    // A scrub is cold-data maintenance. Charging 30MB of record bytes to the
-    // shared block cache would evict the working set of every other tenant.
     o.fill_cache(false);
+    o.set_readahead_size(SCAN_READAHEAD_BYTES);
     o
 }
 
@@ -723,28 +755,36 @@ fn scan_opts() -> ReadOptions {
 /// not memory records and this scrub makes no claim about them.
 pub fn scrub_memories(db: &DB, sweep: &mut Sweep) -> ClassCounts {
     let mut counts = ClassCounts::default();
-    let iter = db.iterator_opt(IteratorMode::Start, scan_opts());
+    // A raw iterator, so the value is only materialised for keys that are
+    // actually memory records. Measured on the live claude-code store: reading
+    // every value in the shared default column family took 23.2s, and 97% of
+    // that work was fact, watermark and vmapping payloads this scrub makes no
+    // claim about.
+    let mut iter = db.raw_iterator_opt(scan_opts());
+    iter.seek_to_first();
 
-    for item in iter {
-        let (key, value) = match item {
-            Ok(kv) => kv,
-            Err(e) => {
-                // An iterator error is not "no more records". Per the
-                // structural-emptiness rule, an inconclusive read must never
-                // read as absence — count it, and let it force Indeterminate.
-                counts.read_errors += 1;
-                tracing::warn!(error = %e, "integrity scrub: memory iterator error");
-                continue;
-            }
-        };
-        counts.keys_seen += 1;
-        if key.len() != 16 {
-            continue;
-        }
-        if !sweep.tick() {
+    loop {
+        if let Err(e) = iter.status() {
+            // An iterator error is not "no more records". Per the
+            // structural-emptiness rule, an inconclusive read must never read
+            // as absence -- count it, and let it force Indeterminate.
+            counts.read_errors += 1;
+            tracing::warn!(error = %e, "integrity scrub: memory iterator error");
             break;
         }
-        classify_memory(&key, &value, &mut counts, sweep);
+        let Some(key) = iter.key() else { break };
+        counts.keys_seen += 1;
+        if key.len() == 16 {
+            if !sweep.tick() {
+                break;
+            }
+            let key = key.to_vec();
+            match iter.value() {
+                Some(value) => classify_memory(&key, value, &mut counts, sweep),
+                None => counts.read_errors += 1,
+            }
+        }
+        iter.next();
     }
     counts
 }
@@ -841,25 +881,28 @@ fn classify_memory(key: &[u8], value: &[u8], counts: &mut ClassCounts, sweep: &m
 /// whole load on graph nodes.
 pub fn scrub_graph_nodes(db: &DB, cf: &ColumnFamily, sweep: &mut Sweep) -> ClassCounts {
     let mut counts = ClassCounts::default();
-    let iter = db.iterator_cf_opt(cf, scan_opts(), IteratorMode::Start);
+    let mut iter = db.raw_iterator_cf_opt(cf, scan_opts());
+    iter.seek_to_first();
 
-    for item in iter {
-        let (key, value) = match item {
-            Ok(kv) => kv,
-            Err(e) => {
-                counts.read_errors += 1;
-                tracing::warn!(error = %e, "integrity scrub: graph iterator error");
-                continue;
-            }
-        };
-        counts.keys_seen += 1;
-        if key.len() != 16 {
-            continue;
-        }
-        if !sweep.tick() {
+    loop {
+        if let Err(e) = iter.status() {
+            counts.read_errors += 1;
+            tracing::warn!(error = %e, "integrity scrub: graph iterator error");
             break;
         }
-        classify_entity(&key, &value, &mut counts, sweep);
+        let Some(key) = iter.key() else { break };
+        counts.keys_seen += 1;
+        if key.len() == 16 {
+            if !sweep.tick() {
+                break;
+            }
+            let key = key.to_vec();
+            match iter.value() {
+                Some(value) => classify_entity(&key, value, &mut counts, sweep),
+                None => counts.read_errors += 1,
+            }
+        }
+        iter.next();
     }
     counts
 }
@@ -1180,7 +1223,10 @@ mod tests {
             counts.clean, 0,
             "a fabricated record must never be counted clean"
         );
-        assert_eq!(counts.undecodable, 0, "it decoded -- that is the whole point");
+        assert_eq!(
+            counts.undecodable, 0,
+            "it decoded -- that is the whole point"
+        );
         assert_eq!(
             counts.implausible, 1,
             "the fabricated record must land in the implausible class"
@@ -1540,7 +1586,10 @@ mod tests {
             implausible: 1,
             ..Default::default()
         };
-        assert_eq!(decide(&c, &ClassCounts::default(), true), Verdict::Unhealthy);
+        assert_eq!(
+            decide(&c, &ClassCounts::default(), true),
+            Verdict::Unhealthy
+        );
     }
 
     #[test]
@@ -1566,7 +1615,10 @@ mod tests {
             ..Default::default()
         };
         assert!((c.undecodable as f64 / c.scanned as f64) > UNDECODABLE_ALARM_RATE);
-        assert_eq!(decide(&c, &ClassCounts::default(), true), Verdict::Unhealthy);
+        assert_eq!(
+            decide(&c, &ClassCounts::default(), true),
+            Verdict::Unhealthy
+        );
     }
 
     #[test]
@@ -1772,5 +1824,4 @@ mod tests {
         let counts = scrub_memories(storage.raw_db(), &mut sweep);
         assert_eq!(counts.clean, 2);
     }
-
 }

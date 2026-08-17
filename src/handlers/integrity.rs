@@ -56,7 +56,8 @@ pub async fn scrub(
 ) -> Result<Json<IntegrityScrubReport>, AppError> {
     validation::validate_user_id(&req.user_id).map_validation_err("user_id")?;
     if let Some(max) = req.max_records {
-        validation::validate_limit(max as usize, "max_records").map_validation_err("max_records")?;
+        validation::validate_limit(max as usize, "max_records")
+            .map_validation_err("max_records")?;
     }
     if let Some(ms) = req.max_duration_ms {
         if ms == 0 || ms > MAX_DURATION_MS {
@@ -96,9 +97,7 @@ pub async fn scrub(
                 let graph_guard = g.read();
                 let gdb = graph_guard.get_db();
                 match gdb.cf_handle(crate::graph_memory::ENTITIES_CF_NAME) {
-                    Some(cf) => {
-                        integrity::scrub_user(&user_id, memory_db, Some((gdb, cf)), budget)
-                    }
+                    Some(cf) => integrity::scrub_user(&user_id, memory_db, Some((gdb, cf)), budget),
                     None => integrity::scrub_user(&user_id, memory_db, None, budget),
                 }
             }
@@ -109,4 +108,110 @@ pub async fn scrub(
     .map_err(|e| AppError::Internal(anyhow::anyhow!("integrity scrub task panicked: {e}")))?;
 
     Ok(Json(report))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::handlers::test_helpers::{post_json, send, send_typed, TestHarness, TEST_API_KEY};
+    use crate::integrity::{IntegrityScrubReport, Verdict};
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use serde_json::json;
+
+    /// The route exists, is authenticated, and returns the report shape.
+    ///
+    /// Route registration compiles whether or not the path is actually
+    /// mounted; only a request through the real router proves it.
+    #[tokio::test]
+    async fn scrub_route_is_reachable_and_returns_a_verdict() {
+        let harness = TestHarness::new();
+        let (status, report): (StatusCode, IntegrityScrubReport) = send_typed(
+            harness.router(),
+            post_json("/api/integrity/scrub", &json!({ "user_id": "scrub-test" })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(report.user_id, "scrub-test");
+        // A fresh user has an empty store and a real graph, so the sweep is
+        // complete and finds nothing.
+        assert!(report.complete, "stop_reason: {:?}", report.stop_reason);
+        assert!(report.skipped.is_empty());
+        assert_eq!(report.verdict, Verdict::Healthy);
+        assert!(report.is_healthy);
+        assert!(
+            !report.checks_applied.is_empty(),
+            "the report must name what it checked"
+        );
+        assert!(
+            !report.verdict_rule.is_empty(),
+            "the judgement must travel with the numbers"
+        );
+    }
+
+    #[tokio::test]
+    async fn scrub_requires_authentication() {
+        let harness = TestHarness::new();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/integrity/scrub")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"user_id":"scrub-test"}"#))
+            .unwrap();
+        let (status, _) = send(harness.router(), req).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // Guard against the assertion above passing for the wrong reason.
+        assert!(!TEST_API_KEY.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scrub_rejects_an_invalid_user_id() {
+        let harness = TestHarness::new();
+        let (status, body) = send(
+            harness.router(),
+            post_json("/api/integrity/scrub", &json!({ "user_id": "../../etc" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_INPUT");
+    }
+
+    #[tokio::test]
+    async fn scrub_rejects_an_out_of_range_duration_budget() {
+        let harness = TestHarness::new();
+        let (status, body) = send(
+            harness.router(),
+            post_json(
+                "/api/integrity/scrub",
+                &json!({ "user_id": "scrub-test", "max_duration_ms": 0 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "INVALID_INPUT");
+    }
+
+    /// A capped sweep must come back over the wire saying it was capped, and
+    /// must not claim health.
+    #[tokio::test]
+    async fn a_capped_sweep_reports_itself_over_http() {
+        let harness = TestHarness::new();
+        let (status, report): (StatusCode, IntegrityScrubReport) = send_typed(
+            harness.router(),
+            post_json(
+                "/api/integrity/scrub",
+                &json!({ "user_id": "scrub-test", "max_duration_ms": 1 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // Either it finished inside 1ms on an empty store (legitimately
+        // healthy), or it was cut short -- in which case it must say so and
+        // must not report health.
+        if !report.complete {
+            assert!(report.stop_reason.is_some());
+            assert_ne!(report.verdict, Verdict::Healthy);
+            assert!(!report.is_healthy);
+        }
+    }
 }
