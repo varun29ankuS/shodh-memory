@@ -456,6 +456,20 @@ describe("view outcome rows", () => {
     });
   });
 
+  it("reads the KIND, not merely the shape — `view` is a source with more than one kind", () => {
+    // An ask and its answer share `source: "view"`. Today only an outcome
+    // carries these three fields, so a shape test alone would appear to work —
+    // and would silently start misreading the next `view` kind that happens to
+    // name a field `state`, presenting it to a reader as a decision the person
+    // made.
+    const impostor = row({
+      source: "view",
+      kind: "view_command",
+      detail: JSON.stringify({ dimension: "cue", state: "applied", at: "/geo" }),
+    });
+    expect(viewOutcomeDetail(impostor)).toBeNull();
+  });
+
   it("returns null for rows that are not outcomes, and for payloads it cannot read", () => {
     expect(viewOutcomeDetail(row({ source: "view", kind: "view_command" }))).toBeNull();
     expect(viewOutcomeDetail(call({ name: "direct_view" }))).toBeNull();
