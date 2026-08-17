@@ -1399,8 +1399,17 @@ export function TasksView({ reach }: { reach: Reachability }) {
               that ordering is most of why it was exhausting to read. */}
           <p className="text-muted-foreground border-border mt-2.5 border-l-2 pl-2.5 text-[11px] leading-relaxed">
             Recorded work only — who recorded it is not stored, and nothing was drawn out of memory.
+            {/* SIZED TO THE WINDOW, WHICH IS NOT A DETAIL. The panel is 280px
+                wide and fixed-positioned, and it cannot scroll — the affordance
+                dismisses on any scroll event, including one inside itself. A
+                first draft of this held everything the `<dl>` and the old
+                counting hint said between them, measured 737px tall against a
+                945px window, and ran off the bottom of the screen with its last
+                two sections unreadable. Half of it moved to the hero, beside
+                the ratios it is actually about; what is left is what qualifies
+                THIS rail. */}
             <InfoHint
-              label="what this screen shows, and what it counts"
+              label="what this screen shows"
               className="ml-1.5 translate-y-[2px]"
             >
               <span className="text-foreground font-medium">What it proves.</span> What was
@@ -1410,35 +1419,21 @@ export function TasksView({ reach }: { reach: Reachability }) {
               <br />
               <span className="text-foreground font-medium">What it cannot.</span> Who recorded any
               of it. There is no origin field on a task, so this screen cannot tell a person from an
-              agent and does not guess.
+              agent, and does not guess.
               <br />
               <br />
               <span className="text-foreground font-medium">What it does not cover.</span> Anything
               not written down as a task. Nothing is extracted from memory — a task exists only
-              because something called the API to create one, so a profile can hold a great deal of
-              memory and no tasks at all.
+              because something called the API to create one.
               <br />
               <br />
               <span className="text-foreground font-medium">&ldquo;No blocker named&rdquo;.</span>{" "}
-              No task in this profile has recorded a dependency on another, or named anything else
-              it is waiting on. That is the absence of a signal rather than evidence the work is
-              clear. Where a dependency does exist the chain can be walked, and the row draws it.
+              No task here has recorded a dependency on another, or named anything else it is
+              waiting on. That is the absence of a signal, not evidence the work is clear.
               <br />
               <br />
               <span className="text-foreground font-medium">Dates.</span> Due dates and repeats are
               set where a task is created; this screen does not add them.
-              <br />
-              <br />
-              <span className="text-foreground font-medium">How it counts.</span> Progress is a
-              count of tasks, because the model has no estimate or size field to weight by. A
-              project&apos;s figure is settled tasks over the tasks in this profile, counted here
-              rather than read from the server&apos;s own per-project counters, which are never
-              populated and ship as zeros. Done and dismissed both count as settled — a dropped task
-              is not outstanding work — and are reported apart in the Settled section, because
-              finishing something and abandoning it are different outcomes. No individual task gets
-              a percentage: a number appears only where there is a real population behind it, a
-              project or a task&apos;s own subtasks. The curves stop at today; nothing is projected
-              forward, there being no estimate, cycle or velocity here to extrapolate from.
             </InfoHint>
           </p>
 
@@ -1458,9 +1453,41 @@ export function TasksView({ reach }: { reach: Reachability }) {
         {lanes.length > 0 ? (
           <section className="border-border border-b py-1.5">
             <div className="flex items-baseline justify-between gap-2 px-4 pb-1">
-              <h2 className="text-[12px] font-medium tracking-tight">
-                {axis ? "How the work has moved" : "What has been recorded"}
-              </h2>
+              <span className="flex items-baseline gap-0.5">
+                <h2 className="text-[12px] font-medium tracking-tight">
+                  {axis ? "How the work has moved" : "What has been recorded"}
+                </h2>
+                {/* HOW THE FIGURES ARE COUNTED, BESIDE THE FIGURES. This used
+                    to hang off the last term of the rail's caveat block, three
+                    sections down a panel about something else, which is a long
+                    way from the "0/50 settled" and the curves it is about. It
+                    is mechanism rather than a caveat that changes how a number
+                    reads — the ratios are what they say they are — so the
+                    disclosure affordance is the right level for it. */}
+                <InfoHint label="how these figures are counted" className="translate-y-[2px]">
+                  <span className="text-foreground font-medium">The unit is a task.</span> The model
+                  has no estimate or size field to weight by. A project&apos;s figure is settled
+                  tasks over the tasks in this profile, counted here rather than read from the
+                  server&apos;s own per-project counters, which are never populated and ship as
+                  zeros.
+                  <br />
+                  <br />
+                  <span className="text-foreground font-medium">Settled is both outcomes.</span>{" "}
+                  Done and dismissed each count, because a dropped task is not outstanding work.
+                  They are reported apart in the Settled section, since finishing something and
+                  abandoning it are different results.
+                  <br />
+                  <br />
+                  <span className="text-foreground font-medium">No task gets a percentage.</span> A
+                  number appears only where there is a real population behind it: a project, or a
+                  task&apos;s own subtasks.
+                  <br />
+                  <br />
+                  <span className="text-foreground font-medium">Nothing is projected.</span> The
+                  curves stop at today. There is no estimate, cycle or velocity here to extrapolate
+                  from.
+                </InfoHint>
+              </span>
               {axis ? (
                 <Meta className="mono text-[10px]">
                   <span>{dateOf(axis.from)}</span>
