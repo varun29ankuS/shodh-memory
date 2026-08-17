@@ -132,8 +132,19 @@ export type SeatEvent =
 			destination: string | null;
 			/** Entity names as the graph knows them — resolved, not as typed. */
 			entities: string[];
-			/** Terms that named nothing in this profile. Never silently dropped. */
+			/** Terms the graph ANSWERED about and does not hold. Never silently dropped. */
 			unresolved: string[];
+			/**
+			 * Terms the graph was never reached to check.
+			 *
+			 * KEPT APART FROM `unresolved` BECAUSE THEY ARE OPPOSITE CLAIMS. One
+			 * says the corpus does not contain a thing; the other says this seat
+			 * does not know. A trail that filed a backend outage under "absent"
+			 * would be evidence for a fact about the person's data that nobody ever
+			 * established — and an ask is exactly the row a reviewer would cite it
+			 * from.
+			 */
+			unchecked: string[];
 			/**
 			 * The one entity to open in the inspector, or null.
 			 *

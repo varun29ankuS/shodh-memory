@@ -92,11 +92,15 @@ test("overflow counts only what the cap dropped, not what dedupe removed", () =>
 
 // ── What the graph said ─────────────────────────────────────────────────────
 
+/** A lookup the graph answered. `checked` is explicit at every call site here
+ *  because the whole point of the field is that "answered: no" and "never
+ *  answered" must not be expressible by the same literal. */
+const answered = (asked, name) => ({ asked, name, checked: true });
+/** A lookup that never reached the graph. */
+const unreachable = (asked) => ({ asked, name: null, checked: false });
+
 test("a term the graph does not know becomes unresolved, never a framed entity", () => {
-	const { resolved, unresolved } = collectHighlights([
-		{ asked: "Dali", name: "Dali" },
-		{ asked: "Atlantis", name: null },
-	]);
+	const { resolved, unresolved } = collectHighlights([answered("Dali", "Dali"), answered("Atlantis", null)]);
 	assert.deepEqual(resolved, [{ asked: "Dali", name: "Dali" }]);
 	assert.deepEqual(unresolved, ["Atlantis"]);
 });
@@ -104,22 +108,76 @@ test("a term the graph does not know becomes unresolved, never a framed entity",
 test("the graph's name travels, not the model's word for it", () => {
 	// The resolver folds curated aliases, so "cargo ship" comes back as "Dali".
 	// Framing the model's word would light nothing while reporting success.
-	const { resolved } = collectHighlights([{ asked: "cargo ship", name: "Dali" }]);
+	const { resolved } = collectHighlights([answered("cargo ship", "Dali")]);
 	assert.deepEqual(resolved, [{ asked: "cargo ship", name: "Dali" }]);
 });
 
 test("two aliases of one entity frame it once", () => {
-	const { resolved } = collectHighlights([
-		{ asked: "the Dali", name: "Dali" },
-		{ asked: "cargo ship", name: "Dali" },
-	]);
+	const { resolved } = collectHighlights([answered("the Dali", "Dali"), answered("cargo ship", "Dali")]);
 	assert.equal(resolved.length, 1);
 });
 
 test("an empty name counts as absent, not as an entity called nothing", () => {
-	const { resolved, unresolved } = collectHighlights([{ asked: "x", name: "   " }]);
+	const { resolved, unresolved } = collectHighlights([answered("x", "   ")]);
 	assert.deepEqual(resolved, []);
 	assert.deepEqual(unresolved, ["x"]);
+});
+
+// ── The graph answered, versus the graph was never asked ────────────────────
+// This pair is the whole reason `checked` exists. Mutations: deleting the
+// `!lookup.checked` branch in collectHighlights; deleting the `unchecked`
+// paragraph in composeDirectViewReport; changing `checked: false` to route into
+// `unresolved`.
+
+test("a term whose lookup FAILED is unchecked, never unresolved", () => {
+	const { resolved, unresolved, unchecked } = collectHighlights([
+		answered("Dali", "Dali"),
+		unreachable("Baltimore"),
+	]);
+	assert.deepEqual(resolved, [{ asked: "Dali", name: "Dali" }]);
+	// The load-bearing assertion: a failed check must NOT become a claim that
+	// this profile's graph has no Baltimore.
+	assert.deepEqual(unresolved, []);
+	assert.deepEqual(unchecked, ["Baltimore"]);
+});
+
+test("an unchecked term is not framed either — it is neither lit nor asserted absent", () => {
+	const { resolved } = collectHighlights([unreachable("Dali")]);
+	assert.deepEqual(resolved, [], "a term nobody verified must never reach the browser");
+});
+
+test("the report says an unchecked term is NOT known to be absent", () => {
+	const text = composeDirectViewReport({
+		destination: graph,
+		resolved: [],
+		unresolved: [],
+		unchecked: ["Baltimore"],
+		overflow: 0,
+		focus: null,
+	});
+	assert.match(text, /Baltimore/);
+	assert.match(text, /could not be reached/);
+	// The sentence that stops the model telling the person their memory is empty.
+	assert.match(text, /says nothing about whether those entities exist/);
+	// And it must NOT reuse the absence wording.
+	assert.doesNotMatch(text, /contains no entity matching: Baltimore/);
+});
+
+test("absent and unchecked terms are reported as two different findings", () => {
+	const text = composeDirectViewReport({
+		destination: graph,
+		resolved: [],
+		unresolved: ["Atlantis"],
+		unchecked: ["Baltimore"],
+		overflow: 0,
+		focus: null,
+	});
+	const absentLine = text.split("\n").find((line) => line.includes("Atlantis"));
+	const uncheckedLine = text.split("\n").find((line) => line.includes("Baltimore"));
+	assert.ok(absentLine && uncheckedLine, "both findings must appear");
+	assert.notEqual(absentLine, uncheckedLine, "they must not be merged into one sentence");
+	assert.match(absentLine, /contains no entity matching/);
+	assert.match(uncheckedLine, /could not be reached/);
 });
 
 // ── What the model is told ──────────────────────────────────────────────────

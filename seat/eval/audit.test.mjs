@@ -354,6 +354,7 @@ function viewRow(overrides = {}) {
 			destination: "/geo",
 			entities: ["Malabar Coast", "Dali"],
 			unresolved: ["Atlantis"],
+			unchecked: ["Baltimore"],
 			focus: null,
 		},
 		...overrides,
@@ -396,6 +397,10 @@ test("the row records the VALIDATED outcome, which its tool_call row cannot", ()
 	assert.equal(detail.destination, "/geo");
 	assert.deepEqual(detail.entities, ["Malabar Coast", "Dali"]);
 	assert.deepEqual(detail.unresolved, ["Atlantis"]);
+	// Absent and unverifiable are separate keys, not one merged list. A trail
+	// that filed a backend outage under "unresolved" would be evidence for a
+	// claim about the person's corpus that nobody ever established.
+	assert.deepEqual(detail.unchecked, ["Baltimore"]);
 	assert.equal(detail.reason, "these 12 memories cluster on the Malabar coast");
 });
 
@@ -411,7 +416,7 @@ test("the ask row states what was requested and NEVER what came of it", () => {
 	const detail = JSON.parse(row.detail);
 	assert.deepEqual(
 		Object.keys(detail).sort(),
-		["destination", "entities", "focus", "reason", "unresolved"],
+		["destination", "entities", "focus", "reason", "unchecked", "unresolved"],
 	);
 	for (const forbidden of ["applied", "verdict", "outcome", "state", "followed", "declined"]) {
 		assert.equal(forbidden in detail, false, `an ask row must not carry "${forbidden}"`);

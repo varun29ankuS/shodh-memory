@@ -191,9 +191,29 @@ export interface ResolvedTerm {
 	name: string;
 }
 
+/**
+ * One term's lookup, as it came back.
+ *
+ * `checked` IS THE FIELD THAT MATTERS. `name: null` means the graph answered and
+ * has nothing by that name; `checked: false` means the graph never answered at
+ * all. Collapsing the second into the first is the exact lie this file forbids —
+ * "this profile's graph contains no entity matching X" is a claim about the
+ * corpus, and a transport failure is not evidence for it. The model would repeat
+ * it to the person as a fact about their data.
+ */
+export interface TermLookup {
+	asked: string;
+	name: string | null;
+	/** False when the lookup itself failed, so `name` says nothing. */
+	checked: boolean;
+}
+
 export interface HighlightOutcome {
 	resolved: ResolvedTerm[];
+	/** The graph answered, and holds nothing by that name. */
 	unresolved: string[];
+	/** The graph was never reached. Not framed, and NOT reported as absent. */
+	unchecked: string[];
 }
 
 /**
@@ -202,14 +222,20 @@ export interface HighlightOutcome {
  * De-duplicated BY THE RESOLVED NAME, not by the asked term: two aliases of one
  * entity ("the Dali", "cargo ship") resolve to a single node, and framing it
  * twice would make a one-entity narrowing report as two.
+ *
+ * The unchecked bucket is deliberately NOT de-duplicated by name — there is no
+ * name to de-duplicate by, only the word the model used.
  */
-export function collectHighlights(
-	lookups: readonly { asked: string; name: string | null }[],
-): HighlightOutcome {
+export function collectHighlights(lookups: readonly TermLookup[]): HighlightOutcome {
 	const seen = new Set<string>();
 	const resolved: ResolvedTerm[] = [];
 	const unresolved: string[] = [];
+	const unchecked: string[] = [];
 	for (const lookup of lookups) {
+		if (!lookup.checked) {
+			unchecked.push(lookup.asked);
+			continue;
+		}
 		if (lookup.name === null || lookup.name.trim().length === 0) {
 			unresolved.push(lookup.asked);
 			continue;
@@ -219,7 +245,7 @@ export function collectHighlights(
 		seen.add(key);
 		resolved.push({ asked: lookup.asked, name: lookup.name });
 	}
-	return { resolved, unresolved };
+	return { resolved, unresolved, unchecked };
 }
 
 function list(values: readonly string[]): string {
@@ -239,12 +265,15 @@ export function composeDirectViewReport(input: {
 	destination: Destination | null;
 	resolved: readonly ResolvedTerm[];
 	unresolved: readonly string[];
+	/** Terms whose graph lookup failed. Absent is treated as none. */
+	unchecked?: readonly string[];
 	overflow: number;
 	/** The entity to open in the inspector, as the graph names it, or null. */
 	focus: { id: string; name: string } | null;
 }): string {
 	const lines: string[] = [];
 	const { destination, resolved, unresolved, overflow, focus } = input;
+	const unchecked = input.unchecked ?? [];
 
 	if (destination) lines.push(`Asked the workbench to open ${destination.noun}.`);
 	if (focus) lines.push(`Asked it to open ${focus.name} in the inspector.`);
@@ -265,6 +294,19 @@ export function composeDirectViewReport(input: {
 		lines.push(
 			`NOT framed — this profile's graph contains no entity matching: ${list(unresolved)}. ` +
 				"Use recall_memory first and take names from the results; the graph is the authority on what exists here.",
+		);
+	}
+
+	// SAID SEPARATELY FROM `unresolved`, AND WORDED SO IT CANNOT BE READ AS ONE.
+	// The paragraph above is a statement about the person's corpus; this one is a
+	// statement about this seat's reach. A model that read a backend outage as
+	// "the graph has no Dali" would tell the person their memory is missing
+	// something that is sitting in it.
+	if (unchecked.length > 0) {
+		lines.push(
+			`NOT framed, and NOT known to be absent — the graph could not be reached to check: ${list(unchecked)}. ` +
+				"This says nothing about whether those entities exist in this profile. Retry the command once; if it " +
+				"fails again the memory backend is down, so answer from what you already have and do not describe the view.",
 		);
 	}
 
@@ -416,28 +458,64 @@ export function createViewTools(context: ViewToolContext): AgentTool<any>[] {
 			}
 
 			// One round trip per term, in parallel and bounded by HIGHLIGHT_LIMIT.
-			// A transport failure propagates: a view command built on entity
-			// checks that did not happen would frame unverified terms, which is
-			// the one thing this tool promises not to do.
-			const lookups = await Promise.all(
-				terms.map(async (asked) => {
-					const entity = await context.backend.findEntity(context.userId, asked);
-					return { asked, name: entity?.name ?? null };
+			//
+			// EACH TERM SETTLES ON ITS OWN, so `Promise.all` here can no longer
+			// reject. A failing lookup still must not frame its term — that rule
+			// has not moved — but it used to reject the whole batch, discarding
+			// the nineteen terms that HAD resolved and the destination with them,
+			// and handing the model a raw transport message it could do nothing
+			// with. A term whose check failed now travels as `unchecked`: not
+			// framed, and explicitly not reported as absent, which is the
+			// distinction one rejected promise used to destroy along with
+			// everything else.
+			const lookups: TermLookup[] = await Promise.all(
+				terms.map(async (asked): Promise<TermLookup> => {
+					try {
+						const entity = await context.backend.findEntity(context.userId, asked);
+						return { asked, name: entity?.name ?? null, checked: true };
+					} catch {
+						return { asked, name: null, checked: false };
+					}
 				}),
 			);
-			const { resolved, unresolved } = collectHighlights(lookups);
+			const { resolved, unresolved, unchecked } = collectHighlights(lookups);
 
 			// THE FOCUS CARRIES A UUID, NOT A NAME, because the browser selects by
 			// `UniverseStar.id` and that id is this node's `uuid`. Resolving it
 			// here is the same rule the highlights follow — the graph's identity
 			// travels, never the model's word — and it is the only way the
 			// inspector can open on the thing that was meant.
+			//
+			// Its failure is caught for the same reason the highlights' are: an
+			// inspector term the graph never answered about is unchecked, not
+			// missing.
 			let focus: { id: string; name: string } | null = null;
 			let focusUnresolved: string | null = null;
+			let focusUnchecked: string | null = null;
 			if (focusTerm.length > 0) {
-				const node = await context.backend.findEntity(context.userId, focusTerm);
-				if (node && node.name.trim().length > 0) focus = { id: node.uuid, name: node.name };
-				else focusUnresolved = focusTerm;
+				try {
+					const node = await context.backend.findEntity(context.userId, focusTerm);
+					if (node && node.name.trim().length > 0) focus = { id: node.uuid, name: node.name };
+					else focusUnresolved = focusTerm;
+				} catch {
+					focusUnchecked = focusTerm;
+				}
+			}
+
+			const allUnresolved = focusUnresolved === null ? unresolved : [...unresolved, focusUnresolved];
+			const allUnchecked = focusUnchecked === null ? unchecked : [...unchecked, focusUnchecked];
+
+			// EVERY TERM FAILED AND THERE WAS NOWHERE TO GO. Nothing can be asked
+			// for, and emitting a command that names nothing would put a row in the
+			// trail claiming an act that never happened. The model is told what
+			// went wrong instead, in the recoverable channel — this is the one
+			// branch where a throw is more honest than a report.
+			if (destination === null && resolved.length === 0 && focus === null && allUnchecked.length > 0) {
+				throw new Error(
+					`The graph could not be reached, so none of ${list(allUnchecked)} could be checked, and there is no ` +
+						"destination to open without them. Nothing was requested. This is not a statement that those " +
+						"entities are absent — retry once, and if it fails again answer without moving the view.",
+				);
 			}
 
 			const entities = resolved.map((term) => term.name);
@@ -454,7 +532,8 @@ export function createViewTools(context: ViewToolContext): AgentTool<any>[] {
 				reason,
 				destination: destination?.path ?? null,
 				entities,
-				unresolved: focusUnresolved === null ? unresolved : [...unresolved, focusUnresolved],
+				unresolved: allUnresolved,
+				unchecked: allUnchecked,
 				focus,
 			});
 
@@ -469,7 +548,8 @@ export function createViewTools(context: ViewToolContext): AgentTool<any>[] {
 				composeDirectViewReport({
 					destination,
 					resolved,
-					unresolved: focusUnresolved === null ? unresolved : [...unresolved, focusUnresolved],
+					unresolved: allUnresolved,
+					unchecked: allUnchecked,
 					overflow,
 					focus,
 				}),
@@ -480,7 +560,8 @@ export function createViewTools(context: ViewToolContext): AgentTool<any>[] {
 				details: {
 					destination: destination?.path ?? null,
 					entities,
-					unresolved,
+					unresolved: allUnresolved,
+					unchecked: allUnchecked,
 					focus,
 					// Null, not an empty array: "the browser said nothing" and "the
 					// browser said nothing changed" are different facts, and a
@@ -491,6 +572,7 @@ export function createViewTools(context: ViewToolContext): AgentTool<any>[] {
 				destination: string | null;
 				entities: string[];
 				unresolved: string[];
+				unchecked: string[];
 				focus: { id: string; name: string } | null;
 				outcomes: ViewOutcome[] | null;
 			}>;

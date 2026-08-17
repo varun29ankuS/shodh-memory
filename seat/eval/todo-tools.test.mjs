@@ -17,6 +17,8 @@ import {
 	agentComments,
 	claimRefusal,
 	composeClaimReport,
+	composeEmptyListingReport,
+	describeTodoFilters,
 	formatTodoLine,
 	parseTodoStatus,
 	shortIdOf,
@@ -238,4 +240,64 @@ test("re-claiming already-in-progress work does not report a status change that 
 	});
 	assert.match(text, /was already in_progress; status unchanged/);
 	assert.doesNotMatch(text, /→/);
+});
+
+// ── An empty listing that is not a dead end ─────────────────────────────────
+// "No todos match those filters" cannot tell an empty board from an over-narrow
+// query, and those call for opposite next moves. Mutations: deleting the
+// settled-work default line in describeTodoFilters; collapsing the
+// narrowed/not-narrowed branch in composeEmptyListingReport to one string;
+// dropping any single filter from describeTodoFilters.
+
+test("the settled-work exclusion is named even though the model never asked for it", () => {
+	// This default is the single most likely cause of a surprising empty
+	// listing and the one thing the model has no way to see it sent.
+	const applied = describeTodoFilters({});
+	assert.equal(applied.length, 1);
+	assert.match(applied[0], /done and cancelled were excluded/);
+});
+
+test("an explicit status replaces the default rather than sitting beside it", () => {
+	const applied = describeTodoFilters({ status: ["done"] });
+	assert.deepEqual(applied, ["status done"]);
+	assert.ok(!applied.some((line) => line.includes("excluded")));
+});
+
+test("every filter the model can send is echoed back to it", () => {
+	const applied = describeTodoFilters({
+		status: ["todo", "blocked"],
+		project: "BOLT",
+		context: "@computer",
+		priority: "urgent",
+		query: "vendor",
+	});
+	assert.deepEqual(applied, [
+		"status todo or blocked",
+		'project "BOLT"',
+		'context "@computer"',
+		"priority urgent",
+		'text matching "vendor"',
+	]);
+});
+
+test("an unfiltered empty listing tells the model to STOP, not to retry", () => {
+	// Telling a model to "try broader filters" when it used none is how a tool
+	// teaches a loop.
+	const text = composeEmptyListingReport(describeTodoFilters({}));
+	assert.match(text, /no open todos/);
+	assert.match(text, /rather than searching again/);
+	assert.doesNotMatch(text, /Drop the narrowing filters/);
+});
+
+test("a filtered empty listing tells the model to widen before concluding", () => {
+	const text = composeEmptyListingReport(describeTodoFilters({ project: "BOLT" }));
+	assert.match(text, /Drop the narrowing filters/);
+	assert.doesNotMatch(text, /no open todos/);
+});
+
+test("the empty report always states what was actually asked for", () => {
+	const text = composeEmptyListingReport(describeTodoFilters({ project: "BOLT", priority: "urgent" }));
+	assert.match(text, /Filters in force/);
+	assert.match(text, /BOLT/);
+	assert.match(text, /urgent/);
 });

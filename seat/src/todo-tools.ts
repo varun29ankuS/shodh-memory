@@ -175,6 +175,52 @@ export function composeClaimReport(input: {
 	return lines.join("\n");
 }
 
+/**
+ * The filters that were actually in force, in the model's own vocabulary.
+ *
+ * Echoed back rather than assumed, because the model does not reliably remember
+ * what it sent by the time it reads the answer, and because one of these was
+ * never sent at all: `list_todos` defaults to excluding settled work, so a board
+ * whose every todo is `done` comes back empty from a call that named no status.
+ * That default is the single most likely cause of a surprising empty listing and
+ * the one the model has no way to see.
+ */
+export function describeTodoFilters(params: {
+	status?: readonly string[];
+	project?: string;
+	context?: string;
+	priority?: string;
+	query?: string;
+}): string[] {
+	const applied: string[] = [];
+	if (params.status && params.status.length > 0) applied.push(`status ${params.status.join(" or ")}`);
+	else applied.push("status: anything not settled (done and cancelled were excluded — you did not ask for them)");
+	if (params.project) applied.push(`project "${params.project}"`);
+	if (params.context) applied.push(`context "${params.context}"`);
+	if (params.priority) applied.push(`priority ${params.priority}`);
+	if (params.query) applied.push(`text matching "${params.query}"`);
+	return applied;
+}
+
+/**
+ * What an empty listing says, and what to do about it.
+ *
+ * The recovery step is chosen by whether anything narrowed the query beyond the
+ * settled-work default: with extra filters the useful next move is to drop them,
+ * and with none there is genuinely nothing to list and retrying is a waste of a
+ * turn. Telling the model to "try broader filters" when it used none is how a
+ * tool teaches a loop.
+ */
+export function composeEmptyListingReport(applied: readonly string[]): string {
+	const narrowed = applied.length > 1;
+	return (
+		`No todos matched. Filters in force: ${applied.join("; ")}.\n` +
+		(narrowed
+			? "Drop the narrowing filters and list again before concluding there is no such work."
+			: "Nothing is filtered but settled work, so this profile has no open todos — say so rather than searching again.")
+	);
+}
+
 export interface TodoToolContext {
 	backend: ShodhBackend;
 	userId: string;
@@ -299,7 +345,13 @@ export function createTodoTools(context: TodoToolContext): AgentTool<any>[] {
 				includeCompleted: params.status?.some((status) => TERMINAL_STATUSES.has(status)) ?? false,
 			});
 			if (response.todos.length === 0) {
-				return textResult("No todos match those filters.", { count: 0 });
+				// AN EMPTY LISTING IS A DEAD END UNLESS IT SAYS WHAT IT ASKED FOR.
+				// "No todos match those filters" leaves the model with no way to
+				// tell an empty board from an over-narrow query, and the two call
+				// for opposite next moves — one is an answer, the other is a retry.
+				// So the filters that were actually in force are echoed back, and
+				// the default that is easiest to forget is named explicitly.
+				return textResult(composeEmptyListingReport(describeTodoFilters(params)), { count: 0 });
 			}
 			const lines = [`${response.todos.length} todo(s):`];
 			for (const todo of response.todos) lines.push(`- ${formatTodoLine(todo)}`);
@@ -501,7 +553,17 @@ export function createTodoTools(context: TodoToolContext): AgentTool<any>[] {
 				commentType: params.kind ?? "progress",
 			});
 			if (!response.comment) {
-				throw new Error(`The comment was not recorded on [${shortIdOf(todo)}]; the backend returned none.`);
+				// Names the consequence, not just the fact. The model's next move
+				// after a failed comment depends entirely on what the comment was
+				// FOR — a finding can be put in the answer instead, an attribution
+				// cannot — and it cannot make that call from "the backend returned
+				// none".
+				throw new Error(
+					`The comment was NOT recorded on [${shortIdOf(todo)}]: the backend accepted the request and ` +
+						"returned no comment, so nothing was written. Nothing on the todo says what you found. Retry " +
+						"once; if it fails again, put the finding in your answer to the user and tell them it could not " +
+						"be filed.",
+				);
 			}
 			return textResult(`Comment recorded on [${shortIdOf(todo)}] as ${author}.`, {
 				todo_id: shortIdOf(todo),

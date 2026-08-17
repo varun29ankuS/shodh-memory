@@ -597,8 +597,17 @@ export function composeVerdict(outcomes: readonly ViewOutcome[] | null): string 
 	}
 	if (outcomes.length === 0) {
 		return (
-			"VERDICT: nothing was actionable. The workbench received the request and found no axis to change — " +
-			"every entity you named resolved to nothing, or the view was already exactly as asked."
+			// The causes are NO LONGER ENUMERATED here, and that is a correction.
+			// This sentence used to say "every entity you named resolved to
+			// nothing, or the view was already exactly as asked", which became
+			// false the moment a term could also fail to be CHECKED — and it would
+			// have been false in the direction that matters, telling the model the
+			// person's graph lacks something nobody ever looked for. The paragraph
+			// above this one already separates framed, absent and unchecked by
+			// name; this line's job is only to say that no axis moved.
+			"VERDICT: nothing was actionable. The workbench received the request and found no axis to change. " +
+			"The report above says which of your terms were framed, which the graph does not hold, and which could " +
+			"not be checked — read it there rather than assuming a cause."
 		);
 	}
 	const lines = outcomes.map((outcome) => `- ${describeOutcome(outcome)}`);

@@ -156,7 +156,15 @@ export type SeatEvent =
       /** Destination path, or null when the move only frames. */
       destination: string | null;
       entities: string[];
+      /** Terms the graph answered about and does not hold. */
       unresolved: string[];
+      /**
+       * Terms the graph was never reached to check — a backend failure, not an
+       * absence. Optional because events written before this field existed are
+       * replayed from the store on every conversation load, and a required field
+       * would make an older row unreadable rather than merely less detailed.
+       */
+      unchecked?: string[];
       /** The one entity to open in the inspector, or null. `id` is the graph's
        *  `uuid`, which is what `UniverseStar.id` and therefore
        *  `selectedEntityId` are — the seat resolved it, so it selects directly. */

@@ -291,6 +291,11 @@ function viewRow(row: StoredEventRow): AuditRow | null {
 			destination: event.destination,
 			entities: event.entities,
 			unresolved: event.unresolved,
+			// Recorded as its own key, never merged into `unresolved`. "The graph
+			// does not hold this" and "the graph was never asked" are opposite
+			// claims about the person's corpus, and an audit row is precisely where
+			// the second must not be able to masquerade as the first.
+			unchecked: event.unchecked,
 			focus: event.focus,
 		}),
 	};
