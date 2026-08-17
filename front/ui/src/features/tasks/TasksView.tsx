@@ -15,7 +15,13 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { ApiError, NetworkError, type Reachability, type TodoStatus } from "@/lib/api";
+import {
+  ApiError,
+  NetworkError,
+  type Reachability,
+  type TodoPriority,
+  type TodoStatus,
+} from "@/lib/api";
 import { useSession } from "@/stores/session";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InfoHint } from "@/components/ui/info-hint";
@@ -135,6 +141,92 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-muted-foreground/70 w-[74px] shrink-0 text-[11px]">{label}</span>
       <span className="min-w-0 flex-1">{children}</span>
     </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- *
+ * PRIORITY
+ *
+ * THE MAIN SCANNING DIMENSION OF A FIFTY-ROW LIST, DRAWN AS ONE. It was two
+ * chips and a grey word — `high` on `warn`, `urgent` on `destructive`, `med`
+ * and `low` as muted text — and that was wrong twice over. It read at a glance
+ * as nothing (three low-contrast pills of near-identical weight), and it spent
+ * both of the screen's reserved colours on a dimension neither belongs to:
+ * `--warn` is what a task is WAITING ON, said on this same row by the "waiting
+ * on n" badge, and `--destructive` is LATE, said on this same row by an overdue
+ * due date. A row could carry `high` in amber beside `waiting on 2` in amber
+ * and mean two unrelated things with one hue.
+ *
+ * SO PRIORITY TAKES NO HUE AT ALL. Four priorities, four fill levels on one
+ * meter, in ink: the ordering is carried by how much of the glyph is filled and
+ * how dark it is, which is a stronger signal at a glance than a colour that has
+ * to be looked up, and it costs the palette nothing. Both reserved colours go
+ * back to meaning exactly one thing each, and the single accent stays with the
+ * curves.
+ *
+ * THE GLYPH NEVER TRAVELS ALONE. Bars with no word are a legend nobody was
+ * given; the word beside them is what makes the first one decipherable. The
+ * pair sits in a FIXED-WIDTH slot at the end of the row, so fifty of them line
+ * up in one column that can be read down — inside the variable-width meta
+ * cluster they shifted with the length of each short id.
+ * -------------------------------------------------------------------------- */
+
+/** How full the meter is, out of four. `none` is the server's unset and draws
+ *  nothing — an empty meter would read as a deliberate "lowest". */
+const PRIORITY_FILL: Record<TodoPriority, number> = {
+  urgent: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+  none: 0,
+};
+
+const BAR_HEIGHTS = ["h-[4px]", "h-[6px]", "h-[8px]", "h-[10px]"];
+
+function PriorityMark({ priority }: { priority: TodoPriority }) {
+  const label = priorityLabel(priority);
+  const fill = PRIORITY_FILL[priority];
+
+  // The slot is held even when there is nothing in it, so a row with no
+  // recorded priority does not pull the column out of alignment for the rows
+  // below it.
+  if (label === null) return <span aria-hidden="true" className="w-[62px] shrink-0" />;
+
+  const loud = fill >= 3;
+  return (
+    <span
+      className="flex w-[62px] shrink-0 items-center justify-end gap-1.5"
+      title={`Priority: ${priority}`}
+    >
+      <span aria-hidden="true" className="flex items-end gap-[2px]">
+        {BAR_HEIGHTS.map((height, i) => (
+          <span
+            key={height}
+            className={cn(
+              "w-[3px] rounded-[1px]",
+              height,
+              i < fill
+                ? loud
+                  ? "bg-foreground"
+                  : "bg-muted-foreground"
+                : // The unfilled rungs are drawn, not omitted: a meter with
+                  // its empty steps missing is four different glyphs rather
+                  // than one glyph at four levels, and cannot be compared
+                  // down a column.
+                  "bg-border",
+            )}
+          />
+        ))}
+      </span>
+      <span
+        className={cn(
+          "text-[10px] leading-none",
+          loud ? "text-foreground font-medium" : "text-muted-foreground",
+        )}
+      >
+        {label}
+      </span>
+    </span>
   );
 }
 
@@ -604,7 +696,6 @@ function TaskRow({
   const meta = STATUS_META[todo.status];
   const Icon = meta.icon;
   const due = dueMeta(todo, Date.now());
-  const priority = priorityLabel(todo.priority);
   const blockers = blockersOf(todo, byId);
   const subtasks = subtaskProgress(todo, all);
   const line = lifelineOf(todo);
@@ -654,11 +745,6 @@ function TaskRow({
               waiting on {blockers.length === 1 ? "1" : blockers.length}
             </Badge>
           ) : null}
-          {todo.priority === "urgent" ? <Badge variant="destructive">urgent</Badge> : null}
-          {todo.priority === "high" ? <Badge variant="warn">high</Badge> : null}
-          {priority && todo.priority !== "urgent" && todo.priority !== "high" ? (
-            <span className="text-muted-foreground/70 text-[11px]">{priority}</span>
-          ) : null}
           {due ? (
             due.tone === "muted" ? (
               <span className="text-muted-foreground mono text-[10px]">{due.label}</span>
@@ -669,6 +755,9 @@ function TaskRow({
             )
           ) : null}
         </Meta>
+        {/* OUTSIDE THE META CLUSTER, so it holds one column down the list
+            rather than starting wherever the short id happened to end. */}
+        <PriorityMark priority={todo.priority} />
       </button>
 
       {open ? (
