@@ -45,7 +45,25 @@ export const isHumanProfile = (profile: string): boolean =>
 export type Reachability =
   | { state: "online"; profiles: string[] }
   | { state: "unauthorized"; status: number }
-  | { state: "offline"; detail: string };
+  | {
+      state: "offline";
+      detail: string;
+      /**
+       * The status the server answered with, or absent when nothing answered.
+       *
+       * `offline` covers two situations with OPPOSITE remedies — no answer at
+       * all (start the server) and an answer this client could not use, e.g. a
+       * 500 (the server is already running; read its log). `detail` has always
+       * carried the difference as prose, and every reader that needed to ACT on
+       * it had to match `backend returned …` against a string this module
+       * formats — so the discrimination is published as a field instead.
+       *
+       * Optional because absence is the meaning, not a gap: a request that
+       * never reached a server has no status, and `0` or `-1` would be a number
+       * a reader could print. Callers branch on presence.
+       */
+      answered?: number;
+    };
 
 /* ------------------------------------------------------------------ *
  * WHY A SCREEN IS EMPTY
@@ -137,7 +155,7 @@ export async function probeBackend(signal?: AbortSignal): Promise<Reachability> 
     if (err instanceof ApiError) {
       return err.isAuthFailure
         ? { state: "unauthorized", status: err.status }
-        : { state: "offline", detail: `backend returned ${err.status}` };
+        : { state: "offline", detail: `backend returned ${err.status}`, answered: err.status };
     }
     if (err instanceof NetworkError) return { state: "offline", detail: err.message };
     throw err;
