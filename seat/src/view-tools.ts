@@ -47,6 +47,7 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { ShodhBackend } from "./backend.js";
 import type { SeatEvent } from "./events.js";
+import { composeToolDescription } from "./tool-descriptions.js";
 import {
 	composeVerdict,
 	composeViewReport,
@@ -362,13 +363,28 @@ export function createViewTools(context: ViewToolContext): AgentTool<any>[] {
 	const directViewTool: AgentTool<typeof directViewParameters> = {
 		name: "direct_view",
 		label: "Direct the view",
-		description:
-			"Move the user's workbench to the surface that answers their question, and light the entities the answer " +
-			"is about. Use it when the shape of the answer has a place — a relational answer belongs on the graph, a " +
-			"geographic one on the map, a question about where something came from on sources. " +
-			"Requires a reason, which is shown to the user. The user always outranks you: if they have moved that part " +
-			"of the view during this turn, your request waits as an offer they can accept. " +
-			"The result tells you what actually happened — moved, waiting as an offer, refused, or not known.",
+		description: composeToolDescription("direct_view", {
+			does:
+				"Asks the user's workbench to open a surface, light the entities an answer is about, and open one of " +
+				"them in the inspector — one request, however many of those three you name, because they are one intent.",
+			useWhen:
+				"Reach for it when the shape of your answer has a place: a relational answer belongs on the graph, a " +
+				"geographic one on the map, a question about where something came from on sources. The reason you give " +
+				"is shown to the user verbatim, so state the evidence — \"these 12 memories cluster on the Malabar " +
+				"coast\" — rather than the action.",
+			notFor:
+				"Do not call it to re-issue a request the workbench refused or is still holding as an offer: the user " +
+				"outranks you on any axis they have touched this turn, and asking twice is the same as not asking. Do " +
+				"not call it to move someone who is already where you would send them — inspect_view tells you that " +
+				"first, and it changes nothing. Do not call it merely to look active; a view that rearranges itself " +
+				"without a finding behind it is noise.",
+			returns:
+				"Every entity name is checked against this profile's graph before anything is sent, and names that " +
+				"match nothing come back to you unframed rather than being silently dropped. The result then states " +
+				"what the workbench did on each axis — MOVED, ALREADY THERE, WAITING as an offer, REFUSED, or NOT " +
+				"KNOWN when nothing answered — and only the first three permit you to tell the user the view moved. " +
+				"It returns nothing about the memories or entities themselves.",
+		}),
 		parameters: directViewParameters,
 		execute: async (toolCallId, params) => {
 			const reason = params.reason.trim();
@@ -501,11 +517,25 @@ export function createViewTools(context: ViewToolContext): AgentTool<any>[] {
 	const inspectViewTool: AgentTool<typeof inspectViewParameters> = {
 		name: "inspect_view",
 		label: "Look at the workbench",
-		description:
-			"See what the user is looking at right now: which surface is open, which memory profile, what is narrowed, " +
-			"what is open in the inspector, and which parts of the view the user is holding this turn. " +
-			"Read-only — it changes nothing. Call it before direct_view when you want to know whether your request " +
-			"would apply or would only become an offer, and to avoid moving someone who is already where you would send them.",
+		description: composeToolDescription("inspect_view", {
+			does:
+				"Reports what the user is looking at right now: which surface is open, which memory profile, what is " +
+				"narrowed and by whom, what is open in the inspector, which axes the user is holding this turn, and " +
+				"which of your offers are still waiting on screen.",
+			useWhen:
+				"Call it before direct_view when it matters whether your request would apply immediately or would only " +
+				"become an offer, and whenever you are about to send someone where they may already be. It takes no " +
+				"arguments and changes nothing, so it costs you only the round trip.",
+			notFor:
+				"It cannot move anything — direct_view is the only tool that asks for a change, and this one has no " +
+				"parameter through which a change could be smuggled. It is also not a way to read the user's data: it " +
+				"says where they are and what is narrowed, never what any memory or entity contains.",
+			returns:
+				"A live reading when the workbench answers within two seconds. When it does not, you get the last " +
+				"state the workbench reported WITH ITS AGE STATED, which is not the same thing — anything the user has " +
+				"done since is missing from it — and when no browser has ever reported, the call fails rather than " +
+				"guessing.",
+		}),
 		parameters: inspectViewParameters,
 		execute: async () => {
 			// Same order rule as the command path: the probe must be known before

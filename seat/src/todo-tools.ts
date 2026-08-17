@@ -28,6 +28,7 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { BackendTodo, ShodhBackend, TodoStatus } from "./backend.js";
 import type { ModelRef } from "./events.js";
+import { composeToolDescription } from "./tool-descriptions.js";
 
 /** src/memory/types.rs `TodoStatus`, in workflow order. */
 export const TODO_STATUSES = ["backlog", "todo", "in_progress", "blocked", "done", "cancelled"] as const;
@@ -267,9 +268,22 @@ export function createTodoTools(context: TodoToolContext): AgentTool<any>[] {
 	const listTool: AgentTool<typeof listParameters> = {
 		name: "list_todos",
 		label: "List todos",
-		description:
-			"List the work recorded against this profile, with status, priority, project, blockers and due dates. " +
-			"Read this before claiming or updating anything: the short ids it returns are what the other todo tools take.",
+		description: composeToolDescription("list_todos", {
+			does:
+				"Lists the work recorded against this profile, one line each, with status, priority, project, contexts, " +
+				"due date and blockers.",
+			useWhen:
+				"Read it before claiming, updating or commenting on anything: the short ids it returns are the handles " +
+				"every other todo tool takes, and it is the only way to learn what those ids are.",
+			notFor:
+				"It is not a search over memory — todos are recorded work, not what was remembered, and recall_memory " +
+				"covers the latter. Do not call it repeatedly within one turn to watch for change; nothing moves the " +
+				"board but you and the user.",
+			returns:
+				"Settled work is excluded unless you name `done` or `cancelled` in `status` explicitly. It does NOT " +
+				"return a todo's comments, so it cannot tell you whether another model has already claimed one — " +
+				"claim_todo performs that check and refuses when it finds a prior claim.",
+		}),
 		parameters: listParameters,
 		execute: async (_toolCallId, params) => {
 			const response = await context.backend.listTodos({
@@ -296,10 +310,24 @@ export function createTodoTools(context: TodoToolContext): AgentTool<any>[] {
 	const claimTool: AgentTool<typeof claimParameters> = {
 		name: "claim_todo",
 		label: "Claim a todo",
-		description:
-			"Take a todo: move it to in_progress and record, on the todo itself, that you took it and what you intend " +
-			"to do. Refuses work that is already settled, or already claimed by another model — this system has no " +
-			"assignee field, so a second claim cannot be made safely.",
+		description: composeToolDescription("claim_todo", {
+			does:
+				"Takes a todo: moves it to in_progress and records on the todo itself, under your model identity, that " +
+				"you took it and what you intend to do about it.",
+			useWhen:
+				"Claim a todo before doing any of the work it describes, so that a second agent looking at the same " +
+				"board can see the work is spoken for and what the plan is.",
+			notFor:
+				"Do not claim work you are not about to start in this turn, and do not claim a todo merely so you can " +
+				"comment on it — comment_on_todo needs no claim. There is no way to release a claim from here, so one " +
+				"you abandon leaves the todo sitting in_progress with your name on it.",
+			returns:
+				"Confirmation that the status moved and that the claim was recorded — separately, because they are two " +
+				"backend calls that can disagree, and a claim whose comment failed has moved the work with nobody " +
+				"recorded as having moved it. It refuses outright when the todo is already settled, or when another " +
+				"model's claim is already on it: this system has no assignee field, so a second claim would overwrite " +
+				"nothing and leave two agents each believing they own the work.",
+		}),
 		parameters: claimParameters,
 		execute: async (_toolCallId, params) => {
 			const author = agentAuthor(context.getModel());
@@ -342,9 +370,25 @@ export function createTodoTools(context: TodoToolContext): AgentTool<any>[] {
 	const updateTool: AgentTool<typeof updateParameters> = {
 		name: "update_todo",
 		label: "Update a todo",
-		description:
-			"Change a todo's status or priority and say why. The note is recorded on the todo under your model " +
-			"identity, so the change is attributable. Marking a todo `blocked` requires naming what it is blocked on.",
+		description: composeToolDescription("update_todo", {
+			does:
+				"Changes a todo's status, priority or blocker and records why, as a note on the todo under your model " +
+				"identity, so that the change is attributable to you rather than to nobody.",
+			useWhen:
+				"Use it when the state of the work has actually changed: you finished it, you started it, or you found " +
+				"out it cannot proceed. Marking it `blocked` requires naming what it is waiting on, because a task that " +
+				"stopped for no recorded reason is worse than one nobody touched.",
+			notFor:
+				"Do not use it to leave a note without changing anything — that is comment_on_todo, and this tool " +
+				"refuses a note-only call. Do not set `done` speculatively: completion is not reversible from here, and " +
+				"it stamps the completion time, rolls a recurring todo over to its next occurrence, and unblocks " +
+				"everything that was waiting on it.",
+			returns:
+				"What actually changed, field by field, plus the consequences of a completion — the next occurrence it " +
+				"created and the todos it unblocked, each by short id. It reports separately whether the explanatory " +
+				"note was recorded, because a change nobody can attribute is a hole in the same audit trail this tool " +
+				"exists to keep whole.",
+		}),
 		parameters: updateParameters,
 		execute: async (_toolCallId, params) => {
 			const author = agentAuthor(context.getModel());
@@ -432,9 +476,19 @@ export function createTodoTools(context: TodoToolContext): AgentTool<any>[] {
 	const commentTool: AgentTool<typeof commentParameters> = {
 		name: "comment_on_todo",
 		label: "Comment on a todo",
-		description:
-			"Add a note to a todo — progress, a finding, a reason — recorded under your model identity. " +
-			"Use it to leave behind what the next agent or the user would need to know.",
+		description: composeToolDescription("comment_on_todo", {
+			does: "Adds a note to a todo — progress, a finding, a reason — recorded under your model identity.",
+			useWhen:
+				"Use it to leave behind what the next agent or the user would need to know and could not reconstruct: " +
+				"what you tried, what you found, why the obvious approach does not work here.",
+			notFor:
+				"Do not use it to change status, priority or blockers — update_todo does that and records its own " +
+				"reason, so a comment describing a change you did not actually make is a false record on the one " +
+				"surface the user trusts to be true. It also does not claim the todo; claim_todo does that.",
+			returns:
+				"Confirmation naming the todo and the identity the comment was signed with. It does not return the " +
+				"todo's other comments, so it tells you nothing about what anyone else has written there.",
+		}),
 		parameters: commentParameters,
 		execute: async (_toolCallId, params) => {
 			const author = agentAuthor(context.getModel());

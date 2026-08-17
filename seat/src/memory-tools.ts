@@ -12,6 +12,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { MemoryType, RecallLineageEdge, RecallMemory, RecallMode, ShodhBackend } from "./backend.js";
 import type { MemoryScope, SeatEvent } from "./events.js";
 import type { LearningLedger } from "./ledger.js";
+import { composeToolDescription } from "./tool-descriptions.js";
 
 export interface MemoryToolContext {
 	backend: ShodhBackend;
@@ -160,10 +161,25 @@ export function createMemoryTools(context: MemoryToolContext): AgentTool<any>[] 
 	const recallTool: AgentTool<typeof recallParameters> = {
 		name: "recall_memory",
 		label: "Recall memory",
-		description:
-			"Search the user's persistent memory (vector + BM25 + knowledge-graph fusion). " +
-			"Returns memories with ids and scores, plus related facts and todos. " +
-			"When a recalled memory informs your answer, cite it inline as [mem:<id>] using the id shown.",
+		description: composeToolDescription("recall_memory", {
+			does:
+				"Searches the user's persistent memory over vector, BM25 and knowledge-graph fusion, and returns the " +
+				"matching memories with their ids and scores alongside any facts and todos the same cue surfaced.",
+			useWhen:
+				"Use it whenever the user refers to past work, people, decisions or preferences, and before answering " +
+				"any question whose evidence the auto-surfaced sample does not already fully cover. Above all, use it " +
+				"before saying that something is NOT in memory — that sample is a handful of closest matches, not the " +
+				"store, and an absence claim made without searching is a claim about a place you never looked.",
+			notFor:
+				"Do not use it for general knowledge the model already has, or to re-read something already quoted " +
+				"earlier in this conversation. Do not use it to check whether an entity exists before naming it in " +
+				"direct_view — that tool resolves every name against the graph itself and tells you which ones matched.",
+			returns:
+				"Each result carries an 8-character id to cite inline as [mem:<id>], a relevance score, and content " +
+				"truncated to 600 characters; cite only ids shown to you. It searches the user's scope only — the " +
+				"assistant's own learning scope is never returned here — and it does not return full memory text, " +
+				"embeddings, or anything you have not been given an id for.",
+		}),
 		parameters: recallParameters,
 		execute: async (toolCallId, params) => {
 			const startedAt = Date.now();
@@ -247,9 +263,21 @@ export function createMemoryTools(context: MemoryToolContext): AgentTool<any>[] 
 	const rememberTool: AgentTool<typeof rememberParameters> = {
 		name: "remember_memory",
 		label: "Remember",
-		description:
-			"Store a durable memory for the user. Use sparingly, for high-value facts, decisions, and learnings — " +
-			"not for conversational filler.",
+		description: composeToolDescription("remember_memory", {
+			does: "Stores one durable memory in the user's own memory scope, where every later recall can reach it.",
+			useWhen:
+				"Use it sparingly, when the conversation produces something worth having next month: a decision and " +
+				"the reason behind it, a stable preference, a fact about the user's world, or a correction to something " +
+				"previously believed.",
+			notFor:
+				"Do not use it for conversational filler, for restating something a recall already returned, or for " +
+				"lessons about how to retrieve and use these tools — those belong in record_seat_learning, which writes " +
+				"to a separate scope so they never come back as answers about the user's own corpus.",
+			returns:
+				"The new memory's short id, which you may cite immediately. The write is recorded in the learning " +
+				"ledger under your model identity and appears in the user's history at once; nothing here can undo it, " +
+				"so a memory written in error has to be reverted by the user from the workbench.",
+		}),
 		parameters: rememberParameters,
 		execute: async (_toolCallId, params) => {
 			const memoryType = (params.memory_type ?? "observation") as MemoryType;
@@ -289,10 +317,22 @@ export function createMemoryTools(context: MemoryToolContext): AgentTool<any>[] 
 	const seatLearningTool: AgentTool<typeof seatLearningParameters> = {
 		name: "record_seat_learning",
 		label: "Record seat learning",
-		description:
-			"Record an operational lesson about how this assistant should retrieve, phrase cues, or use tools — " +
-			"stored in the harness's own memory scope, never in the user's. " +
-			"Never store user content or conversation facts here; use remember_memory for those.",
+		description: composeToolDescription("record_seat_learning", {
+			does:
+				"Records one operational lesson about how this assistant should retrieve, phrase cues, or choose tools, " +
+				"in the assistant's own memory scope rather than the user's.",
+			useWhen:
+				"Use it when a retrieval strategy visibly worked or visibly failed, or when you learn something about " +
+				"the shape of this workbench that would save a later session the same detour. State the lesson so it is " +
+				"actionable the next time the situation recurs, not as a diary entry about this one.",
+			notFor:
+				"Never put user content here — no names, events, decisions or facts about their world. Those belong in " +
+				"remember_memory, and a fact filed in this scope is a fact that will never be found when the user asks " +
+				"about their own corpus.",
+			returns:
+				"The lesson's short id. It is surfaced to future sessions automatically when a message resembles it, " +
+				"so it is never returned by recall_memory and never cited to the user as evidence.",
+		}),
 		parameters: seatLearningParameters,
 		execute: async (_toolCallId, params) => {
 			const memoryType = (params.kind ?? "learning") as MemoryType;
@@ -325,7 +365,12 @@ export function createMemoryTools(context: MemoryToolContext): AgentTool<any>[] 
 				content_preview: params.learning.slice(0, 200),
 				ledger_event_id: ledgerEntry.id,
 			});
-			return textResult("Seat learning recorded.", { memory_id: response.id });
+			// The id, not a bare "recorded". The description promises one, and a
+			// result that names what it wrote is the difference between a tool the
+			// model can reason about afterwards and one it can only hope worked.
+			return textResult(`Seat learning recorded as [mem:${shortId(response.id)}] in the assistant's own scope.`, {
+				memory_id: response.id,
+			});
 		},
 	};
 
