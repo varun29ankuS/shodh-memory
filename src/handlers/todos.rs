@@ -453,119 +453,19 @@ pub struct ListProjectsRequest {
 // HELPER FUNCTIONS
 // =============================================================================
 
-/// Accepted recurrence forms, quoted verbatim in every rejection so a client
-/// that guesses wrong is told what to send instead.
-const RECURRENCE_FORMS: &str = "daily | weekly | weekly:mon,wed,fri (or weekly:1,3,5, \
-     0=Sunday) | monthly | monthly:15 (1-31) | every 3 days (1-3650)";
-
-/// Longest interval `EveryNDays` accepts. `next_occurrence` adds the interval
-/// to a timestamp, and chrono panics on an out-of-range date, so this is a
-/// guard rail rather than a preference — ten years is well past any real
-/// recurring task and nowhere near the overflow.
-const MAX_RECURRENCE_INTERVAL_DAYS: u32 = 3650;
-
-/// Parse a weekday token into `Recurrence::Weekly`'s numbering (0 = Sunday).
-fn parse_weekday(token: &str) -> Option<u8> {
-    match token {
-        "0" | "sun" | "sunday" => Some(0),
-        "1" | "mon" | "monday" => Some(1),
-        "2" | "tue" | "tues" | "tuesday" => Some(2),
-        "3" | "wed" | "weds" | "wednesday" => Some(3),
-        "4" | "thu" | "thur" | "thurs" | "thursday" => Some(4),
-        "5" | "fri" | "friday" => Some(5),
-        "6" | "sat" | "saturday" => Some(6),
-        _ => None,
-    }
-}
-
-fn invalid_recurrence(input: &str, detail: &str) -> AppError {
-    AppError::InvalidInput {
-        field: "recurrence".to_string(),
-        reason: format!("Invalid recurrence '{input}': {detail}. Valid forms: {RECURRENCE_FORMS}"),
-    }
-}
-
 /// Parse a recurrence string into the full [`Recurrence`] enum.
 ///
-/// Every variant of the enum is reachable from here; before this, `weekly` was
-/// hardcoded to Mon-Fri, `monthly` to day 1, and `EveryNDays` to nothing at
-/// all. The three bare words keep their original meanings so existing clients
-/// (the MCP `add_todo` tool ships them as an enum) are unaffected.
-///
-/// Case-insensitive; `_`, `-` and spaces are interchangeable, so both
-/// `every_3_days` and `every 3 days` parse.
+/// The grammar lives on the type ([`Recurrence::from_pattern`]) because MIF
+/// import reads the same patterns; this only turns its reason into the HTTP
+/// error shape, with the accepted forms appended.
 fn parse_recurrence(s: &str) -> Result<Recurrence, AppError> {
-    let lowered = s.trim().to_lowercase().replace(['_', '-'], " ");
-    let normalized = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    let (head, arg) = match normalized.split_once(':') {
-        Some((head, arg)) => (head.trim(), Some(arg.trim())),
-        None => (normalized.as_str(), None),
-    };
-
-    match (head, arg) {
-        ("daily", None) => Ok(Recurrence::Daily),
-
-        // The long-standing default: the working week.
-        ("weekly", None) => Ok(Recurrence::Weekly {
-            days: vec![1, 2, 3, 4, 5],
-        }),
-        ("weekly", Some(list)) => {
-            let mut days = Vec::new();
-            for token in list.split(',') {
-                let token = token.trim();
-                let day = parse_weekday(token)
-                    .ok_or_else(|| invalid_recurrence(s, &format!("unknown weekday '{token}'")))?;
-                days.push(day);
-            }
-            // `next_occurrence` scans for the first day greater than today, so
-            // an unsorted list would pick the wrong one.
-            days.sort_unstable();
-            days.dedup();
-            if days.is_empty() {
-                return Err(invalid_recurrence(s, "no weekdays given"));
-            }
-            Ok(Recurrence::Weekly { days })
-        }
-
-        // The long-standing default: the first of the month.
-        ("monthly", None) => Ok(Recurrence::Monthly { day: 1 }),
-        ("monthly", Some(day)) => {
-            let parsed: u8 = day
-                .parse()
-                .map_err(|_| invalid_recurrence(s, &format!("'{day}' is not a day of the month")))?;
-            if !(1..=31).contains(&parsed) {
-                return Err(invalid_recurrence(s, "day of month must be 1-31"));
-            }
-            Ok(Recurrence::Monthly { day: parsed })
-        }
-
-        // "every 3 days" / "every_3_days" / "every 1 day"
-        (head, None) => {
-            let interval = head
-                .strip_prefix("every ")
-                .and_then(|rest| rest.strip_suffix(" days").or(rest.strip_suffix(" day")))
-                .ok_or_else(|| invalid_recurrence(s, "unrecognised pattern"))?;
-            let n: u32 = interval
-                .parse()
-                .map_err(|_| invalid_recurrence(s, &format!("'{interval}' is not a whole number")))?;
-            if n == 0 {
-                return Err(invalid_recurrence(
-                    s,
-                    "an interval of 0 days would repeat forever on the same day",
-                ));
-            }
-            if n > MAX_RECURRENCE_INTERVAL_DAYS {
-                return Err(invalid_recurrence(
-                    s,
-                    &format!("interval must be at most {MAX_RECURRENCE_INTERVAL_DAYS} days"),
-                ));
-            }
-            Ok(Recurrence::EveryNDays { n })
-        }
-
-        _ => Err(invalid_recurrence(s, "unrecognised pattern")),
-    }
+    Recurrence::from_pattern(s).map_err(|reason| AppError::InvalidInput {
+        field: "recurrence".to_string(),
+        reason: format!(
+            "Invalid recurrence '{s}': {reason}. Valid forms: {}",
+            Recurrence::PATTERN_FORMS
+        ),
+    })
 }
 
 /// Resolve todo references (short keys like "SHO-3", seq numbers, or UUIDs)

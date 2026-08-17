@@ -4014,7 +4014,139 @@ pub enum Recurrence {
     EveryNDays { n: u32 },
 }
 
+/// Weekday abbreviations in `Recurrence::Weekly`'s numbering (0 = Sunday).
+const WEEKDAY_NAMES: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+/// Parse a weekday token into `Recurrence::Weekly`'s numbering (0 = Sunday).
+fn parse_weekday(token: &str) -> Option<u8> {
+    match token {
+        "0" | "sun" | "sunday" => Some(0),
+        "1" | "mon" | "monday" => Some(1),
+        "2" | "tue" | "tues" | "tuesday" => Some(2),
+        "3" | "wed" | "weds" | "wednesday" => Some(3),
+        "4" | "thu" | "thur" | "thurs" | "thursday" => Some(4),
+        "5" | "fri" | "friday" => Some(5),
+        "6" | "sat" | "saturday" => Some(6),
+        _ => None,
+    }
+}
+
 impl Recurrence {
+    /// Human-writable forms this pattern accepts, quoted in every rejection so
+    /// a caller that guesses wrong is told what to send instead.
+    pub const PATTERN_FORMS: &'static str = "daily | weekly | weekly:mon,wed,fri \
+         (or weekly:1,3,5, 0=Sunday) | monthly | monthly:15 (1-31) | every 3 days (1-3650)";
+
+    /// Longest interval `EveryNDays` accepts. `next_occurrence` adds the
+    /// interval to a timestamp and chrono panics on an out-of-range date, so
+    /// this is a guard rail rather than a preference — ten years is well past
+    /// any real recurring task and nowhere near the overflow.
+    pub const MAX_INTERVAL_DAYS: u32 = 3650;
+
+    /// Parse a recurrence pattern. Every variant is reachable from here.
+    ///
+    /// Case-insensitive; `_`, `-` and spaces are interchangeable, so both
+    /// `every_3_days` and `every 3 days` parse. The bare words `daily`,
+    /// `weekly` (Mon-Fri) and `monthly` (day 1) keep the meanings they have
+    /// always had, so existing clients are unaffected.
+    ///
+    /// The error is a short reason, not a full sentence: callers add their own
+    /// framing (the HTTP layer appends [`Recurrence::PATTERN_FORMS`]).
+    pub fn from_pattern(s: &str) -> Result<Self, String> {
+        let lowered = s.trim().to_lowercase().replace(['_', '-'], " ");
+        let normalized = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        let (head, arg) = match normalized.split_once(':') {
+            Some((head, arg)) => (head.trim(), Some(arg.trim())),
+            None => (normalized.as_str(), None),
+        };
+
+        match (head, arg) {
+            ("daily", None) => Ok(Recurrence::Daily),
+
+            // The long-standing default: the working week.
+            ("weekly", None) => Ok(Recurrence::Weekly {
+                days: vec![1, 2, 3, 4, 5],
+            }),
+            ("weekly", Some(list)) => {
+                let mut days = Vec::new();
+                for token in list.split(',') {
+                    let token = token.trim();
+                    let day =
+                        parse_weekday(token).ok_or_else(|| format!("unknown weekday '{token}'"))?;
+                    days.push(day);
+                }
+                // `next_occurrence` scans for the first day greater than today,
+                // so an unsorted list would pick the wrong one.
+                days.sort_unstable();
+                days.dedup();
+                if days.is_empty() {
+                    return Err("no weekdays given".to_string());
+                }
+                Ok(Recurrence::Weekly { days })
+            }
+
+            // The long-standing default: the first of the month.
+            ("monthly", None) => Ok(Recurrence::Monthly { day: 1 }),
+            ("monthly", Some(day)) => {
+                let parsed: u8 = day
+                    .parse()
+                    .map_err(|_| format!("'{day}' is not a day of the month"))?;
+                if !(1..=31).contains(&parsed) {
+                    return Err("day of month must be 1-31".to_string());
+                }
+                Ok(Recurrence::Monthly { day: parsed })
+            }
+
+            // "every 3 days" / "every_3_days" / "every 1 day"
+            (head, None) => {
+                let interval = head
+                    .strip_prefix("every ")
+                    .and_then(|rest| rest.strip_suffix(" days").or(rest.strip_suffix(" day")))
+                    .ok_or_else(|| "unrecognised pattern".to_string())?;
+                let n: u32 = interval
+                    .parse()
+                    .map_err(|_| format!("'{interval}' is not a whole number"))?;
+                if n == 0 {
+                    return Err(
+                        "an interval of 0 days would repeat forever on the same day".to_string()
+                    );
+                }
+                if n > Self::MAX_INTERVAL_DAYS {
+                    return Err(format!(
+                        "interval must be at most {} days",
+                        Self::MAX_INTERVAL_DAYS
+                    ));
+                }
+                Ok(Recurrence::EveryNDays { n })
+            }
+
+            _ => Err("unrecognised pattern".to_string()),
+        }
+    }
+
+    /// Render back into a pattern [`Recurrence::from_pattern`] accepts.
+    ///
+    /// Interchange formats (MIF export) store this rather than the `Debug`
+    /// rendering, which no parser reads.
+    pub fn to_pattern(&self) -> String {
+        match self {
+            Recurrence::Daily => "daily".to_string(),
+            Recurrence::Weekly { days } => {
+                if days.is_empty() {
+                    return "weekly".to_string();
+                }
+                let names: Vec<&str> = days
+                    .iter()
+                    .map(|d| WEEKDAY_NAMES[(*d as usize).min(6)])
+                    .collect();
+                format!("weekly:{}", names.join(","))
+            }
+            Recurrence::Monthly { day } => format!("monthly:{day}"),
+            Recurrence::EveryNDays { n } => format!("every {n} days"),
+        }
+    }
+
     /// Calculate the next due date from a given date
     pub fn next_occurrence(&self, from: DateTime<Utc>) -> DateTime<Utc> {
         use chrono::{Datelike, Duration};

@@ -449,10 +449,9 @@ fn convert_todo(t: &Todo) -> MifTodo {
         contexts: t.contexts.clone(),
         notes: t.notes.clone(),
         blocked_on: t.blocked_on.clone(),
-        recurrence: t
-            .recurrence
-            .as_ref()
-            .map(|r| format!("{r:?}").to_lowercase()),
+        // A pattern the importer can read back, not the Debug rendering
+        // ("weekly { days: [1, 5] }") that no parser accepts.
+        recurrence: t.recurrence.as_ref().map(|r| r.to_pattern()),
         comments,
         related_memory_ids: t.related_memory_ids.iter().map(|id| id.0).collect(),
         external_id: t.external_id.clone(),
@@ -749,5 +748,47 @@ mod tests {
         assert_eq!(imported, 1);
         let entities = graph2.get_all_entities().unwrap();
         assert_eq!(entities[0].fine_type, None);
+    }
+
+    /// A todo's recurrence must survive an export/import round trip. Export
+    /// emitted the Debug rendering ("weekly { days: [1, 5] }") and import
+    /// dropped the field outright, so exporting a recurring todo and importing
+    /// it back silently stopped it recurring. Only worth catching now that a
+    /// client can set a recurrence other than the three hardcoded defaults.
+    #[test]
+    fn mif_round_trip_preserves_todo_recurrence() {
+        use crate::memory::types::Recurrence;
+        use crate::mif::import::prepare_todos;
+
+        let mut todo = Todo::new("round-trip-user".to_string(), "Weekly review".to_string());
+        todo.recurrence = Some(Recurrence::Weekly { days: vec![1, 5] });
+
+        let exported = convert_todo(&todo);
+        assert_eq!(
+            exported.recurrence.as_deref(),
+            Some("weekly:mon,fri"),
+            "export must emit a pattern the importer can read back"
+        );
+
+        let doc: MifDocument = serde_json::from_value(serde_json::json!({
+            "mif_version": "2.0",
+            "generator": {"name": "test", "version": "0"},
+            "export_meta": {
+                "id": "round-trip",
+                "created_at": Utc::now(),
+                "user_id": "round-trip-user",
+                "checksum": "",
+            },
+            "todos": [exported],
+        }))
+        .expect("build MIF document");
+
+        let restored = prepare_todos(&doc, "round-trip-user");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            restored[0].recurrence,
+            Some(Recurrence::Weekly { days: vec![1, 5] }),
+            "import must restore the recurrence, not drop it"
+        );
     }
 }
