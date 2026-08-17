@@ -377,6 +377,21 @@ impl Sweep {
         true
     }
 
+    /// Evidence collected so far, capped at [`MAX_FINDINGS`].
+    pub fn findings(&self) -> &[Finding] {
+        &self.findings
+    }
+
+    /// Whether evidence was dropped because the cap was reached.
+    pub fn findings_truncated(&self) -> bool {
+        self.findings_truncated
+    }
+
+    /// Why the sweep stopped early, if it did. `None` means it ran to the end.
+    pub fn stop_reason(&self) -> Option<&str> {
+        self.stop_reason.as_deref()
+    }
+
     fn push_finding(&mut self, f: Finding) {
         if self.findings.len() < MAX_FINDINGS {
             self.findings.push(f);
