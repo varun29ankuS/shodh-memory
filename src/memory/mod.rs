@@ -160,7 +160,7 @@ pub use crate::memory::segmentation::{
 };
 pub use crate::memory::sessions::{
     Session, SessionDigest, SessionEvent, SessionId, SessionStats, SessionStatus, SessionStore,
-    SessionStoreStats, SessionSummary, TemporalContext, TimeOfDay,
+    SessionSummary, TemporalContext, TimeOfDay, UserSessionStats,
 };
 pub use crate::memory::temporal_facts::{EventType, ResolvedTime, TemporalFact, TemporalFactStore};
 pub use crate::memory::todos::{ProjectStats, TodoStore, UserTodoStats};
@@ -11216,5 +11216,268 @@ mod fact_extraction_flag_tests {
             !flag(&system),
             "everything eligible was processed; the flag must be consumed"
         );
+    }
+}
+
+#[cfg(test)]
+mod memory_entity_resolution_tests {
+    //! `Memory::entity_refs` is never populated on any production write path —
+    //! every constructor sets `Vec::new()`, and the one method that pushes to it
+    //! has no non-test caller. The graph, however, records exactly this
+    //! information: `process_experience_into_graph` writes an `EpisodicNode`
+    //! whose `uuid` IS the memory id and whose `entity_refs` are the resolved
+    //! graph entity UUIDs.
+    //!
+    //! These tests pin the consumers to the graph rather than to the empty
+    //! field. Each one sets up the episode the way the handler layer does and
+    //! asserts on behaviour that was previously unreachable.
+
+    use super::*;
+    use crate::graph_memory::{
+        EdgeTier, EntityLabel, EntityNode, EpisodeSource, EpisodicNode, GraphMemory, LtpStatus,
+        RelationType, RelationshipEdge,
+    };
+    use crate::memory::types::Experience;
+    use std::collections::HashMap as StdHashMap;
+
+    fn setup() -> (MemorySystem, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = MemoryConfig {
+            storage_path: temp_dir.path().to_path_buf(),
+            working_memory_size: 50,
+            session_memory_size_mb: 50,
+            max_heap_per_user_mb: 200,
+            auto_compress: false,
+            compression_age_days: 1,
+            importance_threshold: 0.0,
+        };
+        let mut system = MemorySystem::new(config, None).expect("memory system");
+        let graph = GraphMemory::new(&temp_dir.path().join("graph"), None).expect("graph");
+        system.set_graph_memory(Arc::new(parking_lot::RwLock::new(graph)));
+        (system, temp_dir)
+    }
+
+    fn add_entity(graph: &GraphMemory, name: &str) -> uuid::Uuid {
+        let now = chrono::Utc::now();
+        graph
+            .add_entity(EntityNode {
+                uuid: uuid::Uuid::new_v4(),
+                name: name.to_string(),
+                labels: vec![EntityLabel::Concept],
+                created_at: now,
+                last_seen_at: now,
+                mention_count: 1,
+                summary: String::new(),
+                attributes: StdHashMap::new(),
+                name_embedding: None,
+                salience: 1.0,
+                is_proper_noun: true,
+                selectivity: None,
+                fine_type: None,
+                kb_id: None,
+            })
+            .expect("add entity")
+    }
+
+    fn add_l2_edge(graph: &GraphMemory, from: uuid::Uuid, to: uuid::Uuid) {
+        let now = chrono::Utc::now();
+        graph
+            .add_relationship(RelationshipEdge {
+                uuid: uuid::Uuid::new_v4(),
+                from_entity: from,
+                to_entity: to,
+                relation_type: RelationType::CoOccurs,
+                strength: 1.0,
+                created_at: now,
+                valid_at: now,
+                invalidated_at: None,
+                source_episode_id: None,
+                context: String::new(),
+                last_activated: now,
+                activation_count: 1,
+                ltp_status: LtpStatus::None,
+                tier: EdgeTier::L2Episodic,
+                activation_timestamps: None,
+                entity_confidence: None,
+                forman_curvature: None,
+                endpoint_selectivity: None,
+                provenance: Vec::new(),
+                promoted_at: None,
+            })
+            .expect("add edge");
+    }
+
+    /// Mirror `process_experience_into_graph`: the episode's uuid IS the memory
+    /// id, and its `entity_refs` are the resolved graph entity UUIDs.
+    fn link_memory_to_entities(graph: &GraphMemory, id: &MemoryId, refs: Vec<uuid::Uuid>) {
+        let now = chrono::Utc::now();
+        graph
+            .add_episode(EpisodicNode {
+                uuid: id.0,
+                name: format!("Memory {}", &id.0.to_string()[..8]),
+                content: String::new(),
+                valid_at: now,
+                created_at: now,
+                entity_refs: refs,
+                source: EpisodeSource::Message,
+                metadata: StdHashMap::new(),
+            })
+            .expect("add episode");
+    }
+
+    fn remember(system: &MemorySystem, content: &str) -> MemoryId {
+        system
+            .remember(
+                Experience {
+                    content: content.to_string(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("remember")
+    }
+
+    fn working_memory_for(system: &MemorySystem, id: &MemoryId) -> SharedMemory {
+        system
+            .working_memory
+            .read()
+            .all_memories()
+            .into_iter()
+            .find(|m| &m.id == id)
+            .expect("memory is in working tier after remember")
+    }
+
+    /// `graph_adjusted_threshold` short-circuits on `memory.entity_refs.is_empty()`,
+    /// which is ALWAYS true in production — so the whole edge-count discount
+    /// below that guard is unreachable code and tier promotion has never been
+    /// graph-aware.
+    ///
+    /// Mutation that turns this red again: restore the
+    /// `if memory.entity_refs.is_empty() { return base_threshold; }` guard.
+    #[test]
+    fn graph_adjusted_threshold_discounts_a_well_connected_memory() {
+        let (system, _dir) = setup();
+        let graph = system.graph_memory().expect("graph wired").clone();
+
+        let (alpha, beta, gamma) = {
+            let g = graph.read();
+            let alpha = add_entity(&g, "alpha");
+            let beta = add_entity(&g, "beta");
+            let gamma = add_entity(&g, "gamma");
+            add_l2_edge(&g, alpha, beta);
+            add_l2_edge(&g, alpha, gamma);
+            add_l2_edge(&g, beta, gamma);
+            (alpha, beta, gamma)
+        };
+
+        let id = remember(&system, "A memory whose entities are richly connected.");
+        link_memory_to_entities(&graph.read(), &id, vec![alpha, beta, gamma]);
+
+        let memory = working_memory_for(&system, &id);
+        assert!(
+            memory.entity_refs.is_empty(),
+            "precondition: no production path populates Memory::entity_refs"
+        );
+
+        let base = 0.50_f32;
+        let adjusted = system.graph_adjusted_threshold(&memory, base);
+        assert!(
+            adjusted < base,
+            "a memory with three L2 edges must get a promotion discount, got \
+             {adjusted} against base {base}"
+        );
+    }
+
+    /// The other half of the same guard: a memory that HAS entities but no
+    /// strong edges is supposed to be penalised. That branch was equally
+    /// unreachable.
+    #[test]
+    fn graph_adjusted_threshold_penalises_an_isolated_memory() {
+        let (system, _dir) = setup();
+        let graph = system.graph_memory().expect("graph wired").clone();
+
+        let lonely = add_entity(&graph.read(), "lonely");
+        let id = remember(&system, "A memory whose single entity has no edges.");
+        link_memory_to_entities(&graph.read(), &id, vec![lonely]);
+
+        let memory = working_memory_for(&system, &id);
+        let base = 0.50_f32;
+        let adjusted = system.graph_adjusted_threshold(&memory, base);
+        assert!(
+            adjusted > base,
+            "a memory with entities but no L2+ edges must be penalised, got \
+             {adjusted} against base {base}"
+        );
+    }
+
+    /// A memory the graph knows nothing about has no graph context to judge, so
+    /// the base threshold must be returned unchanged. This is the branch that
+    /// the empty-field short-circuit made look correct for every memory.
+    #[test]
+    fn graph_adjusted_threshold_is_neutral_without_an_episode() {
+        let (system, _dir) = setup();
+        let id = remember(&system, "A memory the graph never saw.");
+        let memory = working_memory_for(&system, &id);
+
+        let base = 0.50_f32;
+        assert_eq!(system.graph_adjusted_threshold(&memory, base), base);
+    }
+
+    /// `compensate_orphaned_memories` scans working and session memories for
+    /// references to orphaned entities via `memory.entity_refs` — always empty,
+    /// so the compensatory boost has never fired for anyone.
+    ///
+    /// Mutation that turns this red again: read `memory.entity_refs` instead of
+    /// resolving the memory's entities through the graph.
+    #[test]
+    fn orphan_compensation_finds_entities_through_the_graph() {
+        let (system, _dir) = setup();
+        let graph = system.graph_memory().expect("graph wired").clone();
+
+        let orphan = add_entity(&graph.read(), "orphaned-entity");
+        let id = remember(&system, "A memory that mentions the orphaned entity.");
+        link_memory_to_entities(&graph.read(), &id, vec![orphan]);
+
+        let memory = working_memory_for(&system, &id);
+        let before = memory.importance();
+
+        let compensated = system
+            .compensate_orphaned_memories(&[orphan.to_string()])
+            .expect("compensate");
+
+        assert_eq!(
+            compensated, 1,
+            "the memory referencing the orphaned entity was not compensated"
+        );
+        assert!(
+            memory.importance() > before,
+            "importance did not move: {before} -> {}",
+            memory.importance()
+        );
+    }
+
+    /// Compensation must not fire for a memory that does not reference the
+    /// orphaned entity — otherwise the "fix" would just boost everything.
+    #[test]
+    fn orphan_compensation_ignores_unrelated_memories() {
+        let (system, _dir) = setup();
+        let graph = system.graph_memory().expect("graph wired").clone();
+
+        let (orphan, unrelated) = {
+            let g = graph.read();
+            (add_entity(&g, "orphaned-entity"), add_entity(&g, "other"))
+        };
+        let id = remember(&system, "A memory about something else entirely.");
+        link_memory_to_entities(&graph.read(), &id, vec![unrelated]);
+
+        let memory = working_memory_for(&system, &id);
+        let before = memory.importance();
+
+        let compensated = system
+            .compensate_orphaned_memories(&[orphan.to_string()])
+            .expect("compensate");
+
+        assert_eq!(compensated, 0, "an unrelated memory was compensated");
+        assert_eq!(memory.importance(), before);
     }
 }

@@ -380,8 +380,83 @@ async fn list_sessions_empty() {
 #[tokio::test]
 async fn session_stats() {
     let h = Harness::new();
-    let (status, _) = json_of(h.app(), authed_get("/api/sessions/stats")).await;
+    let (status, _) = json_of(
+        h.app(),
+        authed_get("/api/sessions/stats?user_id=test-user"),
+    )
+    .await;
     assert!(status.is_success());
+}
+
+/// `/api/sessions/stats` must answer about the caller's own sessions and nobody
+/// else's.
+///
+/// Regression guard for a cross-tenant leak: the handler used to take no
+/// `user_id` at all and return `SessionStore::stats()`, a sum over every user in
+/// the process. The `user_id` query parameter was accepted by axum and silently
+/// dropped, so four different tenants received a byte-identical aggregate —
+/// including `users_with_sessions`, which disclosed how many other tenants
+/// existed to any authenticated key.
+///
+/// The load-bearing assertion is the inequality: any future refactor that
+/// reintroduces a cross-user sum makes the two responses identical again and
+/// turns this red.
+#[tokio::test]
+async fn session_stats_are_scoped_to_the_caller() {
+    let h = Harness::new();
+
+    // Tenant A has one completed and one active session. Tenant B has none.
+    let store = h.mgr.session_store();
+    let finished = store.start_session("tenant-a");
+    store.end_session(&finished, "test");
+    let _live = store.start_session("tenant-a");
+
+    let (status_a, body_a) = json_of(
+        h.app(),
+        authed_get("/api/sessions/stats?user_id=tenant-a"),
+    )
+    .await;
+    assert!(status_a.is_success(), "tenant-a stats returned {status_a}");
+
+    let (status_b, body_b) = json_of(
+        h.app(),
+        authed_get("/api/sessions/stats?user_id=tenant-b"),
+    )
+    .await;
+    assert!(status_b.is_success(), "tenant-b stats returned {status_b}");
+
+    assert_ne!(
+        body_a["stats"], body_b["stats"],
+        "two tenants with different session histories received the same \
+         aggregate — the endpoint is not scoped to the caller"
+    );
+
+    assert_eq!(body_a["stats"]["user_id"], "tenant-a");
+    assert_eq!(body_a["stats"]["active_sessions"], 1);
+    assert_eq!(body_a["stats"]["completed_sessions"], 1);
+
+    assert_eq!(body_b["stats"]["user_id"], "tenant-b");
+    assert_eq!(body_b["stats"]["active_sessions"], 0);
+    assert_eq!(body_b["stats"]["completed_sessions"], 0);
+
+    // The tenant census must not be reachable from a per-user response.
+    assert!(
+        body_a["stats"]["users_with_sessions"].is_null(),
+        "per-user session stats must not disclose how many tenants exist"
+    );
+}
+
+/// The endpoint must reject a missing `user_id` rather than fall back to an
+/// unscoped answer. A silent default is exactly how the original leak read to a
+/// caller: a request that looks scoped and is not.
+#[tokio::test]
+async fn session_stats_require_a_user_id() {
+    let h = Harness::new();
+    let status = status_of(h.app(), authed_get("/api/sessions/stats")).await;
+    assert!(
+        status.is_client_error(),
+        "unscoped /api/sessions/stats returned {status}, expected a 4xx"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -567,6 +642,222 @@ async fn upsert_memory() {
     )
     .await;
     assert!(status.is_success(), "upsert returned {status}");
+}
+
+/// Caller-declared write identity must survive the round trip.
+///
+/// `Memory` carries three multi-tenancy fields — `agent_id`, `run_id`,
+/// `actor_id` — and all three read as `null` on every row of a real store. That
+/// is two different causes wearing one symptom, and this test separates them:
+/// `agent_id`/`run_id` have been accepted and persisted all along (no client
+/// sends them), while `actor_id` had no request field and no write path at all,
+/// so it was structurally unreachable.
+///
+/// The `actor_id` assertion is the fail-first one. The other two are a
+/// regression guard on the `remember_with_agent_detailed` branch at
+/// `remember.rs`, which is easy to lose because nothing in production exercises
+/// it.
+#[tokio::test]
+async fn remember_persists_caller_declared_identity() {
+    let h = Harness::new();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({
+                "user_id": "identity-user",
+                "content": "Provenance round-trip: agent, run and actor.",
+                "agent_id": "agent-7",
+                "run_id": "run-42",
+                "actor_id": "actor-varun"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "remember failed: {body}");
+
+    let id = body
+        .get("id")
+        .or_else(|| body.get("memory_id"))
+        .and_then(|v| v.as_str())
+        .expect("remember response carries an id")
+        .to_string();
+
+    let (status, stored) = json_of(
+        h.app(),
+        authed_get(&format!("/api/memory/{id}?user_id=identity-user")),
+    )
+    .await;
+    assert!(status.is_success(), "get_memory returned {status}");
+
+    let memory = stored.get("memory").unwrap_or(&stored);
+    assert_eq!(memory["agent_id"], "agent-7", "agent_id dropped: {stored}");
+    assert_eq!(memory["run_id"], "run-42", "run_id dropped: {stored}");
+    assert_eq!(
+        memory["actor_id"], "actor-varun",
+        "actor_id dropped — the field is persisted by `Memory` but nothing \
+         accepts or writes it: {stored}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// audit trail — per-memory history
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Every memory mutation is written to `CF_AUDIT` by ~23 `log_event` call
+/// sites, and until this route existed the only thing any client could learn
+/// from that trail was a bucketed tally of event-type names on
+/// `POST /api/sessions/digest`. `MultiUserMemoryManager::get_history` — the
+/// per-memory reader written to serve exactly this — had zero callers
+/// repo-wide.
+///
+/// Fail-first: without the route this is a 404.
+#[tokio::test]
+async fn memory_history_serves_the_audit_trail_for_one_memory() {
+    let h = Harness::new();
+
+    let (status, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({
+                "user_id": "audit-user",
+                "content": "Original content before the update."
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "remember failed: {body}");
+    let id = body
+        .get("id")
+        .or_else(|| body.get("memory_id"))
+        .and_then(|v| v.as_str())
+        .expect("remember response carries an id")
+        .to_string();
+
+    // A second memory whose audit entries must NOT appear in the first one's
+    // history — the filter is the point of a per-memory reader.
+    let (_, other) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({"user_id": "audit-user", "content": "An unrelated memory."}),
+        ),
+    )
+    .await;
+    let other_id = other
+        .get("id")
+        .or_else(|| other.get("memory_id"))
+        .and_then(|v| v.as_str())
+        .expect("remember response carries an id")
+        .to_string();
+
+    // `PUT /api/memory/{id}` is an audited mutation (crud.rs logs "UPDATE").
+    for (target, text) in [(&id, "First revision."), (&other_id, "Other revision.")] {
+        let (status, resp) = json_of(
+            h.app(),
+            authed_put(
+                &format!("/api/memory/{target}"),
+                json!({"user_id": "audit-user", "content": text}),
+            ),
+        )
+        .await;
+        assert!(status.is_success(), "update returned {status}: {resp}");
+    }
+
+    let (status, history) = json_of(
+        h.app(),
+        authed_get(&format!("/api/memory/{id}/history?user_id=audit-user")),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "per-memory history returned {status}: {history}"
+    );
+
+    let events = history["events"]
+        .as_array()
+        .unwrap_or_else(|| panic!("history response has an `events` array: {history}"));
+    assert!(
+        !events.is_empty(),
+        "the UPDATE was audited but the reader returned nothing: {history}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e["memory_id"].as_str() == Some(id.as_str())),
+        "history leaked another memory's audit entries: {history}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event_type"].as_str() == Some("UPDATE")),
+        "the UPDATE event is missing from the memory's history: {history}"
+    );
+    assert_eq!(history["memory_id"], id);
+    assert_eq!(history["count"], events.len());
+}
+
+/// The route is user-scoped like every other namespace read: `user_id` is
+/// required, and one tenant cannot read another tenant's audit trail.
+#[tokio::test]
+async fn memory_history_is_user_scoped() {
+    let h = Harness::new();
+
+    let (_, body) = json_of(
+        h.app(),
+        authed_post(
+            "/api/remember",
+            json!({"user_id": "audit-owner", "content": "Owned by audit-owner."}),
+        ),
+    )
+    .await;
+    let id = body
+        .get("id")
+        .or_else(|| body.get("memory_id"))
+        .and_then(|v| v.as_str())
+        .expect("remember response carries an id")
+        .to_string();
+
+    let (status, resp) = json_of(
+        h.app(),
+        authed_put(
+            &format!("/api/memory/{id}"),
+            json!({"user_id": "audit-owner", "content": "Revised."}),
+        ),
+    )
+    .await;
+    assert!(status.is_success(), "update returned {status}: {resp}");
+
+    let (status, mine) = json_of(
+        h.app(),
+        authed_get(&format!("/api/memory/{id}/history?user_id=audit-owner")),
+    )
+    .await;
+    assert!(status.is_success(), "owner history returned {status}");
+    assert!(
+        !mine["events"].as_array().expect("events array").is_empty(),
+        "owner sees no history: {mine}"
+    );
+
+    let (status, theirs) = json_of(
+        h.app(),
+        authed_get(&format!("/api/memory/{id}/history?user_id=audit-stranger")),
+    )
+    .await;
+    assert!(status.is_success(), "stranger history returned {status}");
+    assert!(
+        theirs["events"].as_array().expect("events array").is_empty(),
+        "a different tenant read this memory's audit trail: {theirs}"
+    );
+
+    // Missing user_id is a 4xx, not an unscoped answer.
+    let status = status_of(h.app(), authed_get(&format!("/api/memory/{id}/history"))).await;
+    assert!(
+        status.is_client_error(),
+        "unscoped history returned {status}, expected a 4xx"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
