@@ -1,10 +1,11 @@
 import { cn } from "@/lib/utils";
-import type { RecallLineageEdge, RecallMemory } from "@/lib/api";
+import type { RecallFact, RecallLineageEdge, RecallMemory } from "@/lib/api";
 import { useSession } from "@/stores/session";
 import { Meta, Stat } from "@/components/ui/meta";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { whyItSurfaced } from "./why";
+import { Facts } from "./Facts";
 
 /**
  * The result column.
@@ -126,19 +127,37 @@ function ResultRow({
 export function ResultList({
   memories,
   lineage,
+  facts,
 }: {
   memories: RecallMemory[];
   /** The causal edges the same response carried. Optional because the pre-query
    *  corpus listing is not a result set and has none. */
   lineage?: RecallLineageEdge[];
+  /** The consolidated claims the same response carried. Optional for the same
+   *  reason as `lineage`: the pre-query corpus listing is not a result set. */
+  facts?: RecallFact[];
 }) {
   return (
-    <ScrollArea role="list" className="min-h-0 flex-1">
-      {memories.map((m) => (
-        <div role="listitem" key={m.id}>
-          <ResultRow memory={m} lineage={lineage} />
-        </div>
-      ))}
+    <ScrollArea className="min-h-0 flex-1">
+      {/* INSIDE THE SCROLL, ABOVE THE ROWS. The facts are what the store
+          concluded and the rows are what it recorded, so the conclusions read
+          first — but they are capped at five by the server and would otherwise
+          hold up to a third of a 340px column permanently, pushing the first
+          result off screen. Scrolling past them costs nothing and returns the
+          whole column to the results.
+
+          OUTSIDE THE LIST SEMANTICS. `role="list"` moved off the ScrollArea and
+          onto the rows' own container: a section of consolidated claims is not
+          one of the results, and leaving it inside the list would have made a
+          screen reader announce a set of N+1 items where N surfaced. */}
+      <Facts facts={facts} />
+      <div role="list">
+        {memories.map((m) => (
+          <div role="listitem" key={m.id}>
+            <ResultRow memory={m} lineage={lineage} />
+          </div>
+        ))}
+      </div>
     </ScrollArea>
   );
 }

@@ -291,8 +291,13 @@ function ResultPane({ reach }: { reach: Reachability }) {
       />
       {/* The lineage the server returned with this result set, so a row can say
           how many of the others it is causally linked to. Same object the graph
-          canvas plots and the Inspector walks — one response, three readings. */}
-      <ResultList memories={data.memories} lineage={data.lineage} />
+          canvas plots and the Inspector walks — one response, three readings.
+
+          `facts` rides the same response and was, until now, fetched on every
+          single query and read only for its `.length`. It is a different claim
+          from a memory — consolidated across episodes rather than recorded once
+          — so it renders as its own section rather than as more rows. */}
+      <ResultList memories={data.memories} lineage={data.lineage} facts={data.facts} />
     </div>
   ) : null;
 }
