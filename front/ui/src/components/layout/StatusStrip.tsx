@@ -1,71 +1,56 @@
 import { cn } from "@/lib/utils";
-import { isHumanProfile, type Reachability } from "@/lib/api";
+import type { ServiceReading, Tone } from "./systemHealth";
+
+const TONE_TEXT: Record<Tone, string> = {
+  live: "text-[var(--live)]",
+  warn: "text-warn",
+  alarm: "text-destructive",
+  unknown: "text-muted-foreground",
+};
 
 /**
- * Connection state, said once for the whole product.
+ * Which service, and what state, said in the header for both of them.
  *
- * Gridline's segmented strip, carrying the live state this app actually has. It
- * replaces three separate statements of the same fact — a card in the middle of
- * the stage, a row at the foot of the rail, and a line in the Inspector — which
- * between them made an ordinary not-started-yet state read as broken.
+ * TWO SEGMENTS, NOT ONE, and that is the correction this component needed most.
+ * It reported the memory server alone, so it displayed "Connected" over a dead
+ * seat — and while the seat is down the assistant cannot answer, cannot move
+ * this view and cannot touch tasks. Being told the system is connected while
+ * half of it is unusable is worse than being told nothing, because it is
+ * believed.
  *
- * A state and its remedy travel together. "Offline" alone sends people to check
- * their network when the server simply is not running.
+ * NO LONGER `hidden sm:flex`. A liveness indicator that disappears exactly when
+ * the window gets cramped is not an indicator; and since the rail is a fixed
+ * 244px at every width, `sm` was never the width at which this app becomes
+ * usable anyway — the strip was vanishing well inside the range where it had
+ * room. The remedy text, which used to need `lg`, has moved to the banner,
+ * where it has a whole line and does not have to compete with the title.
  *
- * The fourth state is the one that only exists because the server tells us the
- * profile list: reachable, authorized, and holding no profiles at all. That is
- * a fresh install, and it is not an error — but it is also not usable, because
- * `get_user_memory` provisions a store for any id it is handed, so inventing a
- * profile to search against would silently create one.
+ * The dot is not the state. It is a second encoding of a state that is also
+ * spelled out in a word beside it, so the reading survives being colour-blind,
+ * being on a projector, or being a screenshot in a slide deck.
  */
-export function StatusStrip({ reach }: { reach: Reachability }) {
-  const { tone, state, remedy } =
-    reach.state === "online"
-      ? reach.profiles.filter(isHumanProfile).length === 0
-        ? {
-            tone: "text-warn",
-            state: "No profiles",
-            remedy: "connected, nothing stored yet",
-          }
-        : {
-            tone: "text-[var(--live)]",
-            state: "Connected",
-            remedy: (() => {
-              const count = reach.profiles.filter(isHumanProfile).length;
-              return `${count} profile${count === 1 ? "" : "s"}`;
-            })(),
-          }
-      : reach.state === "unauthorized"
-        ? {
-            tone: "text-destructive",
-            state: "Key rejected",
-            // The remedy names the variable and the value it needs, which is
-            // the whole of the fix. What the server answered is the evidence
-            // for the diagnosis and stays with it; anything past that is
-            // reassurance, and a broken state is not where reassurance earns
-            // room in a 26px strip.
-            remedy: `${reach.status} — set SHODH_API_KEY to the server's key`,
-          }
-        : {
-            tone: "text-warn",
-            state: "Not running",
-            remedy: "start the shodh backend",
-          };
-
+export function StatusStrip({ readings }: { readings: ServiceReading[] }) {
   return (
-    <div className="bg-muted mono hidden h-[26px] min-w-0 shrink items-center overflow-hidden rounded-md text-[11px] sm:flex">
-      <span
-        className={cn(
-          "border-sidebar flex h-full shrink-0 items-center gap-2 border-r-2 px-2.5",
-          tone,
-        )}
-      >
-        <span className="size-1.5 shrink-0 rounded-full bg-current" />
-        {state}
-      </span>
-      <span className="text-muted-foreground hidden h-full min-w-0 items-center px-2.5 lg:flex">
-        <span className="truncate">{remedy}</span>
-      </span>
+    <div className="bg-muted mono flex h-[26px] min-w-0 shrink items-center overflow-hidden rounded-md text-[11px]">
+      {readings.map((r, i) => (
+        <span
+          key={r.id}
+          // The whole reading, for a pointer. The words on screen are the
+          // primary carrier — this is the evidence behind them, not a
+          // substitute for them.
+          title={`${r.service}: ${r.state} — ${r.evidence}, ${r.checked}${
+            r.consequence ? `. ${r.consequence}` : ""
+          }`}
+          className={cn(
+            "flex h-full min-w-0 items-center gap-1.5 px-2.5",
+            i > 0 && "border-sidebar border-l-2",
+          )}
+        >
+          <span className={cn("size-1.5 shrink-0 rounded-full bg-current", TONE_TEXT[r.tone])} />
+          <span className="text-muted-foreground shrink-0">{r.service}</span>
+          <span className={cn("truncate font-medium", TONE_TEXT[r.tone])}>{r.state}</span>
+        </span>
+      ))}
     </div>
   );
 }

@@ -59,9 +59,20 @@ export interface ServiceReading {
   consequence: string | null;
   /** The one action that changes the state, or null when there is nothing to do. */
   remedy: string | null;
-  /** What was actually observed, and when. Always present: a liveness reading
-   *  with no evidence behind it cannot be told from a guess. */
+  /** What was actually observed. Always present: a liveness reading with no
+   *  evidence behind it cannot be told from a guess. Deliberately holds no
+   *  clock reading — see `checked`. */
   evidence: string;
+  /**
+   * How long ago this was checked, as a phrase.
+   *
+   * SEPARATE FROM `evidence` BECAUSE IT TICKS. The banner is a `role="status"`
+   * region, and a live region whose text changes once a second is announced
+   * once a second — a screen reader would read the whole outage aloud on every
+   * tick. Keeping the only moving string apart lets the view hide it from the
+   * accessibility tree while still showing it.
+   */
+  checked: string;
 }
 
 /** `useReachability` and `useSeatHealth` both poll on this interval. */
@@ -128,7 +139,7 @@ export function describeAge(ageMs: number): string {
 }
 
 /** `checked 4s ago`, or the honest absence of a check. */
-function checkedPhrase(freshness: Freshness): string {
+export function checkedPhrase(freshness: Freshness): string {
   return freshness.kind === "unprobed"
     ? "not checked yet"
     : `checked ${describeAge(freshness.ageMs)}`;
@@ -145,8 +156,8 @@ function checkedPhrase(freshness: Freshness): string {
  * A FAILURE CLAIM IS NOT WITHDRAWN. A server that was not running two minutes
  * ago is still, in all likelihood, not running, and downgrading that to "we are
  * not sure" would hide a real outage behind a technicality — the same trade the
- * green case is being protected from, pointing the other way. The age is
- * appended to the evidence instead, so the reader can weigh it.
+ * green case is being protected from, pointing the other way. Every reading
+ * carries its own age in `checked` regardless, so a reader can weigh it.
  */
 function withFreshness(reading: ServiceReading, freshness: Freshness): ServiceReading {
   if (freshness.kind !== "stale" || reading.tone !== "live") return reading;
@@ -156,7 +167,6 @@ function withFreshness(reading: ServiceReading, freshness: Freshness): ServiceRe
     tone: "unknown",
     consequence: `${reading.service} answered when it was last checked, but this page has stopped hearing from it — nothing on screen is known to be current.`,
     remedy: "Reload to check again.",
-    evidence: reading.evidence,
   };
 }
 
@@ -187,6 +197,7 @@ export function readMemory(reach: Reachability, freshness: Freshness): ServiceRe
       consequence: null,
       remedy: null,
       evidence: "the first check has not answered yet",
+      checked,
     };
   }
 
@@ -202,7 +213,8 @@ export function readMemory(reach: Reachability, freshness: Freshness): ServiceRe
         // problem. Same sentence the stage-level `outageOf` makes.
         consequence: `The memory server is running and refused this key, so ${MEMORY_LOST.toLowerCase()} — nothing has been read at all.`,
         remedy: "Set SHODH_API_KEY to the key the backend was started with, then reload.",
-        evidence: `answered ${reach.status} · ${checked}`,
+        evidence: `answered ${reach.status}`,
+        checked,
       },
       freshness,
     );
@@ -218,7 +230,8 @@ export function readMemory(reach: Reachability, freshness: Freshness): ServiceRe
             tone: "warn",
             consequence: `${MEMORY_LOST}.`,
             remedy: "Start the shodh backend.",
-            evidence: `${reach.detail} · ${checked}`,
+            evidence: reach.detail,
+            checked,
           },
           freshness,
         )
@@ -230,7 +243,8 @@ export function readMemory(reach: Reachability, freshness: Freshness): ServiceRe
             tone: "alarm",
             consequence: `The memory server is running but could not serve the request, so ${MEMORY_LOST.toLowerCase()}.`,
             remedy: "Read the shodh backend's log — it is already up, so starting it again is not the fix.",
-            evidence: `answered ${reach.answered} · ${checked}`,
+            evidence: `answered ${reach.answered}`,
+            checked,
           },
           freshness,
         );
@@ -248,7 +262,8 @@ export function readMemory(reach: Reachability, freshness: Freshness): ServiceRe
         // that is empty for this reason looks identical to one that is broken.
         consequence: `Connected, but nothing is stored yet, so ${MEMORY_LOST.toLowerCase()}.`,
         remedy: "Store a memory through the assistant or the MCP server to create a profile.",
-        evidence: `answering, 0 profiles · ${checked}`,
+        evidence: "answering, 0 profiles",
+        checked,
       },
       freshness,
     );
@@ -262,7 +277,8 @@ export function readMemory(reach: Reachability, freshness: Freshness): ServiceRe
       tone: "live",
       consequence: null,
       remedy: null,
-      evidence: `${profiles} profile${profiles === 1 ? "" : "s"} · ${checked}`,
+      evidence: `${profiles} profile${profiles === 1 ? "" : "s"}`,
+      checked,
     },
     freshness,
   );
@@ -298,6 +314,7 @@ export function readAssistant(
       consequence: null,
       remedy: null,
       evidence: "the first check has not answered yet",
+      checked,
     };
   }
 
@@ -314,7 +331,8 @@ export function readAssistant(
         consequence:
           "The assistant cannot answer, move this view, or touch tasks. Conversations and History have nothing to show.",
         remedy: "Start the seat on port 3141.",
-        evidence: `${seat.detail} · ${checked}`,
+        evidence: seat.detail,
+        checked,
       },
       freshness,
     );
@@ -344,7 +362,8 @@ export function readAssistant(
           consequence:
             "The assistant is running but cannot reach the memory server, which this page can read — so it will answer, and recall and remember nothing.",
           remedy: "Check the seat's SHODH_API_URL and SHODH_API_KEY against the ones this UI proxies to.",
-          evidence: `seat reports: ${seat.backendDetail} · ${checked}`,
+          evidence: `seat reports: ${seat.backendDetail}`,
+          checked,
         }
       : withFreshness(
           {
@@ -354,7 +373,8 @@ export function readAssistant(
             tone: "live",
             consequence: null,
             remedy: null,
-            evidence: `running, waiting on the memory server like this page · ${checked}`,
+            evidence: "running, waiting on the memory server like this page",
+            checked,
           },
           freshness,
         );
@@ -368,7 +388,8 @@ export function readAssistant(
       tone: "live",
       consequence: null,
       remedy: null,
-      evidence: `seat and its backend both answering · ${checked}`,
+      evidence: "seat and its backend both answering",
+      checked,
     },
     freshness,
   );

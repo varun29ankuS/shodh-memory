@@ -95,9 +95,7 @@ describe("readMemory", () => {
   });
 
   it("does not pluralise a single profile", () => {
-    expect(readMemory({ state: "online", profiles: ["varun"] }, fresh).evidence).toContain(
-      "1 profile ",
-    );
+    expect(readMemory({ state: "online", profiles: ["varun"] }, fresh).evidence).toBe("1 profile");
   });
 
   it("treats a reachable server holding nothing as waiting-on, not wrong", () => {
@@ -189,13 +187,20 @@ describe("readMemory", () => {
     expect(r.tone).toBe("warn");
   });
 
-  it("puts the age of every reading in its evidence", () => {
-    expect(readMemory({ state: "online", profiles: ["v"] }, fresh).evidence).toContain(
-      "checked 4s ago",
-    );
-    expect(readMemory({ state: "offline", detail: "x" }, stale).evidence).toContain(
-      "checked 3m ago",
-    );
+  it("dates every reading, including the ones that have never been taken", () => {
+    expect(readMemory({ state: "online", profiles: ["v"] }, fresh).checked).toBe("checked 4s ago");
+    expect(readMemory({ state: "offline", detail: "x" }, stale).checked).toBe("checked 3m ago");
+    expect(readMemory({ state: "offline", detail: "x" }, unprobed).checked).toBe("not checked yet");
+  });
+
+  it("keeps the clock OUT of the evidence, so a live region does not tick", () => {
+    // `evidence` is read inside a role="status" banner. If the age lived in it,
+    // the accessible text would change every second and a screen reader would
+    // read the whole outage aloud on every tick.
+    for (const f of [fresh, stale, unprobed]) {
+      expect(readMemory({ state: "online", profiles: ["v"] }, f).evidence).not.toContain("ago");
+      expect(readMemory({ state: "offline", detail: "x" }, f).evidence).not.toContain("ago");
+    }
   });
 });
 
@@ -274,6 +279,7 @@ describe("ribbonToneOf", () => {
     consequence: null,
     remedy: null,
     evidence: "x",
+    checked: "checked 1s ago",
   });
 
   it("takes the worst service, so one healthy one cannot mask a dead one", () => {
@@ -304,6 +310,7 @@ describe("alertsOf", () => {
     consequence: null,
     remedy: null,
     evidence: "x",
+    checked: "checked 1s ago",
   });
 
   it("stays silent while everything is healthy", () => {
