@@ -1043,4 +1043,40 @@ mod tests {
         assert!(deleted);
         assert!(store.get("test-user", &task.id).unwrap().is_none());
     }
+
+    /// The read that `/api/reminders/due` performs is pure: listing what is due
+    /// must leave every task `Pending` and `triggered_at` unset, so the
+    /// 60-second scheduler can still deliver it. Only an explicit
+    /// `mark_triggered` acknowledgement may consume a reminder.
+    #[test]
+    fn reading_due_tasks_leaves_them_pending() {
+        let (_temp, store) = setup_store();
+
+        let task = ProspectiveTask::new(
+            "test-user".to_string(),
+            "Overdue by design".to_string(),
+            ProspectiveTrigger::AtTime {
+                at: Utc::now() - chrono::Duration::days(1),
+            },
+        );
+        store.store(&task).unwrap();
+
+        let due = store.get_due_tasks("test-user").unwrap();
+        assert_eq!(due.len(), 1, "the overdue task should be reported as due");
+
+        let after = store.get("test-user", &task.id).unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            ProspectiveTaskStatus::Pending,
+            "reading due tasks consumed the reminder"
+        );
+        assert!(
+            after.triggered_at.is_none(),
+            "reading due tasks stamped triggered_at"
+        );
+
+        // And the scheduler can still deliver it — `mark_triggered` returning
+        // true is exactly what gates the REMINDER_DUE event emission.
+        assert!(store.mark_triggered("test-user", &task.id).unwrap());
+    }
 }
