@@ -339,6 +339,7 @@ pub struct Sweep {
     started: Instant,
     budget: ScrubBudget,
     records: u64,
+    keys: u64,
     stop_reason: Option<String>,
     findings: Vec<Finding>,
     finding_quota: BTreeMap<(String, RecordClass), usize>,
@@ -352,6 +353,7 @@ impl Sweep {
             started: Instant::now(),
             budget,
             records: 0,
+            keys: 0,
             stop_reason: None,
             findings: Vec::new(),
             finding_quota: BTreeMap::new(),
@@ -359,6 +361,41 @@ impl Sweep {
         }
     }
 
+    /// Poll the wall-clock deadline. Called on EVERY key, not only on record
+    /// keys.
+    ///
+    /// The memory default column family is shared with subsystem keyspaces
+    /// that outnumber memories 35 to 1, and on some profiles they arrive in
+    /// long uninterrupted runs. A deadline checked only when a record is
+    /// classified can be overrun by seconds while the iterator walks a stretch
+    /// of `facts:` keys — and on a pathological store the request would then
+    /// die at the server timeout returning nothing at all, which is precisely
+    /// the outcome the budget exists to prevent. ~20ns per key buys a deadline
+    /// that actually binds.
+    ///
+    /// Returns `false` once the sweep must stop.
+    fn poll_deadline(&mut self) -> bool {
+        if self.stop_reason.is_some() {
+            return false;
+        }
+        if let Some(max) = self.budget.max_duration {
+            if self.started.elapsed() >= max {
+                self.stop_reason = Some(format!(
+                    "time budget of {}ms exhausted after {} keys ({} records \
+                     classified); the counts below describe only what was scanned",
+                    max.as_millis(),
+                    self.keys,
+                    self.records
+                ));
+                return false;
+            }
+        }
+        self.keys += 1;
+        true
+    }
+
+    /// Charge one classified record against the record budget.
+    ///
     /// Returns `false` when the budget is exhausted, recording why.
     fn tick(&mut self) -> bool {
         if self.stop_reason.is_some() {
@@ -369,19 +406,6 @@ impl Sweep {
                 self.stop_reason = Some(format!(
                     "record budget exhausted after {} records; the counts below \
                      describe only what was scanned",
-                    self.records
-                ));
-                return false;
-            }
-        }
-        if let Some(max) = self.budget.max_duration {
-            // Checking the clock per record costs ~20ns; a 19k-record sweep
-            // pays under a millisecond for a deadline that cannot overrun.
-            if self.started.elapsed() >= max {
-                self.stop_reason = Some(format!(
-                    "time budget of {}ms exhausted after {} records; the counts \
-                     below describe only what was scanned",
-                    max.as_millis(),
                     self.records
                 ));
                 return false;
@@ -774,6 +798,9 @@ pub fn scrub_memories(db: &DB, sweep: &mut Sweep) -> ClassCounts {
         }
         let Some(key) = iter.key() else { break };
         counts.keys_seen += 1;
+        if !sweep.poll_deadline() {
+            break;
+        }
         if key.len() == 16 {
             if !sweep.tick() {
                 break;
@@ -892,6 +919,9 @@ pub fn scrub_graph_nodes(db: &DB, cf: &ColumnFamily, sweep: &mut Sweep) -> Class
         }
         let Some(key) = iter.key() else { break };
         counts.keys_seen += 1;
+        if !sweep.poll_deadline() {
+            break;
+        }
         if key.len() == 16 {
             if !sweep.tick() {
                 break;
@@ -1014,17 +1044,36 @@ fn decide(memories: &ClassCounts, nodes: &ClassCounts, complete: bool) -> Verdic
 ///
 /// # Sampling
 ///
-/// This is a full sweep, deliberately. Both July defects were *write-date
-/// cohorts* — every memory with a non-empty NER list written before 2026-07-12,
-/// every graph node carrying `Other(...)` written before 2026-07-11. Uniform
-/// sampling is exactly the wrong instrument for a cohort: a 5% sample of 19,438
-/// records that happens to draw none of a 6-record population reports zero
-/// defects with complete confidence, and a sampled "0 corrupt" is worse than no
-/// scrub at all because it manufactures the confidence that let the July
-/// breakage survive a month. The sweep is affordable — 19k records at roughly
-/// 1.5KB each, decoded and checked, is well under a second — so there is no
-/// trade to make. `ScrubBudget` exists to bound pathological cases and to make
-/// a truncated sweep *say so*, not as a sampling knob.
+/// This is a full sweep, deliberately. Every defect population found so far is
+/// a *write-date cohort*: the July NER desync hit every memory with a non-empty
+/// NER list written before 2026-07-12; the `EntityLabel` renumbering hit every
+/// node carrying `Other(...)` written before 2026-07-11; and the twenty-one
+/// empty-content records this scrub found on the live claude-code store arrived
+/// in two bursts, on 2026-04-01 and 2026-04-07, and nowhere else.
+///
+/// Uniform sampling is the wrong instrument for a cohort. A 5% sample that
+/// happens to draw none of a twenty-one-record population reports zero defects
+/// with complete confidence — and a sampled "0 corrupt" is worse than no scrub
+/// at all, because it manufactures exactly the confidence that let the July
+/// breakage survive a month.
+///
+/// # Cost, measured
+///
+/// On the live claude-code store (190MB, cold cache, read-only handle) the
+/// memory sweep takes ~12.8s and the graph sweep ~0.5s. The other three
+/// profiles finish in 25–400ms. That cost is *not* record decoding: it is
+/// iterating the shared default column family, where 659,865 of 679,374 keys
+/// belong to the fact, watermark, lineage and vmapping keyspaces rather than to
+/// memories. Per-key cost is ~15–19µs on every profile regardless of how many
+/// records are actually classified, which is the signature of a scan bound by
+/// block reads rather than by work. Giving memories their own column family
+/// would cut this roughly 35-fold; that is a storage-layout change, not a
+/// change to this module.
+///
+/// 13s of `fill_cache(false)` sequential reading, off the request path, once an
+/// hour, is a 0.4% duty cycle and evicts nothing. `ScrubBudget` exists to bound
+/// pathological cases and to make a truncated sweep *say so* — not as a
+/// sampling knob.
 pub fn scrub_user(
     user_id: &str,
     memory_db: &DB,

@@ -2554,6 +2554,19 @@ impl GraphMemory {
         &self.db
     }
 
+    /// An owned handle to the graph database, so a long read-only pass can run
+    /// without holding the `RwLock` that guards this `GraphMemory`.
+    ///
+    /// [`Self::get_db`] returns a borrow, which keeps the guard alive for the
+    /// duration of the pass. Graph writers take `.write()` on that lock, and
+    /// parking_lot prefers writers, so one multi-second scrub holding a read
+    /// guard would stall every subsequent reader behind the blocked writer.
+    /// RocksDB handles are internally synchronised; the lock is not what makes
+    /// this database safe to read. Used by [`crate::integrity`].
+    pub(crate) fn db_arc(&self) -> Arc<DB> {
+        Arc::clone(&self.db)
+    }
+
     // Column family accessors — cheap HashMap lookups on DB internals
     fn entities_cf(&self) -> &ColumnFamily {
         self.db

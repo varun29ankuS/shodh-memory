@@ -85,23 +85,32 @@ pub async fn scrub(
     let graph = state.get_user_graph(&req.user_id).ok();
 
     let user_id = req.user_id.clone();
-    // A full sweep is tens to hundreds of milliseconds of synchronous RocksDB
-    // iteration and postcard decoding. `crud::list_memories` is the precedent:
-    // full scans go on the blocking pool, never on a runtime worker.
+    // Measured at ~13s on the largest live profile, dominated by iterating the
+    // 660k non-memory keys sharing the memory default column family.
+    // `crud::list_memories` is the precedent: full scans go on the blocking
+    // pool, never on a runtime worker.
     let report = tokio::task::spawn_blocking(move || {
-        let memory_guard = memory_sys.read();
-        let memory_db = memory_guard.storage().raw_db();
+        // Take owned RocksDB handles and release both guards BEFORE sweeping.
+        // Holding the graph read guard for thirteen seconds would stall every
+        // graph writer (`handlers::graph` and `handlers::mif` take `.write()`),
+        // and parking_lot prefers writers, so every reader queued behind them
+        // would stall too. RocksDB handles are internally synchronised; the
+        // guards are needed only to reach them.
+        let memory_db = {
+            let memory_guard = memory_sys.read();
+            memory_guard.storage().raw_db().clone()
+        };
+        let graph_db = graph.map(|g| {
+            let graph_guard = g.read();
+            graph_guard.db_arc()
+        });
 
-        match graph {
-            Some(g) => {
-                let graph_guard = g.read();
-                let gdb = graph_guard.get_db();
-                match gdb.cf_handle(crate::graph_memory::ENTITIES_CF_NAME) {
-                    Some(cf) => integrity::scrub_user(&user_id, memory_db, Some((gdb, cf)), budget),
-                    None => integrity::scrub_user(&user_id, memory_db, None, budget),
-                }
-            }
-            None => integrity::scrub_user(&user_id, memory_db, None, budget),
+        match graph_db.as_ref().and_then(|db| {
+            db.cf_handle(crate::graph_memory::ENTITIES_CF_NAME)
+                .map(|cf| (db, cf))
+        }) {
+            Some((gdb, cf)) => integrity::scrub_user(&user_id, &memory_db, Some((gdb, cf)), budget),
+            None => integrity::scrub_user(&user_id, &memory_db, None, budget),
         }
     })
     .await
