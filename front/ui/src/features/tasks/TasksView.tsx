@@ -879,7 +879,7 @@ export function TasksView({ reach }: { reach: Reachability }) {
 
   if (isFetching && !data) {
     return (
-      <div className="mx-auto h-full w-full max-w-4xl">
+      <div className="mx-auto h-full w-full max-w-[1680px]">
         <div className="border-border border-b px-4 py-2.5">
           <Skeleton className="h-3 w-40" />
         </div>
@@ -901,7 +901,7 @@ export function TasksView({ reach }: { reach: Reachability }) {
   if (todos.length === 0) {
     return (
       <ScrollArea className="h-full">
-        <div className="mx-auto max-w-4xl pb-16">
+        <div className="mx-auto w-full max-w-[1680px] pb-16">
           <div className="py-20">
             <EmptyState
               size="page"
@@ -919,12 +919,42 @@ export function TasksView({ reach }: { reach: Reachability }) {
 
   return (
     <ScrollArea className="h-full">
-      <div className="mx-auto max-w-4xl pb-16">
+      {/* THE STAGE IS CLAIMED, NOT CENTRED IN. This was `mx-auto max-w-4xl`,
+          which put an 896px column in the middle of a 1636px stage and left a
+          ~370px void on BOTH sides — measured, symmetric, and nothing to do
+          with the workbench stack, which costs exactly 40px. Centring a fixed
+          column is how a screen ends up with a fifth of its width empty while
+          its rows truncate.
+
+          The width is spent on a SECOND COLUMN rather than on wider rows. A
+          1600px task row is one short title followed by half a metre of blank
+          leader before its id, which is worse than the void it replaced. What
+          the width buys instead is that the standing account of this screen —
+          the counts, the blocked answer, and what it can and cannot prove —
+          stops being a preamble the reader scrolls past once and becomes a
+          panel that stays beside the rows it is about.
+
+          MEASURED ON THE STAGE, NOT THE VIEWPORT. The workbench gives a view
+          whatever the nav and the spines leave, so a `lg:` breakpoint would
+          split into two columns at a viewport width where this pane is 740px
+          wide. `@container` asks the pane. */}
+      <div className="@container mx-auto w-full max-w-[1680px] pb-16">
+        <div className="grid items-start gap-x-7 @min-[1180px]:grid-cols-[minmax(300px,340px)_minmax(0,1fr)]">
         {/* WHAT IS IN HERE. Figures first, then the two limits that change how
             they should be read — on the surface, not behind the info
             affordance. HAX G11 warns that an explanation increases trust by its
-            mere presence, so the caveats sit where the numbers are. */}
-        <header className="border-border border-b px-4 py-2.5">
+            mere presence, so the caveats sit where the numbers are.
+
+            STICKY ON A WIDE STAGE. Every claim in here qualifies every row
+            below it, and a caveat that has scrolled off the top of a fifty-row
+            list is a caveat nobody is reading. */}
+        <aside
+          className={cn(
+            "border-border border-b px-4 py-2.5",
+            "@min-[1180px]:sticky @min-[1180px]:top-0 @min-[1180px]:self-start",
+            "@min-[1180px]:border-r @min-[1180px]:border-b-0 @min-[1180px]:pb-5",
+          )}
+        >
           <Meta className="text-[12px]">
             <Stat value={board.open} label="open" />
             {board.underway > 0 ? <Stat value={board.underway} label="underway" /> : null}
@@ -961,18 +991,28 @@ export function TasksView({ reach }: { reach: Reachability }) {
             )}
           </p>
 
-          <dl className="border-border mt-2 grid grid-cols-[86px_1fr] gap-x-2 gap-y-1 border-l-2 pl-2.5 text-[11px] leading-relaxed">
-            <dt className="text-muted-foreground/70">Proves</dt>
+          {/* TWO COLUMNS WHERE THERE IS ROOM, STACKED IN THE RAIL. An 86px
+              label column against a 230px value column sets these three
+              sentences four words to the line, which is where a considered
+              caveat starts reading as fine print. Stacked, each keeps the
+              rail's full measure and the label becomes a heading over it. */}
+          <dl
+            className={cn(
+              "border-border mt-2.5 grid grid-cols-[86px_1fr] gap-x-2 gap-y-1 border-l-2 pl-2.5 text-[11px] leading-relaxed",
+              "@min-[1180px]:grid-cols-1 @min-[1180px]:gap-y-0",
+            )}
+          >
+            <dt className="text-muted-foreground/70 @min-[1180px]:mt-2.5 @min-[1180px]:text-[10px] @min-[1180px]:font-medium @min-[1180px]:tracking-wide @min-[1180px]:uppercase @min-[1180px]:first:mt-0">Proves</dt>
             <dd>
               what was recorded, what state each task is in now, and — from the server&apos;s own
               activity log — when it started and when it settled.
             </dd>
-            <dt className="text-muted-foreground/70">Cannot prove</dt>
+            <dt className="text-muted-foreground/70 @min-[1180px]:mt-2.5 @min-[1180px]:text-[10px] @min-[1180px]:font-medium @min-[1180px]:tracking-wide @min-[1180px]:uppercase @min-[1180px]:first:mt-0">Cannot prove</dt>
             <dd className="text-muted-foreground">
               who recorded any of it. There is no origin field on a task, so this screen cannot tell
               a person from an agent and does not guess.
             </dd>
-            <dt className="text-muted-foreground/70">Does not cover</dt>
+            <dt className="text-muted-foreground/70 @min-[1180px]:mt-2.5 @min-[1180px]:text-[10px] @min-[1180px]:font-medium @min-[1180px]:tracking-wide @min-[1180px]:uppercase @min-[1180px]:first:mt-0">Does not cover</dt>
             <dd className="text-muted-foreground">
               anything not written down as a task. Nothing is extracted from memory — a task exists
               only because something called the API to create one.
@@ -1006,8 +1046,9 @@ export function TasksView({ reach }: { reach: Reachability }) {
               slice across all of them and no project&apos;s figure would be its own.
             </p>
           ) : null}
-        </header>
+        </aside>
 
+        <div className="min-w-0">
         {/* THE HERO. Suppressed entirely when there is only one project and it
             has never moved — a single flat curve is a one-bar bar chart. */}
         {lanes.length > 0 ? (
@@ -1175,6 +1216,8 @@ export function TasksView({ reach }: { reach: Reachability }) {
             ) : null}
           </section>
         ) : null}
+        </div>
+        </div>
       </div>
     </ScrollArea>
   );
